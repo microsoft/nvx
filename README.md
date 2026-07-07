@@ -72,7 +72,11 @@ hardware detection** and everything that a paravirtual micro-VM does not need:
 - `# CONFIG_PCI is not set`, `# CONFIG_ACPI is not set`
 - no `CONFIG_XEN` (standalone PVH under KVM), no MP table / ISA / legacy platform probing
 - no framebuffer/VGA, USB, sound, HID, ATA/SCSI, network drivers, loadable modules
-- tuned for fast boot: `CONFIG_HZ=100`, tickless idle, no ftrace/tracing, no kernel debug
+- **no networking at all** (`CONFIG_NET` off), no wireless, no audit, no PPS, no suspend/
+  hibernate, no machine-check/NUMA/microcode, no kprobes/profiling
+- tuned for fast boot: `CONFIG_HZ=100`, tickless idle, no ftrace/tracing, no kernel debug,
+  `CONFIG_RANDOM_TRUST_CPU=y` (instant entropy), and — critically — **`CONFIG_PM_TRACE_RTC`
+  off** (see below)
 
 and **enables** exactly what is required to boot:
 
@@ -162,29 +166,48 @@ It also adds a `0x604` control port: a write requests VM shutdown (Nanvix `DEFAU
 
 ### Measured cold-start (`make measure`)
 
-Median of 8 runs, 512 MiB, 1 vCPU, host with nested KVM. Kernel tuned for a micro-VM
-(`CONFIG_HZ=100`, `FTRACE` off, tickless idle).
+Median of 10 runs, 512 MiB, 1 vCPU, host with nested KVM.
 
 *Console transport* (to the kernel->userspace handoff, full kernel logs):
 
 | transport | loud (rendered) | quiet (`--quiet`, discarded) |
 |-----------|----------------:|-----------------------------:|
-| UART `ttyS0` (2 exits/byte) | 1820 ms | 1734 ms |
-| **portb `0xE9`** (1 exit/byte) | **1702 ms** | **1604 ms** |
-
-Routing logs through `0xE9` saves ~120-130 ms by halving the per-byte VM exits; not rendering
-to the terminal saves a further ~85-100 ms.
+| UART `ttyS0` (2 exits/byte) | 337 ms | 256 ms |
+| **portb `0xE9`** (1 exit/byte) | **265 ms** | **194 ms** |
 
 *End-to-end* (to the interactive shell):
 
 | configuration | cold-start |
 |---------------|-----------:|
-| loud, full kernel logs (`console=ttyS0`) | ~1843 ms |
-| **silent** (`console=ttyS0 quiet loglevel=0`) | **~1562 ms** |
+| loud, full kernel logs (`console=ttyS0`) | ~339 ms |
+| silent (`console=ttyS0 quiet loglevel=0`) | ~133 ms |
+| **fastest** (silent, 128 MiB, tuned cmdline) | **~118 ms** (min ~111 ms) |
 
-A **silent cold boot** — kernel log output suppressed so almost nothing crosses the
-console — reaches userspace in ~1.56 s versus ~1.84 s for a fully verbose boot (~15%
-faster). Reproduce with `make measure`.
+### How cold-start went from ~1.6 s to ~0.11 s (~13x)
+
+Profiling with `initcall_debug` found a single dominant cost, then a long tail:
+
+1. **`CONFIG_PM_TRACE_RTC` — the big one (~1.43 s!).** Its `early_resume_init` initcall
+   reads the RTC via `mc146818_get_time(..., 1000)`. This device-less VM has **no RTC**
+   (ports `0x70/0x71` float), so the read spun to its ~1 s timeout (twice). Disabling the
+   `PM_TRACE` debug feature removed the initcall entirely — a 10x win by itself
+   (1562 ms -> 158 ms).
+2. **Strip every subsystem a device-less VM never uses:** `CONFIG_NET` (and NFS/SUNRPC/
+   IPv6), wireless/`CFG80211`, `AUDIT`, `PPS`, `SUSPEND`/`HIBERNATION`, `X86_MCE`, `NUMA`,
+   `MICROCODE`, `KPROBES`, `PROFILING`, RTC-CMOS. `vmlinux` shrank 34 MB -> 19 MB and the
+   initcall tail dropped (158 ms -> ~135 ms).
+3. **Smaller guest RAM.** The kernel initialises a `struct page` for every page of RAM at
+   boot, so 512 MiB costs ~25 ms more than 128 MiB. 128 MiB is plenty for a RAM boot.
+4. **Tuned command line** (trusted single-tenant VM):
+   `clocksource=kvm-clock tsc=reliable no_timer_check random.trust_cpu=on
+   rcupdate.rcu_expedited=1 nokaslr mitigations=off cryptomgr.notests quiet loglevel=0`.
+
+Things that turned out **not** to matter here (already handled by `CONFIG_KVM_GUEST` +
+kvm-clock + `RANDOM_TRUST_CPU`): BogoMIPS/`lpj` calibration (already skipped), TSC
+calibration, and crng entropy stall (crng init is instant via RDRAND). The initramfs
+userland is also negligible (~2 ms to unpack; the ~110 ms is essentially all kernel init).
+
+Reproduce all of the above with `make measure`.
 
 ## Notes
 

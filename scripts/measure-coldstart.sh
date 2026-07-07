@@ -45,3 +45,12 @@ echo
 echo "end-to-end (to interactive shell):"
 printf "  loud full logs     : %s\n" "$(measure "$BANNER" --cmdline 'console=ttyS0 reboot=t panic=-1')"
 printf "  silent (quiet klog): %s\n" "$(measure "$BANNER" --cmdline 'console=ttyS0 quiet loglevel=0 reboot=t panic=-1')"
+
+FAST='clocksource=kvm-clock tsc=reliable no_timer_check random.trust_cpu=on rcupdate.rcu_expedited=1 nokaslr mitigations=off cryptomgr.notests console=ttyS0 quiet loglevel=0 reboot=t panic=-1'
+echo
+echo "fastest (silent, 128 MiB, tuned cmdline):"
+for _ in $(seq 1 "$N"); do
+    timeout 30 "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem 128 \
+        --exit-on-boot --quiet --boot-marker "$BANNER" --cmdline "$FAST" 2>&1 \
+        | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
+done | median | sed 's/^/  fast               : /'
