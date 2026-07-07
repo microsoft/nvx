@@ -6,7 +6,7 @@
 //!
 //! A minimal, single-core x86_64 KVM micro-VM that boots a Linux (Alpine) kernel through
 //! the PVH boot protocol from a RAM initramfs. There is no PCI, no ACPI, and no block
-//! device: the only emulated device is a 16550 serial console.
+//! device: the only emulated device is a bidirectional "portb" console (backing `hvc0`).
 //!
 
 mod boot;
@@ -45,7 +45,7 @@ struct Args {
     initrd: Option<PathBuf>,
 
     /// Kernel command line.
-    #[arg(long, default_value = "console=ttyS0 reboot=t panic=-1")]
+    #[arg(long, default_value = "earlycon=xe9 console=hvc0 reboot=t panic=-1")]
     cmdline: String,
 
     /// Guest RAM size, in MiB.

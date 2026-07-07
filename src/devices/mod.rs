@@ -6,32 +6,30 @@
 //!
 //! Routes guest port-mapped I/O (PMIO) to the modelled devices:
 //!
-//! - the primary **16550 UART** (`0x3F8..=0x3FF`) — the interactive `ttyS0` console;
-//! - a Nanvix-style **`0xE9` debug port** — one `outb` per byte, a lower-overhead console
-//!   path than the UART (which additionally polls the line-status register per byte);
+//! - the **portb console** — a bidirectional per-byte console backing the kernel `hvc0`:
+//!   `outb` to the **`0xE9` data port** transmits a byte (one exit per byte), while the guest
+//!   receives input by polling the **`0xEA` status port** and reading the **`0xE9` data port**;
 //! - a **`0x604` control port** — a write requests VM shutdown (Nanvix `DEFAULT_VMM_PORT`,
-//!   also the ACPI `PM1a_CNT` poweroff register).
+//!   also the ACPI `PM1a_CNT` poweroff register);
+//! - a **`0x605` control port** — a write requests that the VMM take a snapshot.
 //!
 //! Every other port is treated as an unoccupied bus (reads return all-ones, writes are
 //! dropped), which keeps a PCI-less, ACPI-less kernel from stalling on legacy probes.
 //!
 
-pub mod serial;
+pub mod portb;
 
 use ::std::sync::{
     Arc,
     Mutex,
 };
 
-use self::serial::Serial;
-use crate::console::Console;
+use self::portb::PortConsole;
 
-/// Base port of the primary serial controller (`ttyS0`).
-pub const COM1_BASE: u16 = 0x3f8;
-/// Last port of the primary serial controller.
-const COM1_LAST: u16 = 0x3ff;
-/// Nanvix-style per-byte debug console port (`DEFAULT_STDOUT_PORT`).
-pub const DEBUGCON_PORT: u16 = 0xe9;
+/// Console data port: guest `outb` transmits a byte; guest `inb` reads a received byte.
+pub const DATA_PORT: u16 = 0xe9;
+/// Console status port: guest `inb` returns bit 0 set when a received byte is available.
+pub const STATUS_PORT: u16 = 0xea;
 /// Control port: a write requests VM shutdown (Nanvix `DEFAULT_VMM_PORT` / ACPI `PM1a_CNT`).
 pub const VMM_PORT: u16 = 0x604;
 /// Control port: a write requests that the VMM take a snapshot (Nanvix-style snapshot command).
@@ -50,33 +48,32 @@ pub enum PioAction {
 
 /// The guest device bus.
 pub struct DeviceBus {
-    /// Primary UART, shared with the host input thread.
-    serial: Arc<Mutex<Serial>>,
-    /// Shared host console sink (used by the UART and the `0xE9` debug port).
-    console: Arc<Mutex<Console>>,
+    /// The portb console device, shared with the host input thread.
+    console: Arc<Mutex<PortConsole>>,
 }
 
 impl DeviceBus {
-    /// Creates a bus with the given UART and console.
-    pub fn new(serial: Arc<Mutex<Serial>>, console: Arc<Mutex<Console>>) -> Self {
-        Self { serial, console }
+    /// Creates a bus with the given console device.
+    pub fn new(console: Arc<Mutex<PortConsole>>) -> Self {
+        Self { console }
     }
 
-    /// Returns a handle to the primary UART.
-    pub fn serial(&self) -> Arc<Mutex<Serial>> {
-        Arc::clone(&self.serial)
+    /// Returns a handle to the console device.
+    pub fn console(&self) -> Arc<Mutex<PortConsole>> {
+        Arc::clone(&self.console)
     }
 
     /// Services a guest read from `port`, filling `data`.
     pub fn pio_read(&self, port: u16, data: &mut [u8]) {
         match port {
-            COM1_BASE..=COM1_LAST => {
-                let offset: u8 = (port - COM1_BASE) as u8;
-                let value: u8 = self.serial.lock().expect("serial poisoned").read(offset);
+            DATA_PORT => {
+                let value: u8 = self.console.lock().expect("console poisoned").receive();
                 Self::fill(data, value);
             },
-            // The QEMU debug port returns its own address to advertise its presence.
-            DEBUGCON_PORT => Self::fill(data, 0xe9),
+            STATUS_PORT => {
+                let value: u8 = self.console.lock().expect("console poisoned").rx_status();
+                Self::fill(data, value);
+            },
             _ => {
                 // Unoccupied bus: reads float to all-ones.
                 for byte in data.iter_mut() {
@@ -92,16 +89,9 @@ impl DeviceBus {
     #[must_use]
     pub fn pio_write(&self, port: u16, data: &[u8]) -> PioAction {
         match port {
-            COM1_BASE..=COM1_LAST => {
-                let offset: u8 = (port - COM1_BASE) as u8;
-                if let Some(&value) = data.first() {
-                    self.serial.lock().expect("serial poisoned").write(offset, value);
-                }
-                PioAction::None
-            },
-            DEBUGCON_PORT => {
+            DATA_PORT => {
                 if let Some(&byte) = data.first() {
-                    self.console.lock().expect("console poisoned").write_byte(byte);
+                    self.console.lock().expect("console poisoned").transmit(byte);
                 }
                 PioAction::None
             },

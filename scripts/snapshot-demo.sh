@@ -17,7 +17,7 @@ SNAP="${SNAP:-$HOME/build/pysnap}"
 MEM="${MEM:-512}"
 N="${N:-8}"
 MARKER="{'x': 10, 'y': 30}"
-CMDLINE="console=ttyS0 quiet loglevel=0 reboot=t panic=-1"
+CMDLINE="earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
 
 [ -x "$BIN" ]    || { echo "build the VMM first: make release"; exit 1; }
 [ -f "$KERNEL" ] || { echo "missing kernel: $KERNEL (make kernel)"; exit 1; }

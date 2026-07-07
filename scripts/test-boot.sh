@@ -21,7 +21,7 @@ trap 'rm -f "$log"' EXIT
 
 printf 'cat /etc/alpine-release\nreboot -f\n' | timeout 90 "$BIN" \
     --kernel "$KERNEL" --initrd "$INITRD" --mem 512 \
-    --cmdline "console=ttyS0 reboot=t panic=-1" > "$log" 2>&1 || true
+    --cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1" > "$log" 2>&1 || true
 
 if grep -q "$MARKER" "$log"; then
     echo "PASS: guest reached userspace ($MARKER)"

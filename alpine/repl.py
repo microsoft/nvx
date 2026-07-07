@@ -5,7 +5,7 @@
 # byte to I/O port 0x605 through /dev/port (a single `outb`, which the VMM intercepts as a
 # snapshot request). On a snapshot run the VMM captures the VM at exactly this warmed point and
 # stops; on a later restore, execution resumes on the next line and drops straight into an
-# interactive ">>>" prompt on the serial console -- skipping the kernel boot and the entire
+# interactive ">>>" prompt on the console -- skipping the kernel boot and the entire
 # Python startup.
 import code
 import os

@@ -2,7 +2,7 @@
 
 A minimal, single-core **x86_64 KVM micro-VM** that boots a Linux (Alpine) kernel through
 the **PVH boot protocol**, entirely from a **RAM initramfs** — no PCI, no ACPI, no block
-device. The only emulated device is a 16550 serial console.
+device. The only emulated device is a bidirectional "portb" console (backing the kernel's `hvc0`).
 
 It is a standalone extraction and reworking of the **KVM (Linux) backend of the
 [Nanvix Micro-VM (`uservm`)](https://github.com/nanvix/nanvix/tree/dev/src/uservm)**,
@@ -25,7 +25,7 @@ Nothing is prebuilt: `make world` fetches the kernel and Alpine sources and buil
 
 ```
 $ make world                         # build the VMM, the modified kernel, and the initramfs
-$ make run                           # boot Alpine to a shell over the serial console
+$ make run                           # boot Alpine to a shell over the portb console
 ...
 [    1.745978] Run /init as init process
 
@@ -50,11 +50,12 @@ uid=0(root) gid=0(root)
   the real-mode/bzImage setup path entirely.
 - **RAM-only root filesystem.** The initramfs is loaded into guest memory and passed as a PVH
   module; the kernel unpacks it and runs `/init`. There is no virtio and no block device.
-- **Minimal device model.** A 16550A UART at I/O port `0x3F8` (`console=ttyS0`, IRQ 4) is the
-  only device. Every other port floats (reads return all-ones, writes are dropped), which lets
-  a PCI-less/ACPI-less kernel skip legacy probes (i8042, CMOS/RTC, POST codes, ...). The
-  in-kernel KVM irqchip (PIC + IOAPIC) and PIT provide interrupts and the timer; `kvm-clock`
-  provides time.
+- **Minimal device model.** The only device is a bidirectional **"portb" console** backing the
+  kernel's `hvc0`: output is one `outb` per byte to I/O port `0xE9`, input is polled from `0xEA`
+  (status) and `0xE9` (data) — no interrupt line. Every other port floats (reads return all-ones,
+  writes are dropped), which lets a PCI-less/ACPI-less kernel skip legacy probes (i8042, CMOS/RTC,
+  POST codes, ...). The in-kernel KVM irqchip (PIC + IOAPIC) and PIT provide interrupts and the
+  timer; `kvm-clock` provides time.
 
 ### Source layout
 
@@ -67,12 +68,13 @@ uid=0(root) gid=0(root)
 | `src/vcpu.rs`         | vCPU creation, CPUID, and the PVH entry register/segment state |
 | `src/boot/pvh.rs`     | `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
 | `src/boot/params.rs`  | PVH boot-parameter structures |
-| `src/devices/serial.rs` | 16550A UART model |
-| `src/devices/mod.rs`  | PMIO device bus (UART, `0xE9` debug port, `0x604` shutdown) |
+| `src/devices/portb.rs` | portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue |
+| `src/devices/mod.rs`  | PMIO device bus (portb console `0xE9`/`0xEA`, `0x604` shutdown, `0x605` snapshot) |
 | `src/console.rs`      | Shared console sink: buffered/quiet output, byte count, cold-start timing |
 | `src/irq.rs`          | In-kernel irqchip + PIT |
 | `src/layout.rs`       | Guest-physical memory map constants |
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
+| `kernel/hvc_xe9.c`    | The portb `hvc0` console driver (installed into the tree by `build-kernel.sh`) |
 | `kernel/patches/`     | Kernel source modifications (the `0xE9` earlycon) |
 | `alpine/init`         | PID 1 for the RAM initramfs |
 | `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
@@ -90,7 +92,7 @@ applies the modification in `kernel/patches/`, drops in this config, and builds 
 ### Configuration rationale
 
 The guest sees almost no hardware — one CPU, RAM, the in-kernel interrupt controller, and a single
-16550 UART — so the configuration follows one rule: **build in exactly what a device-less PVH/KVM
+portb console — so the configuration follows one rule: **build in exactly what a device-less PVH/KVM
 guest needs to boot, and compile out everything that would probe for hardware that is not there.**
 Probing absent hardware is at best wasted boot time and at worst a multi-second hang (see
 `PM_TRACE_RTC` below).
@@ -100,7 +102,7 @@ Probing absent hardware is at best wasted boot time and at worst a multi-second 
 | `CONFIG_PVH=y` | Enter through the 32-bit PVH entry note, so the VMM loads an uncompressed `vmlinux` and skips the real-mode/bzImage setup and self-decompression path entirely. |
 | `CONFIG_HYPERVISOR_GUEST=y`, `CONFIG_PARAVIRT=y`, `CONFIG_KVM_GUEST=y`, `CONFIG_PARAVIRT_CLOCK=y` | Run as a KVM guest and take time from `kvm-clock` — no PIT/HPET/TSC calibration, no RTC read at boot. |
 | `# CONFIG_PCI`, `# CONFIG_ACPI` (and no EFI) | The VMM exposes no PCI bus, no ACPI tables, and no EFI/BIOS firmware; unclaimed I/O ports float. Enabling these makes the kernel enumerate buses and firmware that do not exist. |
-| `CONFIG_SERIAL_8250=y`, `CONFIG_SERIAL_8250_CONSOLE=y` | Drive the one emulated device: a 16550 UART at `0x3F8` (`console=ttyS0`). |
+| `# CONFIG_SERIAL_8250`, `CONFIG_HVC_XE9=y` | The console is the portb `hvc0` driver (`kernel/hvc_xe9.c`), not a 16550 UART — one `outb`/byte out, polled input in. `CONFIG_SERIAL_EARLYCON` stays for `earlycon=xe9`. |
 | `# CONFIG_FB`, `# CONFIG_HID`, `# CONFIG_SOUND`, `# CONFIG_ATA`, `# CONFIG_SCSI`, `# CONFIG_RTC_CLASS`, no USB | None of these devices exist, so their drivers and boot-time probes are removed. |
 | `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y` | The whole userland is the initramfs unpacked into RAM; there is no block device or virtio, hence no storage stack. |
 | `# CONFIG_NET` | No NIC and no virtio-net, so the entire network stack (plus NFS / IPv6 / wireless) is dropped. |
@@ -130,7 +132,7 @@ Quick start:
 
 ```
 make world          # build all three: the VMM + the modified kernel + the Alpine initramfs
-make run            # boot Alpine to a serial shell
+make run            # boot Alpine to an interactive shell over the portb console
 ```
 
 ### Make targets
@@ -145,7 +147,7 @@ make run            # boot Alpine to a serial shell
 | `kernel` | Download + patch + build the PVH `vmlinux` → `$(KERNEL_IMG)` (`scripts/build-kernel.sh`, ~minutes). |
 | `initramfs` | Build the Alpine RAM rootfs → `$(BUILD_DIR)/initramfs.cpio.gz` (`scripts/build-initramfs.sh`). |
 | `python-initramfs` | Build a rootfs with CPython + pandas/numpy → `$(PY_INITRD)` (`scripts/build-python-initramfs.sh`). |
-| `run`, `boot` | Boot Alpine to an interactive serial shell (`scripts/run.sh`). |
+| `run`, `boot` | Boot Alpine to an interactive shell over the portb console (`scripts/run.sh`). |
 | `selftest` | Run the protected-mode self-test through the real PVH entry path and exit. |
 | `boot-test` | End-to-end: boot and assert the guest reaches userspace (`scripts/test-boot.sh`). |
 | `measure` | Cold-start measurements (`scripts/measure-coldstart.sh`). |
@@ -178,7 +180,7 @@ Run directly:
     --kernel  $HOME/build/vmlinux \
     --initrd  $HOME/build/initramfs.cpio.gz \
     --mem     512 \
-    --cmdline "console=ttyS0 reboot=t panic=-1"
+    --cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"
 ```
 
 ### CLI
@@ -187,7 +189,7 @@ Run directly:
 |------|---------|---------|
 | `--kernel <path>`  | (required)                       | Uncompressed `vmlinux` (PVH) |
 | `--initrd <path>`  | (none)                           | RAM initramfs image |
-| `--cmdline <str>`  | `console=ttyS0 reboot=t panic=-1`| Kernel command line |
+| `--cmdline <str>`  | `earlycon=xe9 console=hvc0 reboot=t panic=-1`| Kernel command line |
 | `--mem <MiB>`      | `512`                            | Guest RAM |
 | `--quiet`          |                                  | Fully silent: discard guest console **and** suppress all VMM logging |
 | `--log-level <lvl>`| `info` (`off` if `--quiet`)      | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
@@ -202,14 +204,14 @@ still renders the guest console), or `--quiet` for a fully silent run (no guest 
 logging). The cold-start line printed under `--exit-on-boot` goes to stderr independently of the
 log level, so measurements keep working even when logging is off.
 
-## Cold-start and the `0xE9` debug console
+## Cold-start and the portb console
 
 The VMM measures **cold-start** — the time from the first guest instruction to a
 boot-completion marker in the console stream — and reports it via `--exit-on-boot`:
 
 ```
 $ ./target/release/microvm --kernel ~/build/vmlinux --initrd ~/build/initramfs.cpio.gz \
-      --exit-on-boot --cmdline "console=ttyS0 reboot=t panic=-1"
+      --exit-on-boot --cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"
 ...
 [INFO microvm::console] cold-start: 1895.7 ms to userspace (13305 console bytes emitted)
 ```
@@ -218,33 +220,35 @@ $ ./target/release/microvm --kernel ~/build/vmlinux --initrd ~/build/initramfs.c
 
 The Nanvix Micro-VM sends guest console output one byte at a time to a dedicated I/O port
 (`0xE9`), so each character is a single `outb` — one VM exit — instead of the 8250 UART's
-*read line-status + write data* (two exits, plus a poll loop). This VMM adds the same
-**`0xE9` debug port**, and a matching **`earlycon=xe9`** driver in the kernel
-(`scripts/build-kernel.sh` patches it in) so kernel logs can be redirected onto that path:
+*read line-status + write data* (two exits, plus a poll loop). This VMM makes that its **only**
+console: a bidirectional **"portb" console** backed by the in-kernel `hvc0` driver
+(`kernel/hvc_xe9.c`, installed by `scripts/build-kernel.sh`). Output is one `outb` to `0xE9`;
+input is polled from `0xEA` (status) and `0xE9` (data). The `earlycon=xe9` driver
+(`kernel/patches/`) provides the earliest boot logs on the same port before `hvc0` takes over:
 
 ```
---cmdline "earlycon=xe9 keep_bootcon ..."     # kernel logs go out via port 0xE9
+--cmdline "earlycon=xe9 console=hvc0 ..."     # early logs via 0xE9, then the interactive hvc0
 ```
 
-It also adds a `0x604` control port: a write requests VM shutdown (Nanvix `DEFAULT_VMM_PORT`).
+There is no 16550 UART: it was measured ~65 ms slower to userspace (2 exits/byte vs 1) and
+removed. The VMM also has a `0x604` control port (a write requests VM shutdown, Nanvix
+`DEFAULT_VMM_PORT`) and a `0x605` port (a write requests a snapshot).
 
 ### Measured cold-start (`make measure`)
 
-Median of 10 runs, 512 MiB, 1 vCPU, host with nested KVM.
+Median of 10 runs, 512 MiB, 1 vCPU, host with nested KVM. The portb console is the only
+transport; rendering it ("loud") vs discarding it (`--quiet`) is the main knob:
 
-*Console transport* (to the kernel->userspace handoff, full kernel logs):
-
-| transport | loud (rendered) | quiet (`--quiet`, discarded) |
-|-----------|----------------:|-----------------------------:|
-| UART `ttyS0` (2 exits/byte) | 337 ms | 256 ms |
-| **portb `0xE9`** (1 exit/byte) | **265 ms** | **194 ms** |
+| portb console (`0xE9` → `hvc0`) | loud (rendered) | quiet (`--quiet`, discarded) |
+|---------------------------------|----------------:|-----------------------------:|
+| to kernel→userspace handoff     | **265 ms**      | **194 ms**                   |
 
 *End-to-end* (to the interactive shell):
 
 | configuration | cold-start |
 |---------------|-----------:|
-| loud, full kernel logs (`console=ttyS0`) | ~339 ms |
-| silent (`console=ttyS0 quiet loglevel=0`) | ~133 ms |
+| loud, full kernel logs | ~339 ms |
+| silent (`quiet loglevel=0`) | ~133 ms |
 | **fastest** (silent, 128 MiB, tuned cmdline) | **~118 ms** (min ~111 ms) |
 
 ### How cold-start went from ~1.6 s to ~0.11 s (~13x)
@@ -286,7 +290,7 @@ boundary** — captures a clean, restorable state:
   registers, and the MSRs a booted Linux keeps (syscall entry points, FS/GS bases, SYSENTER,
   PAT, TSC/TSC-deadline, and the KVM paravirtual-clock MSRs);
 - the in-kernel interrupt controller (PIC + IOAPIC), the PIT, and the KVM clock;
-- the emulated 16550 UART.
+- the portb console device (its pending host-input queue).
 
 `state.bin` holds all of that; `mem.bin` is the raw RAM, **written sparsely** — runs of zero
 pages become file holes, so the image shrinks to the guest's actual footprint (e.g. ~280 MiB
@@ -337,7 +341,7 @@ is **written sparsely**, so the snapshot on disk is ~280 MiB rather than the ful
 To instead drop into an **interactive Python interpreter resumed from a snapshot**, use
 `make snapshot-boot`. It boots `alpine/repl.py`, which warms a full CPython interpreter, requests
 a snapshot at the warmed point, and — on restore — resumes straight into a live `>>>` prompt on
-the serial console, skipping the kernel boot and the entire Python startup. The snapshot is
+the console, skipping the kernel boot and the entire Python startup. The snapshot is
 captured once on first use (a one-off cold boot) and reused afterwards, so every later run drops
 you at the prompt in milliseconds:
 
@@ -361,7 +365,7 @@ they are usable by name at the prompt the instant it resumes. `make snapshot-dem
 - **Exiting the VM:** `reboot -f` (a triple-fault reset with `reboot=t`) is caught by the VMM,
   which exits cleanly. `poweroff` has no effect because the kernel has no ACPI/power management
   and simply halts.
-- When standard input is a terminal it is put in raw mode for an authentic serial console;
+- When standard input is a terminal it is put in raw mode for an authentic console;
   when input is piped (scripts, CI) it is left alone.
 
 ## Provenance & license

@@ -2,10 +2,12 @@
 #
 # Builds the minimal PVH Linux kernel (uncompressed vmlinux) used by the micro-VM.
 #
-# The configuration in kernel/config-microvm disables PCI, ACPI, and legacy PC hardware
-# probing, enables the PVH boot entry (CONFIG_PVH), the KVM paravirt clock, a 16550 serial
-# console, and initramfs support. Alpine's linux-lts is essentially a vanilla LTS kernel, so
-# we build the matching vanilla source from kernel.org.
+# The configuration in kernel/config-microvm disables PCI, ACPI, legacy PC hardware probing,
+# and the 16550 UART (CONFIG_SERIAL_8250), and enables the PVH boot entry (CONFIG_PVH), the
+# KVM paravirt clock, and initramfs support. The guest console is the microvm "portb" hvc
+# driver (kernel/hvc_xe9.c, installed below) plus the earlycon=xe9 output console. Alpine's
+# linux-lts is essentially a vanilla LTS kernel, so we build the matching vanilla source from
+# kernel.org.
 #
 set -euo pipefail
 
@@ -34,6 +36,26 @@ if ! grep -q early_xe9_write arch/x86/kernel/early_printk.c; then
     echo ">> applying $(basename "$PATCH")"
     patch -p1 < "$PATCH"
 fi
+
+# Install the microvm "portb" hvc console driver (bidirectional console over ports 0xE9/0xEA
+# that replaces the 16550 UART). Copy the source in, register it in the hvc Makefile, and add
+# a Kconfig symbol that selects the hvc core. All three steps are idempotent.
+echo ">> installing hvc_xe9 console driver"
+cp -f "$REPO/kernel/hvc_xe9.c" drivers/tty/hvc/hvc_xe9.c
+# shellcheck disable=SC2016  # `$(CONFIG_HVC_XE9)` is a Make variable and must be written literally.
+grep -q 'hvc_xe9.o' drivers/tty/hvc/Makefile \
+    || echo 'obj-$(CONFIG_HVC_XE9)		+= hvc_xe9.o' >> drivers/tty/hvc/Makefile
+grep -q 'HVC_XE9' drivers/tty/hvc/Kconfig || cat >> drivers/tty/hvc/Kconfig <<'EOF'
+
+config HVC_XE9
+	bool "microvm portb (0xE9/0xEA) hypervisor console"
+	depends on X86
+	select HVC_DRIVER
+	help
+	  Bidirectional hypervisor console for the microvm VMM: output is one
+	  outb per byte to I/O port 0xE9, input is polled from 0xEA/0xE9. It
+	  registers as hvc0 and replaces the 16550 UART. Select with console=hvc0.
+EOF
 
 cp "$CONFIG" .config
 make olddefconfig

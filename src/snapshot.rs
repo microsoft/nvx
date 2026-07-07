@@ -10,7 +10,7 @@
 //! Captures and restores the full state of the micro-VM: guest RAM, the vCPU register file
 //! (GPRs, segments, FPU, XCRs, LAPIC, MP state, pending events, debug registers, and a set
 //! of model-specific registers), the in-kernel interrupt controller and PIT, the KVM
-//! paravirtual clock, and the emulated serial device.
+//! paravirtual clock, and the portb console device.
 //!
 //! A snapshot is a directory containing two files:
 //! - `mem.bin` — the raw contents of guest RAM (see [`GuestMemory::snapshot_ram`]);
@@ -166,7 +166,7 @@ pub fn write(
     vcpu: &VcpuFd,
     vm: &VmFd,
     mem: &GuestMemory,
-    serial_state: &[u8],
+    con_state: &[u8],
 ) -> Result<()> {
     ::std::fs::create_dir_all(dir).with_context(|| format!("creating snapshot dir {dir:?}"))?;
 
@@ -224,8 +224,8 @@ pub fn write(
     // Programmable interval timer.
     put_blob(&mut buf, as_bytes(&vm.get_pit2().context("KVM_GET_PIT2")?));
 
-    // Emulated serial device.
-    put_blob(&mut buf, serial_state);
+    // portb console device (pending input queue).
+    put_blob(&mut buf, con_state);
 
     // Persist RAM and state.
     mem.snapshot_ram(&dir.join("mem.bin"))?;
@@ -253,7 +253,7 @@ pub struct Snapshot {
     clock: kvm_clock_data,
     irqchips: [kvm_irqchip; 3],
     pit: kvm_pit_state2,
-    serial_state: Vec<u8>,
+    con_state: Vec<u8>,
 }
 
 impl Snapshot {
@@ -290,7 +290,7 @@ impl Snapshot {
             read_pod(r.blob()?)?,
         ];
         let pit: kvm_pit_state2 = read_pod(r.blob()?)?;
-        let serial_state: Vec<u8> = r.blob()?.to_vec();
+        let con_state: Vec<u8> = r.blob()?.to_vec();
 
         Ok(Self {
             ram_size,
@@ -307,7 +307,7 @@ impl Snapshot {
             clock,
             irqchips,
             pit,
-            serial_state,
+            con_state,
         })
     }
 
@@ -316,9 +316,9 @@ impl Snapshot {
         self.ram_size
     }
 
-    /// Returns the serialized serial-device state.
-    pub fn serial_state(&self) -> &[u8] {
-        &self.serial_state
+    /// Returns the serialized portb console device state (pending input queue).
+    pub fn con_state(&self) -> &[u8] {
+        &self.con_state
     }
 
     /// Applies the VM-wide state (irqchip, PIT, clock) to `vm`. The irqchip and PIT must

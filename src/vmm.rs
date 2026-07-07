@@ -9,7 +9,7 @@
 //!
 //! Ties together guest memory, the interrupt controller, the vCPU, and the device bus, and
 //! drives the single-core execution loop. Bytes typed on the host console are delivered to
-//! the guest UART by a dedicated input thread that wakes the vCPU with `SIGUSR1`.
+//! the guest console device by a dedicated input thread that wakes the vCPU with `SIGUSR1`.
 //!
 
 use ::std::fs;
@@ -54,11 +54,8 @@ use crate::devices::{
     DeviceBus,
     PioAction,
 };
-use crate::devices::serial::Serial;
-use crate::irq::{
-    self,
-    SERIAL_IRQ,
-};
+use crate::devices::portb::PortConsole;
+use crate::irq;
 use crate::memory::GuestMemory;
 use crate::snapshot::{
     self,
@@ -250,9 +247,9 @@ fn run_cold(cfg: Config) -> Result<()> {
     let start_info_gpa: u64 = pvh::configure(&mem, &cfg.cmdline, initrd_region)?;
     vcpu.setup_pvh(&mem, loaded.pvh_entry, start_info_gpa)?;
 
-    let (console, serial, bus) = build_io(&cfg, None);
+    let (console, bus) = build_io(&cfg, None);
     info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cfg.cmdline);
-    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &serial, &bus, false)
+    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, false)
 }
 
 /// Restores and resumes a VM from a snapshot directory.
@@ -277,55 +274,48 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     snap.apply_vm(&vm_fd)?;
     snap.apply_vcpu(&vcpu.fd)?;
 
-    let (console, serial, bus) = build_io(&cfg, Some(snap.serial_state()));
+    let (console, bus) = build_io(&cfg, Some(snap.con_state()));
     info!("resuming guest from snapshot {dir:?} (mem={} MiB)", snap.ram_size() >> 20);
-    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &serial, &bus, true)
+    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true)
 }
 
-/// Builds the shared console, the UART, and the device bus. When `serial_state` is provided
-/// (restore path) the UART registers are reloaded from it.
-fn build_io(
-    cfg: &Config,
-    serial_state: Option<&[u8]>,
-) -> (Arc<Mutex<Console>>, Arc<Mutex<Serial>>, DeviceBus) {
+/// Builds the shared console sink, the portb console device, and the device bus. When
+/// `con_state` is provided (restore path) the device's pending input queue is reloaded from it.
+fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
     let console: Arc<Mutex<Console>> =
         Arc::new(Mutex::new(Console::new(cfg.quiet, &cfg.boot_marker)));
-    let serial: Arc<Mutex<Serial>> = Arc::new(Mutex::new(Serial::new(Arc::clone(&console))));
-    if let Some(state) = serial_state {
-        serial.lock().expect("serial poisoned").restore(state);
+    let con: Arc<Mutex<PortConsole>> =
+        Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
+    if let Some(state) = con_state {
+        con.lock().expect("console poisoned").restore(state);
     }
-    let bus: DeviceBus = DeviceBus::new(Arc::clone(&serial), Arc::clone(&console));
-    (console, serial, bus)
+    let bus: DeviceBus = DeviceBus::new(Arc::clone(&con));
+    (console, bus)
 }
 
 /// Drives the single-core execution loop shared by the cold-boot and restore paths.
-#[allow(clippy::too_many_arguments)]
 fn execute(
     cfg: &Config,
     vm_fd: &::kvm_ioctls::VmFd,
     vcpu: &mut Vcpu,
     mem: &GuestMemory,
     console: &Arc<Mutex<Console>>,
-    serial: &Arc<Mutex<Serial>>,
     bus: &DeviceBus,
     resumed: bool,
 ) -> Result<()> {
     install_signal_handlers();
     let _tty_guard: TtyGuard = TtyGuard::new();
     let vcpu_tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    spawn_input_thread(bus.serial(), Arc::clone(&vcpu_tid));
+    spawn_input_thread(bus.console(), Arc::clone(&vcpu_tid));
     // SAFETY: `pthread_self` merely returns the calling thread's identifier.
     vcpu_tid.store(unsafe { ::libc::pthread_self() } as u64, Ordering::SeqCst);
 
     console.lock().expect("console poisoned").mark_start();
 
     loop {
-        // Flush buffered console output and reflect the UART interrupt state before entering.
+        // Flush buffered console output before re-entering the guest. The portb console is
+        // interrupt-less (the guest's hvc driver polls), so there is no IRQ line to service.
         console.lock().expect("console poisoned").flush();
-        let pending: bool = serial.lock().expect("serial poisoned").interrupt_pending();
-        vm_fd
-            .set_irq_line(SERIAL_IRQ, pending)
-            .context("KVM_IRQ_LINE failed")?;
 
         match vcpu.fd.run() {
             Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
@@ -336,7 +326,7 @@ fn execute(
                     break;
                 },
                 PioAction::Snapshot => {
-                    if take_snapshot(cfg, vm_fd, vcpu, mem, serial, console)? {
+                    if take_snapshot(cfg, vm_fd, vcpu, mem, bus, console)? {
                         break;
                     }
                 },
@@ -398,7 +388,7 @@ fn take_snapshot(
     vm_fd: &::kvm_ioctls::VmFd,
     vcpu: &Vcpu,
     mem: &GuestMemory,
-    serial: &Arc<Mutex<Serial>>,
+    bus: &DeviceBus,
     console: &Arc<Mutex<Console>>,
 ) -> Result<bool> {
     let Some(dir) = &cfg.snapshot else {
@@ -406,8 +396,8 @@ fn take_snapshot(
         return Ok(false);
     };
     console.lock().expect("console poisoned").flush();
-    let serial_state: Vec<u8> = serial.lock().expect("serial poisoned").snapshot();
-    snapshot::write(dir, &vcpu.fd, vm_fd, mem, &serial_state)
+    let con_state: Vec<u8> = bus.console().lock().expect("console poisoned").snapshot();
+    snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state)
         .with_context(|| format!("writing snapshot to {dir:?}"))?;
     info!("snapshot written to {dir:?}");
     Ok(true)
@@ -484,8 +474,8 @@ fn install_signal_handlers() {
     }
 }
 
-/// Spawns a thread that forwards host stdin to the guest UART, waking the vCPU per input.
-fn spawn_input_thread(serial: Arc<Mutex<Serial>>, vcpu_tid: Arc<AtomicU64>) {
+/// Spawns a thread that forwards host stdin to the guest console, waking the vCPU per input.
+fn spawn_input_thread(con: Arc<Mutex<PortConsole>>, vcpu_tid: Arc<AtomicU64>) {
     thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buf = [0u8; 256];
@@ -493,7 +483,7 @@ fn spawn_input_thread(serial: Arc<Mutex<Serial>>, vcpu_tid: Arc<AtomicU64>) {
             match stdin.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    serial.lock().expect("serial poisoned").enqueue(&buf[..n]);
+                    con.lock().expect("console poisoned").enqueue(&buf[..n]);
                     let tid: u64 = vcpu_tid.load(Ordering::SeqCst);
                     if tid != 0 {
                         // SAFETY: `tid` identifies the live vCPU thread; delivering SIGUSR1

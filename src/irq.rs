@@ -19,9 +19,6 @@ use ::anyhow::{
 use ::kvm_bindings::kvm_pit_config;
 use ::kvm_ioctls::VmFd;
 
-/// ISA interrupt line used by the primary 16550 UART (`ttyS0`).
-pub const SERIAL_IRQ: u32 = 4;
-
 /// Creates the in-kernel PIC + IOAPIC and the PIT.
 pub fn setup(vm_fd: &VmFd) -> Result<()> {
     vm_fd

@@ -4,8 +4,8 @@
 //!
 //! # Guest Console
 //!
-//! A single output sink shared by every guest console path (the 16550 UART transmitter and
-//! the Nanvix-style `0xE9` debug port). It:
+//! A single output sink for the guest console: the byte stream transmitted by the portb
+//! console device (`outb` to `0xE9`). It:
 //!
 //! - renders guest output to the host terminal, or discards it in `quiet` mode;
 //! - buffers output and flushes per line (and on demand) instead of per byte, which is the
