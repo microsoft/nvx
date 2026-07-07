@@ -100,6 +100,7 @@ make run            # boot it
 
 make test           # unit tests (no KVM required)
 make selftest       # tiny protected-mode program through the real entry path
+make boot-test      # end-to-end: boot and assert the guest reaches userspace
 ```
 
 Run directly:

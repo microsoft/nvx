@@ -2,7 +2,7 @@
 
 CARGO ?= cargo
 
-.PHONY: all release build test kernel initramfs run selftest clean
+.PHONY: all release build test kernel initramfs run selftest boot-test clean
 
 all: release
 
@@ -26,6 +26,9 @@ run: release
 
 selftest: release
 	./target/release/microvm --selftest
+
+boot-test: release
+	scripts/test-boot.sh
 
 clean:
 	$(CARGO) clean
