@@ -39,6 +39,8 @@ LD_LIBRARY_PATH="$ROOT/lib:$ROOT/usr/lib" "$LD" "$ROOT/sbin/apk" \
 install -m 0755 "$REPO/alpine/init.python" "$ROOT/init"
 install -m 0755 "$REPO/alpine/hello.py" "$ROOT/hello.py"
 install -m 0755 "$REPO/alpine/repl.py" "$ROOT/repl.py"
+install -m 0755 "$REPO/alpine/net-hello.py" "$ROOT/net-hello.py"
+install -m 0755 "$REPO/alpine/net-pandas.py" "$ROOT/net-pandas.py"
 
 ( cd "$ROOT" && find . | cpio --quiet -o -H newc | gzip -9 > "$OUT" )
 echo ">> built $OUT ($(du -h "$OUT" | cut -f1))"

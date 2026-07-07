@@ -9,7 +9,7 @@ BUILD_DIR ?= $(HOME)/build
 KERNEL_IMG ?= $(BUILD_DIR)/vmlinux
 PY_INITRD ?= $(BUILD_DIR)/initramfs-python.cpio.gz
 
-.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure bench-virtfs bench-net-snapshot snapshot-demo snapshot-boot clean
+.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure bench-virtfs bench-net-snapshot bench-net-snapshot-py snapshot-demo snapshot-boot clean
 
 all: release
 
@@ -40,7 +40,7 @@ python-initramfs:
 $(KERNEL_IMG):
 	scripts/build-kernel.sh
 
-$(PY_INITRD): scripts/build-python-initramfs.sh alpine/init.python alpine/hello.py alpine/repl.py
+$(PY_INITRD): scripts/build-python-initramfs.sh alpine/init.python alpine/hello.py alpine/repl.py alpine/net-hello.py alpine/net-pandas.py
 	scripts/build-python-initramfs.sh
 
 run boot: release
@@ -63,6 +63,12 @@ bench-virtfs: release
 # restoring one from a snapshot. Needs privileges for the host TAP (root or passwordless `sudo ip`).
 bench-net-snapshot: release
 	scripts/bench-net-snapshot.sh
+
+# Benchmark snapshot/restore of a networked Python guest: a bare interpreter and a warmed
+# numpy/pandas app, each proving the link works before the timing marker. Needs the Python
+# initramfs and privileges for the host TAP.
+bench-net-snapshot-py: release
+	scripts/bench-net-snapshot-py.sh
 
 snapshot-demo: release $(KERNEL_IMG) $(PY_INITRD)
 	scripts/snapshot-demo.sh

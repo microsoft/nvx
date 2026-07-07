@@ -88,7 +88,8 @@ uid=0(root) gid=0(root)
 | `alpine/init`         | PID 1 for the RAM initramfs |
 | `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
 | `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
-| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `bench-virtfs.sh`, `bench-net-snapshot.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
+| `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore |
+| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `bench-virtfs.sh`, `bench-net-snapshot.sh`, `bench-net-snapshot-py.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
 | `scripts/`            | Kernel / initramfs build and run helpers |
 
 ## The kernel ("modified Alpine kernel")
@@ -467,6 +468,25 @@ $ ./target/release/microvm --restore ./snap --net-tap llxnet0        # ~4x lower
 Because the pre-created MAC matches the one a VMM-managed TAP would derive, snapshots taken either
 way restore over either kind of TAP. Measured restore wall-clock (256 MiB, shared host): **~368 ms**
 with a per-run TAP versus **~89 ms** attaching to a pre-created one.
+
+#### Networked Python workloads (`make bench-net-snapshot-py`)
+
+`scripts/bench-net-snapshot-py.sh` runs the same idea with real workloads on the Python initramfs:
+`alpine/net-hello.py` (a bare CPython interpreter) and `alpine/net-pandas.py` (a warmed
+numpy/pandas interpreter). Each app configures nothing itself — PID 1 (`alpine/init.python`) brings
+the NIC up — then does a real **HTTP GET to the host** (a helper server the script runs) to prove
+the link, warms its hot paths, and requests a snapshot; on restore it re-checks the link and prints
+its marker, so a restore that reaches the marker has resumed with a **live NIC**. Restoring the
+warmed, network-connected interpreter is far faster than cold-booting it (guest resume → marker,
+median of 8, 512 MiB, shared host):
+
+| to a working-network Python app | cold boot | restore |
+|---------------------------------|----------:|--------:|
+| bare interpreter (`net-hello.py`)   | ~1670 ms | **~50 ms** |
+| numpy + pandas (`net-pandas.py`)    | ~2580 ms | **~104 ms** |
+
+(These `restore` figures are the guest resume time; add the one-time host-TAP setup for the
+wall-clock, or use `--net-tap` to make that negligible.)
 
 ## Snapshot / restore and booting from a snapshot
 

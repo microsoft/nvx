@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# Networked numpy/pandas snapshot app.
+#
+# Like net-hello.py, but first imports the (expensive to load) numpy/pandas stack and runs a small
+# DataFrame computation to warm every hot path, so the snapshot captures a fully warmed interpreter
+# *and* a live NIC. After a restore it re-runs the computation (now hitting warm code and data) and
+# re-checks the link over the recreated host TAP, then prints the result -- demonstrating a heavy,
+# network-connected Python service resuming in milliseconds. The snapshot request (a single outb to
+# port 0x605 via /dev/port) is ignored on a plain cold boot.
+import os
+import socket
+
+import numpy as np
+import pandas as pd
+
+# Host HTTP port the benchmark's helper server listens on (see scripts/bench-net-snapshot-py.sh).
+PORT = 8099
+
+
+def gateway():
+    """The host side of the link, taken from the virtnet_gw kernel-command-line token."""
+    try:
+        for tok in open("/proc/cmdline").read().split():
+            if tok.startswith("virtnet_gw="):
+                return tok.split("=", 1)[1]
+    except OSError:
+        pass
+    return "10.0.0.1"
+
+
+def link_ok(host, port=PORT, timeout=3):
+    """True if a real HTTP request to the host over the NIC round-trips."""
+    try:
+        s = socket.create_connection((host, port), timeout)
+        s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+        ok = b"HELLO-HOST" in s.recv(256)
+        s.close()
+        return ok
+    except OSError:
+        return False
+
+
+def work():
+    df = pd.DataFrame({"x": np.arange(5), "y": np.arange(5) ** 2})
+    return df.sum().to_dict()
+
+
+gw = gateway()
+work()       # warm the numpy/pandas hot paths before snapshotting
+link_ok(gw)  # warm the link (ARP + a round-trip)
+
+try:
+    fd = os.open("/dev/port", os.O_WRONLY)
+    os.lseek(fd, 0x605, os.SEEK_SET)
+    os.write(fd, b"\x01")
+    os.close(fd)
+except OSError:
+    pass
+
+# ---- on restore, execution resumes here ----
+result = work()
+ok = link_ok(gw)
+print("PANDASPY-NET %s %s" % ("OK" if ok else "FAIL", result))

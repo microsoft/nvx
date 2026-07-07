@@ -8,6 +8,21 @@ mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 
+# virt-net: if the VMM attached a NIC (see --net), configure it from the kernel command line
+# tokens ("virtnet_ip=<ip>", "virtnet_mask=<dotted>", "virtnet_gw=<host>") so the Python app
+# resumes with a live link. Uses ifconfig (busybox's ip-addr needs AF_UNIX, omitted from this
+# kernel); the default route points at the host side of the point-to-point link.
+nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$nip" ]; then
+    nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ngw=$(sed -n 's/.*virtnet_gw=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ndev=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -n1)
+    if [ -n "$ndev" ]; then
+        ifconfig "$ndev" "$nip" netmask "${nmask:-255.255.255.0}" up
+        [ -n "$ngw" ] && ip route add default via "$ngw" 2>/dev/null
+    fi
+fi
+
 PYAPP=hello.py
 for tok in $(cat /proc/cmdline); do
     case "$tok" in
