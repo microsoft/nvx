@@ -1,0 +1,15 @@
+#!/bin/sh
+# PID 1 for the RAM initramfs. Mounts the pseudo-filesystems, prints a recognizable
+# boot-completion banner (used as the cold-start marker), and drops to an interactive shell.
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev 2>/dev/null || mdev -s
+mount -t tmpfs none /tmp
+echo
+echo "=========================================="
+echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
+echo " uname: $(uname -a)"
+echo "=========================================="
+echo
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+exec /bin/sh

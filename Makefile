@@ -2,9 +2,12 @@
 
 CARGO ?= cargo
 
-.PHONY: all release build test kernel initramfs run selftest boot-test measure clean
+.PHONY: all world release build test kernel initramfs run boot selftest boot-test measure clean
 
 all: release
+
+# Build all three components: the VMM, the modified kernel, and the Alpine initramfs.
+world: release kernel initramfs
 
 release:
 	$(CARGO) build --release
@@ -21,7 +24,7 @@ kernel:
 initramfs:
 	scripts/build-initramfs.sh
 
-run: release
+run boot: release
 	scripts/run.sh
 
 selftest: release

@@ -9,10 +9,11 @@
 #
 set -euo pipefail
 
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 KVER="${KVER:-6.18.38}"
 WORK="${WORK:-$HOME/build/kernel}"
 OUT="${OUT:-$HOME/build/vmlinux}"
-CONFIG="$(cd "$(dirname "$0")/.." && pwd)/kernel/config-microvm"
+CONFIG="$REPO/kernel/config-microvm"
 
 mkdir -p "$WORK"
 cd "$WORK"
@@ -26,29 +27,12 @@ fi
 
 cd "$SRC"
 
-# Add the Nanvix-style per-byte debug console on I/O port 0xE9 (select with earlycon=xe9),
-# used to redirect kernel logs onto the low-overhead "portb" path. Idempotent.
-EP="arch/x86/kernel/early_printk.c"
-if ! grep -q early_xe9_write "$EP"; then
-    echo ">> adding xe9 (port 0xE9) earlycon to $EP"
-    grep -q 'linux/serial_core.h' "$EP" \
-        || sed -i '0,/#include <linux\/console.h>/s//#include <linux\/console.h>\n#include <linux\/serial_core.h>/' "$EP"
-    cat >> "$EP" <<'XE9'
-
-/* microvm: Nanvix-style per-byte debug console on I/O port 0xE9. Select with earlycon=xe9. */
-static void early_xe9_write(struct console *console, const char *s, unsigned int count)
-{
-	while (count--)
-		outb(*s++, 0xe9);
-}
-
-static int __init early_xe9_setup(struct earlycon_device *device, const char *options)
-{
-	device->con->write = early_xe9_write;
-	return 0;
-}
-EARLYCON_DECLARE(xe9, early_xe9_setup);
-XE9
+# Apply the microvm kernel modification (the 0xE9 "portb" debug earlycon). Idempotent: the
+# grep guard skips it if the source already contains the driver.
+PATCH="$REPO/kernel/patches/0001-microvm-xe9-earlycon.patch"
+if ! grep -q early_xe9_write arch/x86/kernel/early_printk.c; then
+    echo ">> applying $(basename "$PATCH")"
+    patch -p1 < "$PATCH"
 fi
 
 cp "$CONFIG" .config

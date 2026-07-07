@@ -6,6 +6,7 @@
 #
 set -euo pipefail
 
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 AVER="${AVER:-3.24.1}"
 ABRANCH="${ABRANCH:-v3.24}"
 WORK="${WORK:-$HOME/build/initramfs}"
@@ -26,22 +27,8 @@ rm -rf "$ROOT"
 mkdir -p "$ROOT"
 tar -xzf "$TARBALL" -C "$ROOT"
 
-cat > "$ROOT/init" <<'INIT'
-#!/bin/sh
-mount -t proc none /proc
-mount -t sysfs none /sys
-mount -t devtmpfs none /dev 2>/dev/null || mdev -s
-mount -t tmpfs none /tmp
-echo
-echo "=========================================="
-echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
-echo " uname: $(uname -a)"
-echo "=========================================="
-echo
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
-exec /bin/sh
-INIT
-chmod +x "$ROOT/init"
+# Install the init (PID 1) from the alpine/ component of this repo.
+install -m 0755 "$REPO/alpine/init" "$ROOT/init"
 
 ( cd "$ROOT" && find . | cpio --quiet -o -H newc | gzip -9 > "$OUT" )
 echo ">> built $OUT ($(du -h "$OUT" | cut -f1))"

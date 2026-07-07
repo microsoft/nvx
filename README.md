@@ -10,10 +10,21 @@ stripped of the Nanvix-specific paravirtual ABI (magic control registers, credit
 snapshotting, control plane, profiler, host filesystem, ...) and given the x86_64 Linux boot
 support required to run a real Linux kernel.
 
+This is a **complete, reproducible package** with three components, each a directory in this
+repo:
+
+- **the VMM** — `src/` (Rust);
+- **the modified kernel** — `kernel/` (a minimal `config` + the `patches/` that add the
+  `0xE9` earlycon), built from vanilla LTS source that `scripts/build-kernel.sh` downloads;
+- **Alpine** — `alpine/` (the RAM `init`), packed onto the official Alpine mini root
+  filesystem that `scripts/build-initramfs.sh` downloads.
+
+Nothing is prebuilt: `make world` fetches the kernel and Alpine sources and builds all three.
+
 ## What it does
 
 ```
-$ make release kernel initramfs      # build the VMM, the kernel, and the initramfs
+$ make world                         # build the VMM, the modified kernel, and the initramfs
 $ make run                           # boot Alpine to a shell over the serial console
 ...
 [    1.745978] Run /init as init process
@@ -61,6 +72,9 @@ uid=0(root) gid=0(root)
 | `src/irq.rs`          | In-kernel irqchip + PIT |
 | `src/layout.rs`       | Guest-physical memory map constants |
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
+| `kernel/patches/`     | Kernel source modifications (the `0xE9` earlycon) |
+| `alpine/init`         | PID 1 for the RAM initramfs |
+| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `test-boot.sh` |
 | `scripts/`            | Kernel / initramfs build and run helpers |
 
 ## The kernel ("modified Alpine kernel")
@@ -84,30 +98,36 @@ and **enables** exactly what is required to boot:
 - `CONFIG_SERIAL_8250=y` / `CONFIG_SERIAL_8250_CONSOLE=y` (`ttyS0`)
 - `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y`
 
-`scripts/build-kernel.sh` downloads the matching kernel source, applies this config, and
-builds an uncompressed `vmlinux` with the PVH entry note.
+`scripts/build-kernel.sh` downloads the matching kernel source, applies the modifications in
+`kernel/patches/` and this config, and builds an uncompressed `vmlinux` with the PVH entry note.
 
 ## The initramfs (RAM filesystem)
 
-`scripts/build-initramfs.sh` unpacks the official Alpine mini root filesystem, adds an `/init`
-that mounts `proc`/`sys`/`dev`/`tmpfs` and execs a shell, and packs it as a gzipped `newc`
-cpio archive. The whole userland lives in RAM.
+`scripts/build-initramfs.sh` unpacks the official Alpine mini root filesystem, installs
+`alpine/init` as PID 1 (it mounts `proc`/`sys`/`dev`/`tmpfs` and execs a shell), and packs it
+as a gzipped `newc` cpio archive. The whole userland lives in RAM.
 
 ## Building and running
 
 Requirements: a Linux host with `/dev/kvm` accessible to your user, a stable Rust toolchain
-(edition 2024), and — for building the kernel — `flex`, `bison`, `libelf-dev`, `bc`, `cpio`.
+(edition 2024), and — for building the kernel — `flex`, `bison`, `libelf-dev`, `bc`, `cpio`,
+`patch`.
 
 ```
-make release        # build the VMM (cargo build --release)
-make kernel         # build $HOME/build/vmlinux           (~minutes)
-make initramfs      # build $HOME/build/initramfs.cpio.gz
+make world          # build all three: VMM + modified kernel + Alpine initramfs
 make run            # boot it
+
+# or individually:
+make release        # build the VMM (cargo build --release)
+make kernel         # download + patch + build $HOME/build/vmlinux   (~minutes)
+make initramfs      # download Alpine + build $HOME/build/initramfs.cpio.gz
 
 make test           # unit tests (no KVM required)
 make selftest       # tiny protected-mode program through the real entry path
 make boot-test      # end-to-end: boot and assert the guest reaches userspace
+make measure        # cold-start measurements
 ```
+
 
 Run directly:
 
