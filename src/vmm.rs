@@ -72,8 +72,9 @@ const TSS_ADDRESS: usize = 0xfffb_d000;
 /// Restores the controlling terminal to its original mode on drop.
 ///
 /// When standard input is a terminal it is switched to raw mode so that keystrokes reach
-/// the guest console immediately and without local echo. When standard input is not a
-/// terminal (e.g. a pipe) this is a no-op, so scripted runs are unaffected.
+/// the guest console immediately and without local echo, while output post-processing is kept
+/// so newlines still carriage-return (no "staircase"). When standard input is not a terminal
+/// (e.g. a pipe) this is a no-op, so scripted runs are unaffected.
 struct TtyGuard {
     fd: ::libc::c_int,
     saved: Option<::libc::termios>,
@@ -90,6 +91,12 @@ impl TtyGuard {
                 if ::libc::tcgetattr(fd, &mut termios) == 0 {
                     let saved: ::libc::termios = termios;
                     ::libc::cfmakeraw(&mut termios);
+                    // `cfmakeraw` clears OPOST, which also drops ONLCR (map `\n` -> `\r\n` on
+                    // output). Without it every newline the VMM emits while the guest runs -- its
+                    // own log lines and the guest console stream -- only line-feeds and never
+                    // returns to column 0, so the terminal "staircases". Re-enable output
+                    // post-processing; input stays raw so keystrokes still reach the guest.
+                    termios.c_oflag |= ::libc::OPOST | ::libc::ONLCR;
                     ::libc::tcsetattr(fd, ::libc::TCSANOW, &termios);
                     return Self { fd, saved: Some(saved) };
                 }
