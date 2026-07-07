@@ -303,7 +303,7 @@ fn execute(
     bus: &DeviceBus,
     resumed: bool,
 ) -> Result<()> {
-    install_sigusr1_handler();
+    install_signal_handlers();
     let _tty_guard: TtyGuard = TtyGuard::new();
     let vcpu_tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     spawn_input_thread(bus.serial(), Arc::clone(&vcpu_tid));
@@ -445,15 +445,35 @@ fn dump_vcpu(vcpu: &Vcpu) {
     }
 }
 
-/// Installs the `SIGUSR1` handler without `SA_RESTART` so it interrupts `KVM_RUN`.
-fn install_sigusr1_handler() {
-    // SAFETY: We install a trivial, async-signal-safe (no-op) handler for SIGUSR1.
+/// Installs the VMM's signal handlers:
+///
+/// - a no-op `SIGUSR1` handler (without `SA_RESTART`) so a console-input notification can
+///   interrupt `KVM_RUN`; and
+/// - `SIG_IGN` for the job-control stop signals `SIGTTIN`/`SIGTTOU`.
+///
+/// The latter matters whenever the VMM runs in a **background process group** — for example
+/// under `timeout(1)` or inside a shell pipeline — while stdin/stdout is still the controlling
+/// terminal. In that situation the input thread's `read` (`SIGTTIN`) and `TtyGuard`'s
+/// `tcsetattr` (`SIGTTOU`) would, by default, stop the whole process (freezing the vCPU and
+/// hanging the guest). Ignoring these signals makes those calls fail with `EIO` instead, so
+/// the guest keeps running (it simply forgoes interactive console input, which such runs do
+/// not use).
+fn install_signal_handlers() {
+    // SAFETY: We install a trivial, async-signal-safe (no-op) handler for SIGUSR1 and set
+    // SIGTTIN/SIGTTOU to SIG_IGN; all operate on process-global signal dispositions.
     unsafe {
         let mut action: ::libc::sigaction = ::core::mem::zeroed();
         action.sa_sigaction = sigusr1_handler as *const () as usize;
         action.sa_flags = 0;
         ::libc::sigemptyset(&mut action.sa_mask);
         ::libc::sigaction(::libc::SIGUSR1, &action, ::core::ptr::null_mut());
+
+        let mut ignore: ::libc::sigaction = ::core::mem::zeroed();
+        ignore.sa_sigaction = ::libc::SIG_IGN;
+        ignore.sa_flags = 0;
+        ::libc::sigemptyset(&mut ignore.sa_mask);
+        ::libc::sigaction(::libc::SIGTTIN, &ignore, ::core::ptr::null_mut());
+        ::libc::sigaction(::libc::SIGTTOU, &ignore, ::core::ptr::null_mut());
     }
 }
 
