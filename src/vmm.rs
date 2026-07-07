@@ -143,6 +143,8 @@ pub struct Config {
     pub mount_rw: bool,
     /// Optional host file backing a read-write `--mount` (implies read-write; persists writes).
     pub mount_image: Option<PathBuf>,
+    /// Optional size (MiB) of the writable ext4 image (headroom for guest writes).
+    pub mount_size: Option<u64>,
 }
 
 /// Runs a tiny 32-bit self-test program through the same `setup_pvh` entry path to validate
@@ -265,6 +267,7 @@ fn run_cold(cfg: Config) -> Result<()> {
                 target: &cfg.mount_target,
                 writable: cfg.mount_rw || cfg.mount_image.is_some(),
                 image: cfg.mount_image.as_deref(),
+                size: cfg.mount_size.map(|mib| mib << 20),
             };
             let (fs, fragment) = virtfs::load(&vm_fd, ram_size, opts)?;
             cmdline.push(' ');

@@ -81,6 +81,9 @@ pub struct Options<'a> {
     /// Optional host file backing a writable export; guest writes persist to it (implies
     /// `writable`).
     pub image: Option<&'a Path>,
+    /// Optional size, in bytes, for a writable ext4 image (headroom for guest writes). Ignored
+    /// for read-only exports and for an existing `image` file (which keeps its own size).
+    pub size: Option<u64>,
 }
 
 ///
@@ -169,12 +172,18 @@ pub fn build_squashfs(dir: &Path) -> Result<Vec<u8>> {
 /// # Description
 ///
 /// Returns the size, in bytes, of the ext4 image to build for read-write exports of `dir`: the
-/// directory's apparent size plus generous headroom, clamped to a sensible minimum and rounded
-/// up to a whole number of pages.
+/// caller's `requested` size (or a default), never smaller than the room needed to hold the
+/// seeded directory plus ext4 metadata/headroom, clamped to a sensible minimum and rounded up to
+/// a whole number of pages.
 ///
-fn ext4_image_size(dir: &Path) -> u64 {
+fn ext4_image_size(dir: &Path, requested: Option<u64>) -> u64 {
     let used: u64 = dir_apparent_size(dir);
-    let raw: u64 = RW_IMAGE_MIN_BYTES.max(used.saturating_mul(2).saturating_add(8 << 20));
+    // Always leave room for the seeded content plus ext4 metadata and write headroom.
+    let needed: u64 = used.saturating_mul(2).saturating_add(8 << 20);
+    let raw: u64 = requested
+        .unwrap_or(RW_IMAGE_MIN_BYTES)
+        .max(needed)
+        .max(RW_IMAGE_MIN_BYTES);
     align_up(raw, PAGE_SIZE)
 }
 
@@ -229,9 +238,9 @@ fn build_ext4_file(dir: &Path, path: &Path, size: u64) -> Result<()> {
 }
 
 /// Builds a throwaway ext4 image from `dir` and returns its bytes (for an ephemeral, anonymously
-/// mapped read-write export).
-fn build_ext4_bytes(dir: &Path) -> Result<Vec<u8>> {
-    let size: u64 = ext4_image_size(dir);
+/// mapped read-write export). `size` optionally overrides the default image size.
+fn build_ext4_bytes(dir: &Path, size: Option<u64>) -> Result<Vec<u8>> {
+    let size: u64 = ext4_image_size(dir, size);
     let tmp: ::std::path::PathBuf =
         ::std::env::temp_dir().join(format!("microvm-virtfs-{}.ext4", ::std::process::id()));
     build_ext4_file(dir, &tmp, size)?;
@@ -242,9 +251,9 @@ fn build_ext4_bytes(dir: &Path) -> Result<Vec<u8>> {
 }
 
 /// Ensures a persistent ext4 image exists at `path` and returns its page-aligned size. A missing
-/// or empty file is created from `dir`; an existing one is reused unchanged so guest edits from
-/// earlier runs survive.
-fn prepare_ext4_image_file(dir: &Path, path: &Path) -> Result<u64> {
+/// or empty file is created from `dir` (using `size` if given); an existing one is reused
+/// unchanged so guest edits from earlier runs survive.
+fn prepare_ext4_image_file(dir: &Path, path: &Path, size: Option<u64>) -> Result<u64> {
     let existing: u64 = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if existing > 0 {
         if !existing.is_multiple_of(PAGE_SIZE) {
@@ -256,7 +265,7 @@ fn prepare_ext4_image_file(dir: &Path, path: &Path) -> Result<u64> {
         info!("virt-fs: reusing existing read-write image {path:?} ({existing} bytes)");
         return Ok(existing);
     }
-    let size: u64 = ext4_image_size(dir);
+    let size: u64 = ext4_image_size(dir, size);
     build_ext4_file(dir, path, size)?;
     Ok(size)
 }
@@ -409,7 +418,7 @@ pub fn load(vm_fd: &VmFd, mem_bytes: u64, opts: Options) -> Result<(VirtFs, Stri
         match opts.image {
             Some(path) => {
                 // Persistent read-write: format (or reuse) the backing file and map it shared.
-                let size: u64 = prepare_ext4_image_file(opts.dir, path)?;
+                let size: u64 = prepare_ext4_image_file(opts.dir, path, opts.size)?;
                 let fs: VirtFs = VirtFs::map_shared_file(vm_fd, base, path, size)?;
                 info!(
                     "virt-fs: exported {:?} as read-write ext4 at gpa {base:#x}, len {:#x}, \
@@ -422,7 +431,7 @@ pub fn load(vm_fd: &VmFd, mem_bytes: u64, opts: Options) -> Result<(VirtFs, Stri
             },
             None => {
                 // Ephemeral read-write: format an image and map it from anonymous memory.
-                let image: Vec<u8> = build_ext4_bytes(opts.dir)?;
+                let image: Vec<u8> = build_ext4_bytes(opts.dir, opts.size)?;
                 let fs: VirtFs = VirtFs::map_anonymous(vm_fd, base, &image)?;
                 info!(
                     "virt-fs: exported {:?} as read-write ext4 ({} bytes, ephemeral) at gpa \
@@ -492,7 +501,8 @@ mod tests {
         );
     }
 
-    /// The read-write image size is clamped to the minimum and page-aligned for a small tree.
+    /// The read-write image size is clamped to the minimum and page-aligned for a small tree, and
+    /// honors an explicit request when it is larger.
     #[test]
     fn ext4_image_size_is_clamped_and_aligned() {
         let dir = ::std::env::temp_dir().join(format!("microvm-virtfs-sz-{}", ::std::process::id()));
@@ -500,11 +510,15 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a"), b"small").unwrap();
 
-        let size = ext4_image_size(&dir);
-        let _ = fs::remove_dir_all(&dir);
-
+        let size = ext4_image_size(&dir, None);
         assert!(size >= RW_IMAGE_MIN_BYTES);
         assert_eq!(size % PAGE_SIZE, 0);
+
+        // A larger explicit request is honored (and page-aligned); a tiny one is bumped to min.
+        assert_eq!(ext4_image_size(&dir, Some(128 << 20)), 128 << 20);
+        assert_eq!(ext4_image_size(&dir, Some(1 << 20)), RW_IMAGE_MIN_BYTES);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `build_squashfs` packs a directory tree into a mountable SquashFS image (magic `hsqs`).
@@ -545,7 +559,7 @@ mod tests {
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("hello.txt"), b"hello rw\n").unwrap();
 
-        let image = build_ext4_bytes(&dir).unwrap();
+        let image = build_ext4_bytes(&dir, None).unwrap();
         let _ = fs::remove_dir_all(&dir);
 
         assert!(image.len() as u64 >= RW_IMAGE_MIN_BYTES);

@@ -9,7 +9,7 @@ BUILD_DIR ?= $(HOME)/build
 KERNEL_IMG ?= $(BUILD_DIR)/vmlinux
 PY_INITRD ?= $(BUILD_DIR)/initramfs-python.cpio.gz
 
-.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure snapshot-demo snapshot-boot clean
+.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure bench-virtfs snapshot-demo snapshot-boot clean
 
 all: release
 
@@ -54,6 +54,10 @@ boot-test: release
 
 measure: release
 	scripts/measure-coldstart.sh
+
+# Benchmark the virt-fs: guest read/write throughput and the persistent --mount-image round-trip.
+bench-virtfs: release
+	scripts/bench-virtfs.sh
 
 snapshot-demo: release $(KERNEL_IMG) $(PY_INITRD)
 	scripts/snapshot-demo.sh

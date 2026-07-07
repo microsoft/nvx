@@ -103,6 +103,11 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     mount_image: Option<PathBuf>,
 
+    /// Size (in MiB) of the writable ext4 image, giving the guest headroom to create files.
+    /// Applies to `--mount-rw`; ignored for a read-only mount or an existing `--mount-image`.
+    #[arg(long, value_name = "MiB")]
+    mount_size: Option<u64>,
+
     /// Run a tiny protected-mode self-test instead of booting a kernel.
     #[arg(long)]
     selftest: bool,
@@ -148,8 +153,10 @@ fn main() -> Result<()> {
         .checked_mul(1024 * 1024)
         .context("--mem is too large")?;
 
-    if args.mount.is_none() && (args.mount_rw || args.mount_image.is_some()) {
-        bail!("--mount-rw and --mount-image require --mount <dir>");
+    if args.mount.is_none()
+        && (args.mount_rw || args.mount_image.is_some() || args.mount_size.is_some())
+    {
+        bail!("--mount-rw, --mount-image and --mount-size require --mount <dir>");
     }
 
     vmm::run(vmm::Config {
@@ -166,5 +173,6 @@ fn main() -> Result<()> {
         mount_target: args.mount_target,
         mount_rw: args.mount_rw,
         mount_image: args.mount_image,
+        mount_size: args.mount_size,
     })
 }

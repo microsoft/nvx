@@ -84,7 +84,7 @@ uid=0(root) gid=0(root)
 | `alpine/init`         | PID 1 for the RAM initramfs |
 | `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
 | `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
-| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
+| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `bench-virtfs.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
 | `scripts/`            | Kernel / initramfs build and run helpers |
 
 ## The kernel ("modified Alpine kernel")
@@ -156,6 +156,7 @@ make run            # boot Alpine to an interactive shell over the portb console
 | `selftest` | Run the protected-mode self-test through the real PVH entry path and exit. |
 | `boot-test` | End-to-end: boot and assert the guest reaches userspace (`scripts/test-boot.sh`). |
 | `measure` | Cold-start measurements (`scripts/measure-coldstart.sh`). |
+| `bench-virtfs` | virt-fs throughput + persistent `--mount-image` round-trip (`scripts/bench-virtfs.sh`). |
 | `snapshot-demo` | pandas/numpy snapshot/restore benchmark (`scripts/snapshot-demo.sh`). |
 | `snapshot-boot` | Resume an interactive Python interpreter from a snapshot (`scripts/snapshot-boot.sh`). |
 | `clean` | `cargo clean`. |
@@ -206,6 +207,7 @@ Run directly:
 | `--mount-target <path>` | `/mnt/host`                 | Guest mount point for `--mount` |
 | `--mount-rw`       |                                  | Mount the `--mount` export read-write (ext4); ephemeral without `--mount-image` |
 | `--mount-image <file>` |                              | Persist a read-write `--mount` to this host image file (implies `--mount-rw`) |
+| `--mount-size <MiB>` |                                | Size of the writable ext4 image (headroom for guest writes; rw only) |
 | `--selftest`       |                                  | Run the protected-mode self-test and exit |
 
 To **suppress all logging**, pass `--log-level off` (mutes the `[… INFO microvm::…]` lines but
@@ -341,7 +343,34 @@ virtfs: mounted host directory at /mnt/host (ext4,rw)
 
 or `MOUNT=./shared MOUNT_IMAGE=./disk.img make run` (or `MOUNT=./shared MOUNT_RW=1 make run` for
 the ephemeral variant). Read-write exports need `mke2fs` (the `e2fsprogs` package) on the host; a
-guest `sync` before shutdown ensures writes reach a persistent image.
+guest `sync` before shutdown ensures writes reach a persistent image. `--mount-size <MiB>` grows
+the ext4 image when the guest needs room to write beyond the seeded contents.
+
+### Benchmark (`make bench-virtfs`)
+
+`scripts/bench-virtfs.sh` measures guest-observed sequential throughput to the mount (busybox
+`dd`, `conv=fsync` writes) for a read-write export that is *ephemeral* (`--mount-rw`) versus
+*persistent* (`--mount-image`), and runs a **persistence round-trip** on a persistent image:
+create + write a payload, then reuse the image across cold boots and verify (by checksum) that the
+guest's writes survived — on the host too (confirmed with `debugfs`). Median of N runs (default
+64 MiB payload, 512 MiB guest):
+
+```
+== sequential throughput (guest dd, conv=fsync writes) ==
+  rw ephemeral (in-memory)    write    336.8 MB/s   read  3100.0 MB/s
+  rw persistent (file-backed) write    290.9 MB/s   read  3800.0 MB/s
+
+== persistence round-trip (rw --mount-image) ==
+  create image + write 64 MiB       : 1967 ms
+  reuse image + verify (cold each)  : 1892 ms  (min 993, max 1916, n=5)
+  payload survived across runs      : 5/5 runs (cksum 3975907619)
+  host sees /data.bin in image      : 67108864 bytes (debugfs)
+```
+
+The persistent image is slower to write than the in-memory one (its dirty pages are backed by a
+host file), but reads come from the mapped window at memory speed. Guest `fsync` reaches the
+`phram` window (host RAM); the VMM flushes that window to the backing file when the VM stops.
+Tune with `N=`, `PAYLOAD_MB=`, `MEM=`, and `IMG_MB=`.
 
 ## Snapshot / restore and booting from a snapshot
 
