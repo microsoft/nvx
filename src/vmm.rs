@@ -62,6 +62,7 @@ use crate::snapshot::{
     Snapshot,
 };
 use crate::vcpu::Vcpu;
+use crate::virtfs;
 
 /// Guest-physical address of the emulated task-state segment required by VT-x.
 const TSS_ADDRESS: usize = 0xfffb_d000;
@@ -134,6 +135,14 @@ pub struct Config {
     pub snapshot: Option<PathBuf>,
     /// Directory to restore the VM from instead of cold-booting a kernel.
     pub restore: Option<PathBuf>,
+    /// Host directory to export to the guest as a virt-fs (`--mount`).
+    pub mount: Option<PathBuf>,
+    /// Guest mount point for the `--mount` directory.
+    pub mount_target: String,
+    /// Export the `--mount` directory read-write (ext4) instead of read-only (SquashFS).
+    pub mount_rw: bool,
+    /// Optional host file backing a read-write `--mount` (implies read-write; persists writes).
+    pub mount_image: Option<PathBuf>,
 }
 
 /// Runs a tiny 32-bit self-test program through the same `setup_pvh` entry path to validate
@@ -244,11 +253,32 @@ fn run_cold(cfg: Config) -> Result<()> {
         },
         None => None,
     };
-    let start_info_gpa: u64 = pvh::configure(&mem, &cfg.cmdline, initrd_region)?;
+    // Optionally export a host directory to the guest as a virt-fs. The filesystem image is
+    // mapped into guest memory above reported RAM and pointed at via the kernel command line;
+    // `_virtfs` owns that mapping (and, for a persistent read-write export, flushes it) and must
+    // stay alive until the guest stops.
+    let mut cmdline: String = cfg.cmdline.clone();
+    let _virtfs: Option<virtfs::VirtFs> = match &cfg.mount {
+        Some(dir) => {
+            let opts = virtfs::Options {
+                dir,
+                target: &cfg.mount_target,
+                writable: cfg.mount_rw || cfg.mount_image.is_some(),
+                image: cfg.mount_image.as_deref(),
+            };
+            let (fs, fragment) = virtfs::load(&vm_fd, ram_size, opts)?;
+            cmdline.push(' ');
+            cmdline.push_str(&fragment);
+            Some(fs)
+        },
+        None => None,
+    };
+
+    let start_info_gpa: u64 = pvh::configure(&mem, &cmdline, initrd_region)?;
     vcpu.setup_pvh(&mem, loaded.pvh_entry, start_info_gpa)?;
 
     let (console, bus) = build_io(&cfg, None);
-    info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cfg.cmdline);
+    info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cmdline);
     execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, false)
 }
 

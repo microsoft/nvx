@@ -17,6 +17,7 @@ mod layout;
 mod memory;
 mod snapshot;
 mod vcpu;
+mod virtfs;
 mod vmm;
 
 use ::std::path::PathBuf;
@@ -80,6 +81,28 @@ struct Args {
     #[arg(long)]
     restore: Option<PathBuf>,
 
+    /// Export this host directory to the guest as a filesystem, mounted at `--mount-target`.
+    /// Read-only (SquashFS) by default; pass `--mount-rw` (or `--mount-image`) to mount it
+    /// read-write (ext4). Surfaced in the guest as an MTD/block device.
+    #[arg(long, value_name = "DIR")]
+    mount: Option<PathBuf>,
+
+    /// Guest mount point for the `--mount` directory.
+    #[arg(long, value_name = "PATH", default_value = crate::virtfs::DEFAULT_MOUNT_TARGET)]
+    mount_target: String,
+
+    /// Mount the `--mount` filesystem read-write (ext4) instead of read-only (SquashFS). Without
+    /// `--mount-image` the writable image is held in guest memory, so changes are discarded when
+    /// the VM stops.
+    #[arg(long)]
+    mount_rw: bool,
+
+    /// Back a read-write `--mount` with this host file (implies `--mount-rw`). The ext4 image is
+    /// created from `--mount` the first time and reused afterwards, and guest writes are flushed
+    /// back to it, so changes persist across runs.
+    #[arg(long, value_name = "FILE")]
+    mount_image: Option<PathBuf>,
+
     /// Run a tiny protected-mode self-test instead of booting a kernel.
     #[arg(long)]
     selftest: bool,
@@ -125,6 +148,10 @@ fn main() -> Result<()> {
         .checked_mul(1024 * 1024)
         .context("--mem is too large")?;
 
+    if args.mount.is_none() && (args.mount_rw || args.mount_image.is_some()) {
+        bail!("--mount-rw and --mount-image require --mount <dir>");
+    }
+
     vmm::run(vmm::Config {
         kernel: args.kernel,
         initrd: args.initrd,
@@ -135,5 +162,9 @@ fn main() -> Result<()> {
         boot_marker: args.boot_marker,
         snapshot: args.snapshot,
         restore: args.restore,
+        mount: args.mount,
+        mount_target: args.mount_target,
+        mount_rw: args.mount_rw,
+        mount_image: args.mount_image,
     })
 }

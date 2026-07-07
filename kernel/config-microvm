@@ -992,7 +992,13 @@ CONFIG_DMI_SCAN_MACHINE_NON_EFI_FALLBACK=y
 
 # CONFIG_FWCTL is not set
 # CONFIG_GNSS is not set
-# CONFIG_MTD is not set
+# virt-fs: expose a host directory (see the VMM's --mount) to the guest. The image is placed in
+# a physical-memory window by the VMM and surfaced through phram (MTD) + mtdblock as a block
+# device that PID 1 mounts. olddefconfig fills in the remaining MTD defaults.
+CONFIG_MTD=y
+CONFIG_MTD_BLKDEVS=y
+CONFIG_MTD_BLOCK=y
+CONFIG_MTD_PHRAM=y
 # CONFIG_OF is not set
 CONFIG_ARCH_MIGHT_HAVE_PC_PARPORT=y
 # CONFIG_PARPORT is not set
@@ -1749,7 +1755,9 @@ CONFIG_MISC_FILESYSTEMS=y
 # CONFIG_BFS_FS is not set
 # CONFIG_EFS_FS is not set
 # CONFIG_CRAMFS is not set
-# CONFIG_SQUASHFS is not set
+# virt-fs: read-only filesystem the VMM builds from the --mount directory (gzip/zlib).
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZLIB=y
 # CONFIG_VXFS_FS is not set
 # CONFIG_MINIX_FS is not set
 # CONFIG_OMFS_FS is not set

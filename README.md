@@ -1,8 +1,10 @@
 # microvm
 
 A minimal, single-core **x86_64 KVM micro-VM** that boots a Linux (Alpine) kernel through
-the **PVH boot protocol**, entirely from a **RAM initramfs** — no PCI, no ACPI, no block
-device. The only emulated device is a bidirectional "portb" console (backing the kernel's `hvc0`).
+the **PVH boot protocol**, entirely from a **RAM initramfs** — no PCI, no ACPI, and no block
+device by default. The only always-on emulated device is a bidirectional "portb" console (backing
+the kernel's `hvc0`); `--mount` can additionally expose a host directory as a virt-fs (read-only,
+or read-write with `--mount-rw`).
 
 It is a standalone extraction and reworking of the **KVM (Linux) backend of the
 [Nanvix Micro-VM (`uservm`)](https://github.com/nanvix/nanvix/tree/dev/src/uservm)**,
@@ -49,9 +51,11 @@ uid=0(root) gid=0(root)
   with `%ebx` pointing at the boot info. The kernel itself switches to long mode. This avoids
   the real-mode/bzImage setup path entirely.
 - **RAM-only root filesystem.** The initramfs is loaded into guest memory and passed as a PVH
-  module; the kernel unpacks it and runs `/init`. There is no virtio and no block device.
-- **Minimal device model.** The only device is a bidirectional **"portb" console** backing the
-  kernel's `hvc0`: output is one `outb` per byte to I/O port `0xE9`, input is polled from `0xEA`
+  module; the kernel unpacks it and runs `/init`. There is no virtio, and no block device unless
+  the optional `--mount` virt-fs is used.
+- **Minimal device model.** The only always-present device is a bidirectional **"portb" console**
+  backing the kernel's `hvc0`: output is one `outb` per byte to I/O port `0xE9`, input is polled
+  from `0xEA`
   (status) and `0xE9` (data) — no interrupt line. Every other port floats (reads return all-ones,
   writes are dropped), which lets a PCI-less/ACPI-less kernel skip legacy probes (i8042, CMOS/RTC,
   POST codes, ...). The in-kernel KVM irqchip (PIC + IOAPIC) and PIT provide interrupts and the
@@ -66,6 +70,7 @@ uid=0(root) gid=0(root)
 | `src/memory.rs`       | Guest RAM as KVM user-memory regions (MMIO-gap aware; snapshot dump / COW restore) |
 | `src/snapshot.rs`     | Full VM snapshot / restore (vCPU + devices + VM state) |
 | `src/vcpu.rs`         | vCPU creation, CPUID, and the PVH entry register/segment state |
+| `src/virtfs.rs`       | virt-fs: pack a `--mount` host directory into a SquashFS (ro) or ext4 (rw) image, map it into guest memory, and point the guest at it |
 | `src/boot/pvh.rs`     | `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
 | `src/boot/params.rs`  | PVH boot-parameter structures |
 | `src/devices/portb.rs` | portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue |
@@ -197,6 +202,10 @@ Run directly:
 | `--boot-marker <s>`| `ALPINE-MICROVM-BOOT-OK`         | Console substring that marks boot completion |
 | `--snapshot <dir>` |                                  | Take a snapshot into `<dir>` when the guest requests one, then exit |
 | `--restore <dir>`  |                                  | Restore and resume from a snapshot `<dir>` instead of booting |
+| `--mount <dir>`    |                                  | Export a host directory to the guest as a virt-fs (read-only SquashFS by default) |
+| `--mount-target <path>` | `/mnt/host`                 | Guest mount point for `--mount` |
+| `--mount-rw`       |                                  | Mount the `--mount` export read-write (ext4); ephemeral without `--mount-image` |
+| `--mount-image <file>` |                              | Persist a read-write `--mount` to this host image file (implies `--mount-rw`) |
 | `--selftest`       |                                  | Run the protected-mode self-test and exit |
 
 To **suppress all logging**, pass `--log-level off` (mutes the `[… INFO microvm::…]` lines but
@@ -276,6 +285,63 @@ calibration, and crng entropy stall (crng init is instant via RDRAND). The initr
 userland is also negligible (~2 ms to unpack; the ~110 ms is essentially all kernel init).
 
 Reproduce all of the above with `make measure`.
+
+## Sharing a host directory (virt-fs)
+
+`--mount <dir>` exports a host directory to the guest, mounted inside the guest at
+`--mount-target` (default `/mnt/host`). By default the export is **read-only**:
+
+```console
+$ ./target/release/microvm --kernel ~/build/vmlinux --initrd ~/build/initramfs.cpio.gz \
+      --mount ./shared --mount-target /mnt/host
+...
+virtfs: mounted host directory at /mnt/host (squashfs,ro)
+# (inside the guest) ls /mnt/host
+```
+
+or `MOUNT=./shared make run`.
+
+This mirrors how the **Nanvix Micro-VM ("uservm")** exposes its RAMFS — the VMM places a
+filesystem image in guest memory and hands the guest its base/size, and the guest mounts it —
+adapted to a stock Linux guest:
+
+1. The VMM packs the directory into a filesystem image (read-only **SquashFS** via `mksquashfs`,
+   or a read-write **ext4** via `mke2fs -d` — see below).
+2. It maps the image into a dedicated KVM memory slot placed **above the RAM reported to the
+   guest** (just past the 4 GiB MMIO gap and any high RAM), so the kernel never allocates over it.
+3. It appends `phram.phram=virtfs,<base>,<len> virtfs_dir=<target> virtfs_fs=<type>
+   virtfs_mode=<ro|rw>` to the kernel command line — the "registers" that tell the guest where the
+   image is, where to mount it, and how.
+4. In the guest, the built-in **`phram`** MTD driver maps that physical window and **`mtdblock`**
+   turns it into `/dev/mtdblock0`; PID 1 (`alpine/init`) mounts it at `<target>`.
+
+The guest side needs no custom driver — only stock kernel options
+(`CONFIG_MTD`/`MTD_BLOCK`/`MTD_PHRAM`, `CONFIG_SQUASHFS`, `CONFIG_EXT4_FS`, all enabled in
+`kernel/config-microvm`).
+
+### Read-write exports
+
+Pass `--mount-rw` to mount the export **read-write** (an ext4 image built from the directory).
+Two flavors:
+
+- **Ephemeral** (`--mount-rw` alone): the writable image lives in guest memory, so the guest can
+  create and edit files, but the changes are discarded when the VM stops.
+- **Persistent** (`--mount-image <file>`, which implies `--mount-rw`): the ext4 image is a host
+  file, mapped `MAP_SHARED`, so guest writes are flushed back to it. The file is created from
+  `--mount` the first time and **reused** afterwards, so edits survive across runs and are visible
+  on the host (e.g. `debugfs -R 'cat /file' <file>`, or a loop mount).
+
+```console
+# writable, changes persist to ./disk.img across runs:
+$ ./target/release/microvm --kernel ~/build/vmlinux --initrd ~/build/initramfs.cpio.gz \
+      --mount ./shared --mount-image ./disk.img
+...
+virtfs: mounted host directory at /mnt/host (ext4,rw)
+```
+
+or `MOUNT=./shared MOUNT_IMAGE=./disk.img make run` (or `MOUNT=./shared MOUNT_RW=1 make run` for
+the ephemeral variant). Read-write exports need `mke2fs` (the `e2fsprogs` package) on the host; a
+guest `sync` before shutdown ensures writes reach a persistent image.
 
 ## Snapshot / restore and booting from a snapshot
 

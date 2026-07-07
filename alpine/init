@@ -5,6 +5,24 @@ mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 mount -t tmpfs none /tmp
+# virt-fs: if the VMM exported a host directory (see --mount), the kernel's phram/mtdblock
+# driver surfaces it as /dev/mtdblock0. Mount it at the requested point using the filesystem type
+# and access mode the VMM chose (all passed on the kernel command line: "virtfs_dir=<path>",
+# "virtfs_fs=<type>", "virtfs_mode=<ro|rw>"; defaults: /mnt/host, squashfs, ro).
+if [ -e /dev/mtdblock0 ]; then
+    vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
+    [ -n "$vdir" ] || vdir=/mnt/host
+    vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)
+    [ -n "$vfs" ] || vfs=squashfs
+    vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
+    [ -n "$vmode" ] || vmode=ro
+    mkdir -p "$vdir"
+    if mount -t "$vfs" -o "$vmode" /dev/mtdblock0 "$vdir" 2>/dev/null; then
+        echo "virtfs: mounted host directory at $vdir ($vfs,$vmode)"
+    else
+        echo "virtfs: failed to mount /dev/mtdblock0 at $vdir" >&2
+    fi
+fi
 echo
 echo "=========================================="
 echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
