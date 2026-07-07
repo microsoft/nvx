@@ -120,6 +120,14 @@ struct Args {
     /// `sudo ip`.
     #[arg(long, value_name = "IP/PREFIX")]
     net: Option<String>,
+
+    /// Attach to this pre-existing, user-owned host TAP instead of creating one per run. The TAP
+    /// must already be configured (MAC, address, up); the VMM binds to it with a single ioctl (no
+    /// privileged `ip` calls) and leaves it in place on exit. This lets `--restore` resume a
+    /// networked guest without any per-run TAP setup. Pair with `--net` on a cold boot; on
+    /// `--restore` the guest addressing comes from the snapshot.
+    #[arg(long, value_name = "NAME")]
+    net_tap: Option<String>,
 }
 
 /// Parses a logging level name into a [`LevelFilter`].
@@ -174,6 +182,10 @@ fn main() -> Result<()> {
         None => None,
     };
 
+    if args.net_tap.is_some() && args.net.is_none() && args.restore.is_none() {
+        bail!("--net-tap requires --net (cold boot) or --restore (a networked snapshot)");
+    }
+
     vmm::run(vmm::Config {
         kernel: args.kernel,
         initrd: args.initrd,
@@ -190,5 +202,6 @@ fn main() -> Result<()> {
         mount_image: args.mount_image,
         mount_size: args.mount_size,
         net,
+        net_tap: args.net_tap,
     })
 }

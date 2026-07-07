@@ -240,17 +240,40 @@ impl NetConfig {
     }
 }
 
-/// A host TAP interface owned by the VMM for the VM's lifetime.
+/// A host TAP interface used by the VMM for the VM's lifetime.
 ///
-/// The TAP is created (persistent, owned by the current user), given the host/gateway address,
-/// and brought up; the character device is then opened and attached with `TUNSETIFF`. On drop the
-/// interface is deleted.
+/// In the default (owned) mode the TAP is created (persistent, owned by the current user), given
+/// the host/gateway MAC and address, and brought up; it is deleted on drop. In the attached mode
+/// (`--net-tap <name>`) the VMM binds to a pre-existing, pre-configured user-owned TAP with a
+/// single `TUNSETIFF` — no privileged `ip` calls — and leaves it in place on drop, so a restore
+/// can resume without any per-run host setup.
 pub struct HostTap {
     name: String,
     fd: Option<OwnedFd>,
+    /// Whether this VMM created the interface (and must therefore delete it on drop).
+    owned: bool,
 }
 
 impl HostTap {
+    /// Creates the host TAP for `cfg` if `external` is `None`, otherwise attaches to the existing,
+    /// pre-configured TAP named `external`.
+    pub fn for_config(cfg: &NetConfig, external: Option<&str>) -> Result<Self> {
+        match external {
+            Some(name) => Self::attach(name),
+            None => Self::create(cfg),
+        }
+    }
+
+    /// Attaches to a pre-existing, user-owned, already-configured TAP by name. Performs no
+    /// privileged `ip` calls (a single `TUNSETIFF`, allowed for a TAP the caller owns) and does
+    /// not delete the interface on drop.
+    pub fn attach(name: &str) -> Result<Self> {
+        let fd: OwnedFd = open_tap(name)
+            .with_context(|| format!("attaching to pre-created TAP {name} (is it up and owned by you?)"))?;
+        info!("virt-net: attached to pre-created host TAP {name}");
+        Ok(Self { name: name.to_string(), fd: Some(fd), owned: false })
+    }
+
     /// Creates and configures the host TAP for `cfg`, then opens and attaches to it.
     pub fn create(cfg: &NetConfig) -> Result<Self> {
         let uid: u32 = unsafe { ::libc::getuid() };
@@ -290,7 +313,7 @@ impl HostTap {
             "virt-net: host TAP {} up ({}), guest {}/{} via gateway {}",
             cfg.tap, host_cidr, cfg.guest_ip, cfg.prefix, cfg.host_ip
         );
-        Ok(Self { name: cfg.tap.clone(), fd: Some(fd) })
+        Ok(Self { name: cfg.tap.clone(), fd: Some(fd), owned: true })
     }
 
     /// Returns the raw file descriptor for the TAP (valid while this `HostTap` is alive).
@@ -304,6 +327,11 @@ impl Drop for HostTap {
         // Close our attachment first: `ip tuntap del` re-attaches to remove the interface and
         // would get EBUSY while our fd still holds it.
         self.fd = None;
+        // A pre-created (attached) TAP is externally managed: leave it in place for reuse.
+        if !self.owned {
+            debug!("virt-net: detached from pre-created TAP {}", self.name);
+            return;
+        }
         // Best-effort teardown of the interface we created.
         if let Err(e) = ip_priv(&["tuntap", "del", "dev", &self.name, "mode", "tap"]) {
             warn!("virt-net: failed to delete TAP {}: {e:#}", self.name);

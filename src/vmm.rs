@@ -153,6 +153,8 @@ pub struct Config {
     pub mount_size: Option<u64>,
     /// Optional virt-net endpoint (`--net`): the guest IP/prefix and derived host gateway.
     pub net: Option<net::NetConfig>,
+    /// Optional pre-existing host TAP to attach to instead of creating one (`--net-tap`).
+    pub net_tap: Option<String>,
 }
 
 /// A running virt-net NIC: the shared device model plus the TAP descriptor the receive thread
@@ -314,7 +316,7 @@ fn run_cold(cfg: Config) -> Result<()> {
     let (net_dev, _net_tap): (Option<NetDevice>, Option<net::HostTap>) = match &cfg.net {
         Some(ncfg) => {
             let irq = net::register_irq(&vm_fd)?;
-            let tap = net::HostTap::create(ncfg)?;
+            let tap = net::HostTap::for_config(ncfg, cfg.net_tap.as_deref())?;
             let dev = Arc::new(Mutex::new(VirtioNet::new(mem.ram(), tap.raw_fd(), irq, ncfg.mac)));
             let tap_fd = tap.raw_fd();
             (Some(NetDevice { dev, tap_fd }), Some(tap))
@@ -357,7 +359,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     // with the ring state already present in the restored guest RAM. `_net_tap` keeps the TAP
     // alive for the VM's lifetime.
     let (net_dev, _net_tap): (Option<NetDevice>, Option<net::HostTap>) =
-        match restore_net(&vm_fd, &mem, snap.net_state())? {
+        match restore_net(&vm_fd, &mem, snap.net_state(), cfg.net_tap.as_deref())? {
             Some((dev, tap)) => (Some(dev), Some(tap)),
             None => (None, None),
         };
@@ -374,13 +376,14 @@ fn restore_net(
     vm_fd: &::kvm_ioctls::VmFd,
     mem: &GuestMemory,
     net_state: &[u8],
+    net_tap: Option<&str>,
 ) -> Result<Option<(NetDevice, net::HostTap)>> {
     if net_state.is_empty() {
         return Ok(None);
     }
     let (ncfg, consumed) = net::NetConfig::from_header(net_state)?;
     let irq = net::register_irq(vm_fd)?;
-    let tap = net::HostTap::create(&ncfg)?;
+    let tap = net::HostTap::for_config(&ncfg, net_tap)?;
     let tap_fd = tap.raw_fd();
     let mut dev = VirtioNet::new(mem.ram(), tap_fd, irq, ncfg.mac);
     dev.load(&net_state[consumed..])?;

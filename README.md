@@ -445,6 +445,29 @@ guest (the guest re-pings the host over the recreated TAP before the timing mark
 that reaches the marker has proven the link works). Resuming a networked guest reaches a live link
 in tens of milliseconds versus a full cold boot.
 
+#### Reusing a pre-created TAP (`--net-tap`)
+
+By default each run creates and destroys its own TAP, which costs four privileged `ip` calls — the
+bulk of a restore's wall-clock (the guest itself resumes in ~15–20 ms). To skip that per-run setup,
+pre-create one persistent, user-owned TAP and point runs at it with `--net-tap <name>`; the VMM
+then binds to it with a single `TUNSETIFF` (no `sudo`, no `ip`) and leaves it in place on exit:
+
+```console
+# one-off: create the TAP with the deterministic gateway MAC/address (needs privileges once)
+$ sudo ip tuntap add dev llxnet0 mode tap user "$USER"
+$ sudo ip link set dev llxnet0 address 52:54:00:00:00:01   # 52:54:00 + gateway 10.0.0.1
+$ sudo ip addr add 10.0.0.1/24 dev llxnet0
+$ sudo ip link set dev llxnet0 up
+
+# capture, then restore repeatedly with no per-run TAP setup:
+$ ./target/release/microvm --net 10.0.0.2/24 --net-tap llxnet0 --snapshot ./snap ...
+$ ./target/release/microvm --restore ./snap --net-tap llxnet0        # ~4x lower wall-clock
+```
+
+Because the pre-created MAC matches the one a VMM-managed TAP would derive, snapshots taken either
+way restore over either kind of TAP. Measured restore wall-clock (256 MiB, shared host): **~368 ms**
+with a per-run TAP versus **~89 ms** attaching to a pre-created one.
+
 ## Snapshot / restore and booting from a snapshot
 
 The VMM can capture the **entire VM state** to a directory and later resume from it, skipping
