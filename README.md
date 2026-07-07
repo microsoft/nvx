@@ -75,8 +75,9 @@ uid=0(root) gid=0(root)
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
 | `kernel/patches/`     | Kernel source modifications (the `0xE9` earlycon) |
 | `alpine/init`         | PID 1 for the RAM initramfs |
-| `alpine/init.python`, `alpine/hello.py` | Python initramfs init + snapshot/hello-world app |
-| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `snapshot-demo.sh`, `test-boot.sh` |
+| `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
+| `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: hello-world demo and interactive REPL |
+| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
 | `scripts/`            | Kernel / initramfs build and run helpers |
 
 ## The kernel ("modified Alpine kernel")
@@ -277,6 +278,28 @@ Median of 8 runs, 256 MiB, 1 vCPU:
 That is a **~70x** speedup: booting the Python app from a snapshot takes single-digit
 milliseconds because it skips the kernel boot and the interpreter's startup entirely.
 Reproduce with `make python-initramfs && make snapshot-demo`.
+
+To instead drop into an **interactive Python interpreter resumed from a snapshot**, use
+`make snapshot-boot`. It boots `alpine/repl.py`, which warms a full CPython interpreter, requests
+a snapshot at the warmed point, and — on restore — resumes straight into a live `>>>` prompt on
+the serial console, skipping the kernel boot and the entire Python startup. The snapshot is
+captured once on first use (a one-off cold boot) and reused afterwards, so every later run drops
+you at the prompt in milliseconds:
+
+```
+$ make snapshot-boot
+>> resuming interactive Python interpreter from snapshot ~/build/pyrepl (Ctrl-D or exit() to quit)
+Python 3.14.5 on microvm (resumed from snapshot).
+Ready: collections, functools, itertools, json, math, os, re, sys. Ctrl-D or exit() to quit.
+>>> math.factorial(5)
+120
+>>> exit()
+```
+
+The interpreter and the modules listed in the banner are already imported in the snapshot, so
+they are usable by name at the prompt the instant it resumes. `make snapshot-demo` and
+`make snapshot-boot` share the one Python initramfs; the initramfs `init` picks the app from a
+`pyapp=<file>` token on the kernel command line (default `hello.py`).
 
 ## Notes
 

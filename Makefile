@@ -9,7 +9,7 @@ BUILD_DIR ?= $(HOME)/build
 KERNEL_IMG ?= $(BUILD_DIR)/vmlinux
 PY_INITRD ?= $(BUILD_DIR)/initramfs-python.cpio.gz
 
-.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure snapshot-demo clean
+.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure snapshot-demo snapshot-boot clean
 
 all: release
 
@@ -40,7 +40,7 @@ python-initramfs:
 $(KERNEL_IMG):
 	scripts/build-kernel.sh
 
-$(PY_INITRD):
+$(PY_INITRD): scripts/build-python-initramfs.sh alpine/init.python alpine/hello.py alpine/repl.py
 	scripts/build-python-initramfs.sh
 
 run boot: release
@@ -57,6 +57,12 @@ measure: release
 
 snapshot-demo: release $(KERNEL_IMG) $(PY_INITRD)
 	scripts/snapshot-demo.sh
+
+# Resume an interactive Python interpreter straight from a snapshot, skipping the kernel boot
+# and Python startup. The snapshot is captured once on first use (a one-off cold boot) and
+# reused afterwards, so repeat runs drop you at the ">>>" prompt in milliseconds.
+snapshot-boot: release $(KERNEL_IMG) $(PY_INITRD)
+	scripts/snapshot-boot.sh
 
 clean:
 	$(CARGO) clean

@@ -1,8 +1,18 @@
 #!/bin/sh
-# PID 1 for the Python RAM initramfs: mounts the pseudo-filesystems, then execs the Python
-# hello-world app (which requests a snapshot and prints its greeting).
+# PID 1 for the Python RAM initramfs: mounts the pseudo-filesystems, then execs a Python app.
+# The app is chosen with a `pyapp=<file>` token on the kernel command line and defaults to the
+# hello-world demo (which requests a snapshot and prints its greeting). snapshot-boot passes
+# `pyapp=repl.py` to instead resume an interactive interpreter from a snapshot.
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
-exec python3 /hello.py
+
+PYAPP=hello.py
+for tok in $(cat /proc/cmdline); do
+    case "$tok" in
+        pyapp=*) PYAPP="${tok#pyapp=}" ;;
+    esac
+done
+
+exec python3 "/$PYAPP"
