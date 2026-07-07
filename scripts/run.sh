@@ -21,4 +21,12 @@ if [ -n "${MOUNT:-}" ]; then
     [ -n "${MOUNT_IMAGE:-}" ] && args+=(--mount-image "$MOUNT_IMAGE")
 fi
 
+# Optionally attach a virt-net NIC and expose a host network endpoint to the guest. Set NET to the
+# guest IP/prefix (e.g. NET=10.0.0.2/24); the host side of the point-to-point TAP link takes the
+# first address of the subnet (10.0.0.1) and becomes the guest's gateway. Creating the host TAP
+# needs privileges (run as root or allow passwordless `sudo ip`).
+if [ -n "${NET:-}" ]; then
+    args+=(--net "$NET")
+fi
+
 exec "$BIN" "${args[@]}"

@@ -4,7 +4,8 @@ A minimal, single-core **x86_64 KVM micro-VM** that boots a Linux (Alpine) kerne
 the **PVH boot protocol**, entirely from a **RAM initramfs** — no PCI, no ACPI, and no block
 device by default. The only always-on emulated device is a bidirectional "portb" console (backing
 the kernel's `hvc0`); `--mount` can additionally expose a host directory as a virt-fs (read-only,
-or read-write with `--mount-rw`).
+or read-write with `--mount-rw`), and `--net` attaches a virtio-net NIC bridged to a host TAP so
+the guest kernel gets real IPv4 networking.
 
 It is a standalone extraction and reworking of the **KVM (Linux) backend of the
 [Nanvix Micro-VM (`uservm`)](https://github.com/nanvix/nanvix/tree/dev/src/uservm)**,
@@ -51,15 +52,17 @@ uid=0(root) gid=0(root)
   with `%ebx` pointing at the boot info. The kernel itself switches to long mode. This avoids
   the real-mode/bzImage setup path entirely.
 - **RAM-only root filesystem.** The initramfs is loaded into guest memory and passed as a PVH
-  module; the kernel unpacks it and runs `/init`. There is no virtio, and no block device unless
-  the optional `--mount` virt-fs is used.
+  module; the kernel unpacks it and runs `/init`. There is no block device unless the optional
+  `--mount` virt-fs is used, and no virtio unless `--net` attaches the virtio-net NIC.
 - **Minimal device model.** The only always-present device is a bidirectional **"portb" console**
   backing the kernel's `hvc0`: output is one `outb` per byte to I/O port `0xE9`, input is polled
   from `0xEA`
   (status) and `0xE9` (data) — no interrupt line. Every other port floats (reads return all-ones,
   writes are dropped), which lets a PCI-less/ACPI-less kernel skip legacy probes (i8042, CMOS/RTC,
   POST codes, ...). The in-kernel KVM irqchip (PIC + IOAPIC) and PIT provide interrupts and the
-  timer; `kvm-clock` provides time.
+  timer; `kvm-clock` provides time. `--net` optionally adds one **virtio-net** NIC on a
+  **virtio-mmio** window (the only MMIO device and the only interrupt-driven one), pointed at
+  through the kernel command line just like the virt-fs.
 
 ### Source layout
 
@@ -71,6 +74,7 @@ uid=0(root) gid=0(root)
 | `src/snapshot.rs`     | Full VM snapshot / restore (vCPU + devices + VM state) |
 | `src/vcpu.rs`         | vCPU creation, CPUID, and the PVH entry register/segment state |
 | `src/virtfs.rs`       | virt-fs: pack a `--mount` host directory into a SquashFS (ro) or ext4 (rw) image, map it into guest memory, and point the guest at it |
+| `src/net.rs`          | virt-net: a virtio-net NIC on a virtio-mmio transport backed by a host TAP (`--net`); parses the endpoint, brings the TAP up, and runs the RX/TX virtqueues |
 | `src/boot/pvh.rs`     | `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
 | `src/boot/params.rs`  | PVH boot-parameter structures |
 | `src/devices/portb.rs` | portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue |
@@ -110,7 +114,7 @@ Probing absent hardware is at best wasted boot time and at worst a multi-second 
 | `# CONFIG_SERIAL_8250`, `CONFIG_HVC_XE9=y` | The console is the portb `hvc0` driver (`kernel/hvc_xe9.c`), not a 16550 UART — one `outb`/byte out, polled input in. `CONFIG_SERIAL_EARLYCON` stays for `earlycon=xe9`. |
 | `# CONFIG_FB`, `# CONFIG_HID`, `# CONFIG_SOUND`, `# CONFIG_ATA`, `# CONFIG_SCSI`, `# CONFIG_RTC_CLASS`, no USB | None of these devices exist, so their drivers and boot-time probes are removed. |
 | `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y` | The whole userland is the initramfs unpacked into RAM; there is no block device or virtio, hence no storage stack. |
-| `# CONFIG_NET` | No NIC and no virtio-net, so the entire network stack (plus NFS / IPv6 / wireless) is dropped. |
+| `CONFIG_NET=y`, `CONFIG_INET=y`, `CONFIG_VIRTIO_MMIO=y` (+ `_CMDLINE_DEVICES`), `CONFIG_VIRTIO_NET=y` | The minimal networking needed for `--net`: IPv4 over one virtio-net NIC on a virtio-mmio window declared via `virtio_mmio.device=` on the kernel command line. IPv6, wireless, NFS and the rest of the stack stay off. Boots without `--net` pay only a few ms for the dormant stack. |
 | `# CONFIG_MODULES` | Everything required is built in; a single static `vmlinux` needs no module loader. |
 | `CONFIG_HZ_100=y`, `CONFIG_NO_HZ_IDLE=y` | A low 100 Hz tick with tickless idle: fewer timer interrupts, faster boot. |
 | `# CONFIG_SUSPEND`, `# CONFIG_HIBERNATION`, `# CONFIG_X86_MCE`, `# CONFIG_NUMA` | Power management, machine-check, and NUMA are meaningless for a single-vCPU, device-less VM. |
@@ -274,7 +278,8 @@ Profiling with `initcall_debug` found a single dominant cost, then a long tail:
 2. **Strip every subsystem a device-less VM never uses:** `CONFIG_NET` (and NFS/SUNRPC/
    IPv6), wireless/`CFG80211`, `AUDIT`, `PPS`, `SUSPEND`/`HIBERNATION`, `X86_MCE`, `NUMA`,
    `MICROCODE`, `KPROBES`, `PROFILING`, RTC-CMOS. `vmlinux` shrank 34 MB -> 19 MB and the
-   initcall tail dropped (158 ms -> ~135 ms).
+   initcall tail dropped (158 ms -> ~135 ms). (A minimal IPv4 + virtio-net stack was later
+   built back in for the optional [`--net`](#networking-virt-net) NIC; the rest stay stripped.)
 3. **Smaller guest RAM.** The kernel initialises a `struct page` for every page of RAM at
    boot, so 512 MiB costs ~25 ms more than 128 MiB. 128 MiB is plenty for a RAM boot.
 4. **Tuned command line** (trusted single-tenant VM):
@@ -371,6 +376,59 @@ The persistent image is slower to write than the in-memory one (its dirty pages 
 host file), but reads come from the mapped window at memory speed. Guest `fsync` reaches the
 `phram` window (host RAM); the VMM flushes that window to the backing file when the VM stops.
 Tune with `N=`, `PAYLOAD_MB=`, `MEM=`, and `IMG_MB=`.
+
+## Networking (virt-net)
+
+`--net <ip>/<prefix>` attaches a NIC and gives the guest a host network endpoint. The value is the
+**guest** address and subnet; the **host** side of the point-to-point link takes the first address
+of that subnet and becomes the guest's gateway. So `--net 10.0.0.2/24` puts the guest on
+`10.0.0.2` and the host on `10.0.0.1`:
+
+```console
+$ sudo ./target/release/microvm --kernel ~/build/vmlinux --initrd ~/build/initramfs.cpio.gz \
+      --net 10.0.0.2/24
+...
+virtnet: configured eth0 as 10.0.0.2/255.255.255.0 (gw 10.0.0.1)
+/ # ping -c1 10.0.0.1          # guest -> host
+64 bytes from 10.0.0.1: seq=0 ttl=64 time=0.20 ms
+/ # wget -qO- http://10.0.0.1:8000/   # reach a server on the host
+```
+
+and, from the host, `ping 10.0.0.2` reaches the guest. Or `NET=10.0.0.2/24 make run`.
+
+This mirrors, in spirit, how the **Nanvix Micro-VM ("uservm")** exposes the host network to the
+guest with `-allow-host-networking` — but where uservm proxies the guest's socket calls to the
+host stack, here the guest runs a **stock Linux TCP/IP stack over a real (virtual) NIC**, so no
+guest-side custom driver or paravirtual ABI is needed:
+
+1. The VMM models one **virtio-net** device on a **virtio-mmio** (version 2 / VIRTIO 1.0) transport
+   in a fixed guest-physical window (`0xd000_0000`, in the MMIO gap that is never reported as RAM),
+   with a single legacy IRQ line (10, delivered through the in-kernel 8259 PIC via a KVM `irqfd`).
+2. It backs the NIC with a host **TAP** interface: it creates the TAP (persistent, owned by the
+   invoking user), gives the host side the gateway address, brings it up, and tears it down when
+   the VM stops. Guest transmit frames are written to the TAP; a receive thread `poll`s the TAP and
+   feeds inbound frames into the guest's receive queue, raising the NIC's interrupt.
+3. It appends `virtio_mmio.device=0x1000@0xd0000000:10 virtnet_ip=<ip> virtnet_mask=<mask>
+   virtnet_gw=<host>` to the kernel command line — the "registers" that tell the guest where the
+   NIC is and how to address the link.
+4. In the guest, the built-in **`virtio_net`** driver binds the device as `eth0`; PID 1
+   (`alpine/init`) reads the `virtnet_*` tokens and configures the interface (address via
+   `ifconfig`, default route via `ip route`).
+
+The guest side needs only stock kernel options (`CONFIG_NET`, `CONFIG_INET`, `CONFIG_VIRTIO_MMIO`
+with `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES`, and `CONFIG_VIRTIO_NET`, all enabled in
+`kernel/config-microvm`).
+
+### Privileges and scope
+
+Creating and configuring the host TAP needs `CAP_NET_ADMIN`, so run the VMM as **root** or allow
+**passwordless `sudo ip`** (the VMM shells out to `ip tuntap`/`ip addr`/`ip link`, escalating with
+`sudo -n` when it is not already privileged). The link is **host ⇄ guest** only: the guest can
+reach the host (and any service bound on the host, including the `10.0.0.1` gateway address), and
+the host can reach the guest. Routing the guest onward to the internet is out of scope — add your
+own NAT (`iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE` plus
+`net.ipv4.ip_forward=1`) if you want it. Networking is IPv4-only and is not captured by
+`--snapshot`/`--restore`.
 
 ## Snapshot / restore and booting from a snapshot
 

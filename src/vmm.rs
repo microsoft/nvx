@@ -22,6 +22,7 @@ use ::std::path::{
     PathBuf,
 };
 use ::std::sync::atomic::{
+    AtomicBool,
     AtomicU64,
     Ordering,
 };
@@ -30,6 +31,7 @@ use ::std::sync::{
     Mutex,
 };
 use ::std::thread;
+use ::std::thread::JoinHandle;
 
 use ::anyhow::{
     Context,
@@ -57,6 +59,10 @@ use crate::devices::{
 use crate::devices::portb::PortConsole;
 use crate::irq;
 use crate::memory::GuestMemory;
+use crate::net::{
+    self,
+    VirtioNet,
+};
 use crate::snapshot::{
     self,
     Snapshot,
@@ -145,6 +151,18 @@ pub struct Config {
     pub mount_image: Option<PathBuf>,
     /// Optional size (MiB) of the writable ext4 image (headroom for guest writes).
     pub mount_size: Option<u64>,
+    /// Optional virt-net endpoint (`--net`): the guest IP/prefix and derived host gateway.
+    pub net: Option<net::NetConfig>,
+}
+
+/// A running virt-net NIC: the shared device model plus the TAP descriptor the receive thread
+/// reads from. The backing [`HostTap`](crate::net::HostTap) is kept alive separately by the
+/// caller for the VM's lifetime.
+struct NetDevice {
+    /// The virtio-net device, shared between the vCPU thread (MMIO/TX) and the receive thread.
+    dev: Arc<Mutex<VirtioNet>>,
+    /// Raw TAP file descriptor, polled by the receive thread.
+    tap_fd: ::std::os::fd::RawFd,
 }
 
 /// Runs a tiny 32-bit self-test program through the same `setup_pvh` entry path to validate
@@ -277,17 +295,44 @@ fn run_cold(cfg: Config) -> Result<()> {
         None => None,
     };
 
+    // Optionally attach a virt-net NIC (see --net). Its guest-visible location (a virtio-mmio
+    // window) and the addresses its `init` should use are handed to the guest on the kernel
+    // command line, mirroring the virt-fs approach above.
+    if let Some(ncfg) = &cfg.net {
+        cmdline.push(' ');
+        cmdline.push_str(&ncfg.cmdline_fragment());
+    }
+
     let start_info_gpa: u64 = pvh::configure(&mem, &cmdline, initrd_region)?;
     vcpu.setup_pvh(&mem, loaded.pvh_entry, start_info_gpa)?;
 
     let (console, bus) = build_io(&cfg, None);
+
+    // Bring up the virt-net NIC: register its irqfd, create/configure the host TAP, and build the
+    // shared device model. `_net_tap` owns the TAP interface (and tears it down on drop) and must
+    // outlive the guest and the receive thread.
+    let (net_dev, _net_tap): (Option<NetDevice>, Option<net::HostTap>) = match &cfg.net {
+        Some(ncfg) => {
+            let irq = net::register_irq(&vm_fd)?;
+            let tap = net::HostTap::create(ncfg)?;
+            let dev = Arc::new(Mutex::new(VirtioNet::new(mem.ram(), tap.raw_fd(), irq, ncfg.mac)));
+            let tap_fd = tap.raw_fd();
+            (Some(NetDevice { dev, tap_fd }), Some(tap))
+        },
+        None => (None, None),
+    };
+
     info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cmdline);
-    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, false)
+    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, false, net_dev)
 }
 
 /// Restores and resumes a VM from a snapshot directory.
 fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     let snap: Snapshot = Snapshot::read(dir)?;
+
+    if cfg.net.is_some() {
+        warn!("--net is not supported when restoring from a snapshot; ignoring it");
+    }
 
     let kvm: Kvm = Kvm::new().context("opening /dev/kvm")?;
     if kvm.get_api_version() != 12 {
@@ -309,7 +354,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
 
     let (console, bus) = build_io(&cfg, Some(snap.con_state()));
     info!("resuming guest from snapshot {dir:?} (mem={} MiB)", snap.ram_size() >> 20);
-    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true)
+    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true, None)
 }
 
 /// Builds the shared console sink, the portb console device, and the device bus. When
@@ -327,6 +372,9 @@ fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, Dev
 }
 
 /// Drives the single-core execution loop shared by the cold-boot and restore paths.
+// The loop needs the full VM context (config, KVM handles, memory, the console/device bus, and the
+// optional NIC); grouping these purely to satisfy the argument-count lint would not aid clarity.
+#[allow(clippy::too_many_arguments)]
 fn execute(
     cfg: &Config,
     vm_fd: &::kvm_ioctls::VmFd,
@@ -335,6 +383,7 @@ fn execute(
     console: &Arc<Mutex<Console>>,
     bus: &DeviceBus,
     resumed: bool,
+    net: Option<NetDevice>,
 ) -> Result<()> {
     install_signal_handlers();
     let _tty_guard: TtyGuard = TtyGuard::new();
@@ -343,7 +392,17 @@ fn execute(
     // SAFETY: `pthread_self` merely returns the calling thread's identifier.
     vcpu_tid.store(unsafe { ::libc::pthread_self() } as u64, Ordering::SeqCst);
 
+    // Start the virt-net receive thread, if a NIC is attached. It feeds host frames into the
+    // guest and is joined on shutdown (before guest memory is released).
+    let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let net_rx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
+        net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop))
+    });
+
     console.lock().expect("console poisoned").mark_start();
+
+    // Deferred KVM_RUN error: stored so the receive thread is still joined on the way out.
+    let mut run_err: Option<::anyhow::Error> = None;
 
     loop {
         // Flush buffered console output before re-entering the guest. The portb console is
@@ -363,6 +422,17 @@ fn execute(
                         break;
                     }
                 },
+            },
+            // Guest MMIO to the virt-net device window (virtio-mmio). Other MMIO reads float to
+            // zero and writes are dropped, matching the unoccupied-bus behaviour of PMIO.
+            Ok(VcpuExit::MmioRead(addr, data)) => match net_mmio_offset(&net, addr) {
+                Some((nd, off)) => nd.dev.lock().expect("virt-net poisoned").mmio_read(off, data),
+                None => data.iter_mut().for_each(|b| *b = 0),
+            },
+            Ok(VcpuExit::MmioWrite(addr, data)) => {
+                if let Some((nd, off)) = net_mmio_offset(&net, addr) {
+                    nd.dev.lock().expect("virt-net poisoned").mmio_write(off, data);
+                }
             },
             Ok(VcpuExit::Hlt) => {
                 info!("guest halted");
@@ -388,7 +458,10 @@ fn execute(
             // A host-thread signal (console input) interrupted KVM_RUN: loop to refresh
             // the interrupt line and re-enter the guest.
             Err(e) if e.errno() == ::libc::EINTR => {},
-            Err(e) => return Err(anyhow!("KVM_RUN failed: {e}")),
+            Err(e) => {
+                run_err = Some(anyhow!("KVM_RUN failed: {e}"));
+                break;
+            },
         }
 
         if cfg.exit_on_boot && console.lock().expect("console poisoned").booted() {
@@ -397,7 +470,17 @@ fn execute(
         }
     }
 
+    // Stop and join the receive thread before guest memory (which it DMAs into) is dropped.
+    net_stop.store(true, Ordering::SeqCst);
+    if let Some(handle) = net_rx {
+        let _ = handle.join();
+    }
+
     console.lock().expect("console poisoned").flush();
+
+    if let Some(err) = run_err {
+        return Err(err);
+    }
 
     // Report the boot/restore time independently of the logging level so it is available
     // even when all logging is suppressed.
@@ -413,6 +496,16 @@ fn execute(
         }
     }
     Ok(())
+}
+
+/// If `addr` falls in the virt-net MMIO window, returns the device and the register offset.
+fn net_mmio_offset(net: &Option<NetDevice>, addr: u64) -> Option<(&NetDevice, u64)> {
+    let nd: &NetDevice = net.as_ref()?;
+    if (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr) {
+        Some((nd, addr - net::NET_MMIO_BASE))
+    } else {
+        None
+    }
 }
 
 /// Takes a snapshot when the guest requests one. Returns `true` if the VM should stop.

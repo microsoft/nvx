@@ -287,6 +287,131 @@ impl GuestMemory {
     pub fn write_obj<T: Copy>(&self, gpa: u64, value: &T) -> Result<()> {
         self.write_slice(gpa, crate::boot::params::as_bytes(value))
     }
+
+    /// Returns a cheap, cloneable, thread-safe accessor for guest RAM, used by device models
+    /// (e.g. the virt-net NIC) to perform virtqueue DMA from their own threads.
+    ///
+    /// The accessor borrows the same host mappings as this [`GuestMemory`]; the caller must keep
+    /// the owning `GuestMemory` alive for as long as any [`GuestRam`] (or thread using one) can
+    /// still touch guest RAM.
+    pub fn ram(&self) -> GuestRam {
+        let views: Vec<RegionView> = self
+            .regions
+            .iter()
+            .map(|r| RegionView {
+                guest_phys: r.guest_phys,
+                size: r.size as u64,
+                host_addr: r.host_addr as usize,
+            })
+            .collect();
+        GuestRam {
+            regions: ::std::sync::Arc::new(views),
+        }
+    }
+}
+
+/// A single RAM region as seen by [`GuestRam`]: a guest-physical range and its host base address.
+#[derive(Clone, Copy)]
+struct RegionView {
+    guest_phys: u64,
+    size: u64,
+    host_addr: usize,
+}
+
+/// A thread-safe, cheaply cloneable view of guest RAM for device DMA.
+///
+/// Translates guest-physical addresses to host pointers into the same mappings owned by
+/// [`GuestMemory`]. All accesses are bounds-checked against a single region (guest-physical DMA
+/// never legitimately spans a region boundary here).
+#[derive(Clone)]
+pub struct GuestRam {
+    regions: ::std::sync::Arc<Vec<RegionView>>,
+}
+
+// SAFETY: The backing mappings are stable for the VM's lifetime and are accessed only through
+// bounds-checked pointer copies; the owning `GuestMemory` guarantees they outlive every access.
+unsafe impl Send for GuestRam {}
+unsafe impl Sync for GuestRam {}
+
+impl GuestRam {
+    /// Returns the host pointer for `gpa`, ensuring `len` bytes fit within a single region.
+    fn host_ptr(&self, gpa: u64, len: usize) -> Option<*mut u8> {
+        for region in self.regions.iter() {
+            let end: u64 = region.guest_phys + region.size;
+            if gpa >= region.guest_phys && gpa < end {
+                let offset: u64 = gpa - region.guest_phys;
+                if offset + len as u64 > region.size {
+                    return None;
+                }
+                // SAFETY: `offset + len` is within the region bounds checked above.
+                return Some(unsafe { (region.host_addr as *mut u8).add(offset as usize) });
+            }
+        }
+        None
+    }
+
+    /// Reads `buf.len()` bytes from guest RAM at `gpa`. Returns `false` if the range is unmapped.
+    #[must_use]
+    pub fn read(&self, gpa: u64, buf: &mut [u8]) -> bool {
+        if buf.is_empty() {
+            return true;
+        }
+        match self.host_ptr(gpa, buf.len()) {
+            // SAFETY: `src` is valid for `buf.len()` bytes (bounds checked in `host_ptr`).
+            Some(src) => unsafe {
+                ::core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len());
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Writes `data` into guest RAM at `gpa`. Returns `false` if the range is unmapped.
+    #[must_use]
+    pub fn write(&self, gpa: u64, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+        match self.host_ptr(gpa, data.len()) {
+            // SAFETY: `dst` is valid for `data.len()` bytes (bounds checked in `host_ptr`).
+            Some(dst) => unsafe {
+                ::core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Reads a little-endian `u16` from guest RAM at `gpa` (0 if unmapped).
+    pub fn read_u16(&self, gpa: u64) -> u16 {
+        let mut b: [u8; 2] = [0; 2];
+        let _ = self.read(gpa, &mut b);
+        u16::from_le_bytes(b)
+    }
+
+    /// Writes a little-endian `u16` to guest RAM at `gpa`.
+    pub fn write_u16(&self, gpa: u64, value: u16) {
+        let _ = self.write(gpa, &value.to_le_bytes());
+    }
+
+    /// Reads a little-endian `u32` from guest RAM at `gpa` (0 if unmapped).
+    pub fn read_u32(&self, gpa: u64) -> u32 {
+        let mut b: [u8; 4] = [0; 4];
+        let _ = self.read(gpa, &mut b);
+        u32::from_le_bytes(b)
+    }
+
+    /// Writes a little-endian `u32` to guest RAM at `gpa`.
+    pub fn write_u32(&self, gpa: u64, value: u32) {
+        let _ = self.write(gpa, &value.to_le_bytes());
+    }
+
+    /// Reads a little-endian `u64` from guest RAM at `gpa` (0 if unmapped).
+    pub fn read_u64(&self, gpa: u64) -> u64 {
+        let mut b: [u8; 8] = [0; 8];
+        let _ = self.read(gpa, &mut b);
+        u64::from_le_bytes(b)
+    }
 }
 
 /// Writes `bytes` to `file` at its current offset, punching a hole (via a forward seek) for each

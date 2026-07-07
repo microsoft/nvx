@@ -15,6 +15,7 @@ mod devices;
 mod irq;
 mod layout;
 mod memory;
+mod net;
 mod snapshot;
 mod vcpu;
 mod virtfs;
@@ -111,6 +112,14 @@ struct Args {
     /// Run a tiny protected-mode self-test instead of booting a kernel.
     #[arg(long)]
     selftest: bool,
+
+    /// Attach a virtio-net NIC and expose a host network endpoint to the guest. The value is the
+    /// guest's IPv4 address and subnet (e.g. `--net 10.0.0.2/24`); the host side of the link takes
+    /// the first address of that subnet (10.0.0.1) and becomes the guest's gateway. Creating and
+    /// configuring the host TAP needs privileges — run the VMM as root or allow passwordless
+    /// `sudo ip`.
+    #[arg(long, value_name = "IP/PREFIX")]
+    net: Option<String>,
 }
 
 /// Parses a logging level name into a [`LevelFilter`].
@@ -159,6 +168,12 @@ fn main() -> Result<()> {
         bail!("--mount-rw, --mount-image and --mount-size require --mount <dir>");
     }
 
+    // Parse the optional virt-net endpoint (guest IP/prefix), deriving the host gateway.
+    let net: Option<net::NetConfig> = match &args.net {
+        Some(spec) => Some(net::NetConfig::parse(spec)?),
+        None => None,
+    };
+
     vmm::run(vmm::Config {
         kernel: args.kernel,
         initrd: args.initrd,
@@ -174,5 +189,6 @@ fn main() -> Result<()> {
         mount_rw: args.mount_rw,
         mount_image: args.mount_image,
         mount_size: args.mount_size,
+        net,
     })
 }

@@ -23,6 +23,24 @@ if [ -e /dev/mtdblock0 ]; then
         echo "virtfs: failed to mount /dev/mtdblock0 at $vdir" >&2
     fi
 fi
+# virt-net: if the VMM attached a NIC (see --net), the virtio-net driver surfaces it as the only
+# non-loopback interface. Configure it from the kernel command line tokens the VMM appended
+# ("virtnet_ip=<ip>", "virtnet_mask=<dotted>", "virtnet_gw=<host>"): assign the address with
+# ifconfig (busybox's ip-addr resolves the device via AF_UNIX, which this minimal kernel omits),
+# then route the default gateway at the host side of the point-to-point link.
+nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$nip" ]; then
+    nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ngw=$(sed -n 's/.*virtnet_gw=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ndev=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -n1)
+    if [ -n "$ndev" ]; then
+        ifconfig "$ndev" "$nip" netmask "${nmask:-255.255.255.0}" up
+        [ -n "$ngw" ] && ip route add default via "$ngw" 2>/dev/null
+        echo "virtnet: configured $ndev as $nip/${nmask:-255.255.255.0} (gw ${ngw:-none})"
+    else
+        echo "virtnet: no network interface found" >&2
+    fi
+fi
 echo
 echo "=========================================="
 echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"

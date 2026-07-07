@@ -904,7 +904,15 @@ CONFIG_PT_RECLAIM=y
 # end of Data Access Monitoring
 # end of Memory Management options
 
-# CONFIG_NET is not set
+#
+# Networking support (minimal: IPv4 over a virtio-net-mmio NIC for --net)
+#
+CONFIG_NET=y
+CONFIG_INET=y
+# CONFIG_IPV6 is not set
+CONFIG_NETDEVICES=y
+CONFIG_NET_CORE=y
+CONFIG_VIRTIO_NET=y
 
 #
 # Device Drivers
@@ -1423,7 +1431,8 @@ CONFIG_VIRTIO=y
 CONFIG_VIRTIO_MENU=y
 # CONFIG_VIRTIO_BALLOON is not set
 CONFIG_VIRTIO_INPUT=y
-# CONFIG_VIRTIO_MMIO is not set
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
 # CONFIG_VIRTIO_DEBUG is not set
 # CONFIG_VIRTIO_RTC is not set
 CONFIG_VHOST_MENU=y
