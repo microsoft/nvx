@@ -76,7 +76,7 @@ uid=0(root) gid=0(root)
 | `kernel/patches/`     | Kernel source modifications (the `0xE9` earlycon) |
 | `alpine/init`         | PID 1 for the RAM initramfs |
 | `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
-| `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: hello-world demo and interactive REPL |
+| `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
 | `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
 | `scripts/`            | Kernel / initramfs build and run helpers |
 
@@ -249,9 +249,11 @@ boundary** — captures a clean, restorable state:
 - the in-kernel interrupt controller (PIC + IOAPIC), the PIT, and the KVM clock;
 - the emulated 16550 UART.
 
-`state.bin` holds all of that; `mem.bin` is the raw RAM. On **restore**, the RAM image is
-mapped copy-on-write (`MAP_PRIVATE`), so pages fault in lazily and there is no upfront copy —
-restore is dominated by re-applying the vCPU/VM state, not by RAM size.
+`state.bin` holds all of that; `mem.bin` is the raw RAM, **written sparsely** — runs of zero
+pages become file holes, so the image shrinks to the guest's actual footprint (e.g. ~280 MiB
+of a 512 MiB guest) rather than the full RAM size. On **restore**, the RAM image is mapped
+copy-on-write (`MAP_PRIVATE`), so pages fault in lazily and there is no upfront copy — restore is
+dominated by re-applying the vCPU/VM state, not by RAM size.
 
 ```
 # take a snapshot when the guest requests one, then exit:
@@ -261,23 +263,37 @@ microvm --kernel vmlinux --initrd initramfs.cpio.gz --mem 256 --snapshot snap/
 microvm --restore snap/ --mem 256
 ```
 
-### Python "hello world" from a snapshot (`make snapshot-demo`)
+### A pandas program from a snapshot (`make snapshot-demo`)
 
-`make python-initramfs` builds an initramfs with a full CPython interpreter and `alpine/hello.py`,
-which warms up the interpreter, requests a snapshot, then prints its greeting. On a cold boot
-the app pays for kernel boot **and** the entire Python startup; from a snapshot it resumes the
-already-running interpreter and prints immediately.
+`make python-initramfs` builds an initramfs with a full CPython interpreter and the pandas/numpy
+stack, plus `alpine/hello.py`:
 
-Median of 8 runs, 256 MiB, 1 vCPU:
+```python
+import pandas as pd, numpy as np
+df = pd.DataFrame({'x': np.arange(5), 'y': np.arange(5) ** 2})
+print(df.sum().to_dict())
+```
 
-| path | to `hello world` |
-|------|-----------------:|
-| cold boot (kernel + Python startup) | ~380 ms |
-| **restore from snapshot** | **~5.3 ms** (min ~4.9 ms) |
+The app imports pandas/numpy and runs the DataFrame computation once to **warm** every code
+path, then requests a snapshot at that fully warmed point. On a cold boot it pays for kernel
+boot, the Python startup, **and** the whole pandas/numpy import (plus pandas' first-use lazy
+init) before it reaches the result; from a snapshot it resumes the warmed interpreter and re-runs
+the computation immediately.
 
-That is a **~70x** speedup: booting the Python app from a snapshot takes single-digit
-milliseconds because it skips the kernel boot and the interpreter's startup entirely.
+Median of 8 runs, 512 MiB, 1 vCPU:
+
+| path | to `{'x': 10, 'y': 30}` |
+|------|-----------------------:|
+| cold boot (kernel + Python startup + pandas/numpy import) | ~2.6 s |
+| **restore from snapshot** | **~63 ms** (min ~55 ms) |
+
+That is a **~40x** speedup: the snapshot skips the kernel boot and, crucially, the entire
+pandas/numpy import, leaving only the (already-warm) DataFrame work on the restored path.
 Reproduce with `make python-initramfs && make snapshot-demo`.
+
+Two things keep this fast and compact: the app **warms the computation before snapshotting**, so
+the restored path hits warm code/data instead of paying pandas' lazy first-use init; and `mem.bin`
+is **written sparsely**, so the snapshot on disk is ~280 MiB rather than the full 512 MiB.
 
 To instead drop into an **interactive Python interpreter resumed from a snapshot**, use
 `make snapshot-boot`. It boots `alpine/repl.py`, which warms a full CPython interpreter, requests

@@ -14,7 +14,7 @@ BIN="$ROOT/target/release/microvm"
 KERNEL="${KERNEL:-$HOME/build/vmlinux}"
 INITRD="${INITRD:-$HOME/build/initramfs-python.cpio.gz}"
 SNAP="${SNAP:-$HOME/build/pyrepl}"
-MEM="${MEM:-256}"
+MEM="${MEM:-512}"
 # `pyapp=repl.py` tells the initramfs init to run the interactive REPL app rather than the
 # hello-world demo. Capture the snapshot with the console quiet so nothing pollutes it.
 CMDLINE="console=ttyS0 quiet loglevel=0 reboot=t panic=-1 pyapp=repl.py"

@@ -136,16 +136,25 @@ impl GuestMemory {
     ///
     pub fn snapshot_ram(&self, path: &::std::path::Path) -> Result<()> {
         use ::std::io::Write;
-        let file: ::std::fs::File =
+
+        // Guest RAM is mostly zero (a fresh boot touches only a fraction of it), so write the
+        // image sparsely: each region emits only its non-zero pages and leaves a hole for every
+        // run of zero pages. Restore maps the file copy-on-write unchanged -- holes fault in as
+        // zero pages -- so the on-disk artifact shrinks to the guest's actual footprint with no
+        // format change.
+        let mut file: ::std::fs::File =
             ::std::fs::File::create(path).with_context(|| format!("creating RAM image {path:?}"))?;
-        let mut writer: ::std::io::BufWriter<::std::fs::File> = ::std::io::BufWriter::new(file);
+        let mut total: u64 = 0;
         for region in &self.regions {
             // SAFETY: `host_addr`/`size` describe a live mapping owned by this region.
             let bytes: &[u8] =
                 unsafe { ::core::slice::from_raw_parts(region.host_addr, region.size) };
-            writer.write_all(bytes).context("writing RAM image")?;
+            write_sparse(&mut file, bytes).context("writing RAM image")?;
+            total += region.size as u64;
         }
-        writer.flush().context("flushing RAM image")?;
+        // A trailing zero run only advances the offset via seek, so pin the file to RAM size.
+        file.set_len(total).context("sizing RAM image")?;
+        file.flush().context("flushing RAM image")?;
         Ok(())
     }
 
@@ -277,5 +286,76 @@ impl GuestMemory {
     /// Writes a `repr(C)` POD value into guest RAM at guest-physical address `gpa`.
     pub fn write_obj<T: Copy>(&self, gpa: u64, value: &T) -> Result<()> {
         self.write_slice(gpa, crate::boot::params::as_bytes(value))
+    }
+}
+
+/// Writes `bytes` to `file` at its current offset, punching a hole (via a forward seek) for each
+/// run of zero pages instead of writing zeros, so the resulting file is sparse. The file offset
+/// always advances by `bytes.len()`; the caller must `set_len` afterwards so a trailing hole is
+/// reflected in the file size. Runs of like (zero / non-zero) pages are coalesced into a single
+/// seek/write to keep the syscall count low.
+fn write_sparse(file: &mut ::std::fs::File, bytes: &[u8]) -> Result<()> {
+    use ::std::io::{
+        Seek,
+        SeekFrom,
+        Write,
+    };
+    const PAGE: usize = 4096;
+    let is_zero = |chunk: &[u8]| chunk.iter().all(|&b| b == 0);
+    let mut off: usize = 0;
+    while off < bytes.len() {
+        let zero: bool = is_zero(&bytes[off..(off + PAGE).min(bytes.len())]);
+        // Extend the current run of same-kind pages.
+        let mut run_end: usize = (off + PAGE).min(bytes.len());
+        while run_end < bytes.len() {
+            let next: usize = (run_end + PAGE).min(bytes.len());
+            if is_zero(&bytes[run_end..next]) != zero {
+                break;
+            }
+            run_end = next;
+        }
+        if zero {
+            file.seek(SeekFrom::Current((run_end - off) as i64))
+                .context("seeking past zero pages")?;
+        } else {
+            file.write_all(&bytes[off..run_end]).context("writing non-zero pages")?;
+        }
+        off = run_end;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_sparse;
+
+    /// A sparse write must reproduce the exact original bytes on read-back: full non-zero pages,
+    /// zero holes, a partially populated page, and a trailing zero run all round-trip.
+    #[test]
+    fn sparse_write_round_trips() {
+        const PAGE: usize = 4096;
+        let mut buf: Vec<u8> = vec![0u8; PAGE * 8];
+        // page 0: fully non-zero
+        for (i, b) in buf[..PAGE].iter_mut().enumerate() {
+            *b = (i % 251 + 1) as u8;
+        }
+        // page 3: fully non-zero
+        buf[PAGE * 3..PAGE * 4].fill(0xAB);
+        // page 5: a single non-zero byte -- a partially populated page must still be preserved
+        buf[PAGE * 5 + 123] = 7;
+        // pages 1, 2, 4, 6, 7 stay zero (holes), including a trailing zero run.
+
+        let path =
+            ::std::env::temp_dir().join(format!("microvm-sparse-{}.bin", ::std::process::id()));
+        {
+            let mut f = ::std::fs::File::create(&path).unwrap();
+            write_sparse(&mut f, &buf).unwrap();
+            // Mirror snapshot_ram: pin the length so the trailing hole is materialised.
+            f.set_len(buf.len() as u64).unwrap();
+        }
+        let back = ::std::fs::read(&path).unwrap();
+        let _ = ::std::fs::remove_file(&path);
+        assert_eq!(back.len(), buf.len(), "restored image must be full RAM size");
+        assert_eq!(back, buf, "sparse round-trip must reproduce the original bytes");
     }
 }

@@ -28,13 +28,13 @@ rm -rf "$ROOT"
 mkdir -p "$ROOT"
 tar -xzf "$TARBALL" -C "$ROOT"
 
-# Install python3 into the target root. `apk` is a musl binary, so invoke it through the
-# rootfs's dynamic loader with the rootfs libraries on the search path -- this works on a
-# glibc host without chroot/root.
-echo ">> installing python3 into the rootfs"
+# Install python3 + the pandas/numpy stack into the target root. `apk` is a musl binary, so
+# invoke it through the rootfs's dynamic loader with the rootfs libraries on the search path --
+# this works on a glibc host without chroot/root.
+echo ">> installing python3 + pandas/numpy into the rootfs"
 LD="$ROOT/lib/ld-musl-x86_64.so.1"
 LD_LIBRARY_PATH="$ROOT/lib:$ROOT/usr/lib" "$LD" "$ROOT/sbin/apk" \
-    --root "$ROOT" --no-cache --no-interactive add python3
+    --root "$ROOT" --no-cache --no-interactive add python3 py3-numpy py3-pandas
 
 install -m 0755 "$REPO/alpine/init.python" "$ROOT/init"
 install -m 0755 "$REPO/alpine/hello.py" "$ROOT/hello.py"

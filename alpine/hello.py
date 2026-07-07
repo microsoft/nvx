@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-# A minimal Python "hello world" that demonstrates snapshot/restore.
+# The boot-from-snapshot benchmark app: a small pandas/numpy program that demonstrates
+# snapshot/restore.
 #
-# By the time this code runs, the Python interpreter is fully started and warmed. It then
-# asks the VMM to take a snapshot by writing one byte to I/O port 0x605 through /dev/port
-# (a single `outb`, which the VMM intercepts as a snapshot request). On a snapshot run the
-# VMM captures the VM at exactly this point and stops; on a later restore, execution resumes
-# on the next line and prints the greeting immediately -- skipping kernel boot and the entire
-# Python startup.
+# It imports the (expensive to load) pandas/numpy stack and runs the DataFrame computation once
+# to warm every code path, THEN asks the VMM to take a snapshot by writing one byte to I/O port
+# 0x605 through /dev/port (a single `outb`, which the VMM intercepts as a snapshot request). On a
+# snapshot run the VMM captures the VM at exactly this fully warmed point and stops; on a later
+# restore, execution resumes on the next line and re-runs the computation immediately -- now
+# hitting warm code and data -- skipping the kernel boot, the Python + pandas/numpy import, and
+# pandas' first-use lazy initialization.
 import os
+
+import pandas as pd, numpy as np
+
+
+def work():
+    df = pd.DataFrame({'x': np.arange(5), 'y': np.arange(5) ** 2})
+    return df.sum().to_dict()
+
+
+work()  # warm-up before snapshotting: exercise the pandas/numpy hot paths so they resume warm
 
 try:
     fd = os.open("/dev/port", os.O_WRONLY)
@@ -17,4 +29,4 @@ try:
 except OSError:
     pass
 
-print("HELLO-WORLD-FROM-PYTHON", flush=True)
+print(work())
