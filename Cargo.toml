@@ -1,0 +1,29 @@
+# This project is derived from the KVM backend of the Nanvix Micro-VM (uservm),
+# Copyright(c) The Maintainers of Nanvix, MIT License.
+
+[package]
+name = "microvm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A minimal single-core x86_64 KVM micro-VM that boots a Linux (Alpine) kernel via the PVH boot protocol from a RAM initramfs."
+
+[[bin]]
+name = "microvm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.11"
+libc = "0.2.186"
+log = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
+kvm-ioctls = "0.25"
+vmm-sys-util = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
