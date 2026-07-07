@@ -72,6 +72,7 @@ hardware detection** and everything that a paravirtual micro-VM does not need:
 - `# CONFIG_PCI is not set`, `# CONFIG_ACPI is not set`
 - no `CONFIG_XEN` (standalone PVH under KVM), no MP table / ISA / legacy platform probing
 - no framebuffer/VGA, USB, sound, HID, ATA/SCSI, network drivers, loadable modules
+- tuned for fast boot: `CONFIG_HZ=100`, tickless idle, no ftrace/tracing, no kernel debug
 
 and **enables** exactly what is required to boot:
 
@@ -161,27 +162,28 @@ It also adds a `0x604` control port: a write requests VM shutdown (Nanvix `DEFAU
 
 ### Measured cold-start (`make measure`)
 
-Median of 6 runs, 512 MiB, 1 vCPU, host with nested KVM:
+Median of 8 runs, 512 MiB, 1 vCPU, host with nested KVM. Kernel tuned for a micro-VM
+(`CONFIG_HZ=100`, `FTRACE` off, tickless idle).
 
 *Console transport* (to the kernel->userspace handoff, full kernel logs):
 
 | transport | loud (rendered) | quiet (`--quiet`, discarded) |
 |-----------|----------------:|-----------------------------:|
-| UART `ttyS0` (2 exits/byte) | 1894 ms | 1758 ms |
-| **portb `0xE9`** (1 exit/byte) | **1790 ms** | **1672 ms** |
+| UART `ttyS0` (2 exits/byte) | 1820 ms | 1734 ms |
+| **portb `0xE9`** (1 exit/byte) | **1702 ms** | **1604 ms** |
 
-Routing logs through `0xE9` saves ~90-105 ms by halving the per-byte VM exits; not rendering
-to the terminal saves a further ~130 ms.
+Routing logs through `0xE9` saves ~120-130 ms by halving the per-byte VM exits; not rendering
+to the terminal saves a further ~85-100 ms.
 
 *End-to-end* (to the interactive shell):
 
 | configuration | cold-start |
 |---------------|-----------:|
-| loud, full kernel logs (`console=ttyS0`) | ~1896 ms |
-| **silent** (`console=ttyS0 quiet loglevel=0`) | **~1588 ms** |
+| loud, full kernel logs (`console=ttyS0`) | ~1843 ms |
+| **silent** (`console=ttyS0 quiet loglevel=0`) | **~1562 ms** |
 
 A **silent cold boot** — kernel log output suppressed so almost nothing crosses the
-console — reaches userspace in ~1.59 s versus ~1.90 s for a fully verbose boot (~16%
+console — reaches userspace in ~1.56 s versus ~1.84 s for a fully verbose boot (~15%
 faster). Reproduce with `make measure`.
 
 ## Notes
