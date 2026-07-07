@@ -331,7 +331,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     let snap: Snapshot = Snapshot::read(dir)?;
 
     if cfg.net.is_some() {
-        warn!("--net is not supported when restoring from a snapshot; ignoring it");
+        warn!("--net is ignored when restoring: networking is rebuilt from the snapshot itself");
     }
 
     let kvm: Kvm = Kvm::new().context("opening /dev/kvm")?;
@@ -352,9 +352,42 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     snap.apply_vm(&vm_fd)?;
     snap.apply_vcpu(&vcpu.fd)?;
 
+    // Rebuild the virt-net NIC from the snapshot: recreate the (identically addressed) host TAP,
+    // re-register the irqfd, and reload the device's transport state so it resumes in lockstep
+    // with the ring state already present in the restored guest RAM. `_net_tap` keeps the TAP
+    // alive for the VM's lifetime.
+    let (net_dev, _net_tap): (Option<NetDevice>, Option<net::HostTap>) =
+        match restore_net(&vm_fd, &mem, snap.net_state())? {
+            Some((dev, tap)) => (Some(dev), Some(tap)),
+            None => (None, None),
+        };
+
     let (console, bus) = build_io(&cfg, Some(snap.con_state()));
     info!("resuming guest from snapshot {dir:?} (mem={} MiB)", snap.ram_size() >> 20);
-    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true, None)
+    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true, net_dev)
+}
+
+/// Rebuilds the virt-net NIC from serialized snapshot state, or returns `None` if the snapshot
+/// had no NIC. Recreates the host TAP (same addressing and MAC as the original), registers the
+/// irqfd, reloads the device's transport indices, and nudges the guest to resume traffic.
+fn restore_net(
+    vm_fd: &::kvm_ioctls::VmFd,
+    mem: &GuestMemory,
+    net_state: &[u8],
+) -> Result<Option<(NetDevice, net::HostTap)>> {
+    if net_state.is_empty() {
+        return Ok(None);
+    }
+    let (ncfg, consumed) = net::NetConfig::from_header(net_state)?;
+    let irq = net::register_irq(vm_fd)?;
+    let tap = net::HostTap::create(&ncfg)?;
+    let tap_fd = tap.raw_fd();
+    let mut dev = VirtioNet::new(mem.ram(), tap_fd, irq, ncfg.mac);
+    dev.load(&net_state[consumed..])?;
+    dev.resume();
+    info!("virt-net: NIC restored (guest {}/{})", ncfg.guest_ip, ncfg.prefix);
+    let dev = Arc::new(Mutex::new(dev));
+    Ok(Some((NetDevice { dev, tap_fd }, tap)))
 }
 
 /// Builds the shared console sink, the portb console device, and the device bus. When
@@ -418,7 +451,7 @@ fn execute(
                     break;
                 },
                 PioAction::Snapshot => {
-                    if take_snapshot(cfg, vm_fd, vcpu, mem, bus, console)? {
+                    if take_snapshot(cfg, vm_fd, vcpu, mem, bus, console, net.as_ref())? {
                         break;
                     }
                 },
@@ -516,6 +549,7 @@ fn take_snapshot(
     mem: &GuestMemory,
     bus: &DeviceBus,
     console: &Arc<Mutex<Console>>,
+    net: Option<&NetDevice>,
 ) -> Result<bool> {
     let Some(dir) = &cfg.snapshot else {
         warn!("guest requested a snapshot but --snapshot was not given; ignoring");
@@ -523,8 +557,23 @@ fn take_snapshot(
     };
     console.lock().expect("console poisoned").flush();
     let con_state: Vec<u8> = bus.console().lock().expect("console poisoned").snapshot();
-    snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state)
-        .with_context(|| format!("writing snapshot to {dir:?}"))?;
+
+    // With a NIC attached, hold its lock across the whole capture so the receive thread cannot
+    // mutate guest RAM or the virtqueues while we dump them, and serialize its transport state
+    // (endpoint header + device indices) alongside the rest.
+    match (net, &cfg.net) {
+        (Some(nd), Some(ncfg)) => {
+            let dev = nd.dev.lock().expect("virt-net poisoned");
+            let mut net_state: Vec<u8> = ncfg.save_header();
+            net_state.extend(dev.save());
+            snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state, &net_state)
+                .with_context(|| format!("writing snapshot to {dir:?}"))?;
+        },
+        _ => {
+            snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state, &[])
+                .with_context(|| format!("writing snapshot to {dir:?}"))?;
+        },
+    }
     info!("snapshot written to {dir:?}");
     Ok(true)
 }

@@ -9,7 +9,7 @@ BUILD_DIR ?= $(HOME)/build
 KERNEL_IMG ?= $(BUILD_DIR)/vmlinux
 PY_INITRD ?= $(BUILD_DIR)/initramfs-python.cpio.gz
 
-.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure bench-virtfs snapshot-demo snapshot-boot clean
+.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure bench-virtfs bench-net-snapshot snapshot-demo snapshot-boot clean
 
 all: release
 
@@ -58,6 +58,11 @@ measure: release
 # Benchmark the virt-fs: guest read/write throughput and the persistent --mount-image round-trip.
 bench-virtfs: release
 	scripts/bench-virtfs.sh
+
+# Benchmark networking across snapshot/restore: cold boot to a working-network shell versus
+# restoring one from a snapshot. Needs privileges for the host TAP (root or passwordless `sudo ip`).
+bench-net-snapshot: release
+	scripts/bench-net-snapshot.sh
 
 snapshot-demo: release $(KERNEL_IMG) $(PY_INITRD)
 	scripts/snapshot-demo.sh

@@ -10,7 +10,8 @@
 //! Captures and restores the full state of the micro-VM: guest RAM, the vCPU register file
 //! (GPRs, segments, FPU, XCRs, LAPIC, MP state, pending events, debug registers, and a set
 //! of model-specific registers), the in-kernel interrupt controller and PIT, the KVM
-//! paravirtual clock, and the portb console device.
+//! paravirtual clock, the portb console device, and — when a NIC is attached (`--net`) — the
+//! virt-net device's transport state so networking resumes across a restore.
 //!
 //! A snapshot is a directory containing two files:
 //! - `mem.bin` — the raw contents of guest RAM (see [`GuestMemory::snapshot_ram`]);
@@ -132,6 +133,11 @@ impl<'a> Reader<'a> {
         let len: usize = self.u32()? as usize;
         self.take(len)
     }
+
+    /// Number of unconsumed bytes remaining in the buffer.
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
 }
 
 /// Reads a POD value from `bytes` (which must be at least `size_of::<T>()` long).
@@ -167,6 +173,7 @@ pub fn write(
     vm: &VmFd,
     mem: &GuestMemory,
     con_state: &[u8],
+    net_state: &[u8],
 ) -> Result<()> {
     ::std::fs::create_dir_all(dir).with_context(|| format!("creating snapshot dir {dir:?}"))?;
 
@@ -227,6 +234,10 @@ pub fn write(
     // portb console device (pending input queue).
     put_blob(&mut buf, con_state);
 
+    // virt-net device state (empty unless a NIC was attached). Written last so older snapshots
+    // that predate the field still parse.
+    put_blob(&mut buf, net_state);
+
     // Persist RAM and state.
     mem.snapshot_ram(&dir.join("mem.bin"))?;
     ::std::fs::write(dir.join("state.bin"), &buf).context("writing state.bin")?;
@@ -254,6 +265,7 @@ pub struct Snapshot {
     irqchips: [kvm_irqchip; 3],
     pit: kvm_pit_state2,
     con_state: Vec<u8>,
+    net_state: Vec<u8>,
 }
 
 impl Snapshot {
@@ -291,6 +303,13 @@ impl Snapshot {
         ];
         let pit: kvm_pit_state2 = read_pod(r.blob()?)?;
         let con_state: Vec<u8> = r.blob()?.to_vec();
+        // virt-net device state is optional: snapshots taken before the field existed simply end
+        // after the console state.
+        let net_state: Vec<u8> = if r.remaining() > 0 {
+            r.blob()?.to_vec()
+        } else {
+            Vec::new()
+        };
 
         Ok(Self {
             ram_size,
@@ -308,6 +327,7 @@ impl Snapshot {
             irqchips,
             pit,
             con_state,
+            net_state,
         })
     }
 
@@ -319,6 +339,11 @@ impl Snapshot {
     /// Returns the serialized portb console device state (pending input queue).
     pub fn con_state(&self) -> &[u8] {
         &self.con_state
+    }
+
+    /// Returns the serialized virt-net device state (empty if the VM had no NIC).
+    pub fn net_state(&self) -> &[u8] {
+        &self.net_state
     }
 
     /// Applies the VM-wide state (irqchip, PIT, clock) to `vm`. The irqchip and PIT must

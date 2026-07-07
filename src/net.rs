@@ -152,6 +152,9 @@ pub struct NetConfig {
     pub host_ip: Ipv4Addr,
     /// Guest MAC address (locally administered, derived from the guest IP).
     pub mac: [u8; 6],
+    /// Host TAP MAC (locally administered, derived from the host IP). Fixed so the guest's ARP
+    /// cache for the gateway stays valid across snapshot/restore.
+    pub host_mac: [u8; 6],
     /// Host TAP interface name.
     pub tap: String,
 }
@@ -174,14 +177,19 @@ impl NetConfig {
         let prefix: u8 = prefix_str
             .parse()
             .with_context(|| format!("--net: invalid prefix '{prefix_str}'"))?;
+        Self::build(guest_ip, prefix)
+    }
+
+    /// Derives the full endpoint configuration (gateway, netmask, MACs, TAP name) from a guest
+    /// address and prefix. Shared by [`parse`](Self::parse) and [`from_header`](Self::from_header).
+    fn build(guest_ip: Ipv4Addr, prefix: u8) -> Result<Self> {
         if !(1..=30).contains(&prefix) {
             bail!("--net: prefix /{prefix} out of range (use 1..=30)");
         }
 
         // Host/gateway = network address + 1.
         let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
-        let guest_u32: u32 = u32::from(guest_ip);
-        let network: u32 = guest_u32 & mask;
+        let network: u32 = u32::from(guest_ip) & mask;
         let host_ip: Ipv4Addr = Ipv4Addr::from(network + 1);
         if host_ip == guest_ip {
             bail!(
@@ -190,14 +198,16 @@ impl NetConfig {
             );
         }
 
-        // Locally administered MAC 52:54:00 + the low 3 octets of the guest IP.
-        let o: [u8; 4] = guest_ip.octets();
-        let mac: [u8; 6] = [0x52, 0x54, 0x00, o[1], o[2], o[3]];
+        // Locally administered MACs 52:54:00 + the low 3 octets of each IP.
+        let g: [u8; 4] = guest_ip.octets();
+        let h: [u8; 4] = host_ip.octets();
+        let mac: [u8; 6] = [0x52, 0x54, 0x00, g[1], g[2], g[3]];
+        let host_mac: [u8; 6] = [0x52, 0x54, 0x00, h[1], h[2], h[3]];
 
         // A TAP name unique to this process (kept within IFNAMSIZ = 15).
         let tap: String = format!("llx{}", ::std::process::id());
 
-        Ok(Self { guest_ip, prefix, netmask: Ipv4Addr::from(mask), host_ip, mac, tap })
+        Ok(Self { guest_ip, prefix, netmask: Ipv4Addr::from(mask), host_ip, mac, host_mac, tap })
     }
 
     /// Builds the kernel command-line fragment that points the guest at the NIC and tells its
@@ -208,6 +218,25 @@ impl NetConfig {
              virtnet_ip={} virtnet_mask={} virtnet_gw={}",
             NET_MMIO_SIZE, NET_MMIO_BASE, NET_IRQ, self.guest_ip, self.netmask, self.host_ip
         )
+    }
+
+    /// Serializes the guest endpoint (address + prefix) into a snapshot so a restore can rebuild
+    /// the identical link without `--net` being given again.
+    pub fn save_header(&self) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::with_capacity(5);
+        b.extend(self.guest_ip.octets());
+        b.push(self.prefix);
+        b
+    }
+
+    /// Reconstructs the endpoints from a header written by [`save_header`](Self::save_header),
+    /// returning the config and the number of header bytes consumed.
+    pub fn from_header(data: &[u8]) -> Result<(Self, usize)> {
+        if data.len() < 5 {
+            bail!("virt-net snapshot header truncated");
+        }
+        let guest_ip: Ipv4Addr = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
+        Ok((Self::build(guest_ip, data[4])?, 5))
     }
 }
 
@@ -231,7 +260,11 @@ impl HostTap {
         ip_priv(&["tuntap", "add", "dev", &cfg.tap, "mode", "tap", "user", &uid.to_string()])
             .with_context(|| format!("creating TAP interface {}", cfg.tap))?;
         // From here on any failure must still tear the interface down.
+        let mac: String = mac_to_string(&cfg.host_mac);
         let configured = (|| -> Result<()> {
+            // Fix the TAP's MAC so the guest's gateway ARP entry stays valid across a restore.
+            ip_priv(&["link", "set", "dev", &cfg.tap, "address", &mac])
+                .with_context(|| format!("setting {} MAC to {mac}", cfg.tap))?;
             ip_priv(&["addr", "add", &host_cidr, "dev", &cfg.tap])
                 .with_context(|| format!("assigning {host_cidr} to {}", cfg.tap))?;
             ip_priv(&["link", "set", "dev", &cfg.tap, "up"])
@@ -339,6 +372,50 @@ fn ip_priv(args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Formats a MAC address as colon-separated lowercase hex.
+fn mac_to_string(mac: &[u8; 6]) -> String {
+    mac.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// A little-endian byte cursor for parsing serialized virt-net device state.
+struct Cursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end: usize = self.pos.checked_add(n).context("virt-net snapshot overflow")?;
+        let s: &[u8] = self.data.get(self.pos..end).context("virt-net snapshot truncated")?;
+        self.pos = end;
+        Ok(s)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16> {
+        let b: &[u8] = self.take(2)?;
+        Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        let b: &[u8] = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        let b: &[u8] = self.take(8)?;
+        let mut a: [u8; 8] = [0; 8];
+        a.copy_from_slice(b);
+        Ok(u64::from_le_bytes(a))
+    }
 }
 
 /// One split virtqueue's device-visible state.
@@ -685,6 +762,66 @@ impl VirtioNet {
             warn!("virt-net: failed to signal IRQ: {e}");
         }
     }
+
+    ///
+    /// # Description
+    ///
+    /// Serializes the transport state a restore needs to resume the device exactly where it left
+    /// off: the negotiated status/features, the interrupt status, and each virtqueue's ready flag,
+    /// size, ring addresses, and consumer indices. The guest's ring *contents* live in guest RAM
+    /// (captured separately), so only these device-side indices need saving.
+    ///
+    pub fn save(&self) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend(self.status.to_le_bytes());
+        b.extend(self.interrupt_status.to_le_bytes());
+        b.extend(self.driver_features.to_le_bytes());
+        for q in &self.queues {
+            b.push(u8::from(q.ready));
+            b.extend(q.size.to_le_bytes());
+            b.extend(q.desc.to_le_bytes());
+            b.extend(q.avail.to_le_bytes());
+            b.extend(q.used.to_le_bytes());
+            b.extend(q.next_avail.to_le_bytes());
+            b.extend(q.next_used.to_le_bytes());
+        }
+        b
+    }
+
+    /// Restores the transport state captured by [`save`](Self::save) into a freshly created
+    /// device, so it resumes consistent with the ring state already present in guest RAM.
+    pub fn load(&mut self, data: &[u8]) -> Result<()> {
+        let mut c: Cursor<'_> = Cursor { data, pos: 0 };
+        self.status = c.u32()?;
+        self.interrupt_status = c.u32()?;
+        self.driver_features = c.u64()?;
+        for q in &mut self.queues {
+            q.ready = c.u8()? != 0;
+            q.size = c.u16()?;
+            q.desc = c.u64()?;
+            q.avail = c.u64()?;
+            q.used = c.u64()?;
+            q.next_avail = c.u16()?;
+            q.next_used = c.u16()?;
+        }
+        Ok(())
+    }
+
+    ///
+    /// # Description
+    ///
+    /// Nudges the guest after a restore: re-delivers any interrupt that was pending when the
+    /// snapshot was taken, and processes any transmit buffers the guest had queued but the device
+    /// had not yet drained. Inbound frames resume through the normal receive path.
+    ///
+    pub fn resume(&mut self) {
+        if self.queues[TX_QUEUE].ready {
+            self.process_tx();
+        }
+        if self.interrupt_status != 0 {
+            let _ = self.irq.write(1);
+        }
+    }
 }
 
 /// Writes one Ethernet frame to the TAP, tolerating a transiently full queue.
@@ -799,5 +936,30 @@ mod tests {
         assert!(frag.contains("virtnet_ip=10.0.0.2"));
         assert!(frag.contains("virtnet_mask=255.255.255.0"));
         assert!(frag.contains("virtnet_gw=10.0.0.1"));
+    }
+
+    #[test]
+    fn host_mac_is_derived_from_gateway() {
+        let cfg = NetConfig::parse("10.0.0.2/24").unwrap();
+        assert_eq!(cfg.host_mac, [0x52, 0x54, 0x00, 0, 0, 1]);
+        assert_eq!(mac_to_string(&cfg.host_mac), "52:54:00:00:00:01");
+    }
+
+    #[test]
+    fn header_round_trips_the_endpoint() {
+        let cfg = NetConfig::parse("192.168.5.37/28").unwrap();
+        let hdr = cfg.save_header();
+        let (back, consumed) = NetConfig::from_header(&hdr).unwrap();
+        assert_eq!(consumed, hdr.len());
+        assert_eq!(back.guest_ip, cfg.guest_ip);
+        assert_eq!(back.prefix, cfg.prefix);
+        assert_eq!(back.host_ip, cfg.host_ip);
+        assert_eq!(back.mac, cfg.mac);
+        assert_eq!(back.host_mac, cfg.host_mac);
+    }
+
+    #[test]
+    fn from_header_rejects_short_input() {
+        assert!(NetConfig::from_header(&[10, 0, 0]).is_err());
     }
 }

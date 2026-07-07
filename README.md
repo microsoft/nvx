@@ -88,7 +88,7 @@ uid=0(root) gid=0(root)
 | `alpine/init`         | PID 1 for the RAM initramfs |
 | `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
 | `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
-| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `bench-virtfs.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
+| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `bench-virtfs.sh`, `bench-net-snapshot.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
 | `scripts/`            | Kernel / initramfs build and run helpers |
 
 ## The kernel ("modified Alpine kernel")
@@ -427,8 +427,23 @@ Creating and configuring the host TAP needs `CAP_NET_ADMIN`, so run the VMM as *
 reach the host (and any service bound on the host, including the `10.0.0.1` gateway address), and
 the host can reach the guest. Routing the guest onward to the internet is out of scope — add your
 own NAT (`iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE` plus
-`net.ipv4.ip_forward=1`) if you want it. Networking is IPv4-only and is not captured by
-`--snapshot`/`--restore`.
+`net.ipv4.ip_forward=1`) if you want it. Networking is IPv4-only.
+
+### Networking across snapshot / restore
+
+The NIC **survives `--snapshot`/`--restore`**. The snapshot captures the device's transport state
+(each virtqueue's ready flag, size, ring addresses, and consumer indices) alongside the guest RAM
+that holds the rings, so on restore the device resumes in lockstep with the driver instead of
+desynchronising. The host side is rebuilt automatically: the restore reads the guest endpoint from
+the snapshot, recreates the TAP with the **same MAC** (derived from the gateway IP, so the guest's
+ARP entry for the gateway stays valid) and address, re-registers the `irqfd`, and re-arms the
+receive thread — no `--net` needs to be given on the restore command line.
+
+`scripts/bench-net-snapshot.sh` (`make bench-net-snapshot`) measures this: cold-booting to a
+**working-network** shell versus **restoring** one from a snapshot of a warmed, network-configured
+guest (the guest re-pings the host over the recreated TAP before the timing marker, so a restore
+that reaches the marker has proven the link works). Resuming a networked guest reaches a live link
+in tens of milliseconds versus a full cold boot.
 
 ## Snapshot / restore and booting from a snapshot
 
