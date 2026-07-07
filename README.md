@@ -82,27 +82,37 @@ uid=0(root) gid=0(root)
 
 ## The kernel ("modified Alpine kernel")
 
-`kernel/config-microvm` is a minimal x86_64 configuration built from the vanilla LTS source
-that Alpine's `linux-lts` tracks. Relative to a stock kernel it **removes PCI and PC-like
-hardware detection** and everything that a paravirtual micro-VM does not need:
+`kernel/config-microvm` is a minimal x86_64 configuration built from the vanilla LTS source that
+Alpine's `linux-lts` tracks. `scripts/build-kernel.sh` downloads the matching kernel source,
+applies the modification in `kernel/patches/`, drops in this config, and builds an uncompressed
+`vmlinux` carrying the PVH entry note.
 
-- `# CONFIG_PCI is not set`, `# CONFIG_ACPI is not set`
-- no `CONFIG_XEN` (standalone PVH under KVM), no MP table / ISA / legacy platform probing
-- no framebuffer/VGA, USB, sound, HID, ATA/SCSI, network drivers, loadable modules
-- **no networking at all** (`CONFIG_NET` off), no wireless, no audit, no PPS, no suspend/
-  hibernate, no machine-check/NUMA/microcode, no kprobes/profiling
-- tuned for fast boot: `CONFIG_HZ=100`, tickless idle, no ftrace/tracing, no kernel debug,
-  `CONFIG_RANDOM_TRUST_CPU=y` (instant entropy), and — critically — **`CONFIG_PM_TRACE_RTC`
-  off** (see below)
+### Configuration rationale
 
-and **enables** exactly what is required to boot:
+The guest sees almost no hardware — one CPU, RAM, the in-kernel interrupt controller, and a single
+16550 UART — so the configuration follows one rule: **build in exactly what a device-less PVH/KVM
+guest needs to boot, and compile out everything that would probe for hardware that is not there.**
+Probing absent hardware is at best wasted boot time and at worst a multi-second hang (see
+`PM_TRACE_RTC` below).
 
-- `CONFIG_PVH=y` (PVH entry), `CONFIG_KVM_GUEST=y` + paravirt clock
-- `CONFIG_SERIAL_8250=y` / `CONFIG_SERIAL_8250_CONSOLE=y` (`ttyS0`)
-- `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y`
+| Config | Why |
+|--------|-----|
+| `CONFIG_PVH=y` | Enter through the 32-bit PVH entry note, so the VMM loads an uncompressed `vmlinux` and skips the real-mode/bzImage setup and self-decompression path entirely. |
+| `CONFIG_HYPERVISOR_GUEST=y`, `CONFIG_PARAVIRT=y`, `CONFIG_KVM_GUEST=y`, `CONFIG_PARAVIRT_CLOCK=y` | Run as a KVM guest and take time from `kvm-clock` — no PIT/HPET/TSC calibration, no RTC read at boot. |
+| `# CONFIG_PCI`, `# CONFIG_ACPI` (and no EFI) | The VMM exposes no PCI bus, no ACPI tables, and no EFI/BIOS firmware; unclaimed I/O ports float. Enabling these makes the kernel enumerate buses and firmware that do not exist. |
+| `CONFIG_SERIAL_8250=y`, `CONFIG_SERIAL_8250_CONSOLE=y` | Drive the one emulated device: a 16550 UART at `0x3F8` (`console=ttyS0`). |
+| `# CONFIG_FB`, `# CONFIG_HID`, `# CONFIG_SOUND`, `# CONFIG_ATA`, `# CONFIG_SCSI`, `# CONFIG_RTC_CLASS`, no USB | None of these devices exist, so their drivers and boot-time probes are removed. |
+| `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y` | The whole userland is the initramfs unpacked into RAM; there is no block device or virtio, hence no storage stack. |
+| `# CONFIG_NET` | No NIC and no virtio-net, so the entire network stack (plus NFS / IPv6 / wireless) is dropped. |
+| `# CONFIG_MODULES` | Everything required is built in; a single static `vmlinux` needs no module loader. |
+| `CONFIG_HZ_100=y`, `CONFIG_NO_HZ_IDLE=y` | A low 100 Hz tick with tickless idle: fewer timer interrupts, faster boot. |
+| `# CONFIG_SUSPEND`, `# CONFIG_HIBERNATION`, `# CONFIG_X86_MCE`, `# CONFIG_NUMA` | Power management, machine-check, and NUMA are meaningless for a single-vCPU, device-less VM. |
+| `# CONFIG_FTRACE`, `# CONFIG_KPROBES`, `# CONFIG_PROFILING`, `# CONFIG_DEBUG_KERNEL` | Tracing / debug / profiling infrastructure is compiled out to shrink the image and speed boot. |
+| no `PM_TRACE_RTC` (gated off by no suspend) | **The load-bearing one.** With suspend/hibernate off there is no `PM_SLEEP`, so the `PM_TRACE` debug feature and its `PM_TRACE_RTC` are never built — which matters: `PM_TRACE_RTC`'s `early_resume_init` initcall reads the RTC via `mc146818_get_time()`, and with no RTC (ports `0x70`/`0x71` float) that read spins to a ~1 s timeout **twice**, most of the old ~1.6 s cold-start (see below). |
 
-`scripts/build-kernel.sh` downloads the matching kernel source, applies the modifications in
-`kernel/patches/` and this config, and builds an uncompressed `vmlinux` with the PVH entry note.
+The only **source** change is `kernel/patches/0001-microvm-xe9-earlycon.patch`, which adds an
+`earlycon=xe9` driver that emits each kernel-log byte with a single `outb` to I/O port `0xE9` —
+see [the "portb" strategy](#the-portb-strategy-mirroring-nanvix).
 
 ## The initramfs (RAM filesystem)
 
@@ -116,20 +126,49 @@ Requirements: a Linux host with `/dev/kvm` accessible to your user, a stable Rus
 (edition 2024), and — for building the kernel — `flex`, `bison`, `libelf-dev`, `bc`, `cpio`,
 `patch`.
 
-```
-make world          # build all three: VMM + modified kernel + Alpine initramfs
-make run            # boot it
+Quick start:
 
-# or individually:
-make release        # build the VMM (cargo build --release)
-make kernel         # download + patch + build $HOME/build/vmlinux   (~minutes)
-make initramfs      # download Alpine + build $HOME/build/initramfs.cpio.gz
-
-make test           # unit tests (no KVM required)
-make selftest       # tiny protected-mode program through the real entry path
-make boot-test      # end-to-end: boot and assert the guest reaches userspace
-make measure        # cold-start measurements
 ```
+make world          # build all three: the VMM + the modified kernel + the Alpine initramfs
+make run            # boot Alpine to a serial shell
+```
+
+### Make targets
+
+| Target | What it does |
+|--------|--------------|
+| `all` *(default)* | Alias for `release`. |
+| `world` | Build all three components: `release` + `kernel` + `initramfs`. |
+| `release` | Build the VMM in release mode → `target/release/microvm`. |
+| `build` | Build the VMM in debug mode. |
+| `test` | Run the unit tests (`cargo test --release`; no KVM required). |
+| `kernel` | Download + patch + build the PVH `vmlinux` → `$(KERNEL_IMG)` (`scripts/build-kernel.sh`, ~minutes). |
+| `initramfs` | Build the Alpine RAM rootfs → `$(BUILD_DIR)/initramfs.cpio.gz` (`scripts/build-initramfs.sh`). |
+| `python-initramfs` | Build a rootfs with CPython + pandas/numpy → `$(PY_INITRD)` (`scripts/build-python-initramfs.sh`). |
+| `run`, `boot` | Boot Alpine to an interactive serial shell (`scripts/run.sh`). |
+| `selftest` | Run the protected-mode self-test through the real PVH entry path and exit. |
+| `boot-test` | End-to-end: boot and assert the guest reaches userspace (`scripts/test-boot.sh`). |
+| `measure` | Cold-start measurements (`scripts/measure-coldstart.sh`). |
+| `snapshot-demo` | pandas/numpy snapshot/restore benchmark (`scripts/snapshot-demo.sh`). |
+| `snapshot-boot` | Resume an interactive Python interpreter from a snapshot (`scripts/snapshot-boot.sh`). |
+| `clean` | `cargo clean`. |
+
+`make kernel` / `initramfs` / `python-initramfs` always re-run their build script. `snapshot-demo`
+and `snapshot-boot` instead depend on the artifacts `$(KERNEL_IMG)` and `$(PY_INITRD)` via file
+rules that build **only when the artifact is missing** (and, for the Python initramfs, when its
+`alpine/` sources change), so they work from a clean tree without rebuilding what is already there.
+
+Both make and the scripts read these overridable variables from the environment:
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `CARGO` | `cargo` | the `release` / `build` / `test` / `clean` targets |
+| `BUILD_DIR` | `$(HOME)/build` | where artifacts are written |
+| `KERNEL_IMG` | `$(BUILD_DIR)/vmlinux` | kernel artifact path |
+| `PY_INITRD` | `$(BUILD_DIR)/initramfs-python.cpio.gz` | Python initramfs artifact path |
+| `KVER` | `6.18.38` | `build-kernel.sh` (kernel version) |
+| `AVER` / `ABRANCH` | `3.24.1` / `v3.24` | the initramfs scripts (Alpine version) |
+| `MEM`, `N`, `SNAP`, `KERNEL`, `INITRD` | (see each script) | `run.sh`, `snapshot-*.sh`, `measure-coldstart.sh` |
 
 
 Run directly:
