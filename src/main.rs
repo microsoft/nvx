@@ -10,6 +10,7 @@
 //!
 
 mod boot;
+mod console;
 mod devices;
 mod irq;
 mod layout;
@@ -49,6 +50,18 @@ struct Args {
     #[arg(long, default_value_t = 512)]
     mem: u64,
 
+    /// Suppress terminal rendering of guest console output (measures a silent boot).
+    #[arg(long)]
+    quiet: bool,
+
+    /// Stop the VM as soon as the boot marker is seen, and report the cold-start time.
+    #[arg(long)]
+    exit_on_boot: bool,
+
+    /// Console substring that marks boot completion (for cold-start timing).
+    #[arg(long, default_value = "ALPINE-MICROVM-BOOT-OK")]
+    boot_marker: String,
+
     /// Run a tiny protected-mode self-test instead of booting a kernel.
     #[arg(long)]
     selftest: bool,
@@ -78,5 +91,8 @@ fn main() -> Result<()> {
         initrd: args.initrd,
         cmdline: args.cmdline,
         mem_bytes,
+        quiet: args.quiet,
+        exit_on_boot: args.exit_on_boot,
+        boot_marker: args.boot_marker,
     })
 }

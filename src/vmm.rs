@@ -45,6 +45,7 @@ use ::log::{
 };
 
 use crate::boot::pvh;
+use crate::console::Console;
 use crate::devices::DeviceBus;
 use crate::devices::serial::Serial;
 use crate::irq::{
@@ -108,6 +109,12 @@ pub struct Config {
     pub cmdline: String,
     /// Guest RAM size, in bytes.
     pub mem_bytes: u64,
+    /// Suppress terminal rendering of guest console output (still counted and scanned).
+    pub quiet: bool,
+    /// Stop the VM as soon as the boot marker is observed (for cold-start measurement).
+    pub exit_on_boot: bool,
+    /// Console substring whose appearance marks boot completion.
+    pub boot_marker: String,
 }
 
 /// Runs a tiny 32-bit self-test program through the same `setup_pvh` entry path to validate
@@ -210,9 +217,11 @@ pub fn run(cfg: Config) -> Result<()> {
     let start_info_gpa: u64 = pvh::configure(&mem, &cfg.cmdline, initrd_region)?;
     vcpu.setup_pvh(&mem, loaded.pvh_entry, start_info_gpa)?;
 
-    // Wire up the console UART and the host input thread.
-    let serial: Arc<Mutex<Serial>> = Arc::new(Mutex::new(Serial::new(Box::new(io::stdout()))));
-    let bus: DeviceBus = DeviceBus::new(Arc::clone(&serial));
+    // Wire up the shared console (UART + 0xE9 debug port) and the host input thread.
+    let console: Arc<Mutex<Console>> =
+        Arc::new(Mutex::new(Console::new(cfg.quiet, &cfg.boot_marker)));
+    let serial: Arc<Mutex<Serial>> = Arc::new(Mutex::new(Serial::new(Arc::clone(&console))));
+    let bus: DeviceBus = DeviceBus::new(Arc::clone(&serial), Arc::clone(&console));
 
     install_sigusr1_handler();
     let _tty_guard: TtyGuard = TtyGuard::new();
@@ -222,9 +231,11 @@ pub fn run(cfg: Config) -> Result<()> {
     vcpu_tid.store(unsafe { ::libc::pthread_self() } as u64, Ordering::SeqCst);
 
     info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cfg.cmdline);
+    console.lock().expect("console poisoned").mark_start();
 
     loop {
-        // Reflect the UART interrupt state onto the ISA line before (re)entering the guest.
+        // Flush buffered console output and reflect the UART interrupt state before entering.
+        console.lock().expect("console poisoned").flush();
         let pending: bool = serial.lock().expect("serial poisoned").interrupt_pending();
         vm_fd
             .set_irq_line(SERIAL_IRQ, pending)
@@ -232,7 +243,12 @@ pub fn run(cfg: Config) -> Result<()> {
 
         match vcpu.fd.run() {
             Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
-            Ok(VcpuExit::IoOut(port, data)) => bus.pio_write(port, data),
+            Ok(VcpuExit::IoOut(port, data)) => {
+                if bus.pio_write(port, data) {
+                    info!("guest requested shutdown");
+                    break;
+                }
+            },
             Ok(VcpuExit::Hlt) => {
                 info!("guest halted");
                 break;
@@ -259,8 +275,14 @@ pub fn run(cfg: Config) -> Result<()> {
             Err(e) if e.errno() == ::libc::EINTR => {},
             Err(e) => return Err(anyhow!("KVM_RUN failed: {e}")),
         }
+
+        if cfg.exit_on_boot && console.lock().expect("console poisoned").booted() {
+            info!("boot complete — stopping guest (--exit-on-boot)");
+            break;
+        }
     }
 
+    console.lock().expect("console poisoned").flush();
     Ok(())
 }
 

@@ -25,6 +25,32 @@ if [ ! -d "$SRC" ]; then
 fi
 
 cd "$SRC"
+
+# Add the Nanvix-style per-byte debug console on I/O port 0xE9 (select with earlycon=xe9),
+# used to redirect kernel logs onto the low-overhead "portb" path. Idempotent.
+EP="arch/x86/kernel/early_printk.c"
+if ! grep -q early_xe9_write "$EP"; then
+    echo ">> adding xe9 (port 0xE9) earlycon to $EP"
+    grep -q 'linux/serial_core.h' "$EP" \
+        || sed -i '0,/#include <linux\/console.h>/s//#include <linux\/console.h>\n#include <linux\/serial_core.h>/' "$EP"
+    cat >> "$EP" <<'XE9'
+
+/* microvm: Nanvix-style per-byte debug console on I/O port 0xE9. Select with earlycon=xe9. */
+static void early_xe9_write(struct console *console, const char *s, unsigned int count)
+{
+	while (count--)
+		outb(*s++, 0xe9);
+}
+
+static int __init early_xe9_setup(struct earlycon_device *device, const char *options)
+{
+	device->con->write = early_xe9_write;
+	return 0;
+}
+EARLYCON_DECLARE(xe9, early_xe9_setup);
+XE9
+fi
+
 cp "$CONFIG" .config
 make olddefconfig
 echo ">> building vmlinux with $(nproc) jobs"

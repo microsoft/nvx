@@ -11,7 +11,12 @@
 //!
 
 use ::std::collections::VecDeque;
-use ::std::io::Write;
+use ::std::sync::{
+    Arc,
+    Mutex,
+};
+
+use crate::console::Console;
 
 // Register offsets from the UART base address.
 const REG_DATA: u8 = 0; // RBR / THR, or DLL when DLAB is set.
@@ -55,13 +60,13 @@ pub struct Serial {
     thre_int: bool,
     /// Receive queue feeding the guest.
     rx: VecDeque<u8>,
-    /// Destination for transmitted bytes (the host console).
-    out: Box<dyn Write + Send>,
+    /// Destination for transmitted bytes (the shared host console).
+    console: Arc<Mutex<Console>>,
 }
 
 impl Serial {
-    /// Creates a UART that transmits to `out`.
-    pub fn new(out: Box<dyn Write + Send>) -> Self {
+    /// Creates a UART that transmits through `console`.
+    pub fn new(console: Arc<Mutex<Console>>) -> Self {
         Self {
             ier: 0,
             lcr: 0,
@@ -71,7 +76,7 @@ impl Serial {
             dlm: 0,
             thre_int: false,
             rx: VecDeque::new(),
-            out,
+            console,
         }
     }
 
@@ -150,8 +155,7 @@ impl Serial {
                     // In loopback mode transmitted data is looped back to the receiver.
                     self.rx.push_back(value);
                 } else {
-                    let _ = self.out.write_all(&[value]);
-                    let _ = self.out.flush();
+                    self.console.lock().expect("console poisoned").write_byte(value);
                     if self.ier & IER_THR != 0 {
                         self.thre_int = true;
                     }

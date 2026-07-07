@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#
+# Measures cold-start time (first guest instruction -> boot marker) for several console
+# configurations and prints the median of N runs each. Requires a built VMM, kernel, and
+# initramfs.
+#
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BIN="$ROOT/target/release/microvm"
+KERNEL="${KERNEL:-$HOME/build/vmlinux}"
+INITRD="${INITRD:-$HOME/build/initramfs.cpio.gz}"
+MEM="${MEM:-512}"
+N="${N:-6}"
+
+[ -x "$BIN" ]    || { echo "build the VMM first: make release"; exit 1; }
+[ -f "$KERNEL" ] || { echo "missing kernel: $KERNEL"; exit 1; }
+[ -f "$INITRD" ] || { echo "missing initrd: $INITRD"; exit 1; }
+
+median() {
+    python3 -c "import sys;v=sorted(float(x) for x in sys.stdin.read().split());\
+print('%8.1f ms  (min %.0f, max %.0f, n=%d)'%(v[len(v)//2],v[0],v[-1],len(v)) if v else 'NO DATA')"
+}
+
+measure() { # $1=marker  $2..=extra args
+    local marker="$1"; shift
+    for _ in $(seq 1 "$N"); do
+        timeout 30 "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" \
+            --exit-on-boot --boot-marker "$marker" "$@" 2>&1 \
+            | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
+    done | median
+}
+
+RUNINIT="Run /init as init process"
+BANNER="ALPINE-MICROVM-BOOT-OK"
+
+echo "cold-start (guest start -> marker), median of $N runs, ${MEM} MiB, 1 vCPU"
+echo
+echo "console transport (to kernel->userspace handoff, full logs):"
+printf "  UART  ttyS0   loud : %s\n" "$(measure "$RUNINIT" --cmdline 'console=ttyS0 reboot=t panic=-1')"
+printf "  portb 0xE9    loud : %s\n" "$(measure "$RUNINIT" --cmdline 'earlycon=xe9 keep_bootcon reboot=t panic=-1')"
+printf "  UART  ttyS0   quiet: %s\n" "$(measure "$RUNINIT" --quiet --cmdline 'console=ttyS0 reboot=t panic=-1')"
+printf "  portb 0xE9    quiet: %s\n" "$(measure "$RUNINIT" --quiet --cmdline 'earlycon=xe9 keep_bootcon reboot=t panic=-1')"
+echo
+echo "end-to-end (to interactive shell):"
+printf "  loud full logs     : %s\n" "$(measure "$BANNER" --cmdline 'console=ttyS0 reboot=t panic=-1')"
+printf "  silent (quiet klog): %s\n" "$(measure "$BANNER" --cmdline 'console=ttyS0 quiet loglevel=0 reboot=t panic=-1')"

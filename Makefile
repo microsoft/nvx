@@ -2,7 +2,7 @@
 
 CARGO ?= cargo
 
-.PHONY: all release build test kernel initramfs run selftest boot-test clean
+.PHONY: all release build test kernel initramfs run selftest boot-test measure clean
 
 all: release
 
@@ -29,6 +29,9 @@ selftest: release
 
 boot-test: release
 	scripts/test-boot.sh
+
+measure: release
+	scripts/measure-coldstart.sh
 
 clean:
 	$(CARGO) clean

@@ -56,7 +56,8 @@ uid=0(root) gid=0(root)
 | `src/boot/pvh.rs`     | `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
 | `src/boot/params.rs`  | PVH boot-parameter structures |
 | `src/devices/serial.rs` | 16550A UART model |
-| `src/devices/mod.rs`  | PMIO device bus |
+| `src/devices/mod.rs`  | PMIO device bus (UART, `0xE9` debug port, `0x604` shutdown) |
+| `src/console.rs`      | Shared console sink: buffered/quiet output, byte count, cold-start timing |
 | `src/irq.rs`          | In-kernel irqchip + PIT |
 | `src/layout.rs`       | Guest-physical memory map constants |
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
@@ -121,7 +122,61 @@ Run directly:
 | `--initrd <path>`  | (none)                           | RAM initramfs image |
 | `--cmdline <str>`  | `console=ttyS0 reboot=t panic=-1`| Kernel command line |
 | `--mem <MiB>`      | `512`                            | Guest RAM |
+| `--quiet`          |                                  | Discard console rendering (measures a silent boot) |
+| `--exit-on-boot`   |                                  | Stop and report cold-start when the boot marker appears |
+| `--boot-marker <s>`| `ALPINE-MICROVM-BOOT-OK`         | Console substring that marks boot completion |
 | `--selftest`       |                                  | Run the protected-mode self-test and exit |
+
+## Cold-start and the `0xE9` debug console
+
+The VMM measures **cold-start** — the time from the first guest instruction to a
+boot-completion marker in the console stream — and reports it via `--exit-on-boot`:
+
+```
+$ ./target/release/microvm --kernel ~/build/vmlinux --initrd ~/build/initramfs.cpio.gz \
+      --exit-on-boot --cmdline "console=ttyS0 reboot=t panic=-1"
+...
+[INFO microvm::console] cold-start: 1895.7 ms to userspace (13305 console bytes emitted)
+```
+
+### The "portb" strategy (mirroring Nanvix)
+
+The Nanvix Micro-VM sends guest console output one byte at a time to a dedicated I/O port
+(`0xE9`), so each character is a single `outb` — one VM exit — instead of the 8250 UART's
+*read line-status + write data* (two exits, plus a poll loop). This VMM adds the same
+**`0xE9` debug port**, and a matching **`earlycon=xe9`** driver in the kernel
+(`scripts/build-kernel.sh` patches it in) so kernel logs can be redirected onto that path:
+
+```
+--cmdline "earlycon=xe9 keep_bootcon ..."     # kernel logs go out via port 0xE9
+```
+
+It also adds a `0x604` control port: a write requests VM shutdown (Nanvix `DEFAULT_VMM_PORT`).
+
+### Measured cold-start (`make measure`)
+
+Median of 6 runs, 512 MiB, 1 vCPU, host with nested KVM:
+
+*Console transport* (to the kernel->userspace handoff, full kernel logs):
+
+| transport | loud (rendered) | quiet (`--quiet`, discarded) |
+|-----------|----------------:|-----------------------------:|
+| UART `ttyS0` (2 exits/byte) | 1894 ms | 1758 ms |
+| **portb `0xE9`** (1 exit/byte) | **1790 ms** | **1672 ms** |
+
+Routing logs through `0xE9` saves ~90-105 ms by halving the per-byte VM exits; not rendering
+to the terminal saves a further ~130 ms.
+
+*End-to-end* (to the interactive shell):
+
+| configuration | cold-start |
+|---------------|-----------:|
+| loud, full kernel logs (`console=ttyS0`) | ~1896 ms |
+| **silent** (`console=ttyS0 quiet loglevel=0`) | **~1588 ms** |
+
+A **silent cold boot** — kernel log output suppressed so almost nothing crosses the
+console — reaches userspace in ~1.59 s versus ~1.90 s for a fully verbose boot (~16%
+faster). Reproduce with `make measure`.
 
 ## Notes
 
