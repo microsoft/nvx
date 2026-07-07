@@ -62,7 +62,8 @@ uid=0(root) gid=0(root)
 |------|----------------|
 | `src/main.rs`         | CLI and entry point |
 | `src/vmm.rs`          | VM setup, the vCPU run loop, console input thread, TTY handling |
-| `src/memory.rs`       | Guest RAM as KVM user-memory regions (MMIO-gap aware) |
+| `src/memory.rs`       | Guest RAM as KVM user-memory regions (MMIO-gap aware; snapshot dump / COW restore) |
+| `src/snapshot.rs`     | Full VM snapshot / restore (vCPU + devices + VM state) |
 | `src/vcpu.rs`         | vCPU creation, CPUID, and the PVH entry register/segment state |
 | `src/boot/pvh.rs`     | `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
 | `src/boot/params.rs`  | PVH boot-parameter structures |
@@ -74,7 +75,8 @@ uid=0(root) gid=0(root)
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
 | `kernel/patches/`     | Kernel source modifications (the `0xE9` earlycon) |
 | `alpine/init`         | PID 1 for the RAM initramfs |
-| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `test-boot.sh` |
+| `alpine/init.python`, `alpine/hello.py` | Python initramfs init + snapshot/hello-world app |
+| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `snapshot-demo.sh`, `test-boot.sh` |
 | `scripts/`            | Kernel / initramfs build and run helpers |
 
 ## The kernel ("modified Alpine kernel")
@@ -149,8 +151,10 @@ Run directly:
 | `--mem <MiB>`      | `512`                            | Guest RAM |
 | `--quiet`          |                                  | Fully silent: discard guest console **and** suppress all VMM logging |
 | `--log-level <lvl>`| `info` (`off` if `--quiet`)      | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
-| `--exit-on-boot`   |                                  | Stop and report cold-start when the boot marker appears |
+| `--exit-on-boot`   |                                  | Stop and report cold-start/restore time when the boot marker appears |
 | `--boot-marker <s>`| `ALPINE-MICROVM-BOOT-OK`         | Console substring that marks boot completion |
+| `--snapshot <dir>` |                                  | Take a snapshot into `<dir>` when the guest requests one, then exit |
+| `--restore <dir>`  |                                  | Restore and resume from a snapshot `<dir>` instead of booting |
 | `--selftest`       |                                  | Run the protected-mode self-test and exit |
 
 To **suppress all logging**, pass `--log-level off` (mutes the `[… INFO microvm::…]` lines but
@@ -228,6 +232,51 @@ calibration, and crng entropy stall (crng init is instant via RDRAND). The initr
 userland is also negligible (~2 ms to unpack; the ~110 ms is essentially all kernel init).
 
 Reproduce all of the above with `make measure`.
+
+## Snapshot / restore and booting from a snapshot
+
+The VMM can capture the **entire VM state** to a directory and later resume from it, skipping
+the kernel boot and application startup entirely. A snapshot is **VMM-initiated on a guest
+request**: the guest asks for one by writing a byte to I/O port `0x605` (via `/dev/port`), the
+VMM intercepts that `outb`, and — because the request happens at a userspace **syscall
+boundary** — captures a clean, restorable state:
+
+- guest RAM (`mem.bin`);
+- the vCPU register file — GPRs, segments, FPU, XCRs, LAPIC, MP state, pending events, debug
+  registers, and the MSRs a booted Linux keeps (syscall entry points, FS/GS bases, SYSENTER,
+  PAT, TSC/TSC-deadline, and the KVM paravirtual-clock MSRs);
+- the in-kernel interrupt controller (PIC + IOAPIC), the PIT, and the KVM clock;
+- the emulated 16550 UART.
+
+`state.bin` holds all of that; `mem.bin` is the raw RAM. On **restore**, the RAM image is
+mapped copy-on-write (`MAP_PRIVATE`), so pages fault in lazily and there is no upfront copy —
+restore is dominated by re-applying the vCPU/VM state, not by RAM size.
+
+```
+# take a snapshot when the guest requests one, then exit:
+microvm --kernel vmlinux --initrd initramfs.cpio.gz --mem 256 --snapshot snap/
+
+# boot from the snapshot (no kernel needed):
+microvm --restore snap/ --mem 256
+```
+
+### Python "hello world" from a snapshot (`make snapshot-demo`)
+
+`make python-initramfs` builds an initramfs with a full CPython interpreter and `alpine/hello.py`,
+which warms up the interpreter, requests a snapshot, then prints its greeting. On a cold boot
+the app pays for kernel boot **and** the entire Python startup; from a snapshot it resumes the
+already-running interpreter and prints immediately.
+
+Median of 8 runs, 256 MiB, 1 vCPU:
+
+| path | to `hello world` |
+|------|-----------------:|
+| cold boot (kernel + Python startup) | ~380 ms |
+| **restore from snapshot** | **~5.3 ms** (min ~4.9 ms) |
+
+That is a **~70x** speedup: booting the Python app from a snapshot takes single-digit
+milliseconds because it skips the kernel boot and the interpreter's startup entirely.
+Reproduce with `make python-initramfs && make snapshot-demo`.
 
 ## Notes
 

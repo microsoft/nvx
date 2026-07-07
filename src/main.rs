@@ -15,6 +15,7 @@ mod devices;
 mod irq;
 mod layout;
 mod memory;
+mod snapshot;
 mod vcpu;
 mod vmm;
 
@@ -70,6 +71,15 @@ struct Args {
     #[arg(long, default_value = "ALPINE-MICROVM-BOOT-OK")]
     boot_marker: String,
 
+    /// Take a snapshot into this directory when the guest requests one (control port 0x605),
+    /// then exit.
+    #[arg(long)]
+    snapshot: Option<PathBuf>,
+
+    /// Restore and resume the VM from this snapshot directory instead of booting a kernel.
+    #[arg(long)]
+    restore: Option<PathBuf>,
+
     /// Run a tiny protected-mode self-test instead of booting a kernel.
     #[arg(long)]
     selftest: bool,
@@ -115,15 +125,15 @@ fn main() -> Result<()> {
         .checked_mul(1024 * 1024)
         .context("--mem is too large")?;
 
-    let kernel: PathBuf = args.kernel.context("--kernel is required")?;
-
     vmm::run(vmm::Config {
-        kernel,
+        kernel: args.kernel,
         initrd: args.initrd,
         cmdline: args.cmdline,
         mem_bytes,
         quiet: args.quiet,
         exit_on_boot: args.exit_on_boot,
         boot_marker: args.boot_marker,
+        snapshot: args.snapshot,
+        restore: args.restore,
     })
 }

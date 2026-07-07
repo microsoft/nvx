@@ -1,0 +1,8 @@
+#!/bin/sh
+# PID 1 for the Python RAM initramfs: mounts the pseudo-filesystems, then execs the Python
+# hello-world app (which requests a snapshot and prints its greeting).
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev 2>/dev/null || mdev -s
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+exec python3 /hello.py

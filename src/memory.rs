@@ -87,20 +87,101 @@ impl GuestMemory {
         Ok(Self { regions, ram_size })
     }
 
-    /// Allocates one host mapping and registers it with KVM as memory `slot`.
+    ///
+    /// # Description
+    ///
+    /// Reconstructs guest RAM from a snapshot file using a copy-on-write (`MAP_PRIVATE`)
+    /// file mapping. Pages are faulted in lazily on first access, so a restore does not pay
+    /// an upfront copy of the whole image.
+    ///
+    /// The layout (split at the MMIO gap) mirrors [`new`](Self::new); the snapshot file is the
+    /// concatenation of the regions in ascending guest-physical order.
+    ///
+    pub fn restore(vm_fd: &VmFd, path: &::std::path::Path, ram_size: u64) -> Result<Self> {
+        use ::std::os::fd::AsRawFd;
+
+        let file: ::std::fs::File =
+            ::std::fs::File::open(path).with_context(|| format!("opening RAM image {path:?}"))?;
+        let fd: ::libc::c_int = file.as_raw_fd();
+
+        let mut regions: Vec<MemoryRegion> = Vec::new();
+        let mut next_slot: u32 = 0;
+        let mut file_off: u64 = 0;
+
+        let low_size: u64 = ram_size.min(MMIO_GAP_START);
+        regions.push(Self::map_region_backed(vm_fd, next_slot, 0, low_size, fd, file_off)?);
+        next_slot += 1;
+        file_off += low_size;
+
+        if ram_size > MMIO_GAP_START {
+            let high_size: u64 = ram_size - MMIO_GAP_START;
+            regions.push(Self::map_region_backed(
+                vm_fd,
+                next_slot,
+                RAM_64BIT_START,
+                high_size,
+                fd,
+                file_off,
+            )?);
+        }
+
+        Ok(Self { regions, ram_size })
+    }
+
+    ///
+    /// # Description
+    ///
+    /// Writes the full contents of guest RAM to `path`, as the concatenation of the regions
+    /// in ascending guest-physical order (the format consumed by [`restore`](Self::restore)).
+    ///
+    pub fn snapshot_ram(&self, path: &::std::path::Path) -> Result<()> {
+        use ::std::io::Write;
+        let file: ::std::fs::File =
+            ::std::fs::File::create(path).with_context(|| format!("creating RAM image {path:?}"))?;
+        let mut writer: ::std::io::BufWriter<::std::fs::File> = ::std::io::BufWriter::new(file);
+        for region in &self.regions {
+            // SAFETY: `host_addr`/`size` describe a live mapping owned by this region.
+            let bytes: &[u8] =
+                unsafe { ::core::slice::from_raw_parts(region.host_addr, region.size) };
+            writer.write_all(bytes).context("writing RAM image")?;
+        }
+        writer.flush().context("flushing RAM image")?;
+        Ok(())
+    }
+
+    /// Allocates one anonymous host mapping and registers it with KVM as memory `slot`.
     fn map_region(vm_fd: &VmFd, slot: u32, guest_phys: u64, size: u64) -> Result<MemoryRegion> {
+        Self::map_region_backed(vm_fd, slot, guest_phys, size, -1, 0)
+    }
+
+    /// Allocates one host mapping (anonymous if `fd < 0`, otherwise a `MAP_PRIVATE` mapping of
+    /// `fd` at `file_off`) and registers it with KVM as memory `slot`.
+    fn map_region_backed(
+        vm_fd: &VmFd,
+        slot: u32,
+        guest_phys: u64,
+        size: u64,
+        fd: ::libc::c_int,
+        file_off: u64,
+    ) -> Result<MemoryRegion> {
         let size: usize = usize::try_from(size).context("region size overflows usize")?;
 
-        // SAFETY: Standard anonymous private mapping request; the returned pointer is checked
-        // against `MAP_FAILED` before use.
+        let (flags, off): (::libc::c_int, ::libc::off_t) = if fd < 0 {
+            (::libc::MAP_PRIVATE | ::libc::MAP_ANONYMOUS | ::libc::MAP_NORESERVE, 0)
+        } else {
+            (::libc::MAP_PRIVATE | ::libc::MAP_NORESERVE, file_off as ::libc::off_t)
+        };
+
+        // SAFETY: Standard mapping request; the returned pointer is checked against MAP_FAILED
+        // before use.
         let host_addr: *mut ::libc::c_void = unsafe {
             ::libc::mmap(
                 ::core::ptr::null_mut(),
                 size,
                 ::libc::PROT_READ | ::libc::PROT_WRITE,
-                ::libc::MAP_PRIVATE | ::libc::MAP_ANONYMOUS | ::libc::MAP_NORESERVE,
-                -1,
-                0,
+                flags,
+                fd,
+                off,
             )
         };
         if host_addr == ::libc::MAP_FAILED {

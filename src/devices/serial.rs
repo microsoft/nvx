@@ -90,6 +90,38 @@ impl Serial {
         self.rx.extend(bytes.iter().copied());
     }
 
+    /// Serializes the UART register state into a compact byte vector (for snapshots).
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::with_capacity(8 + self.rx.len());
+        out.push(self.ier);
+        out.push(self.lcr);
+        out.push(self.mcr);
+        out.push(self.scr);
+        out.push(self.dll);
+        out.push(self.dlm);
+        out.push(u8::from(self.thre_int));
+        out.extend((self.rx.len() as u32).to_le_bytes());
+        out.extend(self.rx.iter().copied());
+        out
+    }
+
+    /// Restores UART register state produced by [`snapshot`](Self::snapshot).
+    pub fn restore(&mut self, data: &[u8]) {
+        if data.len() < 11 {
+            return;
+        }
+        self.ier = data[0];
+        self.lcr = data[1];
+        self.mcr = data[2];
+        self.scr = data[3];
+        self.dll = data[4];
+        self.dlm = data[5];
+        self.thre_int = data[6] != 0;
+        let n: usize = u32::from_le_bytes([data[7], data[8], data[9], data[10]]) as usize;
+        self.rx.clear();
+        self.rx.extend(data.iter().skip(11).take(n).copied());
+    }
+
     /// Returns `true` if the UART is currently asserting its interrupt line.
     pub fn interrupt_pending(&self) -> bool {
         (self.ier & IER_RECV != 0 && !self.rx.is_empty())

@@ -2,7 +2,7 @@
 
 CARGO ?= cargo
 
-.PHONY: all world release build test kernel initramfs run boot selftest boot-test measure clean
+.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure snapshot-demo clean
 
 all: release
 
@@ -24,6 +24,9 @@ kernel:
 initramfs:
 	scripts/build-initramfs.sh
 
+python-initramfs:
+	scripts/build-python-initramfs.sh
+
 run boot: release
 	scripts/run.sh
 
@@ -35,6 +38,9 @@ boot-test: release
 
 measure: release
 	scripts/measure-coldstart.sh
+
+snapshot-demo: release
+	scripts/snapshot-demo.sh
 
 clean:
 	$(CARGO) clean

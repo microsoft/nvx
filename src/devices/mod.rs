@@ -34,6 +34,19 @@ const COM1_LAST: u16 = 0x3ff;
 pub const DEBUGCON_PORT: u16 = 0xe9;
 /// Control port: a write requests VM shutdown (Nanvix `DEFAULT_VMM_PORT` / ACPI `PM1a_CNT`).
 pub const VMM_PORT: u16 = 0x604;
+/// Control port: a write requests that the VMM take a snapshot (Nanvix-style snapshot command).
+pub const SNAPSHOT_PORT: u16 = 0x605;
+
+/// Action the VMM should take after servicing a guest port write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PioAction {
+    /// Continue running the guest.
+    None,
+    /// Shut the VM down.
+    Shutdown,
+    /// Take a snapshot of the VM.
+    Snapshot,
+}
 
 /// The guest device bus.
 pub struct DeviceBus {
@@ -74,31 +87,35 @@ impl DeviceBus {
         }
     }
 
-    /// Services a guest write of `data` to `port`. Returns `true` if the guest requested
-    /// that the VM shut down.
+    /// Services a guest write of `data` to `port`. Returns the [`PioAction`] the VMM should
+    /// take (continue, shut down, or snapshot).
     #[must_use]
-    pub fn pio_write(&self, port: u16, data: &[u8]) -> bool {
+    pub fn pio_write(&self, port: u16, data: &[u8]) -> PioAction {
         match port {
             COM1_BASE..=COM1_LAST => {
                 let offset: u8 = (port - COM1_BASE) as u8;
                 if let Some(&value) = data.first() {
                     self.serial.lock().expect("serial poisoned").write(offset, value);
                 }
-                false
+                PioAction::None
             },
             DEBUGCON_PORT => {
                 if let Some(&byte) = data.first() {
                     self.console.lock().expect("console poisoned").write_byte(byte);
                 }
-                false
+                PioAction::None
             },
             VMM_PORT => {
                 ::log::info!("guest requested shutdown via control port {port:#06x}");
-                true
+                PioAction::Shutdown
+            },
+            SNAPSHOT_PORT => {
+                ::log::info!("guest requested snapshot via control port {port:#06x}");
+                PioAction::Snapshot
             },
             _ => {
                 ::log::trace!("unhandled pio write: port={port:#06x}");
-                false
+                PioAction::None
             },
         }
     }

@@ -17,7 +17,10 @@ use ::std::io::{
     self,
     Read,
 };
-use ::std::path::PathBuf;
+use ::std::path::{
+    Path,
+    PathBuf,
+};
 use ::std::sync::atomic::{
     AtomicU64,
     Ordering,
@@ -42,17 +45,25 @@ use ::log::{
     debug,
     error,
     info,
+    warn,
 };
 
 use crate::boot::pvh;
 use crate::console::Console;
-use crate::devices::DeviceBus;
+use crate::devices::{
+    DeviceBus,
+    PioAction,
+};
 use crate::devices::serial::Serial;
 use crate::irq::{
     self,
     SERIAL_IRQ,
 };
 use crate::memory::GuestMemory;
+use crate::snapshot::{
+    self,
+    Snapshot,
+};
 use crate::vcpu::Vcpu;
 
 /// Guest-physical address of the emulated task-state segment required by VT-x.
@@ -101,8 +112,8 @@ impl Drop for TtyGuard {
 
 /// Configuration for a micro-VM instance.
 pub struct Config {
-    /// Path to the uncompressed `vmlinux` (PVH) kernel image.
-    pub kernel: PathBuf,
+    /// Path to the uncompressed `vmlinux` (PVH) kernel image (not needed when restoring).
+    pub kernel: Option<PathBuf>,
     /// Optional path to the initramfs image.
     pub initrd: Option<PathBuf>,
     /// Kernel command line.
@@ -115,6 +126,10 @@ pub struct Config {
     pub exit_on_boot: bool,
     /// Console substring whose appearance marks boot completion.
     pub boot_marker: String,
+    /// Directory to write a snapshot to when the guest requests one (control port `0x605`).
+    pub snapshot: Option<PathBuf>,
+    /// Directory to restore the VM from instead of cold-booting a kernel.
+    pub restore: Option<PathBuf>,
 }
 
 /// Runs a tiny 32-bit self-test program through the same `setup_pvh` entry path to validate
@@ -173,11 +188,22 @@ pub fn selftest() -> Result<()> {
 ///
 /// # Description
 ///
-/// Creates and runs a micro-VM until the guest halts or resets.
+/// Creates and runs a micro-VM until the guest halts, resets, or is snapshotted. Either
+/// cold-boots a kernel or restores from a snapshot directory, depending on [`Config`].
 ///
 pub fn run(cfg: Config) -> Result<()> {
-    let kernel: Vec<u8> = fs::read(&cfg.kernel)
-        .with_context(|| format!("reading kernel image {:?}", cfg.kernel))?;
+    if let Some(dir) = cfg.restore.clone() {
+        run_restore(cfg, &dir)
+    } else {
+        run_cold(cfg)
+    }
+}
+
+/// Cold-boots a kernel + initramfs via the PVH protocol.
+fn run_cold(cfg: Config) -> Result<()> {
+    let kernel_path: &PathBuf = cfg.kernel.as_ref().context("--kernel is required")?;
+    let kernel: Vec<u8> = fs::read(kernel_path)
+        .with_context(|| format!("reading kernel image {kernel_path:?}"))?;
     let initrd: Option<Vec<u8>> = match &cfg.initrd {
         Some(path) => {
             Some(fs::read(path).with_context(|| format!("reading initramfs {path:?}"))?)
@@ -217,12 +243,66 @@ pub fn run(cfg: Config) -> Result<()> {
     let start_info_gpa: u64 = pvh::configure(&mem, &cfg.cmdline, initrd_region)?;
     vcpu.setup_pvh(&mem, loaded.pvh_entry, start_info_gpa)?;
 
-    // Wire up the shared console (UART + 0xE9 debug port) and the host input thread.
+    let (console, serial, bus) = build_io(&cfg, None);
+    info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cfg.cmdline);
+    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &serial, &bus, false)
+}
+
+/// Restores and resumes a VM from a snapshot directory.
+fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
+    let snap: Snapshot = Snapshot::read(dir)?;
+
+    let kvm: Kvm = Kvm::new().context("opening /dev/kvm")?;
+    if kvm.get_api_version() != 12 {
+        bail!("unexpected KVM API version {}", kvm.get_api_version());
+    }
+    let vm_fd = kvm.create_vm().context("KVM_CREATE_VM failed")?;
+    vm_fd
+        .set_tss_address(TSS_ADDRESS)
+        .context("KVM_SET_TSS_ADDR failed")?;
+
+    // Copy-on-write map the saved RAM image, recreate the irqchip/PIT, and reprogram CPUID.
+    let mem: GuestMemory = GuestMemory::restore(&vm_fd, &dir.join("mem.bin"), snap.ram_size())?;
+    irq::setup(&vm_fd)?;
+    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0)?;
+
+    // Reload the captured processor and VM state.
+    snap.apply_vm(&vm_fd)?;
+    snap.apply_vcpu(&vcpu.fd)?;
+
+    let (console, serial, bus) = build_io(&cfg, Some(snap.serial_state()));
+    info!("resuming guest from snapshot {dir:?} (mem={} MiB)", snap.ram_size() >> 20);
+    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &serial, &bus, true)
+}
+
+/// Builds the shared console, the UART, and the device bus. When `serial_state` is provided
+/// (restore path) the UART registers are reloaded from it.
+fn build_io(
+    cfg: &Config,
+    serial_state: Option<&[u8]>,
+) -> (Arc<Mutex<Console>>, Arc<Mutex<Serial>>, DeviceBus) {
     let console: Arc<Mutex<Console>> =
         Arc::new(Mutex::new(Console::new(cfg.quiet, &cfg.boot_marker)));
     let serial: Arc<Mutex<Serial>> = Arc::new(Mutex::new(Serial::new(Arc::clone(&console))));
+    if let Some(state) = serial_state {
+        serial.lock().expect("serial poisoned").restore(state);
+    }
     let bus: DeviceBus = DeviceBus::new(Arc::clone(&serial), Arc::clone(&console));
+    (console, serial, bus)
+}
 
+/// Drives the single-core execution loop shared by the cold-boot and restore paths.
+#[allow(clippy::too_many_arguments)]
+fn execute(
+    cfg: &Config,
+    vm_fd: &::kvm_ioctls::VmFd,
+    vcpu: &mut Vcpu,
+    mem: &GuestMemory,
+    console: &Arc<Mutex<Console>>,
+    serial: &Arc<Mutex<Serial>>,
+    bus: &DeviceBus,
+    resumed: bool,
+) -> Result<()> {
     install_sigusr1_handler();
     let _tty_guard: TtyGuard = TtyGuard::new();
     let vcpu_tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
@@ -230,7 +310,6 @@ pub fn run(cfg: Config) -> Result<()> {
     // SAFETY: `pthread_self` merely returns the calling thread's identifier.
     vcpu_tid.store(unsafe { ::libc::pthread_self() } as u64, Ordering::SeqCst);
 
-    info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cfg.cmdline);
     console.lock().expect("console poisoned").mark_start();
 
     loop {
@@ -243,11 +322,17 @@ pub fn run(cfg: Config) -> Result<()> {
 
         match vcpu.fd.run() {
             Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
-            Ok(VcpuExit::IoOut(port, data)) => {
-                if bus.pio_write(port, data) {
+            Ok(VcpuExit::IoOut(port, data)) => match bus.pio_write(port, data) {
+                PioAction::None => {},
+                PioAction::Shutdown => {
                     info!("guest requested shutdown");
                     break;
-                }
+                },
+                PioAction::Snapshot => {
+                    if take_snapshot(cfg, vm_fd, vcpu, mem, serial, console)? {
+                        break;
+                    }
+                },
             },
             Ok(VcpuExit::Hlt) => {
                 info!("guest halted");
@@ -261,12 +346,12 @@ pub fn run(cfg: Config) -> Result<()> {
             },
             Ok(VcpuExit::InternalError) => {
                 error!("KVM internal error");
-                dump_vcpu(&vcpu);
+                dump_vcpu(vcpu);
                 break;
             },
             Ok(VcpuExit::FailEntry(reason, cpu)) => {
                 error!("KVM fail entry (reason={reason:#x}, cpu={cpu})");
-                dump_vcpu(&vcpu);
+                dump_vcpu(vcpu);
                 break;
             },
             Ok(other) => debug!("unhandled vcpu exit: {other:?}"),
@@ -277,26 +362,48 @@ pub fn run(cfg: Config) -> Result<()> {
         }
 
         if cfg.exit_on_boot && console.lock().expect("console poisoned").booted() {
-            info!("boot complete — stopping guest (--exit-on-boot)");
+            info!("boot marker seen — stopping guest (--exit-on-boot)");
             break;
         }
     }
 
     console.lock().expect("console poisoned").flush();
 
-    // Report the cold-start measurement independently of the logging level so it is
-    // available even when all logging is suppressed.
+    // Report the boot/restore time independently of the logging level so it is available
+    // even when all logging is suppressed.
     if cfg.exit_on_boot {
         let console = console.lock().expect("console poisoned");
         if let Some(elapsed) = console.cold_start() {
+            let label: &str = if resumed { "restore" } else { "cold-start" };
             eprintln!(
-                "cold-start: {:.1} ms to userspace ({} console bytes emitted)",
+                "{label}: {:.1} ms to marker ({} console bytes emitted)",
                 elapsed.as_secs_f64() * 1000.0,
                 console.bytes_out()
             );
         }
     }
     Ok(())
+}
+
+/// Takes a snapshot when the guest requests one. Returns `true` if the VM should stop.
+fn take_snapshot(
+    cfg: &Config,
+    vm_fd: &::kvm_ioctls::VmFd,
+    vcpu: &Vcpu,
+    mem: &GuestMemory,
+    serial: &Arc<Mutex<Serial>>,
+    console: &Arc<Mutex<Console>>,
+) -> Result<bool> {
+    let Some(dir) = &cfg.snapshot else {
+        warn!("guest requested a snapshot but --snapshot was not given; ignoring");
+        return Ok(false);
+    };
+    console.lock().expect("console poisoned").flush();
+    let serial_state: Vec<u8> = serial.lock().expect("serial poisoned").snapshot();
+    snapshot::write(dir, &vcpu.fd, vm_fd, mem, &serial_state)
+        .with_context(|| format!("writing snapshot to {dir:?}"))?;
+    info!("snapshot written to {dir:?}");
+    Ok(true)
 }
 
 /// No-op `SIGUSR1` handler used solely to interrupt `KVM_RUN`.
