@@ -283,6 +283,19 @@ pub fn run(cfg: Config) -> Result<()> {
     }
 
     console.lock().expect("console poisoned").flush();
+
+    // Report the cold-start measurement independently of the logging level so it is
+    // available even when all logging is suppressed.
+    if cfg.exit_on_boot {
+        let console = console.lock().expect("console poisoned");
+        if let Some(elapsed) = console.cold_start() {
+            eprintln!(
+                "cold-start: {:.1} ms to userspace ({} console bytes emitted)",
+                elapsed.as_secs_f64() * 1000.0,
+                console.bytes_out()
+            );
+        }
+    }
     Ok(())
 }
 

@@ -24,8 +24,6 @@ use ::std::time::{
     Instant,
 };
 
-use ::log::info;
-
 /// Shared guest console sink with boot-time instrumentation.
 pub struct Console {
     /// Where guest output goes (buffered stdout, or a sink in quiet mode).
@@ -84,16 +82,7 @@ impl Console {
         if byte == self.marker[self.match_pos] {
             self.match_pos += 1;
             if self.match_pos == self.marker.len() {
-                if let Some(start) = self.start {
-                    let elapsed: Duration = start.elapsed();
-                    self.cold_start = Some(elapsed);
-                    let _ = self.sink.flush();
-                    info!(
-                        "cold-start: {:.1} ms to userspace ({} console bytes emitted)",
-                        elapsed.as_secs_f64() * 1000.0,
-                        self.bytes_out
-                    );
-                }
+                self.cold_start = self.start.map(|start| start.elapsed());
             }
         } else {
             // Restart the match, allowing the current byte to begin a new one.
@@ -112,13 +101,11 @@ impl Console {
     }
 
     /// Returns the measured cold-start duration, if boot has completed.
-    #[allow(dead_code)]
     pub fn cold_start(&self) -> Option<Duration> {
         self.cold_start
     }
 
     /// Returns the number of console bytes emitted so far.
-    #[allow(dead_code)]
     pub fn bytes_out(&self) -> u64 {
         self.bytes_out
     }

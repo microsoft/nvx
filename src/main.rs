@@ -26,6 +26,7 @@ use ::anyhow::{
     bail,
 };
 use ::clap::Parser;
+use ::log::LevelFilter;
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]
@@ -50,9 +51,16 @@ struct Args {
     #[arg(long, default_value_t = 512)]
     mem: u64,
 
-    /// Suppress terminal rendering of guest console output (measures a silent boot).
+    /// Suppress terminal rendering of guest console output. Also silences all VMM logging
+    /// unless `--log-level` is given explicitly (i.e. `--quiet` alone is fully silent).
     #[arg(long)]
     quiet: bool,
+
+    /// Logging verbosity: off, error, warn, info, debug, or trace. Use `off` to suppress
+    /// all logging. Defaults to `info` (or `off` when `--quiet` is set). `RUST_LOG`
+    /// overrides this.
+    #[arg(long)]
+    log_level: Option<String>,
 
     /// Stop the VM as soon as the boot marker is seen, and report the cold-start time.
     #[arg(long)]
@@ -67,10 +75,33 @@ struct Args {
     selftest: bool,
 }
 
-fn main() -> Result<()> {
-    ::env_logger::Builder::from_env(::env_logger::Env::default().default_filter_or("info")).init();
+/// Parses a logging level name into a [`LevelFilter`].
+fn parse_level(name: &str) -> Result<LevelFilter> {
+    match name.to_ascii_lowercase().as_str() {
+        "off" => Ok(LevelFilter::Off),
+        "error" => Ok(LevelFilter::Error),
+        "warn" => Ok(LevelFilter::Warn),
+        "info" => Ok(LevelFilter::Info),
+        "debug" => Ok(LevelFilter::Debug),
+        "trace" => Ok(LevelFilter::Trace),
+        other => bail!("invalid --log-level '{other}' (use off|error|warn|info|debug|trace)"),
+    }
+}
 
+fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Determine the logging level: explicit --log-level wins, otherwise --quiet suppresses
+    // all logging and the default is `info`. RUST_LOG still overrides via `parse_default_env`.
+    let level: LevelFilter = match &args.log_level {
+        Some(name) => parse_level(name)?,
+        None if args.quiet => LevelFilter::Off,
+        None => LevelFilter::Info,
+    };
+    ::env_logger::Builder::new()
+        .filter_level(level)
+        .parse_default_env()
+        .init();
 
     if args.selftest {
         return vmm::selftest();

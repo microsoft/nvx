@@ -122,10 +122,16 @@ Run directly:
 | `--initrd <path>`  | (none)                           | RAM initramfs image |
 | `--cmdline <str>`  | `console=ttyS0 reboot=t panic=-1`| Kernel command line |
 | `--mem <MiB>`      | `512`                            | Guest RAM |
-| `--quiet`          |                                  | Discard console rendering (measures a silent boot) |
+| `--quiet`          |                                  | Fully silent: discard guest console **and** suppress all VMM logging |
+| `--log-level <lvl>`| `info` (`off` if `--quiet`)      | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
 | `--exit-on-boot`   |                                  | Stop and report cold-start when the boot marker appears |
 | `--boot-marker <s>`| `ALPINE-MICROVM-BOOT-OK`         | Console substring that marks boot completion |
 | `--selftest`       |                                  | Run the protected-mode self-test and exit |
+
+To **suppress all logging**, pass `--log-level off` (mutes the `[… INFO microvm::…]` lines but
+still renders the guest console), or `--quiet` for a fully silent run (no guest console and no
+logging). The cold-start line printed under `--exit-on-boot` goes to stderr independently of the
+log level, so measurements keep working even when logging is off.
 
 ## Cold-start and the `0xE9` debug console
 
