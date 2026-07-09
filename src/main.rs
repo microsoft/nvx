@@ -9,17 +9,31 @@
 //! device: the only emulated device is a bidirectional "portb" console (backing `hvc0`).
 //!
 
+// Portable modules, shared by both backends.
 mod boot;
 mod console;
 mod devices;
-mod irq;
 mod layout;
+
+// Linux backend: KVM-based VMM.
+#[cfg(target_os = "linux")]
+mod irq;
+#[cfg(target_os = "linux")]
 mod memory;
+#[cfg(target_os = "linux")]
 mod net;
+#[cfg(target_os = "linux")]
 mod snapshot;
+#[cfg(target_os = "linux")]
 mod vcpu;
+#[cfg(target_os = "linux")]
 mod virtfs;
+#[cfg(target_os = "linux")]
 mod vmm;
+
+// Windows backend: Windows Hypervisor Platform (WHP) VMM.
+#[cfg(target_os = "windows")]
+mod whp;
 
 use ::std::path::PathBuf;
 
@@ -89,7 +103,7 @@ struct Args {
     mount: Option<PathBuf>,
 
     /// Guest mount point for the `--mount` directory.
-    #[arg(long, value_name = "PATH", default_value = crate::virtfs::DEFAULT_MOUNT_TARGET)]
+    #[arg(long, value_name = "PATH", default_value = "/mnt/host")]
     mount_target: String,
 
     /// Mount the `--mount` filesystem read-write (ext4) instead of read-only (SquashFS). Without
@@ -159,7 +173,7 @@ fn main() -> Result<()> {
         .init();
 
     if args.selftest {
-        return vmm::selftest();
+        return selftest();
     }
 
     if args.mem == 0 {
@@ -176,6 +190,24 @@ fn main() -> Result<()> {
         bail!("--mount-rw, --mount-image and --mount-size require --mount <dir>");
     }
 
+    dispatch(args, mem_bytes)
+}
+
+/// Runs the protected-mode self-test on the active backend.
+#[cfg(target_os = "linux")]
+fn selftest() -> Result<()> {
+    vmm::selftest()
+}
+
+/// Runs the protected-mode self-test on the active backend.
+#[cfg(target_os = "windows")]
+fn selftest() -> Result<()> {
+    whp::selftest()
+}
+
+/// Builds the backend configuration and runs the VM (Linux / KVM backend).
+#[cfg(target_os = "linux")]
+fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     // Parse the optional virt-net endpoint (guest IP/prefix), deriving the host gateway.
     let net: Option<net::NetConfig> = match &args.net {
         Some(spec) => Some(net::NetConfig::parse(spec)?),
@@ -203,5 +235,33 @@ fn main() -> Result<()> {
         mount_size: args.mount_size,
         net,
         net_tap: args.net_tap,
+    })
+}
+
+/// Builds the backend configuration and runs the VM (Windows / WHP backend).
+///
+/// The WHP backend implements the core PVH boot path (kernel + RAM initramfs + portb console).
+/// The snapshot, virt-fs and virt-net features are KVM-specific and are rejected here rather
+/// than silently ignored.
+#[cfg(target_os = "windows")]
+fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
+    if args.net.is_some() || args.net_tap.is_some() {
+        bail!("--net/--net-tap are only available on the Linux/KVM backend");
+    }
+    if args.snapshot.is_some() || args.restore.is_some() {
+        bail!("--snapshot/--restore are only available on the Linux/KVM backend");
+    }
+    if args.mount.is_some() {
+        bail!("--mount is only available on the Linux/KVM backend");
+    }
+
+    whp::run(whp::Config {
+        kernel: args.kernel,
+        initrd: args.initrd,
+        cmdline: args.cmdline,
+        mem_bytes,
+        quiet: args.quiet,
+        exit_on_boot: args.exit_on_boot,
+        boot_marker: args.boot_marker,
     })
 }

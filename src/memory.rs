@@ -283,11 +283,6 @@ impl GuestMemory {
         Ok(())
     }
 
-    /// Writes a `repr(C)` POD value into guest RAM at guest-physical address `gpa`.
-    pub fn write_obj<T: Copy>(&self, gpa: u64, value: &T) -> Result<()> {
-        self.write_slice(gpa, crate::boot::params::as_bytes(value))
-    }
-
     /// Returns a cheap, cloneable, thread-safe accessor for guest RAM, used by device models
     /// (e.g. the virt-net NIC) to perform virtqueue DMA from their own threads.
     ///

@@ -24,6 +24,17 @@ kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
 kvm-ioctls = "0.25"
 vmm-sys-util = "0.15"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Hypervisor",
+    "Win32_System_Memory",
+    "Win32_System_Console",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
 [profile.release]
 opt-level = 3
 lto = true

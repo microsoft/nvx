@@ -9,7 +9,7 @@ BUILD_DIR ?= $(HOME)/build
 KERNEL_IMG ?= $(BUILD_DIR)/vmlinux
 PY_INITRD ?= $(BUILD_DIR)/initramfs-python.cpio.gz
 
-.PHONY: all world release build test kernel initramfs python-initramfs run boot selftest boot-test measure bench-virtfs bench-net-snapshot bench-net-snapshot-py snapshot-demo snapshot-boot clean
+.PHONY: all world release build test kernel initramfs python-initramfs artifacts run boot selftest boot-test measure bench-virtfs bench-net-snapshot bench-net-snapshot-py snapshot-demo snapshot-boot clean
 
 all: release
 
@@ -30,6 +30,11 @@ kernel:
 
 initramfs:
 	scripts/build-initramfs.sh
+
+# Build the Linux artifacts (vmlinux + initramfs.cpio.gz) in Docker, into ./build. Useful when
+# the host lacks a Linux/GCC toolchain (e.g. to produce artifacts for the Windows/WHP backend).
+artifacts:
+	scripts/build-linux-artifacts.sh
 
 python-initramfs:
 	scripts/build-python-initramfs.sh

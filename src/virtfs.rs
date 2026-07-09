@@ -63,9 +63,6 @@ const VIRTFS_NAME: &str = "virtfs";
 /// distinct, higher index keeps the image mapping clear of them.
 const VIRTFS_SLOT: u32 = 8;
 
-/// Default guest mount point used when `--mount-target` is not given.
-pub const DEFAULT_MOUNT_TARGET: &str = "/mnt/host";
-
 /// Minimum size of a read-write ext4 image: enough for the filesystem's own metadata (a small
 /// journal, inode/block tables) plus headroom for the guest to create files.
 const RW_IMAGE_MIN_BYTES: u64 = 16 << 20;

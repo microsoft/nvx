@@ -1,0 +1,12 @@
+# Keep the Docker build context small and cache-stable: only scripts/, kernel/ and alpine/
+# are needed to build the Linux artifacts.
+target/
+build/
+.git/
+docker/
+src/
+*.md
+LICENSE
+Cargo.toml
+Cargo.lock
+Makefile

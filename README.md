@@ -1,17 +1,27 @@
 # microvm
 
-A minimal, single-core **x86_64 KVM micro-VM** that boots a Linux (Alpine) kernel through
+A minimal, single-core **x86_64 micro-VM** that boots a Linux (Alpine) kernel through
 the **PVH boot protocol**, entirely from a **RAM initramfs** — no PCI, no ACPI, and no block
 device by default. The only always-on emulated device is a bidirectional "portb" console (backing
-the kernel's `hvc0`); `--mount` can additionally expose a host directory as a virt-fs (read-only,
-or read-write with `--mount-rw`), and `--net` attaches a virtio-net NIC bridged to a host TAP so
-the guest kernel gets real IPv4 networking.
+the kernel's `hvc0`).
 
-It is a standalone extraction and reworking of the **KVM (Linux) backend of the
+It runs on **two hypervisor backends** from the same codebase:
+
+- **Linux / KVM** — the original backend. Additionally, `--mount` can expose a host directory as a
+  virt-fs (read-only, or read-write with `--mount-rw`), `--net` attaches a virtio-net NIC bridged
+  to a host TAP for real IPv4 networking, and `--snapshot`/`--restore` capture and resume the whole
+  VM.
+- **Windows / WHP** — a backend on the **[Windows Hypervisor Platform](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform)**
+  that PVH-boots the *same* kernel + initramfs with the same portb console. It targets the core
+  boot path; the virt-fs, virt-net and snapshot features are KVM-only. See
+  [Running on Windows (WHP backend)](#running-on-windows-whp-backend).
+
+The Linux/KVM backend is a standalone extraction and reworking of the **KVM (Linux) backend of the
 [Nanvix Micro-VM (`uservm`)](https://github.com/nanvix/nanvix/tree/dev/src/uservm)**,
 stripped of the Nanvix-specific paravirtual ABI (magic control registers, credits,
 snapshotting, control plane, profiler, host filesystem, ...) and given the x86_64 Linux boot
-support required to run a real Linux kernel.
+support required to run a real Linux kernel. The Windows/WHP backend is the WHP-native counterpart
+of that boot path.
 
 This is a **complete, reproducible package** with three components, each a directory in this
 repo:
@@ -68,20 +78,28 @@ uid=0(root) gid=0(root)
 
 | Path | Responsibility |
 |------|----------------|
-| `src/main.rs`         | CLI and entry point |
-| `src/vmm.rs`          | VM setup, the vCPU run loop, console input thread, TTY handling |
-| `src/memory.rs`       | Guest RAM as KVM user-memory regions (MMIO-gap aware; snapshot dump / COW restore) |
-| `src/snapshot.rs`     | Full VM snapshot / restore (vCPU + devices + VM state) |
-| `src/vcpu.rs`         | vCPU creation, CPUID, and the PVH entry register/segment state |
-| `src/virtfs.rs`       | virt-fs: pack a `--mount` host directory into a SquashFS (ro) or ext4 (rw) image, map it into guest memory, and point the guest at it |
-| `src/net.rs`          | virt-net: a virtio-net NIC on a virtio-mmio transport backed by a host TAP (`--net`); parses the endpoint, brings the TAP up, and runs the RX/TX virtqueues |
-| `src/boot/pvh.rs`     | `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
-| `src/boot/params.rs`  | PVH boot-parameter structures |
-| `src/devices/portb.rs` | portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue |
-| `src/devices/mod.rs`  | PMIO device bus (portb console `0xE9`/`0xEA`, `0x604` shutdown, `0x605` snapshot) |
-| `src/console.rs`      | Shared console sink: buffered/quiet output, byte count, cold-start timing |
-| `src/irq.rs`          | In-kernel irqchip + PIT |
-| `src/layout.rs`       | Guest-physical memory map constants |
+| `src/main.rs`         | CLI and entry point; dispatches to the KVM (Linux) or WHP (Windows) backend |
+| `src/console.rs`      | *(shared)* Console sink: buffered/quiet output, byte count, cold-start timing |
+| `src/layout.rs`       | *(shared)* Guest-physical memory map constants |
+| `src/devices/portb.rs` | *(shared)* portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue |
+| `src/devices/mod.rs`  | *(shared)* PMIO device bus (portb console `0xE9`/`0xEA`, `0x604` shutdown, `0x605` snapshot) |
+| `src/boot/mod.rs`     | *(shared)* PVH boot module + `GuestWrite` trait that decouples the loader from each backend's memory |
+| `src/boot/pvh.rs`     | *(shared)* `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
+| `src/boot/params.rs`  | *(shared)* PVH boot-parameter structures |
+| `src/vmm.rs`          | *(Linux/KVM)* VM setup, the vCPU run loop, console input thread, TTY handling |
+| `src/memory.rs`       | *(Linux/KVM)* Guest RAM as KVM user-memory regions (MMIO-gap aware; snapshot dump / COW restore) |
+| `src/vcpu.rs`         | *(Linux/KVM)* vCPU creation, CPUID, and the PVH entry register/segment state |
+| `src/irq.rs`          | *(Linux/KVM)* In-kernel irqchip + PIT |
+| `src/snapshot.rs`     | *(Linux/KVM)* Full VM snapshot / restore (vCPU + devices + VM state) |
+| `src/virtfs.rs`       | *(Linux/KVM)* virt-fs: pack a `--mount` host directory into a SquashFS (ro) or ext4 (rw) image, map it into guest memory, and point the guest at it |
+| `src/net.rs`          | *(Linux/KVM)* virt-net: a virtio-net NIC on a virtio-mmio transport backed by a host TAP (`--net`); parses the endpoint, brings the TAP up, and runs the RX/TX virtqueues |
+| `src/whp/mod.rs`      | *(Windows/WHP)* Partition setup, the vCPU run loop, CPUID synth, I/O dispatch, timer/input threads, LAPIC EOI |
+| `src/whp/memory.rs`   | *(Windows/WHP)* Guest RAM via `VirtualAlloc` + `WHvMapGpaRange` (MMIO-gap aware) |
+| `src/whp/vcpu.rs`     | *(Windows/WHP)* PVH entry register/segment state via `WHvSetVirtualProcessorRegisters` |
+| `src/whp/pic.rs`      | *(Windows/WHP)* Minimal i8259 PIC so the kernel wires up IRQ0 (the host-driven PIT tick) |
+| `src/whp/pit.rs`      | *(Windows/WHP)* Minimal hang-safe i8254 channel-2 PIT counter for guest TSC calibration |
+| `src/whp/rtc.rs`      | *(Windows/WHP)* Minimal MC146818 RTC/CMOS so the boot-time wall-clock read does not spin |
+| `docker/Dockerfile`   | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows) |
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
 | `kernel/hvc_xe9.c`    | The portb `hvc0` console driver (installed into the tree by `build-kernel.sh`) |
 | `kernel/patches/`     | Kernel source modifications (the `0xE9` earlycon) |
@@ -89,8 +107,8 @@ uid=0(root) gid=0(root)
 | `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
 | `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
 | `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore |
-| `scripts/`            | Build (`build-kernel.sh`, `build-initramfs.sh`, `build-python-initramfs.sh`), `run.sh`, `measure-coldstart.sh`, `bench-virtfs.sh`, `bench-net-snapshot.sh`, `bench-net-snapshot-py.sh`, `snapshot-demo.sh`, `snapshot-boot.sh`, `test-boot.sh` |
-| `scripts/`            | Kernel / initramfs build and run helpers |
+| `scripts/*.sh`        | Kernel / initramfs build and run helpers; `build-linux-artifacts.sh` drives the Docker build |
+| `scripts/*.ps1`       | Windows helpers: `build-linux-artifacts.ps1` (Docker build) and `run.ps1` (launcher) |
 
 ## The kernel ("modified Alpine kernel")
 
@@ -219,6 +237,99 @@ To **suppress all logging**, pass `--log-level off` (mutes the `[… INFO microv
 still renders the guest console), or `--quiet` for a fully silent run (no guest console and no
 logging). The cold-start line printed under `--exit-on-boot` goes to stderr independently of the
 log level, so measurements keep working even when logging is off.
+
+## Running on Windows (WHP backend)
+
+On Windows the same VMM PVH-boots the same `vmlinux` + `initramfs.cpio.gz` through the **Windows
+Hypervisor Platform** instead of KVM. The kernel and initramfs still have to be *built* on Linux
+(they need GCC and a Linux tree), so that step runs in **Docker**; everything else runs natively.
+
+### Requirements
+
+- Windows 10/11 (x64) with the **Windows Hypervisor Platform** feature enabled and virtualization
+  enabled in firmware:
+
+  ```powershell
+  Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform   # then reboot
+  ```
+- A stable **Rust** toolchain for the `x86_64-pc-windows-msvc` target (edition 2024).
+- **Docker Desktop** (Linux engine) to build the kernel + initramfs.
+
+### 1. Build the Linux artifacts (Docker)
+
+`docker/Dockerfile` compiles the PVH `vmlinux` and packs the Alpine `initramfs.cpio.gz` inside a
+Linux container, then exports just those two files to the host via `docker build --output`:
+
+```powershell
+scripts\build-linux-artifacts.ps1              # -> build\vmlinux, build\initramfs.cpio.gz
+```
+
+Under the hood this is:
+
+```powershell
+docker build -f docker/Dockerfile --target artifacts --output type=local,dest=build .
+```
+
+The kernel and initramfs stages build in parallel; the kernel compile is the long pole (several
+minutes the first time; downloads and layers are cached afterwards). Override the versions with
+`-Kver`/`-Aver`/`-Abranch` (or the `KVER`/`AVER`/`ABRANCH` build args).
+
+### 2. Build the VMM
+
+```powershell
+cargo build --release          # -> target\release\microvm.exe
+cargo test                     # shared unit tests (no WHP required)
+.\target\release\microvm.exe --selftest    # validate the WHP protected-mode setup end-to-end
+```
+
+### 3. Boot
+
+```powershell
+scripts\run.ps1                                  # boots build\vmlinux + build\initramfs.cpio.gz
+# or, explicitly:
+.\target\release\microvm.exe `
+    --kernel build\vmlinux --initrd build\initramfs.cpio.gz `
+    --mem 512 --cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"
+```
+
+`--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level` and `--selftest`
+all work as on Linux. The KVM-only features (`--mount*`, `--net*`, `--snapshot`, `--restore`) are
+rejected with a clear message on Windows.
+
+### How it boots without KVM's device model
+
+WHP virtualizes the CPU and memory and emulates the local APIC, but — unlike KVM — it has no
+in-hypervisor PIT/PIC/IOAPIC, no `kvm-clock`, and no legacy chipset. A PVH guest with no ACPI/MP
+tables runs its APIC in "virtual wire, no configuration" mode, where Linux does **not** use the
+local-APIC timer and instead drives its clock from the **i8253 PIT on IRQ0**. So, to give the
+guest a working timer while keeping the device model tiny, the WHP backend (`src/whp/`) adds just
+enough emulation:
+
+- **In-hypervisor LAPIC** (`WHvX64LocalApicEmulationModeXApic`): interrupt delivery and `HLT`
+  handling.
+- **A minimal 8259 PIC** (`src/whp/pic.rs`) so the kernel detects the legacy interrupt controller
+  (its probe writes and reads back the mask register) and wires up IRQ0 — otherwise it falls back
+  to a "NULL legacy PIC" and `request_irq(0)` fails, leaving the guest with no clock-event device.
+- **A host timer thread** that produces the PIT tick: roughly every `CONFIG_HZ` period it flags a
+  tick and cancels the vCPU run; the run loop then raises IRQ0 through the PIC and injects it as a
+  fixed local-APIC vector with `WHvRequestInterrupt` (which also wakes a parked/idle vCPU). Because
+  a virtual-wire guest issues only the *8259* end-of-interrupt and never a *local-APIC* one, the
+  VMM completes the LAPIC acknowledge itself — clearing the in-service vector through the
+  interrupt-controller-state API, since WHP's XApic registers are not otherwise writable.
+- **A CPUID intercept** that hands the guest a **known TSC frequency** (measured from the host TSC
+  at start-up, via CPUID leaves `0x15`/`0x16`) so it uses the TSC as a reliable clocksource, and
+  forces the "always-running APIC timer" bit (leaf `6`).
+- **A minimal RTC/CMOS** (`src/whp/rtc.rs`) so the kernel's boot-time wall-clock read returns a
+  sane time instead of spinning forever on a floating `0x70`/`0x71` (the "update-in-progress" bit
+  would otherwise read as permanently set), plus a hang-safe calibration **PIT counter**
+  (`src/whp/pit.rs`, channel 2 + port `0x61`).
+- The shared **portb console** (`0xE9`/`0xEA`) and the `0x604` shutdown port, decoded straight from
+  WHP I/O-port exits — the guest uses single-byte `in`/`out`, so no instruction emulator is needed.
+
+The same `kernel/config-microvm` serves both backends: `CONFIG_KVM_GUEST` simply goes dormant when
+the KVM CPUID signature is absent, and the kernel falls back to the TSC clocksource + PIT/IRQ0
+timer described above. This assumes a host CPU with an invariant TSC (universal on modern x86-64),
+which WHP exposes to the guest.
 
 ## Cold-start and the portb console
 

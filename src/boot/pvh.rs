@@ -24,6 +24,7 @@ use crate::boot::params::{
     XEN_HVM_START_MAGIC_VALUE,
     as_bytes,
 };
+use crate::boot::GuestWrite;
 use crate::layout::{
     CMDLINE_ADDR,
     CMDLINE_MAX_LEN,
@@ -36,7 +37,6 @@ use crate::layout::{
     align_down,
     align_up,
 };
-use crate::memory::GuestMemory;
 
 /// ELF program header type: loadable segment.
 const PT_LOAD: u32 = 1;
@@ -90,7 +90,7 @@ fn rd_u64(buf: &[u8], off: usize) -> Result<u64> {
 /// zero because guest RAM is freshly mapped. The `PT_NOTE` segments are scanned for the
 /// `XEN_ELFNOTE_PHYS32_ENTRY` note that carries the 32-bit PVH entry point.
 ///
-pub fn load_kernel(mem: &GuestMemory, image: &[u8]) -> Result<LoadedKernel> {
+pub fn load_kernel(mem: &impl GuestWrite, image: &[u8]) -> Result<LoadedKernel> {
     // Validate the ELF identification bytes.
     if image.len() < 64 || &image[0..4] != b"\x7fELF" {
         bail!("kernel is not an ELF image");
@@ -199,7 +199,7 @@ fn find_pvh_entry(notes: &[u8]) -> Result<Option<u64>> {
 /// kernel image, and returns its placement.
 ///
 pub fn load_initramfs(
-    mem: &GuestMemory,
+    mem: &impl GuestWrite,
     image: &[u8],
     kernel_end: u64,
     ram_size: u64,
@@ -233,7 +233,7 @@ pub fn load_initramfs(
 ///
 /// The guest-physical address of the [`HvmStartInfo`] structure, to be placed in `%ebx`.
 ///
-pub fn configure(mem: &GuestMemory, cmdline: &str, initrd: Option<InitrdRegion>) -> Result<u64> {
+pub fn configure(mem: &impl GuestWrite, cmdline: &str, initrd: Option<InitrdRegion>) -> Result<u64> {
     // Command line (NUL-terminated).
     let cmdline_bytes: &[u8] = cmdline.as_bytes();
     if cmdline_bytes.len() + 1 > CMDLINE_MAX_LEN {
