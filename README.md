@@ -94,7 +94,7 @@ uid=0(root) gid=0(root)
 | `src/virtfs.rs`       | *(Linux/KVM)* virt-fs: pack a `--mount` host directory into a SquashFS (ro) or ext4 (rw) image, map it into guest memory, and point the guest at it |
 | `src/net.rs`          | *(Linux/KVM)* virt-net: a virtio-net NIC on a virtio-mmio transport backed by a host TAP (`--net`); parses the endpoint, brings the TAP up, and runs the RX/TX virtqueues |
 | `src/whp/mod.rs`      | *(Windows/WHP)* Partition setup, the vCPU run loop, CPUID synth, I/O dispatch, timer/input threads, LAPIC EOI |
-| `src/whp/memory.rs`   | *(Windows/WHP)* Guest RAM via `VirtualAlloc` + `WHvMapGpaRange` (MMIO-gap aware) |
+| `src/whp/memory.rs`   | *(Windows/WHP)* Guest RAM via `VirtualAlloc` + `WHvMapGpaRange` (MMIO-gap aware); restore maps `mem.bin` copy-on-write for lazy, RAM-size-independent resume |
 | `src/whp/vcpu.rs`     | *(Windows/WHP)* PVH entry register/segment state via `WHvSetVirtualProcessorRegisters` |
 | `src/whp/pic.rs`      | *(Windows/WHP)* Minimal i8259 PIC so the kernel wires up IRQ0 (the host-driven PIT tick) |
 | `src/whp/pit.rs`      | *(Windows/WHP)* Minimal hang-safe i8254 channel-2 PIT counter for guest TSC calibration |
@@ -308,6 +308,16 @@ XSAVE area** (via `WHvGet/SetVirtualProcessorXsaveState`, plus `IA32_XSS` so the
 `XRSTORS` does not fault), the emulated **local-APIC** state (via the interrupt-controller-state
 API), and the emulated **8259 PIC / i8253 PIT / MC146818 RTC** and the portb console's pending
 input queue. See [`src/whp/snapshot.rs`](src/whp/snapshot.rs).
+
+`mem.bin` is written **sparsely** (the RAM file is marked sparse with `FSCTL_SET_SPARSE`, since —
+unlike Unix — seeking over zero runs on Windows otherwise leaves physically-allocated zeros), so a
+snapshot occupies only the guest's touched footprint on disk. **Restore is lazy**: rather than
+copying the image up front, it maps `mem.bin` copy-on-write (`CreateFileMapping(PAGE_WRITECOPY)` +
+`MapViewOfFile(FILE_MAP_COPY)`) and registers the views with `WHvMapGpaRange`, so guest pages fault
+in on first access and writes go to private copies — the file is never modified (restores are
+replayable). This mirrors the KVM backend's `MAP_PRIVATE` restore and makes resume **sub-100 ms and
+independent of the configured RAM size** (e.g. ~95 ms at 256 MiB and ~100 ms at 512 MiB, versus
+~200 ms / ~350 ms for an eager copy).
 
 ```powershell
 # take a snapshot when the guest requests one, then exit:

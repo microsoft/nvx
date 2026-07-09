@@ -20,6 +20,11 @@ use ::anyhow::{
     Result,
     bail,
 };
+use ::windows::Win32::Foundation::{
+    CloseHandle,
+    HANDLE,
+};
+use ::windows::Win32::System::IO::DeviceIoControl;
 use ::windows::Win32::System::Hypervisor::{
     WHV_MAP_GPA_RANGE_FLAGS,
     WHV_PARTITION_HANDLE,
@@ -30,13 +35,20 @@ use ::windows::Win32::System::Hypervisor::{
     WHvUnmapGpaRange,
 };
 use ::windows::Win32::System::Memory::{
+    CreateFileMappingW,
+    FILE_MAP_COPY,
     MEM_COMMIT,
     MEM_RELEASE,
     MEM_RESERVE,
+    MEMORY_MAPPED_VIEW_ADDRESS,
+    MapViewOfFile,
     PAGE_READWRITE,
+    PAGE_WRITECOPY,
+    UnmapViewOfFile,
     VirtualAlloc,
     VirtualFree,
 };
+use ::windows::core::PCWSTR;
 
 use crate::boot::GuestWrite;
 use crate::layout::{
@@ -44,7 +56,16 @@ use crate::layout::{
     RAM_64BIT_START,
 };
 
-/// A contiguous guest-physical memory region backed by a `VirtualAlloc` mapping.
+/// How a [`MemoryRegion`]'s host backing was obtained, so it can be released correctly.
+enum Backing {
+    /// Private, demand-zero memory from `VirtualAlloc` (cold boot). Released with `VirtualFree`.
+    Reserved,
+    /// A copy-on-write view of the snapshot file from `MapViewOfFile` (restore). Released with
+    /// `UnmapViewOfFile`.
+    Mapped,
+}
+
+/// A contiguous guest-physical memory region backed by a host mapping.
 struct MemoryRegion {
     /// Base guest-physical address.
     guest_phys: u64,
@@ -54,6 +75,8 @@ struct MemoryRegion {
     host_addr: *mut u8,
     /// Owning partition (needed to unmap the range on drop).
     partition: WHV_PARTITION_HANDLE,
+    /// How the host backing was obtained (selects the correct release call on drop).
+    backing: Backing,
 }
 
 // SAFETY: The backing mappings are owned exclusively by this process for the VM's lifetime and
@@ -63,11 +86,20 @@ unsafe impl Sync for MemoryRegion {}
 
 impl Drop for MemoryRegion {
     fn drop(&mut self) {
-        // SAFETY: `guest_phys`/`size` describe a range mapped by `map_region`, and `host_addr`
-        // is the `VirtualAlloc` base for that region.
+        // SAFETY: `guest_phys`/`size` describe a range mapped by `map_region`/`map_region_view`,
+        // and `host_addr` is the corresponding `VirtualAlloc` base or `MapViewOfFile` view.
         unsafe {
             let _ = WHvUnmapGpaRange(self.partition, self.guest_phys, self.size as u64);
-            let _ = VirtualFree(self.host_addr.cast::<c_void>(), 0, MEM_RELEASE);
+            match self.backing {
+                Backing::Reserved => {
+                    let _ = VirtualFree(self.host_addr.cast::<c_void>(), 0, MEM_RELEASE);
+                },
+                Backing::Mapped => {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                        Value: self.host_addr.cast::<c_void>(),
+                    });
+                },
+            }
         }
     }
 }
@@ -110,32 +142,65 @@ impl GuestMemory {
     ///
     /// # Description
     ///
-    /// Reconstructs guest RAM from a snapshot file, allocating and registering the same
-    /// region layout as [`new`](Self::new) and loading each region's bytes from `path` (the
-    /// concatenation of the regions in ascending guest-physical order).
+    /// Reconstructs guest RAM from a snapshot file **without** an upfront copy, by mapping the
+    /// file copy-on-write (`FILE_MAP_COPY`) into one view per region and registering each view
+    /// with the partition. Guest pages fault in lazily from the file on first access, and writes
+    /// go to private (pagefile-backed) copies, so the snapshot file is never modified and a
+    /// restore pays only for the pages the guest actually touches — mirroring the KVM backend's
+    /// `MAP_PRIVATE` restore. The region layout and file order match [`new`](Self::new).
     ///
     pub fn restore(
         partition: WHV_PARTITION_HANDLE,
         path: &::std::path::Path,
         ram_size: u64,
     ) -> Result<Self> {
-        let mem: Self = Self::new(partition, ram_size)?;
-        let bytes: Vec<u8> =
-            ::std::fs::read(path).with_context(|| format!("reading RAM image {path:?}"))?;
-        let mut off: usize = 0;
-        for region in &mem.regions {
-            let end: usize = off + region.size;
-            let src: &[u8] = bytes
-                .get(off..end)
-                .context("RAM image shorter than the recorded guest RAM size")?;
-            // SAFETY: `region.host_addr` is a live mapping of `region.size` bytes and `src` is
-            // exactly that long.
-            unsafe {
-                ::core::ptr::copy_nonoverlapping(src.as_ptr(), region.host_addr, region.size);
-            }
-            off = end;
+        use ::std::os::windows::io::AsRawHandle;
+
+        if ram_size == 0 {
+            bail!("guest RAM size must be non-zero");
         }
-        Ok(mem)
+
+        // Keep the file open until the views are mapped; the mapping holds its own reference to
+        // the underlying section afterwards, so the file handle may be closed on return.
+        let file: ::std::fs::File =
+            ::std::fs::File::open(path).with_context(|| format!("opening RAM image {path:?}"))?;
+        let file_handle: HANDLE = HANDLE(file.as_raw_handle());
+
+        // A copy-on-write section spanning the whole file (max-size 0 means "use the file size").
+        let mapping: HANDLE = unsafe {
+            CreateFileMappingW(file_handle, None, PAGE_WRITECOPY, 0, 0, PCWSTR::null())
+        }
+        .with_context(|| format!("CreateFileMapping for RAM image {path:?}"))?;
+
+        let build = || -> Result<Vec<MemoryRegion>> {
+            let mut regions: Vec<MemoryRegion> = Vec::new();
+            let low_size: u64 = ram_size.min(MMIO_GAP_START);
+            regions.push(Self::map_region_view(partition, mapping, 0, 0, low_size)?);
+            if ram_size > MMIO_GAP_START {
+                let high_size: u64 = ram_size - MMIO_GAP_START;
+                regions.push(Self::map_region_view(
+                    partition,
+                    mapping,
+                    MMIO_GAP_START,
+                    RAM_64BIT_START,
+                    high_size,
+                )?);
+            }
+            Ok(regions)
+        };
+        let regions: Result<Vec<MemoryRegion>> = build();
+
+        // Each mapped view holds its own reference to the section, so our handle can be released
+        // now regardless of success. On error the partial `regions` drop (unmapping their views).
+        // SAFETY: `mapping` is the handle just returned by `CreateFileMappingW`.
+        unsafe {
+            let _ = CloseHandle(mapping);
+        }
+
+        Ok(Self {
+            regions: regions?,
+            ram_size,
+        })
     }
 
     ///
@@ -151,6 +216,11 @@ impl GuestMemory {
 
         let mut file: ::std::fs::File = ::std::fs::File::create(path)
             .with_context(|| format!("creating RAM image {path:?}"))?;
+        // Mark the file sparse so the zero runs skipped by `write_sparse` become real holes on
+        // disk. Unlike Unix, Windows does not create holes from seeks unless the file is sparse,
+        // so without this the "skipped" zero pages would be physically allocated. Best-effort:
+        // a filesystem that does not support sparse files just yields a full-size image.
+        set_sparse(&file);
         let mut total: u64 = 0;
         for region in &self.regions {
             // SAFETY: `host_addr`/`size` describe a live mapping owned by this region.
@@ -181,10 +251,6 @@ impl GuestMemory {
         }
         let host_addr: *mut u8 = host_addr.cast::<u8>();
 
-        let flags: WHV_MAP_GPA_RANGE_FLAGS = WHV_MAP_GPA_RANGE_FLAGS(
-            WHvMapGpaRangeFlagRead.0 | WHvMapGpaRangeFlagWrite.0 | WHvMapGpaRangeFlagExecute.0,
-        );
-
         // SAFETY: `host_addr` is a live, writable mapping of `size` bytes that outlives the
         // partition's use of the guest-physical range.
         unsafe {
@@ -193,7 +259,7 @@ impl GuestMemory {
                 host_addr.cast::<c_void>(),
                 guest_phys,
                 size as u64,
-                flags,
+                rwx_flags(),
             )
             .with_context(|| format!("WHvMapGpaRange failed (gpa={guest_phys:#x}, size={size})"))?;
         }
@@ -203,6 +269,61 @@ impl GuestMemory {
             size,
             host_addr,
             partition,
+            backing: Backing::Reserved,
+        })
+    }
+
+    /// Maps one copy-on-write view of the snapshot section at file offset `file_off` and
+    /// registers it with the partition as guest RAM at `guest_phys`.
+    fn map_region_view(
+        partition: WHV_PARTITION_HANDLE,
+        mapping: HANDLE,
+        file_off: u64,
+        guest_phys: u64,
+        size: u64,
+    ) -> Result<MemoryRegion> {
+        let size: usize = usize::try_from(size).context("region size overflows usize")?;
+
+        // SAFETY: `mapping` is a live copy-on-write section; the offset is within it and 64 KiB
+        // aligned (0 or `MMIO_GAP_START`), and `size` bytes remain from there.
+        let view: MEMORY_MAPPED_VIEW_ADDRESS = unsafe {
+            MapViewOfFile(
+                mapping,
+                FILE_MAP_COPY,
+                (file_off >> 32) as u32,
+                (file_off & 0xffff_ffff) as u32,
+                size,
+            )
+        };
+        if view.Value.is_null() {
+            bail!("MapViewOfFile failed (offset={file_off:#x}, size={size})");
+        }
+        let host_addr: *mut u8 = view.Value.cast::<u8>();
+
+        // SAFETY: `host_addr` is a live, writable (copy-on-write) view of `size` bytes.
+        if let Err(e) = unsafe {
+            WHvMapGpaRange(
+                partition,
+                view.Value,
+                guest_phys,
+                size as u64,
+                rwx_flags(),
+            )
+        } {
+            // SAFETY: `view` was just returned by `MapViewOfFile` and is not yet mapped elsewhere.
+            unsafe {
+                let _ = UnmapViewOfFile(view);
+            }
+            return Err(e)
+                .with_context(|| format!("WHvMapGpaRange (view) failed (gpa={guest_phys:#x})"));
+        }
+
+        Ok(MemoryRegion {
+            guest_phys,
+            size,
+            host_addr,
+            partition,
+            backing: Backing::Mapped,
         })
     }
 
@@ -274,6 +395,30 @@ impl GuestWrite for GuestMemory {
 
     fn ram_regions(&self) -> Vec<(u64, u64)> {
         self.ram_regions()
+    }
+}
+
+/// The read/write/execute flags used when registering a guest RAM range with the partition.
+fn rwx_flags() -> WHV_MAP_GPA_RANGE_FLAGS {
+    WHV_MAP_GPA_RANGE_FLAGS(
+        WHvMapGpaRangeFlagRead.0 | WHvMapGpaRangeFlagWrite.0 | WHvMapGpaRangeFlagExecute.0,
+    )
+}
+
+/// Marks `file` as a sparse file so that later seeks over zero runs leave real holes on disk
+/// instead of physically-allocated zeros. Best-effort: errors (e.g. an unsupported filesystem)
+/// are ignored, leaving a correct but fully-allocated image.
+fn set_sparse(file: &::std::fs::File) {
+    use ::std::os::windows::io::AsRawHandle;
+    /// `FSCTL_SET_SPARSE` control code (`CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 49, METHOD_BUFFERED,
+    /// FILE_SPECIAL_ACCESS)` == `0x0009_00C4`).
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+    let handle: HANDLE = HANDLE(file.as_raw_handle());
+    let mut returned: u32 = 0;
+    // SAFETY: `handle` is a live, writable file handle; `FSCTL_SET_SPARSE` reads and writes no
+    // buffers, so the null in/out pointers are correct.
+    unsafe {
+        let _ = DeviceIoControl(handle, FSCTL_SET_SPARSE, None, 0, None, 0, Some(&mut returned), None);
     }
 }
 
