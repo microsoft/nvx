@@ -82,6 +82,18 @@ impl Rtc {
             _ => 0x00,                     // other CMOS RAM
         }
     }
+
+    /// Serializes state for a snapshot (just the selected register index).
+    pub fn save(&self) -> Vec<u8> {
+        vec![self.index]
+    }
+
+    /// Restores state produced by [`save`](Self::save).
+    pub fn load(&mut self, data: &[u8]) {
+        if let Some(&index) = data.first() {
+            self.index = index & 0x7f;
+        }
+    }
 }
 
 /// Reads the host local time.

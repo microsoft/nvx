@@ -240,16 +240,13 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
 
 /// Builds the backend configuration and runs the VM (Windows / WHP backend).
 ///
-/// The WHP backend implements the core PVH boot path (kernel + RAM initramfs + portb console).
-/// The snapshot, virt-fs and virt-net features are KVM-specific and are rejected here rather
-/// than silently ignored.
+/// The WHP backend implements the core PVH boot path (kernel + RAM initramfs + portb console)
+/// and snapshot/restore. The virt-fs and virt-net features are KVM-specific and are rejected
+/// here rather than silently ignored.
 #[cfg(target_os = "windows")]
 fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net.is_some() || args.net_tap.is_some() {
         bail!("--net/--net-tap are only available on the Linux/KVM backend");
-    }
-    if args.snapshot.is_some() || args.restore.is_some() {
-        bail!("--snapshot/--restore are only available on the Linux/KVM backend");
     }
     if args.mount.is_some() {
         bail!("--mount is only available on the Linux/KVM backend");
@@ -263,5 +260,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         quiet: args.quiet,
         exit_on_boot: args.exit_on_boot,
         boot_marker: args.boot_marker,
+        snapshot: args.snapshot,
+        restore: args.restore,
     })
 }

@@ -48,6 +48,24 @@ enum Access {
     LoHi,
 }
 
+impl Access {
+    fn to_u8(self) -> u8 {
+        match self {
+            Access::LoByte => 0,
+            Access::HiByte => 1,
+            Access::LoHi => 2,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Access::LoByte,
+            1 => Access::HiByte,
+            _ => Access::LoHi,
+        }
+    }
+}
+
 /// State of a single PIT counter.
 struct Channel {
     /// Reload value; 0 represents a full 65536-count period.
@@ -189,6 +207,47 @@ impl Pit {
             },
             // The command port is write-only.
             _ => 0xff,
+        }
+    }
+
+    /// Serializes the programmable state of the three channels for a snapshot (the real-time
+    /// countdown origin is not saved — counters simply restart on restore, which is harmless
+    /// since nothing post-boot depends on the exact PIT phase).
+    pub fn save(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::with_capacity(3 * 11);
+        for ch in &self.channels {
+            out.extend(ch.reload.to_le_bytes()); // [0..2]
+            out.push(ch.access.to_u8()); // [2]
+            out.push(ch.mode); // [3]
+            out.push(u8::from(ch.gated)); // [4]
+            out.push(ch.read_state); // [5]
+            out.push(u8::from(ch.latched.is_some())); // [6]
+            out.extend(ch.latched.unwrap_or(0).to_le_bytes()); // [7..9]
+            out.push(u8::from(ch.write_lo.is_some())); // [9]
+            out.push(ch.write_lo.unwrap_or(0)); // [10]
+        }
+        out
+    }
+
+    /// Restores state produced by [`save`](Self::save).
+    pub fn load(&mut self, data: &[u8]) {
+        const STRIDE: usize = 11;
+        for (i, ch) in self.channels.iter_mut().enumerate() {
+            let Some(b) = data.get(i * STRIDE..i * STRIDE + STRIDE) else {
+                break;
+            };
+            ch.reload = u16::from_le_bytes([b[0], b[1]]);
+            ch.access = Access::from_u8(b[2]);
+            ch.mode = b[3];
+            ch.gated = b[4] != 0;
+            ch.read_state = b[5];
+            ch.latched = if b[6] != 0 {
+                Some(u16::from_le_bytes([b[7], b[8]]))
+            } else {
+                None
+            };
+            ch.write_lo = if b[9] != 0 { Some(b[10]) } else { None };
+            ch.restart();
         }
     }
 

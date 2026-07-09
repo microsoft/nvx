@@ -107,6 +107,63 @@ impl GuestMemory {
         Ok(Self { regions, ram_size })
     }
 
+    ///
+    /// # Description
+    ///
+    /// Reconstructs guest RAM from a snapshot file, allocating and registering the same
+    /// region layout as [`new`](Self::new) and loading each region's bytes from `path` (the
+    /// concatenation of the regions in ascending guest-physical order).
+    ///
+    pub fn restore(
+        partition: WHV_PARTITION_HANDLE,
+        path: &::std::path::Path,
+        ram_size: u64,
+    ) -> Result<Self> {
+        let mem: Self = Self::new(partition, ram_size)?;
+        let bytes: Vec<u8> =
+            ::std::fs::read(path).with_context(|| format!("reading RAM image {path:?}"))?;
+        let mut off: usize = 0;
+        for region in &mem.regions {
+            let end: usize = off + region.size;
+            let src: &[u8] = bytes
+                .get(off..end)
+                .context("RAM image shorter than the recorded guest RAM size")?;
+            // SAFETY: `region.host_addr` is a live mapping of `region.size` bytes and `src` is
+            // exactly that long.
+            unsafe {
+                ::core::ptr::copy_nonoverlapping(src.as_ptr(), region.host_addr, region.size);
+            }
+            off = end;
+        }
+        Ok(mem)
+    }
+
+    ///
+    /// # Description
+    ///
+    /// Writes the full contents of guest RAM to `path`, as the concatenation of the regions in
+    /// ascending guest-physical order (the format consumed by [`restore`](Self::restore)). Runs
+    /// of zero pages are skipped with a seek, so the on-disk image is sparse where the guest has
+    /// not touched RAM.
+    ///
+    pub fn snapshot_ram(&self, path: &::std::path::Path) -> Result<()> {
+        use ::std::io::Write;
+
+        let mut file: ::std::fs::File = ::std::fs::File::create(path)
+            .with_context(|| format!("creating RAM image {path:?}"))?;
+        let mut total: u64 = 0;
+        for region in &self.regions {
+            // SAFETY: `host_addr`/`size` describe a live mapping owned by this region.
+            let bytes: &[u8] =
+                unsafe { ::core::slice::from_raw_parts(region.host_addr, region.size) };
+            write_sparse(&mut file, bytes).context("writing RAM image")?;
+            total += region.size as u64;
+        }
+        file.set_len(total).context("sizing RAM image")?;
+        file.flush().context("flushing RAM image")?;
+        Ok(())
+    }
+
     /// Allocates one host mapping and registers it with the partition as guest RAM.
     fn map_region(
         partition: WHV_PARTITION_HANDLE,
@@ -218,4 +275,37 @@ impl GuestWrite for GuestMemory {
     fn ram_regions(&self) -> Vec<(u64, u64)> {
         self.ram_regions()
     }
+}
+
+/// Writes `bytes` to `file`, seeking over runs of zero pages instead of writing them so the
+/// resulting file is sparse. The file offset always advances by `bytes.len()`; the caller must
+/// `set_len` afterwards so a trailing zero run is reflected in the file size.
+fn write_sparse(file: &mut ::std::fs::File, bytes: &[u8]) -> Result<()> {
+    use ::std::io::{
+        Seek,
+        SeekFrom,
+        Write,
+    };
+    const PAGE: usize = 4096;
+    let is_zero = |chunk: &[u8]| chunk.iter().all(|&b| b == 0);
+    let mut off: usize = 0;
+    while off < bytes.len() {
+        let zero: bool = is_zero(&bytes[off..(off + PAGE).min(bytes.len())]);
+        let mut run_end: usize = (off + PAGE).min(bytes.len());
+        while run_end < bytes.len() {
+            let next: usize = (run_end + PAGE).min(bytes.len());
+            if is_zero(&bytes[run_end..next]) != zero {
+                break;
+            }
+            run_end = next;
+        }
+        if zero {
+            file.seek(SeekFrom::Current((run_end - off) as i64))
+                .context("seeking past zero pages")?;
+        } else {
+            file.write_all(&bytes[off..run_end]).context("writing non-zero pages")?;
+        }
+        off = run_end;
+    }
+    Ok(())
 }

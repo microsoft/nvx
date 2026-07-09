@@ -62,7 +62,6 @@ impl PortConsole {
     }
 
     /// Serializes the pending input queue into a compact byte vector (for snapshots).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn snapshot(&self) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(4 + self.rx.len());
         out.extend((self.rx.len() as u32).to_le_bytes());
@@ -71,7 +70,6 @@ impl PortConsole {
     }
 
     /// Restores the pending input queue produced by [`snapshot`](Self::snapshot).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn restore(&mut self, data: &[u8]) {
         if data.len() < 4 {
             return;

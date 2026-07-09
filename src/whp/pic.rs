@@ -205,6 +205,40 @@ impl Pic {
         self.master.irr &= !0x01;
         Some(self.master.base)
     }
+
+    /// Serializes both controllers' state for a snapshot (16 bytes).
+    pub fn save(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::with_capacity(16);
+        for chip in [&self.master, &self.slave] {
+            out.push(chip.imr);
+            out.push(chip.irr);
+            out.push(chip.isr);
+            out.push(chip.base);
+            out.push(chip.icw_step);
+            out.push(u8::from(chip.icw4));
+            out.push(u8::from(chip.read_isr));
+            out.push(u8::from(chip.initialised));
+        }
+        out
+    }
+
+    /// Restores state produced by [`save`](Self::save).
+    pub fn load(&mut self, data: &[u8]) {
+        if data.len() < 16 {
+            return;
+        }
+        for (i, chip) in [&mut self.master, &mut self.slave].into_iter().enumerate() {
+            let b: &[u8] = &data[i * 8..i * 8 + 8];
+            chip.imr = b[0];
+            chip.irr = b[1];
+            chip.isr = b[2];
+            chip.base = b[3];
+            chip.icw_step = b[4];
+            chip.icw4 = b[5] != 0;
+            chip.read_isr = b[6] != 0;
+            chip.initialised = b[7] != 0;
+        }
+    }
 }
 
 #[cfg(test)]

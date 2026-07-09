@@ -12,9 +12,9 @@ It runs on **two hypervisor backends** from the same codebase:
   to a host TAP for real IPv4 networking, and `--snapshot`/`--restore` capture and resume the whole
   VM.
 - **Windows / WHP** — a backend on the **[Windows Hypervisor Platform](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform)**
-  that PVH-boots the *same* kernel + initramfs with the same portb console. It targets the core
-  boot path; the virt-fs, virt-net and snapshot features are KVM-only. See
-  [Running on Windows (WHP backend)](#running-on-windows-whp-backend).
+  that PVH-boots the *same* kernel + initramfs with the same portb console, and also supports
+  `--snapshot`/`--restore` (capture and resume the whole VM). The virt-fs and virt-net features
+  are KVM-only. See [Running on Windows (WHP backend)](#running-on-windows-whp-backend).
 
 The Linux/KVM backend is a standalone extraction and reworking of the **KVM (Linux) backend of the
 [Nanvix Micro-VM (`uservm`)](https://github.com/nanvix/nanvix/tree/dev/src/uservm)**,
@@ -99,6 +99,7 @@ uid=0(root) gid=0(root)
 | `src/whp/pic.rs`      | *(Windows/WHP)* Minimal i8259 PIC so the kernel wires up IRQ0 (the host-driven PIT tick) |
 | `src/whp/pit.rs`      | *(Windows/WHP)* Minimal hang-safe i8254 channel-2 PIT counter for guest TSC calibration |
 | `src/whp/rtc.rs`      | *(Windows/WHP)* Minimal MC146818 RTC/CMOS so the boot-time wall-clock read does not spin |
+| `src/whp/snapshot.rs` | *(Windows/WHP)* Full VM snapshot / restore (vCPU regs + XSAVE + APIC + emulated devices) |
 | `docker/Dockerfile`   | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows) |
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
 | `kernel/hvc_xe9.c`    | The portb `hvc0` console driver (installed into the tree by `build-kernel.sh`) |
@@ -292,9 +293,29 @@ scripts\run.ps1                                  # boots build\vmlinux + build\i
     --mem 512 --cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"
 ```
 
-`--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level` and `--selftest`
-all work as on Linux. The KVM-only features (`--mount*`, `--net*`, `--snapshot`, `--restore`) are
-rejected with a clear message on Windows.
+`--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level`, `--selftest` and
+`--snapshot`/`--restore` all work as on Linux. Only the virt-fs and virt-net features
+(`--mount*`, `--net*`) are KVM-only and are rejected with a clear message on Windows.
+
+### Snapshot / restore
+
+The WHP backend implements the same guest-initiated snapshot/restore as KVM (a write to control
+port `0x605` captures the VM, then it exits; `--restore <dir>` resumes it). A snapshot directory
+holds `mem.bin` (guest RAM, written sparsely) and `state.bin` (the framed processor / APIC / device
+state). The captured state is the vCPU register file (GPRs, segments, tables, control/debug and the
+model-specific registers a booted Linux keeps), the **full FPU/SSE/AVX/CET register file as one
+XSAVE area** (via `WHvGet/SetVirtualProcessorXsaveState`, plus `IA32_XSS` so the guest's supervisor
+`XRSTORS` does not fault), the emulated **local-APIC** state (via the interrupt-controller-state
+API), and the emulated **8259 PIC / i8253 PIT / MC146818 RTC** and the portb console's pending
+input queue. See [`src/whp/snapshot.rs`](src/whp/snapshot.rs).
+
+```powershell
+# take a snapshot when the guest requests one, then exit:
+.\target\release\microvm.exe --kernel build\vmlinux --initrd build\initramfs.cpio.gz `
+    --mem 256 --snapshot snap\
+# resume from the snapshot (no kernel needed):
+.\target\release\microvm.exe --restore snap\ --mem 256
+```
 
 ### How it boots without KVM's device model
 
@@ -627,6 +648,11 @@ microvm --kernel vmlinux --initrd initramfs.cpio.gz --mem 256 --snapshot snap/
 # boot from the snapshot (no kernel needed):
 microvm --restore snap/ --mem 256
 ```
+
+The details above (in-kernel PIC/IOAPIC, the KVM clock, `MAP_PRIVATE` COW restore) are the
+Linux/KVM implementation. The **Windows/WHP backend supports the same `--snapshot`/`--restore`
+flow** with a WHP-native capture — see
+[Snapshot / restore](#snapshot--restore) under the WHP section.
 
 ### A pandas program from a snapshot (`make snapshot-demo`)
 

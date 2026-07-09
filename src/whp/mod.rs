@@ -41,6 +41,7 @@ mod memory;
 mod pic;
 mod pit;
 mod rtc;
+mod snapshot;
 mod vcpu;
 
 use ::core::ffi::c_void;
@@ -49,7 +50,10 @@ use ::std::io::{
     self,
     Read,
 };
-use ::std::path::PathBuf;
+use ::std::path::{
+    Path,
+    PathBuf,
+};
 use ::std::sync::atomic::{
     AtomicBool,
     Ordering,
@@ -144,6 +148,7 @@ use crate::whp::memory::GuestMemory;
 use crate::whp::pic::Pic;
 use crate::whp::pit::Pit;
 use crate::whp::rtc::Rtc;
+use crate::whp::snapshot::Snapshot;
 
 /// Index of the single guest virtual processor.
 const VP_INDEX: u32 = 0;
@@ -164,6 +169,10 @@ pub struct Config {
     pub exit_on_boot: bool,
     /// Console substring whose appearance marks boot completion.
     pub boot_marker: String,
+    /// Directory to write a snapshot to when the guest requests one (control port `0x605`).
+    pub snapshot: Option<PathBuf>,
+    /// Directory to restore the VM from instead of cold-booting a kernel.
+    pub restore: Option<PathBuf>,
 }
 
 /// A WHP partition (VM) with an optional single vCPU, torn down in order on drop.
@@ -329,11 +338,43 @@ fn ensure_whp_available() -> Result<()> {
 ///
 /// # Description
 ///
-/// Creates and runs a WHP micro-VM until the guest halts, resets, or the boot marker is seen.
+/// Creates and runs a WHP micro-VM: either cold-boots a kernel or resumes from a snapshot
+/// directory, depending on [`Config`].
 ///
 pub fn run(cfg: Config) -> Result<()> {
     ensure_whp_available()?;
+    match cfg.restore.clone() {
+        Some(dir) => run_restore(cfg, &dir),
+        None => run_cold(cfg),
+    }
+}
 
+/// Creates a partition configured identically for both cold boot and restore: one vCPU, CPUID
+/// interception for the timer-relevant leaves, and in-hypervisor XApic emulation.
+fn create_partition() -> Result<Partition> {
+    let partition: Partition = Partition::new()?;
+    partition.set_property(WHvPartitionPropertyCodeProcessorCount, &1u32)?;
+
+    // Intercept CPUID (bit 0 of the extended VM-exit set) so the leaves below can be tailored.
+    let extended: WHV_EXTENDED_VM_EXITS = WHV_EXTENDED_VM_EXITS { AsUINT64: 1 };
+    partition.set_property(WHvPartitionPropertyCodeExtendedVmExits, &extended)?;
+    let cpuid_leaves: [u32; 3] = [0x0000_0006, 0x0000_0015, 0x0000_0016];
+    partition.set_property_slice(WHvPartitionPropertyCodeCpuidExitList, &cpuid_leaves)?;
+
+    // Emulate the local APIC in the hypervisor: the guest's only interrupt-delivery mechanism.
+    if let Err(e) = partition.set_property(
+        WHvPartitionPropertyCodeLocalApicEmulationMode,
+        &WHvX64LocalApicEmulationModeXApic,
+    ) {
+        warn!("could not enable in-hypervisor LAPIC emulation ({e:#}); the guest timer will not work");
+    }
+
+    partition.setup()?;
+    Ok(partition)
+}
+
+/// Cold-boots a kernel + initramfs via the PVH protocol.
+fn run_cold(cfg: Config) -> Result<()> {
     let kernel_path: &PathBuf = cfg.kernel.as_ref().context("--kernel is required")?;
     let kernel: Vec<u8> =
         fs::read(kernel_path).with_context(|| format!("reading kernel image {kernel_path:?}"))?;
@@ -349,25 +390,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let tsc_hz: u64 = measure_tsc_hz();
     info!("measured host TSC frequency: {} MHz", tsc_hz / 1_000_000);
 
-    let mut partition: Partition = Partition::new()?;
-    partition.set_property(WHvPartitionPropertyCodeProcessorCount, &1u32)?;
-
-    // Intercept CPUID (bit 0 of the extended VM-exit set) so the leaves below can be tailored.
-    let extended: WHV_EXTENDED_VM_EXITS = WHV_EXTENDED_VM_EXITS { AsUINT64: 1 };
-    partition.set_property(WHvPartitionPropertyCodeExtendedVmExits, &extended)?;
-    let cpuid_leaves: [u32; 3] = [0x0000_0006, 0x0000_0015, 0x0000_0016];
-    partition.set_property_slice(WHvPartitionPropertyCodeCpuidExitList, &cpuid_leaves)?;
-
-    // Emulate the local APIC in the hypervisor: the guest's only interrupt source and timer.
-    if let Err(e) = partition.set_property(
-        WHvPartitionPropertyCodeLocalApicEmulationMode,
-        &WHvX64LocalApicEmulationModeXApic,
-    ) {
-        warn!("could not enable in-hypervisor LAPIC emulation ({e:#}); the guest timer will not work");
-    }
-
-    partition.setup()?;
-
+    let mut partition: Partition = create_partition()?;
     let mem: GuestMemory = GuestMemory::new(partition.handle, cfg.mem_bytes)?;
     let ram_size: u64 = mem.ram_size();
     partition.create_vcpu()?;
@@ -389,13 +412,40 @@ pub fn run(cfg: Config) -> Result<()> {
     let start_info_gpa: u64 = pvh::configure(&mem, &cfg.cmdline, initrd_region)?;
     vcpu::setup_pvh(partition.handle, VP_INDEX, &mem, loaded.pvh_entry, start_info_gpa)?;
 
-    let (console, bus) = build_io(&cfg);
+    let (console, bus) = build_io(&cfg, None);
     info!(
         "starting guest (mem={} MiB, cmdline={:?})",
         ram_size >> 20,
         cfg.cmdline
     );
-    execute(&cfg, &partition, &console, &bus, tsc_hz)
+    execute(&cfg, &partition, &mem, Pic::new(), Pit::new(), Rtc::new(), &console, &bus, tsc_hz)
+}
+
+/// Restores and resumes a VM from a snapshot directory.
+fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
+    let snap: Snapshot = Snapshot::read(dir)?;
+    let tsc_hz: u64 = measure_tsc_hz();
+
+    let mut partition: Partition = create_partition()?;
+    let mem: GuestMemory =
+        GuestMemory::restore(partition.handle, &dir.join("mem.bin"), snap.ram_size())?;
+    partition.create_vcpu()?;
+    snap.apply(partition.handle)?;
+
+    // Rebuild the emulated devices from the saved state.
+    let mut pic: Pic = Pic::new();
+    pic.load(snap.pic());
+    let mut pit: Pit = Pit::new();
+    pit.load(snap.pit());
+    let mut rtc: Rtc = Rtc::new();
+    rtc.load(snap.rtc());
+
+    let (console, bus) = build_io(&cfg, Some(snap.console()));
+    info!(
+        "resuming guest from snapshot {dir:?} (mem={} MiB)",
+        snap.ram_size() >> 20
+    );
+    execute(&cfg, &partition, &mem, pic, pit, rtc, &console, &bus, tsc_hz)
 }
 
 ///
@@ -450,20 +500,32 @@ pub fn selftest() -> Result<()> {
     Ok(())
 }
 
-/// Builds the shared console sink, the portb console device, and the device bus.
-fn build_io(cfg: &Config) -> (Arc<Mutex<Console>>, DeviceBus) {
+/// Builds the shared console sink, the portb console device, and the device bus. When
+/// `con_state` is provided (restore path), the device's pending input queue is reloaded from it.
+fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
     let console: Arc<Mutex<Console>> =
         Arc::new(Mutex::new(Console::new(cfg.quiet, &cfg.boot_marker)));
     let con: Arc<Mutex<PortConsole>> =
         Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
+    if let Some(state) = con_state {
+        con.lock().expect("console poisoned").restore(state);
+    }
     let bus: DeviceBus = DeviceBus::new(Arc::clone(&con));
     (console, bus)
 }
 
-/// Drives the single-core execution loop.
+/// Drives the single-core execution loop shared by the cold-boot and restore paths.
+// The loop needs the full VM context (config, partition, memory, the console/device bus, the
+// emulated devices, and the TSC frequency); grouping these purely to satisfy the argument-count
+// lint would not aid clarity.
+#[allow(clippy::too_many_arguments)]
 fn execute(
     cfg: &Config,
     partition: &Partition,
+    mem: &GuestMemory,
+    mut pic: Pic,
+    mut pit: Pit,
+    mut rtc: Rtc,
     console: &Arc<Mutex<Console>>,
     bus: &DeviceBus,
     tsc_hz: u64,
@@ -476,9 +538,6 @@ fn execute(
     // only thread that touches WHP vCPU state. The timer thread merely nudges it via
     // `WHvCancelRunVirtualProcessor` (the one WHP call safe from another thread), which keeps
     // all register and interrupt-injection calls serialized on this thread.
-    let mut pic: Pic = Pic::new();
-    let mut pit: Pit = Pit::new();
-    let mut rtc: Rtc = Rtc::new();
 
     // Host heartbeat: the timer thread sets this flag and cancels the run roughly every
     // `CONFIG_HZ` period, so the loop injects the guest's IRQ0 (the PIT tick) even while the
@@ -517,7 +576,14 @@ fn execute(
                     break;
                 },
                 Ok(PioAction::Snapshot) => {
-                    warn!("guest requested a snapshot, which the WHP backend does not support");
+                    match take_snapshot(cfg, handle, mem, &pic, &pit, &rtc, console, bus) {
+                        Ok(true) => break,
+                        Ok(false) => {},
+                        Err(e) => {
+                            run_err = Some(e);
+                            break;
+                        },
+                    }
                 },
                 Err(e) => {
                     run_err = Some(e);
@@ -582,6 +648,50 @@ fn execute(
         }
     }
     Ok(())
+}
+
+/// Serializes the full VM state when the guest requests a snapshot (control port 0x605). Returns
+/// `Ok(true)` when the snapshot was written and the VM should stop; `Ok(false)` when snapshotting
+/// was requested but not configured (so the guest keeps running).
+// Capturing a consistent snapshot needs the whole VM context (config, partition, memory, the
+// emulated devices, and the console/device bus); bundling them purely to reduce the argument
+// count would not improve clarity.
+#[allow(clippy::too_many_arguments)]
+fn take_snapshot(
+    cfg: &Config,
+    handle: WHV_PARTITION_HANDLE,
+    mem: &GuestMemory,
+    pic: &Pic,
+    pit: &Pit,
+    rtc: &Rtc,
+    console: &Arc<Mutex<Console>>,
+    bus: &DeviceBus,
+) -> Result<bool> {
+    let dir = match &cfg.snapshot {
+        Some(dir) => dir,
+        None => {
+            warn!("guest requested a snapshot but --snapshot was not given; ignoring");
+            return Ok(false);
+        },
+    };
+
+    // Flush any buffered guest output before capturing the console's pending input queue so the
+    // restored VM neither loses emitted bytes nor replays already-consumed ones.
+    console.lock().expect("console poisoned").flush();
+    let con_state: Vec<u8> = bus.console().lock().expect("console poisoned").snapshot();
+    let pic_bytes: Vec<u8> = pic.save();
+    let pit_bytes: Vec<u8> = pit.save();
+    let rtc_bytes: Vec<u8> = rtc.save();
+    let devices = snapshot::DeviceState {
+        pic: &pic_bytes,
+        pit: &pit_bytes,
+        rtc: &rtc_bytes,
+        console: &con_state,
+    };
+    snapshot::write(dir, handle, mem, &devices)
+        .with_context(|| format!("writing snapshot to {}", dir.display()))?;
+    info!("snapshot written to {}", dir.display());
+    Ok(true)
 }
 
 /// Runs the vCPU once, filling `exit` with the exit context.
