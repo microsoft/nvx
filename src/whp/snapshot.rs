@@ -163,6 +163,8 @@ pub struct DeviceState<'a> {
     pub pit: &'a [u8],
     pub rtc: &'a [u8],
     pub console: &'a [u8],
+    /// Serialized virt-net state (endpoint header + device transport indices); empty if no NIC.
+    pub net: &'a [u8],
 }
 
 ///
@@ -242,6 +244,7 @@ pub fn write(
     put_blob(&mut buf, devices.pit);
     put_blob(&mut buf, devices.rtc);
     put_blob(&mut buf, devices.console);
+    put_blob(&mut buf, devices.net);
 
     // Persist RAM and state.
     mem.snapshot_ram(&dir.join("mem.bin"))?;
@@ -263,6 +266,7 @@ pub struct Snapshot {
     pit: Vec<u8>,
     rtc: Vec<u8>,
     console: Vec<u8>,
+    net: Vec<u8>,
 }
 
 impl Snapshot {
@@ -292,6 +296,8 @@ impl Snapshot {
         let pit: Vec<u8> = r.blob()?.to_vec();
         let rtc: Vec<u8> = r.blob()?.to_vec();
         let console: Vec<u8> = r.blob()?.to_vec();
+        // The virt-net blob was added later; tolerate its absence in older snapshots.
+        let net: Vec<u8> = r.blob().map(<[u8]>::to_vec).unwrap_or_default();
 
         Ok(Self {
             ram_size,
@@ -302,6 +308,7 @@ impl Snapshot {
             pit,
             rtc,
             console,
+            net,
         })
     }
 
@@ -328,6 +335,12 @@ impl Snapshot {
     /// Serialized portb console state (pending input queue).
     pub fn console(&self) -> &[u8] {
         &self.console
+    }
+
+    /// Serialized virt-net state (endpoint header + device transport indices); empty if the
+    /// snapshot had no NIC.
+    pub fn net(&self) -> &[u8] {
+        &self.net
     }
 
     /// Applies the processor and local-APIC state to the vCPU. The partition must be set up, the

@@ -13,8 +13,9 @@ It runs on **two hypervisor backends** from the same codebase:
   VM.
 - **Windows / WHP** — a backend on the **[Windows Hypervisor Platform](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform)**
   that PVH-boots the *same* kernel + initramfs with the same portb console, and also supports
-  `--snapshot`/`--restore` (capture and resume the whole VM). The virt-fs and virt-net features
-  are KVM-only. See [Running on Windows (WHP backend)](#running-on-windows-whp-backend).
+  `--snapshot`/`--restore` (capture and resume the whole VM) and `--net` (a virtio-net NIC backed
+  by a built-in user-mode NAT — no TAP driver or admin rights needed). The virt-fs feature is
+  KVM-only. See [Running on Windows (WHP backend)](#running-on-windows-whp-backend).
 
 The Linux/KVM backend is a standalone extraction and reworking of the **KVM (Linux) backend of the
 [Nanvix Micro-VM (`uservm`)](https://github.com/nanvix/nanvix/tree/dev/src/uservm)**,
@@ -99,6 +100,9 @@ uid=0(root) gid=0(root)
 | `src/whp/pic.rs`      | *(Windows/WHP)* Minimal i8259 PIC so the kernel wires up IRQ0 (the host-driven PIT tick) |
 | `src/whp/pit.rs`      | *(Windows/WHP)* Minimal hang-safe i8254 channel-2 PIT counter for guest TSC calibration |
 | `src/whp/rtc.rs`      | *(Windows/WHP)* Minimal MC146818 RTC/CMOS so the boot-time wall-clock read does not spin |
+| `src/whp/net.rs`      | *(Windows/WHP)* virtio-net NIC on virtio-mmio (`--net`); MMIO via the WHP instruction emulator, IRQ on a master-PIC line |
+| `src/whp/slirp.rs`    | *(Windows/WHP)* user-mode NAT backing the NIC: ARP + ICMP for the gateway, TCP/UDP/DNS out through host sockets |
+| `src/whp/emulator.rs` | *(Windows/WHP)* thin wrapper over WHP's instruction emulator for servicing virtio-mmio memory-access exits |
 | `src/whp/snapshot.rs` | *(Windows/WHP)* Full VM snapshot / restore (vCPU regs + XSAVE + APIC + emulated devices) |
 | `docker/Dockerfile`   | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows) |
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
@@ -293,9 +297,38 @@ scripts\run.ps1                                  # boots build\vmlinux + build\i
     --mem 512 --cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"
 ```
 
-`--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level`, `--selftest` and
-`--snapshot`/`--restore` all work as on Linux. Only the virt-fs and virt-net features
-(`--mount*`, `--net*`) are KVM-only and are rejected with a clear message on Windows.
+`--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level`, `--selftest`,
+`--snapshot`/`--restore` and `--net` all work as on Linux. Only the virt-fs feature (`--mount*`)
+and the TAP-attach option (`--net-tap`, which is Linux-specific) are KVM-only and are rejected with
+a clear message on Windows.
+
+### Networking (`--net`, user-mode NAT)
+
+Windows has no unprivileged layer-2 TAP, so instead of bridging to a host interface the WHP backend
+gives the guest the **same virtio-net NIC** as KVM but backs it with a built-in **user-mode NAT** —
+no driver and no administrator rights. The guest gets a static address on a small subnet (from the
+kernel command line, exactly as on Linux: `--net 10.0.0.2/24` ⇒ guest `10.0.0.2`, gateway
+`10.0.0.1`), and the VMM plays the gateway:
+
+- answers **ARP** for the gateway and **ICMP echo** (so `ping <gateway>` works);
+- NATs guest **TCP** out through host `TcpStream`s (speaking TCP to the guest itself);
+- NATs guest **UDP** (including DNS) out through host `UdpSocket`s;
+- connections to the gateway address are served by the host loopback, so the guest can reach host
+  services (e.g. `wget http://10.0.0.1:8080/`).
+
+Two things differ from KVM under the hood because WHP has no in-hypervisor device model: MMIO to the
+virtio-mmio window is serviced through WHP's **instruction emulator**
+([`WHvEmulatorTryMmioEmulation`](src/whp/emulator.rs)), and the NIC interrupt is delivered as a
+**master-PIC line (IRQ5)** injected as a local-APIC vector — the same mechanism as the PIT timer,
+which avoids the slave-PIC cascade. See [`src/whp/net.rs`](src/whp/net.rs) and
+[`src/whp/slirp.rs`](src/whp/slirp.rs). The NIC also **survives snapshot/restore** (its transport
+state and endpoint are captured, and the NAT is rebuilt on resume).
+
+```powershell
+.\target\release\microvm.exe --kernel build\vmlinux --initrd build\initramfs.cpio.gz `
+    --mem 256 --net 10.0.0.2/24 --cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"
+# in the guest:  ping 10.0.0.1   /   wget -qO- http://10.0.0.1:8080/
+```
 
 ### Snapshot / restore
 

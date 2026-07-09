@@ -384,6 +384,37 @@ impl GuestMemory {
         }
         Ok(())
     }
+
+    /// Reads a little-endian `u16` from guest RAM at `gpa` (0 if out of range).
+    pub fn read_u16(&self, gpa: u64) -> u16 {
+        let mut b: [u8; 2] = [0; 2];
+        let _ = self.read_slice(gpa, &mut b);
+        u16::from_le_bytes(b)
+    }
+
+    /// Reads a little-endian `u32` from guest RAM at `gpa` (0 if out of range).
+    pub fn read_u32(&self, gpa: u64) -> u32 {
+        let mut b: [u8; 4] = [0; 4];
+        let _ = self.read_slice(gpa, &mut b);
+        u32::from_le_bytes(b)
+    }
+
+    /// Reads a little-endian `u64` from guest RAM at `gpa` (0 if out of range).
+    pub fn read_u64(&self, gpa: u64) -> u64 {
+        let mut b: [u8; 8] = [0; 8];
+        let _ = self.read_slice(gpa, &mut b);
+        u64::from_le_bytes(b)
+    }
+
+    /// Writes a little-endian `u16` to guest RAM at `gpa` (ignored if out of range).
+    pub fn write_u16(&self, gpa: u64, val: u16) {
+        let _ = self.write_slice(gpa, &val.to_le_bytes());
+    }
+
+    /// Writes a little-endian `u32` to guest RAM at `gpa` (ignored if out of range).
+    pub fn write_u32(&self, gpa: u64, val: u32) {
+        let _ = self.write_slice(gpa, &val.to_le_bytes());
+    }
 }
 
 // The PVH loader writes the kernel, initramfs and boot structures through this trait. The

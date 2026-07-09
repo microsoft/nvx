@@ -80,15 +80,18 @@ impl Chip {
             false
         } else if value & 0x20 != 0 {
             // OCW2: end-of-interrupt. Non-specific clears the highest in-service line;
-            // specific (bit 6) clears the addressed line.
-            let irq0_was_in_service: bool = self.isr & 0x01 != 0;
+            // specific (bit 6) clears the addressed line. In virtual-wire mode the guest issues
+            // only this 8259 end-of-interrupt (never a local-APIC one), so report whether a line
+            // that was in service has now been acknowledged, letting the caller complete the
+            // matching local-APIC EOI for whichever vector was injected (timer IRQ0 or NIC IRQ5).
+            let had_in_service: bool = self.isr != 0;
             if value & 0x40 != 0 {
                 self.isr &= !(1 << (value & 0x07));
             } else if self.isr != 0 {
                 let highest: u32 = self.isr.trailing_zeros();
                 self.isr &= !(1 << highest);
             }
-            irq0_was_in_service && self.isr & 0x01 == 0
+            had_in_service
         } else {
             false
         }
@@ -204,6 +207,27 @@ impl Pic {
         self.master.isr |= 0x01;
         self.master.irr &= !0x01;
         Some(self.master.base)
+    }
+
+    ///
+    /// # Description
+    ///
+    /// Requests master-PIC IRQ `line` (0..=7) and, if it can be delivered right now, returns the
+    /// interrupt vector to inject. Used for the NIC (IRQ5); gating mirrors [`raise_irq0`](Self::raise_irq0):
+    /// suppressed while the controller is uninitialised or the line is masked (the guest masks the
+    /// line while its handler runs, so at most one is in flight).
+    ///
+    pub fn raise_irq(&mut self, line: u8) -> Option<u8> {
+        if line > 7 {
+            return None;
+        }
+        let bit: u8 = 1 << line;
+        if !self.master.initialised || self.master.imr & bit != 0 {
+            return None;
+        }
+        self.master.isr |= bit;
+        self.master.irr &= !bit;
+        Some(self.master.base.wrapping_add(line))
     }
 
     /// Serializes both controllers' state for a snapshot (16 bytes).

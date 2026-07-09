@@ -37,10 +37,13 @@
 //!
 //! Snapshot/restore, virt-fs and virt-net are KVM-specific and are not implemented here.
 
+mod emulator;
 mod memory;
+mod net;
 mod pic;
 mod pit;
 mod rtc;
+mod slirp;
 mod snapshot;
 mod vcpu;
 
@@ -106,6 +109,8 @@ use ::windows::Win32::System::Hypervisor::{
     WHvGetVirtualProcessorInterruptControllerState,
     WHvGetVirtualProcessorRegisters,
     WHvRequestInterrupt,
+    WHV_MEMORY_ACCESS_CONTEXT,
+    WHV_VP_EXIT_CONTEXT,
     WHvPartitionPropertyCodeCpuidExitList,
     WHvPartitionPropertyCodeExtendedVmExits,
     WHvPartitionPropertyCodeLocalApicEmulationMode,
@@ -144,10 +149,17 @@ use crate::devices::{
     DeviceBus,
     PioAction,
 };
+use crate::whp::emulator::{
+    Emulator,
+    MmioHandler,
+};
 use crate::whp::memory::GuestMemory;
+use crate::whp::net::VirtioNet;
+pub use crate::whp::net::NetConfig;
 use crate::whp::pic::Pic;
 use crate::whp::pit::Pit;
 use crate::whp::rtc::Rtc;
+use crate::whp::slirp::SlirpRx;
 use crate::whp::snapshot::Snapshot;
 
 /// Index of the single guest virtual processor.
@@ -173,6 +185,33 @@ pub struct Config {
     pub snapshot: Option<PathBuf>,
     /// Directory to restore the VM from instead of cold-booting a kernel.
     pub restore: Option<PathBuf>,
+    /// Optional virt-net endpoint (`--net`): the guest IP/prefix and derived host gateway.
+    pub net: Option<NetConfig>,
+}
+
+/// A running virt-net NIC: the shared device model, the NAT receive side (drained by the RX pump),
+/// and the endpoint config (for snapshots).
+struct Nic {
+    /// The virtio-net device, shared between the vCPU thread (MMIO/TX) and the RX pump thread.
+    dev: Arc<Mutex<VirtioNet>>,
+    /// NAT -> guest frames, taken by the RX pump thread when `execute` starts.
+    rx: Option<SlirpRx>,
+    /// Endpoint configuration, serialized into snapshots.
+    cfg: NetConfig,
+}
+
+impl Nic {
+    /// Builds a NIC and its NAT backend for `ncfg`, DMAing into `mem`.
+    fn build(mem: &Arc<GuestMemory>, ncfg: &NetConfig) -> Self {
+        let (slirp, rx) = slirp::start(ncfg);
+        let dev: Arc<Mutex<VirtioNet>> =
+            Arc::new(Mutex::new(VirtioNet::new(Arc::clone(mem), slirp, ncfg.mac)));
+        Nic {
+            dev,
+            rx: Some(rx),
+            cfg: ncfg.clone(),
+        }
+    }
 }
 
 /// A WHP partition (VM) with an optional single vCPU, torn down in order on drop.
@@ -391,34 +430,48 @@ fn run_cold(cfg: Config) -> Result<()> {
     info!("measured host TSC frequency: {} MHz", tsc_hz / 1_000_000);
 
     let mut partition: Partition = create_partition()?;
-    let mem: GuestMemory = GuestMemory::new(partition.handle, cfg.mem_bytes)?;
+    let mem: Arc<GuestMemory> = Arc::new(GuestMemory::new(partition.handle, cfg.mem_bytes)?);
     let ram_size: u64 = mem.ram_size();
     partition.create_vcpu()?;
 
+    // Append the virt-net command-line fragment so the guest finds and addresses the NIC.
+    let cmdline: String = match &cfg.net {
+        Some(ncfg) => format!("{} {}", cfg.cmdline, ncfg.cmdline_fragment()),
+        None => cfg.cmdline.clone(),
+    };
+
     // Load the kernel, the initramfs, and the PVH boot structures.
-    let loaded = pvh::load_kernel(&mem, &kernel)?;
+    let loaded = pvh::load_kernel(&*mem, &kernel)?;
     info!(
         "loaded kernel: pvh_entry={:#x}, kernel_end={:#x}",
         loaded.pvh_entry, loaded.kernel_end
     );
     let initrd_region = match &initrd {
         Some(bytes) => {
-            let region = pvh::load_initramfs(&mem, bytes, loaded.kernel_end, ram_size)?;
+            let region = pvh::load_initramfs(&*mem, bytes, loaded.kernel_end, ram_size)?;
             info!("loaded initramfs: addr={:#x}, size={:#x}", region.addr, region.size);
             Some(region)
         },
         None => None,
     };
-    let start_info_gpa: u64 = pvh::configure(&mem, &cfg.cmdline, initrd_region)?;
+    let start_info_gpa: u64 = pvh::configure(&*mem, &cmdline, initrd_region)?;
     vcpu::setup_pvh(partition.handle, VP_INDEX, &mem, loaded.pvh_entry, start_info_gpa)?;
 
+    // Build the NIC (and its user-mode NAT), if requested.
+    let nic: Option<Nic> = match &cfg.net {
+        Some(ncfg) => {
+            info!(
+                "virt-net: NIC at {:#x} (guest {}/{}, gateway {})",
+                net::NET_MMIO_BASE, ncfg.guest_ip, ncfg.prefix, ncfg.host_ip
+            );
+            Some(Nic::build(&mem, ncfg))
+        },
+        None => None,
+    };
+
     let (console, bus) = build_io(&cfg, None);
-    info!(
-        "starting guest (mem={} MiB, cmdline={:?})",
-        ram_size >> 20,
-        cfg.cmdline
-    );
-    execute(&cfg, &partition, &mem, Pic::new(), Pit::new(), Rtc::new(), &console, &bus, tsc_hz)
+    info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cmdline);
+    execute(&cfg, &partition, &mem, Pic::new(), Pit::new(), Rtc::new(), &console, &bus, tsc_hz, nic)
 }
 
 /// Restores and resumes a VM from a snapshot directory.
@@ -427,8 +480,8 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     let tsc_hz: u64 = measure_tsc_hz();
 
     let mut partition: Partition = create_partition()?;
-    let mem: GuestMemory =
-        GuestMemory::restore(partition.handle, &dir.join("mem.bin"), snap.ram_size())?;
+    let mem: Arc<GuestMemory> =
+        Arc::new(GuestMemory::restore(partition.handle, &dir.join("mem.bin"), snap.ram_size())?);
     partition.create_vcpu()?;
     snap.apply(partition.handle)?;
 
@@ -440,12 +493,31 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     let mut rtc: Rtc = Rtc::new();
     rtc.load(snap.rtc());
 
+    // Rebuild the NIC from the snapshot (endpoint header + device transport state), if present.
+    let nic: Option<Nic> = build_restored_nic(&mem, snap.net())?;
+
     let (console, bus) = build_io(&cfg, Some(snap.console()));
     info!(
         "resuming guest from snapshot {dir:?} (mem={} MiB)",
         snap.ram_size() >> 20
     );
-    execute(&cfg, &partition, &mem, pic, pit, rtc, &console, &bus, tsc_hz)
+    execute(&cfg, &partition, &mem, pic, pit, rtc, &console, &bus, tsc_hz, nic)
+}
+
+/// Rebuilds the NIC from serialized snapshot state, or returns `None` if the snapshot had no NIC.
+fn build_restored_nic(mem: &Arc<GuestMemory>, net_state: &[u8]) -> Result<Option<Nic>> {
+    if net_state.is_empty() {
+        return Ok(None);
+    }
+    let (ncfg, consumed) = NetConfig::from_header(net_state)?;
+    let nic: Nic = Nic::build(mem, &ncfg);
+    {
+        let mut dev = nic.dev.lock().expect("virt-net poisoned");
+        dev.load(&net_state[consumed..])?;
+        dev.resume();
+    }
+    info!("virt-net: NIC restored (guest {}/{})", ncfg.guest_ip, ncfg.prefix);
+    Ok(Some(nic))
 }
 
 ///
@@ -529,6 +601,7 @@ fn execute(
     console: &Arc<Mutex<Console>>,
     bus: &DeviceBus,
     tsc_hz: u64,
+    mut nic: Option<Nic>,
 ) -> Result<()> {
     let handle = partition.handle;
     let _guard: ConsoleGuard = ConsoleGuard::new();
@@ -538,6 +611,22 @@ fn execute(
     // only thread that touches WHP vCPU state. The timer thread merely nudges it via
     // `WHvCancelRunVirtualProcessor` (the one WHP call safe from another thread), which keeps
     // all register and interrupt-injection calls serialized on this thread.
+
+    // The virtio-net NIC (if any) needs WHP's instruction emulator to service its MMIO window, and
+    // a receive pump that feeds NAT frames into the guest and wakes this loop to inject the NIC's
+    // IRQ. The pump is joined on shutdown, like the timer thread.
+    let emulator: Option<Emulator> = match &nic {
+        Some(_) => Some(Emulator::new()?),
+        None => None,
+    };
+    let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let net_pump: Option<thread::JoinHandle<()>> = match nic.as_mut() {
+        Some(n) => n
+            .rx
+            .take()
+            .map(|rx| spawn_net_rx(Arc::clone(&n.dev), rx, handle, Arc::clone(&net_stop))),
+        None => None,
+    };
 
     // Host heartbeat: the timer thread sets this flag and cancels the run roughly every
     // `CONFIG_HZ` period, so the loop injects the guest's IRQ0 (the PIT tick) even while the
@@ -562,9 +651,12 @@ fn execute(
             break;
         }
 
-        // Deliver a pending timer tick (raised by the timer thread) as the guest's IRQ0.
+        // Deliver a pending timer tick (raised by the timer thread) as the guest's IRQ0, and
+        // re-check the NIC on the same cadence so a receive interrupt that could not be injected
+        // earlier (e.g. the line was briefly masked) self-heals within one tick.
         if timer_tick.swap(false, Ordering::AcqRel) {
             inject_irq0(&mut pic, handle);
+            service_nic_irq(&nic, &mut pic, handle);
         }
 
         let reason = exit.ExitReason;
@@ -576,7 +668,7 @@ fn execute(
                     break;
                 },
                 Ok(PioAction::Snapshot) => {
-                    match take_snapshot(cfg, handle, mem, &pic, &pit, &rtc, console, bus) {
+                    match take_snapshot(cfg, handle, mem, &pic, &pit, &rtc, console, bus, nic.as_ref()) {
                         Ok(true) => break,
                         Ok(false) => {},
                         Err(e) => {
@@ -601,19 +693,33 @@ fn execute(
             // ever surfaces a bare Halt instead, a short sleep bounds CPU use until the next tick.
             thread::sleep(Duration::from_millis(1));
         } else if reason == WHvRunVpExitReasonCanceled || reason == WHvRunVpExitReasonNone {
-            // Woken by the timer or input thread, or nothing to do: loop and re-enter.
+            // Woken by the timer, input thread, or the NIC receive pump: service a pending NIC
+            // interrupt so a just-delivered frame is signalled to the guest with low latency.
+            service_nic_irq(&nic, &mut pic, handle);
         } else if reason == WHvRunVpExitReasonUnrecoverableException {
             // A PVH/no-ACPI guest reboots via triple fault, which surfaces here. Treat it as a
             // normal termination of the VM (matching `reboot=t`).
             info!("guest reset (reboot/triple fault)");
             break;
         } else if reason == WHvRunVpExitReasonMemoryAccess {
-            // The device-less guest touches only RAM and the (hypervisor-emulated) LAPIC, so an
-            // MMIO exit means an unmapped access we cannot service without an instruction
-            // emulator. Report and stop rather than spin re-faulting the same instruction.
-            error!("unhandled guest MMIO access");
-            dump_vcpu(handle);
-            break;
+            // A guest access to the (unmapped) virtio-mmio window faults out here. Drive WHP's
+            // instruction emulator to decode it and dispatch to the NIC; without a NIC there is
+            // nothing to service, so report and stop rather than spin re-faulting.
+            match (&emulator, &nic) {
+                (Some(emu), Some(n)) => {
+                    if let Err(e) = handle_mmio(emu, handle, &exit, n) {
+                        run_err = Some(e);
+                        break;
+                    }
+                    // A transmit notification (QueueNotify) may have raised the NIC's interrupt.
+                    service_nic_irq(&nic, &mut pic, handle);
+                },
+                _ => {
+                    error!("unhandled guest MMIO access");
+                    dump_vcpu(handle);
+                    break;
+                },
+            }
         } else {
             debug!("unhandled vcpu exit reason {}", reason.0);
         }
@@ -629,6 +735,13 @@ fn execute(
     // `Drop` calls `WHvDeletePartition`). The join waits at most one tick (~10 ms).
     stop.store(true, Ordering::SeqCst);
     let _ = timer_thread.join();
+
+    // Likewise stop and join the NIC receive pump before the partition is dropped, so its cancel
+    // (and NAT worker) cannot outlive it. Joining also shuts the slirp worker down.
+    net_stop.store(true, Ordering::SeqCst);
+    if let Some(pump) = net_pump {
+        let _ = pump.join();
+    }
     console.lock().expect("console poisoned").flush();
 
     if let Some(err) = run_err {
@@ -666,6 +779,7 @@ fn take_snapshot(
     rtc: &Rtc,
     console: &Arc<Mutex<Console>>,
     bus: &DeviceBus,
+    nic: Option<&Nic>,
 ) -> Result<bool> {
     let dir = match &cfg.snapshot {
         Some(dir) => dir,
@@ -682,11 +796,23 @@ fn take_snapshot(
     let pic_bytes: Vec<u8> = pic.save();
     let pit_bytes: Vec<u8> = pit.save();
     let rtc_bytes: Vec<u8> = rtc.save();
+    // Serialize the NIC under its lock so the RX pump cannot mutate the rings mid-capture: the
+    // endpoint header (to rebuild the identical link on restore) followed by the transport state.
+    let net_state: Vec<u8> = match nic {
+        Some(n) => {
+            let dev = n.dev.lock().expect("virt-net poisoned");
+            let mut s: Vec<u8> = n.cfg.save_header();
+            s.extend(dev.save());
+            s
+        },
+        None => Vec::new(),
+    };
     let devices = snapshot::DeviceState {
         pic: &pic_bytes,
         pit: &pit_bytes,
         rtc: &rtc_bytes,
         console: &con_state,
+        net: &net_state,
     };
     snapshot::write(dir, handle, mem, &devices)
         .with_context(|| format!("writing snapshot to {}", dir.display()))?;
@@ -983,6 +1109,126 @@ fn inject_irq0(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
     // SAFETY: `interrupt` is a valid control block of the declared size; the partition is live.
     unsafe {
         let _ = WHvRequestInterrupt(handle, &interrupt, size_of::<WHV_INTERRUPT_CONTROL>() as u32);
+    }
+}
+
+/// Injects the NIC's interrupt (master-PIC line [`net::NET_IRQ`]) if the emulated PIC can deliver
+/// it now. Runs on the vCPU thread; the guest's 8259 end-of-interrupt is completed with a matching
+/// local-APIC EOI in [`handle_io`], exactly like the timer's IRQ0. When the line is masked (the
+/// guest is mid-handler) the injection is skipped; the device keeps its `interrupt_status`
+/// asserted and [`service_nic_irq`] retries on the next event/tick, so the notification is not lost.
+fn inject_net_irq(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
+    let Some(vector) = pic.raise_irq(net::NET_IRQ as u8) else {
+        return;
+    };
+    let interrupt: WHV_INTERRUPT_CONTROL = WHV_INTERRUPT_CONTROL {
+        _bitfield: 0,
+        Destination: 0,
+        Vector: u32::from(vector),
+    };
+    // SAFETY: `interrupt` is a valid control block of the declared size; the partition is live.
+    unsafe {
+        let _ = WHvRequestInterrupt(handle, &interrupt, size_of::<WHV_INTERRUPT_CONTROL>() as u32);
+    }
+}
+
+/// Injects the NIC's IRQ if the device currently has an unacknowledged interrupt asserted. Called
+/// on interrupt-relevant events (a receive-pump wake, a transmit notification, and each timer
+/// tick) rather than every loop iteration, so it neither spins nor starves the receive pump of the
+/// device lock.
+fn service_nic_irq(nic: &Option<Nic>, pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
+    if let Some(n) = nic
+        && n.dev.lock().expect("virt-net poisoned").irq_asserted()
+    {
+        inject_net_irq(pic, handle);
+    }
+}
+
+/// Services a guest MMIO exit by emulating the faulting instruction against the NIC.
+fn handle_mmio(
+    emu: &Emulator,
+    handle: WHV_PARTITION_HANDLE,
+    exit: &WHV_RUN_VP_EXIT_CONTEXT,
+    nic: &Nic,
+) -> Result<()> {
+    let vp: &WHV_VP_EXIT_CONTEXT = &exit.VpContext;
+    // SAFETY: the exit reason selects the `MemoryAccess` arm of the union.
+    let mmio: &WHV_MEMORY_ACCESS_CONTEXT = unsafe { &exit.Anonymous.MemoryAccess };
+    let mut handler: NetMmio<'_> = NetMmio { nic };
+    emu.emulate(handle, vp, mmio, &mut handler)
+}
+
+/// MMIO dispatcher used by the instruction emulator: routes accesses in the virtio-mmio window to
+/// the NIC; other reads float to zero and other writes are dropped (the unoccupied-bus behaviour).
+struct NetMmio<'a> {
+    nic: &'a Nic,
+}
+
+impl MmioHandler for NetMmio<'_> {
+    fn mmio(&mut self, gpa: u64, is_write: bool, data: &mut [u8]) {
+        if (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&gpa) {
+            let off: u64 = gpa - net::NET_MMIO_BASE;
+            let mut dev = self.nic.dev.lock().expect("virt-net poisoned");
+            if is_write {
+                dev.mmio_write(off, data);
+            } else {
+                dev.mmio_read(off, data);
+            }
+        } else if !is_write {
+            data.iter_mut().for_each(|b| *b = 0);
+        }
+    }
+}
+
+/// Spawns the NIC receive pump: it drains NAT frames destined for the guest, scatters each into
+/// the RX virtqueue, and wakes the vCPU loop (via a cross-thread-safe cancel) to inject the NIC's
+/// IRQ. A frame that cannot be delivered yet (the RX ring has no free buffer) is held and retried
+/// rather than dropped, so a TCP segment is never silently lost (there is no retransmission). It
+/// is joined on shutdown before the partition is dropped, so its cancel cannot outlive it; joining
+/// also shuts the NAT worker down.
+fn spawn_net_rx(
+    dev: Arc<Mutex<VirtioNet>>,
+    mut rx: SlirpRx,
+    handle: WHV_PARTITION_HANDLE,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        // A frame accepted from the NAT but not yet deliverable (RX ring full); retried first.
+        let mut pending: Option<Vec<u8>> = None;
+        while !stop.load(Ordering::SeqCst) {
+            // Retry a previously-undeliverable frame before taking a new one.
+            if let Some(frame) = pending.take() {
+                if dev.lock().expect("virt-net poisoned").process_rx(&frame) {
+                    wake_vcpu(handle);
+                } else {
+                    pending = Some(frame);
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+            }
+            match rx.to_guest.recv_timeout(Duration::from_millis(20)) {
+                Ok(frame) => {
+                    if dev.lock().expect("virt-net poisoned").process_rx(&frame) {
+                        wake_vcpu(handle);
+                    } else {
+                        pending = Some(frame);
+                    }
+                },
+                Err(::std::sync::mpsc::RecvTimeoutError::Timeout) => {},
+                Err(::std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        rx.shutdown();
+    })
+}
+
+/// Wakes the (possibly parked) vCPU so the run loop services a pending NIC interrupt. Only
+/// `WHvCancelRunVirtualProcessor` is used, which is safe from another thread; the pump is joined
+/// before the partition is dropped, so the handle stays valid.
+fn wake_vcpu(handle: WHV_PARTITION_HANDLE) {
+    // SAFETY: the partition is live until the receive pump is joined (before the partition drops).
+    unsafe {
+        let _ = WHvCancelRunVirtualProcessor(handle, VP_INDEX, 0);
     }
 }
 
