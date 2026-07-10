@@ -73,4 +73,16 @@ echo " uname: $(uname -a)"
 echo "=========================================="
 echo
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+# snap: optional snapshot benchmark for a plain (non-networked) shell (see the shell-snapshot
+# benchmark). When the kernel command line contains "snap", ask the VMM to take a snapshot at
+# this fully-booted, shell-ready point (one outb to I/O port 0x605 via /dev/port). On the
+# snapshot run the VMM captures here and exits; on a later restore, execution resumes at the next
+# line and the guest prints a marker the benchmark greps for before dropping to the shell.
+case " $(cat /proc/cmdline) " in
+    *" snap "*)
+        printf '\001' | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null
+        # ---- on restore, execution resumes here ----
+        echo "SNAP-RESTORE-OK"
+        ;;
+esac
 exec /bin/sh
