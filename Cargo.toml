@@ -25,6 +25,9 @@ kvm-ioctls = "0.25"
 vmm-sys-util = "0.15"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# Pure-Rust FAT builder for the WHP virt-fs image (no host mke2fs/mksquashfs needed). Timestamps
+# (the `chrono` default feature and its dependency tree) are not needed, so keep only std + LFN.
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",

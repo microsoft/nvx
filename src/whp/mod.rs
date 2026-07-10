@@ -46,6 +46,7 @@ mod rtc;
 mod slirp;
 mod snapshot;
 mod vcpu;
+mod virtfs;
 
 use ::core::ffi::c_void;
 use ::std::fs;
@@ -187,6 +188,16 @@ pub struct Config {
     pub restore: Option<PathBuf>,
     /// Optional virt-net endpoint (`--net`): the guest IP/prefix and derived host gateway.
     pub net: Option<NetConfig>,
+    /// Host directory to export to the guest as a virt-fs (`--mount`).
+    pub mount: Option<PathBuf>,
+    /// Guest mount point for the `--mount` directory.
+    pub mount_target: String,
+    /// Export the `--mount` directory read-write instead of read-only.
+    pub mount_rw: bool,
+    /// Optional host file backing a read-write `--mount` (implies read-write; persists writes).
+    pub mount_image: Option<PathBuf>,
+    /// Optional size (MiB) of the writable image (headroom for guest writes).
+    pub mount_size: Option<u64>,
 }
 
 /// A running virt-net NIC: the shared device model, the NAT receive side (drained by the RX pump),
@@ -435,9 +446,30 @@ fn run_cold(cfg: Config) -> Result<()> {
     partition.create_vcpu()?;
 
     // Append the virt-net command-line fragment so the guest finds and addresses the NIC.
-    let cmdline: String = match &cfg.net {
+    let mut cmdline: String = match &cfg.net {
         Some(ncfg) => format!("{} {}", cfg.cmdline, ncfg.cmdline_fragment()),
         None => cfg.cmdline.clone(),
+    };
+
+    // Optionally export a host directory to the guest as a virt-fs. The FAT image is mapped into
+    // guest memory above reported RAM and pointed at via the kernel command line; `_virtfs` owns
+    // that mapping (and, for a persistent read-write export, flushes it) and must stay alive until
+    // the guest stops.
+    let _virtfs: Option<virtfs::VirtFs> = match &cfg.mount {
+        Some(dir) => {
+            let opts = virtfs::Options {
+                dir,
+                target: &cfg.mount_target,
+                writable: cfg.mount_rw || cfg.mount_image.is_some(),
+                image: cfg.mount_image.as_deref(),
+                size: cfg.mount_size.map(|mib| mib << 20),
+            };
+            let (fs, fragment) = virtfs::load(partition.handle, ram_size, opts)?;
+            cmdline.push(' ');
+            cmdline.push_str(&fragment);
+            Some(fs)
+        },
+        None => None,
     };
 
     // Load the kernel, the initramfs, and the PVH boot structures.

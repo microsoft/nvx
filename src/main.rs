@@ -241,16 +241,13 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
 /// Builds the backend configuration and runs the VM (Windows / WHP backend).
 ///
 /// The WHP backend implements the core PVH boot path (kernel + RAM initramfs + portb console),
-/// snapshot/restore, and virt-net (`--net`) through a user-mode NAT. The virt-fs feature and the
-/// TAP-attach option (`--net-tap`, which is Linux-specific) are rejected here rather than silently
-/// ignored.
+/// snapshot/restore, virt-net (`--net`) through a user-mode NAT, and virt-fs (`--mount`) via a
+/// pure-Rust FAT image. Only the TAP-attach option (`--net-tap`, which is Linux-specific) is
+/// rejected here rather than silently ignored.
 #[cfg(target_os = "windows")]
 fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net_tap.is_some() {
         bail!("--net-tap is only available on the Linux/KVM backend (WHP uses a user-mode NAT)");
-    }
-    if args.mount.is_some() {
-        bail!("--mount is only available on the Linux/KVM backend");
     }
 
     let net: Option<whp::NetConfig> = match &args.net {
@@ -269,5 +266,10 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         snapshot: args.snapshot,
         restore: args.restore,
         net,
+        mount: args.mount,
+        mount_target: args.mount_target,
+        mount_rw: args.mount_rw,
+        mount_image: args.mount_image,
+        mount_size: args.mount_size,
     })
 }

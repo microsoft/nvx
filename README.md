@@ -104,6 +104,7 @@ uid=0(root) gid=0(root)
 | `src/whp/slirp.rs`    | *(Windows/WHP)* user-mode NAT backing the NIC: ARP + ICMP for the gateway, TCP/UDP/DNS out through host sockets |
 | `src/whp/emulator.rs` | *(Windows/WHP)* thin wrapper over WHP's instruction emulator for servicing virtio-mmio memory-access exits |
 | `src/whp/snapshot.rs` | *(Windows/WHP)* Full VM snapshot / restore (vCPU regs + XSAVE + APIC + emulated devices) |
+| `src/whp/virtfs.rs`   | *(Windows/WHP)* virt-fs (`--mount`): a FAT image built in pure Rust (`fatfs`), mapped above RAM via `WHvMapGpaRange`; the guest mounts it as `vfat` |
 | `docker/Dockerfile`   | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows) |
 | `kernel/config-microvm` | Minimal Linux kernel configuration |
 | `kernel/hvc_xe9.c`    | The portb `hvc0` console driver (installed into the tree by `build-kernel.sh`) |
@@ -113,7 +114,7 @@ uid=0(root) gid=0(root)
 | `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
 | `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore |
 | `scripts/*.sh`        | Kernel / initramfs build and run helpers; `build-linux-artifacts.sh` drives the Docker build |
-| `scripts/*.ps1`       | Windows helpers: `build-linux-artifacts.ps1` (Docker build), `run.ps1` (launcher), and the benchmark mirrors `measure-coldstart.ps1` / `bench-net-snapshot.ps1` / `snapshot-demo.ps1` / `snapshot-boot.ps1` / `bench-net-snapshot-py.ps1` |
+| `scripts/*.ps1`       | Windows helpers: `build-linux-artifacts.ps1` + `build-python-initramfs.ps1` (Docker builds), `run.ps1` (launcher), and the benchmark mirrors `measure-coldstart.ps1` / `bench-net-snapshot.ps1` / `snapshot-demo.ps1` / `snapshot-boot.ps1` / `bench-net-snapshot-py.ps1` / `bench-virtfs.ps1` |
 
 ## The kernel ("modified Alpine kernel")
 
@@ -279,6 +280,13 @@ The kernel and initramfs stages build in parallel; the kernel compile is the lon
 minutes the first time; downloads and layers are cached afterwards). Override the versions with
 `-Kver`/`-Aver`/`-Abranch` (or the `KVER`/`AVER`/`ABRANCH` build args).
 
+The Python snapshot demos and `bench-net-snapshot-py.ps1` additionally need a Python initramfs
+(CPython + numpy/pandas). Build it the same way (downloads the packages over the network):
+
+```powershell
+scripts\build-python-initramfs.ps1             # -> build\initramfs-python.cpio.gz
+```
+
 ### 2. Build the VMM
 
 ```powershell
@@ -298,9 +306,12 @@ scripts\run.ps1                                  # boots build\vmlinux + build\i
 ```
 
 `--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level`, `--selftest`,
-`--snapshot`/`--restore` and `--net` all work as on Linux. Only the virt-fs feature (`--mount*`)
-and the TAP-attach option (`--net-tap`, which is Linux-specific) are KVM-only and are rejected with
-a clear message on Windows.
+`--snapshot`/`--restore`, `--net` and the virt-fs flags (`--mount`, `--mount-rw`, `--mount-image`,
+`--mount-size`, `--mount-target`) all work as on Linux. Only the TAP-attach option (`--net-tap`,
+which is Linux-specific) is KVM-only and is rejected with a clear message on Windows. The one
+implementation difference is the virt-fs image format: Windows has no `mksquashfs`/`mke2fs`, so the
+WHP backend builds a **FAT** image in pure Rust (the guest mounts it as `vfat`) where KVM uses
+SquashFS/ext4 — see [Virt-fs](#virt-fs-mount) below.
 
 ### Networking (`--net`, user-mode NAT)
 
@@ -360,6 +371,39 @@ independent of the configured RAM size** (e.g. ~95 ms at 256 MiB and ~100 ms at 
 .\target\release\microvm.exe --restore snap\ --mem 256
 ```
 
+<a name="virt-fs-mount"></a>
+### Virt-fs (`--mount`)
+
+`--mount <dir>` exports a host directory to the guest as a mountable device — the same mechanism as
+KVM: a filesystem image is placed in a guest-physical window above reported RAM, surfaced through
+`phram` (MTD) + `mtdblock` as `/dev/mtdblock0`, and mounted by PID 1 at `--mount-target`
+(default `/mnt/host`). The location, type and mode travel on the kernel command line
+(`phram.phram=virtfs,<base>,<len> virtfs_dir=<path> virtfs_fs=<type> virtfs_mode=<ro|rw>`).
+
+Because Windows has no `mksquashfs`/`mke2fs`, the WHP backend builds the image as a **FAT
+filesystem in pure Rust** (the [`fatfs`](https://crates.io/crates/fatfs) crate) and the guest mounts
+it as `vfat` (`CONFIG_VFAT_FS`), where the KVM backend uses SquashFS (read-only) / ext4
+(read-write). Three modes, matching KVM:
+
+- **read-only** (default): the directory is packed into a FAT image mapped from private host memory
+  (`VirtualAlloc`), mounted `-o ro`.
+- **read-write ephemeral** (`--mount-rw`): a writable FAT image held in private memory; guest writes
+  work but are discarded when the VM stops.
+- **read-write persistent** (`--mount-image <file>`): the FAT image is mapped **shared** from the
+  host file (`CreateFileMapping(PAGE_READWRITE)` + `MapViewOfFile(FILE_MAP_WRITE)`), so guest writes
+  are flushed back and **persist across runs** (the file is created from the directory the first
+  time and reused afterwards). `--mount-size <MiB>` sizes the writable image. See
+  [`src/whp/virtfs.rs`](src/whp/virtfs.rs).
+
+```powershell
+# read-only export:
+.\target\release\microvm.exe --kernel build\vmlinux --initrd build\initramfs.cpio.gz `
+    --mem 512 --mount C:\some\dir
+# persistent read-write image (guest writes to /mnt/host survive across runs):
+.\target\release\microvm.exe --kernel build\vmlinux --initrd build\initramfs.cpio.gz `
+    --mem 512 --mount C:\some\dir --mount-image host.img --mount-size 192
+```
+
 ### Benchmarks
 
 The Linux benchmark shell scripts have PowerShell mirrors that reproduce the same methodology on the
@@ -372,11 +416,12 @@ WHP backend (parsing the VMM's `cold-start:` / `restore:` timing line; no `sudo`
 | `scripts\snapshot-demo.ps1` | `snapshot-demo.sh` | pandas/numpy cold boot vs. restore of a warmed interpreter |
 | `scripts\snapshot-boot.ps1` | `snapshot-boot.sh` | resume an interactive Python REPL straight from a snapshot |
 | `scripts\bench-net-snapshot-py.ps1` | `bench-net-snapshot-py.sh` | networked Python (bare + numpy/pandas) cold boot vs. restore, each verifying a real HTTP round-trip |
+| `scripts\bench-virtfs.ps1` | `bench-virtfs.sh` | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip (pure-Rust FAT, no `mke2fs`) |
 
-The last three need the Python initramfs (`build\initramfs-python.cpio.gz`), which
-`scripts/build-python-initramfs.sh` produces over the network (apk/pip) — build it on a networked
-machine or via the Docker toolchain and copy it in. `bench-net-snapshot-py.ps1` also needs host
-Python for its helper server (the guest GETs the gateway, which the NAT forwards to `127.0.0.1`).
+The three Python scripts need the Python initramfs (`build\initramfs-python.cpio.gz`); build it on
+Windows with `scripts\build-python-initramfs.ps1` (a Docker stage that downloads CPython +
+numpy/pandas). `bench-net-snapshot-py.ps1` also needs host Python for its helper server (the guest
+GETs the gateway, which the NAT forwards to `127.0.0.1`).
 
 
 ### How it boots without KVM's device model

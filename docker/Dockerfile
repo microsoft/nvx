@@ -57,7 +57,22 @@ ENV HOME=/root \
     ABRANCH=${ABRANCH}
 RUN mkdir -p /out && bash /repo/scripts/build-initramfs.sh
 
+# ---- Python initramfs: Alpine rootfs + CPython + numpy/pandas + the snapshot apps. ----
+FROM base AS python-initramfs
+ARG AVER=3.24.1
+ARG ABRANCH=v3.24
+ENV HOME=/root \
+    WORK=/build/initramfs-python \
+    OUT=/out/initramfs-python.cpio.gz \
+    AVER=${AVER} \
+    ABRANCH=${ABRANCH}
+RUN mkdir -p /out && bash /repo/scripts/build-python-initramfs.sh
+
 # ---- Artifacts: a minimal stage carrying just the outputs, for `--output`. ----
 FROM scratch AS artifacts
 COPY --from=kernel /out/vmlinux /vmlinux
 COPY --from=initramfs /out/initramfs.cpio.gz /initramfs.cpio.gz
+
+# ---- Python artifacts: just the Python initramfs (built on demand; needs network). ----
+FROM scratch AS python-artifacts
+COPY --from=python-initramfs /out/initramfs-python.cpio.gz /initramfs-python.cpio.gz
