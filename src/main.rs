@@ -142,8 +142,8 @@ struct Args {
     /// Number of vCPUs to create (functional SMP). Default 1 (single processor). With N > 1 the
     /// VMM writes an Intel MP table so the guest kernel enumerates all N vCPUs and brings the
     /// application processors online via the normal INIT-SIPI-SIPI path (serviced by the in-kernel
-    /// LAPIC). Applies to cold boot only; `--restore` resumes a single processor, and `--snapshot`
-    /// is rejected with N > 1 (SMP snapshot is not implemented). Maximum 254 (8-bit APIC ids).
+    /// LAPIC). On `--restore` the processor count comes from the snapshot. `--snapshot` captures
+    /// a consistent VM-wide cut of all N processors. Maximum 254 (8-bit APIC ids).
     #[arg(long, default_value_t = 1)]
     vcpus: usize,
 }
@@ -230,14 +230,6 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
             "--vcpus supports at most {} CPUs (the MP table uses 8-bit APIC ids)",
             crate::boot::mptable::MAX_SUPPORTED_CPUS
         );
-    }
-    if args.vcpus > 1 && args.restore.is_some() {
-        bail!("--restore is not supported with --vcpus > 1 (SMP restore is not implemented)");
-    }
-    // Snapshotting an SMP guest would dump RAM while the application processors keep mutating it,
-    // producing a torn image; SMP snapshot/restore is not implemented yet.
-    if args.vcpus > 1 && args.snapshot.is_some() {
-        bail!("--snapshot is not supported with --vcpus > 1 (SMP snapshot is not implemented)");
     }
 
     vmm::run(vmm::Config {

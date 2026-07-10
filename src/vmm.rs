@@ -16,10 +16,14 @@
 use ::std::fs;
 use ::std::io::{self, Read};
 use ::std::path::{Path, PathBuf};
-use ::std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use ::std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use ::std::sync::{Arc, Mutex};
 use ::std::thread;
 use ::std::thread::JoinHandle;
+use ::std::time::{
+    Duration,
+    Instant,
+};
 
 use ::anyhow::{Context, Result, anyhow, bail};
 use ::kvm_ioctls::{Cap, Kvm, VcpuExit};
@@ -160,20 +164,53 @@ struct VmControl {
     fatal: Mutex<Option<String>>,
     /// Registered vCPU thread ids, used to force-exit peers from `KVM_RUN` via `SIGRTMIN`.
     tids: Mutex<Vec<u64>>,
+    /// Start gate: application-processor threads park until the boot processor releases them, so
+    /// on restore no AP runs (and none can inject an IPI) until every vCPU has been created and
+    /// its state applied.
+    released: AtomicBool,
+    /// Set once any vCPU observes a guest snapshot request; every vCPU then quiesces so the boot
+    /// processor can take a consistent VM-wide cut.
+    snapshot_requested: AtomicBool,
+    /// Number of application processors that have quiesced (parked out of `KVM_RUN`) for a
+    /// snapshot. The boot processor waits for this to reach the AP count before pausing devices.
+    ap_paused: AtomicUsize,
+    /// Released by the boot processor once all vCPUs are quiesced and the device threads are
+    /// stopped; each application processor then captures its own state.
+    capture_now: AtomicBool,
+    /// Number of application processors that have captured their state into `saved`.
+    ap_captured: AtomicUsize,
+    /// Per-vCPU captured state (indexed by vCPU id), filled during a snapshot.
+    saved: Mutex<Vec<Option<snapshot::VcpuState>>>,
 }
 
 impl VmControl {
-    fn new() -> Self {
+    fn new(vcpu_count: usize) -> Self {
         Self {
             stop: AtomicBool::new(false),
             fatal: Mutex::new(None),
             tids: Mutex::new(Vec::new()),
+            released: AtomicBool::new(false),
+            snapshot_requested: AtomicBool::new(false),
+            ap_paused: AtomicUsize::new(0),
+            capture_now: AtomicBool::new(false),
+            ap_captured: AtomicUsize::new(0),
+            saved: Mutex::new((0..vcpu_count).map(|_| None).collect()),
         }
     }
 
     /// Registers the calling vCPU thread so peers can kick it.
     fn register(&self, tid: u64) {
         self.tids.lock().expect("vm control poisoned").push(tid);
+    }
+
+    /// Releases the application processors from their start gate.
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the application processors have been released from the start gate.
+    fn is_released(&self) -> bool {
+        self.released.load(Ordering::SeqCst)
     }
 
     /// Whether any vCPU has requested the VM to stop.
@@ -198,6 +235,33 @@ impl VmControl {
     /// Takes the recorded fatal error, if any.
     fn take_fatal(&self) -> Option<String> {
         self.fatal.lock().expect("vm control poisoned").take()
+    }
+
+    /// Signals that a guest snapshot has been requested (from any vCPU).
+    fn request_snapshot(&self) {
+        self.snapshot_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a snapshot has been requested and no stop is pending.
+    fn snapshot_pending(&self) -> bool {
+        self.snapshot_requested.load(Ordering::SeqCst) && !self.should_stop()
+    }
+
+    /// Records an application processor's captured state at its vCPU index.
+    fn store_saved(&self, index: usize, state: snapshot::VcpuState) {
+        if let Some(slot) = self.saved.lock().expect("vm control poisoned").get_mut(index) {
+            *slot = Some(state);
+        }
+    }
+
+    /// Consumes every captured vCPU state in index order, failing if any is missing.
+    fn take_saved(&self) -> Result<Vec<snapshot::VcpuState>> {
+        let mut slots = self.saved.lock().expect("vm control poisoned");
+        let mut out: Vec<snapshot::VcpuState> = Vec::with_capacity(slots.len());
+        for (idx, slot) in slots.iter_mut().enumerate() {
+            out.push(slot.take().with_context(|| format!("vCPU {idx} state was not captured"))?);
+        }
+        Ok(out)
     }
 
     /// Sends `SIGRTMIN` to every registered vCPU thread except `self_tid`, forcing them out of a
@@ -512,7 +576,7 @@ fn run_cold(cfg: Config) -> Result<()> {
 
     // The VM supervisor, shared by the boot processor and every application processor, so any
     // vCPU that stops (guest shutdown/reset, fatal exit, panic) stops the whole VM.
-    let control: Arc<VmControl> = Arc::new(VmControl::new());
+    let control: Arc<VmControl> = Arc::new(VmControl::new(cfg.vcpus));
     // Install the kick/console signal handlers before spawning any application-processor thread,
     // so an AP can never receive SIGRTMIN (whose default disposition would kill the process)
     // before its handler exists.
@@ -531,6 +595,7 @@ fn run_cold(cfg: Config) -> Result<()> {
         let ap_net: Option<Arc<Mutex<VirtioNet>>> = net_shared.clone();
         let ap_control: Arc<VmControl> = Arc::clone(&control);
         let exit_on_boot: bool = cfg.exit_on_boot;
+        let snapshot_enabled: bool = cfg.snapshot.is_some();
         let ap_tid: Arc<AtomicU64> = Arc::clone(&tid);
         let handle: JoinHandle<()> = thread::Builder::new()
             .name(format!("vcpu-{id}"))
@@ -542,6 +607,7 @@ fn run_cold(cfg: Config) -> Result<()> {
                     ap_net,
                     ap_console,
                     exit_on_boot,
+                    snapshot_enabled,
                     ap_control,
                     ap_tid,
                 )
@@ -556,6 +622,10 @@ fn run_cold(cfg: Config) -> Result<()> {
             cfg.vcpus - 1
         );
     }
+
+    // Release the application processors: on cold boot they immediately block in `KVM_RUN`
+    // waiting for the guest's INIT-SIPI-SIPI, so the gate only orders them after this point.
+    control.release();
 
     let result = execute(
         &cfg,
@@ -600,6 +670,7 @@ fn run_ap(
     net: Option<Arc<Mutex<VirtioNet>>>,
     console: Arc<Mutex<Console>>,
     exit_on_boot: bool,
+    snapshot_enabled: bool,
     control: Arc<VmControl>,
     tid: Arc<AtomicU64>,
 ) {
@@ -624,6 +695,16 @@ fn run_ap(
             control.kick_others(my_tid);
         };
 
+        // Wait at the start gate before running any guest code: on restore, no AP runs (and so
+        // none can inject an IPI into a peer) until every vCPU has been created and restored and
+        // the boot processor releases them together.
+        while !control.is_released() {
+            if control.should_stop() {
+                return;
+            }
+            thread::sleep(Duration::from_micros(200));
+        }
+
         loop {
             // Clear any pending immediate-exit, then re-check the stop flag before re-entering the
             // guest; a kick delivered after this point makes the next KVM_RUN return at once.
@@ -631,21 +712,32 @@ fn run_ap(
             if control.should_stop() {
                 break;
             }
+            // A snapshot has been requested: quiesce and capture this processor's state, then park
+            // until the boot processor completes the cut. This AP is out of `KVM_RUN` here, so its
+            // register state is a consistent point in the VM-wide cut.
+            if control.snapshot_pending() {
+                if let Err(e) = ap_snapshot(&ap, idx, &control) {
+                    stop_vm(Some(format!("AP{idx} snapshot capture failed: {e}")));
+                }
+                break;
+            }
             match ap.fd.run() {
                 Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
-                Ok(VcpuExit::IoOut(port, data)) => {
-                    if let PioAction::Shutdown = bus.pio_write(port, data) {
+                Ok(VcpuExit::IoOut(port, data)) => match bus.pio_write(port, data) {
+                    PioAction::None => {},
+                    PioAction::Shutdown => {
                         stop_vm(None);
                         break;
-                    }
-                    // The boot marker may be emitted from this AP (the hvc0 console kthread can run
-                    // on any CPU). If so, stop the VM so the boot processor's `--exit-on-boot`
-                    // fires even if it is idle in `KVM_RUN`.
-                    if exit_on_boot && console.lock().expect("console poisoned").booted() {
-                        stop_vm(None);
-                        break;
-                    }
-                }
+                    },
+                    // The snapshot can be triggered from any CPU. Announce it and kick the other
+                    // vCPUs; the boot processor coordinates the actual capture.
+                    PioAction::Snapshot => {
+                        if snapshot_enabled {
+                            control.request_snapshot();
+                            control.kick_others(my_tid);
+                        }
+                    },
+                },
                 Ok(VcpuExit::MmioRead(addr, data)) => net_mmio_read(net.as_ref(), addr, data),
                 Ok(VcpuExit::MmioWrite(addr, data)) => net_mmio_write(net.as_ref(), addr, data),
                 // Linux APs HLT in the idle loop; with the in-kernel LAPIC, KVM re-blocks until the
@@ -675,6 +767,13 @@ fn run_ap(
                     break;
                 }
             }
+            // The boot marker may be emitted from this AP (the hvc0 console kthread can run on any
+            // CPU). If so, stop the VM so the boot processor's `--exit-on-boot` fires even if it is
+            // idle in `KVM_RUN`.
+            if exit_on_boot && console.lock().expect("console poisoned").booted() {
+                stop_vm(None);
+                break;
+            }
         }
     }))
     .is_err();
@@ -683,6 +782,31 @@ fn run_ap(
         control.request_fatal(format!("AP{idx} panicked"));
         control.kick_others(my_tid);
     }
+}
+
+/// Quiesces an application processor for a snapshot and captures its architectural state.
+///
+/// The vCPU is already out of `KVM_RUN` when this is called, so its register state is a
+/// consistent point (any pending MMIO/PIO read completion simply replays after restore). It
+/// announces that it has paused, waits for the boot processor to quiesce every vCPU and stop the
+/// device threads (`capture_now`), captures its own state, and then parks until the whole-VM stop
+/// signals that the cut is complete. Returns early without capturing if the snapshot is aborted.
+fn ap_snapshot(ap: &Vcpu, idx: u64, control: &VmControl) -> Result<()> {
+    control.ap_paused.fetch_add(1, Ordering::SeqCst);
+    while !control.capture_now.load(Ordering::SeqCst) {
+        if control.should_stop() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    let state: snapshot::VcpuState = snapshot::VcpuState::capture(&ap.fd, idx)
+        .with_context(|| format!("capturing AP{idx} state"))?;
+    control.store_saved(idx as usize, state);
+    control.ap_captured.fetch_add(1, Ordering::SeqCst);
+    while !control.should_stop() {
+        thread::sleep(Duration::from_micros(500));
+    }
+    Ok(())
 }
 
 /// Restores and resumes a VM from a snapshot directory.
@@ -702,14 +826,31 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
         .set_tss_address(TSS_ADDRESS)
         .context("KVM_SET_TSS_ADDR failed")?;
 
-    // Copy-on-write map the saved RAM image, recreate the irqchip/PIT, and reprogram CPUID.
+    // Copy-on-write map the saved RAM image and recreate the irqchip/PIT.
+    let n_vcpus: usize = snap.vcpu_count();
     let mem: GuestMemory = GuestMemory::restore(&vm_fd, &dir.join("mem.bin"), snap.ram_size())?;
     irq::setup(&vm_fd)?;
-    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, 1)?;
 
-    // Reload the captured processor and VM state.
+    // Restore barrier: create *every* vCPU and reload its state before any of them runs. An
+    // application processor started early could otherwise send an IPI to a not-yet-created peer
+    // (KVM would drop it) or raise a kick before its handler exists. Each vCPU's CPUID topology
+    // is reprogrammed by `Vcpu::new`; the MP table already lives in the restored guest RAM.
+    let mut vcpus: Vec<Vcpu> = Vec::with_capacity(n_vcpus);
+    for id in 0..n_vcpus {
+        vcpus.push(
+            Vcpu::new(&kvm, &vm_fd, id as u64, n_vcpus)
+                .with_context(|| format!("creating vcpu {id} for restore"))?,
+        );
+    }
     snap.apply_vm(&vm_fd)?;
-    snap.apply_vcpu(&vcpu.fd)?;
+    for (id, v) in vcpus.iter().enumerate() {
+        snap.apply_vcpu(&v.fd, id).with_context(|| format!("restoring vcpu {id}"))?;
+    }
+    // Synchronize the timestamp counter across all processors (write one reference TSC to each)
+    // so a task migrating between them never sees time move backwards.
+    let fds: Vec<&::kvm_ioctls::VcpuFd> = vcpus.iter().map(|v| &v.fd).collect();
+    snap.sync_tsc(&fds)?;
+    drop(fds);
 
     // Rebuild the virt-net NIC from the snapshot: recreate the (identically addressed) host TAP,
     // re-register the irqfd, and reload the device's transport state so it resumes in lockstep
@@ -722,15 +863,75 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
         };
 
     let (console, bus) = build_io(&cfg, Some(snap.con_state()));
+    let bus: Arc<DeviceBus> = Arc::new(bus);
     info!(
-        "resuming guest from snapshot {dir:?} (mem={} MiB)",
+        "resuming guest from snapshot {dir:?} (mem={} MiB, {n_vcpus} vCPU(s))",
         snap.ram_size() >> 20
     );
+    // Install the signal handlers before spawning any application processor.
     install_signal_handlers();
-    let control: Arc<VmControl> = Arc::new(VmControl::new());
-    execute(
-        &cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true, net_dev, control,
-    )
+    let control: Arc<VmControl> = Arc::new(VmControl::new(n_vcpus));
+    let net_shared: Option<Arc<Mutex<VirtioNet>>> =
+        net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
+
+    // The boot processor is index 0; the rest run as application processors, parked at the start
+    // gate until every vCPU is created and restored and the boot processor releases them together.
+    let mut bsp: Vcpu = vcpus.remove(0);
+    let mut ap_threads: ApThreads = ApThreads::new(Arc::clone(&control));
+    for (offset, ap) in vcpus.into_iter().enumerate() {
+        let id: u64 = (offset + 1) as u64;
+        let tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let ap_bus: Arc<DeviceBus> = Arc::clone(&bus);
+        let ap_console: Arc<Mutex<Console>> = Arc::clone(&console);
+        let ap_net: Option<Arc<Mutex<VirtioNet>>> = net_shared.clone();
+        let ap_control: Arc<VmControl> = Arc::clone(&control);
+        let exit_on_boot: bool = cfg.exit_on_boot;
+        let snapshot_enabled: bool = cfg.snapshot.is_some();
+        let ap_tid: Arc<AtomicU64> = Arc::clone(&tid);
+        let handle: JoinHandle<()> = thread::Builder::new()
+            .name(format!("vcpu-{id}"))
+            .spawn(move || {
+                run_ap(
+                    ap,
+                    id,
+                    ap_bus,
+                    ap_net,
+                    ap_console,
+                    exit_on_boot,
+                    snapshot_enabled,
+                    ap_control,
+                    ap_tid,
+                )
+            })
+            .with_context(|| format!("spawning application-processor vcpu {id}"))?;
+        ap_threads.push(id, handle, tid);
+    }
+    if n_vcpus > 1 {
+        info!("SMP restore: {n_vcpus} vCPUs ({} application processor(s))", n_vcpus - 1);
+    }
+
+    // Release the application processors and run the boot processor.
+    control.release();
+    let result = execute(
+        &cfg,
+        &vm_fd,
+        &mut bsp,
+        &mem,
+        &console,
+        bus.as_ref(),
+        true,
+        net_dev,
+        Arc::clone(&control),
+    );
+
+    // Stop the VM and force any application processor still in `KVM_RUN` to exit, then join.
+    ap_threads.stop_and_join();
+
+    match (result, control.take_fatal()) {
+        (Err(e), _) => Err(e),
+        (Ok(()), Some(msg)) => Err(anyhow!("vcpu fatal: {msg}")),
+        (Ok(()), None) => Ok(()),
+    }
 }
 
 /// Rebuilds the virt-net NIC from serialized snapshot state, or returns `None` if the snapshot
@@ -804,12 +1005,16 @@ fn execute(
     // rings the doorbell (delivered via the TX ioeventfd). Both are joined on shutdown, before
     // guest memory is released.
     let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let net_rx: Option<JoinHandle<()>> = net
-        .as_ref()
-        .map(|nd| net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop)));
-    let net_tx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
+    let mut net_rx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
+        net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop))
+    });
+    let mut net_tx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
         net::spawn_tx_thread(Arc::clone(&nd.dev), Arc::clone(&nd.tx_evt), Arc::clone(&net_stop))
     });
+
+    // Whether the guest's snapshot control-port write should be honored (only when a snapshot
+    // destination was given). A stray request without `--snapshot` is warned about and ignored.
+    let snapshot_enabled: bool = cfg.snapshot.is_some();
 
     console.lock().expect("console poisoned").mark_start();
 
@@ -825,6 +1030,20 @@ fn execute(
         // the boot marker has appeared (possibly emitted from an AP while this thread is between
         // KVM_RUN calls, so check here too, not only after an exit).
         if control.should_stop() {
+            break;
+        }
+        // A snapshot has been requested (by this vCPU or an application processor): the boot
+        // processor coordinates a consistent VM-wide cut, then the VM stops.
+        if control.snapshot_pending() {
+            match coordinate_snapshot(
+                cfg, vm_fd, vcpu, mem, bus, console, net.as_ref(), &control, &net_stop,
+                &mut net_rx, &mut net_tx,
+            ) {
+                Ok(()) => info!("snapshot written to {:?}", cfg.snapshot),
+                Err(e) => run_err = Some(e),
+            }
+            control.request_stop();
+            control.kick_others(self_tid);
             break;
         }
         if cfg.exit_on_boot && console.lock().expect("console poisoned").booted() {
@@ -849,10 +1068,17 @@ fn execute(
                     break;
                 }
                 PioAction::Snapshot => {
-                    if take_snapshot(cfg, vm_fd, vcpu, mem, bus, console, net.as_ref())? {
-                        control.request_stop();
+                    if snapshot_enabled {
+                        // Announce the request and force the application processors out of
+                        // KVM_RUN (a HLTed AP in tickless idle would otherwise never observe the
+                        // flag). The coordination runs at the loop top so both boot-processor- and
+                        // AP-initiated snapshots follow one path.
+                        control.request_snapshot();
                         control.kick_others(self_tid);
-                        break;
+                    } else {
+                        warn!(
+                            "guest requested a snapshot but --snapshot was not given; ignoring"
+                        );
                     }
                 }
             },
@@ -946,8 +1172,18 @@ fn execute(
     Ok(())
 }
 
-/// Takes a snapshot when the guest requests one. Returns `true` if the VM should stop.
-fn take_snapshot(
+/// Coordinates a consistent, VM-wide snapshot from the boot processor.
+///
+/// By the time this runs the boot processor is already out of `KVM_RUN`. It waits for every
+/// application processor to quiesce (each parks in [`ap_snapshot`] once it observes the request),
+/// then stops and joins the device threads so nothing can inject an interrupt or DMA into guest
+/// RAM, and only *then* reads any state: the boot processor captures its own registers, releases
+/// the APs to capture theirs, collects all per-vCPU states in index order, and writes the
+/// snapshot (guest RAM, the paravirtual clock, the interrupt controller/PIT, and the console/NIC
+/// device state). The waits are bounded and abort if any vCPU stops, so a failed processor can
+/// never wedge the writer.
+#[allow(clippy::too_many_arguments)]
+fn coordinate_snapshot(
     cfg: &Config,
     vm_fd: &::kvm_ioctls::VmFd,
     vcpu: &Vcpu,
@@ -955,32 +1191,94 @@ fn take_snapshot(
     bus: &DeviceBus,
     console: &Arc<Mutex<Console>>,
     net: Option<&NetDevice>,
-) -> Result<bool> {
-    let Some(dir) = &cfg.snapshot else {
-        warn!("guest requested a snapshot but --snapshot was not given; ignoring");
-        return Ok(false);
-    };
+    control: &VmControl,
+    net_stop: &Arc<AtomicBool>,
+    net_rx: &mut Option<JoinHandle<()>>,
+    net_tx: &mut Option<JoinHandle<()>>,
+) -> Result<()> {
+    let n_aps: usize = cfg.vcpus.saturating_sub(1);
+
+    // 1. Wait until every application processor has quiesced out of KVM_RUN. No vCPU is running
+    //    the guest past this point, so none can inject an IPI into a peer's LAPIC.
+    wait_bounded(|| control.ap_paused.load(Ordering::SeqCst) >= n_aps, control, "vCPUs to quiesce")?;
+
+    // 2. Pause the devices: stop and join the receive/transmit threads so neither can raise an
+    //    interrupt or touch guest RAM while the interrupt controller and memory are captured.
+    net_stop.store(true, Ordering::SeqCst);
+    if let Some(handle) = net_rx.take() {
+        let _ = handle.join();
+    }
+    if let Some(handle) = net_tx.take() {
+        let _ = handle.join();
+    }
+
+    // 3. Capture the boot processor's own state (index 0).
+    let bsp: snapshot::VcpuState =
+        snapshot::VcpuState::capture(&vcpu.fd, 0).context("capturing boot-processor state")?;
+    control.store_saved(0, bsp);
+
+    // 4. The cut is now fixed; release the application processors to capture their own state.
+    control.capture_now.store(true, Ordering::SeqCst);
+    wait_bounded(
+        || control.ap_captured.load(Ordering::SeqCst) >= n_aps,
+        control,
+        "vCPUs to capture state",
+    )?;
+
+    // 5. Collect every processor's state in index order and write the snapshot.
+    let states: Vec<snapshot::VcpuState> = control.take_saved()?;
+    write_snapshot(cfg, vm_fd, mem, bus, console, net, &states)
+}
+
+/// Polls `done` until it is true, aborting if any vCPU requests a stop (a failed peer) or a
+/// generous deadline elapses, so the snapshot coordinator can never block forever.
+fn wait_bounded(
+    mut done: impl FnMut() -> bool,
+    control: &VmControl,
+    what: &str,
+) -> Result<()> {
+    let deadline: Instant = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        if control.should_stop() {
+            bail!("snapshot aborted while waiting for {what} (a vCPU stopped)");
+        }
+        if Instant::now() >= deadline {
+            bail!("snapshot timed out waiting for {what}");
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    Ok(())
+}
+
+/// Serializes the device state and writes the snapshot to `--snapshot`. Called only after every
+/// vCPU is quiesced and the device threads are stopped, so the capture is consistent.
+fn write_snapshot(
+    cfg: &Config,
+    vm_fd: &::kvm_ioctls::VmFd,
+    mem: &GuestMemory,
+    bus: &DeviceBus,
+    console: &Arc<Mutex<Console>>,
+    net: Option<&NetDevice>,
+    states: &[snapshot::VcpuState],
+) -> Result<()> {
+    let dir = cfg.snapshot.as_ref().context("--snapshot destination missing")?;
     console.lock().expect("console poisoned").flush();
     let con_state: Vec<u8> = bus.console().lock().expect("console poisoned").snapshot();
 
-    // With a NIC attached, hold its lock across the whole capture so the receive thread cannot
-    // mutate guest RAM or the virtqueues while we dump them, and serialize its transport state
-    // (endpoint header + device indices) alongside the rest.
     match (net, &cfg.net) {
         (Some(nd), Some(ncfg)) => {
             let dev = nd.dev.lock().expect("virt-net poisoned");
             let mut net_state: Vec<u8> = ncfg.save_header();
             net_state.extend(dev.save());
-            snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state, &net_state)
+            snapshot::write(dir, states, vm_fd, mem, &con_state, &net_state)
                 .with_context(|| format!("writing snapshot to {dir:?}"))?;
         }
         _ => {
-            snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state, &[])
+            snapshot::write(dir, states, vm_fd, mem, &con_state, &[])
                 .with_context(|| format!("writing snapshot to {dir:?}"))?;
         }
     }
-    info!("snapshot written to {dir:?}");
-    Ok(true)
+    Ok(())
 }
 
 thread_local! {
