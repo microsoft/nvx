@@ -64,6 +64,12 @@ const MAGIC: &[u8; 8] = b"MVMSNAP2";
 /// value across all processors so their timestamp counters stay synchronized.
 const IA32_TSC: u32 = 0x0000_0010;
 
+/// IA32_TSC_DEADLINE MSR index. It is an *absolute* TSC value at which the local-APIC timer
+/// fires, so it must be restored only after each vCPU's TSC has been synchronized — otherwise KVM
+/// would arm the deadline against the fresh (near-zero) TSC and delay the first timer by roughly
+/// the guest's pre-snapshot uptime.
+const IA32_TSC_DEADLINE: u32 = 0x0000_06e0;
+
 /// Size in bytes of the fixed `KVM_GET_XSAVE` region (`kvm_xsave.region`, `[u32; 1024]`).
 const XSAVE_REGION_BYTES: usize = 4096;
 
@@ -300,9 +306,15 @@ impl VcpuState {
         self.msrs.iter().find(|(i, _)| *i == IA32_TSC).map(|(_, d)| *d)
     }
 
+    /// Returns the vCPU's captured `IA32_TSC_DEADLINE` value, if present.
+    fn tsc_deadline(&self) -> Option<u64> {
+        self.msrs.iter().find(|(i, _)| *i == IA32_TSC_DEADLINE).map(|(_, d)| *d)
+    }
+
     /// Applies this state to `vcpu`. CPUID must already have been programmed (via `Vcpu::new`).
-    /// `IA32_TSC` is intentionally **not** written here — it is synchronized across all vCPUs by
-    /// [`Snapshot::sync_tsc`] after every processor has been restored.
+    /// `IA32_TSC` and `IA32_TSC_DEADLINE` are intentionally **not** written here: the former is
+    /// synchronized across all vCPUs by [`Snapshot::sync_tsc`] and the latter is armed by
+    /// [`Snapshot::arm_tsc_deadlines`], both only after every processor has been restored.
     fn apply(&self, vcpu: &VcpuFd) -> Result<()> {
         // Register files first.
         vcpu.set_sregs(&self.sregs).context("KVM_SET_SREGS")?;
@@ -334,14 +346,17 @@ impl VcpuState {
         vcpu.set_lapic(&self.lapic).context("KVM_SET_LAPIC")?;
         vcpu.set_mp_state(self.mp_state).context("KVM_SET_MP_STATE")?;
 
-        // TSC frequency before the MSRs that depend on the timebase.
+        // TSC frequency before the MSRs that depend on the timebase. A failure here is surfaced
+        // (a wrong TSC frequency silently corrupts guest timekeeping) rather than discarded.
         if self.tsc_khz != 0 {
-            let _ = vcpu.set_tsc_khz(self.tsc_khz);
+            vcpu.set_tsc_khz(self.tsc_khz).context("KVM_SET_TSC_KHZ")?;
         }
 
-        // Model-specific registers. Skip IA32_TSC (synced separately across all vCPUs).
+        // Model-specific registers. Skip the two timebase MSRs handled separately across all
+        // vCPUs: IA32_TSC (synchronized by `Snapshot::sync_tsc`) and IA32_TSC_DEADLINE (an
+        // absolute TSC value armed by `Snapshot::arm_tsc_deadlines` only after the TSC is set).
         for &(index, data) in &self.msrs {
-            if index == IA32_TSC {
+            if index == IA32_TSC || index == IA32_TSC_DEADLINE {
                 continue;
             }
             let msrs: Msrs = Msrs::from_entries(&[kvm_msr_entry {
@@ -350,7 +365,8 @@ impl VcpuState {
                 ..Default::default()
             }])
             .context("building Msrs")?;
-            // Best effort: an MSR the host will not accept must not abort the restore.
+            // Best effort: an incidental MSR the host will not accept must not abort the restore
+            // (the timebase-critical MSRs above are checked explicitly).
             let _ = vcpu.set_msrs(&msrs);
         }
 
@@ -532,19 +548,47 @@ impl Snapshot {
     /// processor's captured `IA32_TSC` to every processor. Because the writes happen back to back
     /// from a single thread, KVM aligns their TSC offsets, so a task migrating between processors
     /// never observes time moving backwards (matching cloud-hypervisor's TSC synchronization).
-    /// `vcpus` must be ordered to match the snapshot's processor indices.
+    /// `vcpus` must be ordered to match the snapshot's processor indices. A failed or short write
+    /// is surfaced rather than leaving the CPUs unsynchronized.
     pub fn sync_tsc(&self, vcpus: &[&VcpuFd]) -> Result<()> {
         let Some(reference) = self.vcpus.first().and_then(VcpuState::tsc) else {
             return Ok(());
         };
-        for vcpu in vcpus {
+        for (idx, vcpu) in vcpus.iter().enumerate() {
             let msrs: Msrs = Msrs::from_entries(&[kvm_msr_entry {
                 index: IA32_TSC,
                 data: reference,
                 ..Default::default()
             }])
             .context("building IA32_TSC Msrs")?;
-            let _ = vcpu.set_msrs(&msrs);
+            let written = vcpu.set_msrs(&msrs).context("KVM_SET_MSRS(IA32_TSC)")?;
+            if written != 1 {
+                bail!("failed to synchronize IA32_TSC on vCPU {idx} (wrote {written}/1)");
+            }
+        }
+        Ok(())
+    }
+
+    /// Arms each restored vCPU's local-APIC TSC-deadline timer by writing its captured
+    /// `IA32_TSC_DEADLINE`. Must be called **after** [`Snapshot::sync_tsc`] so the absolute
+    /// deadline is compared against the correct (restored) TSC rather than a near-zero one, which
+    /// would otherwise delay the first timer by roughly the guest's pre-snapshot uptime. `vcpus`
+    /// must be ordered to match the snapshot's processor indices; a failed write is surfaced.
+    pub fn arm_tsc_deadlines(&self, vcpus: &[&VcpuFd]) -> Result<()> {
+        for (idx, vcpu) in vcpus.iter().enumerate() {
+            let Some(deadline) = self.vcpus.get(idx).and_then(VcpuState::tsc_deadline) else {
+                continue;
+            };
+            let msrs: Msrs = Msrs::from_entries(&[kvm_msr_entry {
+                index: IA32_TSC_DEADLINE,
+                data: deadline,
+                ..Default::default()
+            }])
+            .context("building IA32_TSC_DEADLINE Msrs")?;
+            let written = vcpu.set_msrs(&msrs).context("KVM_SET_MSRS(IA32_TSC_DEADLINE)")?;
+            if written != 1 {
+                bail!("failed to arm IA32_TSC_DEADLINE on vCPU {idx} (wrote {written}/1)");
+            }
         }
         Ok(())
     }

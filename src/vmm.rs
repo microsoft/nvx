@@ -816,7 +816,7 @@ fn ap_snapshot(ap: &mut Vcpu, idx: u64, control: &VmControl) -> Result<()> {
         }
         thread::sleep(Duration::from_micros(200));
     }
-    ap.drain_pending_io();
+    ap.drain_pending_io().with_context(|| format!("draining AP{idx} I/O for snapshot"))?;
     let state: snapshot::VcpuState = snapshot::VcpuState::capture(&ap.fd, idx)
         .with_context(|| format!("capturing AP{idx} state"))?;
     control.store_saved(idx as usize, state);
@@ -865,9 +865,12 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
         snap.apply_vcpu(&v.fd, id).with_context(|| format!("restoring vcpu {id}"))?;
     }
     // Synchronize the timestamp counter across all processors (write one reference TSC to each)
-    // so a task migrating between them never sees time move backwards.
+    // so a task migrating between them never sees time move backwards, then arm each processor's
+    // TSC-deadline timer against the now-correct TSC (doing it earlier would schedule the deadline
+    // against a near-zero TSC and delay the first timer by the guest's pre-snapshot uptime).
     let fds: Vec<&::kvm_ioctls::VcpuFd> = vcpus.iter().map(|v| &v.fd).collect();
     snap.sync_tsc(&fds)?;
+    snap.arm_tsc_deadlines(&fds)?;
     drop(fds);
 
     // Rebuild the virt-net NIC from the snapshot: recreate the (identically addressed) host TAP,
@@ -1240,7 +1243,7 @@ fn coordinate_snapshot(
 
     // 3. Complete the boot processor's pending I/O (the OUT that triggered the snapshot) so its
     //    register state is past that instruction, then capture it (index 0).
-    vcpu.drain_pending_io();
+    vcpu.drain_pending_io().context("draining boot-processor I/O for snapshot")?;
     let bsp: snapshot::VcpuState =
         snapshot::VcpuState::capture(&vcpu.fd, 0).context("capturing boot-processor state")?;
     control.store_saved(0, bsp);

@@ -118,13 +118,22 @@ impl Vcpu {
     /// triggers a snapshot, or an in-flight console `IN`), KVM has not yet finished the
     /// instruction: it expects another `KVM_RUN` in which `complete_userspace_io` advances past
     /// the faulting instruction and delivers any read result. Re-entering once with
-    /// `immediate_exit` set runs exactly that completion and then returns without executing
-    /// further guest code, so the register state is self-consistent and migration-visible before
-    /// capture. Mirrors cloud-hypervisor's pause step; a no-op when nothing is pending.
-    pub fn drain_pending_io(&mut self) {
+    /// `immediate_exit` set runs exactly that completion and then returns `EINTR` without
+    /// executing further guest code, so the register state is self-consistent and
+    /// migration-visible before capture. Mirrors cloud-hypervisor's pause step.
+    ///
+    /// `EINTR`/`EAGAIN` are the expected results (the completion ran, then the immediate exit or
+    /// an AP state transition fired); any other error or an unexpected guest exit is surfaced so a
+    /// snapshot is never taken over an inconsistent vCPU.
+    pub fn drain_pending_io(&mut self) -> Result<()> {
         self.fd.set_kvm_immediate_exit(1);
-        let _ = self.fd.run();
+        let outcome: Result<()> = match self.fd.run() {
+            Err(e) if e.errno() == ::libc::EINTR || e.errno() == ::libc::EAGAIN => Ok(()),
+            Err(e) => Err(anyhow!("draining pending vCPU I/O failed: {e}")),
+            Ok(exit) => Err(anyhow!("unexpected vCPU exit while draining pending I/O: {exit:?}")),
+        };
         self.fd.set_kvm_immediate_exit(0);
+        outcome
     }
 
     pub fn setup_pvh(&self, mem: &GuestMemory, entry: u64, start_info_gpa: u64) -> Result<()> {
