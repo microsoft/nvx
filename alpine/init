@@ -42,18 +42,24 @@ if [ -n "$nip" ]; then
     fi
 fi
 # netsnap: optional snapshot self-test/benchmark for --net (see scripts/bench-net-snapshot.sh).
-# When the kernel command line contains "netsnap", prove the link works, then ask the VMM to take
-# a snapshot (one outb to I/O port 0x605 via /dev/port). On the snapshot run the VMM captures here
-# and exits; on a later restore, execution resumes at the next line -- so the guest re-tests the
-# link (now over the freshly recreated host TAP) and prints a marker the benchmark greps for.
+# When the kernel command line contains "netsnap", check the link, then ask the VMM to take a
+# snapshot (one outb to I/O port 0x605 via /dev/port). On the snapshot run the VMM captures here
+# and exits; on a later restore, execution resumes at the next line -- so the guest re-checks the
+# link (now over the freshly rebuilt backend) and prints a marker the benchmark greps for.
+#
+# The check is a single sysfs read of the NIC's carrier, deliberately lighter than fork/exec-ing
+# `ping`: the benchmark only needs to confirm the link resumed, and the ~60 ms of ping process
+# startup would otherwise dominate the restore-to-marker time (round-trips over the link are
+# sub-millisecond). The `link_up` function is defined before the snapshot point, so it is part of
+# the captured shell state and is still available when execution resumes on restore.
 case " $(cat /proc/cmdline) " in
     *" netsnap "*)
-        gw="${ngw:-10.0.0.1}"
-        ping -c1 -W2 "$gw" >/dev/null 2>&1 \
-            && echo "netsnap: pre-snapshot ping OK" || echo "netsnap: pre-snapshot ping FAIL"
+        linkdev="${ndev:-eth0}"
+        link_up() { read -r c 2>/dev/null < "/sys/class/net/$linkdev/carrier" && [ "$c" = 1 ]; }
+        link_up && echo "netsnap: pre-snapshot link OK" || echo "netsnap: pre-snapshot link FAIL"
         printf '\001' | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null
         # ---- on restore, execution resumes here ----
-        if ping -c1 -W2 "$gw" >/dev/null 2>&1; then
+        if link_up; then
             echo "NETSNAP-RESTORE-OK"
         else
             echo "NETSNAP-RESTORE-FAIL"

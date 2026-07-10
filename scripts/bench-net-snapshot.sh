@@ -6,9 +6,11 @@
 #      captured and the host TAP is recreated identically, so the link resumes immediately).
 #
 # The snapshot is captured once: a one-off cold boot where alpine/init (with the `netsnap` token)
-# configures the link, pings the host, and asks the VMM for a snapshot (outb to port 0x605). On
-# restore, execution resumes right after that point, the guest re-pings the host over the freshly
-# recreated TAP, and prints NETSNAP-RESTORE-OK -- the marker this script times to.
+# configures the link, checks it, and asks the VMM for a snapshot (outb to port 0x605). On
+# restore, execution resumes right after that point, the guest re-checks the link (now over the
+# freshly recreated TAP) and prints NETSNAP-RESTORE-OK -- the marker this script times to. The
+# link check is a single sysfs carrier read rather than a ping, so the marker reflects link resume
+# time, not ping process-startup overhead.
 #
 # Networking needs privileges for the host TAP: run as root or allow passwordless `sudo ip`.
 #
@@ -59,7 +61,7 @@ timeout 40 "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET
 [ -f "$SNAP/state.bin" ] || { echo "  snapshot capture failed"; exit 1; }
 echo "  snapshot: $SNAP ($(du -sh "$SNAP" | cut -f1); mem.bin $(du -h "$SNAP/mem.bin" | cut -f1))"
 
-echo "== restore -> working-network shell (resume + host TAP recreate + verify ping) =="
+echo "== restore -> working-network shell (resume + host TAP recreate + verify link) =="
 { for _ in $(seq 1 "$N"); do
     timeout 30 "$BIN" --restore "$SNAP" --mem "$MEM" \
         --exit-on-boot --quiet --boot-marker "$RESTORE_MARKER" < /dev/null 2>&1 \
