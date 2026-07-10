@@ -7,8 +7,9 @@
 //!
 //! # Virtual Processor
 //!
-//! Creation and configuration of guest vCPUs, including the register state
-//! required to enter a Linux kernel through the 32-bit PVH entry point.
+//! Creation and configuration of a guest vCPU, including the register state required to enter a
+//! Linux kernel through the 32-bit PVH entry point and the per-vCPU APIC id / topology fix-ups
+//! that let the guest enumerate more than one processor.
 //!
 
 use ::anyhow::{Context, Result, anyhow};

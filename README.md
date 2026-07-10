@@ -1,16 +1,16 @@
 # microvm
 
-A minimal **x86_64 micro-VM** that boots a Linux (Alpine) kernel through
-the **PVH boot protocol**, entirely from a **RAM initramfs** — no PCI, no ACPI, and no block
-device by default. The only always-on emulated device is a bidirectional "portb" console (backing
-the kernel's `hvc0`).
+A minimal **x86_64 micro-VM** (single processor by default, optional functional **SMP** on the KVM
+backend via `--num-cores`) that boots a Linux (Alpine) kernel through the **PVH boot protocol**,
+entirely from a **RAM initramfs** — no PCI, no ACPI, and no block device by default. The only
+always-on emulated device is a bidirectional "portb" console (backing the kernel's `hvc0`).
 
 It runs on **two hypervisor backends** from the same codebase:
 
-- **Linux / KVM** — the original backend. `--vcpus N` provides functional SMP (up to 254 vCPUs).
-  Additionally, `--mount` can expose a host directory as a virt-fs (read-only, or read-write with
-  `--mount-rw`), `--net` attaches a virtio-net NIC bridged to a host TAP for real IPv4 networking,
-  and `--snapshot`/`--restore` capture and resume single-vCPU VMs.
+- **Linux / KVM** — the original backend. Additionally, `--mount` can expose a host directory as a
+  virt-fs (read-only, or read-write with `--mount-rw`), `--net` attaches a virtio-net NIC bridged
+  to a host TAP for real IPv4 networking, `--snapshot`/`--restore` capture and resume the whole
+  VM, and `--num-cores N` runs the guest as functional **SMP** across N vCPUs.
 - **Windows / WHP** — a backend on the **[Windows Hypervisor Platform](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform)**
   that PVH-boots the *same* kernel + initramfs with the same portb console, and also supports
   `--snapshot`/`--restore` (capture and resume the whole VM) and `--net` (a virtio-net NIC backed
@@ -57,9 +57,11 @@ uid=0(root) gid=0(root)
 
 ## Design
 
-- **Functional KVM SMP.** The boot processor runs on the main `KVM_RUN` loop; with `--vcpus N`,
-  each of the other N-1 processors runs on its own host thread and is started by Linux through the
-  normal INIT-SIPI-SIPI path. WHP remains single-vCPU.
+- **Single core by default, optional KVM SMP.** One vCPU is driven by the main `KVM_RUN` loop. On
+  KVM, `--num-cores N` brings up N-1 additional *application processors* — each a vCPU on its own
+  host thread — that the guest starts through the normal INIT–SIPI–SIPI path (serviced by the
+  in-kernel LAPIC) after finding a VMM-written **Intel MP table**. No PCI or ACPI is involved, and
+  no kernel reconfiguration is needed (the config already enables `SMP`/`X86_MPPARSE`).
 - **PVH boot** (`XEN_ELFNOTE_PHYS32_ENTRY` + `hvm_start_info`). The VMM loads an uncompressed
   `vmlinux`, locates the PVH 32-bit entry note, and enters the guest in 32-bit protected mode
   with `%ebx` pointing at the boot info. The kernel itself switches to long mode. This avoids
@@ -146,6 +148,7 @@ Probing absent hardware is at best wasted boot time and at worst a multi-second 
 | `CONFIG_NET=y`, `CONFIG_INET=y`, `CONFIG_VIRTIO_MMIO=y` (+ `_CMDLINE_DEVICES`), `CONFIG_VIRTIO_NET=y`          | The minimal networking needed for `--net`: IPv4 over one virtio-net NIC on a virtio-mmio window declared via `virtio_mmio.device=` on the kernel command line. IPv6, wireless, NFS and the rest of the stack stay off. Boots without `--net` pay only a few ms for the dormant stack.                                                                                                               |
 | `# CONFIG_MODULES`                                                                                             | Everything required is built in; a single static `vmlinux` needs no module loader.                                                                                                                                                                                                                                                                                                                  |
 | `CONFIG_HZ_100=y`, `CONFIG_NO_HZ_IDLE=y`                                                                       | A low 100 Hz tick with tickless idle: fewer timer interrupts, faster boot.                                                                                                                                                                                                                                                                                                                          |
+| `CONFIG_SMP=y`, `CONFIG_X86_MPPARSE=y`, `CONFIG_X86_X2APIC=y`, `CONFIG_NR_CPUS=64`                             | Let the guest enumerate and start more than one vCPU from the VMM's Intel MP table (`--num-cores`). The stock config already includes these options, so multi-core needs no kernel change.                                                                                                                                                                                                          |
 | `# CONFIG_SUSPEND`, `# CONFIG_HIBERNATION`, `# CONFIG_X86_MCE`, `# CONFIG_NUMA`                                | Power management, machine-check, and NUMA are meaningless for this single-package, device-less VM.                                                                                                                                                                                                                                                                                                  |
 | `# CONFIG_FTRACE`, `# CONFIG_KPROBES`, `# CONFIG_PROFILING`, `# CONFIG_DEBUG_KERNEL`                           | Tracing / debug / profiling infrastructure is compiled out to shrink the image and speed boot.                                                                                                                                                                                                                                                                                                      |
 | no `PM_TRACE_RTC` (gated off by no suspend)                                                                    | **The load-bearing one.** With suspend/hibernate off there is no `PM_SLEEP`, so the `PM_TRACE` debug feature and its `PM_TRACE_RTC` are never built — which matters: `PM_TRACE_RTC`'s `early_resume_init` initcall reads the RTC via `mc146818_get_time()`, and with no RTC (ports `0x70`/`0x71` float) that read spins to a ~1 s timeout **twice**, most of the old ~1.6 s cold-start (see below). |
@@ -230,7 +233,7 @@ Run directly:
 | `--initrd <path>`       | (none)                                        | RAM initramfs image                                                                              |
 | `--cmdline <str>`       | `earlycon=xe9 console=hvc0 reboot=t panic=-1` | Kernel command line                                                                              |
 | `--mem <MiB>`           | `512`                                         | Guest RAM                                                                                        |
-| `--vcpus <N>`           | `1`                                           | KVM cold-boot vCPUs (1-254); SMP snapshot/restore is not supported                               |
+| `--num-cores <N>`       | `1`                                           | KVM processor cores/vCPUs (1-254); snapshots capture and restore the full SMP state              |
 | `--quiet`               |                                               | Fully silent: discard guest console **and** suppress all VMM logging                             |
 | `--log-level <lvl>`     | `info` (`off` if `--quiet`)                   | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
 | `--exit-on-boot`        |                                               | Stop and report cold-start/restore time when the boot marker appears                             |
@@ -312,11 +315,12 @@ scripts\run.ps1                                  # boots build\vmlinux + build\i
 
 `--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level`, `--selftest`,
 `--snapshot`/`--restore`, `--net` and the virt-fs flags (`--mount`, `--mount-rw`, `--mount-image`,
-`--mount-size`, `--mount-target`) all work as on Linux. Multi-vCPU `--vcpus` values and the
-TAP-attach option (`--net-tap`) are KVM-only and are rejected with a clear message on Windows. The
-one implementation difference is the virt-fs image format: Windows has no
-`mksquashfs`/`mke2fs`, so the WHP backend builds a **FAT** image in pure Rust (the guest mounts it
-as `vfat`) where KVM uses SquashFS/ext4 — see [Virt-fs](#virt-fs-mount) below.
+`--mount-size`, `--mount-target`) all work as on Linux. The TAP-attach option (`--net-tap`, which is
+Linux-specific) and multi-core (`--num-cores` greater than 1) are KVM-only and are rejected with a
+clear message on Windows. The one
+implementation difference is the virt-fs image format: Windows has no `mksquashfs`/`mke2fs`, so the
+WHP backend builds a **FAT** image in pure Rust (the guest mounts it as `vfat`) where KVM uses
+SquashFS/ext4 — see [Virt-fs](#virt-fs-mount) below.
 
 ### Networking (`--net`, user-mode NAT)
 

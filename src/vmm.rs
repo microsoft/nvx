@@ -7,10 +7,10 @@
 //!
 //! # Virtual Machine Monitor
 //!
-//! Ties together guest memory, the interrupt controller, the vCPU, and the device bus, and
-//! drives the boot processor and application-processor execution loops. Bytes typed on the host
-//! console are delivered to
-//! the guest console device by a dedicated input thread that wakes the vCPU with `SIGUSR1`.
+//! Ties together guest memory, the interrupt controller, the vCPU(s), and the device bus, and
+//! drives the boot-processor execution loop (plus, for `--num-cores > 1`, one thread per
+//! application processor). Bytes typed on the host console are delivered to the guest console
+//! device by a dedicated input thread that wakes the boot vCPU with `SIGUSR1`.
 //!
 
 use ::std::fs;
@@ -128,10 +128,10 @@ pub struct Config {
     pub net: Option<net::NetConfig>,
     /// Optional pre-existing host TAP to attach to instead of creating one (`--net-tap`).
     pub net_tap: Option<String>,
-    /// Number of vCPUs to create (`--vcpus`). 1 keeps the single-processor path. With N > 1 the
-    /// VMM writes an Intel MP table and brings up N-1 application processors so the guest runs
-    /// functional SMP.
-    pub vcpus: usize,
+    /// Number of processor cores / vCPUs to create (`--num-cores`). 1 keeps the single-processor
+    /// path. With N > 1 the VMM writes an Intel MP table and brings up N-1 application processors
+    /// so the guest runs functional SMP.
+    pub num_cores: usize,
 }
 
 /// A running virt-net NIC: the shared device model plus the TAP descriptor the receive thread
@@ -186,7 +186,7 @@ struct VmControl {
     /// Per-vCPU captured state (indexed by vCPU id), filled during a snapshot.
     saved: Mutex<Vec<Option<snapshot::VcpuState>>>,
     /// The number of vCPUs in this VM (the boot processor plus the application processors). Used
-    /// by the snapshot coordinator instead of the CLI `--vcpus`, which is not meaningful on the
+    /// by the snapshot coordinator instead of the CLI `--num-cores`, which is not meaningful on the
     /// restore path (the processor count comes from the snapshot there).
     vcpu_count: usize,
 }
@@ -477,7 +477,7 @@ fn run_cold(cfg: Config) -> Result<()> {
     let mem: GuestMemory = GuestMemory::new(&vm_fd, cfg.mem_bytes)?;
     let ram_size: u64 = mem.ram_size();
     irq::setup(&vm_fd)?;
-    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, cfg.vcpus)?;
+    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, cfg.num_cores)?;
 
     // Load the kernel, the initramfs, and the PVH boot structures.
     let loaded = pvh::load_kernel(&mem, &kernel)?;
@@ -577,21 +577,21 @@ fn run_cold(cfg: Config) -> Result<()> {
         cmdline
     );
 
-    // Functional multi-vCPU SMP (see `--vcpus`). Emit an Intel MP table so the guest kernel
+    // Functional multi-core SMP (see `--num-cores`). Emit an Intel MP table so the guest kernel
     // enumerates every vCPU, then create the application processors (APs) and run each on its own
     // host thread. Each AP is left in KVM's default `KVM_MP_STATE_UNINITIALIZED` state: its
     // `KVM_RUN` blocks until the boot processor's guest kernel issues INIT-SIPI-SIPI, which the
     // in-kernel KVM LAPIC (created before any vCPU) services, waking the AP at the SIPI vector to
     // run the kernel's secondary-CPU trampoline. Only cold boot brings up APs; `--restore` resumes
     // a single processor.
-    if cfg.vcpus > 1 {
-        crate::boot::mptable::write(&mem, cfg.vcpus as u8)
+    if cfg.num_cores > 1 {
+        crate::boot::mptable::write(&mem, cfg.num_cores as u8)
             .context("writing Intel MP table for SMP")?;
     }
 
     // The VM supervisor, shared by the boot processor and every application processor, so any
     // vCPU that stops (guest shutdown/reset, fatal exit, panic) stops the whole VM.
-    let control: Arc<VmControl> = Arc::new(VmControl::new(cfg.vcpus));
+    let control: Arc<VmControl> = Arc::new(VmControl::new(cfg.num_cores));
     // Install the kick/console signal handlers before spawning any application-processor thread,
     // so an AP can never receive SIGRTMIN (whose default disposition would kill the process)
     // before its handler exists.
@@ -601,8 +601,8 @@ fn run_cold(cfg: Config) -> Result<()> {
     let net_shared: Option<Arc<Mutex<VirtioNet>>> = net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
 
     let mut ap_threads: ApThreads = ApThreads::new(Arc::clone(&control));
-    for id in 1..cfg.vcpus as u64 {
-        let ap: Vcpu = Vcpu::new(&kvm, &vm_fd, id, cfg.vcpus)
+    for id in 1..cfg.num_cores as u64 {
+        let ap: Vcpu = Vcpu::new(&kvm, &vm_fd, id, cfg.num_cores)
             .with_context(|| format!("creating application-processor vcpu {id}"))?;
         let tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let ap_bus: Arc<DeviceBus> = Arc::clone(&bus);
@@ -630,11 +630,11 @@ fn run_cold(cfg: Config) -> Result<()> {
             .with_context(|| format!("spawning application-processor vcpu {id}"))?;
         ap_threads.push(id, handle, tid);
     }
-    if cfg.vcpus > 1 {
+    if cfg.num_cores > 1 {
         info!(
             "SMP: created {} vCPUs ({} application processor(s) on their own threads)",
-            cfg.vcpus,
-            cfg.vcpus - 1
+            cfg.num_cores,
+            cfg.num_cores - 1
         );
     }
 
@@ -1223,7 +1223,7 @@ fn coordinate_snapshot(
     net_rx: &mut Option<JoinHandle<()>>,
     net_tx: &mut Option<JoinHandle<()>>,
 ) -> Result<()> {
-    // The processor count comes from the supervisor, not the CLI `--vcpus`: on the restore path
+    // The processor count comes from the supervisor, not the CLI `--num-cores`: on the restore path
     // the latter is not meaningful (the count was recovered from the snapshot).
     let n_aps: usize = control.vcpu_count().saturating_sub(1);
 
