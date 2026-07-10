@@ -61,7 +61,10 @@ use ::anyhow::{
     Result,
     bail,
 };
-use ::kvm_ioctls::VmFd;
+use ::kvm_ioctls::{
+    IoEventAddress,
+    VmFd,
+};
 use ::log::{
     debug,
     info,
@@ -80,6 +83,11 @@ pub const NET_MMIO_SIZE: u64 = 0x1000;
 /// Legacy IRQ line the NIC raises. With no ACPI/MPS the guest runs the in-kernel 8259 PIC, so a
 /// line in `0..=15` is delivered through it (via an `irqfd` on the matching GSI).
 pub const NET_IRQ: u32 = 10;
+
+/// Guest-physical address of the virtio-mmio `QueueNotify` register (the transmit doorbell). A
+/// KVM `ioeventfd` is registered here so the guest's TX kick is handled in the kernel without a
+/// userspace MMIO exit on the vCPU thread.
+pub const NET_QUEUE_NOTIFY_ADDR: u64 = NET_MMIO_BASE + REG_QUEUE_NOTIFY;
 
 // virtio-mmio register offsets (VIRTIO 1.x, MMIO transport, version 2).
 const REG_MAGIC: u64 = 0x000;
@@ -684,7 +692,13 @@ impl VirtioNet {
         self.status = 0;
     }
 
-    /// Drains the transmit queue, writing each guest frame to the TAP.
+    /// Drains the transmit queue in response to a `QueueNotify` doorbell. Called either from the
+    /// dedicated TX worker thread (when the doorbell is delivered via the `ioeventfd`) or, as a
+    /// fallback, from the MMIO write path.
+    pub fn on_tx_notify(&mut self) {
+        self.process_tx();
+    }
+
     fn process_tx(&mut self) {
         let mem: GuestRam = self.mem.clone();
         if !self.queues[TX_QUEUE].ready {
@@ -919,6 +933,52 @@ pub fn register_irq(vm_fd: &VmFd) -> Result<Arc<EventFd>> {
         .register_irqfd(&evt, NET_IRQ)
         .context("registering virt-net irqfd")?;
     Ok(Arc::new(evt))
+}
+
+/// Registers a KVM `ioeventfd` on the virtio-mmio `QueueNotify` register so that the guest's
+/// transmit doorbell (a 4-byte write of the TX queue index) is handled in the kernel and signals
+/// the returned eventfd, instead of exiting to userspace on the vCPU thread. Writes of other
+/// values (e.g. the receive queue index) still fault out and are handled by the MMIO path.
+pub fn register_tx_ioeventfd(vm_fd: &VmFd) -> Result<Arc<EventFd>> {
+    let evt: EventFd =
+        EventFd::new(::libc::EFD_NONBLOCK).context("creating virt-net TX ioeventfd")?;
+    vm_fd
+        .register_ioevent(
+            &evt,
+            &IoEventAddress::Mmio(NET_QUEUE_NOTIFY_ADDR),
+            TX_QUEUE as u32,
+        )
+        .context("registering virt-net TX ioeventfd")?;
+    Ok(Arc::new(evt))
+}
+
+/// Spawns the transmit worker: it waits on the TX `ioeventfd` and drains the transmit queue to the
+/// TAP off the vCPU threads, so a guest send never blocks a vCPU in a userspace MMIO exit.
+pub fn spawn_tx_thread(
+    dev: Arc<Mutex<VirtioNet>>,
+    tx_evt: Arc<EventFd>,
+    stop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    ::std::thread::spawn(move || {
+        let fd: RawFd = tx_evt.as_raw_fd();
+        while !stop.load(Ordering::Relaxed) {
+            // Wait up to 200 ms for a doorbell, re-checking `stop` between waits.
+            let mut pfd: ::libc::pollfd = ::libc::pollfd {
+                fd,
+                events: ::libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `pfd` is a single valid pollfd for the live eventfd descriptor.
+            let rc: ::libc::c_int = unsafe { ::libc::poll(&mut pfd, 1, 200) };
+            if rc <= 0 || pfd.revents & ::libc::POLLIN == 0 {
+                continue;
+            }
+            // Clear the eventfd counter, then drain the transmit queue.
+            let _ = tx_evt.read();
+            dev.lock().expect("virt-net device poisoned").on_tx_notify();
+        }
+        debug!("virt-net: TX thread stopped");
+    })
 }
 
 #[cfg(test)]

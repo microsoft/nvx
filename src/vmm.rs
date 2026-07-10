@@ -134,10 +134,14 @@ pub struct Config {
 /// reads from. The backing [`HostTap`](crate::net::HostTap) is kept alive separately by the
 /// caller for the VM's lifetime.
 struct NetDevice {
-    /// The virtio-net device, shared between the vCPU thread (MMIO/TX) and the receive thread.
+    /// The virtio-net device, shared between the vCPU threads, the receive thread, and the
+    /// transmit thread.
     dev: Arc<Mutex<VirtioNet>>,
     /// Raw TAP file descriptor, polled by the receive thread.
     tap_fd: ::std::os::fd::RawFd,
+    /// The TX doorbell `ioeventfd`: KVM signals it when the guest kicks the transmit queue, and
+    /// the transmit worker waits on it. Kept alive so the ioeventfd stays registered.
+    tx_evt: Arc<::vmm_sys_util::eventfd::EventFd>,
 }
 
 /// VM-wide supervisor shared by every vCPU thread (the boot processor and all application
@@ -468,12 +472,13 @@ fn run_cold(cfg: Config) -> Result<()> {
     // must reach the same console device the boot processor uses.
     let bus: Arc<DeviceBus> = Arc::new(bus);
 
-    // Bring up the virt-net NIC: register its irqfd, create/configure the host TAP, and build the
-    // shared device model. `_net_tap` owns the TAP interface (and tears it down on drop) and must
-    // outlive the guest and the receive thread.
+    // Bring up the virt-net NIC: register its irqfd and TX ioeventfd, create/configure the host
+    // TAP, and build the shared device model. `_net_tap` owns the TAP interface (and tears it down
+    // on drop) and must outlive the guest and the receive/transmit threads.
     let (net_dev, _net_tap): (Option<NetDevice>, Option<net::HostTap>) = match &cfg.net {
         Some(ncfg) => {
             let irq = net::register_irq(&vm_fd)?;
+            let tx_evt = net::register_tx_ioeventfd(&vm_fd)?;
             let tap = net::HostTap::for_config(ncfg, cfg.net_tap.as_deref())?;
             let dev = Arc::new(Mutex::new(VirtioNet::new(
                 mem.ram(),
@@ -482,7 +487,7 @@ fn run_cold(cfg: Config) -> Result<()> {
                 ncfg.mac,
             )));
             let tap_fd = tap.raw_fd();
-            (Some(NetDevice { dev, tap_fd }), Some(tap))
+            (Some(NetDevice { dev, tap_fd, tx_evt }), Some(tap))
         }
         None => (None, None),
     };
@@ -742,6 +747,7 @@ fn restore_net(
     }
     let (ncfg, consumed) = net::NetConfig::from_header(net_state)?;
     let irq = net::register_irq(vm_fd)?;
+    let tx_evt = net::register_tx_ioeventfd(vm_fd)?;
     let tap = net::HostTap::for_config(&ncfg, net_tap)?;
     let tap_fd = tap.raw_fd();
     let mut dev = VirtioNet::new(mem.ram(), tap_fd, irq, ncfg.mac);
@@ -752,7 +758,7 @@ fn restore_net(
         ncfg.guest_ip, ncfg.prefix
     );
     let dev = Arc::new(Mutex::new(dev));
-    Ok(Some((NetDevice { dev, tap_fd }, tap)))
+    Ok(Some((NetDevice { dev, tap_fd, tx_evt }, tap)))
 }
 
 /// Builds the shared console sink, the portb console device, and the device bus. When
@@ -793,12 +799,17 @@ fn execute(
     vcpu_tid.store(self_tid, Ordering::SeqCst);
     control.register(self_tid);
 
-    // Start the virt-net receive thread, if a NIC is attached. It feeds host frames into the
-    // guest and is joined on shutdown (before guest memory is released).
+    // Start the virt-net receive and transmit threads, if a NIC is attached. The receive thread
+    // feeds host frames into the guest; the transmit thread drains the TX queue when the guest
+    // rings the doorbell (delivered via the TX ioeventfd). Both are joined on shutdown, before
+    // guest memory is released.
     let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let net_rx: Option<JoinHandle<()>> = net
         .as_ref()
         .map(|nd| net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop)));
+    let net_tx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
+        net::spawn_tx_thread(Arc::clone(&nd.dev), Arc::clone(&nd.tx_evt), Arc::clone(&net_stop))
+    });
 
     console.lock().expect("console poisoned").mark_start();
 
@@ -903,9 +914,13 @@ fn execute(
         }
     }
 
-    // Stop and join the receive thread before guest memory (which it DMAs into) is dropped.
+    // Stop and join the receive and transmit threads before guest memory (which they DMA into or
+    // out of) is dropped.
     net_stop.store(true, Ordering::SeqCst);
     if let Some(handle) = net_rx {
+        let _ = handle.join();
+    }
+    if let Some(handle) = net_tx {
         let _ = handle.join();
     }
 
