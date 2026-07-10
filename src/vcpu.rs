@@ -7,31 +7,18 @@
 //!
 //! # Virtual Processor
 //!
-//! Creation and configuration of the single guest vCPU, including the register state
+//! Creation and configuration of guest vCPUs, including the register state
 //! required to enter a Linux kernel through the 32-bit PVH entry point.
 //!
 
-use ::anyhow::{
-    Context,
-    Result,
-};
+use ::anyhow::{Context, Result, anyhow};
 use ::kvm_bindings::{
-    KVM_MAX_CPUID_ENTRIES,
-    kvm_regs,
-    kvm_segment,
-    kvm_sregs,
+    CpuId, KVM_CPUID_FLAG_SIGNIFCANT_INDEX, KVM_MAX_CPUID_ENTRIES, kvm_cpuid_entry2, kvm_regs,
+    kvm_segment, kvm_sregs,
 };
-use ::kvm_ioctls::{
-    Kvm,
-    VcpuFd,
-    VmFd,
-};
+use ::kvm_ioctls::{Kvm, VcpuFd, VmFd};
 
-use crate::layout::{
-    BOOT_GDT_ADDR,
-    BOOT_GDT_MAX,
-    BOOT_IDT_ADDR,
-};
+use crate::layout::{BOOT_GDT_ADDR, BOOT_GDT_MAX, BOOT_IDT_ADDR};
 use crate::memory::GuestMemory;
 
 /// `CR0.PE` — protected mode enable.
@@ -39,22 +26,72 @@ const X86_CR0_PE: u64 = 0x1;
 /// Reserved `RFLAGS` bit that must always be set.
 const RFLAGS_RESERVED: u64 = 0x2;
 
-/// The single guest virtual processor.
+/// A guest virtual processor.
 pub struct Vcpu {
     /// KVM vCPU handle.
     pub fd: VcpuFd,
 }
 
 impl Vcpu {
-    /// Creates vCPU `id` and programs its CPUID from the host-supported set.
-    pub fn new(kvm: &Kvm, vm_fd: &VmFd, id: u64) -> Result<Self> {
-        let fd: VcpuFd = vm_fd
-            .create_vcpu(id)
-            .context("KVM_CREATE_VCPU failed")?;
+    /// Creates vCPU `id` (of `vcpu_count` total) and programs its CPUID from the host-supported
+    /// set, fixing up the per-vCPU APIC id and processor topology.
+    ///
+    /// The guest is presented a flat topology of `vcpu_count` single-threaded cores in one package.
+    /// Each vCPU must advertise a distinct APIC id and a matching x2APIC topology, or the guest
+    /// kernel cannot tell the application processors apart (and would build an incorrect
+    /// scheduler/cache topology). We patch, per vCPU:
+    /// - leaf `0x1`: EBX[31:24] = initial APIC id, EBX[23:16] = logical processors per package,
+    ///   EDX[28] = HTT (set when more than one vCPU);
+    /// - leaves `0xB`/`0x1F` (extended topology): EDX = x2APIC id at every level, and the SMT
+    ///   (sub-leaf 0) and core (sub-leaf 1) level shift/count/type, with any further sub-leaves
+    ///   terminated (level type 0).
+    pub fn new(kvm: &Kvm, vm_fd: &VmFd, id: u64, vcpu_count: usize) -> Result<Self> {
+        let fd: VcpuFd = vm_fd.create_vcpu(id).context("KVM_CREATE_VCPU failed")?;
 
-        let cpuid = kvm
+        let supported = kvm
             .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
             .context("KVM_GET_SUPPORTED_CPUID failed")?;
+        let mut entries: Vec<kvm_cpuid_entry2> = supported.as_slice().to_vec();
+
+        let apic_id: u32 = id as u32;
+        let ncpus: u32 = vcpu_count.max(1) as u32;
+        // Bits needed to hold a core id within the package (ceil(log2(ncpus))); the shift that
+        // takes an x2APIC id up to the package level. With one thread per core this is also the
+        // per-vCPU x2APIC id width.
+        let core_width: u32 = u32::BITS - ncpus.saturating_sub(1).leading_zeros();
+        let htt: bool = ncpus > 1;
+
+        // Leaf 0x1: initial APIC id, logical-processors-per-package, and the HTT bit.
+        for entry in entries.iter_mut().filter(|e| e.function == 0x1) {
+            entry.ebx = (entry.ebx & 0x00FF_FFFF) | (apic_id << 24);
+            entry.ebx = (entry.ebx & 0xFF00_FFFF) | ((ncpus & 0xFF) << 16);
+            if htt {
+                entry.edx |= 1 << 28;
+            }
+        }
+
+        // Extended topology (leaf 0xB). KVM's supported set only advertises a single placeholder
+        // sub-leaf, so we replace leaf 0xB (and any 0x1F) with a coherent two-level description:
+        // an SMT level (one thread per core) and a core level (all `ncpus` cores in one package).
+        // EDX carries the per-vCPU x2APIC id at every level.
+        entries.retain(|e| e.function != 0x0B && e.function != 0x1F);
+        let topo_level = |index: u32, shift: u32, count: u32, level_type: u32| kvm_cpuid_entry2 {
+            function: 0x0B,
+            index,
+            flags: KVM_CPUID_FLAG_SIGNIFCANT_INDEX,
+            eax: shift,
+            ebx: count,
+            ecx: index | (level_type << 8),
+            edx: apic_id,
+            padding: [0; 3],
+        };
+        // SMT level: shift 0, 1 logical processor, level type 1 (SMT).
+        entries.push(topo_level(0, 0, 1, 1));
+        // Core level: shift past the core-id bits, `ncpus` logical processors, level type 2 (Core).
+        entries.push(topo_level(1, core_width, ncpus, 2));
+
+        let cpuid =
+            CpuId::from_entries(&entries).map_err(|e| anyhow!("building guest CPUID: {e:?}"))?;
         fd.set_cpuid2(&cpuid).context("KVM_SET_CPUID2 failed")?;
 
         Ok(Self { fd })

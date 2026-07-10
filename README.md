@@ -1,16 +1,16 @@
 # microvm
 
-A minimal, single-core **x86_64 micro-VM** that boots a Linux (Alpine) kernel through
+A minimal **x86_64 micro-VM** that boots a Linux (Alpine) kernel through
 the **PVH boot protocol**, entirely from a **RAM initramfs** — no PCI, no ACPI, and no block
 device by default. The only always-on emulated device is a bidirectional "portb" console (backing
 the kernel's `hvc0`).
 
 It runs on **two hypervisor backends** from the same codebase:
 
-- **Linux / KVM** — the original backend. Additionally, `--mount` can expose a host directory as a
-  virt-fs (read-only, or read-write with `--mount-rw`), `--net` attaches a virtio-net NIC bridged
-  to a host TAP for real IPv4 networking, and `--snapshot`/`--restore` capture and resume the whole
-  VM.
+- **Linux / KVM** — the original backend. `--vcpus N` provides functional SMP (up to 254 vCPUs).
+  Additionally, `--mount` can expose a host directory as a virt-fs (read-only, or read-write with
+  `--mount-rw`), `--net` attaches a virtio-net NIC bridged to a host TAP for real IPv4 networking,
+  and `--snapshot`/`--restore` capture and resume single-vCPU VMs.
 - **Windows / WHP** — a backend on the **[Windows Hypervisor Platform](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform)**
   that PVH-boots the *same* kernel + initramfs with the same portb console, and also supports
   `--snapshot`/`--restore` (capture and resume the whole VM) and `--net` (a virtio-net NIC backed
@@ -57,7 +57,9 @@ uid=0(root) gid=0(root)
 
 ## Design
 
-- **Single core, single thread.** One vCPU driven by a synchronous `KVM_RUN` loop.
+- **Functional KVM SMP.** The boot processor runs on the main `KVM_RUN` loop; with `--vcpus N`,
+  each of the other N-1 processors runs on its own host thread and is started by Linux through the
+  normal INIT-SIPI-SIPI path. WHP remains single-vCPU.
 - **PVH boot** (`XEN_ELFNOTE_PHYS32_ENTRY` + `hvm_start_info`). The VMM loads an uncompressed
   `vmlinux`, locates the PVH 32-bit entry note, and enters the guest in 32-bit protected mode
   with `%ebx` pointing at the boot info. The kernel itself switches to long mode. This avoids
@@ -77,44 +79,45 @@ uid=0(root) gid=0(root)
 
 ### Source layout
 
-| Path | Responsibility |
-|------|----------------|
-| `src/main.rs`         | CLI and entry point; dispatches to the KVM (Linux) or WHP (Windows) backend |
-| `src/console.rs`      | *(shared)* Console sink: buffered/quiet output, byte count, cold-start timing |
-| `src/layout.rs`       | *(shared)* Guest-physical memory map constants |
-| `src/devices/portb.rs` | *(shared)* portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue |
-| `src/devices/mod.rs`  | *(shared)* PMIO device bus (portb console `0xE9`/`0xEA`, `0x604` shutdown, `0x605` snapshot) |
-| `src/boot/mod.rs`     | *(shared)* PVH boot module + `GuestWrite` trait that decouples the loader from each backend's memory |
-| `src/boot/pvh.rs`     | *(shared)* `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout |
-| `src/boot/params.rs`  | *(shared)* PVH boot-parameter structures |
-| `src/vmm.rs`          | *(Linux/KVM)* VM setup, the vCPU run loop, console input thread, TTY handling |
-| `src/memory.rs`       | *(Linux/KVM)* Guest RAM as KVM user-memory regions (MMIO-gap aware; snapshot dump / COW restore) |
-| `src/vcpu.rs`         | *(Linux/KVM)* vCPU creation, CPUID, and the PVH entry register/segment state |
-| `src/irq.rs`          | *(Linux/KVM)* In-kernel irqchip + PIT |
-| `src/snapshot.rs`     | *(Linux/KVM)* Full VM snapshot / restore (vCPU + devices + VM state) |
-| `src/virtfs.rs`       | *(Linux/KVM)* virt-fs: pack a `--mount` host directory into a SquashFS (ro) or ext4 (rw) image, map it into guest memory, and point the guest at it |
-| `src/net.rs`          | *(Linux/KVM)* virt-net: a virtio-net NIC on a virtio-mmio transport backed by a host TAP (`--net`); parses the endpoint, brings the TAP up, and runs the RX/TX virtqueues |
-| `src/whp/mod.rs`      | *(Windows/WHP)* Partition setup, the vCPU run loop, CPUID synth, I/O dispatch, timer/input threads, LAPIC EOI |
-| `src/whp/memory.rs`   | *(Windows/WHP)* Guest RAM via `VirtualAlloc` + `WHvMapGpaRange` (MMIO-gap aware); restore maps `mem.bin` copy-on-write for lazy, RAM-size-independent resume |
-| `src/whp/vcpu.rs`     | *(Windows/WHP)* PVH entry register/segment state via `WHvSetVirtualProcessorRegisters` |
-| `src/whp/pic.rs`      | *(Windows/WHP)* Minimal i8259 PIC so the kernel wires up IRQ0 (the host-driven PIT tick) |
-| `src/whp/pit.rs`      | *(Windows/WHP)* Minimal hang-safe i8254 channel-2 PIT counter for guest TSC calibration |
-| `src/whp/rtc.rs`      | *(Windows/WHP)* Minimal MC146818 RTC/CMOS so the boot-time wall-clock read does not spin |
-| `src/whp/net.rs`      | *(Windows/WHP)* virtio-net NIC on virtio-mmio (`--net`); MMIO via the WHP instruction emulator, IRQ on a master-PIC line |
-| `src/whp/slirp.rs`    | *(Windows/WHP)* user-mode NAT backing the NIC: ARP + ICMP for the gateway, TCP/UDP/DNS out through host sockets |
-| `src/whp/emulator.rs` | *(Windows/WHP)* thin wrapper over WHP's instruction emulator for servicing virtio-mmio memory-access exits |
-| `src/whp/snapshot.rs` | *(Windows/WHP)* Full VM snapshot / restore (vCPU regs + XSAVE + APIC + emulated devices) |
-| `src/whp/virtfs.rs`   | *(Windows/WHP)* virt-fs (`--mount`): a FAT image built in pure Rust (`fatfs`), mapped above RAM via `WHvMapGpaRange`; the guest mounts it as `vfat` |
-| `docker/Dockerfile`   | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows) |
-| `kernel/config-microvm` | Minimal Linux kernel configuration |
-| `kernel/hvc_xe9.c`    | The portb `hvc0` console driver (installed into the tree by `build-kernel.sh`) |
-| `kernel/patches/`     | Kernel source modifications (the `0xE9` earlycon) |
-| `alpine/init`         | PID 1 for the RAM initramfs |
-| `alpine/init.python` | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`) |
-| `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
-| `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore |
-| `scripts/*.sh`        | Kernel / initramfs build and run helpers; `build-linux-artifacts.sh` drives the Docker build |
-| `scripts/*.ps1`       | Windows helpers: `build-linux-artifacts.ps1` + `build-python-initramfs.ps1` (Docker builds), `run.ps1` (launcher), and the benchmark mirrors `measure-coldstart.ps1` / `bench-net-snapshot.ps1` / `snapshot-demo.ps1` / `snapshot-boot.ps1` / `bench-net-snapshot-py.ps1` / `bench-virtfs.ps1` |
+| Path                                          | Responsibility                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/main.rs`                                 | CLI and entry point; dispatches to the KVM (Linux) or WHP (Windows) backend                                                                                                                                                                                                                    |
+| `src/console.rs`                              | *(shared)* Console sink: buffered/quiet output, byte count, cold-start timing                                                                                                                                                                                                                  |
+| `src/layout.rs`                               | *(shared)* Guest-physical memory map constants                                                                                                                                                                                                                                                 |
+| `src/devices/portb.rs`                        | *(shared)* portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue                                                                                                                                                                                                     |
+| `src/devices/mod.rs`                          | *(shared)* PMIO device bus (portb console `0xE9`/`0xEA`, `0x604` shutdown, `0x605` snapshot)                                                                                                                                                                                                   |
+| `src/boot/mod.rs`                             | *(shared)* PVH boot module + `GuestWrite` trait that decouples the loader from each backend's memory                                                                                                                                                                                           |
+| `src/boot/mptable.rs`                         | *(Linux/KVM)* Intel MP table used by an ACPI-less guest to enumerate vCPUs                                                                                                                                                                                                                     |
+| `src/boot/pvh.rs`                             | *(shared)* `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout                                                                                                                                                                                                                     |
+| `src/boot/params.rs`                          | *(shared)* PVH boot-parameter structures                                                                                                                                                                                                                                                       |
+| `src/vmm.rs`                                  | *(Linux/KVM)* VM setup, the vCPU run loop, console input thread, TTY handling                                                                                                                                                                                                                  |
+| `src/memory.rs`                               | *(Linux/KVM)* Guest RAM as KVM user-memory regions (MMIO-gap aware; snapshot dump / COW restore)                                                                                                                                                                                               |
+| `src/vcpu.rs`                                 | *(Linux/KVM)* vCPU creation, CPUID, and the PVH entry register/segment state                                                                                                                                                                                                                   |
+| `src/irq.rs`                                  | *(Linux/KVM)* In-kernel irqchip + PIT                                                                                                                                                                                                                                                          |
+| `src/snapshot.rs`                             | *(Linux/KVM)* Full VM snapshot / restore (vCPU + devices + VM state)                                                                                                                                                                                                                           |
+| `src/virtfs.rs`                               | *(Linux/KVM)* virt-fs: pack a `--mount` host directory into a SquashFS (ro) or ext4 (rw) image, map it into guest memory, and point the guest at it                                                                                                                                            |
+| `src/net.rs`                                  | *(Linux/KVM)* virt-net: a virtio-net NIC on a virtio-mmio transport backed by a host TAP (`--net`); parses the endpoint, brings the TAP up, and runs the RX/TX virtqueues                                                                                                                      |
+| `src/whp/mod.rs`                              | *(Windows/WHP)* Partition setup, the vCPU run loop, CPUID synth, I/O dispatch, timer/input threads, LAPIC EOI                                                                                                                                                                                  |
+| `src/whp/memory.rs`                           | *(Windows/WHP)* Guest RAM via `VirtualAlloc` + `WHvMapGpaRange` (MMIO-gap aware); restore maps `mem.bin` copy-on-write for lazy, RAM-size-independent resume                                                                                                                                   |
+| `src/whp/vcpu.rs`                             | *(Windows/WHP)* PVH entry register/segment state via `WHvSetVirtualProcessorRegisters`                                                                                                                                                                                                         |
+| `src/whp/pic.rs`                              | *(Windows/WHP)* Minimal i8259 PIC so the kernel wires up IRQ0 (the host-driven PIT tick)                                                                                                                                                                                                       |
+| `src/whp/pit.rs`                              | *(Windows/WHP)* Minimal hang-safe i8254 channel-2 PIT counter for guest TSC calibration                                                                                                                                                                                                        |
+| `src/whp/rtc.rs`                              | *(Windows/WHP)* Minimal MC146818 RTC/CMOS so the boot-time wall-clock read does not spin                                                                                                                                                                                                       |
+| `src/whp/net.rs`                              | *(Windows/WHP)* virtio-net NIC on virtio-mmio (`--net`); MMIO via the WHP instruction emulator, IRQ on a master-PIC line                                                                                                                                                                       |
+| `src/whp/slirp.rs`                            | *(Windows/WHP)* user-mode NAT backing the NIC: ARP + ICMP for the gateway, TCP/UDP/DNS out through host sockets                                                                                                                                                                                |
+| `src/whp/emulator.rs`                         | *(Windows/WHP)* thin wrapper over WHP's instruction emulator for servicing virtio-mmio memory-access exits                                                                                                                                                                                     |
+| `src/whp/snapshot.rs`                         | *(Windows/WHP)* Full VM snapshot / restore (vCPU regs + XSAVE + APIC + emulated devices)                                                                                                                                                                                                       |
+| `src/whp/virtfs.rs`                           | *(Windows/WHP)* virt-fs (`--mount`): a FAT image built in pure Rust (`fatfs`), mapped above RAM via `WHvMapGpaRange`; the guest mounts it as `vfat`                                                                                                                                            |
+| `docker/Dockerfile`                           | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows)                                                                                                                                                                                              |
+| `kernel/config-microvm`                       | Minimal Linux kernel configuration                                                                                                                                                                                                                                                             |
+| `kernel/hvc_xe9.c`                            | The portb `hvc0` console driver (installed into the tree by `build-kernel.sh`)                                                                                                                                                                                                                 |
+| `kernel/patches/`                             | Kernel source modifications (the `0xE9` earlycon)                                                                                                                                                                                                                                              |
+| `alpine/init`                                 | PID 1 for the RAM initramfs                                                                                                                                                                                                                                                                    |
+| `alpine/init.python`                          | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`)                                                                                                                                                                                                                       |
+| `alpine/hello.py`, `alpine/repl.py`           | Python snapshot apps: pandas/numpy benchmark and interactive REPL                                                                                                                                                                                                                              |
+| `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore                                                                                                                                                                        |
+| `scripts/*.sh`                                | Kernel / initramfs build and run helpers; `build-linux-artifacts.sh` drives the Docker build                                                                                                                                                                                                   |
+| `scripts/*.ps1`                               | Windows helpers: `build-linux-artifacts.ps1` + `build-python-initramfs.ps1` (Docker builds), `run.ps1` (launcher), and the benchmark mirrors `measure-coldstart.ps1` / `bench-net-snapshot.ps1` / `snapshot-demo.ps1` / `snapshot-boot.ps1` / `bench-net-snapshot-py.ps1` / `bench-virtfs.ps1` |
 
 ## The kernel ("modified Alpine kernel")
 
@@ -125,26 +128,27 @@ applies the modification in `kernel/patches/`, drops in this config, and builds 
 
 ### Configuration rationale
 
-The guest sees almost no hardware — one CPU, RAM, the in-kernel interrupt controller, and a single
-portb console — so the configuration follows one rule: **build in exactly what a device-less PVH/KVM
-guest needs to boot, and compile out everything that would probe for hardware that is not there.**
+The guest sees almost no hardware — one or more CPUs, RAM, the in-kernel interrupt controller, and
+a single portb console — so the configuration follows one rule: **build in exactly what a
+device-less PVH/KVM guest needs to boot, and compile out everything that would probe for hardware
+that is not there.**
 Probing absent hardware is at best wasted boot time and at worst a multi-second hang (see
 `PM_TRACE_RTC` below).
 
-| Config | Why |
-|--------|-----|
-| `CONFIG_PVH=y` | Enter through the 32-bit PVH entry note, so the VMM loads an uncompressed `vmlinux` and skips the real-mode/bzImage setup and self-decompression path entirely. |
-| `CONFIG_HYPERVISOR_GUEST=y`, `CONFIG_PARAVIRT=y`, `CONFIG_KVM_GUEST=y`, `CONFIG_PARAVIRT_CLOCK=y` | Run as a KVM guest and take time from `kvm-clock` — no PIT/HPET/TSC calibration, no RTC read at boot. |
-| `# CONFIG_PCI`, `# CONFIG_ACPI` (and no EFI) | The VMM exposes no PCI bus, no ACPI tables, and no EFI/BIOS firmware; unclaimed I/O ports float. Enabling these makes the kernel enumerate buses and firmware that do not exist. |
-| `# CONFIG_SERIAL_8250`, `CONFIG_HVC_XE9=y` | The console is the portb `hvc0` driver (`kernel/hvc_xe9.c`), not a 16550 UART — one `outb`/byte out, polled input in. `CONFIG_SERIAL_EARLYCON` stays for `earlycon=xe9`. |
-| `# CONFIG_FB`, `# CONFIG_HID`, `# CONFIG_SOUND`, `# CONFIG_ATA`, `# CONFIG_SCSI`, `# CONFIG_RTC_CLASS`, no USB | None of these devices exist, so their drivers and boot-time probes are removed. |
-| `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y` | The whole userland is the initramfs unpacked into RAM; there is no block device or virtio, hence no storage stack. |
-| `CONFIG_NET=y`, `CONFIG_INET=y`, `CONFIG_VIRTIO_MMIO=y` (+ `_CMDLINE_DEVICES`), `CONFIG_VIRTIO_NET=y` | The minimal networking needed for `--net`: IPv4 over one virtio-net NIC on a virtio-mmio window declared via `virtio_mmio.device=` on the kernel command line. IPv6, wireless, NFS and the rest of the stack stay off. Boots without `--net` pay only a few ms for the dormant stack. |
-| `# CONFIG_MODULES` | Everything required is built in; a single static `vmlinux` needs no module loader. |
-| `CONFIG_HZ_100=y`, `CONFIG_NO_HZ_IDLE=y` | A low 100 Hz tick with tickless idle: fewer timer interrupts, faster boot. |
-| `# CONFIG_SUSPEND`, `# CONFIG_HIBERNATION`, `# CONFIG_X86_MCE`, `# CONFIG_NUMA` | Power management, machine-check, and NUMA are meaningless for a single-vCPU, device-less VM. |
-| `# CONFIG_FTRACE`, `# CONFIG_KPROBES`, `# CONFIG_PROFILING`, `# CONFIG_DEBUG_KERNEL` | Tracing / debug / profiling infrastructure is compiled out to shrink the image and speed boot. |
-| no `PM_TRACE_RTC` (gated off by no suspend) | **The load-bearing one.** With suspend/hibernate off there is no `PM_SLEEP`, so the `PM_TRACE` debug feature and its `PM_TRACE_RTC` are never built — which matters: `PM_TRACE_RTC`'s `early_resume_init` initcall reads the RTC via `mc146818_get_time()`, and with no RTC (ports `0x70`/`0x71` float) that read spins to a ~1 s timeout **twice**, most of the old ~1.6 s cold-start (see below). |
+| Config                                                                                                         | Why                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONFIG_PVH=y`                                                                                                 | Enter through the 32-bit PVH entry note, so the VMM loads an uncompressed `vmlinux` and skips the real-mode/bzImage setup and self-decompression path entirely.                                                                                                                                                                                                                                     |
+| `CONFIG_HYPERVISOR_GUEST=y`, `CONFIG_PARAVIRT=y`, `CONFIG_KVM_GUEST=y`, `CONFIG_PARAVIRT_CLOCK=y`              | Run as a KVM guest and take time from `kvm-clock` — no PIT/HPET/TSC calibration, no RTC read at boot.                                                                                                                                                                                                                                                                                               |
+| `# CONFIG_PCI`, `# CONFIG_ACPI` (and no EFI)                                                                   | The VMM exposes no PCI bus, no ACPI tables, and no EFI/BIOS firmware; unclaimed I/O ports float. Enabling these makes the kernel enumerate buses and firmware that do not exist.                                                                                                                                                                                                                    |
+| `# CONFIG_SERIAL_8250`, `CONFIG_HVC_XE9=y`                                                                     | The console is the portb `hvc0` driver (`kernel/hvc_xe9.c`), not a 16550 UART — one `outb`/byte out, polled input in. `CONFIG_SERIAL_EARLYCON` stays for `earlycon=xe9`.                                                                                                                                                                                                                            |
+| `# CONFIG_FB`, `# CONFIG_HID`, `# CONFIG_SOUND`, `# CONFIG_ATA`, `# CONFIG_SCSI`, `# CONFIG_RTC_CLASS`, no USB | None of these devices exist, so their drivers and boot-time probes are removed.                                                                                                                                                                                                                                                                                                                     |
+| `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y`                                               | The whole userland is the initramfs unpacked into RAM; there is no block device or virtio, hence no storage stack.                                                                                                                                                                                                                                                                                  |
+| `CONFIG_NET=y`, `CONFIG_INET=y`, `CONFIG_VIRTIO_MMIO=y` (+ `_CMDLINE_DEVICES`), `CONFIG_VIRTIO_NET=y`          | The minimal networking needed for `--net`: IPv4 over one virtio-net NIC on a virtio-mmio window declared via `virtio_mmio.device=` on the kernel command line. IPv6, wireless, NFS and the rest of the stack stay off. Boots without `--net` pay only a few ms for the dormant stack.                                                                                                               |
+| `# CONFIG_MODULES`                                                                                             | Everything required is built in; a single static `vmlinux` needs no module loader.                                                                                                                                                                                                                                                                                                                  |
+| `CONFIG_HZ_100=y`, `CONFIG_NO_HZ_IDLE=y`                                                                       | A low 100 Hz tick with tickless idle: fewer timer interrupts, faster boot.                                                                                                                                                                                                                                                                                                                          |
+| `# CONFIG_SUSPEND`, `# CONFIG_HIBERNATION`, `# CONFIG_X86_MCE`, `# CONFIG_NUMA`                                | Power management, machine-check, and NUMA are meaningless for this single-package, device-less VM.                                                                                                                                                                                                                                                                                                  |
+| `# CONFIG_FTRACE`, `# CONFIG_KPROBES`, `# CONFIG_PROFILING`, `# CONFIG_DEBUG_KERNEL`                           | Tracing / debug / profiling infrastructure is compiled out to shrink the image and speed boot.                                                                                                                                                                                                                                                                                                      |
+| no `PM_TRACE_RTC` (gated off by no suspend)                                                                    | **The load-bearing one.** With suspend/hibernate off there is no `PM_SLEEP`, so the `PM_TRACE` debug feature and its `PM_TRACE_RTC` are never built — which matters: `PM_TRACE_RTC`'s `early_resume_init` initcall reads the RTC via `mc146818_get_time()`, and with no RTC (ports `0x70`/`0x71` float) that read spins to a ~1 s timeout **twice**, most of the old ~1.6 s cold-start (see below). |
 
 The only **source** change is `kernel/patches/0001-microvm-xe9-earlycon.patch`, which adds an
 `earlycon=xe9` driver that emits each kernel-log byte with a single `outb` to I/O port `0xE9` —
@@ -171,24 +175,24 @@ make run            # boot Alpine to an interactive shell over the portb console
 
 ### Make targets
 
-| Target | What it does |
-|--------|--------------|
-| `all` *(default)* | Alias for `release`. |
-| `world` | Build all three components: `release` + `kernel` + `initramfs`. |
-| `release` | Build the VMM in release mode → `target/release/microvm`. |
-| `build` | Build the VMM in debug mode. |
-| `test` | Run the unit tests (`cargo test --release`; no KVM required). |
-| `kernel` | Download + patch + build the PVH `vmlinux` → `$(KERNEL_IMG)` (`scripts/build-kernel.sh`, ~minutes). |
-| `initramfs` | Build the Alpine RAM rootfs → `$(BUILD_DIR)/initramfs.cpio.gz` (`scripts/build-initramfs.sh`). |
-| `python-initramfs` | Build a rootfs with CPython + pandas/numpy → `$(PY_INITRD)` (`scripts/build-python-initramfs.sh`). |
-| `run`, `boot` | Boot Alpine to an interactive shell over the portb console (`scripts/run.sh`). |
-| `selftest` | Run the protected-mode self-test through the real PVH entry path and exit. |
-| `boot-test` | End-to-end: boot and assert the guest reaches userspace (`scripts/test-boot.sh`). |
-| `measure` | Cold-start measurements (`scripts/measure-coldstart.sh`). |
-| `bench-virtfs` | virt-fs throughput + persistent `--mount-image` round-trip (`scripts/bench-virtfs.sh`). |
-| `snapshot-demo` | pandas/numpy snapshot/restore benchmark (`scripts/snapshot-demo.sh`). |
-| `snapshot-boot` | Resume an interactive Python interpreter from a snapshot (`scripts/snapshot-boot.sh`). |
-| `clean` | `cargo clean`. |
+| Target             | What it does                                                                                        |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| `all` *(default)*  | Alias for `release`.                                                                                |
+| `world`            | Build all three components: `release` + `kernel` + `initramfs`.                                     |
+| `release`          | Build the VMM in release mode → `target/release/microvm`.                                           |
+| `build`            | Build the VMM in debug mode.                                                                        |
+| `test`             | Run the unit tests (`cargo test --release`; no KVM required).                                       |
+| `kernel`           | Download + patch + build the PVH `vmlinux` → `$(KERNEL_IMG)` (`scripts/build-kernel.sh`, ~minutes). |
+| `initramfs`        | Build the Alpine RAM rootfs → `$(BUILD_DIR)/initramfs.cpio.gz` (`scripts/build-initramfs.sh`).      |
+| `python-initramfs` | Build a rootfs with CPython + pandas/numpy → `$(PY_INITRD)` (`scripts/build-python-initramfs.sh`).  |
+| `run`, `boot`      | Boot Alpine to an interactive shell over the portb console (`scripts/run.sh`).                      |
+| `selftest`         | Run the protected-mode self-test through the real PVH entry path and exit.                          |
+| `boot-test`        | End-to-end: boot and assert the guest reaches userspace (`scripts/test-boot.sh`).                   |
+| `measure`          | Cold-start measurements (`scripts/measure-coldstart.sh`).                                           |
+| `bench-virtfs`     | virt-fs throughput + persistent `--mount-image` round-trip (`scripts/bench-virtfs.sh`).             |
+| `snapshot-demo`    | pandas/numpy snapshot/restore benchmark (`scripts/snapshot-demo.sh`).                               |
+| `snapshot-boot`    | Resume an interactive Python interpreter from a snapshot (`scripts/snapshot-boot.sh`).              |
+| `clean`            | `cargo clean`.                                                                                      |
 
 `make kernel` / `initramfs` / `python-initramfs` always re-run their build script. `snapshot-demo`
 and `snapshot-boot` instead depend on the artifacts `$(KERNEL_IMG)` and `$(PY_INITRD)` via file
@@ -197,15 +201,15 @@ rules that build **only when the artifact is missing** (and, for the Python init
 
 Both make and the scripts read these overridable variables from the environment:
 
-| Variable | Default | Used by |
-|----------|---------|---------|
-| `CARGO` | `cargo` | the `release` / `build` / `test` / `clean` targets |
-| `BUILD_DIR` | `$(HOME)/build` | where artifacts are written |
-| `KERNEL_IMG` | `$(BUILD_DIR)/vmlinux` | kernel artifact path |
-| `PY_INITRD` | `$(BUILD_DIR)/initramfs-python.cpio.gz` | Python initramfs artifact path |
-| `KVER` | `6.18.38` | `build-kernel.sh` (kernel version) |
-| `AVER` / `ABRANCH` | `3.24.1` / `v3.24` | the initramfs scripts (Alpine version) |
-| `MEM`, `N`, `SNAP`, `KERNEL`, `INITRD` | (see each script) | `run.sh`, `snapshot-*.sh`, `measure-coldstart.sh` |
+| Variable                               | Default                                 | Used by                                            |
+| -------------------------------------- | --------------------------------------- | -------------------------------------------------- |
+| `CARGO`                                | `cargo`                                 | the `release` / `build` / `test` / `clean` targets |
+| `BUILD_DIR`                            | `$(HOME)/build`                         | where artifacts are written                        |
+| `KERNEL_IMG`                           | `$(BUILD_DIR)/vmlinux`                  | kernel artifact path                               |
+| `PY_INITRD`                            | `$(BUILD_DIR)/initramfs-python.cpio.gz` | Python initramfs artifact path                     |
+| `KVER`                                 | `6.18.38`                               | `build-kernel.sh` (kernel version)                 |
+| `AVER` / `ABRANCH`                     | `3.24.1` / `v3.24`                      | the initramfs scripts (Alpine version)             |
+| `MEM`, `N`, `SNAP`, `KERNEL`, `INITRD` | (see each script)                       | `run.sh`, `snapshot-*.sh`, `measure-coldstart.sh`  |
 
 
 Run directly:
@@ -220,24 +224,25 @@ Run directly:
 
 ### CLI
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--kernel <path>`  | (required)                       | Uncompressed `vmlinux` (PVH) |
-| `--initrd <path>`  | (none)                           | RAM initramfs image |
-| `--cmdline <str>`  | `earlycon=xe9 console=hvc0 reboot=t panic=-1`| Kernel command line |
-| `--mem <MiB>`      | `512`                            | Guest RAM |
-| `--quiet`          |                                  | Fully silent: discard guest console **and** suppress all VMM logging |
-| `--log-level <lvl>`| `info` (`off` if `--quiet`)      | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
-| `--exit-on-boot`   |                                  | Stop and report cold-start/restore time when the boot marker appears |
-| `--boot-marker <s>`| `ALPINE-MICROVM-BOOT-OK`         | Console substring that marks boot completion |
-| `--snapshot <dir>` |                                  | Take a snapshot into `<dir>` when the guest requests one, then exit |
-| `--restore <dir>`  |                                  | Restore and resume from a snapshot `<dir>` instead of booting |
-| `--mount <dir>`    |                                  | Export a host directory to the guest as a virt-fs (read-only SquashFS by default) |
-| `--mount-target <path>` | `/mnt/host`                 | Guest mount point for `--mount` |
-| `--mount-rw`       |                                  | Mount the `--mount` export read-write (ext4); ephemeral without `--mount-image` |
-| `--mount-image <file>` |                              | Persist a read-write `--mount` to this host image file (implies `--mount-rw`) |
-| `--mount-size <MiB>` |                                | Size of the writable ext4 image (headroom for guest writes; rw only) |
-| `--selftest`       |                                  | Run the protected-mode self-test and exit |
+| Flag                    | Default                                       | Meaning                                                                                          |
+| ----------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `--kernel <path>`       | (required)                                    | Uncompressed `vmlinux` (PVH)                                                                     |
+| `--initrd <path>`       | (none)                                        | RAM initramfs image                                                                              |
+| `--cmdline <str>`       | `earlycon=xe9 console=hvc0 reboot=t panic=-1` | Kernel command line                                                                              |
+| `--mem <MiB>`           | `512`                                         | Guest RAM                                                                                        |
+| `--vcpus <N>`           | `1`                                           | KVM cold-boot vCPUs (1-254); SMP snapshot/restore is not supported                               |
+| `--quiet`               |                                               | Fully silent: discard guest console **and** suppress all VMM logging                             |
+| `--log-level <lvl>`     | `info` (`off` if `--quiet`)                   | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
+| `--exit-on-boot`        |                                               | Stop and report cold-start/restore time when the boot marker appears                             |
+| `--boot-marker <s>`     | `ALPINE-MICROVM-BOOT-OK`                      | Console substring that marks boot completion                                                     |
+| `--snapshot <dir>`      |                                               | Take a snapshot into `<dir>` when the guest requests one, then exit                              |
+| `--restore <dir>`       |                                               | Restore and resume from a snapshot `<dir>` instead of booting                                    |
+| `--mount <dir>`         |                                               | Export a host directory to the guest as a virt-fs (read-only SquashFS by default)                |
+| `--mount-target <path>` | `/mnt/host`                                   | Guest mount point for `--mount`                                                                  |
+| `--mount-rw`            |                                               | Mount the `--mount` export read-write (ext4); ephemeral without `--mount-image`                  |
+| `--mount-image <file>`  |                                               | Persist a read-write `--mount` to this host image file (implies `--mount-rw`)                    |
+| `--mount-size <MiB>`    |                                               | Size of the writable ext4 image (headroom for guest writes; rw only)                             |
+| `--selftest`            |                                               | Run the protected-mode self-test and exit                                                        |
 
 To **suppress all logging**, pass `--log-level off` (mutes the `[… INFO microvm::…]` lines but
 still renders the guest console), or `--quiet` for a fully silent run (no guest console and no
@@ -307,11 +312,11 @@ scripts\run.ps1                                  # boots build\vmlinux + build\i
 
 `--quiet`, `--exit-on-boot`, `--boot-marker`, `--mem`, `--cmdline`, `--log-level`, `--selftest`,
 `--snapshot`/`--restore`, `--net` and the virt-fs flags (`--mount`, `--mount-rw`, `--mount-image`,
-`--mount-size`, `--mount-target`) all work as on Linux. Only the TAP-attach option (`--net-tap`,
-which is Linux-specific) is KVM-only and is rejected with a clear message on Windows. The one
-implementation difference is the virt-fs image format: Windows has no `mksquashfs`/`mke2fs`, so the
-WHP backend builds a **FAT** image in pure Rust (the guest mounts it as `vfat`) where KVM uses
-SquashFS/ext4 — see [Virt-fs](#virt-fs-mount) below.
+`--mount-size`, `--mount-target`) all work as on Linux. Multi-vCPU `--vcpus` values and the
+TAP-attach option (`--net-tap`) are KVM-only and are rejected with a clear message on Windows. The
+one implementation difference is the virt-fs image format: Windows has no
+`mksquashfs`/`mke2fs`, so the WHP backend builds a **FAT** image in pure Rust (the guest mounts it
+as `vfat`) where KVM uses SquashFS/ext4 — see [Virt-fs](#virt-fs-mount) below.
 
 ### Networking (`--net`, user-mode NAT)
 
@@ -409,14 +414,14 @@ it as `vfat` (`CONFIG_VFAT_FS`), where the KVM backend uses SquashFS (read-only)
 The Linux benchmark shell scripts have PowerShell mirrors that reproduce the same methodology on the
 WHP backend (parsing the VMM's `cold-start:` / `restore:` timing line; no `sudo` or host TAP):
 
-| Script | Mirrors | Measures |
-| --- | --- | --- |
-| `scripts\measure-coldstart.ps1` | `measure-coldstart.sh` | cold-start (guest start → boot marker) across several console configs |
-| `scripts\bench-net-snapshot.ps1` | `bench-net-snapshot.sh` | networked cold boot vs. snapshot-restore to a live-NIC shell (user-mode NAT) |
-| `scripts\snapshot-demo.ps1` | `snapshot-demo.sh` | pandas/numpy cold boot vs. restore of a warmed interpreter |
-| `scripts\snapshot-boot.ps1` | `snapshot-boot.sh` | resume an interactive Python REPL straight from a snapshot |
+| Script                              | Mirrors                    | Measures                                                                                            |
+| ----------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------- |
+| `scripts\measure-coldstart.ps1`     | `measure-coldstart.sh`     | cold-start (guest start → boot marker) across several console configs                               |
+| `scripts\bench-net-snapshot.ps1`    | `bench-net-snapshot.sh`    | networked cold boot vs. snapshot-restore to a live-NIC shell (user-mode NAT)                        |
+| `scripts\snapshot-demo.ps1`         | `snapshot-demo.sh`         | pandas/numpy cold boot vs. restore of a warmed interpreter                                          |
+| `scripts\snapshot-boot.ps1`         | `snapshot-boot.sh`         | resume an interactive Python REPL straight from a snapshot                                          |
 | `scripts\bench-net-snapshot-py.ps1` | `bench-net-snapshot-py.sh` | networked Python (bare + numpy/pandas) cold boot vs. restore, each verifying a real HTTP round-trip |
-| `scripts\bench-virtfs.ps1` | `bench-virtfs.sh` | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip (pure-Rust FAT, no `mke2fs`) |
+| `scripts\bench-virtfs.ps1`          | `bench-virtfs.sh`          | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip (pure-Rust FAT, no `mke2fs`) |
 
 The three Python scripts need the Python initramfs (`build\initramfs-python.cpio.gz`); build it on
 Windows with `scripts\build-python-initramfs.ps1` (a Docker stage that downloads CPython +
@@ -495,15 +500,15 @@ Median of 10 runs, 512 MiB, 1 vCPU, host with nested KVM. The portb console is t
 transport; rendering it ("loud") vs discarding it (`--quiet`) is the main knob:
 
 | portb console (`0xE9` → `hvc0`) | loud (rendered) | quiet (`--quiet`, discarded) |
-|---------------------------------|----------------:|-----------------------------:|
-| to kernel→userspace handoff     | **265 ms**      | **194 ms**                   |
+| ------------------------------- | --------------: | ---------------------------: |
+| to kernel→userspace handoff     |      **265 ms** |                   **194 ms** |
 
 *End-to-end* (to the interactive shell):
 
-| configuration | cold-start |
-|---------------|-----------:|
-| loud, full kernel logs | ~339 ms |
-| silent (`quiet loglevel=0`) | ~133 ms |
+| configuration                                |                cold-start |
+| -------------------------------------------- | ------------------------: |
+| loud, full kernel logs                       |                   ~339 ms |
+| silent (`quiet loglevel=0`)                  |                   ~133 ms |
 | **fastest** (silent, 128 MiB, tuned cmdline) | **~118 ms** (min ~111 ms) |
 
 ### How cold-start went from ~1.6 s to ~0.11 s (~13x)
@@ -719,10 +724,10 @@ its marker, so a restore that reaches the marker has resumed with a **live NIC**
 warmed, network-connected interpreter is far faster than cold-booting it (guest resume → marker,
 median of 8, 512 MiB, shared host):
 
-| to a working-network Python app | cold boot | restore |
-|---------------------------------|----------:|--------:|
-| bare interpreter (`net-hello.py`)   | ~1670 ms | **~50 ms** |
-| numpy + pandas (`net-pandas.py`)    | ~2580 ms | **~104 ms** |
+| to a working-network Python app   | cold boot |     restore |
+| --------------------------------- | --------: | ----------: |
+| bare interpreter (`net-hello.py`) |  ~1670 ms |  **~50 ms** |
+| numpy + pandas (`net-pandas.py`)  |  ~2580 ms | **~104 ms** |
 
 (These `restore` figures are the guest resume time; add the one-time host-TAP setup for the
 wall-clock, or use `--net-tap` to make that negligible.)
@@ -780,10 +785,10 @@ the computation immediately.
 
 Median of 8 runs, 512 MiB, 1 vCPU:
 
-| path | to `{'x': 10, 'y': 30}` |
-|------|-----------------------:|
-| cold boot (kernel + Python startup + pandas/numpy import) | ~2.6 s |
-| **restore from snapshot** | **~63 ms** (min ~55 ms) |
+| path                                                      | to `{'x': 10, 'y': 30}` |
+| --------------------------------------------------------- | ----------------------: |
+| cold boot (kernel + Python startup + pandas/numpy import) |                  ~2.6 s |
+| **restore from snapshot**                                 | **~63 ms** (min ~55 ms) |
 
 That is a **~40x** speedup: the snapshot skips the kernel boot and, crucially, the entire
 pandas/numpy import, leaving only the (already-warm) DataFrame work on the restored path.

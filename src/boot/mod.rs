@@ -7,6 +7,8 @@
 //! PVH boot protocol support: parameter structures and the kernel/initramfs loader.
 //!
 
+#[cfg(target_os = "linux")]
+pub mod mptable;
 pub mod params;
 pub mod pvh;
 

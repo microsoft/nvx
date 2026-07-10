@@ -8,65 +8,31 @@
 //! # Virtual Machine Monitor
 //!
 //! Ties together guest memory, the interrupt controller, the vCPU, and the device bus, and
-//! drives the single-core execution loop. Bytes typed on the host console are delivered to
+//! drives the boot processor and application-processor execution loops. Bytes typed on the host
+//! console are delivered to
 //! the guest console device by a dedicated input thread that wakes the vCPU with `SIGUSR1`.
 //!
 
 use ::std::fs;
-use ::std::io::{
-    self,
-    Read,
-};
-use ::std::path::{
-    Path,
-    PathBuf,
-};
-use ::std::sync::atomic::{
-    AtomicBool,
-    AtomicU64,
-    Ordering,
-};
-use ::std::sync::{
-    Arc,
-    Mutex,
-};
+use ::std::io::{self, Read};
+use ::std::path::{Path, PathBuf};
+use ::std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use ::std::sync::{Arc, Mutex};
 use ::std::thread;
 use ::std::thread::JoinHandle;
 
-use ::anyhow::{
-    Context,
-    Result,
-    anyhow,
-    bail,
-};
-use ::kvm_ioctls::{
-    Kvm,
-    VcpuExit,
-};
-use ::log::{
-    debug,
-    error,
-    info,
-    warn,
-};
+use ::anyhow::{Context, Result, anyhow, bail};
+use ::kvm_ioctls::{Kvm, VcpuExit};
+use ::log::{debug, error, info, warn};
 
 use crate::boot::pvh;
 use crate::console::Console;
-use crate::devices::{
-    DeviceBus,
-    PioAction,
-};
 use crate::devices::portb::PortConsole;
+use crate::devices::{DeviceBus, PioAction};
 use crate::irq;
 use crate::memory::GuestMemory;
-use crate::net::{
-    self,
-    VirtioNet,
-};
-use crate::snapshot::{
-    self,
-    Snapshot,
-};
+use crate::net::{self, VirtioNet};
+use crate::snapshot::{self, Snapshot};
 use crate::vcpu::Vcpu;
 use crate::virtfs;
 
@@ -102,7 +68,10 @@ impl TtyGuard {
                     // post-processing; input stays raw so keystrokes still reach the guest.
                     termios.c_oflag |= ::libc::OPOST | ::libc::ONLCR;
                     ::libc::tcsetattr(fd, ::libc::TCSANOW, &termios);
-                    return Self { fd, saved: Some(saved) };
+                    return Self {
+                        fd,
+                        saved: Some(saved),
+                    };
                 }
             }
         }
@@ -155,6 +124,10 @@ pub struct Config {
     pub net: Option<net::NetConfig>,
     /// Optional pre-existing host TAP to attach to instead of creating one (`--net-tap`).
     pub net_tap: Option<String>,
+    /// Number of vCPUs to create (`--vcpus`). 1 keeps the single-processor path. With N > 1 the
+    /// VMM writes an Intel MP table and brings up N-1 application processors so the guest runs
+    /// functional SMP.
+    pub vcpus: usize,
 }
 
 /// A running virt-net NIC: the shared device model plus the TAP descriptor the receive thread
@@ -167,14 +140,161 @@ struct NetDevice {
     tap_fd: ::std::os::fd::RawFd,
 }
 
+/// VM-wide supervisor shared by every vCPU thread (the boot processor and all application
+/// processors). Any vCPU that reaches a terminal condition — a guest shutdown/reset, a fatal KVM
+/// exit, or a panic — records it here and kicks the other vCPUs so the whole VM stops together,
+/// rather than leaving the guest running with fewer processors than it believes it has.
+///
+/// Only flat, cheap state lives here (an atomic stop flag, an optional fatal message, and the
+/// registered vCPU thread ids); the caller keeps any richer bookkeeping to itself. This mirrors
+/// cloud-hypervisor (`AtomicBool` flags + a supervisor that owns the reason) and OpenVMM
+/// (`Arc<Halt>` woken by any VP).
+struct VmControl {
+    /// Set once any vCPU asks the VM to stop; polled by every vCPU loop.
+    stop: AtomicBool,
+    /// The first fatal error reported by any vCPU (a normal shutdown leaves this `None`).
+    fatal: Mutex<Option<String>>,
+    /// Registered vCPU thread ids, used to force-exit peers from `KVM_RUN` via `SIGRTMIN`.
+    tids: Mutex<Vec<u64>>,
+}
+
+impl VmControl {
+    fn new() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            fatal: Mutex::new(None),
+            tids: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Registers the calling vCPU thread so peers can kick it.
+    fn register(&self, tid: u64) {
+        self.tids.lock().expect("vm control poisoned").push(tid);
+    }
+
+    /// Whether any vCPU has requested the VM to stop.
+    fn should_stop(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Requests a clean stop of the whole VM (guest shutdown/reset, boot marker, snapshot).
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Requests a stop and records a fatal error (kept only if it is the first one).
+    fn request_fatal(&self, msg: String) {
+        let mut fatal = self.fatal.lock().expect("vm control poisoned");
+        if fatal.is_none() {
+            *fatal = Some(msg);
+        }
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Takes the recorded fatal error, if any.
+    fn take_fatal(&self) -> Option<String> {
+        self.fatal.lock().expect("vm control poisoned").take()
+    }
+
+    /// Sends `SIGRTMIN` to every registered vCPU thread except `self_tid`, forcing them out of a
+    /// blocking `KVM_RUN` so they observe the stop request. The stop flag must already be set.
+    fn kick_others(&self, self_tid: u64) {
+        for &tid in self.tids.lock().expect("vm control poisoned").iter() {
+            if tid != 0 && tid != self_tid {
+                // SAFETY: `tid` is a registered live vCPU thread id; the SIGRTMIN handler sets
+                // `immediate_exit` and interrupts KVM_RUN.
+                unsafe {
+                    ::libc::pthread_kill(tid as ::libc::pthread_t, sigrtmin());
+                }
+            }
+        }
+    }
+}
+
+/// Owns every application-processor thread and guarantees that none can outlive the VM resources
+/// it accesses. This guard also covers partial startup and unwinding paths.
+struct ApThreads {
+    control: Arc<VmControl>,
+    threads: Vec<(u64, JoinHandle<()>, Arc<AtomicU64>)>,
+}
+
+impl ApThreads {
+    fn new(control: Arc<VmControl>) -> Self {
+        Self {
+            control,
+            threads: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, id: u64, handle: JoinHandle<()>, tid: Arc<AtomicU64>) {
+        self.threads.push((id, handle, tid));
+    }
+
+    /// Requests a VM-wide stop, repeatedly wakes APs parked in `KVM_RUN`, and joins them.
+    fn stop_and_join(&mut self) {
+        self.control.request_stop();
+        for (id, handle, tid) in self.threads.drain(..) {
+            // Retry until the thread finishes, covering the startup race where it has not yet
+            // published its pthread id. Stop signalling once it exits so the id cannot be reused.
+            while !handle.is_finished() {
+                let tid: u64 = tid.load(Ordering::SeqCst);
+                if tid != 0 {
+                    // SAFETY: while the handle is unfinished, `tid` identifies its AP thread;
+                    // the installed kick handler interrupts a blocking KVM_RUN.
+                    unsafe {
+                        ::libc::pthread_kill(tid as ::libc::pthread_t, sigrtmin());
+                    }
+                }
+                thread::sleep(::std::time::Duration::from_millis(2));
+            }
+            if handle.join().is_err() {
+                self.control
+                    .request_fatal(format!("AP{id} thread panicked during setup"));
+            }
+        }
+    }
+}
+
+impl Drop for ApThreads {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
+
+/// Services a guest MMIO read to the virt-net window from any vCPU. Reads outside the window float
+/// to all-ones (matching an unoccupied bus).
+fn net_mmio_read(net: Option<&Arc<Mutex<VirtioNet>>>, addr: u64, data: &mut [u8]) {
+    let in_window = (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr);
+    match (net, in_window) {
+        (Some(dev), true) => {
+            let off = addr - net::NET_MMIO_BASE;
+            dev.lock().expect("virt-net poisoned").mmio_read(off, data);
+        }
+        // Unclaimed MMIO reads float to 0xFF (matches cloud-hypervisor's sentinel).
+        _ => data.iter_mut().for_each(|b| *b = 0xff),
+    }
+}
+
+/// Services a guest MMIO write to the virt-net window from any vCPU. Writes outside the window are
+/// dropped (matching an unoccupied bus).
+fn net_mmio_write(net: Option<&Arc<Mutex<VirtioNet>>>, addr: u64, data: &[u8]) {
+    let in_window = (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr);
+    if let (Some(dev), true) = (net, in_window) {
+        let off = addr - net::NET_MMIO_BASE;
+        dev.lock().expect("virt-net poisoned").mmio_write(off, data);
+    }
+}
+
 /// Runs a tiny 32-bit self-test program through the same `setup_pvh` entry path to validate
 /// the VMM's protected-mode setup independently of the kernel image.
 pub fn selftest() -> Result<()> {
     let kvm: Kvm = Kvm::new().context("opening /dev/kvm")?;
     let vm_fd = kvm.create_vm().context("KVM_CREATE_VM failed")?;
-    vm_fd.set_tss_address(TSS_ADDRESS).context("KVM_SET_TSS_ADDR failed")?;
+    vm_fd
+        .set_tss_address(TSS_ADDRESS)
+        .context("KVM_SET_TSS_ADDR failed")?;
     let mem: GuestMemory = GuestMemory::new(&vm_fd, 16 << 20)?;
-    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0)?;
+    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, 1)?;
 
     // 32-bit program: write "HI\n" to COM1 (0x3f8), then HLT.
     //   mov edx, 0x3f8 ; mov al,'H'; out dx,al ; mov al,'I'; out dx,al ;
@@ -200,21 +320,21 @@ pub fn selftest() -> Result<()> {
                     }
                     let _ = io::Write::flush(&mut io::stdout());
                 }
-            },
+            }
             Ok(VcpuExit::Hlt) => {
                 info!("selftest: guest halted as expected — VMM protected-mode setup OK");
                 break;
-            },
+            }
             Ok(other) => {
                 error!("selftest: unexpected exit {other:?}");
                 dump_vcpu(&vcpu);
                 break;
-            },
+            }
             Err(e) => {
                 error!("selftest: KVM_RUN error: {e}");
                 dump_vcpu(&vcpu);
                 break;
-            },
+            }
         }
     }
     Ok(())
@@ -237,12 +357,10 @@ pub fn run(cfg: Config) -> Result<()> {
 /// Cold-boots a kernel + initramfs via the PVH protocol.
 fn run_cold(cfg: Config) -> Result<()> {
     let kernel_path: &PathBuf = cfg.kernel.as_ref().context("--kernel is required")?;
-    let kernel: Vec<u8> = fs::read(kernel_path)
-        .with_context(|| format!("reading kernel image {kernel_path:?}"))?;
+    let kernel: Vec<u8> =
+        fs::read(kernel_path).with_context(|| format!("reading kernel image {kernel_path:?}"))?;
     let initrd: Option<Vec<u8>> = match &cfg.initrd {
-        Some(path) => {
-            Some(fs::read(path).with_context(|| format!("reading initramfs {path:?}"))?)
-        },
+        Some(path) => Some(fs::read(path).with_context(|| format!("reading initramfs {path:?}"))?),
         None => None,
     };
 
@@ -259,7 +377,7 @@ fn run_cold(cfg: Config) -> Result<()> {
     let mem: GuestMemory = GuestMemory::new(&vm_fd, cfg.mem_bytes)?;
     let ram_size: u64 = mem.ram_size();
     irq::setup(&vm_fd)?;
-    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0)?;
+    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, cfg.vcpus)?;
 
     // Load the kernel, the initramfs, and the PVH boot structures.
     let loaded = pvh::load_kernel(&mem, &kernel)?;
@@ -270,9 +388,12 @@ fn run_cold(cfg: Config) -> Result<()> {
     let initrd_region = match &initrd {
         Some(bytes) => {
             let region = pvh::load_initramfs(&mem, bytes, loaded.kernel_end, ram_size)?;
-            info!("loaded initramfs: addr={:#x}, size={:#x}", region.addr, region.size);
+            info!(
+                "loaded initramfs: addr={:#x}, size={:#x}",
+                region.addr, region.size
+            );
             Some(region)
-        },
+        }
         None => None,
     };
     // Optionally export a host directory to the guest as a virt-fs. The filesystem image is
@@ -293,7 +414,7 @@ fn run_cold(cfg: Config) -> Result<()> {
             cmdline.push(' ');
             cmdline.push_str(&fragment);
             Some(fs)
-        },
+        }
         None => None,
     };
 
@@ -309,6 +430,10 @@ fn run_cold(cfg: Config) -> Result<()> {
     vcpu.setup_pvh(&mem, loaded.pvh_entry, start_info_gpa)?;
 
     let (console, bus) = build_io(&cfg, None);
+    // Share the device bus with the application-processor threads: the guest's hvc0 console
+    // kthread can run on any CPU, so console (port `0xE9`) writes may be issued from an AP and
+    // must reach the same console device the boot processor uses.
+    let bus: Arc<DeviceBus> = Arc::new(bus);
 
     // Bring up the virt-net NIC: register its irqfd, create/configure the host TAP, and build the
     // shared device model. `_net_tap` owns the TAP interface (and tears it down on drop) and must
@@ -317,15 +442,209 @@ fn run_cold(cfg: Config) -> Result<()> {
         Some(ncfg) => {
             let irq = net::register_irq(&vm_fd)?;
             let tap = net::HostTap::for_config(ncfg, cfg.net_tap.as_deref())?;
-            let dev = Arc::new(Mutex::new(VirtioNet::new(mem.ram(), tap.raw_fd(), irq, ncfg.mac)));
+            let dev = Arc::new(Mutex::new(VirtioNet::new(
+                mem.ram(),
+                tap.raw_fd(),
+                irq,
+                ncfg.mac,
+            )));
             let tap_fd = tap.raw_fd();
             (Some(NetDevice { dev, tap_fd }), Some(tap))
-        },
+        }
         None => (None, None),
     };
 
-    info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cmdline);
-    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, false, net_dev)
+    info!(
+        "starting guest (mem={} MiB, cmdline={:?})",
+        ram_size >> 20,
+        cmdline
+    );
+
+    // Functional multi-vCPU SMP (see `--vcpus`). Emit an Intel MP table so the guest kernel
+    // enumerates every vCPU, then create the application processors (APs) and run each on its own
+    // host thread. Each AP is left in KVM's default `KVM_MP_STATE_UNINITIALIZED` state: its
+    // `KVM_RUN` blocks until the boot processor's guest kernel issues INIT-SIPI-SIPI, which the
+    // in-kernel KVM LAPIC (created before any vCPU) services, waking the AP at the SIPI vector to
+    // run the kernel's secondary-CPU trampoline. Only cold boot brings up APs; `--restore` resumes
+    // a single processor.
+    if cfg.vcpus > 1 {
+        crate::boot::mptable::write(&mem, cfg.vcpus as u8)
+            .context("writing Intel MP table for SMP")?;
+    }
+
+    // The VM supervisor, shared by the boot processor and every application processor, so any
+    // vCPU that stops (guest shutdown/reset, fatal exit, panic) stops the whole VM.
+    let control: Arc<VmControl> = Arc::new(VmControl::new());
+    // Install the kick/console signal handlers before spawning any application-processor thread,
+    // so an AP can never receive SIGRTMIN (whose default disposition would kill the process)
+    // before its handler exists.
+    install_signal_handlers();
+    // The virt-net device, shared so any vCPU can service its MMIO window (the guest's drivers can
+    // touch it from any CPU). The boot processor keeps `net_dev` (which also owns the RX thread).
+    let net_shared: Option<Arc<Mutex<VirtioNet>>> = net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
+
+    let mut ap_threads: ApThreads = ApThreads::new(Arc::clone(&control));
+    for id in 1..cfg.vcpus as u64 {
+        let ap: Vcpu = Vcpu::new(&kvm, &vm_fd, id, cfg.vcpus)
+            .with_context(|| format!("creating application-processor vcpu {id}"))?;
+        let tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let ap_bus: Arc<DeviceBus> = Arc::clone(&bus);
+        let ap_console: Arc<Mutex<Console>> = Arc::clone(&console);
+        let ap_net: Option<Arc<Mutex<VirtioNet>>> = net_shared.clone();
+        let ap_control: Arc<VmControl> = Arc::clone(&control);
+        let exit_on_boot: bool = cfg.exit_on_boot;
+        let ap_tid: Arc<AtomicU64> = Arc::clone(&tid);
+        let handle: JoinHandle<()> = thread::Builder::new()
+            .name(format!("vcpu-{id}"))
+            .spawn(move || {
+                run_ap(
+                    ap,
+                    id,
+                    ap_bus,
+                    ap_net,
+                    ap_console,
+                    exit_on_boot,
+                    ap_control,
+                    ap_tid,
+                )
+            })
+            .with_context(|| format!("spawning application-processor vcpu {id}"))?;
+        ap_threads.push(id, handle, tid);
+    }
+    if cfg.vcpus > 1 {
+        info!(
+            "SMP: created {} vCPUs ({} application processor(s) on their own threads)",
+            cfg.vcpus,
+            cfg.vcpus - 1
+        );
+    }
+
+    let result = execute(
+        &cfg,
+        &vm_fd,
+        &mut vcpu,
+        &mem,
+        &console,
+        bus.as_ref(),
+        false,
+        net_dev,
+        Arc::clone(&control),
+    );
+
+    // The boot processor has stopped; force APs parked in `KVM_RUN` to observe that stop before
+    // any guest memory or VM resources can be released.
+    ap_threads.stop_and_join();
+
+    // Surface a fatal condition reported by any vCPU (the boot processor's own error already
+    // flows through `result`); a clean guest shutdown/reset leaves no fatal recorded.
+    match (result, control.take_fatal()) {
+        (Err(e), _) => Err(e),
+        (Ok(()), Some(msg)) => Err(anyhow!("vcpu fatal: {msg}")),
+        (Ok(()), None) => Ok(()),
+    }
+}
+
+/// Drives an application-processor vCPU for functional SMP. The AP is created in KVM's default
+/// `KVM_MP_STATE_UNINITIALIZED` state, so its first `KVM_RUN` blocks until the guest boot processor
+/// sends INIT-SIPI-SIPI (serviced by the in-kernel LAPIC), which wakes it at the SIPI vector to run
+/// the kernel's secondary-CPU trampoline. The thread then loops running guest code until the VM
+/// supervisor asks it to stop.
+///
+/// Both port I/O and MMIO are forwarded to the shared device bus / virt-net window: the guest can
+/// touch any device from any CPU (e.g. the hvc0 console kthread, which backs the `--exit-on-boot`
+/// marker, may run on an AP). A terminal exit (guest shutdown/reset, or a fatal KVM exit) is
+/// reported to the supervisor, which stops the whole VM.
+#[allow(clippy::too_many_arguments)]
+fn run_ap(
+    mut ap: Vcpu,
+    idx: u64,
+    bus: Arc<DeviceBus>,
+    net: Option<Arc<Mutex<VirtioNet>>>,
+    console: Arc<Mutex<Console>>,
+    exit_on_boot: bool,
+    control: Arc<VmControl>,
+    tid: Arc<AtomicU64>,
+) {
+    // SAFETY: `pthread_self` merely returns the calling thread's identifier.
+    let my_tid: u64 = unsafe { ::libc::pthread_self() } as u64;
+    tid.store(my_tid, Ordering::SeqCst);
+    control.register(my_tid);
+    let _kick_guard: KickGuard = KickGuard::arm(&mut ap);
+
+    // Run the guest loop under a panic guard: an application-processor thread that unwinds must
+    // still stop the whole VM (and let the boot processor surface a fatal error) rather than
+    // silently vanish, leaving the guest running with fewer processors than it believes it has.
+    let loop_control: Arc<VmControl> = Arc::clone(&control);
+    let panicked: bool = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+        let control = loop_control;
+        // Requests a whole-VM stop, wakes the other vCPUs, and reports an optional fatal error.
+        let stop_vm = |fatal: Option<String>| {
+            match fatal {
+                Some(msg) => control.request_fatal(msg),
+                None => control.request_stop(),
+            }
+            control.kick_others(my_tid);
+        };
+
+        loop {
+            // Clear any pending immediate-exit, then re-check the stop flag before re-entering the
+            // guest; a kick delivered after this point makes the next KVM_RUN return at once.
+            ap.fd.set_kvm_immediate_exit(0);
+            if control.should_stop() {
+                break;
+            }
+            match ap.fd.run() {
+                Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
+                Ok(VcpuExit::IoOut(port, data)) => {
+                    if let PioAction::Shutdown = bus.pio_write(port, data) {
+                        stop_vm(None);
+                        break;
+                    }
+                    // The boot marker may be emitted from this AP (the hvc0 console kthread can run
+                    // on any CPU). If so, stop the VM so the boot processor's `--exit-on-boot`
+                    // fires even if it is idle in `KVM_RUN`.
+                    if exit_on_boot && console.lock().expect("console poisoned").booted() {
+                        stop_vm(None);
+                        break;
+                    }
+                }
+                Ok(VcpuExit::MmioRead(addr, data)) => net_mmio_read(net.as_ref(), addr, data),
+                Ok(VcpuExit::MmioWrite(addr, data)) => net_mmio_write(net.as_ref(), addr, data),
+                // Linux APs HLT in the idle loop; with the in-kernel LAPIC, KVM re-blocks until the
+                // next interrupt, so looping here does not busy-spin.
+                Ok(VcpuExit::Hlt) => {}
+                Ok(VcpuExit::Shutdown) => {
+                    stop_vm(None);
+                    break;
+                }
+                Ok(VcpuExit::FailEntry(reason, cpu)) => {
+                    stop_vm(Some(format!(
+                        "AP{idx} fail entry (reason={reason:#x}, cpu={cpu})"
+                    )));
+                    break;
+                }
+                Ok(VcpuExit::InternalError) => {
+                    stop_vm(Some(format!("AP{idx} KVM internal error")));
+                    break;
+                }
+                Ok(other) => debug!("AP{idx} unhandled vcpu exit: {other:?}"),
+                // Interrupted by the stop-kick (or a spurious signal): re-check `stop` and re-enter.
+                Err(e) if e.errno() == ::libc::EINTR => {}
+                // The UNINITIALIZED -> INIT_RECEIVED transition surfaces as EAGAIN once; retry.
+                Err(e) if e.errno() == ::libc::EAGAIN => {}
+                Err(e) => {
+                    stop_vm(Some(format!("AP{idx} KVM_RUN failed: {e}")));
+                    break;
+                }
+            }
+        }
+    }))
+    .is_err();
+
+    if panicked {
+        control.request_fatal(format!("AP{idx} panicked"));
+        control.kick_others(my_tid);
+    }
 }
 
 /// Restores and resumes a VM from a snapshot directory.
@@ -348,7 +667,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     // Copy-on-write map the saved RAM image, recreate the irqchip/PIT, and reprogram CPUID.
     let mem: GuestMemory = GuestMemory::restore(&vm_fd, &dir.join("mem.bin"), snap.ram_size())?;
     irq::setup(&vm_fd)?;
-    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0)?;
+    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, 1)?;
 
     // Reload the captured processor and VM state.
     snap.apply_vm(&vm_fd)?;
@@ -365,8 +684,15 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
         };
 
     let (console, bus) = build_io(&cfg, Some(snap.con_state()));
-    info!("resuming guest from snapshot {dir:?} (mem={} MiB)", snap.ram_size() >> 20);
-    execute(&cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true, net_dev)
+    info!(
+        "resuming guest from snapshot {dir:?} (mem={} MiB)",
+        snap.ram_size() >> 20
+    );
+    install_signal_handlers();
+    let control: Arc<VmControl> = Arc::new(VmControl::new());
+    execute(
+        &cfg, &vm_fd, &mut vcpu, &mem, &console, &bus, true, net_dev, control,
+    )
 }
 
 /// Rebuilds the virt-net NIC from serialized snapshot state, or returns `None` if the snapshot
@@ -388,7 +714,10 @@ fn restore_net(
     let mut dev = VirtioNet::new(mem.ram(), tap_fd, irq, ncfg.mac);
     dev.load(&net_state[consumed..])?;
     dev.resume();
-    info!("virt-net: NIC restored (guest {}/{})", ncfg.guest_ip, ncfg.prefix);
+    info!(
+        "virt-net: NIC restored (guest {}/{})",
+        ncfg.guest_ip, ncfg.prefix
+    );
     let dev = Arc::new(Mutex::new(dev));
     Ok(Some((NetDevice { dev, tap_fd }, tap)))
 }
@@ -398,8 +727,7 @@ fn restore_net(
 fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
     let console: Arc<Mutex<Console>> =
         Arc::new(Mutex::new(Console::new(cfg.quiet, &cfg.boot_marker)));
-    let con: Arc<Mutex<PortConsole>> =
-        Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
+    let con: Arc<Mutex<PortConsole>> = Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
     if let Some(state) = con_state {
         con.lock().expect("console poisoned").restore(state);
     }
@@ -407,7 +735,7 @@ fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, Dev
     (console, bus)
 }
 
-/// Drives the single-core execution loop shared by the cold-boot and restore paths.
+/// Drives the boot-processor execution loop shared by the cold-boot and restore paths.
 // The loop needs the full VM context (config, KVM handles, memory, the console/device bus, and the
 // optional NIC); grouping these purely to satisfy the argument-count lint would not aid clarity.
 #[allow(clippy::too_many_arguments)]
@@ -420,20 +748,24 @@ fn execute(
     bus: &DeviceBus,
     resumed: bool,
     net: Option<NetDevice>,
+    control: Arc<VmControl>,
 ) -> Result<()> {
-    install_signal_handlers();
     let _tty_guard: TtyGuard = TtyGuard::new();
+    // The kick handler must already be installed by the caller (before any AP thread is spawned).
+    let _kick_guard: KickGuard = KickGuard::arm(vcpu);
     let vcpu_tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     spawn_input_thread(bus.console(), Arc::clone(&vcpu_tid));
     // SAFETY: `pthread_self` merely returns the calling thread's identifier.
-    vcpu_tid.store(unsafe { ::libc::pthread_self() } as u64, Ordering::SeqCst);
+    let self_tid: u64 = unsafe { ::libc::pthread_self() } as u64;
+    vcpu_tid.store(self_tid, Ordering::SeqCst);
+    control.register(self_tid);
 
     // Start the virt-net receive thread, if a NIC is attached. It feeds host frames into the
     // guest and is joined on shutdown (before guest memory is released).
     let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let net_rx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
-        net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop))
-    });
+    let net_rx: Option<JoinHandle<()>> = net
+        .as_ref()
+        .map(|nd| net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop)));
 
     console.lock().expect("console poisoned").mark_start();
 
@@ -441,6 +773,23 @@ fn execute(
     let mut run_err: Option<::anyhow::Error> = None;
 
     loop {
+        // Clear any pending immediate-exit before re-checking the stop conditions, then re-enter
+        // the guest. A kick delivered after this point sets it again, so the next KVM_RUN returns
+        // at once rather than blocking (closing the check-then-run lost-wakeup race).
+        vcpu.fd.set_kvm_immediate_exit(0);
+        // Stop if any vCPU (this one or an application processor) has asked the VM to stop, or if
+        // the boot marker has appeared (possibly emitted from an AP while this thread is between
+        // KVM_RUN calls, so check here too, not only after an exit).
+        if control.should_stop() {
+            break;
+        }
+        if cfg.exit_on_boot && console.lock().expect("console poisoned").booted() {
+            info!("boot marker seen — stopping guest (--exit-on-boot)");
+            control.request_stop();
+            control.kick_others(self_tid);
+            break;
+        }
+
         // Flush buffered console output before re-entering the guest. The portb console is
         // interrupt-less (the guest's hvc driver polls), so there is no IRQ line to service.
         console.lock().expect("console poisoned").flush();
@@ -448,60 +797,75 @@ fn execute(
         match vcpu.fd.run() {
             Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
             Ok(VcpuExit::IoOut(port, data)) => match bus.pio_write(port, data) {
-                PioAction::None => {},
+                PioAction::None => {}
                 PioAction::Shutdown => {
                     info!("guest requested shutdown");
+                    control.request_stop();
+                    control.kick_others(self_tid);
                     break;
-                },
+                }
                 PioAction::Snapshot => {
                     if take_snapshot(cfg, vm_fd, vcpu, mem, bus, console, net.as_ref())? {
+                        control.request_stop();
+                        control.kick_others(self_tid);
                         break;
                     }
-                },
-            },
-            // Guest MMIO to the virt-net device window (virtio-mmio). Other MMIO reads float to
-            // zero and writes are dropped, matching the unoccupied-bus behaviour of PMIO.
-            Ok(VcpuExit::MmioRead(addr, data)) => match net_mmio_offset(&net, addr) {
-                Some((nd, off)) => nd.dev.lock().expect("virt-net poisoned").mmio_read(off, data),
-                None => data.iter_mut().for_each(|b| *b = 0),
-            },
-            Ok(VcpuExit::MmioWrite(addr, data)) => {
-                if let Some((nd, off)) = net_mmio_offset(&net, addr) {
-                    nd.dev.lock().expect("virt-net poisoned").mmio_write(off, data);
                 }
             },
+            // Guest MMIO: the virt-net window is serviced from any vCPU; other reads float to
+            // all-ones and writes are dropped, matching the unoccupied PMIO bus.
+            Ok(VcpuExit::MmioRead(addr, data)) => {
+                net_mmio_read(net.as_ref().map(|nd| &nd.dev), addr, data)
+            }
+            Ok(VcpuExit::MmioWrite(addr, data)) => {
+                net_mmio_write(net.as_ref().map(|nd| &nd.dev), addr, data)
+            }
             Ok(VcpuExit::Hlt) => {
                 info!("guest halted");
+                control.request_stop();
+                control.kick_others(self_tid);
                 break;
-            },
+            }
             Ok(VcpuExit::Shutdown) => {
                 // A PVH/no-ACPI guest reboots via triple fault, which surfaces here. Treat
                 // it as a normal termination of the VM.
                 info!("guest reset (reboot/halt)");
+                control.request_stop();
+                control.kick_others(self_tid);
                 break;
-            },
+            }
             Ok(VcpuExit::InternalError) => {
                 error!("KVM internal error");
                 dump_vcpu(vcpu);
+                run_err = Some(anyhow!("KVM internal error"));
+                control.request_stop();
+                control.kick_others(self_tid);
                 break;
-            },
+            }
             Ok(VcpuExit::FailEntry(reason, cpu)) => {
                 error!("KVM fail entry (reason={reason:#x}, cpu={cpu})");
                 dump_vcpu(vcpu);
+                run_err = Some(anyhow!("KVM fail entry (reason={reason:#x}, cpu={cpu})"));
+                control.request_stop();
+                control.kick_others(self_tid);
                 break;
-            },
+            }
             Ok(other) => debug!("unhandled vcpu exit: {other:?}"),
-            // A host-thread signal (console input) interrupted KVM_RUN: loop to refresh
-            // the interrupt line and re-enter the guest.
-            Err(e) if e.errno() == ::libc::EINTR => {},
+            // A host-thread signal (console input, or the supervisor's stop kick) interrupted
+            // KVM_RUN: loop to re-check the stop/boot conditions and re-enter the guest.
+            Err(e) if e.errno() == ::libc::EINTR => {}
             Err(e) => {
                 run_err = Some(anyhow!("KVM_RUN failed: {e}"));
+                control.request_stop();
+                control.kick_others(self_tid);
                 break;
-            },
+            }
         }
 
         if cfg.exit_on_boot && console.lock().expect("console poisoned").booted() {
             info!("boot marker seen — stopping guest (--exit-on-boot)");
+            control.request_stop();
+            control.kick_others(self_tid);
             break;
         }
     }
@@ -534,16 +898,6 @@ fn execute(
     Ok(())
 }
 
-/// If `addr` falls in the virt-net MMIO window, returns the device and the register offset.
-fn net_mmio_offset(net: &Option<NetDevice>, addr: u64) -> Option<(&NetDevice, u64)> {
-    let nd: &NetDevice = net.as_ref()?;
-    if (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr) {
-        Some((nd, addr - net::NET_MMIO_BASE))
-    } else {
-        None
-    }
-}
-
 /// Takes a snapshot when the guest requests one. Returns `true` if the VM should stop.
 fn take_snapshot(
     cfg: &Config,
@@ -571,18 +925,59 @@ fn take_snapshot(
             net_state.extend(dev.save());
             snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state, &net_state)
                 .with_context(|| format!("writing snapshot to {dir:?}"))?;
-        },
+        }
         _ => {
             snapshot::write(dir, &vcpu.fd, vm_fd, mem, &con_state, &[])
                 .with_context(|| format!("writing snapshot to {dir:?}"))?;
-        },
+        }
     }
     info!("snapshot written to {dir:?}");
     Ok(true)
 }
 
-/// No-op `SIGUSR1` handler used solely to interrupt `KVM_RUN`.
-extern "C" fn sigusr1_handler(_signum: ::libc::c_int) {}
+thread_local! {
+    /// Raw pointer to the calling vCPU thread's `kvm_run.immediate_exit` byte, armed by
+    /// [`arm_kick`] before the thread enters its run loop. The kick handler writes it so a
+    /// `SIGRTMIN`/`SIGUSR1` that races the stop-check still forces the *next* `KVM_RUN` to return
+    /// at once instead of blocking (OpenVMM / rust-vmm's lost-wakeup fix). Null on non-vCPU
+    /// threads, where the handler is a no-op.
+    static KICK_IMMEDIATE_EXIT: ::std::cell::Cell<*mut u8> =
+        const { ::std::cell::Cell::new(::core::ptr::null_mut()) };
+}
+
+/// Keeps the calling vCPU thread's kick pointer armed only while its `VcpuFd` mapping is live.
+struct KickGuard;
+
+impl KickGuard {
+    /// Arms the signal handler so it can force the next `KVM_RUN` to return immediately. The
+    /// thread-local is initialized here so later handler reads are just a load.
+    fn arm(vcpu: &mut Vcpu) -> Self {
+        let ptr: *mut u8 = &mut vcpu.fd.get_kvm_run().immediate_exit as *mut u8;
+        KICK_IMMEDIATE_EXIT.with(|cell| cell.set(ptr));
+        Self
+    }
+}
+
+impl Drop for KickGuard {
+    fn drop(&mut self) {
+        // Clear the pointer before the owning `VcpuFd` can be dropped. This also makes late
+        // console-input signals harmless after the run loop has returned.
+        KICK_IMMEDIATE_EXIT.with(|cell| cell.set(::core::ptr::null_mut()));
+    }
+}
+
+/// Signal handler for the `SIGUSR1` console-input wake and the `SIGRTMIN` vCPU kick. It sets the
+/// calling thread's `kvm_run.immediate_exit` so a `KVM_RUN` entered concurrently returns without
+/// blocking, and also interrupts an already-blocked `KVM_RUN` with `EINTR`.
+extern "C" fn kick_handler(_signum: ::libc::c_int) {
+    let ptr: *mut u8 = KICK_IMMEDIATE_EXIT.with(|c| c.get());
+    if !ptr.is_null() {
+        // SAFETY: `ptr` addresses this thread's live `kvm_run.immediate_exit` byte in the KVM
+        // mmap (kept alive for the thread's lifetime by its owning `VcpuFd`); a single volatile
+        // byte write is async-signal-safe.
+        unsafe { ptr.write_volatile(1) };
+    }
+}
 
 /// Dumps guest register state for diagnosing early boot faults.
 fn dump_vcpu(vcpu: &Vcpu) {
@@ -596,10 +991,7 @@ fn dump_vcpu(vcpu: &Vcpu) {
                 "  rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
                 regs.rax, regs.rbx, regs.rcx, regs.rdx
             );
-            error!(
-                "  rsi={:#018x} rdi={:#018x}",
-                regs.rsi, regs.rdi
-            );
+            error!("  rsi={:#018x} rdi={:#018x}", regs.rsi, regs.rdi);
             error!(
                 "  cr0={:#018x} cr3={:#018x} cr4={:#018x} efer={:#018x}",
                 sregs.cr0, sregs.cr3, sregs.cr4, sregs.efer
@@ -615,15 +1007,15 @@ fn dump_vcpu(vcpu: &Vcpu) {
                 sregs.cs.type_,
                 sregs.cs.present
             );
-        },
+        }
         _ => error!("  <failed to read vcpu registers>"),
     }
 }
 
 /// Installs the VMM's signal handlers:
 ///
-/// - a no-op `SIGUSR1` handler (without `SA_RESTART`) so a console-input notification can
-///   interrupt `KVM_RUN`; and
+/// - a `SIGUSR1`/`SIGRTMIN` handler (without `SA_RESTART`) that sets `immediate_exit` and
+///   interrupts `KVM_RUN`; and
 /// - `SIG_IGN` for the job-control stop signals `SIGTTIN`/`SIGTTOU`.
 ///
 /// The latter matters whenever the VMM runs in a **background process group** — for example
@@ -634,14 +1026,20 @@ fn dump_vcpu(vcpu: &Vcpu) {
 /// the guest keeps running (it simply forgoes interactive console input, which such runs do
 /// not use).
 fn install_signal_handlers() {
-    // SAFETY: We install a trivial, async-signal-safe (no-op) handler for SIGUSR1 and set
-    // SIGTTIN/SIGTTOU to SIG_IGN; all operate on process-global signal dispositions.
+    // SAFETY: We install an async-signal-safe handler (a single volatile byte write via a
+    // thread-local pointer) for SIGUSR1 and SIGRTMIN and set SIGTTIN/SIGTTOU to SIG_IGN; all
+    // operate on process-global signal dispositions.
     unsafe {
         let mut action: ::libc::sigaction = ::core::mem::zeroed();
-        action.sa_sigaction = sigusr1_handler as *const () as usize;
+        action.sa_sigaction = kick_handler as *const () as usize;
         action.sa_flags = 0;
         ::libc::sigemptyset(&mut action.sa_mask);
+        // SIGUSR1: wake the boot processor for console input.
         ::libc::sigaction(::libc::SIGUSR1, &action, ::core::ptr::null_mut());
+        // SIGRTMIN: the VM supervisor's vCPU kick (force a thread out of KVM_RUN so it can observe
+        // the stop request). A real-time signal is used for the kick, matching cloud-hypervisor /
+        // OpenVMM, so it never collides with SIGUSR1's console-input role.
+        ::libc::sigaction(sigrtmin(), &action, ::core::ptr::null_mut());
 
         let mut ignore: ::libc::sigaction = ::core::mem::zeroed();
         ignore.sa_sigaction = ::libc::SIG_IGN;
@@ -650,6 +1048,11 @@ fn install_signal_handlers() {
         ::libc::sigaction(::libc::SIGTTIN, &ignore, ::core::ptr::null_mut());
         ::libc::sigaction(::libc::SIGTTOU, &ignore, ::core::ptr::null_mut());
     }
+}
+
+/// The real-time signal number used for the vCPU kick (`SIGRTMIN`, resolved at runtime).
+fn sigrtmin() -> ::libc::c_int {
+    ::libc::SIGRTMIN()
 }
 
 /// Spawns a thread that forwards host stdin to the guest console, waking the vCPU per input.
@@ -665,12 +1068,12 @@ fn spawn_input_thread(con: Arc<Mutex<PortConsole>>, vcpu_tid: Arc<AtomicU64>) {
                     let tid: u64 = vcpu_tid.load(Ordering::SeqCst);
                     if tid != 0 {
                         // SAFETY: `tid` identifies the live vCPU thread; delivering SIGUSR1
-                        // runs the installed no-op handler and interrupts KVM_RUN.
+                        // runs the installed kick handler and interrupts KVM_RUN.
                         unsafe {
                             ::libc::pthread_kill(tid as ::libc::pthread_t, ::libc::SIGUSR1);
                         }
                     }
-                },
+                }
             }
         }
     });

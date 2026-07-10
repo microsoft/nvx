@@ -4,7 +4,7 @@
 //!
 //! # microvm
 //!
-//! A minimal, single-core x86_64 KVM micro-VM that boots a Linux (Alpine) kernel through
+//! A minimal x86_64 micro-VM that boots a Linux (Alpine) kernel through
 //! the PVH boot protocol from a RAM initramfs. There is no PCI, no ACPI, and no block
 //! device: the only emulated device is a bidirectional "portb" console (backing `hvc0`).
 //!
@@ -37,11 +37,7 @@ mod whp;
 
 use ::std::path::PathBuf;
 
-use ::anyhow::{
-    Context,
-    Result,
-    bail,
-};
+use ::anyhow::{Context, Result, bail};
 use ::clap::Parser;
 use ::log::LevelFilter;
 
@@ -49,7 +45,7 @@ use ::log::LevelFilter;
 #[derive(Parser, Debug)]
 #[command(
     name = "microvm",
-    about = "Minimal single-core x86_64 KVM micro-VM that PVH-boots Linux from a RAM initramfs."
+    about = "Minimal x86_64 micro-VM that PVH-boots Linux from a RAM initramfs."
 )]
 struct Args {
     /// Path to the uncompressed `vmlinux` (PVH) kernel image.
@@ -142,6 +138,14 @@ struct Args {
     /// `--restore` the guest addressing comes from the snapshot.
     #[arg(long, value_name = "NAME")]
     net_tap: Option<String>,
+
+    /// Number of vCPUs to create (functional SMP). Default 1 (single processor). With N > 1 the
+    /// VMM writes an Intel MP table so the guest kernel enumerates all N vCPUs and brings the
+    /// application processors online via the normal INIT-SIPI-SIPI path (serviced by the in-kernel
+    /// LAPIC). Applies to cold boot only; `--restore` resumes a single processor, and `--snapshot`
+    /// is rejected with N > 1 (SMP snapshot is not implemented). Maximum 254 (8-bit APIC ids).
+    #[arg(long, default_value_t = 1)]
+    vcpus: usize,
 }
 
 /// Parses a logging level name into a [`LevelFilter`].
@@ -178,6 +182,9 @@ fn main() -> Result<()> {
 
     if args.mem == 0 {
         bail!("--mem must be greater than zero");
+    }
+    if args.vcpus == 0 {
+        bail!("--vcpus must be greater than zero");
     }
     let mem_bytes: u64 = args
         .mem
@@ -218,6 +225,21 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         bail!("--net-tap requires --net (cold boot) or --restore (a networked snapshot)");
     }
 
+    if args.vcpus > crate::boot::mptable::MAX_SUPPORTED_CPUS as usize {
+        bail!(
+            "--vcpus supports at most {} CPUs (the MP table uses 8-bit APIC ids)",
+            crate::boot::mptable::MAX_SUPPORTED_CPUS
+        );
+    }
+    if args.vcpus > 1 && args.restore.is_some() {
+        bail!("--restore is not supported with --vcpus > 1 (SMP restore is not implemented)");
+    }
+    // Snapshotting an SMP guest would dump RAM while the application processors keep mutating it,
+    // producing a torn image; SMP snapshot/restore is not implemented yet.
+    if args.vcpus > 1 && args.snapshot.is_some() {
+        bail!("--snapshot is not supported with --vcpus > 1 (SMP snapshot is not implemented)");
+    }
+
     vmm::run(vmm::Config {
         kernel: args.kernel,
         initrd: args.initrd,
@@ -235,6 +257,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         mount_size: args.mount_size,
         net,
         net_tap: args.net_tap,
+        vcpus: args.vcpus,
     })
 }
 
@@ -248,6 +271,9 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
 fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net_tap.is_some() {
         bail!("--net-tap is only available on the Linux/KVM backend (WHP uses a user-mode NAT)");
+    }
+    if args.vcpus > 1 {
+        bail!("--vcpus > 1 is only available on the Linux/KVM backend");
     }
 
     let net: Option<whp::NetConfig> = match &args.net {
