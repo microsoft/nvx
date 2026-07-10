@@ -146,6 +146,10 @@ struct NetDevice {
     /// The TX doorbell `ioeventfd`: KVM signals it when the guest kicks the transmit queue, and
     /// the transmit worker waits on it. Kept alive so the ioeventfd stays registered.
     tx_evt: Arc<::vmm_sys_util::eventfd::EventFd>,
+    /// The serialized NIC configuration header (guest/host addressing and MAC). Captured here so
+    /// a snapshot can re-emit it without consulting `--net`, which is absent on the restore path
+    /// (so a snapshot taken from a restored VM still records its NIC).
+    cfg_header: Vec<u8>,
 }
 
 /// VM-wide supervisor shared by every vCPU thread (the boot processor and all application
@@ -181,6 +185,10 @@ struct VmControl {
     ap_captured: AtomicUsize,
     /// Per-vCPU captured state (indexed by vCPU id), filled during a snapshot.
     saved: Mutex<Vec<Option<snapshot::VcpuState>>>,
+    /// The number of vCPUs in this VM (the boot processor plus the application processors). Used
+    /// by the snapshot coordinator instead of the CLI `--vcpus`, which is not meaningful on the
+    /// restore path (the processor count comes from the snapshot there).
+    vcpu_count: usize,
 }
 
 impl VmControl {
@@ -195,7 +203,13 @@ impl VmControl {
             capture_now: AtomicBool::new(false),
             ap_captured: AtomicUsize::new(0),
             saved: Mutex::new((0..vcpu_count).map(|_| None).collect()),
+            vcpu_count,
         }
+    }
+
+    /// The number of vCPUs (boot processor plus application processors) in this VM.
+    fn vcpu_count(&self) -> usize {
+        self.vcpu_count
     }
 
     /// Registers the calling vCPU thread so peers can kick it.
@@ -551,8 +565,9 @@ fn run_cold(cfg: Config) -> Result<()> {
                 ncfg.mac,
             )));
             let tap_fd = tap.raw_fd();
-            (Some(NetDevice { dev, tap_fd, tx_evt }), Some(tap))
-        }
+            let cfg_header = ncfg.save_header();
+            (Some(NetDevice { dev, tap_fd, tx_evt, cfg_header }), Some(tap))
+        },
         None => (None, None),
     };
 
@@ -716,7 +731,7 @@ fn run_ap(
             // until the boot processor completes the cut. This AP is out of `KVM_RUN` here, so its
             // register state is a consistent point in the VM-wide cut.
             if control.snapshot_pending() {
-                if let Err(e) = ap_snapshot(&ap, idx, &control) {
+                if let Err(e) = ap_snapshot(&mut ap, idx, &control) {
                     stop_vm(Some(format!("AP{idx} snapshot capture failed: {e}")));
                 }
                 break;
@@ -782,16 +797,18 @@ fn run_ap(
         control.request_fatal(format!("AP{idx} panicked"));
         control.kick_others(my_tid);
     }
+    // Clear the armed kick pointer before `ap` (and its kvm_run mmap) is dropped.
+    disarm_kick();
 }
 
 /// Quiesces an application processor for a snapshot and captures its architectural state.
 ///
-/// The vCPU is already out of `KVM_RUN` when this is called, so its register state is a
-/// consistent point (any pending MMIO/PIO read completion simply replays after restore). It
-/// announces that it has paused, waits for the boot processor to quiesce every vCPU and stop the
-/// device threads (`capture_now`), captures its own state, and then parks until the whole-VM stop
-/// signals that the cut is complete. Returns early without capturing if the snapshot is aborted.
-fn ap_snapshot(ap: &Vcpu, idx: u64, control: &VmControl) -> Result<()> {
+/// The vCPU is already out of `KVM_RUN` when this is called. It announces that it has paused,
+/// waits for the boot processor to quiesce every vCPU and stop the device threads (`capture_now`),
+/// completes any pending I/O so its register state is self-consistent, captures its own state, and
+/// then parks until the whole-VM stop signals that the cut is complete. Returns early without
+/// capturing if the snapshot is aborted.
+fn ap_snapshot(ap: &mut Vcpu, idx: u64, control: &VmControl) -> Result<()> {
     control.ap_paused.fetch_add(1, Ordering::SeqCst);
     while !control.capture_now.load(Ordering::SeqCst) {
         if control.should_stop() {
@@ -799,6 +816,7 @@ fn ap_snapshot(ap: &Vcpu, idx: u64, control: &VmControl) -> Result<()> {
         }
         thread::sleep(Duration::from_micros(200));
     }
+    ap.drain_pending_io();
     let state: snapshot::VcpuState = snapshot::VcpuState::capture(&ap.fd, idx)
         .with_context(|| format!("capturing AP{idx} state"))?;
     control.store_saved(idx as usize, state);
@@ -958,8 +976,10 @@ fn restore_net(
         "virt-net: NIC restored (guest {}/{})",
         ncfg.guest_ip, ncfg.prefix
     );
+    // Preserve the config header so a snapshot taken from this restored VM re-records the NIC.
+    let cfg_header = ncfg.save_header();
     let dev = Arc::new(Mutex::new(dev));
-    Ok(Some((NetDevice { dev, tap_fd, tx_evt }, tap)))
+    Ok(Some((NetDevice { dev, tap_fd, tx_evt, cfg_header }, tap)))
 }
 
 /// Builds the shared console sink, the portb console device, and the device bus. When
@@ -1152,6 +1172,10 @@ fn execute(
 
     console.lock().expect("console poisoned").flush();
 
+    // Clear this thread's armed kick pointer before returning (the caller drops the vCPU and its
+    // kvm_run mmap once execution ends).
+    disarm_kick();
+
     if let Some(err) = run_err {
         return Err(err);
     }
@@ -1186,7 +1210,7 @@ fn execute(
 fn coordinate_snapshot(
     cfg: &Config,
     vm_fd: &::kvm_ioctls::VmFd,
-    vcpu: &Vcpu,
+    vcpu: &mut Vcpu,
     mem: &GuestMemory,
     bus: &DeviceBus,
     console: &Arc<Mutex<Console>>,
@@ -1196,7 +1220,9 @@ fn coordinate_snapshot(
     net_rx: &mut Option<JoinHandle<()>>,
     net_tx: &mut Option<JoinHandle<()>>,
 ) -> Result<()> {
-    let n_aps: usize = cfg.vcpus.saturating_sub(1);
+    // The processor count comes from the supervisor, not the CLI `--vcpus`: on the restore path
+    // the latter is not meaningful (the count was recovered from the snapshot).
+    let n_aps: usize = control.vcpu_count().saturating_sub(1);
 
     // 1. Wait until every application processor has quiesced out of KVM_RUN. No vCPU is running
     //    the guest past this point, so none can inject an IPI into a peer's LAPIC.
@@ -1212,7 +1238,9 @@ fn coordinate_snapshot(
         let _ = handle.join();
     }
 
-    // 3. Capture the boot processor's own state (index 0).
+    // 3. Complete the boot processor's pending I/O (the OUT that triggered the snapshot) so its
+    //    register state is past that instruction, then capture it (index 0).
+    vcpu.drain_pending_io();
     let bsp: snapshot::VcpuState =
         snapshot::VcpuState::capture(&vcpu.fd, 0).context("capturing boot-processor state")?;
     control.store_saved(0, bsp);
@@ -1265,19 +1293,19 @@ fn write_snapshot(
     console.lock().expect("console poisoned").flush();
     let con_state: Vec<u8> = bus.console().lock().expect("console poisoned").snapshot();
 
-    match (net, &cfg.net) {
-        (Some(nd), Some(ncfg)) => {
+    // Serialize the NIC's config header (from the device itself, so it is present on the restore
+    // path too) followed by its transport state.
+    let net_state: Vec<u8> = match net {
+        Some(nd) => {
             let dev = nd.dev.lock().expect("virt-net poisoned");
-            let mut net_state: Vec<u8> = ncfg.save_header();
-            net_state.extend(dev.save());
-            snapshot::write(dir, states, vm_fd, mem, &con_state, &net_state)
-                .with_context(|| format!("writing snapshot to {dir:?}"))?;
-        }
-        _ => {
-            snapshot::write(dir, states, vm_fd, mem, &con_state, &[])
-                .with_context(|| format!("writing snapshot to {dir:?}"))?;
-        }
-    }
+            let mut s: Vec<u8> = nd.cfg_header.clone();
+            s.extend(dev.save());
+            s
+        },
+        None => Vec::new(),
+    };
+    snapshot::write(dir, states, vm_fd, mem, &con_state, &net_state)
+        .with_context(|| format!("writing snapshot to {dir:?}"))?;
     Ok(())
 }
 
@@ -1310,6 +1338,13 @@ impl Drop for KickGuard {
         // console-input signals harmless after the run loop has returned.
         KICK_IMMEDIATE_EXIT.with(|cell| cell.set(::core::ptr::null_mut()));
     }
+}
+
+/// Clears the calling vCPU thread's armed kick pointer. Called when the thread leaves its run
+/// loop, before its `VcpuFd` (and the `kvm_run` mmap the pointer targets) is dropped, so a late
+/// teardown `SIGRTMIN` can never write through a stale pointer to unmapped memory.
+fn disarm_kick() {
+    KICK_IMMEDIATE_EXIT.with(|c| c.set(::core::ptr::null_mut()));
 }
 
 /// Signal handler for the `SIGUSR1` console-input wake and the `SIGRTMIN` vCPU kick. It sets the

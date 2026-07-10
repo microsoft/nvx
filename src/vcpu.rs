@@ -112,6 +112,21 @@ impl Vcpu {
     /// - `entry`: Guest-physical PVH entry point (`%eip`).
     /// - `start_info_gpa`: Guest-physical address of `hvm_start_info` (`%ebx`).
     ///
+    /// Completes any pending userspace I/O before the vCPU's state is captured for a snapshot.
+    ///
+    /// When `KVM_RUN` exits for a port-I/O or MMIO access (for example the `OUT 0x605` that
+    /// triggers a snapshot, or an in-flight console `IN`), KVM has not yet finished the
+    /// instruction: it expects another `KVM_RUN` in which `complete_userspace_io` advances past
+    /// the faulting instruction and delivers any read result. Re-entering once with
+    /// `immediate_exit` set runs exactly that completion and then returns without executing
+    /// further guest code, so the register state is self-consistent and migration-visible before
+    /// capture. Mirrors cloud-hypervisor's pause step; a no-op when nothing is pending.
+    pub fn drain_pending_io(&mut self) {
+        self.fd.set_kvm_immediate_exit(1);
+        let _ = self.fd.run();
+        self.fd.set_kvm_immediate_exit(0);
+    }
+
     pub fn setup_pvh(&self, mem: &GuestMemory, entry: u64, start_info_gpa: u64) -> Result<()> {
         // Boot GDT: null descriptor, flat 32-bit code, flat 32-bit data, and a TSS.
         let gdt: [u64; 4] = [

@@ -197,12 +197,10 @@ impl VcpuState {
         let sregs = vcpu.get_sregs().context("KVM_GET_SREGS")?;
         let fpu = vcpu.get_fpu().context("KVM_GET_FPU")?;
         let xcrs = vcpu.get_xcrs().context("KVM_GET_XCRS")?;
-        // Extended (AVX/AVX-512) register state. Best effort: a host that does not support
-        // KVM_GET_XSAVE leaves the legacy FPU/XCR state above as the fallback.
-        let xsave: Vec<u8> = match vcpu.get_xsave() {
-            Ok(x) => as_bytes(&x.region).to_vec(),
-            Err(_) => Vec::new(),
-        };
+        // Extended (AVX/AVX-512) register state. A capture failure is fatal rather than silently
+        // producing an empty region that would corrupt the guest's vector registers on restore.
+        let xsave_data = vcpu.get_xsave().context("KVM_GET_XSAVE")?;
+        let xsave: Vec<u8> = as_bytes(&xsave_data.region).to_vec();
         let lapic = vcpu.get_lapic().context("KVM_GET_LAPIC")?;
         let mp_state = vcpu.get_mp_state().context("KVM_GET_MP_STATE")?;
         let vcpu_events = vcpu.get_vcpu_events().context("KVM_GET_VCPU_EVENTS")?;
@@ -306,7 +304,42 @@ impl VcpuState {
     /// `IA32_TSC` is intentionally **not** written here — it is synchronized across all vCPUs by
     /// [`Snapshot::sync_tsc`] after every processor has been restored.
     fn apply(&self, vcpu: &VcpuFd) -> Result<()> {
-        // MSRs first (EFER etc.), then the register files. Skip IA32_TSC (synced separately).
+        // Register files first.
+        vcpu.set_sregs(&self.sregs).context("KVM_SET_SREGS")?;
+        vcpu.set_regs(&self.regs).context("KVM_SET_REGS")?;
+        vcpu.set_fpu(&self.fpu).context("KVM_SET_FPU")?;
+        // Extended state, after CR4.OSXSAVE (set_sregs) and XCR0 (set_xcrs) are in place. These
+        // are hard failures: a silently dropped XCR0/XSAVE would leave the guest's AVX/AVX-512
+        // registers corrupted while restore reported success.
+        vcpu.set_xcrs(&self.xcrs).context("KVM_SET_XCRS")?;
+        if self.xsave.len() < XSAVE_REGION_BYTES {
+            bail!("snapshot xsave region is {} bytes (expected {XSAVE_REGION_BYTES})", self.xsave.len());
+        }
+        let mut xsave: kvm_xsave = kvm_xsave::default();
+        // SAFETY: `xsave.region` is `[u32; 1024]` (XSAVE_REGION_BYTES); we copy exactly that many
+        // bytes into it from a sufficiently large source, then hand it to KVM_SET_XSAVE.
+        unsafe {
+            ::core::ptr::copy_nonoverlapping(
+                self.xsave.as_ptr(),
+                xsave.region.as_mut_ptr().cast::<u8>(),
+                XSAVE_REGION_BYTES,
+            );
+            vcpu.set_xsave(&xsave).context("KVM_SET_XSAVE")?;
+        }
+
+        // Restore the LAPIC (and MP state) *before* the MSRs: KVM only honors an
+        // IA32_TSC_DEADLINE write once the local timer's LVTT is already in TSC-deadline mode, so
+        // the interrupt controller must be in place first or the saved per-CPU timer is left
+        // unarmed. This ordering matches cloud-hypervisor.
+        vcpu.set_lapic(&self.lapic).context("KVM_SET_LAPIC")?;
+        vcpu.set_mp_state(self.mp_state).context("KVM_SET_MP_STATE")?;
+
+        // TSC frequency before the MSRs that depend on the timebase.
+        if self.tsc_khz != 0 {
+            let _ = vcpu.set_tsc_khz(self.tsc_khz);
+        }
+
+        // Model-specific registers. Skip IA32_TSC (synced separately across all vCPUs).
         for &(index, data) in &self.msrs {
             if index == IA32_TSC {
                 continue;
@@ -321,31 +354,6 @@ impl VcpuState {
             let _ = vcpu.set_msrs(&msrs);
         }
 
-        if self.tsc_khz != 0 {
-            let _ = vcpu.set_tsc_khz(self.tsc_khz);
-        }
-
-        vcpu.set_sregs(&self.sregs).context("KVM_SET_SREGS")?;
-        vcpu.set_regs(&self.regs).context("KVM_SET_REGS")?;
-        vcpu.set_fpu(&self.fpu).context("KVM_SET_FPU")?;
-        let _ = vcpu.set_xcrs(&self.xcrs);
-        // Extended state, after XCR0/CR4 are in place. Best effort so a host that rejects the
-        // region falls back to the legacy FPU state restored above.
-        if self.xsave.len() >= XSAVE_REGION_BYTES {
-            let mut xsave: kvm_xsave = kvm_xsave::default();
-            // SAFETY: `xsave.region` is `[u32; 1024]` (XSAVE_REGION_BYTES); we copy exactly that
-            // many bytes into it from a sufficiently large source.
-            unsafe {
-                ::core::ptr::copy_nonoverlapping(
-                    self.xsave.as_ptr(),
-                    xsave.region.as_mut_ptr().cast::<u8>(),
-                    XSAVE_REGION_BYTES,
-                );
-                let _ = vcpu.set_xsave(&xsave);
-            }
-        }
-        vcpu.set_lapic(&self.lapic).context("KVM_SET_LAPIC")?;
-        vcpu.set_mp_state(self.mp_state).context("KVM_SET_MP_STATE")?;
         vcpu.set_vcpu_events(&self.vcpu_events).context("KVM_SET_VCPU_EVENTS")?;
         vcpu.set_debug_regs(&self.debugregs).context("KVM_SET_DEBUGREGS")?;
         Ok(())
