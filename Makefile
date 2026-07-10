@@ -9,7 +9,7 @@ BUILD_DIR ?= $(HOME)/build
 KERNEL_IMG ?= $(BUILD_DIR)/vmlinux
 PY_INITRD ?= $(BUILD_DIR)/initramfs-python.cpio.gz
 
-.PHONY: all world release build test kernel initramfs python-initramfs artifacts run boot selftest boot-test measure bench-virtfs bench-net-snapshot bench-net-snapshot-py snapshot-demo snapshot-boot clean
+.PHONY: all world release build test kernel initramfs python-initramfs artifacts run boot selftest boot-test measure bench-virtfs bench-net-snapshot bench-net-snapshot-py bench-snapshot-shell snapshot-demo snapshot-boot clean
 
 all: release
 
@@ -74,6 +74,11 @@ bench-net-snapshot: release
 # initramfs and privileges for the host TAP.
 bench-net-snapshot-py: release
 	scripts/bench-net-snapshot-py.sh
+
+# Benchmark boot-to-interactive-shell for the plain Alpine initramfs: a cold PVH boot versus a
+# restore from a snapshot captured at the shell-ready point, across 64/128/256/512 MiB of guest RAM.
+bench-snapshot-shell: release
+	scripts/bench-snapshot-shell.sh
 
 snapshot-demo: release $(KERNEL_IMG) $(PY_INITRD)
 	scripts/snapshot-demo.sh
