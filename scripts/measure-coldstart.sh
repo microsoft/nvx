@@ -12,6 +12,7 @@ KERNEL="${KERNEL:-$HOME/build/vmlinux}"
 INITRD="${INITRD:-$HOME/build/initramfs.cpio.gz}"
 MEM="${MEM:-512}"
 N="${N:-6}"
+CORES="${CORES:-1}"   # vCPUs per cold-boot run (--num-cores)
 
 [ -x "$BIN" ]    || { echo "build the VMM first: make release"; exit 1; }
 [ -f "$KERNEL" ] || { echo "missing kernel: $KERNEL"; exit 1; }
@@ -25,7 +26,7 @@ print('%8.1f ms  (min %.0f, max %.0f, n=%d)'%(v[len(v)//2],v[0],v[-1],len(v)) if
 measure() { # $1=marker  $2..=extra args
     local marker="$1"; shift
     for _ in $(seq 1 "$N"); do
-        timeout 30 "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" \
+        timeout 30 "$BIN" --num-cores "$CORES" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" \
             --exit-on-boot --boot-marker "$marker" "$@" 2>&1 \
             | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
     done | median
@@ -34,7 +35,7 @@ measure() { # $1=marker  $2..=extra args
 RUNINIT="Run /init as init process"
 BANNER="ALPINE-MICROVM-BOOT-OK"
 
-echo "cold-start (guest start -> marker), median of $N runs, ${MEM} MiB, 1 vCPU"
+echo "cold-start (guest start -> marker), median of $N runs, ${MEM} MiB, ${CORES} vCPU"
 echo
 echo "portb console (0xE9 -> hvc0), to kernel->userspace handoff, full logs:"
 printf "  loud (rendered)    : %s\n" "$(measure "$RUNINIT" --cmdline 'earlycon=xe9 console=hvc0 reboot=t panic=-1')"
@@ -48,7 +49,7 @@ FAST='clocksource=kvm-clock tsc=reliable no_timer_check random.trust_cpu=on rcup
 echo
 echo "fastest (silent, 128 MiB, tuned cmdline):"
 for _ in $(seq 1 "$N"); do
-    timeout 30 "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem 128 \
+    timeout 30 "$BIN" --num-cores "$CORES" --kernel "$KERNEL" --initrd "$INITRD" --mem 128 \
         --exit-on-boot --quiet --boot-marker "$BANNER" --cmdline "$FAST" 2>&1 \
         | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
 done | median | sed 's/^/  fast               : /'

@@ -23,6 +23,7 @@ INITRD="${INITRD:-$HOME/build/initramfs.cpio.gz}"
 SNAP="${SNAP:-$HOME/build/netsnap}"
 MEM="${MEM:-256}"
 N="${N:-10}"
+CORES="${CORES:-1}"   # vCPUs for cold boots only; snapshot capture and --restore stay single-core
 NET="${NET:-10.0.0.2/24}"
 BANNER="ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER="NETSNAP-RESTORE-OK"
@@ -44,12 +45,12 @@ cleanup_taps() {
 }
 trap cleanup_taps EXIT
 
-echo "networking + snapshot benchmark, median of $N, ${MEM} MiB, 1 vCPU, --net $NET"
+echo "networking + snapshot benchmark, median of $N, ${MEM} MiB, ${CORES} vCPU cold / 1 vCPU restore, --net $NET"
 echo
 
 echo "== cold boot -> working-network shell (kernel boot + virtio-net + ifconfig) =="
 { for _ in $(seq 1 "$N"); do
-    timeout 40 "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET" \
+    timeout 40 "$BIN" --num-cores "$CORES" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET" \
         --exit-on-boot --quiet --boot-marker "$BANNER" --cmdline "$CMDLINE" 2>&1 \
         | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
 done; } | median | sed 's/^/  cold  (guest start -> marker): /'

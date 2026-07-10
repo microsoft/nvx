@@ -18,6 +18,7 @@ KERNEL="${KERNEL:-$HOME/build/vmlinux}"
 INITRD="${INITRD:-$HOME/build/initramfs-python.cpio.gz}"
 MEM="${MEM:-512}"
 N="${N:-8}"
+CORES="${CORES:-1}"   # vCPUs for cold boots only; snapshot capture and --restore stay single-core
 NET="${NET:-10.0.0.2/24}"
 PORT="${PORT:-8099}"
 CMDLINE="earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
@@ -57,7 +58,7 @@ bench_app() { # $1=app file  $2=marker  $3=label
     echo "== $label =="
 
     { for _ in $(seq 1 "$N"); do
-        timeout 60 "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET" \
+        timeout 60 "$BIN" --num-cores "$CORES" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET" \
             --exit-on-boot --quiet --boot-marker "$marker" --cmdline "$CMDLINE pyapp=$app" 2>&1 \
             | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
     done; } | median | sed 's/^/  cold    (guest start  -> marker): /'
@@ -82,7 +83,7 @@ bench_app() { # $1=app file  $2=marker  $3=label
     rm -rf "$snap"
 }
 
-echo "networked Python snapshot benchmark, median of $N, ${MEM} MiB, 1 vCPU, --net $NET"
+echo "networked Python snapshot benchmark, median of $N, ${MEM} MiB, ${CORES} vCPU cold / 1 vCPU restore, --net $NET"
 echo
 bench_app net-hello.py  "HELLOPY-NET OK"  "(a) hello-world Python (bare interpreter + live NIC)"
 echo
