@@ -1,0 +1,275 @@
+# CI for the microvm hypervisor VMM.
+#
+# Builds the VMM, runs smoke tests, and runs benchmarks on both hypervisor backends from the
+# same codebase:
+#   * Linux / KVM   — self-hosted runner in the 'benchmark' group, labels [self-hosted, linux, x64]
+#   * Windows / WHP — self-hosted runner in the 'benchmark' group, labels [self-hosted, windows, x64]
+#
+# Runner requirements (expected to be provisioned on the org's self-hosted runners):
+#   * Linux:   a stable Rust toolchain (edition 2024, >= 1.85), Docker (to build the Linux
+#              kernel + initramfs artifacts), and an accessible /dev/kvm for the KVM backend.
+#              e2fsprogs (mke2fs) is used by the virt-fs benchmark; passwordless `sudo ip` is
+#              used by the networking benchmark (that one benchmark is skipped if unavailable).
+#   * Windows: a stable Rust toolchain for x86_64-pc-windows-msvc (edition 2024), and the
+#              Windows Hypervisor Platform feature enabled for the WHP backend.
+#
+# The kernel + initramfs are built once, in Docker, on the Linux runner and shared with the
+# Windows job (Windows cannot compile the Linux kernel natively). Build, smoke tests, and the
+# benchmark suite all run on every push/PR. A manual run (workflow_dispatch) can opt out of the
+# benchmarks via the run_benchmarks input.
+#
+# Jobs target the org's 'benchmark' runner group (provisioned with Docker + KVM on Linux and the
+# Windows Hypervisor Platform on Windows); the sibling 'test' group is not. If your org uses a
+# different runner group or labels, adjust the `runs-on:` blocks below.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_benchmarks:
+        description: Run the benchmark suite
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # -----------------------------------------------------------------------------------------------
+  # Build the Linux artifacts (PVH vmlinux + Alpine initramfs, plus the Python initramfs used by the
+  # snapshot benchmark) once, in Docker, and publish them for the Linux and Windows jobs. The kernel
+  # needs a Linux/GCC toolchain to compile, so this is the only place it is built.
+  # -----------------------------------------------------------------------------------------------
+  artifacts:
+    name: Build artifacts
+    runs-on:
+      group: benchmark
+      labels: [self-hosted, linux, x64]
+    timeout-minutes: 60
+    env:
+      RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Cache kernel + initramfs
+        id: cache-base
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/vmlinux
+            build/initramfs.cpio.gz
+          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/build-kernel.sh', 'scripts/build-initramfs.sh', 'kernel/**', 'alpine/init') }}
+
+      - name: Build kernel + initramfs (Docker)
+        if: steps.cache-base.outputs.cache-hit != 'true'
+        run: scripts/build-linux-artifacts.sh
+        env:
+          DEST: build
+
+      - name: Cache Python initramfs
+        id: cache-python
+        if: env.RUN_BENCH == 'true'
+        uses: actions/cache@v5
+        with:
+          path: build/initramfs-python.cpio.gz
+          key: microvm-python-${{ hashFiles('docker/Dockerfile', 'scripts/build-python-initramfs.sh', 'alpine/init.python', 'alpine/hello.py', 'alpine/repl.py', 'alpine/net-hello.py', 'alpine/net-pandas.py') }}
+
+      - name: Build Python initramfs (Docker)
+        if: env.RUN_BENCH == 'true' && steps.cache-python.outputs.cache-hit != 'true'
+        run: |
+          docker build \
+            -f docker/Dockerfile \
+            --target python-artifacts \
+            --output type=local,dest=build \
+            .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-artifacts
+          path: build/
+          if-no-files-found: error
+          retention-days: 7
+
+  # -----------------------------------------------------------------------------------------------
+  # Linux / KVM: build the VMM, run the shared unit tests, the KVM protected-mode self-test, the
+  # end-to-end boot smoke test, and the benchmark suite.
+  # -----------------------------------------------------------------------------------------------
+  linux:
+    name: Linux / KVM
+    needs: artifacts
+    runs-on:
+      group: benchmark
+      labels: [self-hosted, linux, x64]
+    timeout-minutes: 45
+    env:
+      RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
+      KERNEL: ${{ github.workspace }}/build/vmlinux
+      INITRD: ${{ github.workspace }}/build/initramfs.cpio.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test --release
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-artifacts
+          path: build
+
+      - name: Self-test (KVM protected-mode)
+        run: ./target/release/microvm --selftest
+
+      - name: Boot smoke test
+        run: scripts/test-boot.sh
+
+      - name: Benchmark — cold-start
+        if: env.RUN_BENCH == 'true'
+        run: scripts/measure-coldstart.sh
+        env:
+          N: 5
+
+      - name: Benchmark — virt-fs
+        if: env.RUN_BENCH == 'true'
+        run: scripts/bench-virtfs.sh
+        env:
+          N: 3
+
+      - name: Benchmark — snapshot/restore (Python)
+        if: env.RUN_BENCH == 'true'
+        run: scripts/snapshot-demo.sh
+        env:
+          N: 5
+          INITRD: ${{ github.workspace }}/build/initramfs-python.cpio.gz
+
+      - name: Benchmark — networking + snapshot
+        if: env.RUN_BENCH == 'true'
+        env:
+          N: 5
+        run: |
+          if sudo -n true 2>/dev/null; then
+            scripts/bench-net-snapshot.sh
+          else
+            echo "::notice::skipping networking benchmark (needs passwordless 'sudo ip' for the host TAP)"
+          fi
+
+  # -----------------------------------------------------------------------------------------------
+  # Windows / WHP: build the VMM, run the shared unit tests, the WHP protected-mode self-test, the
+  # end-to-end boot smoke test, and the benchmark suite. Consumes the Linux artifacts built above.
+  # -----------------------------------------------------------------------------------------------
+  windows:
+    name: Windows / WHP
+    needs: artifacts
+    runs-on:
+      group: benchmark
+      labels: [self-hosted, windows, x64]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: powershell
+    env:
+      RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test --release
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-artifacts
+          path: build
+
+      - name: Self-test (WHP protected-mode)
+        run: .\target\release\microvm.exe --selftest
+
+      - name: Boot smoke test
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $marker = 'ALPINE-MICROVM-BOOT-OK'
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = '.\target\release\microvm.exe'
+          $psi.Arguments = '--kernel build\vmlinux --initrd build\initramfs.cpio.gz --mem 512 ' +
+            '--exit-on-boot --boot-marker "' + $marker + '" ' +
+            '--cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"'
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $psi.UseShellExecute = $false
+          $p = [System.Diagnostics.Process]::Start($psi)
+          $out = $p.StandardOutput.ReadToEndAsync()
+          $err = $p.StandardError.ReadToEndAsync()
+          if (-not $p.WaitForExit(90 * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit(2000) | Out-Null }
+          $text = $err.Result + "`n" + $out.Result
+          Write-Host $text
+          if ($text -match [regex]::Escape($marker)) {
+            Write-Host "PASS: guest reached userspace ($marker)"
+          } else {
+            Write-Error "FAIL: '$marker' not found in boot output"
+            exit 1
+          }
+
+      - name: Benchmark — cold-start
+        if: env.RUN_BENCH == 'true'
+        run: .\scripts\measure-coldstart.ps1 -N 5
+
+      - name: Benchmark — virt-fs
+        if: env.RUN_BENCH == 'true'
+        run: .\scripts\bench-virtfs.ps1 -N 3
+
+      - name: Benchmark — snapshot/restore (Python)
+        if: env.RUN_BENCH == 'true'
+        run: .\scripts\snapshot-demo.ps1 -N 5
+
+      - name: Benchmark — networking + snapshot
+        if: env.RUN_BENCH == 'true'
+        run: .\scripts\bench-net-snapshot.ps1 -N 5
