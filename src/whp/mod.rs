@@ -749,12 +749,18 @@ fn execute(
     }
 
     // Report the boot time independently of the logging level so it is available even when all
-    // logging is suppressed.
+    // logging is suppressed. On the restore path it is labelled "restore" (matching the KVM
+    // backend), so benchmark scripts can distinguish a cold boot from a resume.
     if cfg.exit_on_boot {
         let console = console.lock().expect("console poisoned");
         if let Some(elapsed) = console.cold_start() {
+            let label: &str = if cfg.restore.is_some() {
+                "restore"
+            } else {
+                "cold-start"
+            };
             eprintln!(
-                "cold-start: {:.1} ms to marker ({} console bytes emitted)",
+                "{label}: {:.1} ms to marker ({} console bytes emitted)",
                 elapsed.as_secs_f64() * 1000.0,
                 console.bytes_out()
             );

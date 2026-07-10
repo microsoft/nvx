@@ -113,7 +113,7 @@ uid=0(root) gid=0(root)
 | `alpine/hello.py`, `alpine/repl.py` | Python snapshot apps: pandas/numpy benchmark and interactive REPL |
 | `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore |
 | `scripts/*.sh`        | Kernel / initramfs build and run helpers; `build-linux-artifacts.sh` drives the Docker build |
-| `scripts/*.ps1`       | Windows helpers: `build-linux-artifacts.ps1` (Docker build) and `run.ps1` (launcher) |
+| `scripts/*.ps1`       | Windows helpers: `build-linux-artifacts.ps1` (Docker build), `run.ps1` (launcher), and the benchmark mirrors `measure-coldstart.ps1` / `bench-net-snapshot.ps1` / `snapshot-demo.ps1` / `snapshot-boot.ps1` / `bench-net-snapshot-py.ps1` |
 
 ## The kernel ("modified Alpine kernel")
 
@@ -359,6 +359,25 @@ independent of the configured RAM size** (e.g. ~95 ms at 256 MiB and ~100 ms at 
 # resume from the snapshot (no kernel needed):
 .\target\release\microvm.exe --restore snap\ --mem 256
 ```
+
+### Benchmarks
+
+The Linux benchmark shell scripts have PowerShell mirrors that reproduce the same methodology on the
+WHP backend (parsing the VMM's `cold-start:` / `restore:` timing line; no `sudo` or host TAP):
+
+| Script | Mirrors | Measures |
+| --- | --- | --- |
+| `scripts\measure-coldstart.ps1` | `measure-coldstart.sh` | cold-start (guest start → boot marker) across several console configs |
+| `scripts\bench-net-snapshot.ps1` | `bench-net-snapshot.sh` | networked cold boot vs. snapshot-restore to a live-NIC shell (user-mode NAT) |
+| `scripts\snapshot-demo.ps1` | `snapshot-demo.sh` | pandas/numpy cold boot vs. restore of a warmed interpreter |
+| `scripts\snapshot-boot.ps1` | `snapshot-boot.sh` | resume an interactive Python REPL straight from a snapshot |
+| `scripts\bench-net-snapshot-py.ps1` | `bench-net-snapshot-py.sh` | networked Python (bare + numpy/pandas) cold boot vs. restore, each verifying a real HTTP round-trip |
+
+The last three need the Python initramfs (`build\initramfs-python.cpio.gz`), which
+`scripts/build-python-initramfs.sh` produces over the network (apk/pip) — build it on a networked
+machine or via the Docker toolchain and copy it in. `bench-net-snapshot-py.ps1` also needs host
+Python for its helper server (the guest GETs the gateway, which the NAT forwards to `127.0.0.1`).
+
 
 ### How it boots without KVM's device model
 
