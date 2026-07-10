@@ -1,0 +1,9 @@
+# Pin the project toolchain so builds are reproducible and succeed on any runner even when
+# rustup has no global default configured. Some of the org's self-hosted Windows runners ship
+# rustup without a default toolchain set, which makes the `rustc`/`cargo` proxies fail with
+# "rustup could not choose a version of rustc to run". rustup reads this override file and
+# auto-selects (installing if needed) the channel below, sidestepping that entirely. On runners
+# with a non-rustup toolchain this file is ignored. Edition 2024 needs Rust >= 1.85, which any
+# recent stable satisfies.
+[toolchain]
+channel = "stable"
