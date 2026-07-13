@@ -423,6 +423,13 @@ WHP backend (parsing the VMM's `cold-start:` / `restore:` timing line; no `sudo`
 | `scripts\bench-net-snapshot-py.ps1` | `bench-net-snapshot-py.sh` | networked Python (bare + numpy/pandas) cold boot vs. restore, each verifying a real HTTP round-trip |
 | `scripts\bench-virtfs.ps1`          | `bench-virtfs.sh`          | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip (pure-Rust FAT, no `mke2fs`) |
 
+CI records each merged commit's benchmark p50 values in `data/performance/`. On pull requests,
+`scripts/performance.py` compares each metric with the arithmetic mean of its latest 10 p50 values
+on the PR's base branch. A regression greater than 40% fails the `Performance regression gate`;
+lower latency and higher throughput are treated as improvements. Metrics without history are
+reported as warmups until a baseline exists. The workflow needs `contents: write` permission (and,
+if `main` is protected, a rule allowing `github-actions[bot]`) to persist the baseline commit.
+
 The three Python scripts need the Python initramfs (`build\initramfs-python.cpio.gz`); build it on
 Windows with `scripts\build-python-initramfs.ps1` (a Docker stage that downloads CPython +
 numpy/pandas). `bench-net-snapshot-py.ps1` also needs host Python for its helper server (the guest

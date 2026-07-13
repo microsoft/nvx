@@ -15,8 +15,9 @@
 #
 # The kernel + initramfs are built once, in Docker, on the Linux runner and shared with the
 # Windows job (Windows cannot compile the Linux kernel natively). Build, smoke tests, and the
-# benchmark suite all run on every push/PR. A manual run (workflow_dispatch) can opt out of the
-# benchmarks via the run_benchmarks input.
+# benchmark suite all run on every push/PR. PR benchmark p50 values are gated against the latest
+# 10-point moving average from their base branch; successful main-branch runs persist new baseline
+# data. A manual run (workflow_dispatch) can opt out of the benchmarks via the run_benchmarks input.
 #
 # Jobs target the org's 'benchmark' runner group (provisioned with Docker + KVM on Linux and the
 # Windows Hypervisor Platform on Windows); the sibling 'test' group is not. If your org uses a
@@ -36,11 +37,17 @@ on:
         default: true
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs of the same PR, but retain every merged-commit run.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+
+env:
+  PERFORMANCE_BASELINE_WINDOW: 10
+  # Match Nanvix's tolerance for noisy bare-metal benchmark runners.
+  PERFORMANCE_REGRESSION_THRESHOLD: 40
 
 jobs:
   # -----------------------------------------------------------------------------------------------
@@ -140,6 +147,9 @@ jobs:
       - name: Unit tests
         run: cargo test --release
 
+      - name: Performance tooling tests
+        run: python3 -m unittest scripts/test_performance.py
+
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
@@ -152,21 +162,27 @@ jobs:
       - name: Boot smoke test
         run: scripts/test-boot.sh
 
+      - name: Prepare performance logs
+        if: env.RUN_BENCH == 'true'
+        run: |
+          rm -rf build/performance
+          mkdir -p build/performance
+
       - name: Benchmark — cold-start
         if: env.RUN_BENCH == 'true'
-        run: scripts/measure-coldstart.sh
+        run: scripts/measure-coldstart.sh | tee build/performance/cold-start.log
         env:
           N: 5
 
       - name: Benchmark — virt-fs
         if: env.RUN_BENCH == 'true'
-        run: scripts/bench-virtfs.sh
+        run: scripts/bench-virtfs.sh | tee build/performance/virtfs.log
         env:
           N: 3
 
       - name: Benchmark — snapshot/restore (Python)
         if: env.RUN_BENCH == 'true'
-        run: scripts/snapshot-demo.sh
+        run: scripts/snapshot-demo.sh | tee build/performance/snapshot.log
         env:
           N: 5
           INITRD: ${{ github.workspace }}/build/initramfs-python.cpio.gz
@@ -177,10 +193,19 @@ jobs:
           N: 5
         run: |
           if sudo -n true 2>/dev/null; then
-            scripts/bench-net-snapshot.sh
+            scripts/bench-net-snapshot.sh | tee build/performance/network.log
           else
             echo "::notice::skipping networking benchmark (needs passwordless 'sudo ip' for the host TAP)"
           fi
+
+      - name: Upload performance logs
+        if: always() && env.RUN_BENCH == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: performance-logs-linux-kvm
+          path: build/performance/*.log
+          if-no-files-found: error
+          retention-days: 7
 
   # -----------------------------------------------------------------------------------------------
   # Windows / WHP: build the VMM, run the shared unit tests, the WHP protected-mode self-test, the
@@ -258,18 +283,198 @@ jobs:
             exit 1
           }
 
+      - name: Prepare performance logs
+        if: env.RUN_BENCH == 'true'
+        run: |
+          Remove-Item -Recurse -Force build\performance -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path build\performance | Out-Null
+
       - name: Benchmark — cold-start
         if: env.RUN_BENCH == 'true'
-        run: .\scripts\measure-coldstart.ps1 -N 5
+        run: |
+          .\scripts\measure-coldstart.ps1 -N 5 *>&1 |
+            Tee-Object -FilePath build\performance\cold-start.log
 
       - name: Benchmark — virt-fs
         if: env.RUN_BENCH == 'true'
-        run: .\scripts\bench-virtfs.ps1 -N 3
+        run: |
+          .\scripts\bench-virtfs.ps1 -N 3 *>&1 |
+            Tee-Object -FilePath build\performance\virtfs.log
 
       - name: Benchmark — snapshot/restore (Python)
         if: env.RUN_BENCH == 'true'
-        run: .\scripts\snapshot-demo.ps1 -N 5
+        run: |
+          .\scripts\snapshot-demo.ps1 -N 5 *>&1 |
+            Tee-Object -FilePath build\performance\snapshot.log
 
       - name: Benchmark — networking + snapshot
         if: env.RUN_BENCH == 'true'
-        run: .\scripts\bench-net-snapshot.ps1 -N 5
+        run: |
+          .\scripts\bench-net-snapshot.ps1 -N 5 *>&1 |
+            Tee-Object -FilePath build\performance\network.log
+
+      - name: Upload performance logs
+        if: always() && env.RUN_BENCH == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: performance-logs-windows-whp
+          path: build/performance/*.log
+          if-no-files-found: error
+          retention-days: 7
+
+  # -----------------------------------------------------------------------------------------------
+  # Pull requests compare their p50 values with the moving average stored on the PR base branch.
+  # The comparison runs on a GitHub-hosted worker so benchmark runners never need write access.
+  # -----------------------------------------------------------------------------------------------
+  performance-gate:
+    name: Performance regression gate
+    needs: [linux, windows]
+    if: >-
+      ${{
+        github.event_name == 'pull_request' &&
+        !cancelled() &&
+        needs.linux.result == 'success' &&
+        needs.windows.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download Linux / KVM performance logs
+        uses: actions/download-artifact@v7
+        with:
+          name: performance-logs-linux-kvm
+          path: performance-logs/linux-kvm
+
+      - name: Download Windows / WHP performance logs
+        uses: actions/download-artifact@v7
+        with:
+          name: performance-logs-windows-whp
+          path: performance-logs/windows-whp
+
+      - name: Collect p50 results
+        run: |
+          python3 scripts/performance.py collect \
+            --platform linux-kvm \
+            --commit "${GITHUB_SHA}" \
+            --input-dir performance-logs/linux-kvm \
+            --output-dir performance-results
+          python3 scripts/performance.py collect \
+            --platform windows-whp \
+            --commit "${GITHUB_SHA}" \
+            --input-dir performance-logs/windows-whp \
+            --output-dir performance-results \
+            --require-network
+
+      - name: Load base branch performance history
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p performance-baseline
+          git fetch --no-tags --depth=1 origin "${BASE_REF}"
+          for result in performance-results/*.csv; do
+            filename="$(basename "${result}")"
+            history="FETCH_HEAD:data/performance/${filename}"
+            if git cat-file -e "${history}" 2>/dev/null; then
+              git show "${history}" > "performance-baseline/${filename}"
+            else
+              echo "::notice::No ${filename} performance history on ${BASE_REF}; warming up the baseline"
+            fi
+          done
+
+      - name: Gate on performance regressions
+        run: |
+          python3 scripts/performance.py gate \
+            --baseline-dir performance-baseline \
+            --target-dir performance-results \
+            --window "${PERFORMANCE_BASELINE_WINDOW}" \
+            --threshold "${PERFORMANCE_REGRESSION_THRESHOLD}" \
+            --summary "${GITHUB_STEP_SUMMARY}"
+
+  # -----------------------------------------------------------------------------------------------
+  # A successful push to main (including a merged PR) appends its p50 values to the in-tree history.
+  # -----------------------------------------------------------------------------------------------
+  performance-persist:
+    name: Persist performance baseline
+    needs: [linux, windows]
+    if: >-
+      ${{
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        !cancelled() &&
+        needs.linux.result == 'success' &&
+        needs.windows.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Download Linux / KVM performance logs
+        uses: actions/download-artifact@v7
+        with:
+          name: performance-logs-linux-kvm
+          path: performance-logs/linux-kvm
+
+      - name: Download Windows / WHP performance logs
+        uses: actions/download-artifact@v7
+        with:
+          name: performance-logs-windows-whp
+          path: performance-logs/windows-whp
+
+      - name: Collect p50 results
+        run: |
+          python3 scripts/performance.py collect \
+            --platform linux-kvm \
+            --commit "${GITHUB_SHA}" \
+            --input-dir performance-logs/linux-kvm \
+            --output-dir performance-results
+          python3 scripts/performance.py collect \
+            --platform windows-whp \
+            --commit "${GITHUB_SHA}" \
+            --input-dir performance-logs/windows-whp \
+            --output-dir performance-results \
+            --require-network
+
+      - name: Persist results on main
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git checkout -B performance-persist origin/main
+            python3 scripts/performance.py persist \
+              --source-dir performance-results \
+              --history-dir data/performance
+            git add data/performance
+
+            if git diff --cached --quiet; then
+              echo "No new performance results to persist"
+              exit 0
+            fi
+
+            git commit --no-verify \
+              -m "data: update performance baselines (${GITHUB_SHA}) [skip ci]"
+
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "ERROR: failed to push performance baselines after 3 attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
