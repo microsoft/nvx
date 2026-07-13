@@ -22,7 +22,7 @@ use ::std::thread;
 use ::std::thread::JoinHandle;
 
 use ::anyhow::{Context, Result, anyhow, bail};
-use ::kvm_ioctls::{Kvm, VcpuExit};
+use ::kvm_ioctls::{Cap, Kvm, VcpuExit};
 use ::log::{debug, error, info, warn};
 
 use crate::boot::pvh;
@@ -354,6 +354,24 @@ pub fn run(cfg: Config) -> Result<()> {
     }
 }
 
+/// Adds the virtual TSC frequency unless the caller already supplied an override.
+fn append_tsc_early_khz(cmdline: &mut String, tsc_khz: u32) {
+    if cmdline
+        .split_ascii_whitespace()
+        .any(|arg| arg.starts_with("tsc_early_khz="))
+    {
+        return;
+    }
+    if cmdline
+        .as_bytes()
+        .last()
+        .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        cmdline.push(' ');
+    }
+    cmdline.push_str(&format!("tsc_early_khz={tsc_khz}"));
+}
+
 /// Cold-boots a kernel + initramfs via the PVH protocol.
 fn run_cold(cfg: Config) -> Result<()> {
     let kernel_path: &PathBuf = cfg.kernel.as_ref().context("--kernel is required")?;
@@ -401,6 +419,21 @@ fn run_cold(cfg: Config) -> Result<()> {
     // `_virtfs` owns that mapping (and, for a persistent read-write export, flushes it) and must
     // stay alive until the guest stops.
     let mut cmdline: String = cfg.cmdline.clone();
+    // Linux discovers the TSC frequency before kvm-clock is initialized. Give it KVM's actual
+    // virtual rate so it never has to rely on timing-sensitive PIT/delay-loop calibration.
+    if kvm.check_extension(Cap::GetTscKhz) {
+        let tsc_khz: u32 = vcpu
+            .fd
+            .get_tsc_khz()
+            .context("KVM_GET_TSC_KHZ failed")?;
+        if tsc_khz == 0 {
+            warn!("KVM reported a zero TSC frequency; guest will use timer calibration");
+        } else {
+            append_tsc_early_khz(&mut cmdline, tsc_khz);
+        }
+    } else {
+        warn!("KVM_GET_TSC_KHZ is unavailable; guest will use timer calibration");
+    }
     let _virtfs: Option<virtfs::VirtFs> = match &cfg.mount {
         Some(dir) => {
             let opts = virtfs::Options {
@@ -1077,4 +1110,30 @@ fn spawn_input_thread(con: Arc<Mutex<PortConsole>>, vcpu_tid: Arc<AtomicU64>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tsc_frequency_is_added_to_kernel_command_line() {
+        let mut cmdline = String::from("console=hvc0");
+        append_tsc_early_khz(&mut cmdline, 2_447_770);
+        assert_eq!(cmdline, "console=hvc0 tsc_early_khz=2447770");
+    }
+
+    #[test]
+    fn explicit_tsc_frequency_is_preserved() {
+        let mut cmdline = String::from("tsc_early_khz=123 console=hvc0");
+        append_tsc_early_khz(&mut cmdline, 2_447_770);
+        assert_eq!(cmdline, "tsc_early_khz=123 console=hvc0");
+    }
+
+    #[test]
+    fn tsc_frequency_can_start_an_empty_command_line() {
+        let mut cmdline = String::new();
+        append_tsc_early_khz(&mut cmdline, 2_447_770);
+        assert_eq!(cmdline, "tsc_early_khz=2447770");
+    }
 }
