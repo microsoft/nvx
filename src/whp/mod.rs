@@ -85,6 +85,7 @@ use crate::console::{Console, TimingMarker};
 use crate::devices::portb::PortConsole;
 use crate::devices::{DeviceBus, PioAction};
 use crate::l2bridge::{ExternalIdentity, L2BridgeConfig};
+use crate::profiler::{GuestProfiler, HostTraceSession};
 use crate::whp::emulator::{Emulator, MmioHandler};
 use crate::whp::memory::GuestMemory;
 pub use crate::whp::net::NetConfig;
@@ -138,6 +139,8 @@ pub struct Config {
     pub mount_image: Option<PathBuf>,
     /// Optional size (MiB) of the writable image (headroom for guest writes).
     pub mount_size: Option<u64>,
+    /// Optional guest/host profiling configuration.
+    pub profiling: Option<crate::profiler::ProfilingConfig>,
 }
 
 /// A running virt-net NIC: the shared device model, raw-frame backend, and snapshot-safe identity.
@@ -675,7 +678,27 @@ fn execute(
 ) -> Result<()> {
     let handle = partition.handle;
     let guard: ConsoleGuard = ConsoleGuard::new();
+    let mut guest_profiler: Option<GuestProfiler> = match &cfg.profiling {
+        Some(p) => Some(GuestProfiler::new(p.clone())?),
+        None => None,
+    };
+    let mut host_trace: Option<HostTraceSession> =
+        cfg.profiling.as_ref().and_then(HostTraceSession::start);
+    if let Some(trace) = host_trace.as_ref() {
+        info!("host profiling active: {:?}", trace.output_path);
+    }
+    if cfg
+        .profiling
+        .as_ref()
+        .map(|p| p.host_profile)
+        .unwrap_or(false)
+        && host_trace.is_none()
+    {
+        warn!("--host-profile requested, but host trace session failed to start");
+    }
     let stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let sample_pending: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let sample_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // The emulated 8259 PIC, i8253 PIT and RTC/CMOS are owned by this (the vCPU) thread — the
     // only thread that touches WHP vCPU state. The timer thread merely nudges it via
@@ -719,6 +742,14 @@ fn execute(
     );
     let timer_thread =
         spawn_timer_thread(handle, Arc::clone(&timer_pending), Arc::clone(&stop));
+    let sample_thread: Option<thread::JoinHandle<()>> = cfg.profiling.as_ref().map(|p| {
+        spawn_profiler_thread(
+            handle,
+            Arc::clone(&sample_stop),
+            Arc::clone(&sample_pending),
+            p.sample_hz,
+        )
+    });
 
     console.lock().expect("console poisoned").mark_start();
 
@@ -845,6 +876,11 @@ fn execute(
                 handle,
                 &mut prefer_timer,
             );
+            if sample_pending.swap(false, Ordering::AcqRel) {
+                if let Some(prof) = guest_profiler.as_mut() {
+                    sample_guest_whp(prof, handle, mem);
+                }
+            }
         } else if reason == WHvRunVpExitReasonUnrecoverableException {
             // A PVH/no-ACPI guest reboots via triple fault, which surfaces here. Treat it as a
             // normal termination of the VM (matching `reboot=t`).
@@ -907,7 +943,23 @@ fn execute(
             counters.driver_tx_invalid_descriptors,
         );
     }
+    sample_stop.store(true, Ordering::SeqCst);
+    if let Some(thread) = sample_thread {
+        let _ = thread.join();
+    }
+    if let Some(trace) = host_trace.as_mut() {
+        trace.stop();
+    }
     console.lock().expect("console poisoned").flush();
+    if let Some(prof) = guest_profiler.as_ref() {
+        if let Err(e) = prof.write_folded() {
+            if run_err.is_none() {
+                run_err = Some(e);
+            } else {
+                warn!("failed to write guest profile output: {e}");
+            }
+        }
+    }
 
     if let Some(err) = run_err {
         return Err(err);
@@ -1230,6 +1282,68 @@ fn set_registers(handle: WHV_PARTITION_HANDLE, pairs: &[(WHV_REGISTER_NAME, u64)
         .context("WHvSetVirtualProcessorRegisters failed")?;
     }
     Ok(())
+}
+
+fn sample_guest_whp(profiler: &mut GuestProfiler, handle: WHV_PARTITION_HANDLE, mem: &GuestMemory) {
+    // windows-bindings currently misses WHvX64RegisterRbp, so keep the numeric ID local.
+    const WHV_X64_REGISTER_RBP: WHV_REGISTER_NAME = WHV_REGISTER_NAME(0x05);
+    let names: [WHV_REGISTER_NAME; 4] = [
+        WHvX64RegisterRip,
+        WHV_X64_REGISTER_RBP,
+        WHvX64RegisterCr3,
+        WHvX64RegisterCr4,
+    ];
+    let mut values: [WHV_REGISTER_VALUE; 4] = [WHV_REGISTER_VALUE::default(); 4];
+    // SAFETY: `names`/`values` are equal-length arrays valid for the call.
+    let ok = unsafe {
+        WHvGetVirtualProcessorRegisters(
+            handle,
+            VP_INDEX,
+            names.as_ptr(),
+            names.len() as u32,
+            values.as_mut_ptr(),
+        )
+        .is_ok()
+    };
+    if !ok {
+        return;
+    }
+    // SAFETY: Every queried register was requested as a 64-bit scalar.
+    unsafe {
+        // CR4.LA57 (bit 12) selects 5-level guest paging; forward it so the walk decodes the right
+        // number of levels and uses the matching canonical-address width.
+        let la57 = values[3].Reg64 & (1 << 12) != 0;
+        profiler.record_sample(
+            values[0].Reg64,
+            values[1].Reg64,
+            values[2].Reg64,
+            la57,
+            |gpa, out| mem.read_slice(gpa, out).is_ok(),
+        );
+    }
+}
+
+fn spawn_profiler_thread(
+    handle: WHV_PARTITION_HANDLE,
+    stop: Arc<AtomicBool>,
+    sample_pending: Arc<AtomicBool>,
+    hz: u32,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let period = Duration::from_nanos(1_000_000_000u64 / u64::from(hz.max(1)));
+        while !stop.load(Ordering::SeqCst) {
+            thread::sleep(period);
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            sample_pending.store(true, Ordering::Release);
+            // SAFETY: `handle` identifies the still-live partition (the run loop joins this
+            // thread before dropping it); cancelling a run is always safe.
+            unsafe {
+                let _ = WHvCancelRunVirtualProcessor(handle, VP_INDEX, 0);
+            }
+        }
+    })
 }
 
 /// Spawns the host heartbeat: every `CONFIG_HZ` period it flags a pending timer tick and cancels

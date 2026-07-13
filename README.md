@@ -21,6 +21,7 @@ machine you are changing.
 | [Networking](doc/networking.md) | KVM TAP, WHP user-mode NAT, external HCN/AF_XDP, and network restore. |
 | [Virt-fs](doc/virtfs.md) | Read-only, ephemeral, and persistent host directory exports. |
 | [Snapshot and Restore](doc/snapshots.md) | Capture protocol, state formats, lazy RAM restore, and Python workflows. |
+| [Profiling and Flamegraphs](doc/profiling-flamegraph.md) | Guest sampling, host traces, symbol resolution, and flamegraph post-processing. |
 | [Benchmark Reference](doc/benchmark.md) | Canonical metrics, sample methodology, commands, and CI regression policy. |
 | [Contributing](doc/contributing.md) | Development checks, backend validation, documentation ownership, and pull requests. |
 

@@ -17,6 +17,7 @@ mod devices;
 #[cfg(any(target_os = "windows", test))]
 mod l2bridge;
 mod layout;
+mod profiler;
 
 // Linux backend: KVM-based VMM.
 #[cfg(target_os = "linux")]
@@ -47,6 +48,12 @@ use ::clap::Parser;
 use ::log::LevelFilter;
 
 const PVH_DEFAULT_CMDLINE: &str = "earlycon=xe9 console=hvc0 reboot=t panic=-1";
+
+/// Maximum guest sampling frequency. 8190 Hz is a sane upper bound that keeps sampling overhead
+/// and the retained-sample memory footprint bounded while still giving fine resolution; higher
+/// rates yield diminishing detail at rapidly growing cost. The guest sampler runs its own host-side
+/// timer independent of any host-trace recorder, so this cap is purely a resource guard.
+const MAX_PROFILE_HZ: u32 = 8_190;
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]
@@ -172,6 +179,35 @@ struct Args {
     /// (8-bit APIC ids).
     #[arg(long, default_value_t = 1)]
     vcpus: usize,
+
+    /// Write guest folded stacks to this file and enable guest sampling.
+    #[arg(long, value_name = "FILE")]
+    guest_profile: Option<PathBuf>,
+
+    /// Guest sampling frequency in Hertz.
+    #[arg(long, value_name = "HZ", default_value_t = 997)]
+    profile_hz: u32,
+
+    /// Guest-kernel ELF symbol file used to resolve sampled PCs. Append `@0x<base>` to give the
+    /// absolute guest runtime load address of a relocated or position-independent (PIE/ASLR) image.
+    #[arg(long, value_name = "ELF[@BASE]")]
+    kernel_symbols: Option<String>,
+
+    /// Guest-user ELF symbol file(s), comma-separated or repeated. Append `@0x<base>` per file to
+    /// give the absolute guest runtime load address of a relocated or position-independent image.
+    #[arg(long, value_name = "ELF[@BASE]", value_delimiter = ',')]
+    user_symbols: Vec<String>,
+
+    /// Capture host-side profiling traces for correlation.
+    #[arg(long)]
+    host_profile: bool,
+
+    /// Windows only: WPR recording profile for host tracing. Accepts a bundled profile name
+    /// (`NvxCpuScheduling` [default] — CPU samples plus scheduling events; or `NvxCpu` — leaner,
+    /// CPU samples only), a built-in WPR profile (e.g. `CPU`, `GeneralProfile`), or an explicit
+    /// `path.wprp!ProfileName`. Overrides the `NVX_WPR_PROFILE` environment variable.
+    #[arg(long, value_name = "NAME|FILE!NAME")]
+    wpr_profile: Option<String>,
 }
 
 /// Parses a logging level name into a [`LevelFilter`].
@@ -223,7 +259,105 @@ fn main() -> Result<()> {
         bail!("--mount-rw, --mount-image and --mount-size require --mount <dir>");
     }
 
-    dispatch(args, mem_bytes)
+    let profiling = build_profiling_config(&args)?;
+    dispatch(args, mem_bytes, profiling)
+}
+
+fn build_profiling_config(args: &Args) -> Result<Option<profiler::ProfilingConfig>> {
+    #[cfg(not(target_os = "windows"))]
+    if args.wpr_profile.is_some() {
+        bail!("--wpr-profile is only supported on Windows (it selects the WPR host-trace profile)");
+    }
+    if args.guest_profile.is_none()
+        && (args.kernel_symbols.is_some()
+            || !args.user_symbols.is_empty()
+            || args.host_profile
+            || args.wpr_profile.is_some())
+    {
+        bail!(
+            "--kernel-symbols, --user-symbols, --host-profile and --wpr-profile require \
+             --guest-profile <file>"
+        );
+    }
+    let Some(guest_profile_path) = &args.guest_profile else {
+        return Ok(None);
+    };
+    if args.wpr_profile.is_some() && !args.host_profile {
+        bail!("--wpr-profile requires --host-profile");
+    }
+    if args.profile_hz == 0 {
+        bail!("--profile-hz must be greater than zero");
+    }
+    if args.profile_hz > MAX_PROFILE_HZ {
+        bail!("--profile-hz must be at most {}", MAX_PROFILE_HZ);
+    }
+
+    let kernel_symbols = match &args.kernel_symbols {
+        Some(spec) => Some(parse_symbol_source(spec)?),
+        None => None,
+    };
+    let user_symbols = args
+        .user_symbols
+        .iter()
+        .map(|spec| parse_symbol_source(spec))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(profiler::ProfilingConfig {
+        guest_profile_path: guest_profile_path.clone(),
+        sample_hz: args.profile_hz,
+        kernel_symbols,
+        user_symbols,
+        host_profile: args.host_profile,
+        wpr_profile: args.wpr_profile.clone(),
+        run_id: generate_run_id(),
+    }))
+}
+
+/// Generates a unique provenance id for one profiling invocation.
+///
+/// Combines the wall-clock time with the process id so a guest folded profile and its host trace
+/// produced by the same run share an id that a later run cannot collide with; `full`-mode
+/// post-processing uses it to refuse a host trace that does not belong to the current run.
+fn generate_run_id() -> String {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}-{pid:x}")
+}
+
+/// Parses a `path[@base]` symbol-source specification.
+///
+/// The optional `@base` suffix (hexadecimal `0x…` or decimal) gives the *absolute* guest runtime
+/// address the image is loaded at. Symbols are relocated by `base - min(PT_LOAD.p_vaddr)`, so it
+/// resolves both a PIE (linked at 0) and a relocated `ET_EXEC` (linked at a nonzero address). It is
+/// only treated as a base when the suffix parses as a number, so paths that legitimately contain
+/// `@` are preserved.
+fn parse_symbol_source(spec: &str) -> Result<profiler::SymbolSource> {
+    if let Some((path, base)) = spec.rsplit_once('@') {
+        if !path.is_empty() {
+            if let Some(load_base) = parse_u64_auto(base) {
+                return Ok(profiler::SymbolSource {
+                    path: PathBuf::from(path),
+                    load_base: Some(load_base),
+                });
+            }
+        }
+    }
+    Ok(profiler::SymbolSource {
+        path: PathBuf::from(spec),
+        load_base: None,
+    })
+}
+
+/// Parses an unsigned integer written as `0x…` hexadecimal or plain decimal.
+fn parse_u64_auto(s: &str) -> Option<u64> {
+    let s = s.trim();
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => s.parse::<u64>().ok(),
+    }
 }
 
 /// Runs the KVM protected-mode self-test.
@@ -240,7 +374,11 @@ fn selftest(_args: &Args) -> Result<()> {
 
 /// Builds the backend configuration and runs the VM (Linux / KVM backend).
 #[cfg(target_os = "linux")]
-fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
+fn dispatch(
+    args: Args,
+    mem_bytes: u64,
+    profiling: Option<profiler::ProfilingConfig>,
+) -> Result<()> {
     if args.net_config.is_some() {
         bail!("--net-config is only available on the Windows/WHP backend");
     }
@@ -286,6 +424,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         net,
         net_tap: args.net_tap,
         vcpus: args.vcpus,
+        profiling,
     })
 }
 
@@ -296,7 +435,11 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
 /// pure-Rust FAT image. The TAP-attach option (`--net-tap`, which is Linux-specific) and
 /// multi-vCPU (`--vcpus`, KVM-only) configurations are rejected here rather than silently ignored.
 #[cfg(target_os = "windows")]
-fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
+fn dispatch(
+    args: Args,
+    mem_bytes: u64,
+    profiling: Option<profiler::ProfilingConfig>,
+) -> Result<()> {
     if args.net_tap.is_some() {
         bail!("--net-tap is only available on the Linux/KVM backend (WHP uses a user-mode NAT)");
     }
@@ -335,5 +478,6 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         mount_rw: args.mount_rw,
         mount_image: args.mount_image,
         mount_size: args.mount_size,
+        profiling,
     })
 }

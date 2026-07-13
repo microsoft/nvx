@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WPR recording profiles for nvx host profiling.
+
+  Two bundled profiles, both scoped to what the flamegraph pipeline and scheduling analysis need.
+  Compared with the built-in "CPU" profile they omit its extra user-mode event collector
+  (CLR/JScript/RPC/Win32k/networking providers) and its extra system keywords (CpuConfig,
+  MemoryInfo, Power), and they use a small fixed buffer pool. For reference, a built-in "CPU" run
+  of a sub-second nvx launch produced a roughly 900 MiB ETL that took about 350 s to extract.
+
+    NvxCpu
+      CPU sampled-profile stacks only (no context-switch or ready-thread stacks). The leanest
+      option and by far the smallest ETL; use it when trace size is the priority.
+
+    NvxCpuScheduling (default)
+      Everything in NvxCpu PLUS scheduling events and their stacks: context switch (CSwitch),
+      wakeup (ReadyThread), thread-priority changes, and ideal-processor reassignment. Enables
+      cold-start latency, preemption, wakeup, off-CPU, and CPU-affinity analysis. Note it captures
+      the same high-volume CSwitch/ReadyThread stacks as the built-in "CPU" profile, so its ETL is
+      NOT dramatically smaller than "CPU" for scheduling-heavy runs; it trades size for scheduling
+      visibility. The flamegraph pipeline still folds only SampledProfile events for the CPU graph;
+      the scheduling events are consumed separately (e.g. WPA "CPU Usage (Precise)").
+
+  nvx materializes this file next to the trace and selects NvxCpuScheduling automatically. Override
+  it with the nvx "wpr-profile" CLI flag or the NVX_WPR_PROFILE environment variable. Example
+  override values:
+    NvxCpu                          leanest, sampled-only
+    CPU                             the built-in profile
+    C:\path\my.wprp!MyProfileName   a custom profile
+
+  Ideal processor: "IdealProcessor" is a valid SystemProvider keyword (the built-in "CPU" profile
+  enables it too); NvxCpuScheduling enables it and walks stacks on the ThreadSetIdealProcessor and
+  ThreadSetUserIdealProcessor reassignment events. The switch-in target CPU is additionally carried
+  by the CSwitch and ReadyThread records (WPA derives its "Ideal CPU" columns from them).
+-->
+<WindowsPerformanceRecorder Version="1.0" Author="nvx" Comments="nvx CPU + scheduling profiles">
+  <Profiles>
+    <SystemCollector Id="SystemCollector_Nvx" Name="NvxSystemCollector">
+      <BufferSize Value="1024" />
+      <Buffers Value="256" />
+    </SystemCollector>
+
+    <!-- CPU sampled-profile stacks only. -->
+    <SystemProvider Id="SystemProvider_NvxCpu">
+      <Keywords>
+        <Keyword Value="ProcessThread" />
+        <Keyword Value="Loader" />
+        <Keyword Value="SampledProfile" />
+      </Keywords>
+      <Stacks>
+        <Stack Value="SampledProfile" />
+      </Stacks>
+    </SystemProvider>
+
+    <!-- CPU sampled-profile stacks plus scheduling: context switch, wakeup, priority, ideal CPU. -->
+    <SystemProvider Id="SystemProvider_NvxCpuScheduling">
+      <Keywords>
+        <Keyword Value="ProcessThread" />
+        <Keyword Value="Loader" />
+        <Keyword Value="SampledProfile" />
+        <Keyword Value="CSwitch" />
+        <Keyword Value="ReadyThread" />
+        <Keyword Value="ThreadPriority" />
+        <Keyword Value="IdealProcessor" />
+      </Keywords>
+      <Stacks>
+        <Stack Value="SampledProfile" />
+        <Stack Value="CSwitch" />
+        <Stack Value="ReadyThread" />
+        <Stack Value="ThreadSetPriority" />
+        <Stack Value="ThreadSetBasePriority" />
+        <Stack Value="ThreadSetIdealProcessor" />
+        <Stack Value="ThreadSetUserIdealProcessor" />
+      </Stacks>
+    </SystemProvider>
+
+    <!-- NvxCpu: sampled-only. -->
+    <Profile Id="NvxCpu.Verbose.File" Name="NvxCpu" Description="nvx CPU sampled-profile stacks"
+             LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="SystemCollector_Nvx">
+          <SystemProviderId Value="SystemProvider_NvxCpu" />
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+    <Profile Id="NvxCpu.Light.File" Name="NvxCpu" Description="nvx CPU sampled-profile stacks"
+             Base="NvxCpu.Verbose.File" LoggingMode="File" DetailLevel="Light" />
+
+    <!-- NvxCpuScheduling: sampled + scheduling (default). -->
+    <Profile Id="NvxCpuScheduling.Verbose.File" Name="NvxCpuScheduling"
+             Description="nvx CPU sampled-profile stacks plus scheduling events"
+             LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="SystemCollector_Nvx">
+          <SystemProviderId Value="SystemProvider_NvxCpuScheduling" />
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+    <Profile Id="NvxCpuScheduling.Light.File" Name="NvxCpuScheduling"
+             Description="nvx CPU sampled-profile stacks plus scheduling events"
+             Base="NvxCpuScheduling.Verbose.File" LoggingMode="File" DetailLevel="Light" />
+  </Profiles>
+</WindowsPerformanceRecorder>

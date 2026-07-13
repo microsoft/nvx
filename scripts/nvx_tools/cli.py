@@ -86,7 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         "--out",
         type=Path,
-        default=_path_default("OUT", Path.home() / "build" / "vmlinux"),
+        default=Path(os.environ["OUT"]) if "OUT" in os.environ else None,
+    )
+    kernel.add_argument(
+        "--profiling",
+        "-Profiling",
+        action="store_true",
+        default=os.environ.get("PROFILE") == "1",
+        help="build a frame-pointer kernel for guest profiling",
     )
 
     initramfs = subparsers.add_parser(
@@ -275,6 +282,13 @@ def _add_docker_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--abranch", "-Abranch", default=os.environ.get("ABRANCH", DEFAULT_ALPINE_BRANCH)
     )
+    parser.add_argument(
+        "--profiling",
+        "-Profiling",
+        action="store_true",
+        default=os.environ.get("PROFILE") == "1",
+        help="build a profiling kernel as vmlinux-profiling",
+    )
 
 
 def _add_vm_path_arguments(
@@ -355,7 +369,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         backend = select_backend(args.backend)
         if args.command == "build-kernel":
-            build_kernel(KernelBuildConfig(args.kver, args.work, args.output), backend)
+            output = args.output or Path.home() / "build" / (
+                "vmlinux-profiling" if args.profiling else "vmlinux"
+            )
+            build_kernel(
+                KernelBuildConfig(args.kver, args.work, output, args.profiling),
+                backend,
+            )
             return 0
         if args.command == "build-initramfs":
             build_initramfs(
@@ -389,7 +409,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "build-linux-artifacts":
             build_docker_artifacts(
-                DockerBuildConfig(args.dest, args.kver, args.aver, args.abranch),
+                DockerBuildConfig(
+                    args.dest,
+                    args.kver,
+                    args.aver,
+                    args.abranch,
+                    args.profiling,
+                ),
                 python_only=False,
             )
             return 0

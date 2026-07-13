@@ -49,6 +49,7 @@ class KernelBuildConfig:
     version: str = DEFAULT_KERNEL_VERSION
     work: Path = Path.home() / "build" / "kernel"
     output: Path = Path.home() / "build" / "vmlinux"
+    profiling: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class DockerBuildConfig:
     kernel_version: str = DEFAULT_KERNEL_VERSION
     alpine_version: str = DEFAULT_ALPINE_VERSION
     alpine_branch: str = DEFAULT_ALPINE_BRANCH
+    profiling: bool = False
 
 
 def _require_linux(backend: HostBackend, workflow: str) -> None:
@@ -209,7 +211,19 @@ def build_kernel(config: KernelBuildConfig, backend: HostBackend) -> None:
         with kconfig.open("a", encoding="utf-8") as output:
             output.write(KCONFIG_XE9)
 
-    shutil.copy2(REPO_ROOT / "kernel" / "config-microvm", source / ".config")
+    kernel_config = source / ".config"
+    shutil.copy2(REPO_ROOT / "kernel" / "config-microvm", kernel_config)
+    if config.profiling:
+        print(">> applying profiling kernel config overlay (frame pointers, ORC disabled)")
+        run_checked(
+            [
+                source / "scripts" / "kconfig" / "merge_config.sh",
+                "-m",
+                kernel_config,
+                REPO_ROOT / "kernel" / "config-microvm-profiling",
+            ],
+            cwd=source,
+        )
     run_checked(["make", "olddefconfig"], cwd=source)
     jobs = os.cpu_count() or 1
     print(f">> building vmlinux with {jobs} jobs")
@@ -237,7 +251,7 @@ def docker_build_command(
         "--target",
         target,
     ]
-    if target == "artifacts":
+    if target in {"artifacts", "artifacts-profiling"}:
         command.extend(["--build-arg", f"KVER={config.kernel_version}"])
     command.extend(
         [
@@ -268,7 +282,11 @@ def build_docker_artifacts(
         "docker",
         "docker was not found on PATH; install Docker with the Linux engine first",
     )
-    target = "python-artifacts" if python_only else "artifacts"
+    target = (
+        "python-artifacts"
+        if python_only
+        else "artifacts-profiling" if config.profiling else "artifacts"
+    )
     destination = _docker_destination(config.destination)
     if python_only:
         print(
@@ -276,15 +294,19 @@ def build_docker_artifacts(
             f"(Alpine {config.alpine_version})"
         )
     else:
+        kind = " profiling" if config.profiling else ""
         print(
-            f">> building Linux artifacts into '{destination}' "
+            f">> building Linux{kind} artifacts into '{destination}' "
             f"(kernel {config.kernel_version}, Alpine {config.alpine_version})"
         )
     run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
     expected = (
         ("initramfs-python.cpio.gz",)
         if python_only
-        else ("vmlinux", "initramfs.cpio.gz")
+        else (
+            "vmlinux-profiling" if config.profiling else "vmlinux",
+            "initramfs.cpio.gz",
+        )
     )
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:

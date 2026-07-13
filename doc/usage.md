@@ -92,10 +92,17 @@ built revision.
 | `--net <IP/PREFIX>` | none | Attach standalone KVM TAP or WHP user-mode NAT networking. |
 | `--net-config <json>` | none | WHP-only external AF_XDP L2Bridge manifest; conflicts with `--net`. |
 | `--net-tap <name>` | none | KVM-only preconfigured TAP; valid with `--net` or a network snapshot restore. |
+| `--guest-profile <file>` | none | Sample guest stacks and write folded output. |
+| `--profile-hz <Hz>` | `997` | Guest sampling frequency, from 1 through 8190 Hz. |
+| `--kernel-symbols <ELF[@BASE]>` | none | Resolve guest-kernel sample addresses. |
+| `--user-symbols <ELF[@BASE]>` | none | Resolve guest-user addresses; repeatable or comma-separated. |
+| `--host-profile` | off | Capture a correlated host trace alongside the guest profile. |
+| `--wpr-profile <name>` | platform default | WHP-only WPR profile used with `--host-profile`. |
 | `--selftest` | off | Exercise protected-mode setup without booting Linux. |
 
 See [Networking](networking.md), [Virt-fs](virtfs.md), and
-[Snapshot and Restore](snapshots.md) for the grouped feature options and platform differences.
+[Snapshot and Restore](snapshots.md) for the grouped feature options and platform differences. See
+[Profiling and Flamegraphs](profiling-flamegraph.md) for capture and post-processing workflows.
 
 ## Console and logging
 

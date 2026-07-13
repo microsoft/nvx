@@ -74,6 +74,24 @@ FROM scratch AS artifacts
 COPY --from=kernel /out/vmlinux /vmlinux
 COPY --from=initramfs /out/initramfs.cpio.gz /initramfs.cpio.gz
 
+# ---- Profiling kernel: same build as `kernel` but with PROFILE forced on, so the profiling
+#      artifact target below can never be produced from a standard ORC kernel. ----
+FROM base AS kernel-profiling
+ARG KVER=6.18.38
+ENV HOME=/root \
+    WORK=/build/kernel \
+    OUT=/out/vmlinux-profiling \
+    KVER=${KVER}
+RUN mkdir -p /out && python3 /repo/scripts/nvx.py build-kernel --profiling
+
+# ---- Profiling artifacts: the profiling kernel under a *distinct* name (vmlinux-profiling) so a
+#      `--output` export never overwrites an existing standard vmlinux. Build with
+#      `--target artifacts-profiling`; the dedicated `kernel-profiling` stage forces PROFILE=1, so
+#      this target is self-enforcing and needs no `--build-arg PROFILE=1`. ----
+FROM scratch AS artifacts-profiling
+COPY --from=kernel-profiling /out/vmlinux-profiling /vmlinux-profiling
+COPY --from=initramfs /out/initramfs.cpio.gz /initramfs.cpio.gz
+
 # ---- Python artifacts: just the Python initramfs (built on demand; needs network). ----
 FROM scratch AS python-artifacts
 COPY --from=python-initramfs /out/initramfs-python.cpio.gz /initramfs-python.cpio.gz

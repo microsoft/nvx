@@ -30,7 +30,7 @@ from nvx_tools.benchmarks import (
     parse_dd_rate,
 )
 from nvx_tools.common import CommandResult, REPO_ROOT, ScriptError, remove_tree
-from nvx_tools.cli import build_parser
+from nvx_tools.cli import build_parser, main as cli_main
 from nvx_tools.vm import (
     BOOT_MARKER,
     BootTestConfig,
@@ -214,6 +214,18 @@ class BackendTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_profiling_kernel_uses_distinct_default_output(self) -> None:
+        with (
+            patch("nvx_tools.cli.select_backend", return_value=LinuxBackend()),
+            patch("nvx_tools.cli.build_kernel") as build_kernel,
+        ):
+            result = cli_main(["build-kernel", "--profiling"])
+
+        self.assertEqual(result, 0)
+        config = build_kernel.call_args.args[0]
+        self.assertTrue(config.profiling)
+        self.assertEqual(config.output.name, "vmlinux-profiling")
+
     def test_docker_artifact_command_carries_all_version_inputs(self) -> None:
         config = DockerBuildConfig(Path("output"), "6.18.99", "3.24.9", "v3.24")
         command = [str(value) for value in docker_build_command(config, "artifacts")]
@@ -234,6 +246,33 @@ class BuildTests(unittest.TestCase):
 
         self.assertNotIn("KVER=unused", command)
         self.assertIn("AVER=3.24.9", command)
+
+    @patch("nvx_tools.build.require_tool")
+    @patch("nvx_tools.build.run_checked")
+    def test_profiling_docker_build_selects_distinct_target(
+        self, run: object, require: object
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            (destination / "vmlinux-profiling").write_bytes(b"kernel")
+            (destination / "initramfs.cpio.gz").write_bytes(b"initrd")
+
+            build_docker_artifacts(
+                DockerBuildConfig(
+                    destination,
+                    "6.18.99",
+                    "3.24.9",
+                    "v3.24",
+                    profiling=True,
+                ),
+                python_only=False,
+            )
+
+        command = [str(value) for value in run.call_args.args[0]]
+        self.assertEqual(
+            command[command.index("--target") + 1], "artifacts-profiling"
+        )
+        self.assertIn("KVER=6.18.99", command)
 
     @patch("nvx_tools.build.require_tool")
     @patch("nvx_tools.build.run_checked")

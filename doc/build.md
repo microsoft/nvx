@@ -47,6 +47,14 @@ cargo build --release
 checks the result for the Xen PVH entry note. `build-initramfs` downloads the Alpine mini root
 filesystem, adds the NVX PID 1 and snapshot helper, and packs a gzipped `newc` cpio archive.
 
+For guest stack sampling, build a frame-pointer kernel with the profiling overlay:
+
+```console
+python3 scripts/nvx.py build-kernel --profiling
+```
+
+This writes `$HOME/build/vmlinux-profiling` without replacing the ordinary ORC-enabled kernel.
+
 ## Build guest artifacts with Docker
 
 The portable build uses `docker/Dockerfile` and exports only the finished artifacts:
@@ -61,6 +69,9 @@ It produces:
 build/vmlinux
 build/initramfs.cpio.gz
 ```
+
+Pass `--profiling` to export `build/vmlinux-profiling` and the same initramfs through the dedicated
+`artifacts-profiling` Docker target.
 
 The Docker kernel and initramfs stages can build in parallel and reuse normal Docker layer caches.
 On Windows this is the standard guest-artifact build. On Linux, pass these non-default paths to the
@@ -167,6 +178,7 @@ Current defaults are Linux `6.18.38`, Alpine `3.24.1`, and Alpine branch `v3.24`
 | `WORK`, `--work` | Download and intermediate build directory. |
 | `OUT`, `--output` | Output file for a native artifact build. |
 | `DEST`, `--dest` | Docker export directory. |
+| `PROFILE=1`, `--profiling` | Build the profiling kernel as `vmlinux-profiling`. |
 | `BUILD_DIR` | Makefile artifact directory, defaulting to `$HOME/build`. |
 | `KERNEL_IMG`, `INITRD_IMG`, `PY_INITRD` | Individual Makefile artifact paths. |
 | `CARGO`, `PYTHON` | Executables used by the Makefile. |

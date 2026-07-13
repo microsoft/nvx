@@ -33,6 +33,7 @@ use crate::devices::{DeviceBus, PioAction};
 use crate::irq;
 use crate::memory::GuestMemory;
 use crate::net::{self, VirtioNet};
+use crate::profiler::{GuestProfiler, HostTraceSession};
 use crate::snapshot::{self, Snapshot};
 use crate::vcpu::Vcpu;
 use crate::virtfs;
@@ -133,6 +134,8 @@ pub struct Config {
     /// VMM writes an Intel MP table and brings up N-1 application processors so the guest runs
     /// functional SMP.
     pub vcpus: usize,
+    /// Optional guest/host profiling configuration.
+    pub profiling: Option<crate::profiler::ProfilingConfig>,
 }
 
 /// A running virt-net NIC: the shared device model plus the TAP descriptor the receive thread
@@ -167,6 +170,10 @@ struct VmControl {
     stop: AtomicBool,
     /// The first fatal error reported by any vCPU (a normal shutdown leaves this `None`).
     fatal: Mutex<Option<String>>,
+    /// A best-effort error (currently a guest-profile write failure) reported by the boot vCPU
+    /// after its run loop ended. Kept separate from `fatal` so it is reconciled last and can never
+    /// mask a real vCPU (boot or AP) fatal.
+    deferred_err: Mutex<Option<String>>,
     /// Registered vCPU thread ids, used to force-exit peers from `KVM_RUN` via `SIGRTMIN`.
     tids: Mutex<Vec<u64>>,
     /// Start gate: application-processor threads park until the boot processor releases them, so
@@ -197,6 +204,7 @@ impl VmControl {
         Self {
             stop: AtomicBool::new(false),
             fatal: Mutex::new(None),
+            deferred_err: Mutex::new(None),
             tids: Mutex::new(Vec::new()),
             released: AtomicBool::new(false),
             snapshot_requested: AtomicBool::new(false),
@@ -285,6 +293,21 @@ impl VmControl {
             );
         }
         Ok(out)
+    }
+
+    /// Records a best-effort deferred error (kept only if it is the first one). Unlike
+    /// `request_fatal`, this neither requests a stop nor competes with vCPU fatals; the caller
+    /// reconciles it last, so a profile-write failure can never mask a real vCPU error.
+    fn set_deferred_err(&self, msg: String) {
+        let mut deferred = self.deferred_err.lock().expect("vm control poisoned");
+        if deferred.is_none() {
+            *deferred = Some(msg);
+        }
+    }
+
+    /// Takes the recorded best-effort deferred error, if any.
+    fn take_deferred_err(&self) -> Option<String> {
+        self.deferred_err.lock().expect("vm control poisoned").take()
     }
 
     /// Sends `SIGRTMIN` to every registered vCPU thread except `self_tid`, forcing them out of a
@@ -672,12 +695,17 @@ fn run_cold(cfg: Config) -> Result<()> {
     // any guest memory or VM resources can be released.
     ap_threads.stop_and_join();
 
-    // Surface a fatal condition reported by any vCPU (the boot processor's own error already
-    // flows through `result`); a clean guest shutdown/reset leaves no fatal recorded.
+    // Reconcile the run outcome in priority order: the boot processor's own error (via `result`)
+    // first, then a fatal reported by any AP, and finally a best-effort deferred error (e.g. a
+    // guest-profile write failure) — so a profile-write error can never mask a real vCPU fatal.
+    // A clean guest shutdown/reset leaves nothing recorded.
     match (result, control.take_fatal()) {
         (Err(e), _) => Err(e),
         (Ok(()), Some(msg)) => Err(anyhow!("vcpu fatal: {msg}")),
-        (Ok(()), None) => Ok(()),
+        (Ok(()), None) => match control.take_deferred_err() {
+            Some(msg) => Err(anyhow!("{msg}")),
+            None => Ok(()),
+        },
     }
 }
 
@@ -949,8 +977,10 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
         );
     }
 
-    // Release the application processors and run the boot processor.
-    control.release();
+    // Run the boot processor. The application processors were spawned above but remain parked on
+    // the `control` gate; `execute` releases them only after the guest profiler, host trace, and
+    // sampler thread are fully armed (see the `resumed` release below), so a restored AP cannot run
+    // ahead — or emit the completion marker — before profiling capture has begun.
     let result = execute(
         &cfg,
         &vm_fd,
@@ -966,10 +996,16 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     // Stop the VM and force any application processor still in `KVM_RUN` to exit, then join.
     ap_threads.stop_and_join();
 
+    // Reconcile in the same priority order as the cold-start path: the boot processor's own error
+    // first, then any AP fatal, and finally a best-effort deferred error (e.g. a guest-profile
+    // write failure) so it can never mask a real vCPU fatal.
     match (result, control.take_fatal()) {
         (Err(e), _) => Err(e),
         (Ok(()), Some(msg)) => Err(anyhow!("vcpu fatal: {msg}")),
-        (Ok(()), None) => Ok(()),
+        (Ok(()), None) => match control.take_deferred_err() {
+            Some(msg) => Err(anyhow!("{msg}")),
+            None => Ok(()),
+        },
     }
 }
 
@@ -1045,7 +1081,34 @@ fn execute(
     let tty_guard: TtyGuard = TtyGuard::new();
     // The kick handler must already be installed by the caller (before any AP thread is spawned).
     let _kick_guard: KickGuard = KickGuard::arm(vcpu);
+    let mut guest_profiler: Option<GuestProfiler> = match &cfg.profiling {
+        Some(p) => Some(GuestProfiler::new(p.clone())?),
+        None => None,
+    };
+    if guest_profiler.is_some() && cfg.vcpus > 1 {
+        warn!(
+            "guest profiling samples only the boot processor; the other {} vCPU(s) run \
+             unprofiled",
+            cfg.vcpus - 1
+        );
+    }
+    let mut host_trace: Option<HostTraceSession> =
+        cfg.profiling.as_ref().and_then(HostTraceSession::start);
+    if let Some(trace) = host_trace.as_ref() {
+        info!("host profiling active: {:?}", trace.output_path);
+    }
+    if cfg
+        .profiling
+        .as_ref()
+        .map(|p| p.host_profile)
+        .unwrap_or(false)
+        && host_trace.is_none()
+    {
+        warn!("--host-profile requested, but host trace session failed to start");
+    }
     let vcpu_tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let sample_pending: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let sample_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let defer_input: bool = cfg.defer_stdin_until_boot && tty_guard.saved.is_none() && !resumed;
     spawn_input_thread(
         bus.console(),
@@ -1057,6 +1120,14 @@ fn execute(
     let self_tid: u64 = unsafe { ::libc::pthread_self() } as u64;
     vcpu_tid.store(self_tid, Ordering::SeqCst);
     control.register(self_tid);
+    let sample_thread: Option<JoinHandle<()>> = cfg.profiling.as_ref().map(|p| {
+        spawn_sampler_thread(
+            Arc::clone(&vcpu_tid),
+            Arc::clone(&sample_stop),
+            Arc::clone(&sample_pending),
+            p.sample_hz,
+        )
+    });
 
     // Start the virt-net receive and transmit threads, if a NIC is attached. The receive thread
     // feeds host frames into the guest; the transmit thread drains the TX queue when the guest
@@ -1080,6 +1151,15 @@ fn execute(
 
     console.lock().expect("console poisoned").mark_start();
 
+    // On the restore path the application processors were spawned parked on the `control` gate;
+    // release them now — after the guest profiler, host trace, and sampler thread above are armed —
+    // so their execution (and the guest's completion marker) falls inside the profiling window
+    // rather than racing ahead of capture. The cold-start path releases its APs before `execute`
+    // (they then wait on the boot processor's INIT/SIPI sequence, so no early work is lost).
+    if resumed {
+        control.release();
+    }
+
     // Deferred KVM_RUN error: stored so the receive thread is still joined on the way out.
     let mut run_err: Option<::anyhow::Error> = None;
 
@@ -1097,6 +1177,12 @@ fn execute(
         // A snapshot has been requested (by this vCPU or an application processor): the boot
         // processor coordinates a consistent VM-wide cut, then the VM stops.
         if control.snapshot_pending() {
+            // The guest-sampling tick (SIGUSR2) is installed without SA_RESTART, so if it fires
+            // while this thread is inside a snapshot ioctl (KVM_GET_*/KVM_SET_*) the ioctl would
+            // fail with EINTR and corrupt the snapshot. Block it for the whole coordinated
+            // snapshot; a tick that arrives meanwhile stays pending and is delivered harmlessly
+            // once the guard unblocks it. Only armed when profiling is active.
+            let _sample_guard = cfg.profiling.as_ref().map(|_| SampleSignalGuard::block());
             match coordinate_snapshot(
                 cfg,
                 vm_fd,
@@ -1192,7 +1278,13 @@ fn execute(
             Ok(other) => debug!("unhandled vcpu exit: {other:?}"),
             // A host-thread signal (console input, or the supervisor's stop kick) interrupted
             // KVM_RUN: loop to re-check the stop/boot conditions and re-enter the guest.
-            Err(e) if e.errno() == ::libc::EINTR => {}
+            Err(e) if e.errno() == ::libc::EINTR => {
+                if sample_pending.swap(false, Ordering::AcqRel) {
+                    if let Some(prof) = guest_profiler.as_mut() {
+                        sample_guest(prof, vcpu, mem);
+                    }
+                }
+            }
             Err(e) => {
                 run_err = Some(anyhow!("KVM_RUN failed: {e}"));
                 control.request_stop();
@@ -1218,8 +1310,27 @@ fn execute(
     if let Some(handle) = net_tx {
         let _ = handle.join();
     }
+    sample_stop.store(true, Ordering::SeqCst);
+    if let Some(handle) = sample_thread {
+        let _ = handle.join();
+    }
+    if let Some(trace) = host_trace.as_mut() {
+        trace.stop();
+    }
 
     console.lock().expect("console poisoned").flush();
+    if let Some(prof) = guest_profiler.as_ref() {
+        if let Err(e) = prof.write_folded() {
+            warn!("failed to write guest profile output: {e}");
+            // Surface the failure as the process result only when this vCPU did not itself error.
+            // Recorded as a *deferred* error (not `run_err`/`fatal`) so the caller reconciles it
+            // last, after joining the APs — a best-effort profile write can never mask a boot or
+            // AP fatal.
+            if run_err.is_none() {
+                control.set_deferred_err(format!("failed to write guest profile output: {e}"));
+            }
+        }
+    }
 
     // Clear this thread's armed kick pointer before returning (the caller drops the vCPU and its
     // kvm_run mmap once execution ends).
@@ -1250,6 +1361,19 @@ fn execute(
         }
     }
     Ok(())
+}
+
+fn sample_guest(profiler: &mut GuestProfiler, vcpu: &Vcpu, mem: &GuestMemory) {
+    let regs = vcpu.fd.get_regs();
+    let sregs = vcpu.fd.get_sregs();
+    if let (Ok(regs), Ok(sregs)) = (regs, sregs) {
+        // CR4.LA57 (bit 12) selects 5-level guest paging; forward it so the walk decodes the right
+        // number of levels and uses the matching canonical-address width.
+        let la57 = sregs.cr4 & (1 << 12) != 0;
+        profiler.record_sample(regs.rip, regs.rbp, sregs.cr3, la57, |gpa, out| {
+            mem.read_slice(gpa, out).is_ok()
+        });
+    }
 }
 
 /// Coordinates a consistent, VM-wide snapshot from the boot processor.
@@ -1460,8 +1584,9 @@ fn dump_vcpu(vcpu: &Vcpu) {
 
 /// Installs the VMM's signal handlers:
 ///
-/// - a `SIGUSR1`/`SIGRTMIN` handler (without `SA_RESTART`) that sets `immediate_exit` and
-///   interrupts `KVM_RUN`; and
+/// - a `SIGUSR1`/`SIGRTMIN`/`SIGUSR2` handler (without `SA_RESTART`) that sets `immediate_exit`
+///   and interrupts `KVM_RUN` (`SIGUSR1` for console input, `SIGRTMIN` for the vCPU kick, and
+///   `SIGUSR2` for the guest profiler's sampling tick); and
 /// - `SIG_IGN` for the job-control stop signals `SIGTTIN`/`SIGTTOU`.
 ///
 /// The latter matters whenever the VMM runs in a **background process group** — for example
@@ -1473,8 +1598,8 @@ fn dump_vcpu(vcpu: &Vcpu) {
 /// not use).
 fn install_signal_handlers() {
     // SAFETY: We install an async-signal-safe handler (a single volatile byte write via a
-    // thread-local pointer) for SIGUSR1 and SIGRTMIN and set SIGTTIN/SIGTTOU to SIG_IGN; all
-    // operate on process-global signal dispositions.
+    // thread-local pointer) for SIGUSR1, SIGRTMIN and SIGUSR2 and set SIGTTIN/SIGTTOU to
+    // SIG_IGN; all operate on process-global signal dispositions.
     unsafe {
         let mut action: ::libc::sigaction = ::core::mem::zeroed();
         action.sa_sigaction = kick_handler as *const () as usize;
@@ -1486,6 +1611,10 @@ fn install_signal_handlers() {
         // the stop request). A real-time signal is used for the kick, matching cloud-hypervisor /
         // OpenVMM, so it never collides with SIGUSR1's console-input role.
         ::libc::sigaction(sigrtmin(), &action, ::core::ptr::null_mut());
+        // SIGUSR2: the guest profiler's sampling tick. It reuses the kick handler so a sampling
+        // signal forces the boot vCPU out of KVM_RUN (via EINTR / immediate_exit) exactly like a
+        // console wake, letting the run loop capture the guest register/stack state.
+        ::libc::sigaction(::libc::SIGUSR2, &action, ::core::ptr::null_mut());
 
         let mut ignore: ::libc::sigaction = ::core::mem::zeroed();
         ignore.sa_sigaction = ::libc::SIG_IGN;
@@ -1535,6 +1664,62 @@ fn spawn_input_thread(
             }
         }
     });
+}
+
+/// Spawns the guest-sampling timer thread. It periodically interrupts the boot vCPU with
+/// `SIGUSR2` so the run loop samples the guest register/stack state at roughly `hz` Hertz. Only
+/// the boot processor is sampled; application processors run unprofiled.
+fn spawn_sampler_thread(
+    vcpu_tid: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    sample_pending: Arc<AtomicBool>,
+    hz: u32,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let period = Duration::from_nanos(1_000_000_000u64 / u64::from(hz.max(1)));
+        while !stop.load(Ordering::Relaxed) {
+            thread::sleep(period);
+            sample_pending.store(true, Ordering::Release);
+            let tid: u64 = vcpu_tid.load(Ordering::SeqCst);
+            if tid != 0 {
+                // SAFETY: `tid` identifies the live boot vCPU thread; SIGUSR2 runs the installed
+                // kick handler and interrupts KVM_RUN.
+                unsafe {
+                    ::libc::pthread_kill(tid as ::libc::pthread_t, ::libc::SIGUSR2);
+                }
+            }
+        }
+    })
+}
+
+/// RAII guard that blocks the guest-sampling signal (`SIGUSR2`) on the current thread and unblocks
+/// it on drop. Used to fence the boot vCPU's snapshot ioctls off from sampling ticks so they are
+/// never interrupted (the sampling handler has no `SA_RESTART`).
+struct SampleSignalGuard;
+
+impl SampleSignalGuard {
+    fn block() -> Self {
+        // SAFETY: builds a one-signal set and adjusts only this thread's block mask.
+        unsafe {
+            let mut set: ::libc::sigset_t = ::core::mem::zeroed();
+            ::libc::sigemptyset(&mut set);
+            ::libc::sigaddset(&mut set, ::libc::SIGUSR2);
+            ::libc::pthread_sigmask(::libc::SIG_BLOCK, &set, ::core::ptr::null_mut());
+        }
+        SampleSignalGuard
+    }
+}
+
+impl Drop for SampleSignalGuard {
+    fn drop(&mut self) {
+        // SAFETY: builds a one-signal set and adjusts only this thread's block mask.
+        unsafe {
+            let mut set: ::libc::sigset_t = ::core::mem::zeroed();
+            ::libc::sigemptyset(&mut set);
+            ::libc::sigaddset(&mut set, ::libc::SIGUSR2);
+            ::libc::pthread_sigmask(::libc::SIG_UNBLOCK, &set, ::core::ptr::null_mut());
+        }
+    }
 }
 
 #[cfg(test)]

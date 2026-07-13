@@ -1,0 +1,12 @@
+# Cargo configuration for the microvm VMM.
+#
+# Force frame pointers on Linux builds so `perf record -g` (the default frame-pointer call-graph
+# unwinder) can walk the VMM's host stacks when `--host-profile` is used. The release profile
+# enables LTO (see Cargo.toml) which otherwise omits frame pointers, leaving host call stacks
+# shallow. Frame pointers cost ~1% and one register — negligible for a micro-VM VMM, and the same
+# frame-pointer discipline the guest profiler already relies on.
+#
+# Scoped to Linux only: Windows/WHP host stackwalking uses PDB unwind information (not frame
+# pointers), so the Windows binary is intentionally left unchanged.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "force-frame-pointers=yes"]
