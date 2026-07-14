@@ -17,28 +17,21 @@
 //! - NATs guest **UDP** (including DNS) out through host `UdpSocket`s and relays replies back;
 //! - NATs guest **TCP** out through host `TcpStream`s, speaking TCP to the guest itself.
 //!
-//! Frames flow over two channels: [`Slirp::send_from_guest`] (guest -> NAT, called on the vCPU
-//! thread) and the [`SlirpRx`] receiver (NAT -> guest, drained by the RX pump thread).
+//! Frames flow over bounded channels: [`FrameBackend::try_send`] (guest -> NAT, called on the
+//! vCPU thread) and [`FrameBackend::recv_timeout`] (NAT -> guest, drained by the RX pump thread).
 //!
 
 use ::std::net::Ipv4Addr;
 use ::std::sync::Arc;
-use ::std::sync::atomic::{
-    AtomicBool,
-    Ordering,
-};
-use ::std::sync::mpsc::{
-    Receiver,
-    Sender,
-    channel,
-};
-use ::std::thread::{
-    self,
-    JoinHandle,
-};
+use ::std::sync::Mutex;
+use ::std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use ::std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use ::std::thread::{self, JoinHandle};
 use ::std::time::Duration;
 
-use crate::whp::net::NetConfig;
+use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters, NetConfig};
+
+const FRAME_QUEUE_DEPTH: usize = 256;
 
 mod proto;
 mod tcp;
@@ -51,47 +44,43 @@ const ETH_ARP: u16 = 0x0806;
 /// EtherType for IPv4.
 const ETH_IPV4: u16 = 0x0800;
 
-/// Handle held by the device to push guest frames into the NAT (non-blocking).
+/// The standalone SLIRP implementation of the generic raw-frame backend.
 pub struct Slirp {
-    to_nat: Sender<Vec<u8>>,
+    to_nat: SyncSender<Vec<u8>>,
+    to_guest: Mutex<Receiver<Vec<u8>>>,
+    stop: Arc<AtomicBool>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    tx_accepted: AtomicU64,
+    tx_dropped: AtomicU64,
+    rx_received: AtomicU64,
 }
 
 impl Slirp {
-    /// Hands one guest-transmitted Ethernet frame to the NAT worker. Never blocks the vCPU thread.
-    pub fn send_from_guest(&self, frame: Vec<u8>) {
-        let _ = self.to_nat.send(frame);
-    }
-}
-
-/// The NAT -> guest side: the RX pump drains this and scatters each frame into the RX virtqueue.
-pub struct SlirpRx {
-    /// Frames the NAT has produced for the guest.
-    pub to_guest: Receiver<Vec<u8>>,
-    /// Worker stop flag and join handle, so the pump can shut the worker down cleanly.
-    stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl SlirpRx {
-    /// Signals the worker to stop and joins it.
-    pub fn shutdown(&mut self) {
+    fn shutdown_worker(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(h) = self.worker.take() {
+        if let Some(h) = self
+            .worker
+            .lock()
+            .expect("slirp worker lock poisoned")
+            .take()
+        {
             let _ = h.join();
         }
     }
 }
 
-impl Drop for SlirpRx {
+impl Drop for Slirp {
     fn drop(&mut self) {
-        self.shutdown();
+        self.shutdown_worker();
     }
 }
 
-/// Starts the NAT worker for `cfg`, returning the device-side handle and the RX side.
-pub fn start(cfg: &NetConfig) -> (Slirp, SlirpRx) {
-    let (to_nat, from_guest): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
-    let (to_guest_tx, to_guest): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
+/// Starts the NAT worker for `cfg`.
+pub fn start(cfg: &NetConfig) -> Arc<Slirp> {
+    let (to_nat, from_guest): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) =
+        sync_channel(FRAME_QUEUE_DEPTH);
+    let (to_guest_tx, to_guest): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) =
+        sync_channel(FRAME_QUEUE_DEPTH);
     let stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     let worker_cfg: NetConfig = cfg.clone();
@@ -110,8 +99,8 @@ pub fn start(cfg: &NetConfig) -> (Slirp, SlirpRx) {
                         while let Ok(f) = from_guest.try_recv() {
                             nat.on_guest_frame(&f);
                         }
-                    },
-                    Err(::std::sync::mpsc::RecvTimeoutError::Timeout) => {},
+                    }
+                    Err(::std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(::std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
                 nat.poll_sockets();
@@ -119,21 +108,78 @@ pub fn start(cfg: &NetConfig) -> (Slirp, SlirpRx) {
         })
         .expect("spawning slirp worker");
 
-    (
-        Slirp { to_nat },
-        SlirpRx {
-            to_guest,
-            stop,
-            worker: Some(worker),
-        },
-    )
+    Arc::new(Slirp {
+        to_nat,
+        to_guest: Mutex::new(to_guest),
+        stop,
+        worker: Mutex::new(Some(worker)),
+        tx_accepted: AtomicU64::new(0),
+        tx_dropped: AtomicU64::new(0),
+        rx_received: AtomicU64::new(0),
+    })
+}
+
+impl FrameBackend for Slirp {
+    fn try_send(&self, frame: Vec<u8>) -> bool {
+        match self.to_nat.try_send(frame) {
+            Ok(()) => {
+                self.tx_accepted.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(_) => {
+                self.tx_dropped.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        }
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Option<Vec<u8>> {
+        match self
+            .to_guest
+            .lock()
+            .expect("slirp RX lock poisoned")
+            .recv_timeout(timeout)
+        {
+            Ok(frame) => {
+                self.rx_received.fetch_add(1, Ordering::Relaxed);
+                Some(frame)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn health(&self) -> BackendHealth {
+        if self.stop.load(Ordering::Acquire) {
+            BackendHealth::Stopped
+        } else {
+            BackendHealth::Ready
+        }
+    }
+
+    fn counters(&self) -> FrameCounters {
+        FrameCounters {
+            guest_tx_accepted: self.tx_accepted.load(Ordering::Relaxed),
+            guest_tx_dropped: self.tx_dropped.load(Ordering::Relaxed),
+            guest_rx_received: self.rx_received.load(Ordering::Relaxed),
+            ..Default::default()
+        }
+    }
+
+    fn quiesce(&self, _timeout: Duration) -> ::anyhow::Result<()> {
+        self.stop.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn shutdown(&self) {
+        self.shutdown_worker();
+    }
 }
 
 /// The NAT state machine, owned by the worker thread.
 struct Nat {
     cfg: NetConfig,
     /// Sink for frames destined to the guest.
-    to_guest: Sender<Vec<u8>>,
+    to_guest: SyncSender<Vec<u8>>,
     /// Guest MAC, learned from the first frame (falls back to the configured MAC).
     guest_mac: [u8; 6],
     udp: udp::UdpNat,
@@ -141,7 +187,7 @@ struct Nat {
 }
 
 impl Nat {
-    fn new(cfg: NetConfig, to_guest: Sender<Vec<u8>>) -> Self {
+    fn new(cfg: NetConfig, to_guest: SyncSender<Vec<u8>>) -> Self {
         let guest_mac: [u8; 6] = cfg.mac;
         Self {
             cfg,
@@ -154,7 +200,7 @@ impl Nat {
 
     /// Sends one fully-formed Ethernet frame to the guest.
     fn emit(&self, frame: Vec<u8>) {
-        let _ = self.to_guest.send(frame);
+        let _ = self.to_guest.try_send(frame);
     }
 
     /// Handles one Ethernet frame transmitted by the guest.
@@ -168,7 +214,7 @@ impl Nat {
         match ethertype {
             ETH_ARP => self.on_arp(&frame[14..]),
             ETH_IPV4 => self.on_ipv4(&frame[14..]),
-            _ => {},
+            _ => {}
         }
     }
 
@@ -216,14 +262,14 @@ impl Nat {
                 if let Some(reply) = self.udp.on_guest(&self.cfg, &pkt) {
                     self.emit(self.frame_to_guest(&reply));
                 }
-            },
+            }
             IpProto::Tcp => {
                 let out: Vec<Vec<u8>> = self.tcp.on_guest(&self.cfg, &pkt);
                 for ip_reply in out {
                     self.emit(self.frame_to_guest(&ip_reply));
                 }
-            },
-            IpProto::Other(_) => {},
+            }
+            IpProto::Other(_) => {}
         }
     }
 

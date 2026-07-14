@@ -35,7 +35,9 @@
 //! - the shared **portb console** (`0xE9`/`0xEA`) and control ports, decoded natively from WHP
 //!   I/O-port exits (no instruction emulator needed, since the guest uses single-byte `in`/`out`).
 //!
-//! Snapshot/restore, virt-fs and virt-net are KVM-specific and are not implemented here.
+//! Snapshot/restore, virt-fs and virt-net are implemented here. `--net` is a standalone
+//! user-mode SLIRP backend; `--net-config` is an explicit external L2Bridge contract and never
+//! silently falls back to SLIRP.
 
 mod emulator;
 mod memory;
@@ -47,120 +49,55 @@ mod slirp;
 mod snapshot;
 mod vcpu;
 mod virtfs;
+mod xdp;
 
 use ::core::ffi::c_void;
 use ::std::fs;
-use ::std::io::{
-    self,
-    Read,
-};
-use ::std::path::{
-    Path,
-    PathBuf,
-};
-use ::std::sync::atomic::{
-    AtomicBool,
-    Ordering,
-};
-use ::std::sync::{
-    Arc,
-    Mutex,
-};
+use ::std::io::{self, Read};
+use ::std::path::{Path, PathBuf};
+use ::std::sync::atomic::{AtomicBool, Ordering};
+use ::std::sync::{Arc, Mutex};
 use ::std::thread;
 use ::std::time::{Duration, Instant};
 
-use ::anyhow::{
-    Context,
-    Result,
-    bail,
-};
-use ::log::{
-    debug,
-    error,
-    info,
-    warn,
-};
-use ::windows::Win32::System::Console::{
-    CONSOLE_MODE,
-    ENABLE_ECHO_INPUT,
-    ENABLE_LINE_INPUT,
-    ENABLE_PROCESSED_OUTPUT,
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-    GetConsoleMode,
-    GetStdHandle,
-    STD_INPUT_HANDLE,
-    STD_OUTPUT_HANDLE,
-    SetConsoleMode,
-};
+use ::anyhow::{Context, Result, bail};
+use ::log::{debug, error, info, warn};
 use ::windows::Win32::Foundation::HANDLE;
+use ::windows::Win32::System::Console::{
+    CONSOLE_MODE, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_OUTPUT,
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+    STD_OUTPUT_HANDLE, SetConsoleMode,
+};
 use ::windows::Win32::System::Hypervisor::{
-    WHV_EXTENDED_VM_EXITS,
-    WHV_INTERRUPT_CONTROL,
-    WHV_PARTITION_HANDLE,
-    WHV_PARTITION_PROPERTY_CODE,
-    WHV_REGISTER_NAME,
-    WHV_REGISTER_VALUE,
-    WHV_RUN_VP_EXIT_CONTEXT,
-    WHvCancelRunVirtualProcessor,
-    WHvCreatePartition,
-    WHvCreateVirtualProcessor,
-    WHvDeletePartition,
-    WHvDeleteVirtualProcessor,
-    WHvGetCapability,
-    WHvGetVirtualProcessorInterruptControllerState,
-    WHvGetVirtualProcessorRegisters,
-    WHvRequestInterrupt,
-    WHV_MEMORY_ACCESS_CONTEXT,
-    WHV_VP_EXIT_CONTEXT,
-    WHvPartitionPropertyCodeCpuidExitList,
-    WHvPartitionPropertyCodeExtendedVmExits,
-    WHvPartitionPropertyCodeLocalApicEmulationMode,
-    WHvPartitionPropertyCodeProcessorCount,
-    WHvRunVirtualProcessor,
-    WHvRunVpExitReasonCanceled,
-    WHvRunVpExitReasonMemoryAccess,
-    WHvRunVpExitReasonNone,
-    WHvRunVpExitReasonUnrecoverableException,
-    WHvRunVpExitReasonX64Cpuid,
-    WHvRunVpExitReasonX64Halt,
-    WHvRunVpExitReasonX64IoPortAccess,
-    WHvSetPartitionProperty,
-    WHvSetVirtualProcessorInterruptControllerState,
-    WHvSetVirtualProcessorRegisters,
-    WHvSetupPartition,
-    WHvX64LocalApicEmulationModeXApic,
-    WHvX64RegisterCr0,
-    WHvX64RegisterCr3,
-    WHvX64RegisterCr4,
-    WHvX64RegisterEfer,
-    WHvX64RegisterRax,
-    WHvX64RegisterRbx,
-    WHvX64RegisterRcx,
-    WHvX64RegisterRdx,
-    WHvX64RegisterRflags,
-    WHvX64RegisterRip,
-    WHvX64RegisterRsp,
-    WHvCapabilityCodeHypervisorPresent,
+    WHV_EXTENDED_VM_EXITS, WHV_INTERRUPT_CONTROL, WHV_MEMORY_ACCESS_CONTEXT, WHV_PARTITION_HANDLE,
+    WHV_PARTITION_PROPERTY_CODE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
+    WHV_VP_EXIT_CONTEXT, WHvCancelRunVirtualProcessor, WHvCapabilityCodeHypervisorPresent,
+    WHvCreatePartition, WHvCreateVirtualProcessor, WHvDeletePartition, WHvDeleteVirtualProcessor,
+    WHvGetCapability, WHvGetVirtualProcessorInterruptControllerState,
+    WHvGetVirtualProcessorRegisters, WHvPartitionPropertyCodeCpuidExitList,
+    WHvPartitionPropertyCodeExtendedVmExits, WHvPartitionPropertyCodeLocalApicEmulationMode,
+    WHvPartitionPropertyCodeProcessorCount, WHvRequestInterrupt, WHvRunVirtualProcessor,
+    WHvRunVpExitReasonCanceled, WHvRunVpExitReasonMemoryAccess, WHvRunVpExitReasonNone,
+    WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Cpuid,
+    WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty,
+    WHvSetVirtualProcessorInterruptControllerState, WHvSetVirtualProcessorRegisters,
+    WHvSetupPartition, WHvX64LocalApicEmulationModeXApic, WHvX64RegisterCr0, WHvX64RegisterCr3,
+    WHvX64RegisterCr4, WHvX64RegisterEfer, WHvX64RegisterRax, WHvX64RegisterRbx, WHvX64RegisterRcx,
+    WHvX64RegisterRdx, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterRsp,
 };
 
 use crate::boot::pvh;
 use crate::console::{Console, TimingMarker};
 use crate::devices::portb::PortConsole;
-use crate::devices::{
-    DeviceBus,
-    PioAction,
-};
-use crate::whp::emulator::{
-    Emulator,
-    MmioHandler,
-};
+use crate::devices::{DeviceBus, PioAction};
+use crate::l2bridge::{ExternalIdentity, L2BridgeConfig};
+use crate::whp::emulator::{Emulator, MmioHandler};
 use crate::whp::memory::GuestMemory;
-use crate::whp::net::VirtioNet;
 pub use crate::whp::net::NetConfig;
+use crate::whp::net::{FrameBackend, VirtioNet};
 use crate::whp::pic::Pic;
 use crate::whp::pit::Pit;
 use crate::whp::rtc::Rtc;
-use crate::whp::slirp::SlirpRx;
 use crate::whp::snapshot::Snapshot;
 
 /// Index of the single guest virtual processor.
@@ -192,6 +129,8 @@ pub struct Config {
     pub restore: Option<PathBuf>,
     /// Optional virt-net endpoint (`--net`): the guest IP/prefix and derived host gateway.
     pub net: Option<NetConfig>,
+    /// Optional external L2Bridge data-plane contract (`--net-config`).
+    pub net_config: Option<L2BridgeConfig>,
     /// Host directory to export to the guest as a virt-fs (`--mount`).
     pub mount: Option<PathBuf>,
     /// Guest mount point for the `--mount` directory.
@@ -204,28 +143,67 @@ pub struct Config {
     pub mount_size: Option<u64>,
 }
 
-/// A running virt-net NIC: the shared device model, the NAT receive side (drained by the RX pump),
-/// and the endpoint config (for snapshots).
+/// A running virt-net NIC: the shared device model, raw-frame backend, and snapshot-safe identity.
 struct Nic {
     /// The virtio-net device, shared between the vCPU thread (MMIO/TX) and the RX pump thread.
     dev: Arc<Mutex<VirtioNet>>,
-    /// NAT -> guest frames, taken by the RX pump thread when `execute` starts.
-    rx: Option<SlirpRx>,
-    /// Endpoint configuration, serialized into snapshots.
-    cfg: NetConfig,
+    /// Data plane shared by the TX device path and RX pump.
+    backend: Arc<dyn FrameBackend>,
+    /// Snapshot header containing guest identity only, never host attachment state.
+    snapshot_header: Vec<u8>,
 }
 
 impl Nic {
-    /// Builds a NIC and its NAT backend for `ncfg`, DMAing into `mem`.
-    fn build(mem: &Arc<GuestMemory>, ncfg: &NetConfig) -> Self {
-        let (slirp, rx) = slirp::start(ncfg);
-        let dev: Arc<Mutex<VirtioNet>> =
-            Arc::new(Mutex::new(VirtioNet::new(Arc::clone(mem), slirp, ncfg.mac)));
+    /// Builds the standalone SLIRP NIC.
+    fn build_slirp(mem: &Arc<GuestMemory>, ncfg: &NetConfig) -> Self {
+        let slirp = slirp::start(ncfg);
+        let backend: Arc<dyn FrameBackend> = slirp;
+        let dev: Arc<Mutex<VirtioNet>> = Arc::new(Mutex::new(VirtioNet::new(
+            Arc::clone(mem),
+            Arc::clone(&backend),
+            ncfg.mac,
+        )));
         Nic {
             dev,
-            rx: Some(rx),
-            cfg: ncfg.clone(),
+            backend,
+            snapshot_header: ncfg.save_header(),
         }
+    }
+
+    /// Builds the external NIC. `xdp::start` must report readiness before this returns.
+    fn build_l2bridge(mem: &Arc<GuestMemory>, config: &L2BridgeConfig) -> Result<Self> {
+        // The Agent owns and hosts this pipe; NVX is only a client. Connect before initializing
+        // XDP so an initialization failure can be reported, then do not enter the vCPU loop until
+        // the Agent explicitly acknowledges the ready data plane with StartVm.
+        let pipe = xdp::ControlPipe::connect(&config.runtime.control_pipe)?;
+        let started = match xdp::start(config) {
+            Ok(started) => started,
+            Err(error) => {
+                pipe.data_plane_error(&format!("{error:#}"));
+                return Err(error);
+            }
+        };
+        if let Err(error) = pipe.data_plane_ready(&started.queues) {
+            pipe.data_plane_error(&format!("{error:#}"));
+            return Err(error);
+        }
+        if let Err(error) = pipe.wait_start_vm() {
+            pipe.data_plane_error(&format!("{error:#}"));
+            return Err(error);
+        }
+
+        let backend = started.backend;
+        let identity = config.external_identity()?;
+        let dev = Arc::new(Mutex::new(VirtioNet::new(
+            Arc::clone(mem),
+            Arc::clone(&backend),
+            identity.mac,
+        )));
+        Ok(Self {
+            dev,
+            backend,
+            snapshot_header: NetConfig::save_external_header(&identity),
+        })
     }
 }
 
@@ -325,10 +303,9 @@ struct ConsoleGuard {
 
 impl ConsoleGuard {
     fn new() -> Self {
-        let stdin: Option<(HANDLE, CONSOLE_MODE)> = configure_console(
-            STD_INPUT_HANDLE,
-            |m| CONSOLE_MODE(m.0 & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0)),
-        );
+        let stdin: Option<(HANDLE, CONSOLE_MODE)> = configure_console(STD_INPUT_HANDLE, |m| {
+            CONSOLE_MODE(m.0 & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0))
+        });
         let stdout: Option<(HANDLE, CONSOLE_MODE)> = configure_console(STD_OUTPUT_HANDLE, |m| {
             CONSOLE_MODE(m.0 | ENABLE_PROCESSED_OUTPUT.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0)
         });
@@ -338,7 +315,10 @@ impl ConsoleGuard {
 
 impl Drop for ConsoleGuard {
     fn drop(&mut self) {
-        for entry in [self.stdin.take(), self.stdout.take()].into_iter().flatten() {
+        for entry in [self.stdin.take(), self.stdout.take()]
+            .into_iter()
+            .flatten()
+        {
             // SAFETY: `entry.0` is a console handle previously returned by `GetStdHandle`.
             unsafe {
                 let _ = SetConsoleMode(entry.0, entry.1);
@@ -420,7 +400,9 @@ fn create_partition() -> Result<Partition> {
         WHvPartitionPropertyCodeLocalApicEmulationMode,
         &WHvX64LocalApicEmulationModeXApic,
     ) {
-        warn!("could not enable in-hypervisor LAPIC emulation ({e:#}); the guest timer will not work");
+        warn!(
+            "could not enable in-hypervisor LAPIC emulation ({e:#}); the guest timer will not work"
+        );
     }
 
     partition.setup()?;
@@ -433,9 +415,7 @@ fn run_cold(cfg: Config) -> Result<()> {
     let kernel: Vec<u8> =
         fs::read(kernel_path).with_context(|| format!("reading kernel image {kernel_path:?}"))?;
     let initrd: Option<Vec<u8>> = match &cfg.initrd {
-        Some(path) => {
-            Some(fs::read(path).with_context(|| format!("reading initramfs {path:?}"))?)
-        },
+        Some(path) => Some(fs::read(path).with_context(|| format!("reading initramfs {path:?}"))?),
         None => None,
     };
 
@@ -449,10 +429,13 @@ fn run_cold(cfg: Config) -> Result<()> {
     let ram_size: u64 = mem.ram_size();
     partition.create_vcpu()?;
 
-    // Append the virt-net command-line fragment so the guest finds and addresses the NIC.
-    let mut cmdline: String = match &cfg.net {
-        Some(ncfg) => format!("{} {}", cfg.cmdline, ncfg.cmdline_fragment()),
-        None => cfg.cmdline.clone(),
+    // Append the selected NIC's guest configuration. `--net` remains standalone SLIRP; an
+    // external manifest transports the exact CNI values without deriving a gateway or MAC.
+    let mut cmdline: String = match (&cfg.net, &cfg.net_config) {
+        (Some(ncfg), None) => format!("{} {}", cfg.cmdline, ncfg.cmdline_fragment()),
+        (None, Some(config)) => format!("{} {}", cfg.cmdline, config.guest_cmdline_fragment()?),
+        (None, None) => cfg.cmdline.clone(),
+        (Some(_), Some(_)) => bail!("--net and --net-config are mutually exclusive"),
     };
 
     // Optionally export a host directory to the guest as a virt-fs. The FAT image is mapped into
@@ -472,9 +455,15 @@ fn run_cold(cfg: Config) -> Result<()> {
             cmdline.push(' ');
             cmdline.push_str(&fragment);
             Some(fs)
-        },
+        }
         None => None,
     };
+    if cfg.net_config.is_some() && cmdline.len() > crate::l2bridge::MAX_GUEST_CMDLINE {
+        bail!(
+            "external guest network configuration exceeds the {}-byte kernel command-line limit",
+            crate::l2bridge::MAX_GUEST_CMDLINE
+        );
+    }
 
     // Load the kernel, the initramfs, and the PVH boot structures.
     let loaded = pvh::load_kernel(&*mem, &kernel)?;
@@ -485,29 +474,67 @@ fn run_cold(cfg: Config) -> Result<()> {
     let initrd_region = match &initrd {
         Some(bytes) => {
             let region = pvh::load_initramfs(&*mem, bytes, loaded.kernel_end, ram_size)?;
-            info!("loaded initramfs: addr={:#x}, size={:#x}", region.addr, region.size);
+            info!(
+                "loaded initramfs: addr={:#x}, size={:#x}",
+                region.addr, region.size
+            );
             Some(region)
-        },
+        }
         None => None,
     };
     let start_info_gpa: u64 = pvh::configure(&*mem, &cmdline, initrd_region)?;
-    vcpu::setup_pvh(partition.handle, VP_INDEX, &mem, loaded.pvh_entry, start_info_gpa)?;
+    vcpu::setup_pvh(
+        partition.handle,
+        VP_INDEX,
+        &mem,
+        loaded.pvh_entry,
+        start_info_gpa,
+    )?;
 
-    // Build the NIC (and its user-mode NAT), if requested.
-    let nic: Option<Nic> = match &cfg.net {
-        Some(ncfg) => {
+    // Build the NIC before entering the vCPU loop. An external backend must reach data-plane
+    // readiness here; failure aborts the launch rather than falling back to standalone SLIRP.
+    let nic: Option<Nic> = match (&cfg.net, &cfg.net_config) {
+        (Some(ncfg), None) => {
             info!(
-                "virt-net: NIC at {:#x} (guest {}/{}, gateway {})",
-                net::NET_MMIO_BASE, ncfg.guest_ip, ncfg.prefix, ncfg.host_ip
+                "virt-net: standalone SLIRP NIC at {:#x} (guest {}/{}, gateway {})",
+                net::NET_MMIO_BASE,
+                ncfg.guest_ip,
+                ncfg.prefix,
+                ncfg.host_ip
             );
-            Some(Nic::build(&mem, ncfg))
-        },
-        None => None,
+            Some(Nic::build_slirp(&mem, ncfg))
+        }
+        (None, Some(config)) => {
+            info!(
+                "virt-net: initializing external L2Bridge NIC at {:#x} (ifIndex {}, MTU {})",
+                net::NET_MMIO_BASE,
+                config.attachment.interface_index,
+                config.device.mtu
+            );
+            Some(Nic::build_l2bridge(&mem, config)?)
+        }
+        (None, None) => None,
+        (Some(_), Some(_)) => bail!("--net and --net-config are mutually exclusive"),
     };
 
     let (console, bus) = build_io(&cfg, None);
-    info!("starting guest (mem={} MiB, cmdline={:?})", ram_size >> 20, cmdline);
-    execute(&cfg, &partition, &mem, Pic::new(), Pit::new(), Rtc::new(), &console, &bus, tsc_hz, nic)
+    info!(
+        "starting guest (mem={} MiB, cmdline={:?})",
+        ram_size >> 20,
+        cmdline
+    );
+    execute(
+        &cfg,
+        &partition,
+        &mem,
+        Pic::new(),
+        Pit::new(),
+        Rtc::new(),
+        &console,
+        &bus,
+        tsc_hz,
+        nic,
+    )
 }
 
 /// Restores and resumes a VM from a snapshot directory.
@@ -516,8 +543,11 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     let tsc_hz: u64 = measure_tsc_hz();
 
     let mut partition: Partition = create_partition()?;
-    let mem: Arc<GuestMemory> =
-        Arc::new(GuestMemory::restore(partition.handle, &dir.join("mem.bin"), snap.ram_size())?);
+    let mem: Arc<GuestMemory> = Arc::new(GuestMemory::restore(
+        partition.handle,
+        &dir.join("mem.bin"),
+        snap.ram_size(),
+    )?);
     partition.create_vcpu()?;
     snap.apply(partition.handle)?;
 
@@ -529,30 +559,57 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     let mut rtc: Rtc = Rtc::new();
     rtc.load(snap.rtc());
 
-    // Rebuild the NIC from the snapshot (endpoint header + device transport state), if present.
-    let nic: Option<Nic> = build_restored_nic(&mem, snap.net())?;
+    // An external snapshot is restored only with a fresh external manifest. The data-plane
+    // backend is initialized and ready before device state is restored and the vCPU can resume.
+    let nic: Option<Nic> = build_restored_nic(&mem, snap.net(), cfg.net_config.as_ref())?;
+    if nic.is_none() && cfg.net_config.is_some() {
+        bail!("--net-config was supplied but this snapshot has no NIC");
+    }
 
     let (console, bus) = build_io(&cfg, Some(snap.console()));
     info!(
         "resuming guest from snapshot {dir:?} (mem={} MiB)",
         snap.ram_size() >> 20
     );
-    execute(&cfg, &partition, &mem, pic, pit, rtc, &console, &bus, tsc_hz, nic)
+    execute(
+        &cfg, &partition, &mem, pic, pit, rtc, &console, &bus, tsc_hz, nic,
+    )
 }
 
 /// Rebuilds the NIC from serialized snapshot state, or returns `None` if the snapshot had no NIC.
-fn build_restored_nic(mem: &Arc<GuestMemory>, net_state: &[u8]) -> Result<Option<Nic>> {
+fn build_restored_nic(
+    mem: &Arc<GuestMemory>,
+    net_state: &[u8],
+    external: Option<&L2BridgeConfig>,
+) -> Result<Option<Nic>> {
     if net_state.is_empty() {
         return Ok(None);
     }
-    let (ncfg, consumed) = NetConfig::from_header(net_state)?;
-    let nic: Nic = Nic::build(mem, &ncfg);
+    let (nic, consumed): (Nic, usize) = if NetConfig::is_external_snapshot(net_state) {
+        let config = external.context(
+            "an external L2Bridge snapshot requires a fresh --net-config; refusing SLIRP fallback",
+        )?;
+        let (saved, consumed) = NetConfig::load_external_header(net_state)?;
+        let current: ExternalIdentity = config.external_identity()?;
+        if saved != current {
+            bail!(
+                "external L2Bridge restore identity mismatch (MAC, MTU, or guest bootstrap changed)"
+            );
+        }
+        (Nic::build_l2bridge(mem, config)?, consumed)
+    } else {
+        if external.is_some() {
+            bail!("a standalone SLIRP snapshot cannot be restored with --net-config");
+        }
+        let (ncfg, consumed) = NetConfig::from_header(net_state)?;
+        (Nic::build_slirp(mem, &ncfg), consumed)
+    };
     {
         let mut dev = nic.dev.lock().expect("virt-net poisoned");
         dev.load(&net_state[consumed..])?;
         dev.resume();
     }
-    info!("virt-net: NIC restored (guest {}/{})", ncfg.guest_ip, ncfg.prefix);
+    info!("virt-net: NIC restored after backend readiness");
     Ok(Some(nic))
 }
 
@@ -640,7 +697,7 @@ fn execute(
     console: &Arc<Mutex<Console>>,
     bus: &DeviceBus,
     tsc_hz: u64,
-    mut nic: Option<Nic>,
+    nic: Option<Nic>,
 ) -> Result<()> {
     let handle = partition.handle;
     let guard: ConsoleGuard = ConsoleGuard::new();
@@ -658,12 +715,19 @@ fn execute(
         Some(_) => Some(Emulator::new()?),
         None => None,
     };
+    if let Some(nic) = nic.as_ref()
+        && nic.backend.health() != net::BackendHealth::Ready
+    {
+        bail!("network backend was not ready before vCPU execution");
+    }
     let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let net_pump: Option<thread::JoinHandle<()>> = match nic.as_mut() {
-        Some(n) => n
-            .rx
-            .take()
-            .map(|rx| spawn_net_rx(Arc::clone(&n.dev), rx, handle, Arc::clone(&net_stop))),
+    let net_pump: Option<thread::JoinHandle<()>> = match nic.as_ref() {
+        Some(n) => Some(spawn_net_rx(
+            Arc::clone(&n.dev),
+            Arc::clone(&n.backend),
+            handle,
+            Arc::clone(&net_stop),
+        )),
         None => None,
     };
 
@@ -710,25 +774,38 @@ fn execute(
         let reason = exit.ExitReason;
         if reason == WHvRunVpExitReasonX64IoPortAccess {
             match handle_io(&mut pit, &mut rtc, &mut pic, bus, handle, &exit) {
-                Ok(PioAction::None) => {},
+                Ok(PioAction::None) => {}
                 Ok(PioAction::Shutdown) => {
                     info!("guest requested shutdown");
                     break;
-                },
+                }
                 Ok(PioAction::Snapshot) => {
-                    match take_snapshot(cfg, handle, mem, &pic, &pit, &rtc, console, bus, nic.as_ref()) {
+                    match take_snapshot(
+                        cfg,
+                        handle,
+                        mem,
+                        &pic,
+                        &pit,
+                        &rtc,
+                        console,
+                        bus,
+                        nic.as_ref(),
+                    ) {
                         Ok(true) => break,
-                        Ok(false) => {},
+                        Ok(false) => {}
                         Err(e) => {
                             run_err = Some(e);
                             break;
-                        },
+                        }
                     }
-                },
+                    // A PIC EOI is an I/O-port write. If it completed another interrupt, immediately
+                    // retry a pending NIC notification before the next timer tick can claim the PIC.
+                    service_nic_irq(&nic, &mut pic, handle);
+                }
                 Err(e) => {
                     run_err = Some(e);
                     break;
-                },
+                }
             }
         } else if reason == WHvRunVpExitReasonX64Cpuid {
             if let Err(e) = handle_cpuid(handle, &exit, tsc_hz) {
@@ -761,12 +838,12 @@ fn execute(
                     }
                     // A transmit notification (QueueNotify) may have raised the NIC's interrupt.
                     service_nic_irq(&nic, &mut pic, handle);
-                },
+                }
                 _ => {
                     error!("unhandled guest MMIO access");
                     dump_vcpu(handle);
                     break;
-                },
+                }
             }
         } else {
             debug!("unhandled vcpu exit reason {}", reason.0);
@@ -789,6 +866,18 @@ fn execute(
     net_stop.store(true, Ordering::SeqCst);
     if let Some(pump) = net_pump {
         let _ = pump.join();
+    }
+    if let Some(nic) = nic.as_ref() {
+        let counters = nic.backend.counters();
+        info!(
+            "virt-net counters: tx accepted={}, tx dropped={}, rx received={}, rx dropped={}, errors={}",
+            counters.guest_tx_accepted,
+            counters.guest_tx_dropped,
+            counters.guest_rx_received,
+            counters.guest_rx_dropped,
+            counters.backend_errors,
+        );
+        nic.backend.shutdown();
     }
     console.lock().expect("console poisoned").flush();
 
@@ -847,7 +936,7 @@ fn take_snapshot(
         None => {
             warn!("guest requested a snapshot but --snapshot was not given; ignoring");
             return Ok(false);
-        },
+        }
     };
     let capture_start = Instant::now();
 
@@ -858,15 +947,19 @@ fn take_snapshot(
     let pic_bytes: Vec<u8> = pic.save();
     let pit_bytes: Vec<u8> = pit.save();
     let rtc_bytes: Vec<u8> = rtc.save();
-    // Serialize the NIC under its lock so the RX pump cannot mutate the rings mid-capture: the
-    // endpoint header (to rebuild the identical link on restore) followed by the transport state.
+    // Quiesce the frame backend before capturing virtqueue transport state. External RX that has
+    // not reached a used ring is intentionally discarded; guest TX has been accepted or dropped
+    // before its descriptor is completed, preventing an unsent frame from reappearing on restore.
     let net_state: Vec<u8> = match nic {
         Some(n) => {
+            n.backend
+                .quiesce(Duration::from_secs(2))
+                .context("quiescing network backend for snapshot")?;
             let dev = n.dev.lock().expect("virt-net poisoned");
-            let mut s: Vec<u8> = n.cfg.save_header();
+            let mut s: Vec<u8> = n.snapshot_header.clone();
             s.extend(dev.save());
             s
-        },
+        }
         None => Vec::new(),
     };
     let devices = snapshot::DeviceState {
@@ -964,10 +1057,7 @@ fn handle_io(
         let next_rip: u64 = exit.VpContext.Rip.wrapping_add(instruction_length(exit));
         set_registers(
             handle,
-            &[
-                (WHvX64RegisterRax, rax),
-                (WHvX64RegisterRip, next_rip),
-            ],
+            &[(WHvX64RegisterRax, rax), (WHvX64RegisterRip, next_rip)],
         )?;
     }
     Ok(action)
@@ -1002,7 +1092,7 @@ fn handle_cpuid(
             ebx = num;
             ecx = crystal;
             edx = 0;
-        },
+        }
         // Leaf 0x16: nominal processor frequency information (MHz).
         0x0000_0016 => {
             let mhz: u32 = (tsc_hz / 1_000_000) as u32;
@@ -1010,8 +1100,8 @@ fn handle_cpuid(
             ebx = mhz;
             ecx = 100;
             edx = 0;
-        },
-        _ => {},
+        }
+        _ => {}
     }
 
     let next_rip: u64 = exit.VpContext.Rip.wrapping_add(instruction_length(exit));
@@ -1093,8 +1183,10 @@ fn lapic_eoi(handle: WHV_PARTITION_HANDLE, vector: u8) {
 /// Sets a batch of 64-bit scalar registers on the vCPU.
 fn set_registers(handle: WHV_PARTITION_HANDLE, pairs: &[(WHV_REGISTER_NAME, u64)]) -> Result<()> {
     let names: Vec<WHV_REGISTER_NAME> = pairs.iter().map(|p| p.0).collect();
-    let values: Vec<WHV_REGISTER_VALUE> =
-        pairs.iter().map(|p| WHV_REGISTER_VALUE { Reg64: p.1 }).collect();
+    let values: Vec<WHV_REGISTER_VALUE> = pairs
+        .iter()
+        .map(|p| WHV_REGISTER_VALUE { Reg64: p.1 })
+        .collect();
     // SAFETY: `names` and `values` are parallel arrays of equal length that outlive the call.
     unsafe {
         WHvSetVirtualProcessorRegisters(
@@ -1160,8 +1252,16 @@ fn inject_irq0(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
         Vector: u32::from(vector),
     };
     // SAFETY: `interrupt` is a valid control block of the declared size; the partition is live.
-    unsafe {
-        let _ = WHvRequestInterrupt(handle, &interrupt, size_of::<WHV_INTERRUPT_CONTROL>() as u32);
+    let result = unsafe {
+        WHvRequestInterrupt(
+            handle,
+            &interrupt,
+            size_of::<WHV_INTERRUPT_CONTROL>() as u32,
+        )
+    };
+    if let Err(e) = result {
+        pic.cancel_irq(0);
+        error!("timer: WHvRequestInterrupt failed for IRQ0 vector {vector:#04x}: {e}");
     }
 }
 
@@ -1180,8 +1280,19 @@ fn inject_net_irq(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
         Vector: u32::from(vector),
     };
     // SAFETY: `interrupt` is a valid control block of the declared size; the partition is live.
-    unsafe {
-        let _ = WHvRequestInterrupt(handle, &interrupt, size_of::<WHV_INTERRUPT_CONTROL>() as u32);
+    let result = unsafe {
+        WHvRequestInterrupt(
+            handle,
+            &interrupt,
+            size_of::<WHV_INTERRUPT_CONTROL>() as u32,
+        )
+    };
+    if let Err(e) = result {
+        pic.cancel_irq(net::NET_IRQ as u8);
+        error!(
+            "virt-net: WHvRequestInterrupt failed for IRQ{} vector {vector:#04x}: {e}",
+            net::NET_IRQ
+        );
     }
 }
 
@@ -1241,14 +1352,14 @@ impl MmioHandler for NetMmio<'_> {
 /// also shuts the NAT worker down.
 fn spawn_net_rx(
     dev: Arc<Mutex<VirtioNet>>,
-    mut rx: SlirpRx,
+    backend: Arc<dyn FrameBackend>,
     handle: WHV_PARTITION_HANDLE,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         // A frame accepted from the NAT but not yet deliverable (RX ring full); retried first.
         let mut pending: Option<Vec<u8>> = None;
-        while !stop.load(Ordering::SeqCst) {
+        while !stop.load(Ordering::SeqCst) && backend.health() == net::BackendHealth::Ready {
             // Retry a previously-undeliverable frame before taking a new one.
             if let Some(frame) = pending.take() {
                 if dev.lock().expect("virt-net poisoned").process_rx(&frame) {
@@ -1259,19 +1370,18 @@ fn spawn_net_rx(
                     continue;
                 }
             }
-            match rx.to_guest.recv_timeout(Duration::from_millis(20)) {
-                Ok(frame) => {
+            match backend.recv_timeout(Duration::from_millis(20)) {
+                Some(frame) => {
                     if dev.lock().expect("virt-net poisoned").process_rx(&frame) {
                         wake_vcpu(handle);
                     } else {
                         pending = Some(frame);
                     }
-                },
-                Err(::std::sync::mpsc::RecvTimeoutError::Timeout) => {},
-                Err(::std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                None => {}
             }
         }
-        rx.shutdown();
+        backend.shutdown();
     })
 }
 
@@ -1280,8 +1390,9 @@ fn spawn_net_rx(
 /// before the partition is dropped, so the handle stays valid.
 fn wake_vcpu(handle: WHV_PARTITION_HANDLE) {
     // SAFETY: the partition is live until the receive pump is joined (before the partition drops).
-    unsafe {
-        let _ = WHvCancelRunVirtualProcessor(handle, VP_INDEX, 0);
+    let result = unsafe { WHvCancelRunVirtualProcessor(handle, VP_INDEX, 0) };
+    if let Err(e) = result {
+        error!("virt-net: failed to wake vCPU after RX: {e}");
     }
 }
 
@@ -1320,7 +1431,7 @@ fn spawn_input_thread(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     con.lock().expect("console poisoned").enqueue(&buf[..n]);
-                },
+                }
             }
         }
     });
@@ -1329,8 +1440,7 @@ fn spawn_input_thread(
 /// Measures the host TSC frequency (Hz) against the performance counter.
 fn measure_tsc_hz() -> u64 {
     use ::windows::Win32::System::Performance::{
-        QueryPerformanceCounter,
-        QueryPerformanceFrequency,
+        QueryPerformanceCounter, QueryPerformanceFrequency,
     };
 
     let mut qpf: i64 = 1;

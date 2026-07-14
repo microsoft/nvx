@@ -23,7 +23,7 @@ if [ -e /dev/mtdblock0 ]; then
         echo "virtfs: failed to mount /dev/mtdblock0 at $vdir" >&2
     fi
 fi
-# virt-net: if the VMM attached a NIC (see --net), the virtio-net driver surfaces it as the only
+# virt-net: if the VMM attached a NIC (see --net or --net-config), the virtio-net driver surfaces it as the only
 # non-loopback interface. Configure it from the kernel command line tokens the VMM appended
 # ("virtnet_ip=<ip>", "virtnet_mask=<dotted>", "virtnet_gw=<host>"): assign the address with
 # ifconfig (busybox's ip-addr resolves the device via AF_UNIX, which this minimal kernel omits),
@@ -32,11 +32,40 @@ nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$nip" ]; then
     nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
     ngw=$(sed -n 's/.*virtnet_gw=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nprefix=$(sed -n 's/.*virtnet_prefix=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nmac=$(sed -n 's/.*virtnet_mac=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nmtu=$(sed -n 's/.*virtnet_mtu=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nroutes=$(sed -n 's/.*virtnet_routes=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ndns=$(sed -n 's/.*virtnet_dns=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nsearch=$(sed -n 's/.*virtnet_search=\([^ ]*\).*/\1/p' /proc/cmdline)
     ndev=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -n1)
     if [ -n "$ndev" ]; then
+        [ -n "$nmac" ] && ifconfig "$ndev" hw ether "$nmac" 2>/dev/null
+        [ -n "$nmtu" ] && ifconfig "$ndev" mtu "$nmtu" 2>/dev/null
         ifconfig "$ndev" "$nip" netmask "${nmask:-255.255.255.0}" up
         [ -n "$ngw" ] && ip route add default via "$ngw" 2>/dev/null
-        echo "virtnet: configured $ndev as $nip/${nmask:-255.255.255.0} (gw ${ngw:-none})"
+        oldifs=$IFS
+        IFS=,
+        for route in $nroutes; do
+            dest=${route%@*}
+            hop=${route#*@}
+            [ -n "$dest" ] && [ "$dest" != "$route" ] && ip route add "$dest" via "$hop" 2>/dev/null
+        done
+        for server in $ndns; do
+            [ -n "$server" ] && echo "nameserver $server" >> /etc/resolv.conf
+        done
+        IFS=$oldifs
+        [ -n "$nsearch" ] && echo "search $(echo "$nsearch" | tr ',' ' ')" >> /etc/resolv.conf
+        echo "virtnet: configured $ndev as $nip/${nprefix:-$nmask} (gw ${ngw:-none}, mtu ${nmtu:-default})"
+        nprobe=$(sed -n 's/.*virtnet_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
+        if [ -n "$nprobe" ]; then
+            if ping -c 3 -W 2 "$nprobe" >/tmp/virtnet-probe.log 2>&1; then
+                echo "VIRTNET-PROBE-OK: $nprobe"
+            else
+                cat /tmp/virtnet-probe.log >&2
+                echo "VIRTNET-PROBE-FAIL: $nprobe" >&2
+            fi
+        fi
     else
         echo "virtnet: no network interface found" >&2
     fi
@@ -57,12 +86,50 @@ case " $(cat /proc/cmdline) " in
         linkdev="${ndev:-eth0}"
         link_up() { read -r c 2>/dev/null < "/sys/class/net/$linkdev/carrier" && [ "$c" = 1 ]; }
         link_up && echo "netsnap: pre-snapshot link OK" || echo "netsnap: pre-snapshot link FAIL"
+        ntcp=$(sed -n 's/.*netsnap_tcp=\([^ ]*\).*/\1/p' /proc/cmdline)
+        if [ -n "$ntcp" ]; then
+            nthost=${ntcp%:*}
+            ntport=${ntcp##*:}
+            rm -f /tmp/netsnap-tcp.in /tmp/netsnap-tcp.out
+            mkfifo /tmp/netsnap-tcp.in
+            nc "$nthost" "$ntport" </tmp/netsnap-tcp.in >/tmp/netsnap-tcp.out 2>&1 &
+            ncpid=$!
+            exec 3>/tmp/netsnap-tcp.in
+            wait_for_tcp_ack() {
+                marker=$1
+                attempts=0
+                while [ "$attempts" -lt 5 ]; do
+                    grep -q "^ACK:$marker$" /tmp/netsnap-tcp.out && return 0
+                    kill -0 "$ncpid" 2>/dev/null || return 1
+                    attempts=$((attempts + 1))
+                    sleep 1
+                done
+                return 1
+            }
+            echo PRE >&3
+            if wait_for_tcp_ack PRE; then
+                echo "netsnap: pre-snapshot TCP OK ($ntcp)"
+            else
+                echo "netsnap: pre-snapshot TCP FAIL ($ntcp)" >&2
+            fi
+        fi
         printf '\001' | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null
         # ---- on restore, execution resumes here ----
         if link_up; then
             echo "NETSNAP-RESTORE-OK"
         else
             echo "NETSNAP-RESTORE-FAIL"
+        fi
+        if [ -n "$ntcp" ]; then
+            echo POST >&3
+            if wait_for_tcp_ack POST; then
+                echo "NETSNAP-TCP-RESTORE-OK: $ntcp"
+            else
+                cat /tmp/netsnap-tcp.out >&2
+                echo "NETSNAP-TCP-RESTORE-FAIL: $ntcp" >&2
+            fi
+            exec 3>&-
+            wait "$ncpid" 2>/dev/null
         fi
         ;;
 esac

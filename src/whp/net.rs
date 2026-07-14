@@ -27,19 +27,12 @@
 
 use ::std::net::Ipv4Addr;
 use ::std::sync::Arc;
-use ::std::sync::atomic::{
-    Ordering,
-    fence,
-};
+use ::std::sync::atomic::{Ordering, fence};
 
-use ::anyhow::{
-    Context,
-    Result,
-    bail,
-};
+use ::anyhow::{Context, Result, bail};
 
+use crate::l2bridge::ExternalIdentity;
 use crate::whp::memory::GuestMemory;
-use crate::whp::slirp::Slirp;
 
 /// Guest-physical base of the virtio-mmio device window. It lives in the MMIO gap
 /// (`0xC000_0000..4 GiB`), which is never reported to the guest as RAM, so accesses there fault
@@ -107,6 +100,40 @@ const NUM_QUEUES: usize = 2;
 const RX_QUEUE: usize = 0;
 /// Transmit virtqueue index (device reads guest buffers).
 const TX_QUEUE: usize = 1;
+const EXTERNAL_SNAPSHOT_MAGIC: &[u8; 8] = b"NXL2NET1";
+
+/// Snapshot of backend-side packet accounting. Counters make bounded-queue backpressure visible
+/// rather than silently growing memory while the guest is faster than the external data plane.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameCounters {
+    pub guest_tx_accepted: u64,
+    pub guest_tx_dropped: u64,
+    pub guest_rx_received: u64,
+    pub guest_rx_dropped: u64,
+    pub backend_errors: u64,
+}
+
+/// Data-plane state exposed to the device and lifecycle code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendHealth {
+    Ready,
+    Quiescing,
+    Stopped,
+    Failed,
+}
+
+/// Raw-Ethernet frame boundary between virtio-net and its host data plane.
+///
+/// Implementations must be bounded and nonblocking for [`try_send`](Self::try_send): it is called
+/// while the vCPU holds the `VirtioNet` mutex. The receive side is owned by the pump thread.
+pub trait FrameBackend: Send + Sync {
+    fn try_send(&self, frame: Vec<u8>) -> bool;
+    fn recv_timeout(&self, timeout: ::std::time::Duration) -> Option<Vec<u8>>;
+    fn health(&self) -> BackendHealth;
+    fn counters(&self) -> FrameCounters;
+    fn quiesce(&self, timeout: ::std::time::Duration) -> Result<()>;
+    fn shutdown(&self);
+}
 
 /// The guest and host endpoints of the virt-net link, parsed from `--net`.
 #[derive(Clone, Debug)]
@@ -145,6 +172,54 @@ impl NetConfig {
             .parse()
             .with_context(|| format!("--net: invalid prefix '{prefix_str}'"))?;
         Self::build(guest_ip, prefix)
+    }
+
+    /// Serializes only the guest-visible external NIC identity. Interface indices, selected queues,
+    /// XSK/UMEM state and all XDP handles are deliberately excluded.
+    pub fn save_external_header(identity: &ExternalIdentity) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + 6 + 4 + 32 + 4 + identity.bootstrap.len());
+        bytes.extend_from_slice(EXTERNAL_SNAPSHOT_MAGIC);
+        bytes.extend_from_slice(&identity.mac);
+        bytes.extend_from_slice(&identity.mtu.to_le_bytes());
+        bytes.extend_from_slice(&identity.bootstrap_digest);
+        bytes.extend_from_slice(&(identity.bootstrap.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&identity.bootstrap);
+        bytes
+    }
+
+    /// Reads an external snapshot header and returns the identity plus the byte count it consumed.
+    pub fn load_external_header(data: &[u8]) -> Result<(ExternalIdentity, usize)> {
+        const FIXED: usize = 8 + 6 + 4 + 32 + 4;
+        if data.len() < FIXED || &data[..8] != EXTERNAL_SNAPSHOT_MAGIC {
+            bail!("invalid external L2Bridge snapshot header");
+        }
+        let mut mac = [0; 6];
+        mac.copy_from_slice(&data[8..14]);
+        let mtu = u32::from_le_bytes(data[14..18].try_into().unwrap());
+        let mut digest = [0; 32];
+        digest.copy_from_slice(&data[18..50]);
+        let bootstrap_len = u32::from_le_bytes(data[50..54].try_into().unwrap()) as usize;
+        let end = FIXED
+            .checked_add(bootstrap_len)
+            .context("external snapshot header overflow")?;
+        let bootstrap = data
+            .get(FIXED..end)
+            .context("external snapshot bootstrap truncated")?
+            .to_vec();
+        Ok((
+            ExternalIdentity {
+                mac,
+                mtu,
+                bootstrap,
+                bootstrap_digest: digest,
+            },
+            end,
+        ))
+    }
+
+    /// Whether this net-state blob belongs to the external L2Bridge backend.
+    pub fn is_external_snapshot(data: &[u8]) -> bool {
+        data.starts_with(EXTERNAL_SNAPSHOT_MAGIC)
     }
 
     /// Derives the full endpoint configuration (gateway, netmask, MACs) from a guest address and
@@ -215,8 +290,14 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end: usize = self.pos.checked_add(n).context("virt-net snapshot overflow")?;
-        let s: &[u8] = self.data.get(self.pos..end).context("virt-net snapshot truncated")?;
+        let end: usize = self
+            .pos
+            .checked_add(n)
+            .context("virt-net snapshot overflow")?;
+        let s: &[u8] = self
+            .data
+            .get(self.pos..end)
+            .context("virt-net snapshot truncated")?;
         self.pos = end;
         Ok(s)
     }
@@ -294,12 +375,12 @@ fn read_desc(mem: &GuestMemory, table: u64, idx: u16) -> (u64, u32, u16, u16) {
     )
 }
 
-/// The virtio-net-mmio device: MMIO register state plus the two virtqueues and the NAT backend.
+/// The virtio-net-mmio device: MMIO register state plus the two virtqueues and a raw-frame backend.
 pub struct VirtioNet {
     /// Guest RAM accessor for virtqueue DMA (shared with the RX pump thread).
     mem: Arc<GuestMemory>,
-    /// User-mode NAT the guest's frames are sent to and received from.
-    nat: Slirp,
+    /// Host data plane the guest's Ethernet frames are sent to and received from.
+    backend: Arc<dyn FrameBackend>,
     /// Guest MAC address (exposed through config space).
     mac: [u8; 6],
     device_features_sel: u32,
@@ -312,11 +393,11 @@ pub struct VirtioNet {
 }
 
 impl VirtioNet {
-    /// Creates the device backed by NAT `nat`, presenting `mac` to the guest.
-    pub fn new(mem: Arc<GuestMemory>, nat: Slirp, mac: [u8; 6]) -> Self {
+    /// Creates the device backed by `backend`, presenting `mac` to the guest.
+    pub fn new(mem: Arc<GuestMemory>, backend: Arc<dyn FrameBackend>, mac: [u8; 6]) -> Self {
         Self {
             mem,
-            nat,
+            backend,
             mac,
             device_features_sel: 0,
             driver_features_sel: 0,
@@ -354,9 +435,13 @@ impl VirtioNet {
                 } else {
                     f as u32
                 }
-            },
+            }
             REG_QUEUE_NUM_MAX => u32::from(QUEUE_SIZE_MAX),
-            REG_QUEUE_READY => u32::from(self.queues.get(self.queue_sel as usize).is_some_and(|q| q.ready)),
+            REG_QUEUE_READY => u32::from(
+                self.queues
+                    .get(self.queue_sel as usize)
+                    .is_some_and(|q| q.ready),
+            ),
             REG_INTERRUPT_STATUS => self.interrupt_status,
             REG_STATUS => self.status,
             REG_CONFIG_GENERATION => 0,
@@ -381,18 +466,19 @@ impl VirtioNet {
             REG_DEVICE_FEATURES_SEL => self.device_features_sel = val,
             REG_DRIVER_FEATURES => {
                 if self.driver_features_sel == 1 {
-                    self.driver_features = (self.driver_features & 0xffff_ffff) | (u64::from(val) << 32);
+                    self.driver_features =
+                        (self.driver_features & 0xffff_ffff) | (u64::from(val) << 32);
                 } else {
                     self.driver_features = (self.driver_features & !0xffff_ffff) | u64::from(val);
                 }
-            },
+            }
             REG_DRIVER_FEATURES_SEL => self.driver_features_sel = val,
             REG_QUEUE_SEL => self.queue_sel = val,
             REG_QUEUE_NUM => {
                 if let Some(q) = self.queues.get_mut(sel) {
                     q.size = val as u16;
                 }
-            },
+            }
             REG_QUEUE_READY => {
                 if let Some(q) = self.queues.get_mut(sel) {
                     q.ready = val == 1;
@@ -404,7 +490,7 @@ impl VirtioNet {
                         self.mem.write_u16(used.wrapping_add(2), 0);
                     }
                 }
-            },
+            }
             REG_QUEUE_NOTIFY if val as usize == TX_QUEUE => self.process_tx(),
             REG_INTERRUPT_ACK => self.interrupt_status &= !val,
             REG_STATUS => {
@@ -412,14 +498,14 @@ impl VirtioNet {
                 if val == 0 {
                     self.reset();
                 }
-            },
+            }
             REG_QUEUE_DESC_LOW => self.set_queue_addr(sel, |q| &mut q.desc, val, false),
             REG_QUEUE_DESC_HIGH => self.set_queue_addr(sel, |q| &mut q.desc, val, true),
             REG_QUEUE_DRIVER_LOW => self.set_queue_addr(sel, |q| &mut q.avail, val, false),
             REG_QUEUE_DRIVER_HIGH => self.set_queue_addr(sel, |q| &mut q.avail, val, true),
             REG_QUEUE_DEVICE_LOW => self.set_queue_addr(sel, |q| &mut q.used, val, false),
             REG_QUEUE_DEVICE_HIGH => self.set_queue_addr(sel, |q| &mut q.used, val, true),
-            _ => {},
+            _ => {}
         }
     }
 
@@ -452,7 +538,7 @@ impl VirtioNet {
         self.status = 0;
     }
 
-    /// Drains the transmit queue, handing each guest Ethernet frame to the NAT.
+    /// Drains the transmit queue, handing each guest Ethernet frame to the bounded backend.
     fn process_tx(&mut self) {
         if !self.queues[TX_QUEUE].ready {
             return;
@@ -481,9 +567,11 @@ impl VirtioNet {
                 }
             }
 
-            // Strip the virtio_net_hdr and hand the raw Ethernet frame to the NAT.
+            // Strip the virtio_net_hdr and hand the raw Ethernet frame to the backend. A full
+            // bounded queue completes the descriptor and is observable through backend counters;
+            // it must never stall a vCPU while this device mutex is held.
             if frame.len() > NET_HDR_LEN {
-                self.nat.send_from_guest(frame[NET_HDR_LEN..].to_vec());
+                let _ = self.backend.try_send(frame[NET_HDR_LEN..].to_vec());
             }
             self.queues[TX_QUEUE].push_used(&mem, u32::from(head), 0);
             raised = true;
@@ -522,7 +610,12 @@ impl VirtioNet {
             if flags & VIRTQ_DESC_F_WRITE != 0 && written < payload.len() {
                 let take: usize = (len as usize).min(payload.len() - written);
                 if take > 0 {
-                    let _ = mem.write_slice(addr, &payload[written..written + take]);
+                    if let Err(e) = mem.write_slice(addr, &payload[written..written + take]) {
+                        log::error!(
+                            "virt-net: RX descriptor write failed at {addr:#x} for {take} bytes: {e:#}"
+                        );
+                        break;
+                    }
                     written += take;
                 }
             }
@@ -537,6 +630,12 @@ impl VirtioNet {
             }
         }
 
+        if written < payload.len() {
+            log::warn!(
+                "virt-net: RX buffer too small ({written} < {}); frame truncated",
+                payload.len()
+            );
+        }
         self.queues[RX_QUEUE].push_used(&mem, u32::from(head), written as u32);
         self.raise_irq();
         true
@@ -663,5 +762,20 @@ mod tests {
         assert!(frag.contains(&format!("{NET_MMIO_SIZE:#x}@{NET_MMIO_BASE:#x}:{NET_IRQ}")));
         assert!(frag.contains("virtnet_ip=10.0.0.2"));
         assert!(frag.contains("virtnet_gw=10.0.0.1"));
+    }
+
+    #[test]
+    fn external_snapshot_header_has_guest_identity_only() {
+        let identity = ExternalIdentity {
+            mac: [0, 0x15, 0x5d, 1, 2, 3],
+            mtu: 1500,
+            bootstrap: br#"{"version":1,"ipv4":{"address":"192.168.0.12"}}"#.to_vec(),
+            bootstrap_digest: [0xa5; 32],
+        };
+        let header = NetConfig::save_external_header(&identity);
+        let (loaded, consumed) = NetConfig::load_external_header(&header).unwrap();
+        assert_eq!(loaded, identity);
+        assert_eq!(consumed, header.len());
+        assert!(NetConfig::is_external_snapshot(&header));
     }
 }

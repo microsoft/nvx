@@ -233,6 +233,13 @@ impl Pic {
         Some(self.master.base.wrapping_add(line))
     }
 
+    /// Rolls back an in-service bit when the corresponding WHP interrupt request fails.
+    pub fn cancel_irq(&mut self, line: u8) {
+        if line <= 7 {
+            self.master.isr &= !(1 << line);
+        }
+    }
+
     /// Serializes both controllers' state for a snapshot (16 bytes).
     pub fn save(&self) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(16);
@@ -348,4 +355,5 @@ mod tests {
         pic.write(PIC_MASTER_DATA, 0xff); // mask everything, including IRQ0
         assert_eq!(pic.raise_irq0(), None);
     }
+
 }

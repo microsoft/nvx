@@ -14,6 +14,7 @@
 mod boot;
 mod console;
 mod devices;
+mod l2bridge;
 mod layout;
 
 // Linux backend: KVM-based VMM.
@@ -142,6 +143,11 @@ struct Args {
     #[arg(long, value_name = "IP/PREFIX")]
     net: Option<String>,
 
+    /// Path to a versioned external L2Bridge network manifest. This is mutually exclusive with
+    /// `--net`, which remains the standalone SLIRP configuration.
+    #[arg(long, value_name = "JSON", conflicts_with = "net")]
+    net_config: Option<PathBuf>,
+
     /// Attach to this pre-existing, user-owned host TAP instead of creating one per run. The TAP
     /// must already be configured (MAC, address, up); the VMM binds to it with a single ioctl (no
     /// privileged `ip` calls) and leaves it in place on exit. This lets `--restore` resume a
@@ -227,6 +233,9 @@ fn selftest() -> Result<()> {
 /// Builds the backend configuration and runs the VM (Linux / KVM backend).
 #[cfg(target_os = "linux")]
 fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
+    if args.net_config.is_some() {
+        bail!("--net-config is only available on the Windows/WHP backend");
+    }
     // Parse the optional virt-net endpoint (guest IP/prefix), deriving the host gateway.
     let net: Option<net::NetConfig> = match &args.net {
         Some(spec) => Some(net::NetConfig::parse(spec)?),
@@ -286,6 +295,10 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         Some(spec) => Some(whp::NetConfig::parse(spec)?),
         None => None,
     };
+    let net_config: Option<l2bridge::L2BridgeConfig> = match &args.net_config {
+        Some(path) => Some(l2bridge::L2BridgeConfig::from_path(path)?),
+        None => None,
+    };
 
     whp::run(whp::Config {
         kernel: args.kernel,
@@ -300,6 +313,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         snapshot: args.snapshot,
         restore: args.restore,
         net,
+        net_config,
         mount: args.mount,
         mount_target: args.mount_target,
         mount_rw: args.mount_rw,

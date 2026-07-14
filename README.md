@@ -19,6 +19,13 @@ It runs on **two hypervisor backends** from the same codebase:
   by a built-in user-mode NAT — no TAP driver or admin rights needed). The virt-fs feature is
   KVM-only. See [Running on Windows (WHP backend)](#running-on-windows-whp-backend).
 
+  `--net-config <json>` validates the versioned external L2Bridge launch contract (exact
+  interface index, CNI MAC/MTU, IPv4/routes/DNS, and control pipe) and is mutually exclusive with
+  `--net`. It never falls back to SLIRP. The AF_XDP forwarding backend dynamically loads the
+  backward-compatible v2 API from the production-signed
+  [XDP-for-Windows 1.3.0 installer](https://aka.ms/xdp-v1.msi); the node image must install that
+  exact package before an external launch is accepted.
+
 The Linux/KVM backend is a standalone extraction and reworking of the **KVM (Linux) backend of the
 [Nanvix Micro-VM (`uservm`)](https://github.com/nanvix/nanvix/tree/dev/src/uservm)**,
 stripped of the Nanvix-specific paravirtual ABI (magic control registers, credits,
