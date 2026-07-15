@@ -8,7 +8,7 @@
 //! # Virtual Machine Monitor
 //!
 //! Ties together guest memory, the interrupt controller, the vCPU(s), and the device bus, and
-//! drives the boot-processor execution loop (plus, for `--num-cores > 1`, one thread per
+//! drives the boot-processor execution loop (plus, for `--vcpus > 1`, one thread per
 //! application processor). Bytes typed on the host console are delivered to the guest console
 //! device by a dedicated input thread that wakes the boot vCPU with `SIGUSR1`.
 //!
@@ -20,10 +20,7 @@ use ::std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use ::std::sync::{Arc, Mutex};
 use ::std::thread;
 use ::std::thread::JoinHandle;
-use ::std::time::{
-    Duration,
-    Instant,
-};
+use ::std::time::{Duration, Instant};
 
 use ::anyhow::{Context, Result, anyhow, bail};
 use ::kvm_ioctls::{Cap, Kvm, VcpuExit};
@@ -128,10 +125,10 @@ pub struct Config {
     pub net: Option<net::NetConfig>,
     /// Optional pre-existing host TAP to attach to instead of creating one (`--net-tap`).
     pub net_tap: Option<String>,
-    /// Number of processor cores / vCPUs to create (`--num-cores`). 1 keeps the single-processor
-    /// path. With N > 1 the VMM writes an Intel MP table and brings up N-1 application processors
-    /// so the guest runs functional SMP.
-    pub num_cores: usize,
+    /// Number of vCPUs to create (`--vcpus`). 1 keeps the single-processor path. With N > 1 the
+    /// VMM writes an Intel MP table and brings up N-1 application processors so the guest runs
+    /// functional SMP.
+    pub vcpus: usize,
 }
 
 /// A running virt-net NIC: the shared device model plus the TAP descriptor the receive thread
@@ -186,7 +183,7 @@ struct VmControl {
     /// Per-vCPU captured state (indexed by vCPU id), filled during a snapshot.
     saved: Mutex<Vec<Option<snapshot::VcpuState>>>,
     /// The number of vCPUs in this VM (the boot processor plus the application processors). Used
-    /// by the snapshot coordinator instead of the CLI `--num-cores`, which is not meaningful on the
+    /// by the snapshot coordinator instead of the CLI `--vcpus`, which is not meaningful on the
     /// restore path (the processor count comes from the snapshot there).
     vcpu_count: usize,
 }
@@ -263,7 +260,12 @@ impl VmControl {
 
     /// Records an application processor's captured state at its vCPU index.
     fn store_saved(&self, index: usize, state: snapshot::VcpuState) {
-        if let Some(slot) = self.saved.lock().expect("vm control poisoned").get_mut(index) {
+        if let Some(slot) = self
+            .saved
+            .lock()
+            .expect("vm control poisoned")
+            .get_mut(index)
+        {
             *slot = Some(state);
         }
     }
@@ -273,7 +275,10 @@ impl VmControl {
         let mut slots = self.saved.lock().expect("vm control poisoned");
         let mut out: Vec<snapshot::VcpuState> = Vec::with_capacity(slots.len());
         for (idx, slot) in slots.iter_mut().enumerate() {
-            out.push(slot.take().with_context(|| format!("vCPU {idx} state was not captured"))?);
+            out.push(
+                slot.take()
+                    .with_context(|| format!("vCPU {idx} state was not captured"))?,
+            );
         }
         Ok(out)
     }
@@ -477,7 +482,7 @@ fn run_cold(cfg: Config) -> Result<()> {
     let mem: GuestMemory = GuestMemory::new(&vm_fd, cfg.mem_bytes)?;
     let ram_size: u64 = mem.ram_size();
     irq::setup(&vm_fd)?;
-    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, cfg.num_cores)?;
+    let mut vcpu: Vcpu = Vcpu::new(&kvm, &vm_fd, 0, cfg.vcpus)?;
 
     // Load the kernel, the initramfs, and the PVH boot structures.
     let loaded = pvh::load_kernel(&mem, &kernel)?;
@@ -504,10 +509,7 @@ fn run_cold(cfg: Config) -> Result<()> {
     // Linux discovers the TSC frequency before kvm-clock is initialized. Give it KVM's actual
     // virtual rate so it never has to rely on timing-sensitive PIT/delay-loop calibration.
     if kvm.check_extension(Cap::GetTscKhz) {
-        let tsc_khz: u32 = vcpu
-            .fd
-            .get_tsc_khz()
-            .context("KVM_GET_TSC_KHZ failed")?;
+        let tsc_khz: u32 = vcpu.fd.get_tsc_khz().context("KVM_GET_TSC_KHZ failed")?;
         if tsc_khz == 0 {
             warn!("KVM reported a zero TSC frequency; guest will use timer calibration");
         } else {
@@ -566,8 +568,16 @@ fn run_cold(cfg: Config) -> Result<()> {
             )));
             let tap_fd = tap.raw_fd();
             let cfg_header = ncfg.save_header();
-            (Some(NetDevice { dev, tap_fd, tx_evt, cfg_header }), Some(tap))
-        },
+            (
+                Some(NetDevice {
+                    dev,
+                    tap_fd,
+                    tx_evt,
+                    cfg_header,
+                }),
+                Some(tap),
+            )
+        }
         None => (None, None),
     };
 
@@ -577,21 +587,21 @@ fn run_cold(cfg: Config) -> Result<()> {
         cmdline
     );
 
-    // Functional multi-core SMP (see `--num-cores`). Emit an Intel MP table so the guest kernel
+    // Functional multi-vCPU SMP (see `--vcpus`). Emit an Intel MP table so the guest kernel
     // enumerates every vCPU, then create the application processors (APs) and run each on its own
     // host thread. Each AP is left in KVM's default `KVM_MP_STATE_UNINITIALIZED` state: its
     // `KVM_RUN` blocks until the boot processor's guest kernel issues INIT-SIPI-SIPI, which the
     // in-kernel KVM LAPIC (created before any vCPU) services, waking the AP at the SIPI vector to
     // run the kernel's secondary-CPU trampoline. Only cold boot brings up APs; `--restore` resumes
     // a single processor.
-    if cfg.num_cores > 1 {
-        crate::boot::mptable::write(&mem, cfg.num_cores as u8)
+    if cfg.vcpus > 1 {
+        crate::boot::mptable::write(&mem, cfg.vcpus as u8)
             .context("writing Intel MP table for SMP")?;
     }
 
     // The VM supervisor, shared by the boot processor and every application processor, so any
     // vCPU that stops (guest shutdown/reset, fatal exit, panic) stops the whole VM.
-    let control: Arc<VmControl> = Arc::new(VmControl::new(cfg.num_cores));
+    let control: Arc<VmControl> = Arc::new(VmControl::new(cfg.vcpus));
     // Install the kick/console signal handlers before spawning any application-processor thread,
     // so an AP can never receive SIGRTMIN (whose default disposition would kill the process)
     // before its handler exists.
@@ -601,8 +611,8 @@ fn run_cold(cfg: Config) -> Result<()> {
     let net_shared: Option<Arc<Mutex<VirtioNet>>> = net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
 
     let mut ap_threads: ApThreads = ApThreads::new(Arc::clone(&control));
-    for id in 1..cfg.num_cores as u64 {
-        let ap: Vcpu = Vcpu::new(&kvm, &vm_fd, id, cfg.num_cores)
+    for id in 1..cfg.vcpus as u64 {
+        let ap: Vcpu = Vcpu::new(&kvm, &vm_fd, id, cfg.vcpus)
             .with_context(|| format!("creating application-processor vcpu {id}"))?;
         let tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let ap_bus: Arc<DeviceBus> = Arc::clone(&bus);
@@ -630,11 +640,11 @@ fn run_cold(cfg: Config) -> Result<()> {
             .with_context(|| format!("spawning application-processor vcpu {id}"))?;
         ap_threads.push(id, handle, tid);
     }
-    if cfg.num_cores > 1 {
+    if cfg.vcpus > 1 {
         info!(
             "SMP: created {} vCPUs ({} application processor(s) on their own threads)",
-            cfg.num_cores,
-            cfg.num_cores - 1
+            cfg.vcpus,
+            cfg.vcpus - 1
         );
     }
 
@@ -739,11 +749,11 @@ fn run_ap(
             match ap.fd.run() {
                 Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
                 Ok(VcpuExit::IoOut(port, data)) => match bus.pio_write(port, data) {
-                    PioAction::None => {},
+                    PioAction::None => {}
                     PioAction::Shutdown => {
                         stop_vm(None);
                         break;
-                    },
+                    }
                     // The snapshot can be triggered from any CPU. Announce it and kick the other
                     // vCPUs; the boot processor coordinates the actual capture.
                     PioAction::Snapshot => {
@@ -751,7 +761,7 @@ fn run_ap(
                             control.request_snapshot();
                             control.kick_others(my_tid);
                         }
-                    },
+                    }
                 },
                 Ok(VcpuExit::MmioRead(addr, data)) => net_mmio_read(net.as_ref(), addr, data),
                 Ok(VcpuExit::MmioWrite(addr, data)) => net_mmio_write(net.as_ref(), addr, data),
@@ -816,7 +826,8 @@ fn ap_snapshot(ap: &mut Vcpu, idx: u64, control: &VmControl) -> Result<()> {
         }
         thread::sleep(Duration::from_micros(200));
     }
-    ap.drain_pending_io().with_context(|| format!("draining AP{idx} I/O for snapshot"))?;
+    ap.drain_pending_io()
+        .with_context(|| format!("draining AP{idx} I/O for snapshot"))?;
     let state: snapshot::VcpuState = snapshot::VcpuState::capture(&ap.fd, idx)
         .with_context(|| format!("capturing AP{idx} state"))?;
     control.store_saved(idx as usize, state);
@@ -862,7 +873,8 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     }
     snap.apply_vm(&vm_fd)?;
     for (id, v) in vcpus.iter().enumerate() {
-        snap.apply_vcpu(&v.fd, id).with_context(|| format!("restoring vcpu {id}"))?;
+        snap.apply_vcpu(&v.fd, id)
+            .with_context(|| format!("restoring vcpu {id}"))?;
     }
     // Synchronize the timestamp counter across all processors (write one reference TSC to each)
     // so a task migrating between them never sees time move backwards, then arm each processor's
@@ -892,8 +904,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     // Install the signal handlers before spawning any application processor.
     install_signal_handlers();
     let control: Arc<VmControl> = Arc::new(VmControl::new(n_vcpus));
-    let net_shared: Option<Arc<Mutex<VirtioNet>>> =
-        net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
+    let net_shared: Option<Arc<Mutex<VirtioNet>>> = net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
 
     // The boot processor is index 0; the rest run as application processors, parked at the start
     // gate until every vCPU is created and restored and the boot processor releases them together.
@@ -928,7 +939,10 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
         ap_threads.push(id, handle, tid);
     }
     if n_vcpus > 1 {
-        info!("SMP restore: {n_vcpus} vCPUs ({} application processor(s))", n_vcpus - 1);
+        info!(
+            "SMP restore: {n_vcpus} vCPUs ({} application processor(s))",
+            n_vcpus - 1
+        );
     }
 
     // Release the application processors and run the boot processor.
@@ -982,7 +996,15 @@ fn restore_net(
     // Preserve the config header so a snapshot taken from this restored VM re-records the NIC.
     let cfg_header = ncfg.save_header();
     let dev = Arc::new(Mutex::new(dev));
-    Ok(Some((NetDevice { dev, tap_fd, tx_evt, cfg_header }, tap)))
+    Ok(Some((
+        NetDevice {
+            dev,
+            tap_fd,
+            tx_evt,
+            cfg_header,
+        },
+        tap,
+    )))
 }
 
 /// Builds the shared console sink, the portb console device, and the device bus. When
@@ -1028,11 +1050,15 @@ fn execute(
     // rings the doorbell (delivered via the TX ioeventfd). Both are joined on shutdown, before
     // guest memory is released.
     let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let mut net_rx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
-        net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop))
-    });
+    let mut net_rx: Option<JoinHandle<()>> = net
+        .as_ref()
+        .map(|nd| net::spawn_rx_thread(Arc::clone(&nd.dev), nd.tap_fd, Arc::clone(&net_stop)));
     let mut net_tx: Option<JoinHandle<()>> = net.as_ref().map(|nd| {
-        net::spawn_tx_thread(Arc::clone(&nd.dev), Arc::clone(&nd.tx_evt), Arc::clone(&net_stop))
+        net::spawn_tx_thread(
+            Arc::clone(&nd.dev),
+            Arc::clone(&nd.tx_evt),
+            Arc::clone(&net_stop),
+        )
     });
 
     // Whether the guest's snapshot control-port write should be honored (only when a snapshot
@@ -1059,8 +1085,17 @@ fn execute(
         // processor coordinates a consistent VM-wide cut, then the VM stops.
         if control.snapshot_pending() {
             match coordinate_snapshot(
-                cfg, vm_fd, vcpu, mem, bus, console, net.as_ref(), &control, &net_stop,
-                &mut net_rx, &mut net_tx,
+                cfg,
+                vm_fd,
+                vcpu,
+                mem,
+                bus,
+                console,
+                net.as_ref(),
+                &control,
+                &net_stop,
+                &mut net_rx,
+                &mut net_tx,
             ) {
                 Ok(()) => info!("snapshot written to {:?}", cfg.snapshot),
                 Err(e) => run_err = Some(e),
@@ -1099,9 +1134,7 @@ fn execute(
                         control.request_snapshot();
                         control.kick_others(self_tid);
                     } else {
-                        warn!(
-                            "guest requested a snapshot but --snapshot was not given; ignoring"
-                        );
+                        warn!("guest requested a snapshot but --snapshot was not given; ignoring");
                     }
                 }
             },
@@ -1223,13 +1256,17 @@ fn coordinate_snapshot(
     net_rx: &mut Option<JoinHandle<()>>,
     net_tx: &mut Option<JoinHandle<()>>,
 ) -> Result<()> {
-    // The processor count comes from the supervisor, not the CLI `--num-cores`: on the restore path
+    // The processor count comes from the supervisor, not the CLI `--vcpus`: on the restore path
     // the latter is not meaningful (the count was recovered from the snapshot).
     let n_aps: usize = control.vcpu_count().saturating_sub(1);
 
     // 1. Wait until every application processor has quiesced out of KVM_RUN. No vCPU is running
     //    the guest past this point, so none can inject an IPI into a peer's LAPIC.
-    wait_bounded(|| control.ap_paused.load(Ordering::SeqCst) >= n_aps, control, "vCPUs to quiesce")?;
+    wait_bounded(
+        || control.ap_paused.load(Ordering::SeqCst) >= n_aps,
+        control,
+        "vCPUs to quiesce",
+    )?;
 
     // 2. Pause the devices: stop and join the receive/transmit threads so neither can raise an
     //    interrupt or touch guest RAM while the interrupt controller and memory are captured.
@@ -1243,7 +1280,8 @@ fn coordinate_snapshot(
 
     // 3. Complete the boot processor's pending I/O (the OUT that triggered the snapshot) so its
     //    register state is past that instruction, then capture it (index 0).
-    vcpu.drain_pending_io().context("draining boot-processor I/O for snapshot")?;
+    vcpu.drain_pending_io()
+        .context("draining boot-processor I/O for snapshot")?;
     let bsp: snapshot::VcpuState =
         snapshot::VcpuState::capture(&vcpu.fd, 0).context("capturing boot-processor state")?;
     control.store_saved(0, bsp);
@@ -1263,11 +1301,7 @@ fn coordinate_snapshot(
 
 /// Polls `done` until it is true, aborting if any vCPU requests a stop (a failed peer) or a
 /// generous deadline elapses, so the snapshot coordinator can never block forever.
-fn wait_bounded(
-    mut done: impl FnMut() -> bool,
-    control: &VmControl,
-    what: &str,
-) -> Result<()> {
+fn wait_bounded(mut done: impl FnMut() -> bool, control: &VmControl, what: &str) -> Result<()> {
     let deadline: Instant = Instant::now() + Duration::from_secs(10);
     while !done() {
         if control.should_stop() {
@@ -1292,7 +1326,10 @@ fn write_snapshot(
     net: Option<&NetDevice>,
     states: &[snapshot::VcpuState],
 ) -> Result<()> {
-    let dir = cfg.snapshot.as_ref().context("--snapshot destination missing")?;
+    let dir = cfg
+        .snapshot
+        .as_ref()
+        .context("--snapshot destination missing")?;
     console.lock().expect("console poisoned").flush();
     let con_state: Vec<u8> = bus.console().lock().expect("console poisoned").snapshot();
 
@@ -1304,7 +1341,7 @@ fn write_snapshot(
             let mut s: Vec<u8> = nd.cfg_header.clone();
             s.extend(dev.save());
             s
-        },
+        }
         None => Vec::new(),
     };
     snapshot::write(dir, states, vm_fd, mem, &con_state, &net_state)

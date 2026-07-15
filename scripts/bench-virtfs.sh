@@ -23,7 +23,7 @@ KERNEL="${KERNEL:-$HOME/build/vmlinux}"
 INITRD="${INITRD:-$HOME/build/initramfs.cpio.gz}"
 MEM="${MEM:-512}"
 N="${N:-5}"
-CORES="${CORES:-1}"   # vCPUs per guest run (--num-cores)
+CORES="${CORES:-1}"   # vCPUs per guest run (--vcpus)
 PAYLOAD_MB="${PAYLOAD_MB:-64}"
 # Give the ext4 image comfortable headroom over the payload.
 IMG_MB="${IMG_MB:-$((PAYLOAD_MB * 2 + 64))}"
@@ -74,7 +74,7 @@ now_ms() { date +%s%3N; }
 # guest shell never receives the final "reboot -f" line and would hang until the timeout.
 guest_run() { # $1=script  $2..=extra microvm args
     local script="$1"; shift
-    printf '%s\n' "$script" | timeout 120 "$BIN" --num-cores "$CORES" --kernel "$KERNEL" --initrd "$INITRD" \
+    printf '%s\n' "$script" | timeout 120 "$BIN" --vcpus "$CORES" --kernel "$KERNEL" --initrd "$INITRD" \
         --mem "$MEM" --log-level off --cmdline "$CMDLINE" "$@" 2>&1 || true
 }
 

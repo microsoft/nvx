@@ -50,7 +50,7 @@ echo
 
 echo "== cold boot -> working-network shell (kernel boot + virtio-net + ifconfig) =="
 { for _ in $(seq 1 "$N"); do
-    timeout 40 "$BIN" --num-cores "$CORES" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET" \
+    timeout 40 "$BIN" --vcpus "$CORES" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET" \
         --exit-on-boot --quiet --boot-marker "$BANNER" --cmdline "$CMDLINE" 2>&1 \
         | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
 done; } | median | sed 's/^/  cold  (guest start -> marker): /'

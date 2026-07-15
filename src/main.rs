@@ -5,7 +5,7 @@
 //! # microvm
 //!
 //! A minimal x86_64 micro-VM (single processor by default, optional functional KVM SMP via
-//! `--num-cores`) that boots a Linux (Alpine) kernel through the PVH boot protocol from a RAM
+//! `--vcpus`) that boots a Linux (Alpine) kernel through the PVH boot protocol from a RAM
 //! initramfs. There is no PCI, no ACPI, and no block device: the only always-on emulated device
 //! is a bidirectional "portb" console (backing `hvc0`).
 //!
@@ -46,7 +46,7 @@ use ::log::LevelFilter;
 #[derive(Parser, Debug)]
 #[command(
     name = "microvm",
-    about = "Minimal x86_64 micro-VM that PVH-boots Linux from a RAM initramfs (optional KVM SMP via --num-cores)."
+    about = "Minimal x86_64 micro-VM that PVH-boots Linux from a RAM initramfs (optional KVM SMP via --vcpus)."
 )]
 struct Args {
     /// Path to the uncompressed `vmlinux` (PVH) kernel image.
@@ -140,14 +140,14 @@ struct Args {
     #[arg(long, value_name = "NAME")]
     net_tap: Option<String>,
 
-    /// Number of processor cores (vCPUs) to create (functional SMP). Default 1 (single
-    /// processor). With N > 1 the VMM writes an Intel MP table so the guest kernel enumerates all
-    /// N cores and brings the application processors online via the normal INIT-SIPI-SIPI path
+    /// Number of vCPUs to create (functional SMP). Default 1 (single processor). With N > 1 the
+    /// VMM writes an Intel MP table so the guest kernel enumerates all N vCPUs and brings the
+    /// application processors online via the normal INIT-SIPI-SIPI path
     /// (serviced by the in-kernel LAPIC). On `--restore` the processor count comes from the
     /// snapshot. `--snapshot` captures a consistent VM-wide cut of all N processors. Maximum 254
     /// (8-bit APIC ids).
     #[arg(long, default_value_t = 1)]
-    num_cores: usize,
+    vcpus: usize,
 }
 
 /// Parses a logging level name into a [`LevelFilter`].
@@ -185,8 +185,8 @@ fn main() -> Result<()> {
     if args.mem == 0 {
         bail!("--mem must be greater than zero");
     }
-    if args.num_cores == 0 {
-        bail!("--num-cores must be greater than zero");
+    if args.vcpus == 0 {
+        bail!("--vcpus must be greater than zero");
     }
     let mem_bytes: u64 = args
         .mem
@@ -227,9 +227,9 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         bail!("--net-tap requires --net (cold boot) or --restore (a networked snapshot)");
     }
 
-    if args.num_cores > crate::boot::mptable::MAX_SUPPORTED_CPUS as usize {
+    if args.vcpus > crate::boot::mptable::MAX_SUPPORTED_CPUS as usize {
         bail!(
-            "--num-cores supports at most {} cores (the MP table uses 8-bit APIC ids)",
+            "--vcpus supports at most {} CPUs (the MP table uses 8-bit APIC ids)",
             crate::boot::mptable::MAX_SUPPORTED_CPUS
         );
     }
@@ -251,7 +251,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         mount_size: args.mount_size,
         net,
         net_tap: args.net_tap,
-        num_cores: args.num_cores,
+        vcpus: args.vcpus,
     })
 }
 
@@ -260,14 +260,14 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
 /// The WHP backend implements the core PVH boot path (kernel + RAM initramfs + portb console),
 /// snapshot/restore, virt-net (`--net`) through a user-mode NAT, and virt-fs (`--mount`) via a
 /// pure-Rust FAT image. The TAP-attach option (`--net-tap`, which is Linux-specific) and
-/// multi-core (`--num-cores`, KVM-only) are rejected here rather than silently ignored.
+/// multi-vCPU (`--vcpus`, KVM-only) configurations are rejected here rather than silently ignored.
 #[cfg(target_os = "windows")]
 fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net_tap.is_some() {
         bail!("--net-tap is only available on the Linux/KVM backend (WHP uses a user-mode NAT)");
     }
-    if args.num_cores > 1 {
-        bail!("--num-cores > 1 is only available on the Linux/KVM backend (WHP is single-core)");
+    if args.vcpus > 1 {
+        bail!("--vcpus > 1 is only available on the Linux/KVM backend (WHP is single-vCPU)");
     }
 
     let net: Option<whp::NetConfig> = match &args.net {
