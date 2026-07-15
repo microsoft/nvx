@@ -36,9 +36,32 @@ NETWORK_LOG = """
   restore wall-clock             :   50.0 ms  (min 49.0, max 51.0, n=5)
 """
 
+SHELL_SNAPSHOT_LOG = """
+== 64 MiB ==
+    cold boot           : median   510.0 ms   (min 500.0, max 1,510.0, n=5)
+             fast path   505.0 ms (n=4)  |  slow path  1510.0 ms (n=1, +~1005 ms TSC PIT-calib)
+    snapshot restore    : median     5.0 ms   (min 4.8, max 5.2, n=5)
+    speedup             : 101x (fast-path cold) .. 102x (median cold) faster via snapshot
+
+== 128 MiB ==
+    cold boot           : median   520.0 ms   (min 510.0, max 530.0, n=5)
+    snapshot restore    : median     5.5 ms   (min 5.3, max 5.7, n=5)
+    speedup             : 95x (fast-path cold) .. 95x (median cold) faster via snapshot
+
+== 256 MiB ==
+    cold boot           : median   540.0 ms   (min 530.0, max 550.0, n=5)
+    snapshot restore    : median     6.0 ms   (min 5.8, max 6.2, n=5)
+    speedup             : 90x (fast-path cold) .. 90x (median cold) faster via snapshot
+
+== 512 MiB ==
+    cold boot           : median   580.0 ms   (min 570.0, max 590.0, n=5)
+    snapshot restore    : median     7.0 ms   (min 6.8, max 7.2, n=5)
+    speedup             : 83x (fast-path cold) .. 83x (median cold) faster via snapshot
+"""
+
 
 class PerformanceTests(unittest.TestCase):
-    def test_collects_linux_and_utf16_windows_logs(self):
+    def test_collects_linux_metrics_from_utf8_and_utf16_logs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             logs = root / "logs"
@@ -48,17 +71,61 @@ class PerformanceTests(unittest.TestCase):
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
             (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
             (logs / "network.log").write_text(NETWORK_LOG, encoding="utf-16")
+            (logs / "shell-snapshot.log").write_text(
+                SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
 
             result_path = performance.collect_results(
-                "windows-whp", "abc123", logs, output, require_network=True
+                "linux-kvm",
+                "abc123",
+                logs,
+                output,
+                require_network=True,
+                require_shell_snapshot=True,
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 15)
+            self.assertEqual(len(results), 23)
             by_metric = {result.metric: result for result in results}
             self.assertEqual(by_metric["virtfs_ephemeral_read"].p50, 1200.0)
             self.assertEqual(by_metric["virtfs_ephemeral_read"].direction, "higher")
             self.assertEqual(by_metric["network_snapshot_restore"].p50, 40.0)
+            self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].p50, 510.0)
+            self.assertEqual(
+                by_metric["shell_snapshot_cold_64_mib"].direction, "lower"
+            )
+            self.assertEqual(
+                by_metric["shell_snapshot_restore_512_mib"].p50, 7.0
+            )
+
+    def test_shell_snapshot_requires_every_memory_size(self):
+        incomplete_log = SHELL_SNAPSHOT_LOG.split("== 512 MiB ==", maxsplit=1)[0]
+        with self.assertRaisesRegex(
+            performance.PerformanceError,
+            r"missing memory section\(s\).*512 MiB",
+        ):
+            performance._parse_shell_snapshot(incomplete_log)
+
+    def test_collect_requires_shell_snapshot_log_when_requested(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"required benchmark log not found: .*shell-snapshot\.log",
+            ):
+                performance.collect_results(
+                    "linux-kvm",
+                    "abc123",
+                    logs,
+                    root / "results",
+                    require_shell_snapshot=True,
+                )
 
     def test_gate_uses_latest_ten_p50_values_and_both_directions(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -187,6 +187,12 @@ jobs:
           N: 5
           INITRD: ${{ github.workspace }}/build/initramfs-python.cpio.gz
 
+      - name: Benchmark — snapshot/restore (shell)
+        if: env.RUN_BENCH == 'true'
+        run: scripts/bench-snapshot-shell.sh | tee build/performance/shell-snapshot.log
+        env:
+          N: 5
+
       - name: Benchmark — networking + snapshot
         if: env.RUN_BENCH == 'true'
         env:
@@ -362,7 +368,8 @@ jobs:
             --platform linux-kvm \
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/linux-kvm \
-            --output-dir performance-results
+            --output-dir performance-results \
+            --require-shell-snapshot
           python3 scripts/performance.py collect \
             --platform windows-whp \
             --commit "${GITHUB_SHA}" \
@@ -439,7 +446,8 @@ jobs:
             --platform linux-kvm \
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/linux-kvm \
-            --output-dir performance-results
+            --output-dir performance-results \
+            --require-shell-snapshot
           python3 scripts/performance.py collect \
             --platform windows-whp \
             --commit "${GITHUB_SHA}" \

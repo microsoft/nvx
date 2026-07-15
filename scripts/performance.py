@@ -21,6 +21,12 @@ CSV_FIELDS = ["commit", "metric", "unit", "direction", "p50"]
 DIRECTIONS = {"lower", "higher"}
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
+SHELL_SNAPSHOT_SECTION = re.compile(
+    r"^==\s*(?P<memory>[0-9]+)\s+MiB\s*==\s*$"
+    r"(?P<body>.*?)(?=^==\s*[0-9]+\s+MiB\s*==\s*$|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
 
 
 class PerformanceError(RuntimeError):
@@ -124,6 +130,54 @@ def _parse_snapshot(text: str) -> dict[str, MetricValue]:
     return _parse_fixed(text, "snapshot.log", patterns)
 
 
+def _parse_shell_snapshot(text: str) -> dict[str, MetricValue]:
+    sections: dict[int, str] = {}
+    for match in SHELL_SNAPSHOT_SECTION.finditer(text):
+        memory_mib = int(match.group("memory"))
+        if memory_mib in sections:
+            raise PerformanceError(
+                f"duplicate {memory_mib} MiB section in shell-snapshot.log"
+            )
+        sections[memory_mib] = match.group("body")
+
+    missing = [
+        memory_mib
+        for memory_mib in SHELL_SNAPSHOT_MEMORIES_MIB
+        if memory_mib not in sections
+    ]
+    if missing:
+        sizes = ", ".join(f"{memory_mib} MiB" for memory_mib in missing)
+        raise PerformanceError(
+            f"missing memory section(s) in shell-snapshot.log: {sizes}"
+        )
+
+    metrics: dict[str, MetricValue] = {}
+    for memory_mib in SHELL_SNAPSHOT_MEMORIES_MIB:
+        metrics.update(
+            _parse_fixed(
+                sections[memory_mib],
+                f"shell-snapshot.log ({memory_mib} MiB)",
+                [
+                    (
+                        f"shell_snapshot_cold_{memory_mib}_mib",
+                        "ms",
+                        "lower",
+                        rf"^\s*cold boot\s*:\s*median\s+"
+                        rf"(?P<value>{NUMBER})\s*ms\b",
+                    ),
+                    (
+                        f"shell_snapshot_restore_{memory_mib}_mib",
+                        "ms",
+                        "lower",
+                        rf"^\s*snapshot restore\s*:\s*median\s+"
+                        rf"(?P<value>{NUMBER})\s*ms\b",
+                    ),
+                ],
+            )
+        )
+    return metrics
+
+
 def _parse_network(text: str) -> dict[str, MetricValue]:
     patterns = [
         (
@@ -223,6 +277,7 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "cold-start.log": (_parse_cold_start, True),
     "virtfs.log": (_parse_virtfs, True),
     "snapshot.log": (_parse_snapshot, True),
+    "shell-snapshot.log": (_parse_shell_snapshot, False),
     "network.log": (_parse_network, False),
 }
 
@@ -298,17 +353,22 @@ def collect_results(
     input_dir: Path,
     output_dir: Path,
     require_network: bool = False,
+    require_shell_snapshot: bool = False,
 ) -> Path:
     if not platform or "/" in platform or platform in {".", ".."}:
         raise PerformanceError(f"invalid platform name: {platform!r}")
     if not commit:
         raise PerformanceError("commit must not be empty")
 
+    required_optional_logs = {
+        "network.log": require_network,
+        "shell-snapshot.log": require_shell_snapshot,
+    }
     collected: dict[str, MetricValue] = {}
     for filename, (parser, required) in LOG_PARSERS.items():
         path = input_dir / filename
         if not path.exists():
-            if required or (filename == "network.log" and require_network):
+            if required or required_optional_logs.get(filename, False):
                 raise PerformanceError(f"required benchmark log not found: {path}")
             print(f"SKIP: optional benchmark log not found: {path}")
             continue
@@ -503,6 +563,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--input-dir", type=Path, required=True)
     collect.add_argument("--output-dir", type=Path, required=True)
     collect.add_argument("--require-network", action="store_true")
+    collect.add_argument("--require-shell-snapshot", action="store_true")
 
     gate = commands.add_parser("gate", help="check current p50 values for regressions")
     gate.add_argument("--baseline-dir", type=Path, required=True)
@@ -528,7 +589,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.commit,
                 args.input_dir,
                 args.output_dir,
-                args.require_network,
+                require_network=args.require_network,
+                require_shell_snapshot=args.require_shell_snapshot,
             )
             return 0
         if args.command == "gate":
