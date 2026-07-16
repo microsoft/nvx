@@ -28,16 +28,31 @@ def gateway():
     return "10.0.0.1"
 
 
-def link_ok(host, port=PORT, timeout=3):
-    """True if a real HTTP request to the host over the NIC round-trips."""
+def is_cold_measurement():
+    """True when the benchmark wants one cold-path link check without taking a snapshot."""
     try:
-        s = socket.create_connection((host, port), timeout)
-        s.sendall(b"GET / HTTP/1.0\r\n\r\n")
-        ok = b"HELLO-HOST" in s.recv(256)
-        s.close()
-        return ok
+        return "netbench_cold=1" in open("/proc/cmdline").read().split()
     except OSError:
         return False
+
+
+def link_ok(host, port=PORT, timeout=3, attempts=3):
+    """True if a real HTTP request to the host over the NIC round-trips."""
+    for _ in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout) as sock:
+                sock.sendall(b"GET / HTTP/1.0\r\n\r\n")
+                response = bytearray()
+                while len(response) < 4096:
+                    chunk = sock.recv(512)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+                if b"HELLO-HOST" in response:
+                    return True
+        except OSError:
+            pass
+    return False
 
 
 def work():
@@ -46,16 +61,16 @@ def work():
 
 
 gw = gateway()
-work()       # warm the numpy/pandas hot paths before snapshotting
-link_ok(gw)  # warm the link (ARP + a round-trip)
-
-try:
-    fd = os.open("/dev/port", os.O_WRONLY)
-    os.lseek(fd, 0x605, os.SEEK_SET)
-    os.write(fd, b"\x01")
-    os.close(fd)
-except OSError:
-    pass
+if not is_cold_measurement():
+    work()       # warm the numpy/pandas hot paths before snapshotting
+    link_ok(gw)  # warm the link (ARP + a round-trip)
+    try:
+        fd = os.open("/dev/port", os.O_WRONLY)
+        os.lseek(fd, 0x605, os.SEEK_SET)
+        os.write(fd, b"\x01")
+        os.close(fd)
+    except OSError:
+        pass
 
 # ---- on restore, execution resumes here ----
 result = work()

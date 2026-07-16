@@ -17,7 +17,7 @@
 
 .EXAMPLE
     scripts\snapshot-demo.ps1
-    scripts\snapshot-demo.ps1 -Mem 256 -N 10
+    scripts\snapshot-demo.ps1 -Mem 512 -N 10
 #>
 [CmdletBinding()]
 param(
@@ -33,12 +33,12 @@ $repo = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $repo 'target\release\microvm.exe'
 if (-not $Kernel) { $Kernel = Join-Path $repo 'build\vmlinux' }
 if (-not $Initrd) { $Initrd = Join-Path $repo 'build\initramfs-python.cpio.gz' }
-if (-not $Snap)   { $Snap   = Join-Path $repo 'build\pysnap' }
+if (-not $Snap) { $Snap = Join-Path $repo 'build\pysnap' }
 
-$marker  = "{'x': 10, 'y': 30}"
+$marker = "{'x': 10, 'y': 30}"
 $cmdline = 'earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1'
 
-if (-not (Test-Path $bin))    { throw "build the VMM first: cargo build --release" }
+if (-not (Test-Path $bin)) { throw "build the VMM first: cargo build --release" }
 if (-not (Test-Path $Kernel)) { throw "missing kernel: $Kernel (scripts\build-linux-artifacts.ps1)" }
 if (-not (Test-Path $Initrd)) { throw "missing python initramfs: $Initrd (scripts/build-python-initramfs.sh, needs network)" }
 
@@ -70,7 +70,7 @@ function Format-Median {
     param([double[]]$Vals)
     $s = @($Vals | Where-Object { $_ -ne $null } | Sort-Object)
     if (-not $s.Count) { return 'NO DATA' }
-    $md = if ($s.Count % 2) { $s[[int](($s.Count - 1) / 2)] } else { ($s[$s.Count/2 - 1] + $s[$s.Count/2]) / 2 }
+    $md = if ($s.Count % 2) { $s[[int](($s.Count - 1) / 2)] } else { ($s[$s.Count / 2 - 1] + $s[$s.Count / 2]) / 2 }
     '{0,7:N1} ms  (min {1:N1}, max {2:N1}, n={3})' -f $md, $s[0], $s[-1], $s.Count
 }
 

@@ -126,6 +126,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Validate shell scripts
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find scripts -type f -name '*.sh' -print0)
+
+      - name: Validate GitHub Actions workflow
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -204,6 +219,36 @@ jobs:
             echo "::notice::skipping networking benchmark (needs passwordless 'sudo ip' for the host TAP)"
           fi
 
+      - name: Smoke — networked Python snapshot
+        if: env.RUN_BENCH == 'true'
+        env:
+          INITRD: ${{ github.workspace }}/build/initramfs-python.cpio.gz
+          N: 1
+        run: |
+          set -euo pipefail
+          if sudo -n true 2>/dev/null; then
+            output=$(scripts/bench-net-snapshot-py.sh 2>&1)
+            printf '%s\n' "$output"
+            if grep -q 'NO DATA' <<<"$output"; then
+              echo 'networked Python benchmark produced no data' >&2
+              exit 1
+            fi
+            grep -q 'verified: HELLOPY-NET OK' <<<"$output"
+            grep -q 'verified: PANDASPY-NET OK' <<<"$output"
+          else
+            echo "::notice::skipping networked Python smoke test (needs passwordless 'sudo ip' for the host TAP)"
+          fi
+
+      - name: Smoke — interactive snapshot boot
+        if: env.RUN_BENCH == 'true'
+        env:
+          INITRD: ${{ github.workspace }}/build/initramfs-python.cpio.gz
+          SNAP: ${{ runner.temp }}/nvx-pyrepl
+        run: |
+          set -euo pipefail
+          rm -rf "$SNAP"
+          printf 'exit()\n' | timeout 90 scripts/snapshot-boot.sh
+
       - name: Upload performance logs
         if: always() && env.RUN_BENCH == 'true'
         uses: actions/upload-artifact@v6
@@ -232,6 +277,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Validate PowerShell scripts
+        run: |
+          $failed = $false
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $script = $_
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $script.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            foreach ($error in $errors) {
+              Write-Error "$($script.Name): $($error.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { throw 'PowerShell syntax validation failed' }
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -265,29 +329,7 @@ jobs:
 
       - name: Boot smoke test
         timeout-minutes: 5
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $marker = 'ALPINE-MICROVM-BOOT-OK'
-          $psi = New-Object System.Diagnostics.ProcessStartInfo
-          $psi.FileName = '.\target\release\microvm.exe'
-          $psi.Arguments = '--kernel build\vmlinux --initrd build\initramfs.cpio.gz --mem 512 ' +
-            '--exit-on-boot --boot-marker "' + $marker + '" ' +
-            '--cmdline "earlycon=xe9 console=hvc0 reboot=t panic=-1"'
-          $psi.RedirectStandardOutput = $true
-          $psi.RedirectStandardError = $true
-          $psi.UseShellExecute = $false
-          $p = [System.Diagnostics.Process]::Start($psi)
-          $out = $p.StandardOutput.ReadToEndAsync()
-          $err = $p.StandardError.ReadToEndAsync()
-          if (-not $p.WaitForExit(90 * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit(2000) | Out-Null }
-          $text = $err.Result + "`n" + $out.Result
-          Write-Host $text
-          if ($text -match [regex]::Escape($marker)) {
-            Write-Host "PASS: guest reached userspace ($marker)"
-          } else {
-            Write-Error "FAIL: '$marker' not found in boot output"
-            exit 1
-          }
+        run: .\scripts\test-boot.ps1
 
       - name: Prepare performance logs
         if: env.RUN_BENCH == 'true'
@@ -304,8 +346,13 @@ jobs:
       - name: Benchmark — virt-fs
         if: env.RUN_BENCH == 'true'
         run: |
-          .\scripts\bench-virtfs.ps1 -N 3 *>&1 |
-            Tee-Object -FilePath build\performance\virtfs.log
+          $output = .\scripts\bench-virtfs.ps1 -N 3 *>&1 |
+            Tee-Object -FilePath build\performance\virtfs.log |
+            Out-String
+          Write-Host $output
+          if ($output -notmatch 'payload survived across runs\s+: 3/3') {
+            throw 'virt-fs persistence verification failed'
+          }
 
       - name: Benchmark — snapshot/restore (Python)
         if: env.RUN_BENCH == 'true'
@@ -318,6 +365,22 @@ jobs:
         run: |
           .\scripts\bench-net-snapshot.ps1 -N 5 *>&1 |
             Tee-Object -FilePath build\performance\network.log
+
+      - name: Smoke — networked Python snapshot
+        if: env.RUN_BENCH == 'true'
+        run: |
+          $output = .\scripts\bench-net-snapshot-py.ps1 -N 1 *>&1 | Out-String
+          Write-Host $output
+          if ($output -match 'NO DATA') { throw 'networked Python benchmark produced no data' }
+          if ($output -notmatch 'verified: HELLOPY-NET OK') { throw 'hello-world network verification missing' }
+          if ($output -notmatch 'verified: PANDASPY-NET OK') { throw 'pandas network verification missing' }
+
+      - name: Smoke — interactive snapshot boot
+        if: env.RUN_BENCH == 'true'
+        run: |
+          $snap = Join-Path $env:RUNNER_TEMP 'nvx-pyrepl'
+          Remove-Item -Recurse -Force $snap -ErrorAction SilentlyContinue
+          .\scripts\snapshot-boot.ps1 -Snap $snap -Mem 512 -SmokeTest
 
       - name: Upload performance logs
         if: always() && env.RUN_BENCH == 'true'

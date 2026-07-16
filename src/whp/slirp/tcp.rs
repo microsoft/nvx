@@ -82,6 +82,10 @@ struct Conn {
     rcv_nxt: u32,
     /// Next sequence number we will send to the guest.
     snd_nxt: u32,
+    /// Initial sequence number used for this connection's SYN-ACK.
+    isn: u32,
+    /// Whether the guest has acknowledged our SYN.
+    syn_acked: bool,
     /// Oldest of our sequence numbers the guest has not acknowledged.
     snd_una: u32,
     /// Guest's advertised receive window.
@@ -142,7 +146,21 @@ impl TcpNat {
             return out;
         }
 
-        if flags & SYN != 0 && !self.conns.contains_key(&key) {
+        if flags & SYN != 0 {
+            if let Some(conn) = self.conns.get(&key) {
+                if !conn.syn_acked {
+                    out.push(build_segment(
+                        cfg,
+                        conn,
+                        conn.isn,
+                        seq.wrapping_add(1),
+                        SYN | ACK,
+                        &[],
+                    ));
+                }
+                return out;
+            }
+
             let host_dst: Ipv4Addr = if pkt.dst == cfg.host_ip {
                 Ipv4Addr::LOCALHOST
             } else {
@@ -155,6 +173,8 @@ impl TcpNat {
                 guest_port: src_port,
                 rcv_nxt: seq.wrapping_add(1),
                 snd_nxt: isn.wrapping_add(1),
+                isn,
+                syn_acked: false,
                 snd_una: isn,
                 guest_window: window.max(1),
                 host: None,
@@ -176,6 +196,9 @@ impl TcpNat {
         };
         conn.last = Instant::now();
         conn.guest_window = window.max(1);
+        if flags & ACK != 0 && seq_gt(ack, conn.isn) {
+            conn.syn_acked = true;
+        }
         if flags & ACK != 0 && seq_gt(ack, conn.snd_una) {
             conn.snd_una = ack;
         }
@@ -353,4 +376,38 @@ fn spawn_connect(dst: Ipv4Addr, port: u16) -> Receiver<Option<TcpStream>> {
         let _ = tx.send(stream);
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn syn_packet<'a>(tcp: &'a [u8], cfg: &NetConfig) -> Ipv4Packet<'a> {
+        Ipv4Packet {
+            src: cfg.guest_ip,
+            dst: cfg.host_ip,
+            proto: IpProto::Tcp,
+            payload: tcp,
+        }
+    }
+
+    #[test]
+    fn duplicate_syn_retransmits_the_same_syn_ack() {
+        let cfg = NetConfig::parse("10.0.0.2/24").unwrap();
+        let mut tcp = [0u8; 20];
+        tcp[0..2].copy_from_slice(&49152u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&9u16.to_be_bytes());
+        tcp[4..8].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = SYN;
+        tcp[14..16].copy_from_slice(&4096u16.to_be_bytes());
+
+        let mut nat = TcpNat::new();
+        let first = nat.on_guest(&cfg, &syn_packet(&tcp, &cfg));
+        let retry = nat.on_guest(&cfg, &syn_packet(&tcp, &cfg));
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(&first[0][20..], &retry[0][20..]);
+    }
 }

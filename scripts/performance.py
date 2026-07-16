@@ -282,6 +282,15 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
 }
 
 
+def _platform_metric_name(platform: str, metric: str) -> str:
+    # Earlier Windows virt-fs runs could queue commands before the guest shell was ready and record
+    # a fast no-op as `virtfs_reuse`. Keep Linux history intact, but warm a new Windows baseline for
+    # the now fail-fast, checksum-verified workload.
+    if platform == "windows-whp" and metric == "virtfs_reuse":
+        return "virtfs_verified_reuse"
+    return metric
+
+
 def write_results(path: Path, results: Iterable[Result]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = list(results)
@@ -373,6 +382,7 @@ def collect_results(
             print(f"SKIP: optional benchmark log not found: {path}")
             continue
         for metric, value in parser(_read_log(path)).items():
+            metric = _platform_metric_name(platform, metric)
             if metric in collected:
                 raise PerformanceError(f"duplicate collected metric: {metric}")
             collected[metric] = value

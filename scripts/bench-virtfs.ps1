@@ -38,7 +38,7 @@ if (-not $Initrd) { $Initrd = Join-Path $repo 'build\initramfs.cpio.gz' }
 if ($ImgMB -le 0) { $ImgMB = $PayloadMB * 2 + 64 }
 $cmdline = 'console=hvc0 quiet loglevel=0 reboot=t panic=-1'
 
-if (-not (Test-Path $bin))    { throw "build the VMM first: cargo build --release" }
+if (-not (Test-Path $bin)) { throw "build the VMM first: cargo build --release" }
 if (-not (Test-Path $Kernel)) { throw "missing kernel: $Kernel (scripts\build-linux-artifacts.ps1)" }
 if (-not (Test-Path $Initrd)) { throw "missing initrd: $Initrd" }
 
@@ -47,7 +47,7 @@ if (-not (Test-Path $Initrd)) { throw "missing initrd: $Initrd" }
 function Invoke-Guest {
     param([string]$Script, [string[]]$MountArgs, [int]$TimeoutSec = 120)
     $a = @('--kernel', $Kernel, '--initrd', $Initrd, '--mem', "$Mem", '--log-level', 'off',
-        '--cmdline', $cmdline) + $MountArgs
+        '--defer-stdin-until-boot', '--boot-marker', '/ # ', '--cmdline', $cmdline) + $MountArgs
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $bin
     $psi.Arguments = ($a | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
@@ -73,7 +73,8 @@ function Get-DdRate {
     if ($lines[$Occurrence - 1] -match '([0-9.]+)\s?([KMG]?)B/s') {
         $v = [double]$Matches[1]
         switch ($Matches[2]) { 'K' { $v * 1e-3 } 'M' { $v } 'G' { $v * 1e3 } default { $v * 1e-6 } }
-    } else { $null }
+    }
+    else { $null }
 }
 
 # Reduces MB/s samples to a median line.
@@ -81,7 +82,7 @@ function Format-RateMedian {
     param([double[]]$Vals)
     $s = @($Vals | Where-Object { $_ -ne $null -and $_ -gt 0 } | Sort-Object)
     if (-not $s.Count) { return '     n/a  (too fast for busybox dd to time)' }
-    '{0,8:N1} MB/s  (min {1:N0}, max {2:N0}, n={3})' -f $s[[int]($s.Count/2)], $s[0], $s[-1], $s.Count
+    '{0,8:N1} MB/s  (min {1:N0}, max {2:N0}, n={3})' -f $s[[int]($s.Count / 2)], $s[0], $s[-1], $s.Count
 }
 
 # Reduces millisecond samples to a median line.
@@ -89,7 +90,12 @@ function Format-MsMedian {
     param([double[]]$Vals)
     $s = @($Vals | Where-Object { $_ -ne $null } | Sort-Object)
     if (-not $s.Count) { return 'NO DATA' }
-    '{0,7:N0} ms  (min {1:N0}, max {2:N0}, n={3})' -f $s[[int]($s.Count/2)], $s[0], $s[-1], $s.Count
+    '{0,7:N0} ms  (min {1:N0}, max {2:N0}, n={3})' -f $s[[int]($s.Count / 2)], $s[0], $s[-1], $s.Count
+}
+
+function Format-FailureTail {
+    param([string]$Text)
+    (($Text -split '\r?\n' | Where-Object { $_ } | Select-Object -Last 30) -join "`n")
 }
 
 # Extracts the cksum checksum for /mnt/host/data.bin from guest output.
@@ -109,10 +115,16 @@ try {
     Write-Host "virt-fs benchmark: $PayloadMB MiB payload, ${Mem} MiB guest, image $ImgMB MiB, median of $N runs"
     Write-Host ''
 
+    # On very slow guests, the shell prompt can race the first external exec. Retry the known
+    # BusyBox binary before starting any measured work; Invoke-Guest's timeout bounds the loop.
+    $busyboxReady = "until /bin/busybox true 2>/dev/null; do :; done`n"
+
     # Guest workload: write then read PAYLOAD_MB through the mount (plain dd, no pipelines).
-    $ioScript = "dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count=$PayloadMB conv=fsync 2>&1`n" +
-                "sync`necho 3 > /proc/sys/vm/drop_caches 2>/dev/null`n" +
-                "dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1`nsync`nreboot -f`n"
+    $ioScript = $busyboxReady +
+    "/bin/busybox dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count=$PayloadMB conv=fsync 2>&1`n" +
+    "/bin/busybox sync`necho 3 > /proc/sys/vm/drop_caches 2>/dev/null`n" +
+    "/bin/busybox dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1`n" +
+    "/bin/busybox sync`n/bin/busybox reboot -f`n"
 
     # ---- Part 1: guest-observed sequential throughput ----
     function Invoke-IoBench {
@@ -120,8 +132,13 @@ try {
         $w = @(); $r = @()
         for ($i = 0; $i -lt $N; $i++) {
             $o = Invoke-Guest -Script $ioScript -MountArgs $MountArgs
-            $w += (Get-DdRate -Text $o -Occurrence 1)
-            $r += (Get-DdRate -Text $o -Occurrence 2)
+            $writeRate = Get-DdRate -Text $o -Occurrence 1
+            $readRate = Get-DdRate -Text $o -Occurrence 2
+            if ($null -eq $writeRate -or $null -eq $readRate) {
+                throw "$Label run $($i + 1)/$N did not report both dd rates`n$(Format-FailureTail $o)"
+            }
+            $w += $writeRate
+            $r += $readRate
         }
         Write-Host ("  {0,-27} write {1}" -f $Label, (Format-RateMedian -Vals $w))
         Write-Host ("  {0,-27} read  {1}" -f '', (Format-RateMedian -Vals $r))
@@ -136,23 +153,33 @@ try {
     # ---- Part 2: persistence round-trip on a --mount-image ----
     Write-Host '== persistence round-trip (rw --mount-image) =='
     Remove-Item -Force $roundImg -ErrorAction SilentlyContinue
-    $createScript = "dd if=/dev/zero of=/mnt/host/data.bin bs=1M count=$PayloadMB 2>/dev/null`n" +
-                    "cksum /mnt/host/data.bin`nsync`nreboot -f`n"
+    $createScript = $busyboxReady +
+    "/bin/busybox dd if=/dev/zero of=/mnt/host/data.bin bs=1M count=$PayloadMB 2>/dev/null`n" +
+    "/bin/busybox cksum /mnt/host/data.bin`n/bin/busybox sync`n" +
+    "/bin/busybox reboot -f`n"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $createOut = Invoke-Guest -Script $createScript -MountArgs @('--mount', $seed, '--mount-image', $roundImg, '--mount-size', "$ImgMB")
     $sw.Stop()
     $createCk = Get-DataCksum -Text $createOut
+    if (-not $createCk) {
+        throw "persistent image creation did not report a checksum`n$(Format-FailureTail $createOut)"
+    }
     Write-Host ("  create image + write {0} MiB       : {1:N0} ms" -f $PayloadMB, $sw.Elapsed.TotalMilliseconds)
     Write-Host ("  host image on disk                : {0} ({1:N0} MiB)" -f (Split-Path $roundImg -Leaf), ((Get-Item $roundImg).Length / 1MB))
 
     $reuse = @(); $ok = 0
-    $verifyScript = "cksum /mnt/host/data.bin 2>/dev/null`nreboot -f`n"
+    $verifyScript = $busyboxReady +
+    "/bin/busybox cksum /mnt/host/data.bin 2>/dev/null`n/bin/busybox reboot -f`n"
     for ($i = 0; $i -lt $N; $i++) {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $verifyOut = Invoke-Guest -Script $verifyScript -MountArgs @('--mount', $seed, '--mount-image', $roundImg, '--mount-size', "$ImgMB")
         $sw.Stop()
         $reuse += $sw.Elapsed.TotalMilliseconds
-        if ($createCk -and (Get-DataCksum -Text $verifyOut) -eq $createCk) { $ok++ }
+        $verifyCk = Get-DataCksum -Text $verifyOut
+        if ($verifyCk -ne $createCk) {
+            throw "persistent image verification $($i + 1)/$N checksum mismatch ($verifyCk != $createCk)`n$(Format-FailureTail $verifyOut)"
+        }
+        $ok++
     }
     Write-Host ("  reuse image + verify (cold each)  : {0}" -f (Format-MsMedian -Vals $reuse))
     Write-Host ("  payload survived across runs      : {0}/{1} runs (cksum {2})" -f $ok, $N, $(if ($createCk) { $createCk } else { '?' }))

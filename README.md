@@ -1,5 +1,7 @@
 # microvm
 
+[![CI](https://github.com/nanvix/nvx/actions/workflows/ci.yml/badge.svg)](https://github.com/nanvix/nvx/actions/workflows/ci.yml)
+
 A minimal **x86_64 micro-VM** (single processor by default, optional functional **SMP** on the KVM
 backend via `--vcpus`) that boots a Linux (Alpine) kernel through the **PVH boot protocol**,
 entirely from a **RAM initramfs** — no PCI, no ACPI, and no block device by default. The only
@@ -119,7 +121,7 @@ uid=0(root) gid=0(root)
 | `alpine/hello.py`, `alpine/repl.py`           | Python snapshot apps: pandas/numpy benchmark and interactive REPL                                                                                                                                                                                                                              |
 | `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore                                                                                                                                                                        |
 | `scripts/*.sh`                                | Kernel / initramfs build and run helpers; `build-linux-artifacts.sh` drives the Docker build                                                                                                                                                                                                   |
-| `scripts/*.ps1`                               | Windows helpers: `build-linux-artifacts.ps1` + `build-python-initramfs.ps1` (Docker builds), `run.ps1` (launcher), and the benchmark mirrors `measure-coldstart.ps1` / `bench-net-snapshot.ps1` / `snapshot-demo.ps1` / `snapshot-boot.ps1` / `bench-net-snapshot-py.ps1` / `bench-virtfs.ps1` |
+| `scripts/*.ps1`                               | Windows helpers: Docker artifact builds, the `run.ps1` launcher, the `test-boot.ps1` smoke test, and PowerShell mirrors of every benchmark script                                                                                                                                             |
 
 ## The kernel ("modified Alpine kernel")
 
@@ -238,6 +240,7 @@ Run directly:
 | `--log-level <lvl>`     | `info` (`off` if `--quiet`)                   | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
 | `--exit-on-boot`        |                                               | Stop and report cold-start/restore time when the boot marker appears                             |
 | `--boot-marker <s>`     | `ALPINE-MICROVM-BOOT-OK`                      | Console substring that marks boot completion                                                     |
+| `--defer-stdin-until-boot` |                                            | Delay redirected cold-boot input until the boot marker; terminals/restores remain immediate      |
 | `--snapshot <dir>`      |                                               | Take a snapshot into `<dir>` when the guest requests one, then exit                              |
 | `--restore <dir>`       |                                               | Restore and resume from a snapshot `<dir>` instead of booting                                    |
 | `--mount <dir>`         |                                               | Export a host directory to the guest as a virt-fs (read-only SquashFS by default)                |
@@ -299,9 +302,13 @@ scripts\build-python-initramfs.ps1             # -> build\initramfs-python.cpio.
 
 ```powershell
 cargo build --release          # -> target\release\microvm.exe
-cargo test                     # shared unit tests (no WHP required)
+cargo test --release           # shared + WHP unit tests (no hypervisor required)
 .\target\release\microvm.exe --selftest    # validate the WHP protected-mode setup end-to-end
+scripts\test-boot.ps1          # boot Linux and assert that the guest reaches userspace
 ```
+
+The boot smoke test mirrors `scripts/test-boot.sh`: it has a 90-second timeout and succeeds only
+after seeing `ALPINE-MICROVM-BOOT-OK` in guest output.
 
 ### 3. Boot
 
@@ -433,6 +440,8 @@ on the PR's base branch. A regression greater than 40% fails the `Performance re
 lower latency and higher throughput are treated as improvements. Metrics without history are
 reported as warmups until a baseline exists. The workflow needs `contents: write` permission (and,
 if `main` is protected, a rule allowing `github-actions[bot]`) to persist the baseline commit.
+It also validates every shell and PowerShell helper, uses the platform boot-test scripts, and runs
+networked-Python plus interactive snapshot-boot smoke tests on both KVM and WHP.
 
 The three Python scripts need the Python initramfs (`build\initramfs-python.cpio.gz`); build it on
 Windows with `scripts\build-python-initramfs.ps1` (a Docker stage that downloads CPython +

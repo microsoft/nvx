@@ -61,6 +61,16 @@ SHELL_SNAPSHOT_LOG = """
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_windows_virtfs_reuse_uses_verified_metric(self):
+        self.assertEqual(
+            performance._platform_metric_name("windows-whp", "virtfs_reuse"),
+            "virtfs_verified_reuse",
+        )
+        self.assertEqual(
+            performance._platform_metric_name("linux-kvm", "virtfs_reuse"),
+            "virtfs_reuse",
+        )
+
     def test_collects_linux_metrics_from_utf8_and_utf16_logs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

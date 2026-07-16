@@ -182,6 +182,8 @@ pub struct Config {
     pub exit_on_boot: bool,
     /// Console substring whose appearance marks boot completion.
     pub boot_marker: String,
+    /// Delay redirected cold-boot stdin until the boot marker appears.
+    pub defer_stdin_until_boot: bool,
     /// Directory to write a snapshot to when the guest requests one (control port `0x605`).
     pub snapshot: Option<PathBuf>,
     /// Directory to restore the VM from instead of cold-booting a kernel.
@@ -636,7 +638,7 @@ fn execute(
     mut nic: Option<Nic>,
 ) -> Result<()> {
     let handle = partition.handle;
-    let _guard: ConsoleGuard = ConsoleGuard::new();
+    let guard: ConsoleGuard = ConsoleGuard::new();
     let stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // The emulated 8259 PIC, i8253 PIT and RTC/CMOS are owned by this (the vCPU) thread — the
@@ -665,7 +667,14 @@ fn execute(
     // vCPU is parked at `HLT`. It is joined on shutdown (below) so no cancel can outlive the
     // partition. The input thread makes no WHP calls, so it can stay detached.
     let timer_tick: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    spawn_input_thread(bus.console(), Arc::clone(&stop));
+    let defer_input: bool =
+        cfg.defer_stdin_until_boot && guard.stdin.is_none() && cfg.restore.is_none();
+    spawn_input_thread(
+        bus.console(),
+        Arc::clone(console),
+        Arc::clone(&stop),
+        defer_input,
+    );
     let timer_thread = spawn_timer_thread(handle, Arc::clone(&timer_tick), Arc::clone(&stop));
 
     console.lock().expect("console poisoned").mark_start();
@@ -687,8 +696,10 @@ fn execute(
         // re-check the NIC on the same cadence so a receive interrupt that could not be injected
         // earlier (e.g. the line was briefly masked) self-heals within one tick.
         if timer_tick.swap(false, Ordering::AcqRel) {
-            inject_irq0(&mut pic, handle);
+            // Service the level-asserted NIC first. With one master-PIC line allowed in service,
+            // injecting the periodic timer first on every retry would starve a pending NIC IRQ.
             service_nic_irq(&nic, &mut pic, handle);
+            inject_irq0(&mut pic, handle);
         }
 
         let reason = exit.ExitReason;
@@ -904,12 +915,12 @@ fn handle_io(
                 rtc.write(port, b);
             }
         } else if Pic::owns(port) {
-            let mut eoi = false;
+            let mut eoi_vector: Option<u8> = None;
             for &b in &bytes[..size] {
-                eoi |= pic.write(port, b);
+                eoi_vector = pic.write(port, b).or(eoi_vector);
             }
-            if eoi {
-                lapic_eoi(handle);
+            if let Some(vector) = eoi_vector {
+                lapic_eoi(handle, vector);
             }
         } else {
             action = bus.pio_write(port, &bytes[..size]);
@@ -1011,20 +1022,17 @@ fn advance_rip(handle: WHV_PARTITION_HANDLE, exit: &WHV_RUN_VP_EXIT_CONTEXT) -> 
     set_registers(handle, &[(WHvX64RegisterRip, next_rip)])
 }
 
-/// Performs a best-effort local-APIC end-of-interrupt on the vCPU (writing the APIC EOI
-/// register clears the highest-priority in-service vector). WHP rejects the write when no
-/// vector is in service, which is harmless here (there is simply nothing to complete), so the
-/// error is ignored rather than propagated.
-/// Completes the guest's IRQ0 at the local APIC.
+/// Performs a best-effort local-APIC end-of-interrupt for `vector` on the vCPU.
 ///
 /// Under WHP's XApic emulation the individual APIC registers (including the EOI register) are
 /// not reachable via `WHvSetVirtualProcessorRegisters`, and there is no ExtINT injection type,
 /// so a virtual-wire IRQ0 delivered as a fixed vector would leave its in-service bit set with no
 /// way for the guest (which issues only the 8259 EOI) to clear it. The APIC save/restore API is
-/// reachable, though: read the local-APIC state, clear the highest in-service vector's bit (the
-/// one just acknowledged), and write it back — the effect of an EOI, letting the next tick be
-/// delivered. Best-effort: any failure is ignored.
-fn lapic_eoi(handle: WHV_PARTITION_HANDLE) {
+/// reachable, though: read the local-APIC state, clear the exact vector just acknowledged by the
+/// PIC, and write it back — the effect of an EOI without
+/// accidentally clearing a concurrently in-service timer or NIC vector. Best-effort: any failure
+/// is ignored.
+fn lapic_eoi(handle: WHV_PARTITION_HANDLE, vector: u8) {
     /// Offset of the in-service register (ISR) in WHP's local-APIC state: eight contiguous
     /// 32-bit words (vectors 0..255), i.e. a 4-byte stride rather than the 16-byte MMIO stride.
     const APIC_ISR: usize = 0x100;
@@ -1045,24 +1053,15 @@ fn lapic_eoi(handle: WHV_PARTITION_HANDLE) {
         return;
     }
 
-    // Clear the highest-priority in-service vector (the one just acknowledged), scanning the
-    // eight ISR words from the highest vectors down.
-    let mut cleared = false;
-    for reg in (0..8).rev() {
-        let off: usize = APIC_ISR + reg * 4;
-        let mut word =
-            u32::from_le_bytes([state[off], state[off + 1], state[off + 2], state[off + 3]]);
-        if word != 0 {
-            let highest: u32 = 31 - word.leading_zeros();
-            word &= !(1 << highest);
-            state[off..off + 4].copy_from_slice(&word.to_le_bytes());
-            cleared = true;
-            break;
-        }
-    }
-    if !cleared {
+    let reg: usize = usize::from(vector / 32);
+    let bit: u32 = u32::from(vector % 32);
+    let off: usize = APIC_ISR + reg * 4;
+    let mut word = u32::from_le_bytes([state[off], state[off + 1], state[off + 2], state[off + 3]]);
+    if word & (1 << bit) == 0 {
         return;
     }
+    word &= !(1 << bit);
+    state[off..off + 4].copy_from_slice(&word.to_le_bytes());
 
     // SAFETY: `state`/`written` describe the buffer just read back from WHP.
     unsafe {
@@ -1275,8 +1274,26 @@ fn wake_vcpu(handle: WHV_PARTITION_HANDLE) {
 /// It makes no WHP calls — it only enqueues bytes into the shared console device — so it can be
 /// left detached without any partition-handle lifetime hazard. The guest observes the input on
 /// its next `hvc` poll, which the timer tick keeps running; it does not need an explicit wake.
-fn spawn_input_thread(con: Arc<Mutex<PortConsole>>, stop: Arc<AtomicBool>) {
+fn spawn_input_thread(
+    con: Arc<Mutex<PortConsole>>,
+    console: Arc<Mutex<Console>>,
+    stop: Arc<AtomicBool>,
+    defer_until_boot: bool,
+) {
     thread::spawn(move || {
+        if defer_until_boot {
+            while !stop.load(Ordering::SeqCst)
+                && !console.lock().expect("console poisoned").booted()
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            // The marker is emitted immediately before PID 1 execs the interactive shell.
+            thread::sleep(Duration::from_millis(10));
+        }
+
         let mut stdin = io::stdin();
         let mut buf = [0u8; 256];
         loop {

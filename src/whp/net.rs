@@ -612,6 +612,7 @@ mod tests {
     fn config_derives_gateway_and_macs() {
         let cfg = NetConfig::parse("10.0.0.2/24").unwrap();
         assert_eq!(cfg.guest_ip, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(cfg.prefix, 24);
         assert_eq!(cfg.host_ip, Ipv4Addr::new(10, 0, 0, 1));
         assert_eq!(cfg.netmask, Ipv4Addr::new(255, 255, 255, 0));
         assert_eq!(cfg.mac, [0x52, 0x54, 0x00, 0, 0, 2]);
@@ -619,12 +620,40 @@ mod tests {
     }
 
     #[test]
+    fn config_derives_gateway_from_subnet() {
+        let cfg = NetConfig::parse("192.168.5.37/28").unwrap();
+        assert_eq!(cfg.host_ip, Ipv4Addr::new(192, 168, 5, 33));
+        assert_eq!(cfg.netmask, Ipv4Addr::new(255, 255, 255, 240));
+    }
+
+    #[test]
+    fn config_rejects_gateway_collision() {
+        assert!(NetConfig::parse("10.0.0.1/24").is_err());
+    }
+
+    #[test]
+    fn config_rejects_bad_input() {
+        assert!(NetConfig::parse("10.0.0.2").is_err());
+        assert!(NetConfig::parse("not-an-ip/24").is_err());
+        assert!(NetConfig::parse("10.0.0.2/40").is_err());
+    }
+
+    #[test]
     fn config_header_round_trips() {
         let cfg = NetConfig::parse("192.168.5.10/24").unwrap();
-        let (back, used) = NetConfig::from_header(&cfg.save_header()).unwrap();
-        assert_eq!(used, 5);
+        let header = cfg.save_header();
+        let (back, used) = NetConfig::from_header(&header).unwrap();
+        assert_eq!(used, header.len());
         assert_eq!(back.guest_ip, cfg.guest_ip);
+        assert_eq!(back.prefix, cfg.prefix);
         assert_eq!(back.host_ip, cfg.host_ip);
+        assert_eq!(back.mac, cfg.mac);
+        assert_eq!(back.host_mac, cfg.host_mac);
+    }
+
+    #[test]
+    fn config_header_rejects_short_input() {
+        assert!(NetConfig::from_header(&[10, 0, 0]).is_err());
     }
 
     #[test]

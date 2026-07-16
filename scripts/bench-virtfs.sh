@@ -75,7 +75,8 @@ now_ms() { date +%s%3N; }
 guest_run() { # $1=script  $2..=extra microvm args
     local script="$1"; shift
     printf '%s\n' "$script" | timeout 120 "$BIN" --vcpus "$CORES" --kernel "$KERNEL" --initrd "$INITRD" \
-        --mem "$MEM" --log-level off --cmdline "$CMDLINE" "$@" 2>&1 || true
+        --mem "$MEM" --log-level off --defer-stdin-until-boot --boot-marker '/ # ' \
+        --cmdline "$CMDLINE" "$@" 2>&1 || true
 }
 
 # Extracts the dd throughput token (e.g. "355.6MB/s") from the Nth "copied" line of guest output.
@@ -86,12 +87,13 @@ dd_rate() { # $1=guest output  $2=occurrence (1=write, 2=read)
 # Guest workload: write then read PAYLOAD_MB through the mount (plain dd, no pipelines).
 io_script() {
     cat <<EOF
-dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count=$PAYLOAD_MB conv=fsync 2>&1
-sync
+until /bin/busybox true 2>/dev/null; do :; done
+/bin/busybox dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count=$PAYLOAD_MB conv=fsync 2>&1
+/bin/busybox sync
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1
-sync
-reboot -f
+/bin/busybox dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1
+/bin/busybox sync
+/bin/busybox reboot -f
 EOF
 }
 
@@ -121,16 +123,18 @@ echo
 # ---- Part 2: persistence round-trip on a --mount-image --------------------------------------
 create_script() {
     cat <<EOF
-dd if=/dev/zero of=/mnt/host/data.bin bs=1M count=$PAYLOAD_MB 2>/dev/null
-cksum /mnt/host/data.bin
-sync
-reboot -f
+until /bin/busybox true 2>/dev/null; do :; done
+/bin/busybox dd if=/dev/zero of=/mnt/host/data.bin bs=1M count=$PAYLOAD_MB 2>/dev/null
+/bin/busybox cksum /mnt/host/data.bin
+/bin/busybox sync
+/bin/busybox reboot -f
 EOF
 }
 verify_script() {
     cat <<EOF
-cksum /mnt/host/data.bin 2>/dev/null
-reboot -f
+until /bin/busybox true 2>/dev/null; do :; done
+/bin/busybox cksum /mnt/host/data.bin 2>/dev/null
+/bin/busybox reboot -f
 EOF
 }
 # Extracts the cksum checksum for /mnt/host/data.bin from guest output.

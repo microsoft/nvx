@@ -107,6 +107,8 @@ pub struct Config {
     pub exit_on_boot: bool,
     /// Console substring whose appearance marks boot completion.
     pub boot_marker: String,
+    /// Delay redirected cold-boot stdin until the boot marker appears.
+    pub defer_stdin_until_boot: bool,
     /// Directory to write a snapshot to when the guest requests one (control port `0x605`).
     pub snapshot: Option<PathBuf>,
     /// Directory to restore the VM from instead of cold-booting a kernel.
@@ -1035,11 +1037,17 @@ fn execute(
     net: Option<NetDevice>,
     control: Arc<VmControl>,
 ) -> Result<()> {
-    let _tty_guard: TtyGuard = TtyGuard::new();
+    let tty_guard: TtyGuard = TtyGuard::new();
     // The kick handler must already be installed by the caller (before any AP thread is spawned).
     let _kick_guard: KickGuard = KickGuard::arm(vcpu);
     let vcpu_tid: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    spawn_input_thread(bus.console(), Arc::clone(&vcpu_tid));
+    let defer_input: bool = cfg.defer_stdin_until_boot && tty_guard.saved.is_none() && !resumed;
+    spawn_input_thread(
+        bus.console(),
+        Arc::clone(console),
+        Arc::clone(&vcpu_tid),
+        defer_input,
+    );
     // SAFETY: `pthread_self` merely returns the calling thread's identifier.
     let self_tid: u64 = unsafe { ::libc::pthread_self() } as u64;
     vcpu_tid.store(self_tid, Ordering::SeqCst);
@@ -1477,8 +1485,20 @@ fn sigrtmin() -> ::libc::c_int {
 }
 
 /// Spawns a thread that forwards host stdin to the guest console, waking the vCPU per input.
-fn spawn_input_thread(con: Arc<Mutex<PortConsole>>, vcpu_tid: Arc<AtomicU64>) {
+fn spawn_input_thread(
+    con: Arc<Mutex<PortConsole>>,
+    console: Arc<Mutex<Console>>,
+    vcpu_tid: Arc<AtomicU64>,
+    defer_until_boot: bool,
+) {
     thread::spawn(move || {
+        if defer_until_boot {
+            while !console.lock().expect("console poisoned").booted() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
         let mut stdin = io::stdin();
         let mut buf = [0u8; 256];
         loop {

@@ -17,14 +17,17 @@
 
 .EXAMPLE
     scripts\snapshot-boot.ps1
-    scripts\snapshot-boot.ps1 -Mem 256
+    scripts\snapshot-boot.ps1 -Mem 512
+    scripts\snapshot-boot.ps1 -SmokeTest
 #>
 [CmdletBinding()]
 param(
     [string]$Kernel,
     [string]$Initrd,
     [string]$Snap,
-    [int]$Mem = 512
+    [int]$Mem = 512,
+    # Resume noninteractively, verify the Python banner, and exit. Intended for CI.
+    [switch]$SmokeTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,11 +35,24 @@ $repo = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $repo 'target\release\microvm.exe'
 if (-not $Kernel) { $Kernel = Join-Path $repo 'build\vmlinux' }
 if (-not $Initrd) { $Initrd = Join-Path $repo 'build\initramfs-python.cpio.gz' }
-if (-not $Snap)   { $Snap   = Join-Path $repo 'build\pyrepl' }
+if (-not $Snap) { $Snap = Join-Path $repo 'build\pyrepl' }
 
 # `pyapp=repl.py` tells the initramfs init to run the interactive REPL app rather than the
-# hello-world demo. Capture the snapshot with the console quiet so nothing pollutes it.
+# hello-world demo. The kernel stays quiet; capture output is redirected so failures are reported.
 $cmdline = 'earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1 pyapp=repl.py'
+
+# Windows PowerShell 5.1 lacks ProcessStartInfo.StandardInputEncoding. Process.Start copies the
+# console input encoding into redirected stdin, so scope it to no-BOM UTF-8 while opening the pipe.
+function Start-ProcessWithoutStdinBom([System.Diagnostics.ProcessStartInfo]$StartInfo) {
+    $originalEncoding = [Console]::InputEncoding
+    try {
+        [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+        return [System.Diagnostics.Process]::Start($StartInfo)
+    }
+    finally {
+        [Console]::InputEncoding = $originalEncoding
+    }
+}
 
 if (-not (Test-Path $bin)) { throw "build the VMM first: cargo build --release" }
 
@@ -50,16 +66,52 @@ if (-not (Test-Path (Join-Path $Snap 'state.bin')) -or -not (Test-Path (Join-Pat
     if (Test-Path $Snap) { Remove-Item -Recurse -Force $Snap }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $bin
-    $capArgs = @('--kernel', $Kernel, '--initrd', $Initrd, '--mem', "$Mem", '--snapshot', $Snap, '--quiet', '--cmdline', $cmdline)
+    $capArgs = @('--kernel', $Kernel, '--initrd', $Initrd, '--mem', "$Mem", '--snapshot', $Snap, '--log-level', 'warn', '--cmdline', $cmdline)
     $psi.Arguments = ($capArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
     $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
-    $p = [System.Diagnostics.Process]::Start($psi)
-    $p.StandardInput.Close()   # the guest sees stdin EOF, like `< /dev/null`
-    if (-not $p.WaitForExit(40000)) { try { $p.Kill() } catch {}; throw "snapshot capture timed out" }
-    if (-not (Test-Path (Join-Path $Snap 'state.bin'))) { throw "snapshot capture failed" }
+    $p = Start-ProcessWithoutStdinBom $psi
+    $p.StandardInput.BaseStream.Close()
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    $timedOut = -not $p.WaitForExit(40000)
+    if ($timedOut) { try { $p.Kill() } catch {}; $p.WaitForExit(2000) | Out-Null }
+    $text = $errTask.Result + "`n" + $outTask.Result
+    $diagnostic = (($text -split '\r?\n' | Where-Object { $_ } | Select-Object -Last 20) -join "`n")
+    if ($timedOut) { throw "snapshot capture timed out`n$diagnostic" }
+    if ($p.ExitCode -ne 0) { throw "snapshot capture exited $($p.ExitCode)`n$diagnostic" }
+    if (-not (Test-Path (Join-Path $Snap 'state.bin'))) { throw "snapshot capture failed`n$diagnostic" }
 }
 
 Write-Host ">> resuming interactive Python interpreter from snapshot $Snap (Ctrl-D or exit() to quit)"
+if ($SmokeTest) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $bin
+    $restoreArgs = @('--restore', $Snap, '--mem', "$Mem")
+    $psi.Arguments = ($restoreArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+
+    $p = Start-ProcessWithoutStdinBom $psi
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    $inputBytes = [System.Text.UTF8Encoding]::new($false).GetBytes("exit()`n")
+    $p.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
+    $p.StandardInput.BaseStream.Close()
+
+    $timedOut = -not $p.WaitForExit(30000)
+    if ($timedOut) { try { $p.Kill() } catch {}; $p.WaitForExit(2000) | Out-Null }
+    $text = $errTask.Result + "`n" + $outTask.Result
+    Write-Host $text
+    if ($timedOut) { throw 'snapshot restore smoke test timed out' }
+    if ($p.ExitCode -ne 0) { throw "snapshot restore smoke test exited $($p.ExitCode)" }
+    if ($text -notmatch 'resumed from snapshot') { throw 'restored Python banner was not observed' }
+    exit 0
+}
+
 & $bin --restore $Snap --mem "$Mem"
 exit $LASTEXITCODE

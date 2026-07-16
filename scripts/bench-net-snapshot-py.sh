@@ -59,7 +59,7 @@ bench_app() { # $1=app file  $2=marker  $3=label
 
     { for _ in $(seq 1 "$N"); do
         timeout 60 "$BIN" --vcpus "$CORES" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --net "$NET" \
-            --exit-on-boot --quiet --boot-marker "$marker" --cmdline "$CMDLINE pyapp=$app" 2>&1 \
+            --exit-on-boot --quiet --boot-marker "$marker" --cmdline "$CMDLINE pyapp=$app netbench_cold=1" 2>&1 \
             | grep -oE 'cold-start: [0-9.]+' | grep -oE '[0-9.]+$'
     done; } | median | sed 's/^/  cold    (guest start  -> marker): /'
 

@@ -54,10 +54,9 @@ struct Chip {
 }
 
 impl Chip {
-    /// Handles a write to the command port (`0x20`/`0xA0`). Returns `true` if this write was an
-    /// end-of-interrupt that cleared IRQ line 0's in-service bit (the timer line on the master),
-    /// so the caller can complete the matching local-APIC EOI.
-    fn write_cmd(&mut self, value: u8) -> bool {
+    /// Handles a write to the command port (`0x20`/`0xA0`). Returns the line cleared by an
+    /// end-of-interrupt so the caller can complete the matching local-APIC EOI.
+    fn write_cmd(&mut self, value: u8) -> Option<u8> {
         if value & 0x10 != 0 {
             // ICW1: begin initialisation. Real hardware leaves the lines masked until the
             // kernel programs OCW1; keep them masked so a host tick cannot inject IRQ0 into the
@@ -69,7 +68,7 @@ impl Chip {
             self.isr = 0;
             self.irr = 0;
             self.read_isr = false;
-            false
+            None
         } else if value & 0x08 != 0 {
             // OCW3: select the register exposed on the next command-port read.
             if value & 0x03 == 0x03 {
@@ -77,23 +76,28 @@ impl Chip {
             } else if value & 0x03 == 0x02 {
                 self.read_isr = false;
             }
-            false
+            None
         } else if value & 0x20 != 0 {
             // OCW2: end-of-interrupt. Non-specific clears the highest in-service line;
             // specific (bit 6) clears the addressed line. In virtual-wire mode the guest issues
             // only this 8259 end-of-interrupt (never a local-APIC one), so report whether a line
             // that was in service has now been acknowledged, letting the caller complete the
             // matching local-APIC EOI for whichever vector was injected (timer IRQ0 or NIC IRQ5).
-            let had_in_service: bool = self.isr != 0;
-            if value & 0x40 != 0 {
-                self.isr &= !(1 << (value & 0x07));
+            let line: u8 = if value & 0x40 != 0 {
+                value & 0x07
             } else if self.isr != 0 {
-                let highest: u32 = self.isr.trailing_zeros();
-                self.isr &= !(1 << highest);
+                self.isr.trailing_zeros() as u8
+            } else {
+                return None;
+            };
+            let bit: u8 = 1 << line;
+            if self.isr & bit == 0 {
+                return None;
             }
-            had_in_service
+            self.isr &= !bit;
+            Some(line)
         } else {
-            false
+            None
         }
     }
 
@@ -151,25 +155,27 @@ impl Pic {
         )
     }
 
-    /// Services a guest write of `value` to `port`. Returns `true` if the write completed an
-    /// end-of-interrupt for IRQ0 (the timer line), so the caller can issue the matching
-    /// local-APIC EOI.
-    pub fn write(&mut self, port: u16, value: u8) -> bool {
+    /// Services a guest write of `value` to `port`. Returns the vector acknowledged by an
+    /// end-of-interrupt so the caller can issue the matching local-APIC EOI.
+    pub fn write(&mut self, port: u16, value: u8) -> Option<u8> {
         match port {
-            PIC_MASTER_CMD => self.master.write_cmd(value),
+            PIC_MASTER_CMD => self
+                .master
+                .write_cmd(value)
+                .map(|line| self.master.base.wrapping_add(line)),
             PIC_MASTER_DATA => {
                 self.master.write_data(value);
-                false
+                None
             },
             PIC_SLAVE_CMD => {
                 self.slave.write_cmd(value);
-                false
+                None
             },
             PIC_SLAVE_DATA => {
                 self.slave.write_data(value);
-                false
+                None
             },
-            _ => false,
+            _ => None,
         }
     }
 
@@ -191,17 +197,14 @@ impl Pic {
     /// interrupt vector to inject into the guest.
     ///
     /// Delivery is suppressed when the controller is not yet initialised, when IRQ0 is masked,
-    /// or when IRQ0 is already in service (awaiting the guest's end-of-interrupt) — mirroring
-    /// the 8259A's own gating, so a steady host tick produces at most one pending IRQ0 at a
-    /// time regardless of cadence.
+    /// or while any master-PIC line is awaiting the guest's end-of-interrupt. This keeps a steady
+    /// host tick from overlapping an active timer or NIC interrupt.
     ///
     pub fn raise_irq0(&mut self) -> Option<u8> {
-        // Deliver only once the controller is initialised and IRQ0 is unmasked. The in-service
-        // bit is set so the guest's spurious-IRQ check (`i8259A_irq_real`, which reads the ISR)
-        // treats the line as real, but it is *not* used to gate delivery: WHP's fixed injection
-        // does not leave a stuck local-APIC in-service state to acknowledge, and the guest masks
-        // IRQ0 while handling it, so the mask alone rate-limits the tick to one in flight.
-        if !self.master.initialised || self.master.imr & 0x01 != 0 {
+        // Marking a request in service happens before WHP delivers its fixed interrupt. Keep only
+        // one master-PIC line in flight so a queued higher-priority timer cannot consume the
+        // non-specific EOI for an active NIC interrupt (leaving the NIC's LAPIC vector stuck).
+        if !self.master.initialised || self.master.imr & 0x01 != 0 || self.master.isr != 0 {
             return None;
         }
         self.master.isr |= 0x01;
@@ -213,16 +216,16 @@ impl Pic {
     /// # Description
     ///
     /// Requests master-PIC IRQ `line` (0..=7) and, if it can be delivered right now, returns the
-    /// interrupt vector to inject. Used for the NIC (IRQ5); gating mirrors [`raise_irq0`](Self::raise_irq0):
-    /// suppressed while the controller is uninitialised or the line is masked (the guest masks the
-    /// line while its handler runs, so at most one is in flight).
+    /// interrupt vector to inject. Used for the NIC (IRQ5); gating mirrors
+    /// [`raise_irq0`](Self::raise_irq0): suppressed while the controller is uninitialised, the line
+    /// is masked, or another master-PIC interrupt is in service.
     ///
     pub fn raise_irq(&mut self, line: u8) -> Option<u8> {
         if line > 7 {
             return None;
         }
         let bit: u8 = 1 << line;
-        if !self.master.initialised || self.master.imr & bit != 0 {
+        if !self.master.initialised || self.master.imr & bit != 0 || self.master.isr != 0 {
             return None;
         }
         self.master.isr |= bit;
@@ -288,14 +291,51 @@ mod tests {
         // Unmask IRQ0: it now delivers the captured vector base + 0.
         pic.write(PIC_MASTER_DATA, 0xfe);
         assert_eq!(pic.raise_irq0(), Some(0x30), "IRQ0 delivers vector base + 0");
-        // Delivery is gated by the mask, not in-service state (WHP's fixed injection leaves no
-        // local-APIC in-service bit to acknowledge), so masking IRQ0 suppresses it.
+        // Masking suppresses delivery, and unmasking does not bypass the in-service state.
         pic.write(PIC_MASTER_DATA, 0xff);
         assert_eq!(pic.raise_irq0(), None);
-        // A completed 8259 end-of-interrupt is reported so the caller can mirror it at the LAPIC.
         pic.write(PIC_MASTER_DATA, 0xfe);
+        assert_eq!(pic.raise_irq0(), None);
+        // EOI identifies the vector so the caller can mirror it at the LAPIC, then IRQ0 may fire
+        // again.
+        assert_eq!(
+            pic.write(PIC_MASTER_CMD, 0x20),
+            Some(0x30),
+            "non-specific EOI acknowledges the IRQ0 vector"
+        );
         assert_eq!(pic.raise_irq0(), Some(0x30));
-        assert!(pic.write(PIC_MASTER_CMD, 0x20), "non-specific EOI acknowledges IRQ0");
+    }
+
+    #[test]
+    fn eoi_identifies_the_acknowledged_vector() {
+        let mut pic = Pic::new();
+        pic.write(PIC_MASTER_CMD, 0x11);
+        pic.write(PIC_MASTER_DATA, 0x30);
+        pic.write(PIC_MASTER_DATA, 0x04);
+        pic.write(PIC_MASTER_DATA, 0x01);
+        pic.write(PIC_MASTER_DATA, 0x00);
+
+        assert_eq!(pic.raise_irq(5), Some(0x35));
+        assert_eq!(pic.write(PIC_MASTER_CMD, 0x20), Some(0x35));
+        assert_eq!(pic.write(PIC_MASTER_CMD, 0x20), None);
+    }
+
+    #[test]
+    fn serializes_timer_and_nic_interrupts() {
+        let mut pic = Pic::new();
+        pic.write(PIC_MASTER_CMD, 0x11);
+        pic.write(PIC_MASTER_DATA, 0x30);
+        pic.write(PIC_MASTER_DATA, 0x04);
+        pic.write(PIC_MASTER_DATA, 0x01);
+        pic.write(PIC_MASTER_DATA, 0x00);
+
+        assert_eq!(pic.raise_irq(5), Some(0x35));
+        assert_eq!(pic.raise_irq0(), None, "timer waits for the NIC EOI");
+        assert_eq!(pic.write(PIC_MASTER_CMD, 0x20), Some(0x35));
+        assert_eq!(pic.raise_irq0(), Some(0x30));
+        assert_eq!(pic.raise_irq(5), None, "NIC waits for the timer EOI");
+        assert_eq!(pic.write(PIC_MASTER_CMD, 0x20), Some(0x30));
+        assert_eq!(pic.raise_irq(5), Some(0x35));
     }
 
     #[test]

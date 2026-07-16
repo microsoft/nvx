@@ -24,13 +24,14 @@
 
 .EXAMPLE
     scripts\bench-net-snapshot-py.ps1
-    scripts\bench-net-snapshot-py.ps1 -Mem 256 -N 10
+    scripts\bench-net-snapshot-py.ps1 -Mem 512 -N 10
 #>
 [CmdletBinding()]
 param(
     [string]$Kernel,
     [string]$Initrd,
     [int]$Mem = 512,
+    [ValidateRange(1, 10000)]
     [int]$N = 8,
     [string]$Net = '10.0.0.2/24',
     [int]$Port = 8099
@@ -44,7 +45,7 @@ if (-not $Initrd) { $Initrd = Join-Path $repo 'build\initramfs-python.cpio.gz' }
 
 $cmdline = 'earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1'
 
-if (-not (Test-Path $bin))    { throw "build the VMM first: cargo build --release" }
+if (-not (Test-Path $bin)) { throw "build the VMM first: cargo build --release" }
 if (-not (Test-Path $Kernel)) { throw "missing kernel: $Kernel (scripts\build-linux-artifacts.ps1)" }
 if (-not (Test-Path $Initrd)) { throw "missing python initramfs: $Initrd (scripts/build-python-initramfs.sh, needs network)" }
 
@@ -77,8 +78,13 @@ function Format-Median {
     param([double[]]$Vals)
     $s = @($Vals | Where-Object { $_ -ne $null } | Sort-Object)
     if (-not $s.Count) { return 'NO DATA' }
-    $md = if ($s.Count % 2) { $s[[int](($s.Count - 1) / 2)] } else { ($s[$s.Count/2 - 1] + $s[$s.Count/2]) / 2 }
+    $md = if ($s.Count % 2) { $s[[int](($s.Count - 1) / 2)] } else { ($s[$s.Count / 2 - 1] + $s[$s.Count / 2]) / 2 }
     '{0,7:N1} ms  (min {1:N1}, max {2:N1}, n={3})' -f $md, $s[0], $s[-1], $s.Count
+}
+
+function Format-FailureTail {
+    param([string]$Text)
+    (($Text -split '\r?\n' | Where-Object { $_ } | Select-Object -Last 20) -join "`n")
 }
 
 # Host helper server: the guest apps do an HTTP GET to the gateway (NAT -> 127.0.0.1) to prove the
@@ -99,7 +105,8 @@ try {
         try {
             $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -TimeoutSec 1 -UseBasicParsing
             if ($r.Content -match 'HELLO-HOST') { $ready = $true; break }
-        } catch {}
+        }
+        catch {}
         Start-Sleep -Milliseconds 200
     }
     if (-not $ready) { throw "host helper server did not come up on port $Port (already in use?)" }
@@ -108,38 +115,52 @@ try {
     function Invoke-BenchApp {
         param([string]$App, [string]$Marker, [string]$Label)
         $snap = Join-Path $repo ('build\nspy_' + ($App -replace '\.py$', ''))
-        Write-Host "== $Label =="
+        try {
+            Write-Host "== $Label =="
 
-        $cold = @()
-        for ($i = 0; $i -lt $N; $i++) {
-            $r = Invoke-VmMs @('--kernel', $Kernel, '--initrd', $Initrd, '--mem', "$Mem", '--net', $Net,
-                '--exit-on-boot', '--quiet', '--boot-marker', $Marker, '--cmdline', "$cmdline pyapp=$App")
-            if ($r.Ms -ne $null) { $cold += $r.Ms }
+            $cold = @()
+            for ($i = 0; $i -lt $N; $i++) {
+                $r = Invoke-VmMs @('--kernel', $Kernel, '--initrd', $Initrd, '--mem', "$Mem", '--net', $Net,
+                    '--exit-on-boot', '--quiet', '--boot-marker', $Marker, '--cmdline', "$cmdline pyapp=$App netbench_cold=1")
+                if ($null -eq $r.Ms) {
+                    throw "cold run $($i + 1)/$N for $App did not reach '$Marker'`n$(Format-FailureTail $r.Text)"
+                }
+                $cold += $r.Ms
+            }
+            Write-Host ("  cold    (guest start  -> marker): {0}" -f (Format-Median -Vals $cold))
+
+            if (Test-Path $snap) { Remove-Item -Recurse -Force $snap }
+            $capture = Invoke-VmMs @('--kernel', $Kernel, '--initrd', $Initrd, '--mem', "$Mem", '--net', $Net,
+                '--snapshot', $snap, '--quiet', '--cmdline', "$cmdline pyapp=$App")
+            if (-not (Test-Path (Join-Path $snap 'state.bin'))) {
+                throw "snapshot capture failed for $App`n$(Format-FailureTail $capture.Text)"
+            }
+            $alloc = 0
+            & fsutil sparse queryrange (Join-Path $snap 'mem.bin') 2>$null | ForEach-Object {
+                if ($_ -match 'length:\s*(0x[0-9a-fA-F]+)') { $alloc += [Convert]::ToInt64($Matches[1], 16) }
+            }
+            Write-Host ("  snapshot: mem.bin footprint ~{0:N0} MiB on disk" -f ($alloc / 1MB))
+
+            $rest = @()
+            for ($i = 0; $i -lt $N; $i++) {
+                $r = Invoke-VmMs @('--restore', $snap, '--mem', "$Mem", '--exit-on-boot', '--quiet', '--boot-marker', $Marker) 40
+                if ($null -eq $r.Ms) {
+                    throw "restore run $($i + 1)/$N for $App did not reach '$Marker'`n$(Format-FailureTail $r.Text)"
+                }
+                $rest += $r.Ms
+            }
+            Write-Host ("  restore (guest resume -> marker): {0}" -f (Format-Median -Vals $rest))
+
+            # Confirm the marker really is the OK variant (network verified), one loud run.
+            $v = Invoke-VmMs @('--restore', $snap, '--mem', "$Mem", '--exit-on-boot', '--boot-marker', $Marker, '--log-level', 'warn') 40
+            if ($v.Text -notmatch ([regex]::Escape($Marker) + "[A-Za-z' :{},0-9]*")) {
+                throw "restore verification for $App did not emit '$Marker'`n$(Format-FailureTail $v.Text)"
+            }
+            Write-Host ("  verified: {0}" -f $Matches[0])
         }
-        Write-Host ("  cold    (guest start  -> marker): {0}" -f (Format-Median -Vals $cold))
-
-        if (Test-Path $snap) { Remove-Item -Recurse -Force $snap }
-        Invoke-VmMs @('--kernel', $Kernel, '--initrd', $Initrd, '--mem', "$Mem", '--net', $Net,
-            '--snapshot', $snap, '--quiet', '--cmdline', "$cmdline pyapp=$App") | Out-Null
-        if (-not (Test-Path (Join-Path $snap 'state.bin'))) { Write-Host '  snapshot capture failed'; return }
-        $alloc = 0
-        & fsutil sparse queryrange (Join-Path $snap 'mem.bin') 2>$null | ForEach-Object {
-            if ($_ -match 'length:\s*(0x[0-9a-fA-F]+)') { $alloc += [Convert]::ToInt64($Matches[1], 16) }
+        finally {
+            Remove-Item -Recurse -Force $snap -ErrorAction SilentlyContinue
         }
-        Write-Host ("  snapshot: mem.bin footprint ~{0:N0} MiB on disk" -f ($alloc / 1MB))
-
-        $rest = @()
-        for ($i = 0; $i -lt $N; $i++) {
-            $r = Invoke-VmMs @('--restore', $snap, '--mem', "$Mem", '--exit-on-boot', '--quiet', '--boot-marker', $Marker) 40
-            if ($r.Ms -ne $null) { $rest += $r.Ms }
-        }
-        Write-Host ("  restore (guest resume -> marker): {0}" -f (Format-Median -Vals $rest))
-
-        # Confirm the marker really is the OK variant (network verified), one loud run.
-        $v = Invoke-VmMs @('--restore', $snap, '--mem', "$Mem", '--exit-on-boot', '--boot-marker', $Marker, '--log-level', 'warn') 40
-        $seen = if ($v.Text -match ([regex]::Escape($Marker) + "[A-Za-z' :{},0-9]*")) { $Matches[0] } else { '<marker not seen>' }
-        Write-Host ("  verified: {0}" -f $seen)
-        Remove-Item -Recurse -Force $snap -ErrorAction SilentlyContinue
     }
 
     Write-Host "networked Python snapshot benchmark, median of $N, ${Mem} MiB, 1 vCPU, --net $Net (user-mode NAT)"

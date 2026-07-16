@@ -84,6 +84,11 @@ struct Args {
     #[arg(long, default_value = "ALPINE-MICROVM-BOOT-OK")]
     boot_marker: String,
 
+    /// For redirected stdin on a cold boot, wait until the boot marker appears before forwarding
+    /// input to the guest console. Interactive terminals and restores are never delayed.
+    #[arg(long)]
+    defer_stdin_until_boot: bool,
+
     /// Take a snapshot into this directory when the guest requests one (control port 0x605),
     /// then exit.
     #[arg(long)]
@@ -242,6 +247,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         quiet: args.quiet,
         exit_on_boot: args.exit_on_boot,
         boot_marker: args.boot_marker,
+        defer_stdin_until_boot: args.defer_stdin_until_boot,
         snapshot: args.snapshot,
         restore: args.restore,
         mount: args.mount,
@@ -283,6 +289,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         quiet: args.quiet,
         exit_on_boot: args.exit_on_boot,
         boot_marker: args.boot_marker,
+        defer_stdin_until_boot: args.defer_stdin_until_boot,
         snapshot: args.snapshot,
         restore: args.restore,
         net,
