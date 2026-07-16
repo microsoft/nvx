@@ -240,6 +240,7 @@ Run directly:
 | `--log-level <lvl>`     | `info` (`off` if `--quiet`)                   | `off`/`error`/`warn`/`info`/`debug`/`trace`; `off` suppresses all logging (`RUST_LOG` overrides) |
 | `--exit-on-boot`        |                                               | Stop and report cold-start/restore time when the boot marker appears                             |
 | `--boot-marker <s>`     | `ALPINE-MICROVM-BOOT-OK`                      | Console substring that marks boot completion                                                     |
+| `--timing-marker <label=text>` | *(repeatable)*                         | Time another console substring from the same first-guest-instruction clock                       |
 | `--defer-stdin-until-boot` |                                            | Delay redirected cold-boot input until the boot marker; terminals/restores remain immediate      |
 | `--snapshot <dir>`      |                                               | Take a snapshot into `<dir>` when the guest requests one, then exit                              |
 | `--restore <dir>`       |                                               | Restore and resume from a snapshot `<dir>` instead of booting                                    |

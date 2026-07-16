@@ -144,7 +144,7 @@ use ::windows::Win32::System::Hypervisor::{
 };
 
 use crate::boot::pvh;
-use crate::console::Console;
+use crate::console::{Console, TimingMarker};
 use crate::devices::portb::PortConsole;
 use crate::devices::{
     DeviceBus,
@@ -182,6 +182,8 @@ pub struct Config {
     pub exit_on_boot: bool,
     /// Console substring whose appearance marks boot completion.
     pub boot_marker: String,
+    /// Additional named console substrings timed from the first guest instruction.
+    pub timing_markers: Vec<TimingMarker>,
     /// Delay redirected cold-boot stdin until the boot marker appears.
     pub defer_stdin_until_boot: bool,
     /// Directory to write a snapshot to when the guest requests one (control port `0x605`).
@@ -609,8 +611,11 @@ pub fn selftest() -> Result<()> {
 /// Builds the shared console sink, the portb console device, and the device bus. When
 /// `con_state` is provided (restore path), the device's pending input queue is reloaded from it.
 fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
-    let console: Arc<Mutex<Console>> =
-        Arc::new(Mutex::new(Console::new(cfg.quiet, &cfg.boot_marker)));
+    let console: Arc<Mutex<Console>> = Arc::new(Mutex::new(Console::with_timing_markers(
+        cfg.quiet,
+        &cfg.boot_marker,
+        &cfg.timing_markers,
+    )));
     let con: Arc<Mutex<PortConsole>> =
         Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
     if let Some(state) = con_state {
@@ -789,6 +794,13 @@ fn execute(
 
     if let Some(err) = run_err {
         return Err(err);
+    }
+
+    if !cfg.timing_markers.is_empty() {
+        let console = console.lock().expect("console poisoned");
+        for (label, elapsed) in console.timings() {
+            eprintln!("timing-marker: {label} {:.1} ms", elapsed.as_secs_f64() * 1000.0);
+        }
     }
 
     // Report the boot time independently of the logging level so it is available even when all

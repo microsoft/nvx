@@ -84,6 +84,11 @@ struct Args {
     #[arg(long, default_value = "ALPINE-MICROVM-BOOT-OK")]
     boot_marker: String,
 
+    /// Additional console substring to time from the first guest instruction. Repeat as
+    /// `--timing-marker LABEL=TEXT`; results are printed when the VM exits.
+    #[arg(long, value_name = "LABEL=TEXT")]
+    timing_marker: Vec<console::TimingMarker>,
+
     /// For redirected stdin on a cold boot, wait until the boot marker appears before forwarding
     /// input to the guest console. Interactive terminals and restores are never delayed.
     #[arg(long)]
@@ -247,6 +252,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         quiet: args.quiet,
         exit_on_boot: args.exit_on_boot,
         boot_marker: args.boot_marker,
+        timing_markers: args.timing_marker,
         defer_stdin_until_boot: args.defer_stdin_until_boot,
         snapshot: args.snapshot,
         restore: args.restore,
@@ -289,6 +295,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         quiet: args.quiet,
         exit_on_boot: args.exit_on_boot,
         boot_marker: args.boot_marker,
+        timing_markers: args.timing_marker,
         defer_stdin_until_boot: args.defer_stdin_until_boot,
         snapshot: args.snapshot,
         restore: args.restore,
