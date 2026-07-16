@@ -899,7 +899,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
             None => (None, None),
         };
 
-    let (console, bus) = build_io(&cfg, Some(snap.con_state()));
+    let (console, bus) = build_io(&cfg, Some(snap.device_state()));
     let bus: Arc<DeviceBus> = Arc::new(bus);
     info!(
         "resuming guest from snapshot {dir:?} (mem={} MiB, {n_vcpus} vCPU(s))",
@@ -1011,19 +1011,19 @@ fn restore_net(
     )))
 }
 
-/// Builds the shared console sink, the portb console device, and the device bus. When
-/// `con_state` is provided (restore path) the device's pending input queue is reloaded from it.
-fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
+/// Builds the shared console sink and PMIO device bus. When `device_state` is provided, the
+/// pending console input and RTC register index are restored from it.
+fn build_io(cfg: &Config, device_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
     let console: Arc<Mutex<Console>> = Arc::new(Mutex::new(Console::with_timing_markers(
         cfg.quiet,
         &cfg.boot_marker,
         &cfg.timing_markers,
     )));
     let con: Arc<Mutex<PortConsole>> = Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
-    if let Some(state) = con_state {
-        con.lock().expect("console poisoned").restore(state);
-    }
     let bus: DeviceBus = DeviceBus::new(Arc::clone(&con));
+    if let Some(state) = device_state {
+        bus.restore(state);
+    }
     (console, bus)
 }
 
@@ -1356,7 +1356,7 @@ fn write_snapshot(
         .as_ref()
         .context("--snapshot destination missing")?;
     console.lock().expect("console poisoned").flush();
-    let con_state: Vec<u8> = bus.console().lock().expect("console poisoned").snapshot();
+    let device_state: Vec<u8> = bus.snapshot();
 
     // Serialize the NIC's config header (from the device itself, so it is present on the restore
     // path too) followed by its transport state.
@@ -1369,7 +1369,7 @@ fn write_snapshot(
         }
         None => Vec::new(),
     };
-    snapshot::write(dir, states, vm_fd, mem, &con_state, &net_state)
+    snapshot::write(dir, states, vm_fd, mem, &device_state, &net_state)
         .with_context(|| format!("writing snapshot to {dir:?}"))?;
     Ok(())
 }

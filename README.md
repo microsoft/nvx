@@ -4,8 +4,8 @@
 
 A minimal **x86_64 micro-VM** (single processor by default, optional functional **SMP** on the KVM
 backend via `--vcpus`) that boots a Linux (Alpine) kernel through the **PVH boot protocol**,
-entirely from a **RAM initramfs** — no PCI, no ACPI, and no block device by default. The only
-always-on emulated device is a bidirectional "portb" console (backing the kernel's `hvc0`).
+entirely from a **RAM initramfs** — no PCI, no ACPI, and no block device by default. Its tiny
+always-on PMIO model is a bidirectional "portb" console plus the wall-clock registers of an RTC.
 
 It runs on **two hypervisor backends** from the same codebase:
 
@@ -71,13 +71,14 @@ uid=0(root) gid=0(root)
 - **RAM-only root filesystem.** The initramfs is loaded into guest memory and passed as a PVH
   module; the kernel unpacks it and runs `/init`. There is no block device unless the optional
   `--mount` virt-fs is used, and no virtio unless `--net` attaches the virtio-net NIC.
-- **Minimal device model.** The only always-present device is a bidirectional **"portb" console**
+- **Minimal device model.** The primary device is a bidirectional **"portb" console**
   backing the kernel's `hvc0`: output is one `outb` per byte to I/O port `0xE9`, input is polled
   from `0xEA`
-  (status) and `0xE9` (data) — no interrupt line. Every other port floats (reads return all-ones,
-  writes are dropped), which lets a PCI-less/ACPI-less kernel skip legacy probes (i8042, CMOS/RTC,
-  POST codes, ...). The in-kernel KVM irqchip (PIC + IOAPIC) and PIT provide interrupts and the
-  timer; `kvm-clock` provides time. `--net` optionally adds one **virtio-net** NIC on a
+  (status) and `0xE9` (data) — no interrupt line. A minimal MC146818 at `0x70`/`0x71` supplies the
+  early x86 wall-clock read but no interrupts; without it Linux waits about one second for a
+  permanently set update-in-progress bit. Every other port floats. The in-kernel KVM irqchip
+  (PIC + IOAPIC) and PIT provide interrupts and the timer; `kvm-clock` provides runtime time.
+  `--net` optionally adds one **virtio-net** NIC on a
   **virtio-mmio** window (the only MMIO device and the only interrupt-driven one), pointed at
   through the kernel command line just like the virt-fs.
 
@@ -89,7 +90,8 @@ uid=0(root) gid=0(root)
 | `src/console.rs`                              | *(shared)* Console sink: buffered/quiet output, byte count, cold-start timing                                                                                                                                                                                                                  |
 | `src/layout.rs`                               | *(shared)* Guest-physical memory map constants                                                                                                                                                                                                                                                 |
 | `src/devices/portb.rs`                        | *(shared)* portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue                                                                                                                                                                                                     |
-| `src/devices/mod.rs`                          | *(shared)* PMIO device bus (portb console `0xE9`/`0xEA`, `0x604` shutdown, `0x605` snapshot)                                                                                                                                                                                                   |
+| `src/devices/rtc.rs`                          | *(Linux/KVM)* Minimal MC146818 RTC/CMOS that prevents the early x86 wall-clock timeout                                                                                                                                                                                                         |
+| `src/devices/mod.rs`                          | *(shared)* PMIO device bus (portb console `0xE9`/`0xEA`, KVM RTC `0x70`/`0x71`, `0x604` shutdown, `0x605` snapshot)                                                                                                                                                                             |
 | `src/boot/mod.rs`                             | *(shared)* PVH boot module + `GuestWrite` trait that decouples the loader from each backend's memory                                                                                                                                                                                           |
 | `src/boot/mptable.rs`                         | *(Linux/KVM)* Intel MP table used by an ACPI-less guest to enumerate vCPUs                                                                                                                                                                                                                     |
 | `src/boot/pvh.rs`                             | *(shared)* `vmlinux` ELF loader, PVH note parsing, `hvm_start_info` layout                                                                                                                                                                                                                     |

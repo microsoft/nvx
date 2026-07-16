@@ -6,8 +6,8 @@
 //!
 //! A minimal x86_64 micro-VM (single processor by default, optional functional KVM SMP via
 //! `--vcpus`) that boots a Linux (Alpine) kernel through the PVH boot protocol from a RAM
-//! initramfs. There is no PCI, no ACPI, and no block device: the only always-on emulated device
-//! is a bidirectional "portb" console (backing `hvc0`).
+//! initramfs. There is no PCI, no ACPI, and no block device: the always-on PMIO model is a
+//! bidirectional "portb" console (backing `hvc0`) plus minimal RTC wall-clock registers.
 //!
 
 // Portable modules, shared by both backends.

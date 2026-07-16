@@ -10,7 +10,7 @@
 //! Captures and restores the full state of the micro-VM: guest RAM, the vCPU register file
 //! (GPRs, segments, FPU, XCRs, LAPIC, MP state, pending events, debug registers, and a set
 //! of model-specific registers), the in-kernel interrupt controller and PIT, the KVM
-//! paravirtual clock, the portb console device, and — when a NIC is attached (`--net`) — the
+//! paravirtual clock, the PMIO devices, and — when a NIC is attached (`--net`) — the
 //! virt-net device's transport state so networking resumes across a restore.
 //!
 //! A snapshot is a directory containing two files:
@@ -392,7 +392,7 @@ pub fn write(
     states: &[VcpuState],
     vm: &VmFd,
     mem: &GuestMemory,
-    con_state: &[u8],
+    device_state: &[u8],
     net_state: &[u8],
 ) -> Result<()> {
     if states.is_empty() {
@@ -426,8 +426,8 @@ pub fn write(
     // Programmable interval timer.
     put_blob(&mut buf, as_bytes(&vm.get_pit2().context("KVM_GET_PIT2")?));
 
-    // portb console device (pending input queue).
-    put_blob(&mut buf, con_state);
+    // PMIO device state (pending console input and the selected RTC/CMOS register).
+    put_blob(&mut buf, device_state);
 
     // virt-net device state (empty unless a NIC was attached).
     put_blob(&mut buf, net_state);
@@ -449,7 +449,7 @@ pub struct Snapshot {
     clock: kvm_clock_data,
     irqchips: [kvm_irqchip; 3],
     pit: kvm_pit_state2,
-    con_state: Vec<u8>,
+    device_state: Vec<u8>,
     net_state: Vec<u8>,
 }
 
@@ -482,7 +482,7 @@ impl Snapshot {
             read_pod(r.blob()?)?,
         ];
         let pit: kvm_pit_state2 = read_pod(r.blob()?)?;
-        let con_state: Vec<u8> = r.blob()?.to_vec();
+        let device_state: Vec<u8> = r.blob()?.to_vec();
         let net_state: Vec<u8> = r.blob()?.to_vec();
 
         Ok(Self {
@@ -491,7 +491,7 @@ impl Snapshot {
             clock,
             irqchips,
             pit,
-            con_state,
+            device_state,
             net_state,
         })
     }
@@ -506,9 +506,9 @@ impl Snapshot {
         self.vcpus.len()
     }
 
-    /// Returns the serialized portb console device state (pending input queue).
-    pub fn con_state(&self) -> &[u8] {
-        &self.con_state
+    /// Returns the serialized PMIO device state.
+    pub fn device_state(&self) -> &[u8] {
+        &self.device_state
     }
 
     /// Returns the serialized virt-net device state (empty if the VM had no NIC).
