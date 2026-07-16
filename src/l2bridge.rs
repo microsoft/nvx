@@ -22,6 +22,14 @@ const MAX_CONTROL_PIPE: usize = 240;
 const MAX_CMDLINE_FRAGMENT: usize = 2048;
 /// The initramfs transport must fit the kernel command-line limit without truncation.
 pub const MAX_GUEST_CMDLINE: usize = 2048;
+/// Smallest IPv4 MTU accepted by the external-network contract.
+pub const MIN_EXTERNAL_MTU: u32 = 576;
+/// Largest MTU accepted by the version-1 wire contract.
+pub const MAX_EXTERNAL_MTU: u32 = 65_521;
+/// Largest MTU supported by the AF_XDP data-plane frame layout.
+pub const MAX_AFXDP_MTU: u32 = 4082;
+/// Largest RSS queue set supported by the external data-plane contract.
+pub const MAX_EXTERNAL_QUEUES: usize = 64;
 
 /// The fully validated `--net-config` contract owned by NVX.
 #[derive(Clone, Debug, DeriveDeserialize, ::serde::Serialize)]
@@ -66,7 +74,7 @@ pub struct GuestBootstrap {
     pub dns: Dns,
 }
 
-#[derive(Clone, Debug, DeriveDeserialize, ::serde::Serialize)]
+#[derive(Clone, Debug, DeriveDeserialize, Eq, PartialEq, ::serde::Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Ipv4 {
     pub address: String,
@@ -74,14 +82,14 @@ pub struct Ipv4 {
     pub gateway: String,
 }
 
-#[derive(Clone, Debug, DeriveDeserialize, ::serde::Serialize)]
+#[derive(Clone, Debug, DeriveDeserialize, Eq, PartialEq, ::serde::Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Route {
     pub destination: String,
     pub next_hop: String,
 }
 
-#[derive(Clone, Debug, DeriveDeserialize, ::serde::Serialize)]
+#[derive(Clone, Debug, DeriveDeserialize, Eq, PartialEq, ::serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dns {
     pub servers: Vec<String>,
@@ -146,9 +154,12 @@ impl L2BridgeConfig {
             "auto" if self.attachment.queue_selection.queues.is_empty() => {}
             "explicit" => {
                 let queues = &self.attachment.queue_selection.queues;
-                if queues.is_empty() || queues.windows(2).any(|q| q[0] >= q[1]) {
+                if queues.is_empty()
+                    || queues.len() > MAX_EXTERNAL_QUEUES
+                    || queues.windows(2).any(|q| q[0] >= q[1])
+                {
                     bail!(
-                        "explicit queueSelection.queues must be a non-empty, strictly ascending list"
+                        "explicit queueSelection.queues must contain 1..={MAX_EXTERNAL_QUEUES} strictly ascending entries"
                     );
                 }
             }
@@ -157,8 +168,8 @@ impl L2BridgeConfig {
         }
 
         let _ = self.mac()?;
-        if !(576..=65_521).contains(&self.device.mtu) {
-            bail!("device.mtu must be in 576..=65521");
+        if !(MIN_EXTERNAL_MTU..=MAX_EXTERNAL_MTU).contains(&self.device.mtu) {
+            bail!("device.mtu must be in {MIN_EXTERNAL_MTU}..={MAX_EXTERNAL_MTU}");
         }
         let ip: Ipv4Addr = self
             .guest_bootstrap
@@ -184,10 +195,12 @@ impl L2BridgeConfig {
         for route in &self.guest_bootstrap.routes {
             parse_ipv4_cidr(&route.destination)
                 .with_context(|| format!("invalid route destination {:?}", route.destination))?;
-            let _: Ipv4Addr = route
-                .next_hop
-                .parse()
-                .with_context(|| format!("invalid route nextHop {:?}", route.next_hop))?;
+            if !route.next_hop.is_empty() {
+                let _: Ipv4Addr = route
+                    .next_hop
+                    .parse()
+                    .with_context(|| format!("invalid route nextHop {:?}", route.next_hop))?;
+            }
         }
         if self.guest_bootstrap.dns.servers.len() > 16 || self.guest_bootstrap.dns.search.len() > 16
         {
@@ -230,16 +243,25 @@ impl L2BridgeConfig {
     /// A bounded kernel-command-line transport for the minimal Alpine guest.
     pub fn guest_cmdline_fragment(&self) -> Result<String> {
         let ipv4 = &self.guest_bootstrap.ipv4;
-        let routes = self
+        let explicit_routes = self
             .guest_bootstrap
             .routes
             .iter()
             .map(|r| format!("{}@{}", r.destination, r.next_hop))
             .collect::<Vec<_>>()
             .join(",");
+        if !explicit_routes.is_empty() {
+            validate_token(&explicit_routes, "guest network field")?;
+        }
+        let effective_routes = effective_routes(ipv4, &self.guest_bootstrap.routes);
+        let routes = effective_routes
+            .iter()
+            .map(|r| format!("{}@{}", r.destination, r.next_hop))
+            .collect::<Vec<_>>()
+            .join(",");
         let dns = self.guest_bootstrap.dns.servers.join(",");
         let search = self.guest_bootstrap.dns.search.join(",");
-        for token in [&routes, &dns, &search] {
+        for token in [&dns, &search] {
             if !token.is_empty() {
                 validate_token(token, "guest network field")?;
             }
@@ -252,8 +274,8 @@ impl L2BridgeConfig {
             u32::MAX << (32 - prefix)
         });
         let fragment = format!(
-            "virtio_mmio.device={:#x}@{:#x}:{} virtnet_ip={} virtnet_prefix={} virtnet_mask={} \
-             virtnet_gw={} virtnet_mac={} virtnet_mtu={} virtnet_routes={} \
+            "virtio_mmio.device={:#x}@{:#x}:{} virtnet_required=1 virtnet_ip={} \
+             virtnet_prefix={} virtnet_mask={} virtnet_mac={} virtnet_mtu={} virtnet_routes={} \
              virtnet_dns={} virtnet_search={}",
             0x1000_u64,
             0xd000_0000_u64,
@@ -261,7 +283,6 @@ impl L2BridgeConfig {
             ipv4.address,
             ipv4.prefix_length,
             mask,
-            ipv4.gateway,
             mac,
             self.device.mtu,
             routes,
@@ -276,10 +297,12 @@ impl L2BridgeConfig {
 
     /// Produces the snapshot-safe guest-visible identity, excluding interface and XDP resources.
     pub fn external_identity(&self) -> Result<ExternalIdentity> {
+        let effective_routes =
+            effective_routes(&self.guest_bootstrap.ipv4, &self.guest_bootstrap.routes);
         let bootstrap = ::serde_json::to_vec(&BootstrapIdentity {
             version: VERSION,
             ipv4: &self.guest_bootstrap.ipv4,
-            routes: &self.guest_bootstrap.routes,
+            routes: &effective_routes,
             dns: &self.guest_bootstrap.dns,
         })
         .context("serializing guest bootstrap identity")?;
@@ -293,6 +316,20 @@ impl L2BridgeConfig {
     }
 }
 
+impl ExternalIdentity {
+    /// Compares guest-visible identity while accepting legacy v1 snapshots whose route list
+    /// omitted the default route represented by `ipv4.gateway`.
+    pub fn equivalent(&self, other: &Self) -> bool {
+        if self.mac != other.mac || self.mtu != other.mtu {
+            return false;
+        }
+        if self.bootstrap == other.bootstrap && self.bootstrap_digest == other.bootstrap_digest {
+            return true;
+        }
+        canonical_bootstrap(&self.bootstrap) == canonical_bootstrap(&other.bootstrap)
+    }
+}
+
 #[derive(::serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapIdentity<'a> {
@@ -300,6 +337,38 @@ struct BootstrapIdentity<'a> {
     ipv4: &'a Ipv4,
     routes: &'a [Route],
     dns: &'a Dns,
+}
+
+#[derive(DeriveDeserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct OwnedBootstrapIdentity {
+    version: u32,
+    ipv4: Ipv4,
+    routes: Vec<Route>,
+    dns: Dns,
+}
+
+fn effective_routes(ipv4: &Ipv4, routes: &[Route]) -> Vec<Route> {
+    let mut effective = routes.to_vec();
+    if !effective
+        .iter()
+        .any(|route| route.destination == "0.0.0.0/0")
+    {
+        effective.push(Route {
+            destination: "0.0.0.0/0".to_owned(),
+            next_hop: ipv4.gateway.clone(),
+        });
+    }
+    effective
+}
+
+fn canonical_bootstrap(bytes: &[u8]) -> Option<OwnedBootstrapIdentity> {
+    let mut identity: OwnedBootstrapIdentity = ::serde_json::from_slice(bytes).ok()?;
+    if identity.version != VERSION {
+        return None;
+    }
+    identity.routes = effective_routes(&identity.ipv4, &identity.routes);
+    Some(identity)
 }
 
 fn parse_ipv4_cidr(value: &str) -> Result<()> {
@@ -438,6 +507,7 @@ mod tests {
         );
         assert_eq!(encoded["device"]["macAddress"], "00-15-5D-01-02-03");
         assert_eq!(encoded["guestBootstrap"]["ipv4"]["prefixLength"], 24);
+        assert_eq!(encoded["guestBootstrap"]["ipv4"]["gateway"], "192.168.0.1");
         assert_eq!(
             encoded["guestBootstrap"]["routes"][0]["nextHop"],
             "192.168.0.1"
@@ -469,6 +539,112 @@ mod tests {
     }
 
     #[test]
+    fn manifest_accepts_maximum_external_mtu() {
+        assert!(
+            L2BridgeConfig::from_json(CONFIG.replace("\"mtu\":1500", "\"mtu\":65521").as_bytes())
+                .is_ok()
+        );
+        assert!(
+            L2BridgeConfig::from_json(CONFIG.replace("\"mtu\":1500", "\"mtu\":65522").as_bytes())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn manifest_preserves_v1_gateway_in_snapshot_identity() {
+        let cfg = L2BridgeConfig::from_json(CONFIG.as_bytes()).unwrap();
+        let identity: Value =
+            ::serde_json::from_slice(&cfg.external_identity().unwrap().bootstrap).unwrap();
+        assert_eq!(identity["ipv4"]["gateway"], "192.168.0.1");
+    }
+
+    #[test]
+    fn manifest_encodes_on_link_route() {
+        let on_link = CONFIG.replace("\"nextHop\":\"192.168.0.1\"", "\"nextHop\":\"\"");
+        let cfg = L2BridgeConfig::from_json(on_link.as_bytes()).unwrap();
+        assert_eq!(cfg.guest_bootstrap.routes[0].next_hop, "");
+        assert!(
+            cfg.guest_cmdline_fragment()
+                .unwrap()
+                .contains("virtnet_routes=0.0.0.0/0@ ")
+        );
+    }
+
+    #[test]
+    fn external_cmdline_requires_network_without_gateway_token() {
+        let fragment = L2BridgeConfig::from_json(CONFIG.as_bytes())
+            .unwrap()
+            .guest_cmdline_fragment()
+            .unwrap();
+        assert!(fragment.contains(" virtnet_required=1 "));
+        assert!(!fragment.contains("virtnet_gw="));
+    }
+
+    #[test]
+    fn gateway_supplies_only_a_missing_default_route() {
+        let without_default = CONFIG.replace(
+            r#""routes":[{"destination":"0.0.0.0/0","nextHop":"192.168.0.1"}]"#,
+            r#""routes":[{"destination":"10.0.0.0/8","nextHop":""}]"#,
+        );
+        let fragment = L2BridgeConfig::from_json(without_default.as_bytes())
+            .unwrap()
+            .guest_cmdline_fragment()
+            .unwrap();
+        assert!(fragment.contains("virtnet_routes=10.0.0.0/8@,0.0.0.0/0@192.168.0.1"));
+    }
+
+    #[test]
+    fn canonical_identity_accepts_legacy_v1_route_omission() {
+        let without_default = CONFIG.replace(
+            r#""routes":[{"destination":"0.0.0.0/0","nextHop":"192.168.0.1"}]"#,
+            r#""routes":[{"destination":"10.0.0.0/8","nextHop":""}]"#,
+        );
+        let cfg = L2BridgeConfig::from_json(without_default.as_bytes()).unwrap();
+        let current = cfg.external_identity().unwrap();
+        let legacy_bootstrap = ::serde_json::to_vec(&BootstrapIdentity {
+            version: VERSION,
+            ipv4: &cfg.guest_bootstrap.ipv4,
+            routes: &cfg.guest_bootstrap.routes,
+            dns: &cfg.guest_bootstrap.dns,
+        })
+        .unwrap();
+        let legacy = ExternalIdentity {
+            mac: current.mac,
+            mtu: current.mtu,
+            bootstrap_digest: Sha256::digest(&legacy_bootstrap).into(),
+            bootstrap: legacy_bootstrap,
+        };
+        assert_ne!(legacy.bootstrap, current.bootstrap);
+        assert!(legacy.equivalent(&current));
+    }
+
+    #[test]
+    fn synthesized_default_does_not_reduce_v1_explicit_route_budget() {
+        let routes = (0..9)
+            .map(|index| Route {
+                destination: format!("10.{index}.0.0/16"),
+                next_hop: "192.168.100.100".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let explicit = routes
+            .iter()
+            .map(|route| format!("{}@{}", route.destination, route.next_hop))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(explicit.len() <= 253);
+        assert!(explicit.len() + ",0.0.0.0/0@192.168.0.1".len() > 253);
+
+        let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
+        value["guestBootstrap"]["routes"] = ::serde_json::to_value(routes).unwrap();
+        let cfg = L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            cfg.guest_cmdline_fragment()
+                .unwrap()
+                .contains("0.0.0.0/0@192.168.0.1")
+        );
+    }
+
+    #[test]
     fn manifest_rejects_invalid_queue_combinations() {
         assert!(
             L2BridgeConfig::from_json(
@@ -486,6 +662,21 @@ mod tests {
                         "\"mode\":\"explicit\",\"queues\":[2,1]"
                     )
                     .as_bytes()
+            )
+            .is_err()
+        );
+        let too_many = (0..=MAX_EXTERNAL_QUEUES)
+            .map(|queue| queue.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            L2BridgeConfig::from_json(
+                CONFIG
+                    .replace(
+                        "\"mode\":\"auto\"",
+                        &format!("\"mode\":\"explicit\",\"queues\":[{too_many}]"),
+                    )
+                    .as_bytes(),
             )
             .is_err()
         );

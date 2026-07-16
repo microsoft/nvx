@@ -156,6 +156,10 @@ impl FrameBackend for Slirp {
         }
     }
 
+    fn check_health(&self) -> ::anyhow::Result<()> {
+        Ok(())
+    }
+
     fn counters(&self) -> FrameCounters {
         FrameCounters {
             guest_tx_accepted: self.tx_accepted.load(Ordering::Relaxed),
@@ -166,7 +170,7 @@ impl FrameBackend for Slirp {
     }
 
     fn quiesce(&self, _timeout: Duration) -> ::anyhow::Result<()> {
-        self.stop.store(true, Ordering::SeqCst);
+        self.shutdown_worker();
         Ok(())
     }
 

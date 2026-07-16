@@ -17,10 +17,9 @@
 //! init-sequence handling) so the kernel wires up the legacy IRQ path, and it turns a periodic
 //! host tick into the guest's IRQ0 timer interrupt (see [`raise_irq0`](Pic::raise_irq0)).
 //!
-//! Only what the timer path needs is modelled: the ICW1–ICW4 init sequence (to capture the
-//! vector base the guest programs), OCW1 (mask), OCW2 (end-of-interrupt), OCW3 (read IRR/ISR),
-//! and IRQ0 request/in-service/EOI bookkeeping on the master. The slave exists only to satisfy
-//! the two-controller init the kernel performs.
+//! Only the master lines used by the timer and NIC are modelled: the ICW1–ICW4 init sequence,
+//! OCW1 (mask), OCW2 (end-of-interrupt), OCW3 (read IRR/ISR), and request/in-service bookkeeping.
+//! The slave exists only to satisfy the two-controller init the kernel performs.
 //!
 
 /// Master PIC command port.

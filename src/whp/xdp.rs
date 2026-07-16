@@ -10,7 +10,10 @@
 use ::core::ffi::c_void;
 use ::std::fs::{File, OpenOptions};
 use ::std::io::{BufReader, ErrorKind, Read, Write};
-use ::std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use ::std::pin::Pin;
+use ::std::sync::atomic::{
+    AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
+};
 use ::std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use ::std::sync::{Arc, Mutex};
 use ::std::thread::{self, JoinHandle};
@@ -19,29 +22,53 @@ use ::std::time::{Duration, Instant};
 use ::anyhow::{Context, Result, bail};
 use ::serde::Deserialize;
 use ::serde_json::json;
+use ::windows::Win32::Foundation::{HANDLE as WinHandle, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use ::windows::Win32::System::IO::{CancelIoEx, OVERLAPPED};
+use ::windows::Win32::System::Threading::{
+    CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+};
 
-use crate::l2bridge::L2BridgeConfig;
+use crate::l2bridge::{L2BridgeConfig, MAX_AFXDP_MTU, MAX_EXTERNAL_QUEUES};
 use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters};
 
 const XDP_API_VERSION_2: u32 = 2;
 const XDP_CREATE_PROGRAM_GENERIC: u32 = 0x1;
 const XDP_CREATE_PROGRAM_ALL_QUEUES: u32 = 0x4;
+const XSK_BIND_RX_GENERIC: u32 = 0x1 | 0x4;
 const XSK_BIND_RX_TX_GENERIC: u32 = 0x1 | 0x2 | 0x4;
+const XSK_NOTIFY_POKE_RX: u32 = 0x1;
+const XSK_NOTIFY_POKE_TX: u32 = 0x2;
+const XSK_NOTIFY_WAIT_RX: u32 = 0x4;
+const XSK_NOTIFY_WAIT_TX: u32 = 0x8;
+const XSK_RING_FLAG_ERROR: u32 = 0x1;
+const XSK_RING_FLAG_NEED_POKE: u32 = 0x2;
+const XSK_SOCKOPT_RX_HOOK_ID: u32 = 8;
+const XSK_SOCKOPT_RX_ERROR: u32 = 10;
+const XSK_SOCKOPT_RX_FILL_ERROR: u32 = 11;
+const XSK_SOCKOPT_TX_ERROR: u32 = 12;
+const XSK_SOCKOPT_TX_COMPLETION_ERROR: u32 = 13;
 const XSK_RING_SIZE: u32 = 128;
-const FRAME_SIZE: usize = 4096;
-const RX_FRAME_COUNT: usize = XSK_RING_SIZE as usize;
-const TX_FRAME_COUNT: usize = XSK_RING_SIZE as usize;
-const UMEM_SIZE: usize = FRAME_SIZE * (RX_FRAME_COUNT + TX_FRAME_COUNT);
-/// The supported automatic topology is at most 64 queues. Queue ID 64 is an overflow probe.
-const MAX_AUTO_QUEUES: u32 = 64;
+const MAX_FRAME_SIZE: usize = 4096;
+const RX_FRAME_COUNT: usize = 64;
+const TX_FRAME_COUNT: usize = 64;
+const RX_CHANNEL_DEPTH: usize = 256;
+const MAX_QUEUES_PER_WORKER: usize = 63;
+const HEALTH_POLL_INTERVAL_MS: u32 = 250;
 const TX_BATCH: usize = 64;
 const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONTROL_MESSAGE: usize = 4096;
+const STATE_READY: u8 = 0;
+const STATE_QUIESCING: u8 = 1;
+const STATE_STOPPED: u8 = 2;
+const STATE_FAILED: u8 = 3;
+const HRESULT_IO_PENDING: HResult = 0x8007_03e5_u32 as i32;
+const HRESULT_OPERATION_ABORTED: HResult = 0x8007_03e3_u32 as i32;
 
 type Handle = isize;
 type HResult = i32;
 type XdpOpenApiFn = unsafe extern "system" fn(u32, *mut *const XdpApiTable) -> HResult;
 type XdpCloseApiFn = unsafe extern "system" fn(*const XdpApiTable);
+type XdpGetRoutineFn = unsafe extern "system" fn(*const u8) -> *const c_void;
 type XdpCreateProgramFn = unsafe extern "system" fn(
     u32,
     *const XdpHookId,
@@ -51,14 +78,19 @@ type XdpCreateProgramFn = unsafe extern "system" fn(
     u32,
     *mut Handle,
 ) -> HResult;
+type XdpInterfaceOpenFn = unsafe extern "system" fn(u32, *mut Handle) -> HResult;
 type XskCreateFn = unsafe extern "system" fn(*mut Handle) -> HResult;
 type XskBindFn = unsafe extern "system" fn(Handle, u32, u32, u32) -> HResult;
 type XskActivateFn = unsafe extern "system" fn(Handle, u32) -> HResult;
 type XskNotifySocketFn = unsafe extern "system" fn(Handle, u32, u32, *mut u32) -> HResult;
+type XskNotifyAsyncFn = unsafe extern "system" fn(Handle, u32, *mut OVERLAPPED) -> HResult;
+type XskGetNotifyAsyncResultFn = unsafe extern "system" fn(*mut OVERLAPPED, *mut u32) -> HResult;
 type XskSetSockoptFn = unsafe extern "system" fn(Handle, u32, *const c_void, u32) -> HResult;
 type XskGetSockoptFn = unsafe extern "system" fn(Handle, u32, *mut c_void, *mut u32) -> HResult;
 type XskIoctlFn =
     unsafe extern "system" fn(Handle, u32, *const c_void, u32, *mut c_void, *mut u32) -> HResult;
+type XdpRssGetCapabilitiesFn =
+    unsafe extern "system" fn(Handle, *mut XdpRssCapabilities, *mut u32) -> HResult;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -72,18 +104,36 @@ unsafe extern "system" {
 struct XdpApiTable {
     open_api: Option<XdpOpenApiFn>,
     close_api: Option<XdpCloseApiFn>,
-    _get_routine: *const c_void,
+    get_routine: Option<XdpGetRoutineFn>,
     create_program: Option<XdpCreateProgramFn>,
-    _interface_open: *const c_void,
+    interface_open: Option<XdpInterfaceOpenFn>,
     xsk_create: Option<XskCreateFn>,
     xsk_bind: Option<XskBindFn>,
     xsk_activate: Option<XskActivateFn>,
     xsk_notify_socket: Option<XskNotifySocketFn>,
-    _xsk_notify_async: *const c_void,
-    _xsk_get_notify_async_result: *const c_void,
+    xsk_notify_async: Option<XskNotifyAsyncFn>,
+    xsk_get_notify_async_result: Option<XskGetNotifyAsyncResultFn>,
     xsk_set_sockopt: Option<XskSetSockoptFn>,
     xsk_get_sockopt: Option<XskGetSockoptFn>,
     _xsk_ioctl: Option<XskIoctlFn>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct XdpObjectHeader {
+    revision: u32,
+    size: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct XdpRssCapabilities {
+    header: XdpObjectHeader,
+    flags: u32,
+    hash_types: u32,
+    hash_secret_key_size: u32,
+    number_of_receive_queues: u32,
+    number_of_indirection_table_entries: u32,
 }
 
 #[repr(C)]
@@ -287,17 +337,51 @@ impl XdpApi {
     fn required(&self) -> Result<()> {
         let t = self.table();
         if t.close_api.is_none()
+            || t.get_routine.is_none()
             || t.create_program.is_none()
+            || t.interface_open.is_none()
             || t.xsk_create.is_none()
             || t.xsk_bind.is_none()
             || t.xsk_activate.is_none()
             || t.xsk_notify_socket.is_none()
+            || t.xsk_notify_async.is_none()
+            || t.xsk_get_notify_async_result.is_none()
             || t.xsk_set_sockopt.is_none()
             || t.xsk_get_sockopt.is_none()
         {
             bail!("XdpOpenApi(2) returned an incomplete XDP_API_TABLE");
         }
         Ok(())
+    }
+
+    fn automatic_queue_ids(&self, if_index: u32) -> Result<Vec<u32>> {
+        let routine = unsafe {
+            self.table().get_routine.unwrap()(c"XdpRssGetCapabilitiesExperimental".as_ptr().cast())
+        };
+        if routine.is_null() {
+            bail!("XDP v1.3 does not expose RSS queue capabilities; use explicit queueSelection");
+        }
+        let get_capabilities: XdpRssGetCapabilitiesFn = unsafe { ::core::mem::transmute(routine) };
+        let mut interface = 0;
+        check(
+            unsafe { self.table().interface_open.unwrap()(if_index, &mut interface) },
+            "XdpInterfaceOpen",
+        )?;
+        let _interface = OwnedHandle(interface);
+        let mut capabilities = XdpRssCapabilities {
+            header: XdpObjectHeader {
+                revision: 1,
+                // Revision 1 ends at NumberOfReceiveQueues.
+                size: 24,
+            },
+            ..Default::default()
+        };
+        let mut size = size_of::<XdpRssCapabilities>() as u32;
+        check(
+            unsafe { get_capabilities(interface, &mut capabilities, &mut size) },
+            "XdpRssGetCapabilitiesExperimental",
+        )?;
+        automatic_queue_ids_from_count(capabilities.number_of_receive_queues)
     }
 }
 
@@ -313,6 +397,13 @@ impl Drop for XdpApi {
 }
 
 struct OwnedHandle(Handle);
+
+impl OwnedHandle {
+    fn win_handle(&self) -> WinHandle {
+        WinHandle(self.0 as *mut c_void)
+    }
+}
+
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         if self.0 != 0 {
@@ -323,9 +414,32 @@ impl Drop for OwnedHandle {
     }
 }
 
+struct Event(OwnedHandle);
+
+impl Event {
+    fn new() -> Result<Self> {
+        let handle =
+            unsafe { CreateEventW(None, true, false, None) }.context("creating AF_XDP event")?;
+        Ok(Self(OwnedHandle(handle.0 as Handle)))
+    }
+
+    fn handle(&self) -> WinHandle {
+        self.0.win_handle()
+    }
+
+    fn set(&self) -> Result<()> {
+        unsafe { SetEvent(self.handle()) }.context("signalling AF_XDP event")
+    }
+
+    fn reset(&self) -> Result<()> {
+        unsafe { ResetEvent(self.handle()) }.context("resetting AF_XDP event")
+    }
+}
+
 struct Ring {
     producer: *mut AtomicU32,
     consumer: *mut AtomicU32,
+    flags: *mut AtomicU32,
     elements: *mut u8,
     size: u32,
     mask: u32,
@@ -350,6 +464,7 @@ impl Ring {
         Ok(Self {
             producer: unsafe { info.ring.add(info.producer_index_offset as usize).cast() },
             consumer: unsafe { info.ring.add(info.consumer_index_offset as usize).cast() },
+            flags: unsafe { info.ring.add(info.flags_offset as usize).cast() },
             elements: unsafe { info.ring.add(info.descriptors_offset as usize) },
             size: info.size,
             mask: info.size - 1,
@@ -424,6 +539,111 @@ impl Ring {
             );
         }
     }
+
+    fn has_error(&self) -> bool {
+        unsafe { (&*self.flags).load(Ordering::Acquire) & XSK_RING_FLAG_ERROR != 0 }
+    }
+
+    fn needs_poke(&self) -> bool {
+        // XDP requires a store-load barrier between publishing producer/consumer progress and
+        // observing NEED_POKE, otherwise the driver and application can both go to sleep.
+        fence(Ordering::SeqCst);
+        unsafe { (&*self.flags).load(Ordering::Acquire) & XSK_RING_FLAG_NEED_POKE != 0 }
+    }
+}
+
+struct NotifyWait {
+    event: Event,
+    overlapped: OVERLAPPED,
+    pending: bool,
+}
+
+// The pinned allocation is moved only by pointer. A worker owns it exclusively, and cancellation
+// completes every pending request before the allocation or socket is dropped.
+unsafe impl Send for NotifyWait {}
+
+impl NotifyWait {
+    fn new() -> Result<Pin<Box<Self>>> {
+        let event = Event::new()?;
+        let mut wait = Box::pin(Self {
+            event,
+            overlapped: OVERLAPPED::default(),
+            pending: false,
+        });
+        unsafe {
+            Pin::as_mut(&mut wait).get_unchecked_mut().overlapped.hEvent =
+                wait.as_ref().event.handle();
+        }
+        Ok(wait)
+    }
+
+    fn event_handle(self: Pin<&Self>) -> WinHandle {
+        self.get_ref().event.handle()
+    }
+
+    fn arm(self: Pin<&mut Self>, api: &XdpApi, socket: Handle, flags: u32) -> Result<bool> {
+        let this = unsafe { self.get_unchecked_mut() };
+        if this.pending {
+            return Ok(false);
+        }
+        this.event.reset()?;
+        this.overlapped = OVERLAPPED::default();
+        this.overlapped.hEvent = this.event.handle();
+        let status =
+            unsafe { api.table().xsk_notify_async.unwrap()(socket, flags, &mut this.overlapped) };
+        if status == HRESULT_IO_PENDING {
+            this.pending = true;
+            return Ok(false);
+        }
+        check(status, "XskNotifyAsync")?;
+        let mut result = 0;
+        check(
+            unsafe {
+                api.table().xsk_get_notify_async_result.unwrap()(&mut this.overlapped, &mut result)
+            },
+            "XskGetNotifyAsyncResult",
+        )?;
+        Ok(true)
+    }
+
+    fn complete(self: Pin<&mut Self>, api: &XdpApi) -> Result<()> {
+        let this = unsafe { self.get_unchecked_mut() };
+        if !this.pending {
+            return Ok(());
+        }
+        let mut result = 0;
+        let status = unsafe {
+            api.table().xsk_get_notify_async_result.unwrap()(&mut this.overlapped, &mut result)
+        };
+        this.pending = false;
+        check(status, "XskGetNotifyAsyncResult")
+    }
+
+    fn cancel(self: Pin<&mut Self>, api: &XdpApi, socket: &OwnedHandle) -> Result<()> {
+        let this = unsafe { self.get_unchecked_mut() };
+        if !this.pending {
+            return Ok(());
+        }
+        // XskNotifyAsync is an overlapped IOCTL. XDP's cancellation path completes the IRP and
+        // signals this event, so waiting here keeps the OVERLAPPED address valid through teardown.
+        let _ = unsafe { CancelIoEx(socket.win_handle(), Some(&this.overlapped)) };
+        let wait = unsafe { WaitForSingleObject(this.event.handle(), INFINITE) };
+        if wait != WAIT_OBJECT_0 {
+            bail!(
+                "waiting for cancelled AF_XDP notification failed with status {:#x}",
+                wait.0
+            );
+        }
+        let mut result = 0;
+        let status = unsafe {
+            api.table().xsk_get_notify_async_result.unwrap()(&mut this.overlapped, &mut result)
+        };
+        this.pending = false;
+        if failed(status) && status != HRESULT_OPERATION_ABORTED {
+            bail!("cancelled XskNotifyAsync failed with HRESULT {status:#x}");
+        }
+        Ok(())
+    }
 }
 
 struct Queue {
@@ -432,23 +652,32 @@ struct Queue {
     _rx_program: OwnedHandle,
     socket: OwnedHandle,
     umem: Vec<u8>,
+    chunk_size: usize,
     fill: Ring,
-    completion: Ring,
+    completion: Option<Ring>,
     rx: Ring,
-    tx: Ring,
+    tx: Option<Ring>,
     tx_free: Vec<u64>,
+    notify: Pin<Box<NotifyWait>>,
 }
 
 impl Queue {
-    fn create(api: Arc<XdpApi>, if_index: u32, queue_id: u32) -> Result<Self> {
+    fn create(
+        api: Arc<XdpApi>,
+        if_index: u32,
+        queue_id: u32,
+        chunk_size: usize,
+        tx_enabled: bool,
+    ) -> Result<Self> {
         let t = api.table();
         let mut raw = 0;
         check(unsafe { t.xsk_create.unwrap()(&mut raw) }, "XskCreate")?;
         let socket = OwnedHandle(raw);
-        let mut umem = vec![0; UMEM_SIZE];
+        let umem_size = queue_umem_size(chunk_size, tx_enabled)?;
+        let mut umem = vec![0; umem_size];
         let reg = XskUmemReg {
-            total_size: UMEM_SIZE as u64,
-            chunk_size: FRAME_SIZE as u32,
+            total_size: umem_size as u64,
+            chunk_size: chunk_size as u32,
             headroom: 0,
             address: umem.as_mut_ptr().cast(),
         };
@@ -464,10 +693,21 @@ impl Queue {
             "XSK_SOCKOPT_UMEM_REG",
         )?;
         check(
-            unsafe { t.xsk_bind.unwrap()(socket.0, if_index, queue_id, XSK_BIND_RX_TX_GENERIC) },
+            unsafe {
+                t.xsk_bind.unwrap()(
+                    socket.0,
+                    if_index,
+                    queue_id,
+                    if tx_enabled {
+                        XSK_BIND_RX_TX_GENERIC
+                    } else {
+                        XSK_BIND_RX_GENERIC
+                    },
+                )
+            },
             "XskBind",
         )?;
-        for option in [2, 3, 4, 5] {
+        for option in [2, 3] {
             check(
                 unsafe {
                     t.xsk_set_sockopt.unwrap()(
@@ -479,6 +719,21 @@ impl Queue {
                 },
                 "XskSetSockopt ring size",
             )?;
+        }
+        if tx_enabled {
+            for option in [4, 5] {
+                check(
+                    unsafe {
+                        t.xsk_set_sockopt.unwrap()(
+                            socket.0,
+                            option,
+                            (&XSK_RING_SIZE as *const u32).cast(),
+                            size_of::<u32>() as u32,
+                        )
+                    },
+                    "XskSetSockopt TX ring size",
+                )?;
+            }
         }
         check(
             unsafe { t.xsk_activate.unwrap()(socket.0, 0) },
@@ -500,73 +755,217 @@ impl Queue {
         if len as usize != size_of::<XskRingInfoSet>() {
             bail!("unexpected XSK_RING_INFO size {len}");
         }
+        let mut hook = XdpHookId {
+            layer: 0,
+            direction: 0,
+            sublayer: 0,
+        };
+        let mut hook_len = size_of::<XdpHookId>() as u32;
+        check(
+            unsafe {
+                t.xsk_get_sockopt.unwrap()(
+                    socket.0,
+                    XSK_SOCKOPT_RX_HOOK_ID,
+                    (&mut hook as *mut XdpHookId).cast(),
+                    &mut hook_len,
+                )
+            },
+            "XSK_SOCKOPT_RX_HOOK_ID",
+        )?;
+        if hook_len as usize != size_of::<XdpHookId>() {
+            bail!("unexpected XSK RX hook size {hook_len}");
+        }
         let mut queue = Self {
             _api: Arc::clone(&api),
             queue_id,
-            _rx_program: OwnedHandle(create_rx_program(&api, if_index, queue_id, socket.0)?),
+            _rx_program: OwnedHandle(create_rx_program(
+                &api, if_index, queue_id, socket.0, &hook,
+            )?),
             socket,
             umem,
+            chunk_size,
             fill: unsafe { Ring::new(info.fill)? },
-            completion: unsafe { Ring::new(info.completion)? },
+            completion: if tx_enabled {
+                Some(unsafe { Ring::new(info.completion)? })
+            } else {
+                None
+            },
             rx: unsafe { Ring::new(info.rx)? },
-            tx: unsafe { Ring::new(info.tx)? },
-            tx_free: (RX_FRAME_COUNT..RX_FRAME_COUNT + TX_FRAME_COUNT)
-                .map(|n| (n * FRAME_SIZE) as u64)
-                .collect(),
+            tx: if tx_enabled {
+                Some(unsafe { Ring::new(info.tx)? })
+            } else {
+                None
+            },
+            tx_free: if tx_enabled {
+                (RX_FRAME_COUNT..RX_FRAME_COUNT + TX_FRAME_COUNT)
+                    .map(|n| (n * chunk_size) as u64)
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            notify: NotifyWait::new()?,
         };
-        queue.refill_rx()?;
-        let mut notify_result = 0;
-        check(
-            unsafe { t.xsk_notify_socket.unwrap()(queue.socket.0, 0x1, 0, &mut notify_result) },
-            "XskNotifySocket POKE_RX",
-        )?;
+        queue.refill_rx(&api)?;
         Ok(queue)
     }
 
-    fn refill_rx(&mut self) -> Result<()> {
+    fn refill_rx(&mut self, api: &XdpApi) -> Result<()> {
         let (start, count) = self.fill.producer_reserve(RX_FRAME_COUNT as u32);
         if count != RX_FRAME_COUNT as u32 {
             bail!("AF_XDP fill ring has insufficient initial capacity");
         }
         for i in 0..count {
             unsafe {
-                *self.fill.element::<u64>(start + i) = (i as usize * FRAME_SIZE) as u64;
+                *self.fill.element::<u64>(start + i) = (i as usize * self.chunk_size) as u64;
             }
         }
         self.fill.producer_submit(count);
+        if self.fill.needs_poke() {
+            self.notify_socket(api, XSK_NOTIFY_POKE_RX, "POKE_RX")?;
+        }
         Ok(())
     }
 
-    fn reclaim_tx(&mut self, inflight: &AtomicUsize) {
-        let (start, count) = self.completion.consumer_reserve(XSK_RING_SIZE);
-        for i in 0..count {
-            let address = unsafe { *self.completion.element::<u64>(start + i) };
-            self.tx_free.push(address & 0x0000_ffff_ffff_ffff);
-            inflight.fetch_sub(1, Ordering::AcqRel);
+    fn check_ring_errors(&self, api: &XdpApi) -> Result<()> {
+        self.check_ring_error(api, &self.rx, XSK_SOCKOPT_RX_ERROR, "RX")?;
+        self.check_ring_error(api, &self.fill, XSK_SOCKOPT_RX_FILL_ERROR, "RX fill")?;
+        if let Some(tx) = &self.tx {
+            self.check_ring_error(api, tx, XSK_SOCKOPT_TX_ERROR, "TX")?;
         }
-        if count != 0 {
-            self.completion.consumer_release(count);
+        if let Some(completion) = &self.completion {
+            self.check_ring_error(
+                api,
+                completion,
+                XSK_SOCKOPT_TX_COMPLETION_ERROR,
+                "TX completion",
+            )?;
         }
+        Ok(())
     }
 
-    fn receive(&mut self, out: &SyncSender<Vec<u8>>, counters: &Counters, quiescing: bool) {
+    fn check_ring_error(&self, api: &XdpApi, ring: &Ring, option: u32, name: &str) -> Result<()> {
+        if !ring.has_error() {
+            return Ok(());
+        }
+        let mut code = 0_u32;
+        let mut len = size_of::<u32>() as u32;
+        check(
+            unsafe {
+                api.table().xsk_get_sockopt.unwrap()(
+                    self.socket.0,
+                    option,
+                    (&mut code as *mut u32).cast(),
+                    &mut len,
+                )
+            },
+            "reading AF_XDP ring error",
+        )?;
+        if len as usize != size_of::<u32>() {
+            bail!(
+                "AF_XDP queue {} returned invalid {name} error size {len}",
+                self.queue_id
+            );
+        }
+        bail!(
+            "AF_XDP queue {} {name} ring entered a terminal state (XSK error {code:#x})",
+            self.queue_id
+        );
+    }
+
+    fn notify_socket(&self, api: &XdpApi, flags: u32, operation: &str) -> Result<()> {
+        let mut result = 0;
+        check(
+            unsafe { api.table().xsk_notify_socket.unwrap()(self.socket.0, flags, 0, &mut result) },
+            operation,
+        )?;
+        if result != 0 {
+            bail!("{operation} returned unexpected result flags {result:#x}");
+        }
+        Ok(())
+    }
+
+    fn reclaim_tx(&mut self, inflight: &AtomicUsize) -> Result<bool> {
+        let Some(completion) = self.completion.as_mut() else {
+            return Ok(false);
+        };
+        let (start, count) = completion.consumer_reserve(XSK_RING_SIZE);
+        for i in 0..count {
+            let address = unsafe { *completion.element::<u64>(start + i) } & 0x0000_ffff_ffff_ffff;
+            let offset = address as usize;
+            let tx_base = RX_FRAME_COUNT * self.chunk_size;
+            if offset < tx_base
+                || offset >= self.umem.len()
+                || !offset.is_multiple_of(self.chunk_size)
+            {
+                bail!(
+                    "AF_XDP queue {} returned invalid TX completion address {address:#x}",
+                    self.queue_id
+                );
+            }
+            let previous = inflight
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    value.checked_sub(1)
+                })
+                .map_err(|_| ::anyhow::anyhow!("AF_XDP TX inflight counter underflow"))?;
+            debug_assert!(previous > 0);
+            self.tx_free.push(address);
+        }
+        if count != 0 {
+            completion.consumer_release(count);
+        }
+        Ok(count != 0)
+    }
+
+    fn receive(
+        &mut self,
+        api: &XdpApi,
+        out: &SyncSender<Vec<u8>>,
+        counters: &Counters,
+        quiescing: bool,
+    ) -> Result<bool> {
         let (start, count) = self.rx.consumer_reserve(XSK_RING_SIZE);
+        if count == 0 {
+            return Ok(false);
+        }
+        let (fill_start, fill_count) = self.fill.producer_reserve(count);
+        if fill_count != count {
+            bail!(
+                "AF_XDP queue {} fill ring cannot recycle {count} RX buffers",
+                self.queue_id
+            );
+        }
         for i in 0..count {
             let descriptor = unsafe { *self.rx.element::<XskBufferDescriptor>(start + i) };
-            let offset = ((descriptor.address_and_offset & 0x0000_ffff_ffff_ffff)
-                + (descriptor.address_and_offset >> 48)) as usize;
+            let base = descriptor.address_and_offset & 0x0000_ffff_ffff_ffff;
+            if base as usize >= RX_FRAME_COUNT * self.chunk_size
+                || !(base as usize).is_multiple_of(self.chunk_size)
+            {
+                bail!(
+                    "AF_XDP RX queue {} returned invalid buffer address {base:#x}",
+                    self.queue_id
+                );
+            }
+            let offset = (base + (descriptor.address_and_offset >> 48)) as usize;
             let end = offset.saturating_add(descriptor.length as usize);
-            if descriptor.length < 14 || end > self.umem.len() || quiescing {
+            if end > self.umem.len() {
+                bail!(
+                    "AF_XDP RX queue {} returned an out-of-range descriptor raw={:#x} length={} umem={}",
+                    self.queue_id,
+                    descriptor.address_and_offset,
+                    descriptor.length,
+                    self.umem.len()
+                );
+            }
+            if descriptor.length < 14 {
                 log::error!(
-                    "virt-net: AF_XDP RX queue {} rejected descriptor raw={:#x} offset={} length={} end={} umem={} quiescing={}",
+                    "virt-net: AF_XDP RX queue {} rejected short frame raw={:#x} offset={} length={}",
                     self.queue_id,
                     descriptor.address_and_offset,
                     offset,
                     descriptor.length,
-                    end,
-                    self.umem.len(),
-                    quiescing
                 );
+                counters.rx_dropped.fetch_add(1, Ordering::Relaxed);
+            } else if quiescing {
                 counters.rx_dropped.fetch_add(1, Ordering::Relaxed);
             } else {
                 let frame = &self.umem[offset..end];
@@ -580,44 +979,71 @@ impl Queue {
                     counters.rx_dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            let (fill, available) = self.fill.producer_reserve(1);
-            if available == 1 {
-                unsafe {
-                    *self.fill.element::<u64>(fill) =
-                        descriptor.address_and_offset & 0x0000_ffff_ffff_ffff;
-                }
-                self.fill.producer_submit(1);
-            } else {
-                counters.errors.fetch_add(1, Ordering::Relaxed);
+            unsafe {
+                *self.fill.element::<u64>(fill_start + i) = base;
             }
         }
-        if count != 0 {
-            self.rx.consumer_release(count);
+        self.fill.producer_submit(count);
+        self.rx.consumer_release(count);
+        if self.fill.needs_poke() {
+            self.notify_socket(api, XSK_NOTIFY_POKE_RX, "XskNotifySocket POKE_RX")?;
         }
+        Ok(true)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> bool {
-        if frame.len() < 14 || frame.len() > FRAME_SIZE {
+        if frame.len() < 14 || frame.len() > self.chunk_size {
             return false;
         }
+        let Some(tx) = self.tx.as_mut() else {
+            return false;
+        };
         let Some(address) = self.tx_free.pop() else {
             return false;
         };
-        let (slot, available) = self.tx.producer_reserve(1);
+        let (slot, available) = tx.producer_reserve(1);
         if available != 1 {
             self.tx_free.push(address);
             return false;
         }
-        self.umem[address as usize..address as usize + frame.len()].copy_from_slice(&frame);
+        self.umem[address as usize..address as usize + frame.len()].copy_from_slice(frame);
         unsafe {
-            *self.tx.element::<XskBufferDescriptor>(slot) = XskBufferDescriptor {
+            *tx.element::<XskBufferDescriptor>(slot) = XskBufferDescriptor {
                 address_and_offset: address,
                 length: frame.len() as u32,
                 reserved: 0,
             };
         }
-        self.tx.producer_submit(1);
+        tx.producer_submit(1);
         true
+    }
+
+    fn poke_tx_if_needed(&self, api: &XdpApi) -> Result<()> {
+        if self.tx.as_ref().is_some_and(Ring::needs_poke) {
+            self.notify_socket(api, XSK_NOTIFY_POKE_TX, "XskNotifySocket POKE_TX")?;
+        }
+        Ok(())
+    }
+
+    fn arm_notify(&mut self, api: &XdpApi) -> Result<bool> {
+        let flags = if self.tx.is_some() {
+            XSK_NOTIFY_WAIT_RX | XSK_NOTIFY_WAIT_TX
+        } else {
+            XSK_NOTIFY_WAIT_RX
+        };
+        self.notify.as_mut().arm(api, self.socket.0, flags)
+    }
+
+    fn complete_notify(&mut self, api: &XdpApi) -> Result<()> {
+        self.notify.as_mut().complete(api)
+    }
+
+    fn cancel_notify(&mut self, api: &XdpApi) -> Result<()> {
+        self.notify.as_mut().cancel(api, &self.socket)
+    }
+
+    fn notify_handle(&self) -> WinHandle {
+        self.notify.as_ref().event_handle()
     }
 }
 
@@ -629,83 +1055,207 @@ struct Counters {
     errors: AtomicU64,
 }
 
+struct SharedState {
+    stop: AtomicBool,
+    state: AtomicU8,
+    inflight: AtomicUsize,
+    counters: Counters,
+    failure: Mutex<Option<String>>,
+}
+
+impl SharedState {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            stop: AtomicBool::new(false),
+            state: AtomicU8::new(STATE_READY),
+            inflight: AtomicUsize::new(0),
+            counters: Counters {
+                tx_accepted: AtomicU64::new(0),
+                tx_dropped: AtomicU64::new(0),
+                rx_received: AtomicU64::new(0),
+                rx_dropped: AtomicU64::new(0),
+                errors: AtomicU64::new(0),
+            },
+            failure: Mutex::new(None),
+        })
+    }
+
+    fn fail(&self, message: impl Into<String>) {
+        if self.state.load(Ordering::Acquire) == STATE_STOPPED {
+            return;
+        }
+        let mut failure = self.failure.lock().expect("AF_XDP failure lock poisoned");
+        if failure.is_none() {
+            let message = message.into();
+            log::error!("virt-net: {message}");
+            *failure = Some(message);
+            self.counters.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        self.state.store(STATE_FAILED, Ordering::Release);
+        self.stop.store(true, Ordering::Release);
+    }
+
+    fn failure_message(&self) -> String {
+        self.failure
+            .lock()
+            .expect("AF_XDP failure lock poisoned")
+            .clone()
+            .unwrap_or_else(|| "AF_XDP backend failed".to_owned())
+    }
+}
+
 struct Afxdp {
     _api: Arc<XdpApi>,
     tx_guard: Mutex<Option<OwnedHandle>>,
-    senders: Vec<SyncSender<Vec<u8>>>,
+    tx_sender: SyncSender<Vec<u8>>,
+    tx_wake: Arc<Event>,
     receiver: Mutex<Receiver<Vec<u8>>>,
-    stop: Arc<AtomicBool>,
-    state: Arc<AtomicU8>,
-    inflight: Arc<AtomicUsize>,
-    counters: Arc<Counters>,
+    max_frame_size: usize,
+    shared: Arc<SharedState>,
+    controls: Vec<Arc<Event>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl Afxdp {
-    fn new(api: Arc<XdpApi>, guard: OwnedHandle, queues: Vec<Queue>) -> Arc<Self> {
-        let (out, receiver) = sync_channel((queues.len() * XSK_RING_SIZE as usize).max(1));
-        let stop = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(AtomicU8::new(0));
-        let inflight = Arc::new(AtomicUsize::new(0));
-        let counters = Arc::new(Counters {
-            tx_accepted: AtomicU64::new(0),
-            tx_dropped: AtomicU64::new(0),
-            rx_received: AtomicU64::new(0),
-            rx_dropped: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-        });
-        let mut senders = Vec::new();
-        let mut workers = Vec::new();
-        for mut queue in queues {
-            let (tx, rx) = sync_channel(XSK_RING_SIZE as usize);
-            senders.push(tx);
-            let stop = Arc::clone(&stop);
-            let state = Arc::clone(&state);
-            let inflight = Arc::clone(&inflight);
-            let counters = Arc::clone(&counters);
+    fn new(
+        api: Arc<XdpApi>,
+        guard: OwnedHandle,
+        queues: Vec<Queue>,
+        max_frame_size: usize,
+    ) -> Result<Arc<Self>> {
+        let (out, receiver) = sync_channel(RX_CHANNEL_DEPTH);
+        let (tx_sender, tx_receiver) = sync_channel(TX_FRAME_COUNT);
+        let shared = SharedState::new();
+        let mut tx_receiver = Some(tx_receiver);
+        let mut controls: Vec<Arc<Event>> = Vec::new();
+        let mut workers: Vec<JoinHandle<()>> = Vec::new();
+        let mut queue_iter = queues.into_iter();
+        let mut worker_index = 0;
+        loop {
+            let shard = queue_iter
+                .by_ref()
+                .take(MAX_QUEUES_PER_WORKER)
+                .collect::<Vec<_>>();
+            if shard.is_empty() {
+                break;
+            }
+            let control = match Event::new() {
+                Ok(event) => Arc::new(event),
+                Err(error) => {
+                    shared.stop.store(true, Ordering::Release);
+                    for control in &controls {
+                        let _ = control.set();
+                    }
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(error);
+                }
+            };
+            controls.push(Arc::clone(&control));
             let api = Arc::clone(&api);
+            let worker_shared = Arc::clone(&shared);
             let out = out.clone();
-            workers.push(
-                thread::Builder::new()
-                    .name("whp-afxdp".into())
-                    .spawn(move || {
-                        worker(&api, &mut queue, rx, out, stop, state, inflight, counters);
-                    })
-                    .expect("spawning AF_XDP worker"),
-            );
+            let input = if worker_index == 0 {
+                tx_receiver.take()
+            } else {
+                None
+            };
+            match thread::Builder::new()
+                .name(format!("whp-afxdp-{worker_index}"))
+                .spawn(move || worker(api, shard, input, out, control, worker_shared))
+            {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    shared.stop.store(true, Ordering::Release);
+                    for control in &controls {
+                        let _ = control.set();
+                    }
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(error).context("spawning AF_XDP dispatcher");
+                }
+            }
+            worker_index += 1;
         }
-        Arc::new(Self {
+        let tx_wake = Arc::clone(
+            controls
+                .first()
+                .context("AF_XDP backend has no dispatcher")?,
+        );
+        Ok(Arc::new(Self {
             _api: api,
             tx_guard: Mutex::new(Some(guard)),
-            senders,
+            tx_sender,
+            tx_wake,
             receiver: Mutex::new(receiver),
-            stop,
-            state,
-            inflight,
-            counters,
+            max_frame_size,
+            shared,
+            controls,
             workers: Mutex::new(workers),
-        })
+        }))
+    }
+
+    fn signal_controls(&self) {
+        for control in &self.controls {
+            if let Err(error) = control.set() {
+                self.shared
+                    .fail(format!("failed to wake AF_XDP dispatcher: {error:#}"));
+            }
+        }
+    }
+
+    fn stop_workers(&self) {
+        self.shared.stop.store(true, Ordering::Release);
+        self.signal_controls();
+        for worker in self
+            .workers
+            .lock()
+            .expect("AF_XDP workers poisoned")
+            .drain(..)
+        {
+            if worker.join().is_err() {
+                self.shared.fail("AF_XDP dispatcher panicked");
+            }
+        }
+        // RX redirect programs and XSKs are dropped by their workers before this all-queue TX
+        // guard is removed. The API table/library is retained until the backend drops.
+        self.tx_guard.lock().expect("AF_XDP guard poisoned").take();
     }
 }
 
 impl FrameBackend for Afxdp {
     fn try_send(&self, frame: Vec<u8>) -> bool {
-        if self.state.load(Ordering::Acquire) != 0 || frame.len() < 14 || frame.len() > FRAME_SIZE {
-            self.counters.tx_dropped.fetch_add(1, Ordering::Relaxed);
+        if self.shared.state.load(Ordering::Acquire) != STATE_READY
+            || frame.len() < 14
+            || frame.len() > self.max_frame_size
+        {
+            self.shared
+                .counters
+                .tx_dropped
+                .fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        // The guest exposes one ordered virtio TX queue. Keep it on the first validated XSK;
-        // additional XSKs exist to receive RSS-distributed traffic from every adapter queue.
-        let index = 0;
-        self.inflight.fetch_add(1, Ordering::AcqRel);
-        match self.senders[index].try_send(frame) {
+        self.shared.inflight.fetch_add(1, Ordering::AcqRel);
+        match self.tx_sender.try_send(frame) {
             Ok(()) => {
-                self.counters.tx_accepted.fetch_add(1, Ordering::Relaxed);
+                self.shared
+                    .counters
+                    .tx_accepted
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Err(error) = self.tx_wake.set() {
+                    self.shared
+                        .fail(format!("failed to wake AF_XDP TX dispatcher: {error:#}"));
+                }
                 true
             }
             Err(_) => {
-                self.inflight.fetch_sub(1, Ordering::AcqRel);
-                self.counters.tx_dropped.fetch_add(1, Ordering::Relaxed);
+                self.shared.inflight.fetch_sub(1, Ordering::AcqRel);
+                self.shared
+                    .counters
+                    .tx_dropped
+                    .fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
@@ -719,60 +1269,64 @@ impl FrameBackend for Afxdp {
             .ok()
     }
     fn health(&self) -> BackendHealth {
-        match self.state.load(Ordering::Acquire) {
-            0 => BackendHealth::Ready,
-            1 => BackendHealth::Quiescing,
-            2 => BackendHealth::Stopped,
+        match self.shared.state.load(Ordering::Acquire) {
+            STATE_READY => BackendHealth::Ready,
+            STATE_QUIESCING => BackendHealth::Quiescing,
+            STATE_STOPPED => BackendHealth::Stopped,
             _ => BackendHealth::Failed,
         }
     }
+    fn check_health(&self) -> Result<()> {
+        if self.shared.state.load(Ordering::Acquire) == STATE_FAILED {
+            bail!("{}", self.shared.failure_message());
+        }
+        Ok(())
+    }
     fn counters(&self) -> FrameCounters {
         FrameCounters {
-            guest_tx_accepted: self.counters.tx_accepted.load(Ordering::Relaxed),
-            guest_tx_dropped: self.counters.tx_dropped.load(Ordering::Relaxed),
-            guest_rx_received: self.counters.rx_received.load(Ordering::Relaxed),
-            guest_rx_dropped: self.counters.rx_dropped.load(Ordering::Relaxed),
-            backend_errors: self.counters.errors.load(Ordering::Relaxed),
+            guest_tx_accepted: self.shared.counters.tx_accepted.load(Ordering::Relaxed),
+            guest_tx_dropped: self.shared.counters.tx_dropped.load(Ordering::Relaxed),
+            guest_rx_received: self.shared.counters.rx_received.load(Ordering::Relaxed),
+            guest_rx_dropped: self.shared.counters.rx_dropped.load(Ordering::Relaxed),
+            backend_errors: self.shared.counters.errors.load(Ordering::Relaxed),
         }
     }
     fn quiesce(&self, timeout: Duration) -> Result<()> {
-        if self.state.load(Ordering::Acquire) == 3 {
-            bail!("AF_XDP backend is already failed");
+        match self.shared.state.compare_exchange(
+            STATE_READY,
+            STATE_QUIESCING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(STATE_QUIESCING) => {}
+            Err(STATE_FAILED) => return self.check_health(),
+            Err(_) => return Ok(()),
         }
-        self.state.store(1, Ordering::Release);
+        self.signal_controls();
         let deadline = Instant::now() + timeout;
-        while self.inflight.load(Ordering::Acquire) != 0 {
-            if self.state.load(Ordering::Acquire) == 3 {
-                bail!("AF_XDP backend failed while draining TX");
+        while self.shared.inflight.load(Ordering::Acquire) != 0 {
+            if self.shared.state.load(Ordering::Acquire) == STATE_FAILED {
+                self.stop_workers();
+                return self.check_health();
             }
             if Instant::now() >= deadline {
-                self.state.store(3, Ordering::Release);
-                self.shutdown();
-                bail!("timed out draining AF_XDP TX completions");
+                self.shared.fail("timed out draining AF_XDP TX completions");
+                self.stop_workers();
+                return self.check_health();
             }
             thread::sleep(Duration::from_millis(1));
         }
-        self.shutdown();
+        self.stop_workers();
+        if self.shared.state.load(Ordering::Acquire) != STATE_FAILED {
+            self.shared.state.store(STATE_STOPPED, Ordering::Release);
+        }
         Ok(())
     }
     fn shutdown(&self) {
-        let failed = self.state.load(Ordering::Acquire) == 3;
-        if !self.stop.swap(true, Ordering::AcqRel) {
-            if !failed {
-                self.state.store(2, Ordering::Release);
-            }
+        if self.shared.state.load(Ordering::Acquire) != STATE_FAILED {
+            self.shared.state.store(STATE_STOPPED, Ordering::Release);
         }
-        for worker in self
-            .workers
-            .lock()
-            .expect("AF_XDP workers poisoned")
-            .drain(..)
-        {
-            let _ = worker.join();
-        }
-        // RX redirect programs and XSKs are dropped by their workers before this all-queue TX
-        // guard is removed. The API table/library is retained until the backend drops.
-        self.tx_guard.lock().expect("AF_XDP guard poisoned").take();
+        self.stop_workers();
     }
 }
 
@@ -783,59 +1337,135 @@ impl Drop for Afxdp {
 }
 
 fn worker(
-    api: &XdpApi,
-    queue: &mut Queue,
-    input: Receiver<Vec<u8>>,
+    api: Arc<XdpApi>,
+    mut queues: Vec<Queue>,
+    input: Option<Receiver<Vec<u8>>>,
     output: SyncSender<Vec<u8>>,
-    stop: Arc<AtomicBool>,
-    state: Arc<AtomicU8>,
-    inflight: Arc<AtomicUsize>,
-    counters: Arc<Counters>,
+    control: Arc<Event>,
+    shared: Arc<SharedState>,
 ) {
-    let mut pending = None;
-    while !stop.load(Ordering::Acquire) {
-        queue.reclaim_tx(&inflight);
-        queue.receive(&output, &counters, state.load(Ordering::Acquire) != 0);
-
-        let mut submitted = 0;
-        for _ in 0..TX_BATCH {
-            let frame = match pending.take() {
-                Some(frame) => frame,
-                None => match input.try_recv() {
-                    Ok(frame) => frame,
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                },
-            };
-            if queue.transmit(&frame) {
-                submitted += 1;
-            } else {
-                pending = Some(frame);
-                break;
-            }
+    if let Err(error) = worker_loop(
+        &api,
+        &mut queues,
+        input.as_ref(),
+        &output,
+        &control,
+        &shared,
+    ) && !shared.stop.load(Ordering::Acquire)
+    {
+        shared.fail(format!("AF_XDP dispatcher failed: {error:#}"));
+    }
+    for queue in &mut queues {
+        if let Err(error) = queue.cancel_notify(&api) {
+            log::error!(
+                "virt-net: failed to cancel AF_XDP queue {} notification: {error:#}",
+                queue.queue_id
+            );
         }
-
-        if submitted != 0 {
-            let mut result = 0;
-            if failed(unsafe {
-                api.table().xsk_notify_socket.unwrap()(queue.socket.0, 0x2, 0, &mut result)
-            }) {
-                counters.errors.fetch_add(1, Ordering::Relaxed);
-                state.store(3, Ordering::Release);
-                stop.store(true, Ordering::Release);
-            }
-            // Drain further immediately available work without paying a receive wait per frame.
-            continue;
-        }
-
-        let mut result = 0;
-        let wait_flag = if pending.is_some() { 0x8 } else { 0x4 };
-        let _ = unsafe {
-            api.table().xsk_notify_socket.unwrap()(queue.socket.0, wait_flag, 1, &mut result)
-        };
     }
 }
 
-fn create_rx_program(api: &XdpApi, if_index: u32, queue: u32, socket: Handle) -> Result<Handle> {
+fn worker_loop(
+    api: &XdpApi,
+    queues: &mut [Queue],
+    input: Option<&Receiver<Vec<u8>>>,
+    output: &SyncSender<Vec<u8>>,
+    control: &Event,
+    shared: &SharedState,
+) -> Result<()> {
+    let mut pending_tx = None;
+    loop {
+        if shared.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let quiescing = shared.state.load(Ordering::Acquire) != STATE_READY;
+        for queue in queues.iter_mut() {
+            queue.check_ring_errors(api)?;
+            if queue.reclaim_tx(&shared.inflight)? {
+                queue.poke_tx_if_needed(api)?;
+            }
+            queue.receive(api, output, &shared.counters, quiescing)?;
+        }
+
+        if let Some(input) = input {
+            let primary = queues
+                .first_mut()
+                .context("AF_XDP TX dispatcher has no primary queue")?;
+            let mut submitted = 0;
+            for _ in 0..TX_BATCH {
+                let frame = match pending_tx.take() {
+                    Some(frame) => frame,
+                    None => match input.try_recv() {
+                        Ok(frame) => frame,
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                    },
+                };
+                if primary.transmit(&frame) {
+                    submitted += 1;
+                } else {
+                    pending_tx = Some(frame);
+                    break;
+                }
+            }
+            if submitted != 0 {
+                primary.poke_tx_if_needed(api)?;
+            }
+        }
+
+        if shared.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let mut completed_immediately = false;
+        for queue in queues.iter_mut() {
+            completed_immediately |= queue.arm_notify(api)?;
+        }
+        if completed_immediately {
+            continue;
+        }
+
+        let mut handles = Vec::with_capacity(queues.len() + 1);
+        // The control event has the lowest wait index so shutdown, quiesce, and guest TX cannot
+        // be starved by continuously signalled RX queues.
+        handles.push(control.handle());
+        handles.extend(queues.iter().map(Queue::notify_handle));
+        // Ring-error flags do not necessarily complete an idle XSK notify on interface detach.
+        // A low-rate heartbeat bounds fault detection without returning to per-queue polling.
+        let wait = unsafe { WaitForMultipleObjects(&handles, false, HEALTH_POLL_INTERVAL_MS) };
+        if wait == WAIT_FAILED {
+            bail!(
+                "WaitForMultipleObjects failed: {}",
+                ::std::io::Error::last_os_error()
+            );
+        }
+        if wait == WAIT_TIMEOUT {
+            continue;
+        }
+        let index = wait
+            .0
+            .checked_sub(WAIT_OBJECT_0.0)
+            .context("unexpected AF_XDP wait result")? as usize;
+        if index == 0 {
+            // Reset before draining the TX channel. Any producer racing after this reset sets the
+            // event again, so no enqueue notification can be lost.
+            control.reset()?;
+        } else {
+            let queue = queues
+                .get_mut(index - 1)
+                .context("AF_XDP wait returned an invalid queue index")?;
+            queue.complete_notify(api)?;
+        }
+    }
+}
+
+fn create_rx_program(
+    api: &XdpApi,
+    if_index: u32,
+    queue: u32,
+    socket: Handle,
+    hook: &XdpHookId,
+) -> Result<Handle> {
     let rule = XdpRule {
         match_type: 0,
         pattern: XdpMatchPattern { _bytes: [0; 40] },
@@ -848,19 +1478,14 @@ fn create_rx_program(api: &XdpApi, if_index: u32, queue: u32, socket: Handle) ->
             },
         },
     };
-    let hook = XdpHookId {
-        layer: 0,
-        direction: 0,
-        sublayer: 0,
-    };
     let mut program = 0;
     check(
         unsafe {
             api.table().create_program.unwrap()(
                 if_index,
-                &hook,
+                hook,
                 queue,
-                0,
+                XDP_CREATE_PROGRAM_GENERIC,
                 &rule,
                 1,
                 &mut program,
@@ -912,6 +1537,47 @@ fn check(status: HResult, operation: &str) -> Result<()> {
     Ok(())
 }
 
+fn frame_layout(mtu: u32) -> Result<(usize, usize)> {
+    if mtu > MAX_AFXDP_MTU {
+        bail!("device.mtu {mtu} exceeds the AF_XDP {MAX_AFXDP_MTU}-byte frame limit");
+    }
+    let max_frame_size = mtu as usize + 14;
+    let chunk_size = max_frame_size.next_power_of_two();
+    if chunk_size > MAX_FRAME_SIZE {
+        bail!("AF_XDP frame size {max_frame_size} exceeds the {MAX_FRAME_SIZE}-byte UMEM limit");
+    }
+    Ok((max_frame_size, chunk_size))
+}
+
+fn queue_umem_size(chunk_size: usize, tx_enabled: bool) -> Result<usize> {
+    let frame_count = RX_FRAME_COUNT + usize::from(tx_enabled) * TX_FRAME_COUNT;
+    chunk_size
+        .checked_mul(frame_count)
+        .context("AF_XDP UMEM size overflow")
+}
+
+fn automatic_queue_ids_from_count(count: u32) -> Result<Vec<u32>> {
+    // Non-RSS adapters report zero receive queues, but the generic provider still exposes queue 0.
+    let count = count.max(1) as usize;
+    if count > MAX_EXTERNAL_QUEUES {
+        bail!(
+            "AF_XDP automatic queue discovery returned {count} receive queues (supported range 1..={MAX_EXTERNAL_QUEUES})"
+        );
+    }
+    Ok((0..count as u32).collect())
+}
+
+fn initialize_queues<T>(
+    ids: &[u32],
+    mut create: impl FnMut(usize, u32) -> Result<T>,
+) -> Result<Vec<T>> {
+    let mut queues = Vec::with_capacity(ids.len());
+    for (index, id) in ids.iter().copied().enumerate() {
+        queues.push(create(index, id).with_context(|| format!("initializing AF_XDP queue {id}"))?);
+    }
+    Ok(queues)
+}
+
 /// Resources returned only after every selected queue and the TX guard are active.
 pub struct BackendStart {
     pub backend: Arc<dyn FrameBackend>,
@@ -919,41 +1585,38 @@ pub struct BackendStart {
 }
 
 pub fn start(config: &L2BridgeConfig) -> Result<BackendStart> {
-    if config.device.mtu as usize + 14 > FRAME_SIZE {
-        bail!(
-            "device.mtu {} exceeds the AF_XDP {}-byte frame limit",
-            config.device.mtu,
-            FRAME_SIZE - 14
-        );
-    }
+    let (max_frame_size, chunk_size) = frame_layout(config.device.mtu)?;
     let api = XdpApi::load()?;
     let selected = &config.attachment.queue_selection;
-    let mut queues = Vec::new();
     let ids: Vec<u32> = if selected.mode == "explicit" {
         selected.queues.clone()
     } else {
-        (0..=MAX_AUTO_QUEUES).collect()
+        api.automatic_queue_ids(config.attachment.interface_index)?
     };
-    for id in ids {
-        match Queue::create(Arc::clone(&api), config.attachment.interface_index, id) {
-            Ok(queue) => queues.push((id, queue)),
-            Err(_error) if selected.mode == "auto" && id != 0 => break,
-            Err(error) => return Err(error).with_context(|| format!("binding AF_XDP queue {id}")),
-        }
+    if ids.is_empty() || ids.len() > MAX_EXTERNAL_QUEUES {
+        bail!("AF_XDP queue selection must contain 1..={MAX_EXTERNAL_QUEUES} queues");
     }
-    if queues.is_empty() {
-        bail!("AF_XDP queue 0 did not bind");
-    }
-    if selected.mode == "auto" && queues.len() > MAX_AUTO_QUEUES as usize {
-        bail!("AF_XDP queue discovery found more than {MAX_AUTO_QUEUES} queues");
-    }
-    let queue_ids = queues.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let queues = initialize_queues(&ids, |index, id| {
+        Queue::create(
+            Arc::clone(&api),
+            config.attachment.interface_index,
+            id,
+            chunk_size,
+            index == 0,
+        )
+    })?;
+    let total_umem = queues.iter().map(|queue| queue.umem.len()).sum::<usize>();
+    log::info!(
+        "virt-net: AF_XDP initialized {} queues with {} dispatchers and {:.1} MiB UMEM",
+        ids.len(),
+        ids.len().div_ceil(MAX_QUEUES_PER_WORKER),
+        total_umem as f64 / (1024.0 * 1024.0),
+    );
     let guard = create_tx_guard(&api, config.attachment.interface_index)?;
-    let backend: Arc<dyn FrameBackend> =
-        Afxdp::new(api, guard, queues.into_iter().map(|(_, q)| q).collect());
+    let backend: Arc<dyn FrameBackend> = Afxdp::new(api, guard, queues, max_frame_size)?;
     Ok(BackendStart {
         backend,
-        queues: queue_ids,
+        queues: ids,
     })
 }
 
@@ -964,6 +1627,7 @@ mod tests {
     fn v2_abi_layout_matches_published_headers() {
         assert_eq!(size_of::<XdpApiTable>(), 14 * size_of::<usize>());
         assert_eq!(size_of::<XdpHookId>(), 12);
+        assert_eq!(size_of::<XdpRssCapabilities>(), 28);
         assert_eq!(size_of::<XskUmemReg>(), 24);
         assert_eq!(size_of::<XskBufferDescriptor>(), 16);
         assert_eq!(size_of::<XskRingInfo>(), 40);
@@ -971,10 +1635,86 @@ mod tests {
         assert_eq!(size_of::<XdpMatchPattern>(), 40);
         assert_eq!(size_of::<XdpRedirect>(), 16);
         assert_eq!(size_of::<XdpRule>(), 72);
+        assert_eq!(size_of::<OVERLAPPED>(), 32);
     }
     #[test]
     fn ring_index_wraps_at_power_of_two_size() {
         assert_eq!(17_u32 & (8 - 1), 1);
+    }
+
+    #[test]
+    fn ring_flags_report_error_and_need_poke() {
+        #[repr(C)]
+        struct MockRing {
+            producer: AtomicU32,
+            consumer: AtomicU32,
+            flags: AtomicU32,
+            descriptors: [u64; 8],
+        }
+
+        let mut memory = MockRing {
+            producer: AtomicU32::new(0),
+            consumer: AtomicU32::new(0),
+            flags: AtomicU32::new(0),
+            descriptors: [0; 8],
+        };
+        let base = (&mut memory as *mut MockRing).cast::<u8>();
+        let offset = |field: *const u8| unsafe { field.offset_from(base) as u32 };
+        let info = XskRingInfo {
+            ring: base,
+            descriptors_offset: offset(memory.descriptors.as_ptr().cast()),
+            producer_index_offset: offset((&memory.producer as *const AtomicU32).cast()),
+            consumer_index_offset: offset((&memory.consumer as *const AtomicU32).cast()),
+            flags_offset: offset((&memory.flags as *const AtomicU32).cast()),
+            size: 8,
+            element_stride: size_of::<u64>() as u32,
+            reserved: 0,
+        };
+        let ring = unsafe { Ring::new(info) }.unwrap();
+        memory.flags.store(
+            XSK_RING_FLAG_ERROR | XSK_RING_FLAG_NEED_POKE,
+            Ordering::Release,
+        );
+        assert!(ring.has_error());
+        assert!(ring.needs_poke());
+    }
+
+    #[test]
+    fn common_mtu_uses_bounded_worker_and_umem_budget() {
+        let (max_frame, chunk) = frame_layout(1500).unwrap();
+        assert_eq!(max_frame, 1514);
+        assert_eq!(chunk, 2048);
+        let total =
+            queue_umem_size(chunk, true).unwrap() + 63 * queue_umem_size(chunk, false).unwrap();
+        assert!(total <= 9 * 1024 * 1024);
+        assert_eq!(MAX_EXTERNAL_QUEUES.div_ceil(MAX_QUEUES_PER_WORKER), 2);
+    }
+
+    #[test]
+    fn automatic_queue_count_is_exact_and_bounded() {
+        assert_eq!(automatic_queue_ids_from_count(3).unwrap(), vec![0, 1, 2]);
+        assert_eq!(automatic_queue_ids_from_count(0).unwrap(), vec![0]);
+        assert!(automatic_queue_ids_from_count(65).is_err());
+    }
+
+    #[test]
+    fn queue_initialization_is_transactional() {
+        struct Tracked(Arc<AtomicUsize>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let result = initialize_queues(&[0, 1, 2], |_, id| {
+            if id == 2 {
+                bail!("injected queue failure");
+            }
+            Ok(Tracked(Arc::clone(&dropped)))
+        });
+        assert!(result.is_err());
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
     }
 
     #[test]

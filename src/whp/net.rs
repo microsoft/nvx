@@ -130,6 +130,7 @@ pub trait FrameBackend: Send + Sync {
     fn try_send(&self, frame: Vec<u8>) -> bool;
     fn recv_timeout(&self, timeout: ::std::time::Duration) -> Option<Vec<u8>>;
     fn health(&self) -> BackendHealth;
+    fn check_health(&self) -> Result<()>;
     fn counters(&self) -> FrameCounters;
     fn quiesce(&self, timeout: ::std::time::Duration) -> Result<()>;
     fn shutdown(&self);

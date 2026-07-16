@@ -23,13 +23,13 @@ if [ -e /dev/mtdblock0 ]; then
         echo "virtfs: failed to mount /dev/mtdblock0 at $vdir" >&2
     fi
 fi
-# virt-net: if the VMM attached a NIC (see --net or --net-config), the virtio-net driver surfaces it as the only
-# non-loopback interface. Configure it from the kernel command line tokens the VMM appended
-# ("virtnet_ip=<ip>", "virtnet_mask=<dotted>", "virtnet_gw=<host>"): assign the address with
-# ifconfig (busybox's ip-addr resolves the device via AF_UNIX, which this minimal kernel omits),
-# then route the default gateway at the host side of the point-to-point link.
+# virt-net: if the VMM attached a NIC (see --net or --net-config), configure the only
+# non-loopback interface from its virtnet_* command-line tokens. External networking includes
+# virtnet_required=1 and must complete in full before the guest reports boot success. Standalone
+# --net retains best-effort setup and supplies virtnet_gw.
+nrequired=$(sed -n 's/.*virtnet_required=\([^ ]*\).*/\1/p' /proc/cmdline)
 nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
-if [ -n "$nip" ]; then
+if [ "$nrequired" = 1 ] || [ -n "$nip" ]; then
     nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
     ngw=$(sed -n 's/.*virtnet_gw=\([^ ]*\).*/\1/p' /proc/cmdline)
     nprefix=$(sed -n 's/.*virtnet_prefix=\([^ ]*\).*/\1/p' /proc/cmdline)
@@ -38,25 +38,129 @@ if [ -n "$nip" ]; then
     nroutes=$(sed -n 's/.*virtnet_routes=\([^ ]*\).*/\1/p' /proc/cmdline)
     ndns=$(sed -n 's/.*virtnet_dns=\([^ ]*\).*/\1/p' /proc/cmdline)
     nsearch=$(sed -n 's/.*virtnet_search=\([^ ]*\).*/\1/p' /proc/cmdline)
-    ndev=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -n1)
-    if [ -n "$ndev" ]; then
-        [ -n "$nmac" ] && ifconfig "$ndev" hw ether "$nmac" 2>/dev/null
-        [ -n "$nmtu" ] && ifconfig "$ndev" mtu "$nmtu" 2>/dev/null
-        ifconfig "$ndev" "$nip" netmask "${nmask:-255.255.255.0}" up
-        [ -n "$ngw" ] && ip route add default via "$ngw" 2>/dev/null
+    virtnet_ok=1
+    virtnet_error() {
+        virtnet_ok=0
+        if [ "$nrequired" = 1 ]; then
+            echo "VIRTNET-FAIL: $*" >&2
+            sync 2>/dev/null
+            reboot -f 2>/dev/null
+            exit 1
+        fi
+        echo "virtnet: $*" >&2
+    }
+
+    [ -n "$nip" ] || virtnet_error "missing virtnet_ip"
+    ndev=
+    nwait=0
+    while [ -z "$ndev" ] && [ "$nwait" -lt 5 ]; do
+        ndev=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -n1)
+        [ -n "$ndev" ] && break
+        mdev -s 2>/dev/null
+        sleep 1
+        nwait=$((nwait + 1))
+    done
+    if [ -z "$ndev" ]; then
+        virtnet_error "no network interface found after ${nwait}s"
+    else
+        if [ "$nrequired" = 1 ] && [ -z "$nmac" ]; then
+            virtnet_error "missing virtnet_mac"
+        elif [ -n "$nmac" ]; then
+            if ! ifconfig "$ndev" hw ether "$nmac"; then
+                virtnet_error "failed to set $ndev MAC to $nmac"
+            fi
+        fi
+        if [ "$nrequired" = 1 ] && [ -z "$nmtu" ]; then
+            virtnet_error "missing virtnet_mtu"
+        elif [ -n "$nmtu" ]; then
+            if ! ifconfig "$ndev" mtu "$nmtu"; then
+                virtnet_error "failed to set $ndev MTU to $nmtu"
+            fi
+        fi
+        if [ "$nrequired" = 1 ] && [ -z "$nprefix" ]; then
+            virtnet_error "missing virtnet_prefix"
+        fi
+        if [ -z "$nmask" ]; then
+            if [ "$nrequired" = 1 ]; then
+                virtnet_error "missing virtnet_mask"
+            else
+                nmask=255.255.255.0
+            fi
+        fi
+        if ! ifconfig "$ndev" "$nip" netmask "$nmask" up; then
+            virtnet_error "failed to configure $ndev as $nip/$nmask"
+        fi
+        if [ "$nrequired" != 1 ] && [ -n "$ngw" ]; then
+            route del default dev "$ndev" 2>/dev/null
+            route add -host "$ngw" dev "$ndev" 2>/dev/null
+            if ! route add default gw "$ngw" dev "$ndev"; then
+                virtnet_error "failed to install standalone default route via $ngw"
+            fi
+        fi
+
         oldifs=$IFS
         IFS=,
         for route in $nroutes; do
-            dest=${route%@*}
-            hop=${route#*@}
-            [ -n "$dest" ] && [ "$dest" != "$route" ] && ip route add "$dest" via "$hop" 2>/dev/null
-        done
-        for server in $ndns; do
-            [ -n "$server" ] && echo "nameserver $server" >> /etc/resolv.conf
+            case "$route" in
+                *@*)
+                    dest=${route%%@*}
+                    hop=${route#*@}
+                    ;;
+                *)
+                    virtnet_error "invalid route token $route"
+                    continue
+                    ;;
+            esac
+            if [ -z "$dest" ]; then
+                virtnet_error "route has an empty destination"
+                continue
+            fi
+            if [ -n "$hop" ]; then
+                route del -host "$hop" dev "$ndev" 2>/dev/null
+                if ! route add -host "$hop" dev "$ndev"; then
+                    virtnet_error "failed to mark route next hop $hop on-link via $ndev"
+                elif [ "$dest" = "0.0.0.0/0" ]; then
+                    route del default dev "$ndev" 2>/dev/null
+                    if ! route add default gw "$hop" dev "$ndev"; then
+                        virtnet_error "failed to install route $dest via $hop dev $ndev"
+                    fi
+                else
+                    route del -net "$dest" dev "$ndev" 2>/dev/null
+                    if ! route add -net "$dest" gw "$hop" dev "$ndev"; then
+                        virtnet_error "failed to install route $dest via $hop dev $ndev"
+                    fi
+                fi
+            else
+                route del -net "$dest" dev "$ndev" 2>/dev/null
+                if ! route add -net "$dest" dev "$ndev"; then
+                    virtnet_error "failed to install on-link route $dest dev $ndev"
+                fi
+            fi
         done
         IFS=$oldifs
-        [ -n "$nsearch" ] && echo "search $(echo "$nsearch" | tr ',' ' ')" >> /etc/resolv.conf
-        echo "virtnet: configured $ndev as $nip/${nprefix:-$nmask} (gw ${ngw:-none}, mtu ${nmtu:-default})"
+
+        if [ "$nrequired" = 1 ] || [ -n "$ndns" ] || [ -n "$nsearch" ]; then
+            if ! : > /etc/resolv.conf; then
+                virtnet_error "failed to replace /etc/resolv.conf"
+            fi
+            oldifs=$IFS
+            IFS=,
+            for server in $ndns; do
+                if [ -n "$server" ]; then
+                    if ! printf 'nameserver %s\n' "$server" >> /etc/resolv.conf; then
+                        virtnet_error "failed to write DNS server $server"
+                    fi
+                fi
+            done
+            IFS=$oldifs
+            if [ -n "$nsearch" ]; then
+                search_domains=$(printf '%s' "$nsearch" | tr ',' ' ')
+                if ! printf 'search %s\n' "$search_domains" >> /etc/resolv.conf; then
+                    virtnet_error "failed to write DNS search domains"
+                fi
+            fi
+        fi
+
         nprobe=$(sed -n 's/.*virtnet_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
         if [ -n "$nprobe" ]; then
             if ping -c 3 -W 2 "$nprobe" >/tmp/virtnet-probe.log 2>&1; then
@@ -64,10 +168,12 @@ if [ -n "$nip" ]; then
             else
                 cat /tmp/virtnet-probe.log >&2
                 echo "VIRTNET-PROBE-FAIL: $nprobe" >&2
+                [ "$nrequired" != 1 ] || virtnet_error "connectivity probe failed for $nprobe"
             fi
         fi
-    else
-        echo "virtnet: no network interface found" >&2
+        if [ "$virtnet_ok" = 1 ]; then
+            echo "VIRTNET-OK: configured $ndev as $nip/${nprefix:-$nmask} (mtu ${nmtu:-default})"
+        fi
     fi
 fi
 # netsnap: optional snapshot self-test/benchmark for --net (see `scripts/nvx.py bench-net-snapshot`).
@@ -113,12 +219,30 @@ case " $(cat /proc/cmdline) " in
                 echo "netsnap: pre-snapshot TCP FAIL ($ntcp)" >&2
             fi
         fi
+        ntxflood=$(sed -n 's/.*netsnap_tx_flood=\([^ ]*\).*/\1/p' /proc/cmdline)
+        if [ -n "$ntxflood" ]; then
+            ping -i 0.01 "$ntxflood" >/tmp/netsnap-tx-flood.log 2>&1 &
+            ntxpid=$!
+            sleep 1
+            if kill -0 "$ntxpid" 2>/dev/null; then
+                echo "netsnap: active TX flood running ($ntxflood)"
+            else
+                cat /tmp/netsnap-tx-flood.log >&2
+                echo "netsnap: active TX flood failed ($ntxflood)" >&2
+                ntxpid=
+            fi
+        fi
         printf '\001' | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null
         # ---- on restore, execution resumes here ----
         if link_up; then
             echo "NETSNAP-RESTORE-OK"
         else
             echo "NETSNAP-RESTORE-FAIL"
+        fi
+        if [ -n "$ntxpid" ]; then
+            kill "$ntxpid" 2>/dev/null
+            wait "$ntxpid" 2>/dev/null
+            echo "NETSNAP-ACTIVE-TX-RESTORE-OK: $ntxflood"
         fi
         if [ -n "$ntcp" ]; then
             echo POST >&3

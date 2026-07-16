@@ -591,7 +591,7 @@ fn build_restored_nic(
         )?;
         let (saved, consumed) = NetConfig::load_external_header(net_state)?;
         let current: ExternalIdentity = config.external_identity()?;
-        if saved != current {
+        if !saved.equivalent(&current) {
             bail!(
                 "external L2Bridge restore identity mismatch (MAC, MTU, or guest bootstrap changed)"
             );
@@ -715,21 +715,23 @@ fn execute(
         Some(_) => Some(Emulator::new()?),
         None => None,
     };
-    if let Some(nic) = nic.as_ref()
-        && nic.backend.health() != net::BackendHealth::Ready
-    {
-        bail!("network backend was not ready before vCPU execution");
+    if let Some(nic) = nic.as_ref() {
+        nic.backend
+            .check_health()
+            .context("network backend was not ready before vCPU execution")?;
+        if nic.backend.health() != net::BackendHealth::Ready {
+            bail!("network backend was not ready before vCPU execution");
+        }
     }
     let net_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let net_pump: Option<thread::JoinHandle<()>> = match nic.as_ref() {
-        Some(n) => Some(spawn_net_rx(
+    let mut net_pump: Option<thread::JoinHandle<()>> = nic.as_ref().map(|n| {
+        spawn_net_rx(
             Arc::clone(&n.dev),
             Arc::clone(&n.backend),
             handle,
             Arc::clone(&net_stop),
-        )),
-        None => None,
-    };
+        )
+    });
 
     // Host heartbeat: the timer thread sets this flag and cancels the run roughly every
     // `CONFIG_HZ` period, so the loop injects the guest's IRQ0 (the PIT tick) even while the
@@ -760,6 +762,12 @@ fn execute(
             run_err = Some(e);
             break;
         }
+        if let Some(nic) = nic.as_ref()
+            && let Err(error) = nic.backend.check_health()
+        {
+            run_err = Some(error.context("network backend failed while the VM was running"));
+            break;
+        }
 
         // Deliver a pending timer tick (raised by the timer thread) as the guest's IRQ0, and
         // re-check the NIC on the same cadence so a receive interrupt that could not be injected
@@ -774,33 +782,48 @@ fn execute(
         let reason = exit.ExitReason;
         if reason == WHvRunVpExitReasonX64IoPortAccess {
             match handle_io(&mut pit, &mut rtc, &mut pic, bus, handle, &exit) {
-                Ok(PioAction::None) => {}
-                Ok(PioAction::Shutdown) => {
-                    info!("guest requested shutdown");
-                    break;
-                }
-                Ok(PioAction::Snapshot) => {
-                    match take_snapshot(
-                        cfg,
-                        handle,
-                        mem,
-                        &pic,
-                        &pit,
-                        &rtc,
-                        console,
-                        bus,
-                        nic.as_ref(),
-                    ) {
-                        Ok(true) => break,
-                        Ok(false) => {}
-                        Err(e) => {
-                            run_err = Some(e);
+                Ok(result) => {
+                    if result.pic_eoi {
+                        // A PIC EOI releases the serialized master interrupt. Retry the NIC
+                        // immediately, before the next timer tick can claim IRQ0 again.
+                        service_nic_irq(&nic, &mut pic, handle);
+                    }
+                    match result.action {
+                        PioAction::None => {}
+                        PioAction::Shutdown => {
+                            info!("guest requested shutdown");
                             break;
                         }
+                        PioAction::Snapshot => {
+                            if cfg.snapshot.is_some() {
+                                // Stop and join the RX pump before quiescing the backend and
+                                // copying guest RAM. This positively excludes a concurrent
+                                // process_rx write from racing the memory snapshot.
+                                net_stop.store(true, Ordering::SeqCst);
+                                if let Some(pump) = net_pump.take() {
+                                    let _ = pump.join();
+                                }
+                            }
+                            match take_snapshot(
+                                cfg,
+                                handle,
+                                mem,
+                                &pic,
+                                &pit,
+                                &rtc,
+                                console,
+                                bus,
+                                nic.as_ref(),
+                            ) {
+                                Ok(true) => break,
+                                Ok(false) => {}
+                                Err(e) => {
+                                    run_err = Some(e);
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    // A PIC EOI is an I/O-port write. If it completed another interrupt, immediately
-                    // retry a pending NIC notification before the next timer tick can claim the PIC.
-                    service_nic_irq(&nic, &mut pic, handle);
                 }
                 Err(e) => {
                     run_err = Some(e);
@@ -862,9 +885,9 @@ fn execute(
     let _ = timer_thread.join();
 
     // Likewise stop and join the NIC receive pump before the partition is dropped, so its cancel
-    // (and NAT worker) cannot outlive it. Joining also shuts the slirp worker down.
+    // cannot outlive it. Backend workers are stopped separately below.
     net_stop.store(true, Ordering::SeqCst);
-    if let Some(pump) = net_pump {
+    if let Some(pump) = net_pump.take() {
         let _ = pump.join();
     }
     if let Some(nic) = nic.as_ref() {
@@ -911,6 +934,12 @@ fn execute(
         }
     }
     Ok(())
+}
+
+/// Result of one guest PIO access.
+struct PioResult {
+    action: PioAction,
+    pic_eoi: bool,
 }
 
 /// Serializes the full VM state when the guest requests a snapshot (control port 0x605). Returns
@@ -1001,7 +1030,7 @@ fn handle_io(
     bus: &DeviceBus,
     handle: WHV_PARTITION_HANDLE,
     exit: &WHV_RUN_VP_EXIT_CONTEXT,
-) -> Result<PioAction> {
+) -> Result<PioResult> {
     // SAFETY: The caller only invokes this on an `X64IoPortAccess` exit.
     let io = unsafe { exit.Anonymous.IoPortAccess };
     let info: u32 = unsafe { io.AccessInfo.AsUINT32 };
@@ -1013,6 +1042,7 @@ fn handle_io(
     let port: u16 = io.PortNumber;
 
     let mut action: PioAction = PioAction::None;
+    let mut pic_eoi = false;
     if is_write {
         let bytes: [u8; 8] = io.Rax.to_le_bytes();
         if Pit::owns(port) {
@@ -1030,6 +1060,7 @@ fn handle_io(
             }
             if let Some(vector) = eoi_vector {
                 lapic_eoi(handle, vector);
+                pic_eoi = true;
             }
         } else {
             action = bus.pio_write(port, &bytes[..size]);
@@ -1060,7 +1091,7 @@ fn handle_io(
             &[(WHvX64RegisterRax, rax), (WHvX64RegisterRip, next_rip)],
         )?;
     }
-    Ok(action)
+    Ok(PioResult { action, pic_eoi })
 }
 
 /// Services a CPUID exit, tailoring the timer-relevant leaves and advancing `RIP`.
@@ -1348,8 +1379,8 @@ impl MmioHandler for NetMmio<'_> {
 /// the RX virtqueue, and wakes the vCPU loop (via a cross-thread-safe cancel) to inject the NIC's
 /// IRQ. A frame that cannot be delivered yet (the RX ring has no free buffer) is held and retried
 /// rather than dropped, so a TCP segment is never silently lost (there is no retransmission). It
-/// is joined on shutdown before the partition is dropped, so its cancel cannot outlive it; joining
-/// also shuts the NAT worker down.
+/// is joined before snapshots and shutdown so its guest-memory writes and vCPU cancel cannot
+/// outlive the protected VM state. Backend workers have an independent lifecycle.
 fn spawn_net_rx(
     dev: Arc<Mutex<VirtioNet>>,
     backend: Arc<dyn FrameBackend>,
@@ -1362,6 +1393,9 @@ fn spawn_net_rx(
         while !stop.load(Ordering::SeqCst) && backend.health() == net::BackendHealth::Ready {
             // Retry a previously-undeliverable frame before taking a new one.
             if let Some(frame) = pending.take() {
+                if stop.load(Ordering::SeqCst) || backend.health() != net::BackendHealth::Ready {
+                    break;
+                }
                 if dev.lock().expect("virt-net poisoned").process_rx(&frame) {
                     wake_vcpu(handle);
                 } else {
@@ -1370,18 +1404,17 @@ fn spawn_net_rx(
                     continue;
                 }
             }
-            match backend.recv_timeout(Duration::from_millis(20)) {
-                Some(frame) => {
-                    if dev.lock().expect("virt-net poisoned").process_rx(&frame) {
-                        wake_vcpu(handle);
-                    } else {
-                        pending = Some(frame);
-                    }
+            if let Some(frame) = backend.recv_timeout(Duration::from_millis(20)) {
+                if stop.load(Ordering::SeqCst) || backend.health() != net::BackendHealth::Ready {
+                    break;
                 }
-                None => {}
+                if dev.lock().expect("virt-net poisoned").process_rx(&frame) {
+                    wake_vcpu(handle);
+                } else {
+                    pending = Some(frame);
+                }
             }
         }
-        backend.shutdown();
     })
 }
 
