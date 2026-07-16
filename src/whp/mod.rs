@@ -67,7 +67,7 @@ use ::std::sync::{
     Mutex,
 };
 use ::std::thread;
-use ::std::time::Duration;
+use ::std::time::{Duration, Instant};
 
 use ::anyhow::{
     Context,
@@ -849,6 +849,7 @@ fn take_snapshot(
             return Ok(false);
         },
     };
+    let capture_start = Instant::now();
 
     // Flush any buffered guest output before capturing the console's pending input queue so the
     // restored VM neither loses emitted bytes nor replays already-consumed ones.
@@ -877,6 +878,9 @@ fn take_snapshot(
     };
     snapshot::write(dir, handle, mem, &devices)
         .with_context(|| format!("writing snapshot to {}", dir.display()))?;
+    if !cfg.timing_markers.is_empty() {
+        eprintln!("snapshot-capture: {:.1} ms", capture_start.elapsed().as_secs_f64() * 1000.0);
+    }
     info!("snapshot written to {}", dir.display());
     Ok(true)
 }

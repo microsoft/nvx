@@ -1276,6 +1276,7 @@ fn coordinate_snapshot(
     net_rx: &mut Option<JoinHandle<()>>,
     net_tx: &mut Option<JoinHandle<()>>,
 ) -> Result<()> {
+    let capture_start = Instant::now();
     // The processor count comes from the supervisor, not the CLI `--vcpus`: on the restore path
     // the latter is not meaningful (the count was recovered from the snapshot).
     let n_aps: usize = control.vcpu_count().saturating_sub(1);
@@ -1316,7 +1317,11 @@ fn coordinate_snapshot(
 
     // 5. Collect every processor's state in index order and write the snapshot.
     let states: Vec<snapshot::VcpuState> = control.take_saved()?;
-    write_snapshot(cfg, vm_fd, mem, bus, console, net, &states)
+    write_snapshot(cfg, vm_fd, mem, bus, console, net, &states)?;
+    if !cfg.timing_markers.is_empty() {
+        eprintln!("snapshot-capture: {:.1} ms", capture_start.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(())
 }
 
 /// Polls `done` until it is true, aborting if any vCPU requests a stop (a failed peer) or a
