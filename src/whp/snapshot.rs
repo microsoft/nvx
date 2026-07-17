@@ -246,9 +246,26 @@ pub fn write(
     put_blob(&mut buf, devices.console);
     put_blob(&mut buf, devices.net);
 
-    // Persist RAM and state.
-    mem.snapshot_ram(&dir.join("mem.bin"))?;
-    ::std::fs::write(dir.join("state.bin"), &buf).context("writing state.bin")?;
+    // Persist through temporary files. state.bin is renamed last and is the completion marker
+    // consumed by the Agent, so a failed capture cannot expose a partially-written snapshot.
+    let mem_path = dir.join("mem.bin");
+    let state_path = dir.join("state.bin");
+    let mem_temp = dir.join("mem.bin.tmp");
+    let state_temp = dir.join("state.bin.tmp");
+    for path in [&mem_temp, &state_temp] {
+        let _ = ::std::fs::remove_file(path);
+    }
+    mem.snapshot_ram(&mem_temp)?;
+    {
+        use ::std::io::Write;
+        let mut file = ::std::fs::File::create(&state_temp).context("creating state.bin.tmp")?;
+        file.write_all(&buf).context("writing state.bin.tmp")?;
+        file.sync_all().context("flushing state.bin.tmp")?;
+    }
+    let _ = ::std::fs::remove_file(&mem_path);
+    let _ = ::std::fs::remove_file(&state_path);
+    ::std::fs::rename(&mem_temp, &mem_path).context("publishing mem.bin")?;
+    ::std::fs::rename(&state_temp, &state_path).context("publishing state.bin")?;
     Ok(())
 }
 

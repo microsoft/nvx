@@ -25,11 +25,12 @@ use ::std::net::Ipv4Addr;
 use ::std::sync::Arc;
 use ::std::sync::Mutex;
 use ::std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use ::std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use ::std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use ::std::thread::{self, JoinHandle};
 use ::std::time::Duration;
+use ::std::time::Instant;
 
-use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters, NetConfig};
+use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters, FrameSend, NetConfig};
 
 const FRAME_QUEUE_DEPTH: usize = 256;
 
@@ -56,22 +57,50 @@ pub struct Slirp {
 }
 
 impl Slirp {
-    fn shutdown_worker(&self) {
+    fn shutdown_worker(&self, timeout: Duration) -> ::anyhow::Result<()> {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(h) = self
-            .worker
-            .lock()
-            .expect("slirp worker lock poisoned")
-            .take()
-        {
-            let _ = h.join();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let finished = self
+                .worker
+                .lock()
+                .expect("slirp worker lock poisoned")
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished);
+            if finished {
+                if let Some(worker) = self
+                    .worker
+                    .lock()
+                    .expect("slirp worker lock poisoned")
+                    .take()
+                {
+                    worker
+                        .join()
+                        .map_err(|_| ::anyhow::anyhow!("SLIRP worker panicked"))?;
+                }
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                ::anyhow::bail!("timed out stopping SLIRP worker");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn stop_bounded(&self) {
+        if let Err(error) = self.shutdown_worker(Duration::from_secs(2)) {
+            log::error!("virt-net: {error:#}");
+            self.worker
+                .lock()
+                .expect("slirp worker lock poisoned")
+                .take();
         }
     }
 }
 
 impl Drop for Slirp {
     fn drop(&mut self) {
-        self.shutdown_worker();
+        self.stop_bounded();
     }
 }
 
@@ -88,7 +117,7 @@ pub fn start(cfg: &NetConfig) -> Arc<Slirp> {
     let worker: JoinHandle<()> = thread::Builder::new()
         .name("whp-slirp".into())
         .spawn(move || {
-            let mut nat: Nat = Nat::new(worker_cfg, to_guest_tx);
+            let mut nat: Nat = Nat::new(worker_cfg, to_guest_tx, Arc::clone(&worker_stop));
             while !worker_stop.load(Ordering::Acquire) {
                 // Drain guest frames without blocking long, then service host sockets, so both
                 // directions stay responsive.
@@ -120,15 +149,16 @@ pub fn start(cfg: &NetConfig) -> Arc<Slirp> {
 }
 
 impl FrameBackend for Slirp {
-    fn try_send(&self, frame: Vec<u8>) -> bool {
+    fn try_send(&self, frame: Vec<u8>) -> FrameSend {
         match self.to_nat.try_send(frame) {
             Ok(()) => {
                 self.tx_accepted.fetch_add(1, Ordering::Relaxed);
-                true
+                FrameSend::Accepted
             }
-            Err(_) => {
+            Err(TrySendError::Full(_)) => FrameSend::Backpressure,
+            Err(TrySendError::Disconnected(_)) => {
                 self.tx_dropped.fetch_add(1, Ordering::Relaxed);
-                false
+                FrameSend::Dropped
             }
         }
     }
@@ -169,13 +199,12 @@ impl FrameBackend for Slirp {
         }
     }
 
-    fn quiesce(&self, _timeout: Duration) -> ::anyhow::Result<()> {
-        self.shutdown_worker();
-        Ok(())
+    fn quiesce(&self, timeout: Duration) -> ::anyhow::Result<()> {
+        self.shutdown_worker(timeout)
     }
 
     fn shutdown(&self) {
-        self.shutdown_worker();
+        self.stop_bounded();
     }
 }
 
@@ -184,6 +213,7 @@ struct Nat {
     cfg: NetConfig,
     /// Sink for frames destined to the guest.
     to_guest: SyncSender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
     /// Guest MAC, learned from the first frame (falls back to the configured MAC).
     guest_mac: [u8; 6],
     udp: udp::UdpNat,
@@ -191,20 +221,36 @@ struct Nat {
 }
 
 impl Nat {
-    fn new(cfg: NetConfig, to_guest: SyncSender<Vec<u8>>) -> Self {
+    fn new(cfg: NetConfig, to_guest: SyncSender<Vec<u8>>, stop: Arc<AtomicBool>) -> Self {
         let guest_mac: [u8; 6] = cfg.mac;
         Self {
             cfg,
             to_guest,
+            stop,
             guest_mac,
             udp: udp::UdpNat::new(),
             tcp: tcp::TcpNat::new(),
         }
     }
 
-    /// Sends one fully-formed Ethernet frame to the guest.
-    fn emit(&self, frame: Vec<u8>) {
-        let _ = self.to_guest.try_send(frame);
+    /// Sends one fully-formed Ethernet frame to the guest. Bounded-channel pressure pauses the
+    /// NAT state machine instead of dropping committed TCP sequence state. Shutdown cancels the
+    /// wait so snapshot quiescing cannot deadlock behind a full guest RX ring.
+    fn emit(&self, frame: Vec<u8>) -> bool {
+        let mut frame = frame;
+        loop {
+            match self.to_guest.try_send(frame) {
+                Ok(()) => return true,
+                Err(TrySendError::Full(pending)) => {
+                    if self.stop.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    frame = pending;
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(TrySendError::Disconnected(_)) => return false,
+            }
+        }
     }
 
     /// Handles one Ethernet frame transmitted by the guest.
@@ -252,7 +298,7 @@ impl Nat {
         reply.extend_from_slice(&self.cfg.host_ip.octets()); // sender pa
         reply.extend_from_slice(&sender_mac); // target ha
         reply.extend_from_slice(&sender_ip.octets()); // target pa
-        self.emit(reply);
+        let _ = self.emit(reply);
     }
 
     /// Handles one IPv4 packet from the guest.
@@ -264,13 +310,15 @@ impl Nat {
             IpProto::Icmp => self.on_icmp(&pkt),
             IpProto::Udp => {
                 if let Some(reply) = self.udp.on_guest(&self.cfg, &pkt) {
-                    self.emit(self.frame_to_guest(&reply));
+                    let _ = self.emit(self.frame_to_guest(&reply));
                 }
             }
             IpProto::Tcp => {
                 let out: Vec<Vec<u8>> = self.tcp.on_guest(&self.cfg, &pkt);
                 for ip_reply in out {
-                    self.emit(self.frame_to_guest(&ip_reply));
+                    if !self.emit(self.frame_to_guest(&ip_reply)) {
+                        break;
+                    }
                 }
             }
             IpProto::Other(_) => {}
@@ -296,7 +344,7 @@ impl Nat {
 
         let ip_reply: Vec<u8> =
             proto::build_ipv4(self.cfg.host_ip, pkt.src, IpProto::Icmp, &reply_icmp);
-        self.emit(self.frame_to_guest(&ip_reply));
+        let _ = self.emit(self.frame_to_guest(&ip_reply));
     }
 
     /// Wraps an IPv4 packet (whose source is some host/gateway address) in an Ethernet frame
@@ -316,7 +364,35 @@ impl Nat {
         self.udp.poll(&self.cfg, &mut out);
         self.tcp.poll(&self.cfg, &mut out);
         for ip in out {
-            self.emit(self.frame_to_guest(&ip));
+            if !self.emit(self.frame_to_guest(&ip)) {
+                break;
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::std::sync::mpsc::{TryRecvError, channel};
+
+    #[test]
+    fn guest_output_backpressure_waits_instead_of_dropping() {
+        let cfg = NetConfig::parse("10.0.0.2/24").unwrap();
+        let (frames, receiver) = sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let nat = Nat::new(cfg, frames, Arc::clone(&stop));
+        assert!(nat.emit(vec![1]));
+
+        let (completed, completion) = channel();
+        let sender = thread::spawn(move || {
+            completed.send(nat.emit(vec![2])).unwrap();
+        });
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(completion.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(receiver.recv().unwrap(), vec![1]);
+        assert!(completion.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert_eq!(receiver.recv().unwrap(), vec![2]);
+        sender.join().unwrap();
     }
 }

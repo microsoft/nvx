@@ -21,9 +21,10 @@ It runs on **two hypervisor backends** from the same codebase:
 
   `--net-config <json>` validates the versioned external L2Bridge launch contract (exact
   interface index, CNI MAC/MTU, IPv4/routes/DNS, and control pipe) and is mutually exclusive with
-  `--net`. The version-1 schema retains its IPv4 gateway and 576–65521 MTU range; the AF_XDP
-  backend supports MTUs through 4082. Routes are authoritative, an empty `nextHop` means on-link,
-  and the gateway supplies a default route only when the route list has none. Guest bootstrap
+  `--net`. The version-2 schema requires both interface index and stable LUID, and retains the
+  IPv4 gateway and 576–65521 MTU fields; the AF_XDP backend supports MTUs through 4082. Routes
+  are authoritative, an empty `nextHop` means on-link, and the gateway supplies a default route
+  only when the route list has none. Guest bootstrap
   fails closed instead of reporting boot success after partial network setup. It never falls back
   to SLIRP. The AF_XDP forwarding backend dynamically loads the backward-compatible v2 API from
   the production-signed

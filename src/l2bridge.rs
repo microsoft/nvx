@@ -17,9 +17,14 @@ use ::serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor
 use ::serde_json::{Map, Value};
 use ::sha2::{Digest, Sha256};
 
-const VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
+const BOOTSTRAP_IDENTITY_VERSION: u32 = 1;
 const MAX_CONTROL_PIPE: usize = 240;
 const MAX_CMDLINE_FRAGMENT: usize = 2048;
+const MAX_DNS_SERVERS: usize = 3;
+const MAX_DNS_SEARCH_DOMAINS: usize = 6;
+const MAX_RESOLV_SEARCH_TOKEN: usize = 247;
+const MAX_EXPLICIT_ROUTES: usize = 32;
 /// The initramfs transport must fit the kernel command-line limit without truncation.
 pub const MAX_GUEST_CMDLINE: usize = 2048;
 /// Smallest IPv4 MTU accepted by the external-network contract.
@@ -48,6 +53,7 @@ pub struct L2BridgeConfig {
 pub struct Attachment {
     pub backend: String,
     pub interface_index: u32,
+    pub interface_luid: u64,
     pub queue_selection: QueueSelection,
 }
 
@@ -135,9 +141,9 @@ impl L2BridgeConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != VERSION {
+        if self.version != CONTRACT_VERSION {
             bail!(
-                "unsupported --net-config version {} (only {VERSION} is supported)",
+                "unsupported --net-config version {} (only {CONTRACT_VERSION} is supported)",
                 self.version
             );
         }
@@ -149,6 +155,9 @@ impl L2BridgeConfig {
         }
         if self.attachment.interface_index == 0 {
             bail!("attachment.interfaceIndex must be a non-zero Windows interface index");
+        }
+        if self.attachment.interface_luid == 0 {
+            bail!("attachment.interfaceLuid must be a non-zero Windows interface LUID");
         }
         match self.attachment.queue_selection.mode.as_str() {
             "auto" if self.attachment.queue_selection.queues.is_empty() => {}
@@ -189,8 +198,18 @@ impl L2BridgeConfig {
         if ip.is_unspecified() || gateway.is_unspecified() {
             bail!("guestBootstrap IPv4 address and gateway must not be unspecified");
         }
-        if self.guest_bootstrap.routes.len() > 32 {
-            bail!("guestBootstrap.routes exceeds the 32-route limit");
+        let default_routes = self
+            .guest_bootstrap
+            .routes
+            .iter()
+            .filter(|route| route.destination == "0.0.0.0/0")
+            .count();
+        if default_routes > 1
+            || self.guest_bootstrap.routes.len() - default_routes > MAX_EXPLICIT_ROUTES
+        {
+            bail!(
+                "guestBootstrap.routes exceeds {MAX_EXPLICIT_ROUTES} explicit routes or contains duplicate defaults"
+            );
         }
         for route in &self.guest_bootstrap.routes {
             parse_ipv4_cidr(&route.destination)
@@ -202,15 +221,24 @@ impl L2BridgeConfig {
                     .with_context(|| format!("invalid route nextHop {:?}", route.next_hop))?;
             }
         }
-        if self.guest_bootstrap.dns.servers.len() > 16 || self.guest_bootstrap.dns.search.len() > 16
-        {
-            bail!("guestBootstrap DNS lists exceed their 16-entry limits");
+        if self.guest_bootstrap.dns.servers.len() > MAX_DNS_SERVERS {
+            bail!("guestBootstrap DNS servers exceed the {MAX_DNS_SERVERS}-entry resolver limit");
+        }
+        if self.guest_bootstrap.dns.search.len() > MAX_DNS_SEARCH_DOMAINS {
+            bail!(
+                "guestBootstrap DNS search domains exceed the {MAX_DNS_SEARCH_DOMAINS}-entry resolver limit"
+            );
         }
         for server in &self.guest_bootstrap.dns.servers {
             let _: Ipv4Addr = server.parse().context("DNS servers must be IPv4 in v1")?;
         }
         for domain in &self.guest_bootstrap.dns.search {
-            validate_token(domain, "DNS search domain")?;
+            validate_dns_domain(domain)?;
+        }
+        if self.guest_bootstrap.dns.search.join(" ").len() > MAX_RESOLV_SEARCH_TOKEN {
+            bail!(
+                "guestBootstrap DNS search line exceeds the {MAX_RESOLV_SEARCH_TOKEN}-byte resolver limit"
+            );
         }
         if !self.runtime.control_pipe.starts_with(r"\\.\pipe\")
             || self.runtime.control_pipe.len() > MAX_CONTROL_PIPE
@@ -247,6 +275,7 @@ impl L2BridgeConfig {
             .guest_bootstrap
             .routes
             .iter()
+            .filter(|route| route.destination != "0.0.0.0/0")
             .map(|r| format!("{}@{}", r.destination, r.next_hop))
             .collect::<Vec<_>>()
             .join(",");
@@ -300,7 +329,7 @@ impl L2BridgeConfig {
         let effective_routes =
             effective_routes(&self.guest_bootstrap.ipv4, &self.guest_bootstrap.routes);
         let bootstrap = ::serde_json::to_vec(&BootstrapIdentity {
-            version: VERSION,
+            version: BOOTSTRAP_IDENTITY_VERSION,
             ipv4: &self.guest_bootstrap.ipv4,
             routes: &effective_routes,
             dns: &self.guest_bootstrap.dns,
@@ -364,7 +393,7 @@ fn effective_routes(ipv4: &Ipv4, routes: &[Route]) -> Vec<Route> {
 
 fn canonical_bootstrap(bytes: &[u8]) -> Option<OwnedBootstrapIdentity> {
     let mut identity: OwnedBootstrapIdentity = ::serde_json::from_slice(bytes).ok()?;
-    if identity.version != VERSION {
+    if identity.version != BOOTSTRAP_IDENTITY_VERSION {
         return None;
     }
     identity.routes = effective_routes(&identity.ipv4, &identity.routes);
@@ -389,6 +418,18 @@ fn validate_token(value: &str, field: &str) -> Result<()> {
         })
     {
         bail!("{field} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_dns_domain(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 253
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+    {
+        bail!("DNS search domain contains unsupported characters");
     }
     Ok(())
 }
@@ -470,8 +511,8 @@ mod tests {
     use super::*;
 
     const CONFIG: &str = r#"{
-      "version": 1,
-      "attachment": {"backend":"afxdp-l2bridge","interfaceIndex":123,"queueSelection":{"mode":"auto"}},
+      "version": 2,
+      "attachment": {"backend":"afxdp-l2bridge","interfaceIndex":123,"interfaceLuid":456,"queueSelection":{"mode":"auto"}},
       "device": {"macAddress":"00-15-5D-01-02-03","mtu":1500},
       "guestBootstrap": {
         "ipv4":{"address":"192.168.0.12","prefixLength":24,"gateway":"192.168.0.1"},
@@ -499,6 +540,7 @@ mod tests {
         let encoded = ::serde_json::to_value(&cfg).unwrap();
         assert_eq!(encoded["attachment"]["backend"], "afxdp-l2bridge");
         assert_eq!(encoded["attachment"]["interfaceIndex"], 123);
+        assert_eq!(encoded["attachment"]["interfaceLuid"], 456);
         assert_eq!(encoded["attachment"]["queueSelection"]["mode"], "auto");
         assert!(
             encoded["attachment"]["queueSelection"]
@@ -523,7 +565,7 @@ mod tests {
         assert!(
             L2BridgeConfig::from_json(
                 CONFIG
-                    .replacen("\"version\": 1", "\"version\": 1,\"version\": 1", 1)
+                    .replacen("\"version\": 2", "\"version\": 2,\"version\": 2", 1)
                     .as_bytes()
             )
             .is_err()
@@ -531,7 +573,7 @@ mod tests {
         assert!(
             L2BridgeConfig::from_json(
                 CONFIG
-                    .replacen("\"version\": 1", "\"unknown\":true,\"version\": 1", 1)
+                    .replacen("\"version\": 2", "\"unknown\":true,\"version\": 2", 1)
                     .as_bytes()
             )
             .is_err()
@@ -602,7 +644,7 @@ mod tests {
         let cfg = L2BridgeConfig::from_json(without_default.as_bytes()).unwrap();
         let current = cfg.external_identity().unwrap();
         let legacy_bootstrap = ::serde_json::to_vec(&BootstrapIdentity {
-            version: VERSION,
+            version: BOOTSTRAP_IDENTITY_VERSION,
             ipv4: &cfg.guest_bootstrap.ipv4,
             routes: &cfg.guest_bootstrap.routes,
             dns: &cfg.guest_bootstrap.dns,
@@ -635,13 +677,24 @@ mod tests {
         assert!(explicit.len() + ",0.0.0.0/0@192.168.0.1".len() > 253);
 
         let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
-        value["guestBootstrap"]["routes"] = ::serde_json::to_value(routes).unwrap();
+        value["guestBootstrap"]["routes"] = ::serde_json::to_value(&routes).unwrap();
         let cfg = L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(
             cfg.guest_cmdline_fragment()
                 .unwrap()
                 .contains("0.0.0.0/0@192.168.0.1")
         );
+
+        let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
+        let mut explicit_default = routes;
+        explicit_default.push(Route {
+            destination: "0.0.0.0/0".to_owned(),
+            next_hop: "192.168.0.1".to_owned(),
+        });
+        value["guestBootstrap"]["routes"] =
+            ::serde_json::to_value(explicit_default).unwrap();
+        let cfg = L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(cfg.guest_cmdline_fragment().is_ok());
     }
 
     #[test]
@@ -680,5 +733,22 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn manifest_enforces_guest_resolver_limits() {
+        let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
+        value["guestBootstrap"]["dns"]["servers"] = ::serde_json::json!([
+            "1.1.1.1",
+            "8.8.8.8",
+            "9.9.9.9",
+            "168.63.129.16"
+        ]);
+        assert!(L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).is_err());
+
+        let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
+        value["guestBootstrap"]["dns"]["search"] =
+            ::serde_json::json!(["internal,example"]);
+        assert!(L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).is_err());
     }
 }

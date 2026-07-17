@@ -111,6 +111,10 @@ pub struct FrameCounters {
     pub guest_rx_received: u64,
     pub guest_rx_dropped: u64,
     pub backend_errors: u64,
+    pub driver_rx_dropped: u64,
+    pub driver_rx_truncated: u64,
+    pub driver_rx_invalid_descriptors: u64,
+    pub driver_tx_invalid_descriptors: u64,
 }
 
 /// Data-plane state exposed to the device and lifecycle code.
@@ -122,12 +126,19 @@ pub enum BackendHealth {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameSend {
+    Accepted,
+    Backpressure,
+    Dropped,
+}
+
 /// Raw-Ethernet frame boundary between virtio-net and its host data plane.
 ///
 /// Implementations must be bounded and nonblocking for [`try_send`](Self::try_send): it is called
 /// while the vCPU holds the `VirtioNet` mutex. The receive side is owned by the pump thread.
 pub trait FrameBackend: Send + Sync {
-    fn try_send(&self, frame: Vec<u8>) -> bool;
+    fn try_send(&self, frame: Vec<u8>) -> FrameSend;
     fn recv_timeout(&self, timeout: ::std::time::Duration) -> Option<Vec<u8>>;
     fn health(&self) -> BackendHealth;
     fn check_health(&self) -> Result<()>;
@@ -334,8 +345,7 @@ struct Queue {
 }
 
 impl Queue {
-    /// Pops the head descriptor index of the next available chain, or `None` if none is pending.
-    fn pop_avail(&mut self, mem: &GuestMemory) -> Option<u16> {
+    fn peek_avail(&self, mem: &GuestMemory) -> Option<u16> {
         if !self.ready || self.size == 0 {
             return None;
         }
@@ -345,8 +355,17 @@ impl Queue {
             return None;
         }
         let slot: u64 = u64::from(self.next_avail % self.size);
-        let head: u16 = mem.read_u16(self.avail.wrapping_add(4 + 2 * slot));
+        Some(mem.read_u16(self.avail.wrapping_add(4 + 2 * slot)))
+    }
+
+    fn consume_avail(&mut self) {
         self.next_avail = self.next_avail.wrapping_add(1);
+    }
+
+    /// Pops the head descriptor index of the next available chain, or `None` if none is pending.
+    fn pop_avail(&mut self, mem: &GuestMemory) -> Option<u16> {
+        let head = self.peek_avail(mem)?;
+        self.consume_avail();
         Some(head)
     }
 
@@ -540,13 +559,13 @@ impl VirtioNet {
     }
 
     /// Drains the transmit queue, handing each guest Ethernet frame to the bounded backend.
-    fn process_tx(&mut self) {
+    pub fn process_tx(&mut self) {
         if !self.queues[TX_QUEUE].ready {
             return;
         }
         let mem: Arc<GuestMemory> = Arc::clone(&self.mem);
         let mut raised: bool = false;
-        while let Some(head) = self.queues[TX_QUEUE].pop_avail(&mem) {
+        while let Some(head) = self.queues[TX_QUEUE].peek_avail(&mem) {
             let table: u64 = self.queues[TX_QUEUE].desc;
             let size: u16 = self.queues[TX_QUEUE].size;
 
@@ -571,9 +590,15 @@ impl VirtioNet {
             // Strip the virtio_net_hdr and hand the raw Ethernet frame to the backend. A full
             // bounded queue completes the descriptor and is observable through backend counters;
             // it must never stall a vCPU while this device mutex is held.
-            if frame.len() > NET_HDR_LEN {
-                let _ = self.backend.try_send(frame[NET_HDR_LEN..].to_vec());
+            let outcome = if frame.len() > NET_HDR_LEN {
+                self.backend.try_send(frame[NET_HDR_LEN..].to_vec())
+            } else {
+                FrameSend::Dropped
+            };
+            if outcome == FrameSend::Backpressure {
+                break;
             }
+            self.queues[TX_QUEUE].consume_avail();
             self.queues[TX_QUEUE].push_used(&mem, u32::from(head), 0);
             raised = true;
         }

@@ -94,8 +94,10 @@ struct Conn {
     host: Option<TcpStream>,
     /// Pending background connect result.
     connecting: Option<Receiver<Option<TcpStream>>>,
-    /// Guest data buffered until the host socket is connected.
+    /// Guest data buffered until the non-blocking host socket accepts it.
     pending_out: Vec<u8>,
+    guest_fin_pending: bool,
+    host_write_shutdown: bool,
     state: State,
     /// Whether we have sent our FIN to the guest.
     fin_sent: bool,
@@ -180,6 +182,8 @@ impl TcpNat {
                 host: None,
                 connecting: Some(spawn_connect(host_dst, dst_port)),
                 pending_out: Vec::new(),
+                guest_fin_pending: false,
+                host_write_shutdown: false,
                 state: State::Connecting,
                 fin_sent: false,
                 last: Instant::now(),
@@ -205,21 +209,17 @@ impl TcpNat {
 
         // In-order guest data: forward to the host (or buffer until connected), then acknowledge.
         if !payload.is_empty() && seq == conn.rcv_nxt {
-            conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload.len() as u32);
-            match &mut conn.host {
-                Some(stream) => {
-                    let _ = stream.write_all(payload);
-                },
-                None => conn.pending_out.extend_from_slice(payload),
-            }
+            let capacity = usize::from(OUR_WINDOW).saturating_sub(conn.pending_out.len());
+            let accepted = payload.len().min(capacity);
+            conn.pending_out.extend_from_slice(&payload[..accepted]);
+            conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accepted as u32);
         }
 
-        // Guest FIN: half-close towards the host and acknowledge.
+        // Guest FIN: acknowledge it only after all payload in this segment was accepted. The
+        // host write side is closed later, after the buffered payload has drained.
         if flags & FIN != 0 && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt {
             conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
-            if let Some(stream) = &conn.host {
-                let _ = stream.shutdown(::std::net::Shutdown::Write);
-            }
+            conn.guest_fin_pending = true;
             conn.state = State::Closing;
         }
 
@@ -245,14 +245,13 @@ impl TcpNat {
             {
                 match rx.try_recv() {
                         Ok(Some(stream)) => {
-                            // Write any buffered request while the socket is still blocking (so the
-                            // write completes), then switch to non-blocking for the relay reads.
-                            if !conn.pending_out.is_empty() {
-                                let mut s = &stream;
-                                let _ = s.write_all(&conn.pending_out);
-                                conn.pending_out.clear();
+                            if stream.set_nonblocking(true).is_err() {
+                                out.push(build_segment(
+                                    cfg, conn, conn.snd_nxt, conn.rcv_nxt, RST | ACK, &[],
+                                ));
+                                dead.push(*key);
+                                continue;
                             }
-                            let _ = stream.set_nonblocking(true);
                             conn.host = Some(stream);
                             conn.connecting = None;
                             if conn.state == State::Connecting {
@@ -273,6 +272,47 @@ impl TcpNat {
                             continue;
                         },
                     }
+            }
+
+            let window_before = advertised_window(conn);
+            let mut host_write_failed = false;
+            if let Some(stream) = &mut conn.host {
+                while !conn.pending_out.is_empty() {
+                    match stream.write(&conn.pending_out) {
+                        Ok(0) => break,
+                        Ok(written) => {
+                            conn.pending_out.drain(..written);
+                        },
+                        Err(ref error)
+                            if error.kind() == ::std::io::ErrorKind::WouldBlock =>
+                        {
+                            break;
+                        },
+                        Err(_) => {
+                            host_write_failed = true;
+                            break;
+                        },
+                    }
+                }
+                if conn.pending_out.is_empty()
+                    && conn.guest_fin_pending
+                    && !conn.host_write_shutdown
+                {
+                    let _ = stream.shutdown(::std::net::Shutdown::Write);
+                    conn.host_write_shutdown = true;
+                }
+            }
+            if host_write_failed {
+                out.push(build_segment(
+                    cfg, conn, conn.snd_nxt, conn.rcv_nxt, RST | ACK, &[],
+                ));
+                dead.push(*key);
+                continue;
+            }
+            if advertised_window(conn) > window_before {
+                out.push(build_segment(
+                    cfg, conn, conn.snd_nxt, conn.rcv_nxt, ACK, &[],
+                ));
             }
 
             // Relay host -> guest data, honouring the guest's advertised window.
@@ -318,10 +358,7 @@ impl TcpNat {
             }
 
             // Reclaim a fully-closed connection (our FIN acknowledged after the guest's FIN).
-            if conn.state == State::Closing
-                && conn.fin_sent
-                && !seq_gt(conn.snd_nxt, conn.snd_una)
-            {
+            if can_reclaim(conn) {
                 dead.push(*key);
             }
             if now.duration_since(conn.last) > CONN_TTL {
@@ -351,13 +388,24 @@ fn build_segment(
     tcp.extend_from_slice(&ack.to_be_bytes());
     tcp.push(5 << 4); // data offset = 5 words, no options
     tcp.push(flags);
-    tcp.extend_from_slice(&OUR_WINDOW.to_be_bytes());
+    tcp.extend_from_slice(&advertised_window(conn).to_be_bytes());
     tcp.extend_from_slice(&[0, 0]); // checksum placeholder
     tcp.extend_from_slice(&[0, 0]); // urgent pointer
     tcp.extend_from_slice(payload);
     let csum: u16 = proto::transport_checksum(conn.dst_ip, cfg.guest_ip, IpProto::Tcp, &tcp);
     tcp[16..18].copy_from_slice(&csum.to_be_bytes());
     proto::build_ipv4(conn.dst_ip, cfg.guest_ip, IpProto::Tcp, &tcp)
+}
+
+fn advertised_window(conn: &Conn) -> u16 {
+    OUR_WINDOW.saturating_sub(conn.pending_out.len().min(usize::from(OUR_WINDOW)) as u16)
+}
+
+fn can_reclaim(conn: &Conn) -> bool {
+    conn.state == State::Closing
+        && conn.fin_sent
+        && conn.guest_fin_pending
+        && !seq_gt(conn.snd_nxt, conn.snd_una)
 }
 
 /// A monotonically-increasing source of initial sequence numbers.
@@ -381,6 +429,28 @@ fn spawn_connect(dst: Ipv4Addr, port: u16) -> Receiver<Option<TcpStream>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connection() -> Conn {
+        Conn {
+            dst_ip: Ipv4Addr::LOCALHOST,
+            dst_port: 80,
+            guest_port: 1000,
+            rcv_nxt: 0,
+            snd_nxt: 1,
+            isn: 0,
+            syn_acked: true,
+            snd_una: 1,
+            guest_window: 1024,
+            host: None,
+            connecting: None,
+            pending_out: Vec::new(),
+            guest_fin_pending: false,
+            host_write_shutdown: false,
+            state: State::Closing,
+            fin_sent: true,
+            last: Instant::now(),
+        }
+    }
 
     fn syn_packet<'a>(tcp: &'a [u8], cfg: &NetConfig) -> Ipv4Packet<'a> {
         Ipv4Packet {
@@ -409,5 +479,23 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(retry.len(), 1);
         assert_eq!(&first[0][20..], &retry[0][20..]);
+    }
+
+    #[test]
+    fn pending_host_output_closes_and_reopens_advertised_window() {
+        let mut conn = connection();
+        assert_eq!(advertised_window(&conn), OUR_WINDOW);
+        conn.pending_out.resize(usize::from(OUR_WINDOW), 0);
+        assert_eq!(advertised_window(&conn), 0);
+        conn.pending_out.clear();
+        assert_eq!(advertised_window(&conn), OUR_WINDOW);
+    }
+
+    #[test]
+    fn host_fin_waits_for_guest_fin_before_reclaim() {
+        let mut conn = connection();
+        assert!(!can_reclaim(&conn));
+        conn.guest_fin_pending = true;
+        assert!(can_reclaim(&conn));
     }
 }

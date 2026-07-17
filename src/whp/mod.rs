@@ -183,7 +183,9 @@ impl Nic {
                 return Err(error);
             }
         };
-        if let Err(error) = pipe.data_plane_ready(&started.queues) {
+        if let Err(error) =
+            pipe.data_plane_ready(&started.queues, started.interface_luid)
+        {
             pipe.data_plane_error(&format!("{error:#}"));
             return Err(error);
         }
@@ -737,7 +739,7 @@ fn execute(
     // `CONFIG_HZ` period, so the loop injects the guest's IRQ0 (the PIT tick) even while the
     // vCPU is parked at `HLT`. It is joined on shutdown (below) so no cancel can outlive the
     // partition. The input thread makes no WHP calls, so it can stay detached.
-    let timer_tick: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let timer_pending: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let defer_input: bool =
         cfg.defer_stdin_until_boot && guard.stdin.is_none() && cfg.restore.is_none();
     spawn_input_thread(
@@ -746,12 +748,14 @@ fn execute(
         Arc::clone(&stop),
         defer_input,
     );
-    let timer_thread = spawn_timer_thread(handle, Arc::clone(&timer_tick), Arc::clone(&stop));
+    let timer_thread =
+        spawn_timer_thread(handle, Arc::clone(&timer_pending), Arc::clone(&stop));
 
     console.lock().expect("console poisoned").mark_start();
 
     let mut exit: WHV_RUN_VP_EXIT_CONTEXT = WHV_RUN_VP_EXIT_CONTEXT::default();
     let mut run_err: Option<::anyhow::Error> = None;
+    let mut prefer_timer = true;
 
     loop {
         // Flush buffered console output before re-entering the guest. The portb console is
@@ -768,25 +772,33 @@ fn execute(
             run_err = Some(error.context("network backend failed while the VM was running"));
             break;
         }
+        if let Some(nic) = nic.as_ref() {
+            nic.dev.lock().expect("virt-net poisoned").process_tx();
+        }
 
         // Deliver a pending timer tick (raised by the timer thread) as the guest's IRQ0, and
         // re-check the NIC on the same cadence so a receive interrupt that could not be injected
         // earlier (e.g. the line was briefly masked) self-heals within one tick.
-        if timer_tick.swap(false, Ordering::AcqRel) {
-            // Service the level-asserted NIC first. With one master-PIC line allowed in service,
-            // injecting the periodic timer first on every retry would starve a pending NIC IRQ.
-            service_nic_irq(&nic, &mut pic, handle);
-            inject_irq0(&mut pic, handle);
-        }
+        service_pending_irqs(
+            &timer_pending,
+            &nic,
+            &mut pic,
+            handle,
+            &mut prefer_timer,
+        );
 
         let reason = exit.ExitReason;
         if reason == WHvRunVpExitReasonX64IoPortAccess {
             match handle_io(&mut pit, &mut rtc, &mut pic, bus, handle, &exit) {
                 Ok(result) => {
                     if result.pic_eoi {
-                        // A PIC EOI releases the serialized master interrupt. Retry the NIC
-                        // immediately, before the next timer tick can claim IRQ0 again.
-                        service_nic_irq(&nic, &mut pic, handle);
+                        service_pending_irqs(
+                            &timer_pending,
+                            &nic,
+                            &mut pic,
+                            handle,
+                            &mut prefer_timer,
+                        );
                     }
                     match result.action {
                         PioAction::None => {}
@@ -796,9 +808,19 @@ fn execute(
                         }
                         PioAction::Snapshot => {
                             if cfg.snapshot.is_some() {
-                                // Stop and join the RX pump before quiescing the backend and
-                                // copying guest RAM. This positively excludes a concurrent
-                                // process_rx write from racing the memory snapshot.
+                                if let Some(n) = nic.as_ref()
+                                    && let Err(error) =
+                                        n.backend.quiesce(Duration::from_secs(2))
+                                {
+                                    run_err = Some(
+                                        error.context(
+                                            "quiescing network backend for snapshot",
+                                        ),
+                                    );
+                                    break;
+                                }
+                                // The quiesced backend produces no more frames. Join the pump
+                                // before copying RAM to exclude a concurrent process_rx write.
                                 net_stop.store(true, Ordering::SeqCst);
                                 if let Some(pump) = net_pump.take() {
                                     let _ = pump.join();
@@ -843,7 +865,13 @@ fn execute(
         } else if reason == WHvRunVpExitReasonCanceled || reason == WHvRunVpExitReasonNone {
             // Woken by the timer, input thread, or the NIC receive pump: service a pending NIC
             // interrupt so a just-delivered frame is signalled to the guest with low latency.
-            service_nic_irq(&nic, &mut pic, handle);
+            service_pending_irqs(
+                &timer_pending,
+                &nic,
+                &mut pic,
+                handle,
+                &mut prefer_timer,
+            );
         } else if reason == WHvRunVpExitReasonUnrecoverableException {
             // A PVH/no-ACPI guest reboots via triple fault, which surfaces here. Treat it as a
             // normal termination of the VM (matching `reboot=t`).
@@ -860,7 +888,13 @@ fn execute(
                         break;
                     }
                     // A transmit notification (QueueNotify) may have raised the NIC's interrupt.
-                    service_nic_irq(&nic, &mut pic, handle);
+                    service_pending_irqs(
+                        &timer_pending,
+                        &nic,
+                        &mut pic,
+                        handle,
+                        &mut prefer_timer,
+                    );
                 }
                 _ => {
                     error!("unhandled guest MMIO access");
@@ -884,8 +918,11 @@ fn execute(
     stop.store(true, Ordering::SeqCst);
     let _ = timer_thread.join();
 
-    // Likewise stop and join the NIC receive pump before the partition is dropped, so its cancel
-    // cannot outlive it. Backend workers are stopped separately below.
+    if let Some(nic) = nic.as_ref() {
+        // Keep the pump alive while stopping a bounded backend so any final guest-bound frame can
+        // drain instead of deadlocking a worker in delivery-aware backpressure.
+        nic.backend.shutdown();
+    }
     net_stop.store(true, Ordering::SeqCst);
     if let Some(pump) = net_pump.take() {
         let _ = pump.join();
@@ -893,14 +930,17 @@ fn execute(
     if let Some(nic) = nic.as_ref() {
         let counters = nic.backend.counters();
         info!(
-            "virt-net counters: tx accepted={}, tx dropped={}, rx received={}, rx dropped={}, errors={}",
+            "virt-net counters: tx accepted={}, tx dropped={}, rx received={}, rx dropped={}, errors={}, driver rx dropped={}, driver rx truncated={}, driver rx invalid={}, driver tx invalid={}",
             counters.guest_tx_accepted,
             counters.guest_tx_dropped,
             counters.guest_rx_received,
             counters.guest_rx_dropped,
             counters.backend_errors,
+            counters.driver_rx_dropped,
+            counters.driver_rx_truncated,
+            counters.driver_rx_invalid_descriptors,
+            counters.driver_tx_invalid_descriptors,
         );
-        nic.backend.shutdown();
     }
     console.lock().expect("console poisoned").flush();
 
@@ -976,14 +1016,9 @@ fn take_snapshot(
     let pic_bytes: Vec<u8> = pic.save();
     let pit_bytes: Vec<u8> = pit.save();
     let rtc_bytes: Vec<u8> = rtc.save();
-    // Quiesce the frame backend before capturing virtqueue transport state. External RX that has
-    // not reached a used ring is intentionally discarded; guest TX has been accepted or dropped
-    // before its descriptor is completed, preventing an unsent frame from reappearing on restore.
+    // The caller quiesced the frame backend and joined the RX pump before entering here.
     let net_state: Vec<u8> = match nic {
         Some(n) => {
-            n.backend
-                .quiesce(Duration::from_secs(2))
-                .context("quiescing network backend for snapshot")?;
             let dev = n.dev.lock().expect("virt-net poisoned");
             let mut s: Vec<u8> = n.snapshot_header.clone();
             s.extend(dev.save());
@@ -1170,9 +1205,9 @@ fn advance_rip(handle: WHV_PARTITION_HANDLE, exit: &WHV_RUN_VP_EXIT_CONTEXT) -> 
 /// accidentally clearing a concurrently in-service timer or NIC vector. Best-effort: any failure
 /// is ignored.
 fn lapic_eoi(handle: WHV_PARTITION_HANDLE, vector: u8) {
-    /// Offset of the in-service register (ISR) in WHP's local-APIC state: eight contiguous
-    /// 32-bit words (vectors 0..255), i.e. a 4-byte stride rather than the 16-byte MMIO stride.
+    /// Offset of the in-service register (ISR) in WHP's architectural local-APIC page.
     const APIC_ISR: usize = 0x100;
+    const APIC_REGISTER_STRIDE: usize = 0x10;
 
     let mut state: [u8; 4096] = [0; 4096];
     let mut written: u32 = 0;
@@ -1186,13 +1221,13 @@ fn lapic_eoi(handle: WHV_PARTITION_HANDLE, vector: u8) {
             Some(&mut written),
         )
     };
-    if got.is_err() || (written as usize) < APIC_ISR + 0x20 {
+    if got.is_err() || (written as usize) < APIC_ISR + 8 * APIC_REGISTER_STRIDE {
         return;
     }
 
     let reg: usize = usize::from(vector / 32);
     let bit: u32 = u32::from(vector % 32);
-    let off: usize = APIC_ISR + reg * 4;
+    let off: usize = APIC_ISR + reg * APIC_REGISTER_STRIDE;
     let mut word = u32::from_le_bytes([state[off], state[off + 1], state[off + 2], state[off + 3]]);
     if word & (1 << bit) == 0 {
         return;
@@ -1246,7 +1281,7 @@ fn set_registers(handle: WHV_PARTITION_HANDLE, pairs: &[(WHV_REGISTER_NAME, u64)
 /// and the exact cadence no longer matters.
 fn spawn_timer_thread(
     handle: WHV_PARTITION_HANDLE,
-    timer_tick: Arc<AtomicBool>,
+    timer_pending: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -1257,7 +1292,7 @@ fn spawn_timer_thread(
             if stop.load(Ordering::SeqCst) {
                 break;
             }
-            timer_tick.store(true, Ordering::Release);
+            timer_pending.store(true, Ordering::Release);
             // SAFETY: `handle` identifies the still-live partition (the run loop joins this
             // thread before dropping it); cancelling a run is always safe.
             unsafe {
@@ -1272,9 +1307,9 @@ fn spawn_timer_thread(
 /// Runs on the vCPU thread. The tick is delivered as a fixed local-APIC interrupt at the vector
 /// the guest programmed the 8259 with; the guest's 8259 end-of-interrupt is completed with a
 /// matching local-APIC EOI in [`handle_io`], since a virtual-wire guest issues only the former.
-fn inject_irq0(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
+fn inject_irq0(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) -> bool {
     let Some(vector) = pic.raise_irq0() else {
-        return;
+        return false;
     };
     let interrupt: WHV_INTERRUPT_CONTROL = WHV_INTERRUPT_CONTROL {
         // Type = Fixed, DestinationMode = Physical, TriggerMode = Edge (all zero).
@@ -1293,6 +1328,24 @@ fn inject_irq0(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
     if let Err(e) = result {
         pic.cancel_irq(0);
         error!("timer: WHvRequestInterrupt failed for IRQ0 vector {vector:#04x}: {e}");
+        return false;
+    }
+    true
+}
+
+fn service_timer_irq(
+    timer_pending: &AtomicBool,
+    pic: &mut Pic,
+    handle: WHV_PARTITION_HANDLE,
+) -> bool {
+    if !timer_pending.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    if inject_irq0(pic, handle) {
+        true
+    } else {
+        timer_pending.store(true, Ordering::Release);
+        false
     }
 }
 
@@ -1301,9 +1354,9 @@ fn inject_irq0(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
 /// local-APIC EOI in [`handle_io`], exactly like the timer's IRQ0. When the line is masked (the
 /// guest is mid-handler) the injection is skipped; the device keeps its `interrupt_status`
 /// asserted and [`service_nic_irq`] retries on the next event/tick, so the notification is not lost.
-fn inject_net_irq(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
+fn inject_net_irq(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) -> bool {
     let Some(vector) = pic.raise_irq(net::NET_IRQ as u8) else {
-        return;
+        return false;
     };
     let interrupt: WHV_INTERRUPT_CONTROL = WHV_INTERRUPT_CONTROL {
         _bitfield: 0,
@@ -1324,18 +1377,56 @@ fn inject_net_irq(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
             "virt-net: WHvRequestInterrupt failed for IRQ{} vector {vector:#04x}: {e}",
             net::NET_IRQ
         );
+        return false;
     }
+    true
 }
 
 /// Injects the NIC's IRQ if the device currently has an unacknowledged interrupt asserted. Called
 /// on interrupt-relevant events (a receive-pump wake, a transmit notification, and each timer
 /// tick) rather than every loop iteration, so it neither spins nor starves the receive pump of the
 /// device lock.
-fn service_nic_irq(nic: &Option<Nic>, pic: &mut Pic, handle: WHV_PARTITION_HANDLE) {
+fn service_nic_irq(nic: &Option<Nic>, pic: &mut Pic, handle: WHV_PARTITION_HANDLE) -> bool {
     if let Some(n) = nic
         && n.dev.lock().expect("virt-net poisoned").irq_asserted()
     {
-        inject_net_irq(pic, handle);
+        return inject_net_irq(pic, handle);
+    }
+    false
+}
+
+fn service_pending_irqs(
+    timer_pending: &AtomicBool,
+    nic: &Option<Nic>,
+    pic: &mut Pic,
+    handle: WHV_PARTITION_HANDLE,
+    prefer_timer: &mut bool,
+) {
+    let timer_waiting = timer_pending.load(Ordering::Acquire);
+    let nic_waiting = nic.as_ref().is_some_and(|n| {
+        n.dev.lock().expect("virt-net poisoned").irq_asserted()
+    });
+
+    if timer_waiting && nic_waiting {
+        if *prefer_timer {
+            if service_timer_irq(timer_pending, pic, handle) {
+                *prefer_timer = false;
+            } else if service_nic_irq(nic, pic, handle) {
+                *prefer_timer = true;
+            }
+        } else {
+            if service_nic_irq(nic, pic, handle) {
+                *prefer_timer = true;
+            } else if service_timer_irq(timer_pending, pic, handle) {
+                *prefer_timer = false;
+            }
+        }
+    } else if timer_waiting {
+        if service_timer_irq(timer_pending, pic, handle) {
+            *prefer_timer = false;
+        }
+    } else if nic_waiting && service_nic_irq(nic, pic, handle) {
+        *prefer_timer = true;
     }
 }
 

@@ -10,6 +10,7 @@
 use ::core::ffi::c_void;
 use ::std::fs::{File, OpenOptions};
 use ::std::io::{BufReader, ErrorKind, Read, Write};
+use ::std::panic::{AssertUnwindSafe, catch_unwind};
 use ::std::pin::Pin;
 use ::std::sync::atomic::{
     AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
@@ -29,7 +30,7 @@ use ::windows::Win32::System::Threading::{
 };
 
 use crate::l2bridge::{L2BridgeConfig, MAX_AFXDP_MTU, MAX_EXTERNAL_QUEUES};
-use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters};
+use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters, FrameSend};
 
 const XDP_API_VERSION_2: u32 = 2;
 const XDP_CREATE_PROGRAM_GENERIC: u32 = 0x1;
@@ -43,6 +44,7 @@ const XSK_NOTIFY_WAIT_TX: u32 = 0x8;
 const XSK_RING_FLAG_ERROR: u32 = 0x1;
 const XSK_RING_FLAG_NEED_POKE: u32 = 0x2;
 const XSK_SOCKOPT_RX_HOOK_ID: u32 = 8;
+const XSK_SOCKOPT_STATISTICS: u32 = 7;
 const XSK_SOCKOPT_RX_ERROR: u32 = 10;
 const XSK_SOCKOPT_RX_FILL_ERROR: u32 = 11;
 const XSK_SOCKOPT_TX_ERROR: u32 = 12;
@@ -54,6 +56,7 @@ const TX_FRAME_COUNT: usize = 64;
 const RX_CHANNEL_DEPTH: usize = 256;
 const MAX_QUEUES_PER_WORKER: usize = 63;
 const HEALTH_POLL_INTERVAL_MS: u32 = 250;
+const DRIVER_STATS_INTERVAL: Duration = Duration::from_secs(1);
 const TX_BATCH: usize = 64;
 const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONTROL_MESSAGE: usize = 4096;
@@ -63,6 +66,8 @@ const STATE_STOPPED: u8 = 2;
 const STATE_FAILED: u8 = 3;
 const HRESULT_IO_PENDING: HResult = 0x8007_03e5_u32 as i32;
 const HRESULT_OPERATION_ABORTED: HResult = 0x8007_03e3_u32 as i32;
+const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+const ERROR_PIPE_BUSY: i32 = 231;
 
 type Handle = isize;
 type HResult = i32;
@@ -94,10 +99,16 @@ type XdpRssGetCapabilitiesFn =
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn LoadLibraryA(name: *const u8) -> Handle;
+    fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
     fn FreeLibrary(module: Handle) -> i32;
     fn CloseHandle(handle: Handle) -> i32;
+}
+
+#[link(name = "iphlpapi")]
+unsafe extern "system" {
+    fn ConvertInterfaceIndexToLuid(interface_index: u32, interface_luid: *mut u64) -> u32;
+    fn ConvertInterfaceLuidToIndex(interface_luid: *const u64, interface_index: *mut u32) -> u32;
 }
 
 #[repr(C)]
@@ -211,6 +222,15 @@ struct XskBufferDescriptor {
     reserved: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct XskStatistics {
+    rx_dropped: u64,
+    rx_truncated: u64,
+    rx_invalid_descriptors: u64,
+    tx_invalid_descriptors: u64,
+}
+
 /// The Agent-hosted control pipe. NVX is always the client.
 pub struct ControlPipe {
     reader: Mutex<BufReader<File>>,
@@ -229,10 +249,7 @@ impl ControlPipe {
                         writer: Mutex::new(file),
                     });
                 }
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::WouldBlock)
-                        && Instant::now() < deadline =>
-                {
+                Err(error) if retryable_pipe_error(&error) && Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => {
@@ -243,8 +260,12 @@ impl ControlPipe {
         }
     }
 
-    pub fn data_plane_ready(&self, queues: &[u32]) -> Result<()> {
-        self.write_message(json!({ "type": "DataPlaneReady", "queues": queues }))
+    pub fn data_plane_ready(&self, queues: &[u32], interface_luid: u64) -> Result<()> {
+        self.write_message(json!({
+            "type": "DataPlaneReady",
+            "queues": queues,
+            "interfaceLuid": interface_luid,
+        }))
     }
 
     pub fn data_plane_error(&self, message: &str) {
@@ -287,6 +308,11 @@ impl ControlPipe {
     }
 }
 
+fn retryable_pipe_error(error: &::std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::NotFound | ErrorKind::WouldBlock)
+        || error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartVm {
@@ -304,10 +330,10 @@ unsafe impl Sync for XdpApi {}
 
 impl XdpApi {
     fn load() -> Result<Arc<Self>> {
-        // The strings include their NUL terminators as required by LoadLibraryA/GetProcAddress.
-        let module = unsafe { LoadLibraryA(c"xdpapi.dll".as_ptr().cast()) };
+        let name = "xdpapi.dll\0".encode_utf16().collect::<Vec<_>>();
+        let module = unsafe { LoadLibraryExW(name.as_ptr(), 0, LOAD_LIBRARY_SEARCH_SYSTEM32) };
         if module == 0 {
-            bail!("loading xdpapi.dll failed; install signed XDP-for-Windows v1.3.0");
+            bail!("loading xdpapi.dll from System32 failed; install signed XDP-for-Windows v1.3.0");
         }
         let proc = unsafe { GetProcAddress(module, c"XdpOpenApi".as_ptr().cast()) };
         if proc.is_null() {
@@ -659,6 +685,8 @@ struct Queue {
     tx: Option<Ring>,
     tx_free: Vec<u64>,
     notify: Pin<Box<NotifyWait>>,
+    last_statistics: XskStatistics,
+    statistics_warning_emitted: bool,
 }
 
 impl Queue {
@@ -804,6 +832,8 @@ impl Queue {
                 Vec::new()
             },
             notify: NotifyWait::new()?,
+            last_statistics: XskStatistics::default(),
+            statistics_warning_emitted: false,
         };
         queue.refill_rx(&api)?;
         Ok(queue)
@@ -841,6 +871,67 @@ impl Queue {
             )?;
         }
         Ok(())
+    }
+
+    fn update_statistics(&mut self, api: &XdpApi, counters: &Counters) -> Result<()> {
+        let mut statistics = XskStatistics::default();
+        let mut len = size_of::<XskStatistics>() as u32;
+        check(
+            unsafe {
+                api.table().xsk_get_sockopt.unwrap()(
+                    self.socket.0,
+                    XSK_SOCKOPT_STATISTICS,
+                    (&mut statistics as *mut XskStatistics).cast(),
+                    &mut len,
+                )
+            },
+            "XSK_SOCKOPT_STATISTICS",
+        )?;
+        if len as usize != size_of::<XskStatistics>() {
+            bail!(
+                "AF_XDP queue {} returned invalid statistics size {len}",
+                self.queue_id
+            );
+        }
+        counters.driver_rx_dropped.fetch_add(
+            statistics
+                .rx_dropped
+                .wrapping_sub(self.last_statistics.rx_dropped),
+            Ordering::Relaxed,
+        );
+        counters.driver_rx_truncated.fetch_add(
+            statistics
+                .rx_truncated
+                .wrapping_sub(self.last_statistics.rx_truncated),
+            Ordering::Relaxed,
+        );
+        counters.driver_rx_invalid.fetch_add(
+            statistics
+                .rx_invalid_descriptors
+                .wrapping_sub(self.last_statistics.rx_invalid_descriptors),
+            Ordering::Relaxed,
+        );
+        counters.driver_tx_invalid.fetch_add(
+            statistics
+                .tx_invalid_descriptors
+                .wrapping_sub(self.last_statistics.tx_invalid_descriptors),
+            Ordering::Relaxed,
+        );
+        self.last_statistics = statistics;
+        self.statistics_warning_emitted = false;
+        Ok(())
+    }
+
+    fn refresh_statistics(&mut self, api: &XdpApi, counters: &Counters) {
+        if let Err(error) = self.update_statistics(api, counters)
+            && !self.statistics_warning_emitted
+        {
+            log::warn!(
+                "virt-net: AF_XDP queue {} statistics unavailable: {error:#}",
+                self.queue_id
+            );
+            self.statistics_warning_emitted = true;
+        }
     }
 
     fn check_ring_error(&self, api: &XdpApi, ring: &Ring, option: u32, name: &str) -> Result<()> {
@@ -956,26 +1047,13 @@ impl Queue {
                     self.umem.len()
                 );
             }
-            if descriptor.length < 14 {
-                log::error!(
-                    "virt-net: AF_XDP RX queue {} rejected short frame raw={:#x} offset={} length={}",
-                    self.queue_id,
-                    descriptor.address_and_offset,
-                    offset,
-                    descriptor.length,
-                );
-                counters.rx_dropped.fetch_add(1, Ordering::Relaxed);
-            } else if quiescing {
+            if descriptor.length < 14 || quiescing {
                 counters.rx_dropped.fetch_add(1, Ordering::Relaxed);
             } else {
                 let frame = &self.umem[offset..end];
                 if out.try_send(frame.to_vec()).is_ok() {
                     counters.rx_received.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    log::error!(
-                        "virt-net: AF_XDP RX queue {} dropped a frame because the guest channel is full",
-                        self.queue_id
-                    );
                     counters.rx_dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -1053,6 +1131,10 @@ struct Counters {
     rx_received: AtomicU64,
     rx_dropped: AtomicU64,
     errors: AtomicU64,
+    driver_rx_dropped: AtomicU64,
+    driver_rx_truncated: AtomicU64,
+    driver_rx_invalid: AtomicU64,
+    driver_tx_invalid: AtomicU64,
 }
 
 struct SharedState {
@@ -1075,6 +1157,10 @@ impl SharedState {
                 rx_received: AtomicU64::new(0),
                 rx_dropped: AtomicU64::new(0),
                 errors: AtomicU64::new(0),
+                driver_rx_dropped: AtomicU64::new(0),
+                driver_rx_truncated: AtomicU64::new(0),
+                driver_rx_invalid: AtomicU64::new(0),
+                driver_tx_invalid: AtomicU64::new(0),
             },
             failure: Mutex::new(None),
         })
@@ -1226,7 +1312,7 @@ impl Afxdp {
 }
 
 impl FrameBackend for Afxdp {
-    fn try_send(&self, frame: Vec<u8>) -> bool {
+    fn try_send(&self, frame: Vec<u8>) -> FrameSend {
         if self.shared.state.load(Ordering::Acquire) != STATE_READY
             || frame.len() < 14
             || frame.len() > self.max_frame_size
@@ -1235,7 +1321,7 @@ impl FrameBackend for Afxdp {
                 .counters
                 .tx_dropped
                 .fetch_add(1, Ordering::Relaxed);
-            return false;
+            return FrameSend::Dropped;
         }
         self.shared.inflight.fetch_add(1, Ordering::AcqRel);
         match self.tx_sender.try_send(frame) {
@@ -1248,15 +1334,19 @@ impl FrameBackend for Afxdp {
                     self.shared
                         .fail(format!("failed to wake AF_XDP TX dispatcher: {error:#}"));
                 }
-                true
+                FrameSend::Accepted
             }
-            Err(_) => {
+            Err(::std::sync::mpsc::TrySendError::Full(_)) => {
+                self.shared.inflight.fetch_sub(1, Ordering::AcqRel);
+                FrameSend::Backpressure
+            }
+            Err(::std::sync::mpsc::TrySendError::Disconnected(_)) => {
                 self.shared.inflight.fetch_sub(1, Ordering::AcqRel);
                 self.shared
                     .counters
                     .tx_dropped
                     .fetch_add(1, Ordering::Relaxed);
-                false
+                FrameSend::Dropped
             }
         }
     }
@@ -1289,6 +1379,26 @@ impl FrameBackend for Afxdp {
             guest_rx_received: self.shared.counters.rx_received.load(Ordering::Relaxed),
             guest_rx_dropped: self.shared.counters.rx_dropped.load(Ordering::Relaxed),
             backend_errors: self.shared.counters.errors.load(Ordering::Relaxed),
+            driver_rx_dropped: self
+                .shared
+                .counters
+                .driver_rx_dropped
+                .load(Ordering::Relaxed),
+            driver_rx_truncated: self
+                .shared
+                .counters
+                .driver_rx_truncated
+                .load(Ordering::Relaxed),
+            driver_rx_invalid_descriptors: self
+                .shared
+                .counters
+                .driver_rx_invalid
+                .load(Ordering::Relaxed),
+            driver_tx_invalid_descriptors: self
+                .shared
+                .counters
+                .driver_tx_invalid
+                .load(Ordering::Relaxed),
         }
     }
     fn quiesce(&self, timeout: Duration) -> Result<()> {
@@ -1344,16 +1454,25 @@ fn worker(
     control: Arc<Event>,
     shared: Arc<SharedState>,
 ) {
-    if let Err(error) = worker_loop(
-        &api,
-        &mut queues,
-        input.as_ref(),
-        &output,
-        &control,
-        &shared,
-    ) && !shared.stop.load(Ordering::Acquire)
-    {
-        shared.fail(format!("AF_XDP dispatcher failed: {error:#}"));
+    match catch_unwind(AssertUnwindSafe(|| {
+        worker_loop(
+            &api,
+            &mut queues,
+            input.as_ref(),
+            &output,
+            &control,
+            &shared,
+        )
+    })) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if !shared.stop.load(Ordering::Acquire) => {
+            shared.fail(format!("AF_XDP dispatcher failed: {error:#}"));
+        }
+        Err(_) => shared.fail("AF_XDP dispatcher panicked"),
+        _ => {}
+    }
+    for queue in &mut queues {
+        queue.refresh_statistics(&api, &shared.counters);
     }
     for queue in &mut queues {
         if let Err(error) = queue.cancel_notify(&api) {
@@ -1374,6 +1493,7 @@ fn worker_loop(
     shared: &SharedState,
 ) -> Result<()> {
     let mut pending_tx = None;
+    let mut next_statistics = Instant::now();
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return Ok(());
@@ -1386,6 +1506,12 @@ fn worker_loop(
                 queue.poke_tx_if_needed(api)?;
             }
             queue.receive(api, output, &shared.counters, quiescing)?;
+        }
+        if Instant::now() >= next_statistics {
+            for queue in queues.iter_mut() {
+                queue.refresh_statistics(api, &shared.counters);
+            }
+            next_statistics = Instant::now() + DRIVER_STATS_INTERVAL;
         }
 
         if let Some(input) = input {
@@ -1537,6 +1663,33 @@ fn check(status: HResult, operation: &str) -> Result<()> {
     Ok(())
 }
 
+fn interface_luid(interface_index: u32) -> Result<u64> {
+    let mut luid = 0_u64;
+    let status = unsafe { ConvertInterfaceIndexToLuid(interface_index, &mut luid) };
+    if status != 0 {
+        bail!("ConvertInterfaceIndexToLuid({interface_index}) failed with Win32 status {status}");
+    }
+    Ok(luid)
+}
+
+fn validate_interface_identity(interface_index: u32, expected_luid: u64) -> Result<u64> {
+    if expected_luid != 0 {
+        let mut observed_index = 0_u32;
+        let status = unsafe { ConvertInterfaceLuidToIndex(&expected_luid, &mut observed_index) };
+        if status != 0 {
+            bail!("ConvertInterfaceLuidToIndex({expected_luid}) failed with Win32 status {status}");
+        }
+        if observed_index != interface_index {
+            bail!(
+                "network interface LUID {expected_luid} maps to index {observed_index}, expected {interface_index}"
+            );
+        }
+        return Ok(expected_luid);
+    }
+    let observed = interface_luid(interface_index)?;
+    Ok(observed)
+}
+
 fn frame_layout(mtu: u32) -> Result<(usize, usize)> {
     if mtu > MAX_AFXDP_MTU {
         bail!("device.mtu {mtu} exceeds the AF_XDP {MAX_AFXDP_MTU}-byte frame limit");
@@ -1582,9 +1735,12 @@ fn initialize_queues<T>(
 pub struct BackendStart {
     pub backend: Arc<dyn FrameBackend>,
     pub queues: Vec<u32>,
+    pub interface_luid: u64,
 }
 
 pub fn start(config: &L2BridgeConfig) -> Result<BackendStart> {
+    let expected_luid = config.attachment.interface_luid;
+    validate_interface_identity(config.attachment.interface_index, expected_luid)?;
     let (max_frame_size, chunk_size) = frame_layout(config.device.mtu)?;
     let api = XdpApi::load()?;
     let selected = &config.attachment.queue_selection;
@@ -1613,10 +1769,13 @@ pub fn start(config: &L2BridgeConfig) -> Result<BackendStart> {
         total_umem as f64 / (1024.0 * 1024.0),
     );
     let guard = create_tx_guard(&api, config.attachment.interface_index)?;
+    let observed_luid =
+        validate_interface_identity(config.attachment.interface_index, expected_luid)?;
     let backend: Arc<dyn FrameBackend> = Afxdp::new(api, guard, queues, max_frame_size)?;
     Ok(BackendStart {
         backend,
         queues: ids,
+        interface_luid: observed_luid,
     })
 }
 
@@ -1630,6 +1789,7 @@ mod tests {
         assert_eq!(size_of::<XdpRssCapabilities>(), 28);
         assert_eq!(size_of::<XskUmemReg>(), 24);
         assert_eq!(size_of::<XskBufferDescriptor>(), 16);
+        assert_eq!(size_of::<XskStatistics>(), 32);
         assert_eq!(size_of::<XskRingInfo>(), 40);
         assert_eq!(size_of::<XskRingInfoSet>(), 160);
         assert_eq!(size_of::<XdpMatchPattern>(), 40);
@@ -1722,5 +1882,12 @@ mod tests {
         let command: StartVm = ::serde_json::from_str(r#"{"type":"StartVm"}"#).unwrap();
         assert_eq!(command.kind, "StartVm");
         assert!(::serde_json::from_str::<StartVm>(r#"{"type":"StartVm","extra":true}"#).is_err());
+    }
+
+    #[test]
+    fn busy_named_pipe_is_retryable() {
+        assert!(retryable_pipe_error(&::std::io::Error::from_raw_os_error(
+            ERROR_PIPE_BUSY
+        )));
     }
 }
