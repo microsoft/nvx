@@ -219,6 +219,7 @@ Both make and `scripts/nvx.py` read these overridable variables from the environ
 | `KVER`                                 | `6.18.38`                               | `build-kernel` (kernel version)                    |
 | `AVER` / `ABRANCH`                     | `3.24.1` / `v3.24`                      | the initramfs builders (Alpine version)            |
 | `MEM`, `N`, `SNAP`, `KERNEL`, `INITRD` | (see `scripts/nvx.py --help`)           | run, snapshot, and benchmark commands              |
+| `NVX_ARTIFACT_DIR`                     | `$HOME/build` (Linux)                   | default Linux snapshot and artifact directory      |
 
 All helper workflows use one cross-platform command surface. Run
 `python3 scripts/nvx.py <command> --help` on Linux or `python scripts\nvx.py <command> --help`

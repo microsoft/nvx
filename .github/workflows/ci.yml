@@ -160,6 +160,7 @@ jobs:
           rm -rf "$HOME/.cargo/registry" "$HOME/.cargo/git"
           mkdir -p "$RUNNER_TEMP/cargo-home"
           echo "CARGO_HOME=$RUNNER_TEMP/cargo-home" >> "$GITHUB_ENV"
+          echo "NVX_ARTIFACT_DIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -248,7 +249,10 @@ jobs:
         run: |
           set -euo pipefail
           if sudo -n true 2>/dev/null; then
-            output=$(python3 scripts/nvx.py bench-net-snapshot-py 2>&1)
+            if ! output=$(python3 scripts/nvx.py bench-net-snapshot-py 2>&1); then
+              printf '%s\n' "$output"
+              exit 1
+            fi
             printf '%s\n' "$output"
             if grep -q 'NO DATA' <<<"$output"; then
               echo 'networked Python benchmark produced no data' >&2

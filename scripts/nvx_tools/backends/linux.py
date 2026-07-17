@@ -21,7 +21,9 @@ class LinuxBackend(HostBackend):
         super().__init__(
             name="linux-kvm",
             executable_suffix="",
-            artifact_dir=Path.home() / "build",
+            artifact_dir=Path(
+                os.environ.get("NVX_ARTIFACT_DIR", Path.home() / "build")
+            ),
             clocksource="kvm-clock",
             supports_vcpus=True,
         )

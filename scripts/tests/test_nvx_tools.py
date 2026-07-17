@@ -53,6 +53,12 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(windows.clocksource, "tsc")
         self.assertFalse(windows.supports_vcpus)
 
+    def test_linux_artifact_root_can_use_runner_scratch(self) -> None:
+        with patch.dict(os.environ, {"NVX_ARTIFACT_DIR": "/runner/temp"}):
+            backend = LinuxBackend()
+
+        self.assertEqual(backend.artifact_dir, Path("/runner/temp"))
+
     def test_network_snapshot_keeps_256_mib_default(self) -> None:
         args = build_parser().parse_args(["bench-net-snapshot"])
 
