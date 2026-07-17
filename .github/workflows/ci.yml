@@ -72,6 +72,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Reclaim stale Docker build cache
+        run: docker builder prune --all --force --filter until=168h
+
       - name: Cache kernel + initramfs
         id: cache-base
         uses: actions/cache@v5
