@@ -267,6 +267,7 @@ Run directly:
 | `--defer-stdin-until-boot` |                                            | Delay redirected cold-boot input until the boot marker; terminals/restores remain immediate      |
 | `--snapshot <dir>`      |                                               | Take a snapshot into `<dir>` when the guest requests one, then exit                              |
 | `--restore <dir>`       |                                               | Restore and resume from a snapshot `<dir>` instead of booting                                    |
+| `--restore-ready-pipe <pipe>` |                                          | WHP-only Agent pipe signaled after snapshot and device restoration                               |
 | `--mount <dir>`         |                                               | Export a host directory to the guest as a virt-fs (read-only SquashFS by default)                |
 | `--mount-target <path>` | `/mnt/host`                                   | Guest mount point for `--mount`                                                                  |
 | `--mount-rw`            |                                               | Mount the `--mount` export read-write (ext4); ephemeral without `--mount-image`                  |

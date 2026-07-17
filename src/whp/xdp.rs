@@ -272,6 +272,10 @@ impl ControlPipe {
         let _ = self.write_message(json!({ "type": "DataPlaneError", "message": message }));
     }
 
+    pub fn restore_ready(&self) -> Result<()> {
+        self.write_message(json!({ "type": "RestoreReady" }))
+    }
+
     pub fn wait_start_vm(&self) -> Result<()> {
         let mut reader = self.reader.lock().expect("control pipe reader poisoned");
         let mut bytes = Vec::with_capacity(MAX_CONTROL_MESSAGE);

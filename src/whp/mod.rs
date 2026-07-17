@@ -127,6 +127,8 @@ pub struct Config {
     pub snapshot: Option<PathBuf>,
     /// Directory to restore the VM from instead of cold-booting a kernel.
     pub restore: Option<PathBuf>,
+    /// Agent-hosted pipe signaled after snapshot and device state are restored.
+    pub restore_ready_pipe: Option<String>,
     /// Optional virt-net endpoint (`--net`): the guest IP/prefix and derived host gateway.
     pub net: Option<NetConfig>,
     /// Optional external L2Bridge data-plane contract (`--net-config`).
@@ -756,6 +758,10 @@ fn execute(
     let mut exit: WHV_RUN_VP_EXIT_CONTEXT = WHV_RUN_VP_EXIT_CONTEXT::default();
     let mut run_err: Option<::anyhow::Error> = None;
     let mut prefer_timer = true;
+    if let Some(path) = cfg.restore_ready_pipe.as_deref() {
+        let pipe = xdp::ControlPipe::connect(path)?;
+        pipe.restore_ready()?;
+    }
 
     loop {
         // Flush buffered console output before re-entering the guest. The portb console is

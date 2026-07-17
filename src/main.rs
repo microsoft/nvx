@@ -104,6 +104,10 @@ struct Args {
     #[arg(long)]
     restore: Option<PathBuf>,
 
+    /// Windows named pipe used to report that snapshot state and devices are fully restored.
+    #[arg(long, value_name = "PIPE", requires = "restore")]
+    restore_ready_pipe: Option<String>,
+
     /// Export this host directory to the guest as a filesystem, mounted at `--mount-target`.
     /// Read-only (SquashFS) by default; pass `--mount-rw` (or `--mount-image`) to mount it
     /// read-write (ext4). Surfaced in the guest as an MTD/block device.
@@ -236,6 +240,9 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net_config.is_some() {
         bail!("--net-config is only available on the Windows/WHP backend");
     }
+    if args.restore_ready_pipe.is_some() {
+        bail!("--restore-ready-pipe is only available on the Windows/WHP backend");
+    }
     // Parse the optional virt-net endpoint (guest IP/prefix), deriving the host gateway.
     let net: Option<net::NetConfig> = match &args.net {
         Some(spec) => Some(net::NetConfig::parse(spec)?),
@@ -312,6 +319,7 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
         defer_stdin_until_boot: args.defer_stdin_until_boot,
         snapshot: args.snapshot,
         restore: args.restore,
+        restore_ready_pipe: args.restore_ready_pipe,
         net,
         net_config,
         mount: args.mount,
