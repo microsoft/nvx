@@ -31,9 +31,9 @@ repo:
 
 - **the VMM** — `src/` (Rust);
 - **the modified kernel** — `kernel/` (a minimal `config` + the `patches/` that add the
-  `0xE9` earlycon), built from vanilla LTS source that `scripts/build-kernel.sh` downloads;
+  `0xE9` earlycon), built from vanilla LTS source by `python3 scripts/nvx.py build-kernel`;
 - **Alpine** — `alpine/` (the RAM `init`), packed onto the official Alpine mini root
-  filesystem that `scripts/build-initramfs.sh` downloads.
+  filesystem by `python3 scripts/nvx.py build-initramfs`.
 
 Nothing is prebuilt: `make world` fetches the kernel and Alpine sources and builds all three.
 
@@ -116,19 +116,20 @@ uid=0(root) gid=0(root)
 | `src/whp/virtfs.rs`                           | *(Windows/WHP)* virt-fs (`--mount`): a FAT image built in pure Rust (`fatfs`), mapped above RAM via `WHvMapGpaRange`; the guest mounts it as `vfat`                                                                                                                                            |
 | `docker/Dockerfile`                           | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows)                                                                                                                                                                                              |
 | `kernel/config-microvm`                       | Minimal Linux kernel configuration                                                                                                                                                                                                                                                             |
-| `kernel/hvc_xe9.c`                            | The portb `hvc0` console driver (installed into the tree by `build-kernel.sh`)                                                                                                                                                                                                                 |
+| `kernel/hvc_xe9.c`                            | The portb `hvc0` console driver (installed into the tree by the Python kernel builder)                                                                                                                                                                                                         |
 | `kernel/patches/`                             | Kernel source modifications (the `0xE9` earlycon)                                                                                                                                                                                                                                              |
 | `alpine/init`                                 | PID 1 for the RAM initramfs                                                                                                                                                                                                                                                                    |
 | `alpine/init.python`                          | PID 1 for the Python initramfs (runs `pyapp=<file>`, default `hello.py`)                                                                                                                                                                                                                       |
 | `alpine/hello.py`, `alpine/repl.py`           | Python snapshot apps: pandas/numpy benchmark and interactive REPL                                                                                                                                                                                                                              |
 | `alpine/net-hello.py`, `alpine/net-pandas.py` | Networked Python snapshot apps: a bare interpreter and a warmed numpy/pandas app that prove the NIC works after restore                                                                                                                                                                        |
-| `scripts/*.sh`                                | Kernel / initramfs build and run helpers; `build-linux-artifacts.sh` drives the Docker build                                                                                                                                                                                                   |
-| `scripts/*.ps1`                               | Windows helpers: Docker artifact builds, the `run.ps1` launcher, the `test-boot.ps1` smoke test, and PowerShell mirrors of every benchmark script                                                                                                                                             |
+| `scripts/nvx.py`                              | Cross-platform entry point for build, run, smoke-test, snapshot, and benchmark workflows                                                                                                                                                                                                      |
+| `scripts/nvx_tools/`                          | Shared Python workflow logic plus explicit Linux/KVM and Windows/WHP host backends                                                                                                                                                                                                             |
+| `scripts/performance.py`                      | Performance log collection, history persistence, and regression gating                                                                                                                                                                                                                        |
 
 ## The kernel ("modified Alpine kernel")
 
 `kernel/config-microvm` is a minimal x86_64 configuration built from the vanilla LTS source that
-Alpine's `linux-lts` tracks. `scripts/build-kernel.sh` downloads the matching kernel source,
+Alpine's `linux-lts` tracks. `python3 scripts/nvx.py build-kernel` downloads the matching source,
 applies the modification in `kernel/patches/`, drops in this config, and builds an uncompressed
 `vmlinux` carrying the PVH entry note.
 
@@ -163,13 +164,13 @@ see [the "portb" strategy](#the-portb-strategy-mirroring-nanvix).
 
 ## The initramfs (RAM filesystem)
 
-`scripts/build-initramfs.sh` unpacks the official Alpine mini root filesystem, installs
+`python3 scripts/nvx.py build-initramfs` unpacks the official Alpine mini root filesystem, installs
 `alpine/init` as PID 1 (it mounts `proc`/`sys`/`dev`/`tmpfs` and execs a shell), and packs it
 as a gzipped `newc` cpio archive. The whole userland lives in RAM.
 
 ## Building and running
 
-Requirements: a Linux host with `/dev/kvm` accessible to your user, a stable Rust toolchain
+Requirements: Python 3.10+, a Linux host with `/dev/kvm` accessible to your user, a stable Rust toolchain
 (edition 2024), and — for building the kernel — `flex`, `bison`, `libelf-dev`, `bc`, `cpio`,
 `patch`.
 
@@ -189,34 +190,41 @@ make run            # boot Alpine to an interactive shell over the portb console
 | `release`          | Build the VMM in release mode → `target/release/microvm`.                                           |
 | `build`            | Build the VMM in debug mode.                                                                        |
 | `test`             | Run the unit tests (`cargo test --release`; no KVM required).                                       |
-| `kernel`           | Download + patch + build the PVH `vmlinux` → `$(KERNEL_IMG)` (`scripts/build-kernel.sh`, ~minutes). |
-| `initramfs`        | Build the Alpine RAM rootfs → `$(BUILD_DIR)/initramfs.cpio.gz` (`scripts/build-initramfs.sh`).      |
-| `python-initramfs` | Build a rootfs with CPython + pandas/numpy → `$(PY_INITRD)` (`scripts/build-python-initramfs.sh`).  |
-| `run`, `boot`      | Boot Alpine to an interactive shell over the portb console (`scripts/run.sh`).                      |
+| `kernel`           | Download + patch + build the PVH `vmlinux` → `$(KERNEL_IMG)`.                                      |
+| `initramfs`        | Build the Alpine RAM rootfs → `$(BUILD_DIR)/initramfs.cpio.gz`.                                    |
+| `python-initramfs` | Build a rootfs with CPython + pandas/numpy → `$(PY_INITRD)`.                                       |
+| `run`, `boot`      | Boot Alpine to an interactive shell over the portb console.                                       |
 | `selftest`         | Run the protected-mode self-test through the real PVH entry path and exit.                          |
-| `boot-test`        | End-to-end: boot and assert the guest reaches userspace (`scripts/test-boot.sh`).                   |
-| `measure`          | Cold-start measurements (`scripts/measure-coldstart.sh`).                                           |
-| `bench-virtfs`     | virt-fs throughput + persistent `--mount-image` round-trip (`scripts/bench-virtfs.sh`).             |
-| `snapshot-demo`    | pandas/numpy snapshot/restore benchmark (`scripts/snapshot-demo.sh`).                               |
-| `snapshot-boot`    | Resume an interactive Python interpreter from a snapshot (`scripts/snapshot-boot.sh`).              |
+| `boot-test`        | End-to-end: boot and assert the guest reaches userspace.                                            |
+| `measure`          | Cold-start measurements.                                                                             |
+| `bench-virtfs`     | virt-fs throughput + persistent `--mount-image` round-trip.                                         |
+| `snapshot-demo`    | pandas/numpy snapshot/restore benchmark.                                                             |
+| `snapshot-boot`    | Resume an interactive Python interpreter from a snapshot.                                          |
 | `clean`            | `cargo clean`.                                                                                      |
 
-`make kernel` / `initramfs` / `python-initramfs` always re-run their build script. `snapshot-demo`
+`make kernel` / `initramfs` / `python-initramfs` always re-run their Python workflow. `snapshot-demo`
 and `snapshot-boot` instead depend on the artifacts `$(KERNEL_IMG)` and `$(PY_INITRD)` via file
 rules that build **only when the artifact is missing** (and, for the Python initramfs, when its
 `alpine/` sources change), so they work from a clean tree without rebuilding what is already there.
 
-Both make and the scripts read these overridable variables from the environment:
+Both make and `scripts/nvx.py` read these overridable variables from the environment:
 
 | Variable                               | Default                                 | Used by                                            |
 | -------------------------------------- | --------------------------------------- | -------------------------------------------------- |
 | `CARGO`                                | `cargo`                                 | the `release` / `build` / `test` / `clean` targets |
 | `BUILD_DIR`                            | `$(HOME)/build`                         | where artifacts are written                        |
 | `KERNEL_IMG`                           | `$(BUILD_DIR)/vmlinux`                  | kernel artifact path                               |
+| `INITRD_IMG`                           | `$(BUILD_DIR)/initramfs.cpio.gz`        | base initramfs artifact path                       |
 | `PY_INITRD`                            | `$(BUILD_DIR)/initramfs-python.cpio.gz` | Python initramfs artifact path                     |
-| `KVER`                                 | `6.18.38`                               | `build-kernel.sh` (kernel version)                 |
-| `AVER` / `ABRANCH`                     | `3.24.1` / `v3.24`                      | the initramfs scripts (Alpine version)             |
-| `MEM`, `N`, `SNAP`, `KERNEL`, `INITRD` | (see each script)                       | `run.sh`, `snapshot-*.sh`, `measure-coldstart.sh`  |
+| `KVER`                                 | `6.18.38`                               | `build-kernel` (kernel version)                    |
+| `AVER` / `ABRANCH`                     | `3.24.1` / `v3.24`                      | the initramfs builders (Alpine version)            |
+| `MEM`, `N`, `SNAP`, `KERNEL`, `INITRD` | (see `scripts/nvx.py --help`)           | run, snapshot, and benchmark commands              |
+
+All helper workflows use one cross-platform command surface. Run
+`python3 scripts/nvx.py <command> --help` on Linux or `python scripts\nvx.py <command> --help`
+on Windows. Shared process, snapshot, parsing, and reporting logic lives in `scripts/nvx_tools/`;
+the `LinuxBackend` and `WindowsBackend` classes contain host paths, KVM/WHP capabilities, TAP
+cleanup, sparse-file accounting, and Linux-only tool requirements.
 
 
 Run directly:
@@ -281,7 +289,7 @@ Hypervisor Platform** instead of KVM. The kernel and initramfs still have to be 
 Linux container, then exports just those two files to the host via `docker build --output`:
 
 ```powershell
-scripts\build-linux-artifacts.ps1              # -> build\vmlinux, build\initramfs.cpio.gz
+python scripts\nvx.py build-linux-artifacts    # -> build\vmlinux, build\initramfs.cpio.gz
 ```
 
 Under the hood this is:
@@ -294,11 +302,11 @@ The kernel and initramfs stages build in parallel; the kernel compile is the lon
 minutes the first time; downloads and layers are cached afterwards). Override the versions with
 `-Kver`/`-Aver`/`-Abranch` (or the `KVER`/`AVER`/`ABRANCH` build args).
 
-The Python snapshot demos and `bench-net-snapshot-py.ps1` additionally need a Python initramfs
+The Python snapshot demos and `bench-net-snapshot-py` command additionally need a Python initramfs
 (CPython + numpy/pandas). Build it the same way (downloads the packages over the network):
 
 ```powershell
-scripts\build-python-initramfs.ps1             # -> build\initramfs-python.cpio.gz
+python scripts\nvx.py build-python-initramfs   # -> build\initramfs-python.cpio.gz
 ```
 
 ### 2. Build the VMM
@@ -307,16 +315,16 @@ scripts\build-python-initramfs.ps1             # -> build\initramfs-python.cpio.
 cargo build --release          # -> target\release\microvm.exe
 cargo test --release           # shared + WHP unit tests (no hypervisor required)
 .\target\release\microvm.exe --selftest    # validate the WHP protected-mode setup end-to-end
-scripts\test-boot.ps1          # boot Linux and assert that the guest reaches userspace
+python scripts\nvx.py test-boot              # boot Linux and assert that userspace is reached
 ```
 
-The boot smoke test mirrors `scripts/test-boot.sh`: it has a 90-second timeout and succeeds only
+The shared boot smoke test has a 90-second timeout and succeeds only
 after seeing `ALPINE-MICROVM-BOOT-OK` in guest output.
 
 ### 3. Boot
 
 ```powershell
-scripts\run.ps1                                  # boots build\vmlinux + build\initramfs.cpio.gz
+python scripts\nvx.py run                        # boots build\vmlinux + build\initramfs.cpio.gz
 # or, explicitly:
 .\target\release\microvm.exe `
     --kernel build\vmlinux --initrd build\initramfs.cpio.gz `
@@ -425,17 +433,18 @@ it as `vfat` (`CONFIG_VFAT_FS`), where the KVM backend uses SquashFS (read-only)
 
 ### Benchmarks
 
-The Linux benchmark shell scripts have PowerShell mirrors that reproduce the same methodology on the
-WHP backend (parsing the VMM's `cold-start:` / `restore:` timing line; no `sudo` or host TAP):
+The same Python commands run on KVM and WHP. Shared methodology parses the VMM's `cold-start:` /
+`restore:` lines; the selected backend supplies KVM TAP/ext4 behavior or WHP NAT/FAT behavior:
 
-| Script                              | Mirrors                    | Measures                                                                                            |
-| ----------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------- |
-| `scripts\measure-coldstart.ps1`     | `measure-coldstart.sh`     | cold-start (guest start → boot marker) across several console configs                               |
-| `scripts\bench-net-snapshot.ps1`    | `bench-net-snapshot.sh`    | networked cold boot vs. snapshot-restore to a live-NIC shell (user-mode NAT)                        |
-| `scripts\snapshot-demo.ps1`         | `snapshot-demo.sh`         | pandas/numpy cold boot vs. restore of a warmed interpreter                                          |
-| `scripts\snapshot-boot.ps1`         | `snapshot-boot.sh`         | resume an interactive Python REPL straight from a snapshot                                          |
-| `scripts\bench-net-snapshot-py.ps1` | `bench-net-snapshot-py.sh` | networked Python (bare + numpy/pandas) cold boot vs. restore, each verifying a real HTTP round-trip |
-| `scripts\bench-virtfs.ps1`          | `bench-virtfs.sh`          | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip (pure-Rust FAT, no `mke2fs`) |
+| Command                 | Measures                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| `measure-coldstart`     | cold-start (guest start → boot marker) across several console configurations                       |
+| `bench-net-snapshot`    | networked cold boot vs. snapshot restore to a live-NIC shell                                       |
+| `snapshot-demo`         | pandas/numpy cold boot vs. restore of a warmed interpreter                                          |
+| `snapshot-boot`         | resume an interactive Python REPL straight from a snapshot                                          |
+| `bench-net-snapshot-py` | networked Python (bare + numpy/pandas) cold vs. restore with a real HTTP round-trip                 |
+| `bench-virtfs`          | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip                             |
+| `bench-snapshot-shell`  | cold shell boot vs. shell-ready snapshot restore across memory sizes                              |
 
 CI records each merged commit's benchmark p50 values in `data/performance/`. On pull requests,
 `scripts/performance.py` compares each metric with the arithmetic mean of its latest 10 p50 values
@@ -443,12 +452,12 @@ on the PR's base branch. A regression greater than 40% fails the `Performance re
 lower latency and higher throughput are treated as improvements. Metrics without history are
 reported as warmups until a baseline exists. The workflow needs `contents: write` permission (and,
 if `main` is protected, a rule allowing `github-actions[bot]`) to persist the baseline commit.
-It also validates every shell and PowerShell helper, uses the platform boot-test scripts, and runs
+It compiles and unit-tests the shared Python tooling on both hosts, uses the shared boot test, and runs
 networked-Python plus interactive snapshot-boot smoke tests on both KVM and WHP.
 
-The three Python scripts need the Python initramfs (`build\initramfs-python.cpio.gz`); build it on
-Windows with `scripts\build-python-initramfs.ps1` (a Docker stage that downloads CPython +
-numpy/pandas). `bench-net-snapshot-py.ps1` also needs host Python for its helper server (the guest
+The Python workflows need the Python initramfs (`build\initramfs-python.cpio.gz`); build it on
+Windows with `python scripts\nvx.py build-python-initramfs` (a Docker stage that downloads CPython +
+numpy/pandas). `bench-net-snapshot-py` also uses its host Python process for a helper server (the guest
 GETs the gateway, which the NAT forwards to `127.0.0.1`).
 
 
@@ -505,7 +514,7 @@ The Nanvix Micro-VM sends guest console output one byte at a time to a dedicated
 (`0xE9`), so each character is a single `outb` — one VM exit — instead of the 8250 UART's
 *read line-status + write data* (two exits, plus a poll loop). This VMM makes that its **only**
 console: a bidirectional **"portb" console** backed by the in-kernel `hvc0` driver
-(`kernel/hvc_xe9.c`, installed by `scripts/build-kernel.sh`). Output is one `outb` to `0xE9`;
+(`kernel/hvc_xe9.c`, installed by `scripts/nvx.py build-kernel`). Output is one `outb` to `0xE9`;
 input is polled from `0xEA` (status) and `0xE9` (data). The `earlycon=xe9` driver
 (`kernel/patches/`) provides the earliest boot logs on the same port before `hvc0` takes over:
 
@@ -621,7 +630,7 @@ the ext4 image when the guest needs room to write beyond the seeded contents.
 
 ### Benchmark (`make bench-virtfs`)
 
-`scripts/bench-virtfs.sh` measures guest-observed sequential throughput to the mount (busybox
+`python3 scripts/nvx.py bench-virtfs` measures guest-observed sequential throughput to the mount (busybox
 `dd`, `conv=fsync` writes) for a read-write export that is *ephemeral* (`--mount-rw`) versus
 *persistent* (`--mount-image`), and runs a **persistence round-trip** on a persistent image:
 create + write a payload, then reuse the image across cold boots and verify (by checksum) that the
@@ -707,7 +716,7 @@ the snapshot, recreates the TAP with the **same MAC** (derived from the gateway 
 ARP entry for the gateway stays valid) and address, re-registers the `irqfd`, and re-arms the
 receive thread — no `--net` needs to be given on the restore command line.
 
-`scripts/bench-net-snapshot.sh` (`make bench-net-snapshot`) measures this: cold-booting to a
+`python3 scripts/nvx.py bench-net-snapshot` (`make bench-net-snapshot`) measures this: cold-booting to a
 **working-network** shell versus **restoring** one from a snapshot of a warmed, network-configured
 guest (the guest re-pings the host over the recreated TAP before the timing marker, so a restore
 that reaches the marker has proven the link works). Resuming a networked guest reaches a live link
@@ -738,7 +747,7 @@ with a per-run TAP versus **~89 ms** attaching to a pre-created one.
 
 #### Networked Python workloads (`make bench-net-snapshot-py`)
 
-`scripts/bench-net-snapshot-py.sh` runs the same idea with real workloads on the Python initramfs:
+`python3 scripts/nvx.py bench-net-snapshot-py` runs the same idea with real workloads on the Python initramfs:
 `alpine/net-hello.py` (a bare CPython interpreter) and `alpine/net-pandas.py` (a warmed
 numpy/pandas interpreter). Each app configures nothing itself — PID 1 (`alpine/init.python`) brings
 the NIC up — then does a real **HTTP GET to the host** (a helper server the script runs) to prove

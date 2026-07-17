@@ -10,3 +10,5 @@ LICENSE
 Cargo.toml
 Cargo.lock
 Makefile
+__pycache__/
+*.py[cod]

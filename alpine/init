@@ -41,7 +41,7 @@ if [ -n "$nip" ]; then
         echo "virtnet: no network interface found" >&2
     fi
 fi
-# netsnap: optional snapshot self-test/benchmark for --net (see scripts/bench-net-snapshot.sh).
+# netsnap: optional snapshot self-test/benchmark for --net (see `scripts/nvx.py bench-net-snapshot`).
 # When the kernel command line contains "netsnap", check the link, then ask the VMM to take a
 # snapshot (one outb to I/O port 0x605 via /dev/port). On the snapshot run the VMM captures here
 # and exits; on a later restore, execution resumes at the next line -- so the guest re-checks the
@@ -67,7 +67,7 @@ case " $(cat /proc/cmdline) " in
         ;;
 esac
 # shellsnap: optional cold-vs-snapshot benchmark for the plain shell (see
-# scripts/bench-snapshot-shell.sh). When the kernel command line contains "shellsnap", ask the VMM
+# `scripts/nvx.py bench-snapshot-shell`). When the kernel command line contains "shellsnap", ask the VMM
 # to take a snapshot (one outb to I/O port 0x605 via /dev/port) just before the boot banner below.
 # On the snapshot run the VMM captures here and exits; on a later restore, execution resumes at the
 # next line and falls through to the banner -- the same marker the benchmark times on a cold boot.

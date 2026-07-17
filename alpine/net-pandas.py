@@ -13,8 +13,8 @@ import socket
 import numpy as np
 import pandas as pd
 
-# Host HTTP port the benchmark's helper server listens on (see scripts/bench-net-snapshot-py.sh).
-PORT = 8099
+# Host HTTP port the benchmark's helper server listens on.
+DEFAULT_PORT = 8099
 
 
 def gateway():
@@ -28,6 +28,17 @@ def gateway():
     return "10.0.0.1"
 
 
+def helper_port():
+    """The host helper port, taken from the optional benchmark command-line token."""
+    try:
+        for tok in open("/proc/cmdline").read().split():
+            if tok.startswith("netbench_port="):
+                return int(tok.split("=", 1)[1])
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_PORT
+
+
 def is_cold_measurement():
     """True when the benchmark wants one cold-path link check without taking a snapshot."""
     try:
@@ -36,7 +47,7 @@ def is_cold_measurement():
         return False
 
 
-def link_ok(host, port=PORT, timeout=3, attempts=3):
+def link_ok(host, port, timeout=3, attempts=3):
     """True if a real HTTP request to the host over the NIC round-trips."""
     for _ in range(attempts):
         try:
@@ -61,9 +72,10 @@ def work():
 
 
 gw = gateway()
+port = helper_port()
 if not is_cold_measurement():
     work()       # warm the numpy/pandas hot paths before snapshotting
-    link_ok(gw)  # warm the link (ARP + a round-trip)
+    link_ok(gw, port)  # warm the link (ARP + a round-trip)
     try:
         fd = os.open("/dev/port", os.O_WRONLY)
         os.lseek(fd, 0x605, os.SEEK_SET)
@@ -74,5 +86,5 @@ if not is_cold_measurement():
 
 # ---- on restore, execution resumes here ----
 result = work()
-ok = link_ok(gw)
+ok = link_ok(gw, port)
 print("PANDASPY-NET %s %s" % ("OK" if ok else "FAIL", result))

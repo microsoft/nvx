@@ -1,0 +1,491 @@
+"""Shared VM launch and smoke-test workflows."""
+
+from __future__ import annotations
+
+import re
+import shutil
+import statistics
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable, Sequence
+
+from .backends.base import HostBackend
+from .common import (
+    CommandResult,
+    ScriptError,
+    diagnostic_tail,
+    require_file,
+    require_success,
+    run_capture,
+)
+
+
+DEFAULT_CMDLINE = "earlycon=xe9 console=hvc0 reboot=t panic=-1"
+BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
+Runner = Callable[..., CommandResult]
+METRIC_PATTERN = re.compile(r"(?:cold-start|restore):\s*([0-9.]+)")
+
+
+@dataclass(frozen=True)
+class BootTestConfig:
+    kernel: Path
+    initrd: Path
+    mem: int = 512
+    timeout: int = 90
+
+
+@dataclass(frozen=True)
+class BootTestReport:
+    passed: bool
+    alpine_release: str | None
+    uname: str | None
+    result: CommandResult
+
+
+@dataclass(frozen=True)
+class VmConfig:
+    kernel: Path
+    initrd: Path
+    mem: int = 512
+    vcpus: int = 1
+    cmdline: str = DEFAULT_CMDLINE
+
+
+@dataclass(frozen=True)
+class SnapshotConfig:
+    kernel: Path
+    initrd: Path
+    snapshot: Path
+    mem: int = 512
+    runs: int = 8
+
+
+def boot_test(
+    config: BootTestConfig,
+    backend: HostBackend,
+    *,
+    runner: Runner = run_capture,
+) -> BootTestReport:
+    executable = backend.executable()
+    require_file(executable, "build the VMM first: cargo build --release")
+    require_file(
+        config.kernel,
+        f"missing kernel: {config.kernel} ({backend.build_hint})",
+    )
+    require_file(
+        config.initrd,
+        f"missing initrd: {config.initrd} ({backend.build_hint})",
+    )
+
+    result = runner(
+        [
+            executable,
+            "--kernel",
+            config.kernel,
+            "--initrd",
+            config.initrd,
+            "--mem",
+            str(config.mem),
+            "--cmdline",
+            DEFAULT_CMDLINE,
+        ],
+        input_text="cat /etc/alpine-release\nuname -a\nreboot -f\n",
+        timeout=config.timeout,
+    )
+    text = result.text
+    alpine_match = re.search(r"(?m)^3\.[0-9]+\.[0-9]+[^\r\n]*", text)
+    uname_match = re.search(r"(?m)^Linux .* x86_64[^\r\n]*", text)
+    return BootTestReport(
+        passed=BOOT_MARKER in text,
+        alpine_release=alpine_match.group(0).strip() if alpine_match else None,
+        uname=uname_match.group(0).strip() if uname_match else None,
+        result=result,
+    )
+
+
+def print_boot_test(report: BootTestReport) -> int:
+    if report.passed:
+        print(f"PASS: guest reached userspace ({BOOT_MARKER})")
+        if report.alpine_release:
+            print(f"  alpine-release: {report.alpine_release}")
+        if report.uname:
+            print(f"  uname: {report.uname}")
+        return 0
+
+    print(f"FAIL: '{BOOT_MARKER}' not found in boot output")
+    if report.result.timed_out:
+        print("  process timed out")
+    print("--- last 25 lines ---")
+    print("\n".join(report.result.text.splitlines()[-25:]))
+    return 1
+
+
+def require_vm_inputs(config: VmConfig, backend: HostBackend) -> Path:
+    executable = backend.executable()
+    require_file(executable, "build the VMM first: cargo build --release")
+    require_file(config.kernel, f"missing kernel: {config.kernel} ({backend.build_hint})")
+    require_file(config.initrd, f"missing initrd: {config.initrd} ({backend.build_hint})")
+    return executable
+
+
+def cold_boot_args(
+    executable: Path,
+    config: VmConfig,
+    backend: HostBackend,
+    extra: Iterable[str | Path] = (),
+) -> list[str | Path]:
+    args: list[str | Path] = [executable]
+    backend.add_vcpus(args, config.vcpus)
+    args.extend(
+        [
+            "--kernel",
+            config.kernel,
+            "--initrd",
+            config.initrd,
+            "--mem",
+            str(config.mem),
+            "--cmdline",
+            config.cmdline,
+            *extra,
+        ]
+    )
+    return args
+
+
+def invoke_vm_metric(
+    args: Sequence[str | Path],
+    *,
+    timeout: int = 30,
+    runner: Runner = run_capture,
+) -> float | None:
+    result = runner(args, timeout=timeout)
+    require_success(result, "VM timing run")
+    match = METRIC_PATTERN.search(result.text)
+    return float(match.group(1)) if match else None
+
+
+def collect_metrics(
+    args: Sequence[str | Path],
+    runs: int,
+    *,
+    timeout: int = 30,
+    runner: Runner = run_capture,
+) -> list[float]:
+    if runs < 1:
+        raise ScriptError("number of runs must be at least 1")
+    values = [
+        invoke_vm_metric(args, timeout=timeout, runner=runner) for _ in range(runs)
+    ]
+    return [value for value in values if value is not None]
+
+
+def require_samples(values: Sequence[float], label: str, expected: int) -> None:
+    if len(values) != expected:
+        raise ScriptError(
+            f"{label} produced {len(values)}/{expected} timing samples"
+        )
+
+
+def format_median(values: Sequence[float], width: int = 7) -> str:
+    if not values:
+        return "NO DATA"
+    return (
+        f"{statistics.median(values):{width}.1f} ms  "
+        f"(min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
+    )
+
+
+def run_vm(
+    config: VmConfig,
+    backend: HostBackend,
+    *,
+    profile: str = "release",
+    quiet: bool = False,
+    exit_on_boot: bool = False,
+    mount: Path | None = None,
+    mount_target: str = "/mnt/host",
+    mount_rw: bool = False,
+    mount_image: Path | None = None,
+    mount_size: int | None = None,
+    net: str | None = None,
+) -> int:
+    executable = backend.executable(profile)
+    require_file(executable, f"microvm not found at {executable}; build it first")
+    require_file(config.kernel, f"missing kernel: {config.kernel} ({backend.build_hint})")
+    require_file(config.initrd, f"missing initrd: {config.initrd} ({backend.build_hint})")
+    args = cold_boot_args(executable, config, backend)
+    if quiet:
+        args.append("--quiet")
+    if exit_on_boot:
+        args.append("--exit-on-boot")
+    if mount is not None:
+        args.extend(["--mount", mount, "--mount-target", mount_target])
+        if mount_rw:
+            args.append("--mount-rw")
+        if mount_image is not None:
+            args.extend(["--mount-image", mount_image])
+        if mount_size is not None:
+            args.extend(["--mount-size", str(mount_size)])
+    if net:
+        args.extend(["--net", net])
+    return subprocess.call([str(value) for value in args])
+
+
+def measure_coldstart(
+    config: VmConfig, backend: HostBackend, runs: int
+) -> None:
+    executable = require_vm_inputs(config, backend)
+    base = DEFAULT_CMDLINE
+    silent = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
+    clocksource = f"clocksource={backend.clocksource} " if backend.clocksource else ""
+    fast = (
+        f"{clocksource}tsc=reliable no_timer_check random.trust_cpu=on "
+        "rcupdate.rcu_expedited=1 nokaslr mitigations=off cryptomgr.notests "
+        "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
+    )
+
+    def measure(marker: str, cmdline: str, *, quiet: bool, mem: int) -> str:
+        run_config = VmConfig(
+            config.kernel, config.initrd, mem, config.vcpus, cmdline
+        )
+        args = cold_boot_args(
+            executable,
+            run_config,
+            backend,
+            ["--exit-on-boot", "--boot-marker", marker],
+        )
+        if quiet:
+            args.append("--quiet")
+        samples = collect_metrics(args, runs)
+        require_samples(samples, marker, runs)
+        return format_median(samples, width=8)
+
+    runinit = "Run /init as init process"
+    banner = BOOT_MARKER
+    print(
+        f"cold-start (guest start -> marker), median of {runs} runs, "
+        f"{config.mem} MiB, {config.vcpus} vCPU"
+    )
+    print()
+    print("portb console (0xE9 -> hvc0), to kernel->userspace handoff, full logs:")
+    print(f"  loud (rendered)    : {measure(runinit, base, quiet=False, mem=config.mem)}")
+    print(f"  quiet (discarded)  : {measure(runinit, base, quiet=True, mem=config.mem)}")
+    print()
+    print("end-to-end (to interactive shell):")
+    print(f"  loud full logs     : {measure(banner, base, quiet=False, mem=config.mem)}")
+    print(f"  silent (quiet klog): {measure(banner, silent, quiet=True, mem=config.mem)}")
+    print()
+    print("fastest (silent, 128 MiB, tuned cmdline):")
+    print(f"  fast               : {measure(banner, fast, quiet=True, mem=128)}")
+
+
+def capture_snapshot(
+    args: Sequence[str | Path],
+    snapshot: Path,
+    *,
+    timeout: int = 40,
+    runner: Runner = run_capture,
+) -> CommandResult:
+    shutil.rmtree(snapshot, ignore_errors=True)
+    result = runner(args, timeout=timeout)
+    state = snapshot / "state.bin"
+    memory = snapshot / "mem.bin"
+    if result.timed_out or result.returncode not in (0, None) or not state.is_file() or not memory.is_file():
+        diagnostic = diagnostic_tail(result.text)
+        reason = "timed out" if result.timed_out else f"exited {result.returncode}"
+        raise ScriptError(f"snapshot capture {reason}\n{diagnostic}".rstrip())
+    return result
+
+
+def snapshot_demo(config: SnapshotConfig, backend: HostBackend) -> None:
+    vm_config = VmConfig(config.kernel, config.initrd, config.mem)
+    executable = require_vm_inputs(vm_config, backend)
+    marker = "{'x': 10, 'y': 30}"
+    cmdline = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
+    cold_args = cold_boot_args(
+        executable,
+        VmConfig(config.kernel, config.initrd, config.mem, 1, cmdline),
+        backend,
+        ["--exit-on-boot", "--quiet", "--boot-marker", marker],
+    )
+    print("== cold boot -> pandas result (kernel boot + Python startup + pandas/numpy import) ==")
+    cold = collect_metrics(cold_args, config.runs, timeout=40)
+    require_samples(cold, "python snapshot cold boot", config.runs)
+    print(f"  cold:    {format_median(cold)}")
+
+    print("== taking snapshot at the fully warmed point (pandas/numpy imported + computation warmed) ==")
+    capture_args = cold_boot_args(
+        executable,
+        VmConfig(config.kernel, config.initrd, config.mem, 1, cmdline),
+        backend,
+        ["--snapshot", config.snapshot, "--quiet"],
+    )
+    capture_snapshot(capture_args, config.snapshot)
+    state = config.snapshot / "state.bin"
+    memory = config.snapshot / "mem.bin"
+    footprint = backend.allocated_size(memory) / (1024 * 1024)
+    print(
+        f"  snapshot: {config.snapshot} (state.bin {state.stat().st_size} B; "
+        f"mem.bin footprint ~{footprint:.0f} MiB on disk)"
+    )
+
+    print("== restore -> pandas result (resume the warmed interpreter) ==")
+    restore_args: list[str | Path] = [
+        executable,
+        "--restore",
+        config.snapshot,
+        "--mem",
+        str(config.mem),
+        "--exit-on-boot",
+        "--quiet",
+        "--boot-marker",
+        marker,
+    ]
+    restored = collect_metrics(restore_args, config.runs)
+    require_samples(restored, "python snapshot restore", config.runs)
+    print(f"  restore: {format_median(restored)}")
+
+
+def benchmark_shell_snapshot(
+    config: SnapshotConfig,
+    backend: HostBackend,
+    memories: Sequence[int],
+) -> None:
+    vm_config = VmConfig(config.kernel, config.initrd, config.mem)
+    executable = require_vm_inputs(vm_config, backend)
+    cmdline = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
+    print(
+        f"boot-to-shell: cold PVH boot vs snapshot restore, median of {config.runs} runs, 1 vCPU"
+    )
+    print(f'marker : "{BOOT_MARKER}"')
+    print(f"kernel : {config.kernel}")
+    print(f"initrd : {config.initrd}")
+    print()
+
+    for memory_mib in memories:
+        cold_args = cold_boot_args(
+            executable,
+            VmConfig(config.kernel, config.initrd, memory_mib, 1, cmdline),
+            backend,
+            ["--exit-on-boot", "--quiet", "--boot-marker", BOOT_MARKER],
+        )
+        cold = collect_metrics(cold_args, config.runs)
+        snapshot = Path(f"{config.snapshot}-{memory_mib}")
+        capture_args = cold_boot_args(
+            executable,
+            VmConfig(
+                config.kernel,
+                config.initrd,
+                memory_mib,
+                1,
+                f"{cmdline} shellsnap",
+            ),
+            backend,
+            ["--snapshot", snapshot, "--quiet"],
+        )
+        capture_snapshot(capture_args, snapshot, timeout=30)
+        restore_args: list[str | Path] = [
+            executable,
+            "--restore",
+            snapshot,
+            "--mem",
+            str(memory_mib),
+            "--exit-on-boot",
+            "--quiet",
+            "--boot-marker",
+            BOOT_MARKER,
+        ]
+        restored = collect_metrics(restore_args, config.runs)
+        require_samples(cold, f"shell cold boot ({memory_mib} MiB)", config.runs)
+        require_samples(restored, f"shell restore ({memory_mib} MiB)", config.runs)
+        _print_shell_snapshot_summary(memory_mib, cold, restored)
+
+
+def _print_shell_snapshot_summary(
+    memory_mib: int, cold: Sequence[float], restored: Sequence[float]
+) -> None:
+    split_ms = 900.0
+    fast = [value for value in cold if value < split_ms]
+    slow = [value for value in cold if value >= split_ms]
+
+    def line(name: str, values: Sequence[float]) -> str:
+        if not values:
+            return f"  {name:<20}: NO DATA"
+        return (
+            f"  {name:<20}: median {statistics.median(values):7.1f} ms   "
+            f"(min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
+        )
+
+    print(f"== {memory_mib} MiB ==")
+    print(line("cold boot", cold))
+    if fast and slow:
+        print(
+            f"       fast path {statistics.median(fast):7.1f} ms (n={len(fast)})  |  "
+            f"slow path {statistics.median(slow):7.1f} ms (n={len(slow)}, "
+            f"+~{statistics.median(slow) - statistics.median(fast):.0f} ms TSC PIT-calib)"
+        )
+    print(line("snapshot restore", restored))
+    if restored and statistics.median(restored) > 0:
+        base = statistics.median(fast) if fast else statistics.median(cold)
+        print(
+            f"  {'speedup':<20}: {base / statistics.median(restored):.0f}x "
+            f"(fast-path cold) .. {statistics.median(cold) / statistics.median(restored):.0f}x "
+            "(median cold) faster via snapshot"
+        )
+    print()
+
+
+def snapshot_boot(
+    config: SnapshotConfig,
+    backend: HostBackend,
+    *,
+    smoke_test: bool = False,
+) -> int:
+    executable = backend.executable()
+    require_file(executable, "build the VMM first: cargo build --release")
+    cmdline = (
+        "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1 pyapp=repl.py"
+    )
+    state = config.snapshot / "state.bin"
+    memory = config.snapshot / "mem.bin"
+    if not state.is_file() or not memory.is_file():
+        require_file(config.kernel, f"missing kernel: {config.kernel} ({backend.build_hint})")
+        require_file(
+            config.initrd,
+            f"missing python initramfs: {config.initrd} ({backend.build_hint})",
+        )
+        print(
+            f">> no snapshot at {config.snapshot} yet; capturing a warmed interpreter "
+            "(one-off cold boot)"
+        )
+        capture_args = cold_boot_args(
+            executable,
+            VmConfig(config.kernel, config.initrd, config.mem, 1, cmdline),
+            backend,
+            ["--snapshot", config.snapshot, "--log-level", "warn"],
+        )
+        capture_snapshot(capture_args, config.snapshot)
+
+    print(
+        f">> resuming interactive Python interpreter from snapshot {config.snapshot} "
+        "(Ctrl-D or exit() to quit)"
+    )
+    restore_args: list[str | Path] = [
+        executable,
+        "--restore",
+        config.snapshot,
+        "--mem",
+        str(config.mem),
+    ]
+    if not smoke_test:
+        return subprocess.call([str(value) for value in restore_args])
+    result = run_capture(restore_args, input_text="exit()\n", timeout=30)
+    print(result.text)
+    if result.timed_out:
+        raise ScriptError("snapshot restore smoke test timed out")
+    if result.returncode != 0:
+        raise ScriptError(f"snapshot restore smoke test exited {result.returncode}")
+    if "resumed from snapshot" not in result.text:
+        raise ScriptError("restored Python banner was not observed")
+    return 0

@@ -67,6 +67,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: Cache kernel + initramfs
         id: cache-base
         uses: actions/cache@v5
@@ -74,11 +79,11 @@ jobs:
           path: |
             build/vmlinux
             build/initramfs.cpio.gz
-          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/build-kernel.sh', 'scripts/build-initramfs.sh', 'kernel/**', 'alpine/init') }}
+          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'kernel/**', 'alpine/init') }}
 
       - name: Build kernel + initramfs (Docker)
         if: steps.cache-base.outputs.cache-hit != 'true'
-        run: scripts/build-linux-artifacts.sh
+        run: python3 scripts/nvx.py build-linux-artifacts --dest build
         env:
           DEST: build
 
@@ -88,16 +93,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: build/initramfs-python.cpio.gz
-          key: microvm-python-${{ hashFiles('docker/Dockerfile', 'scripts/build-python-initramfs.sh', 'alpine/init.python', 'alpine/hello.py', 'alpine/repl.py', 'alpine/net-hello.py', 'alpine/net-pandas.py') }}
+          key: microvm-python-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'alpine/init.python', 'alpine/hello.py', 'alpine/repl.py', 'alpine/net-hello.py', 'alpine/net-pandas.py') }}
 
       - name: Build Python initramfs (Docker)
         if: env.RUN_BENCH == 'true' && steps.cache-python.outputs.cache-hit != 'true'
-        run: |
-          docker build \
-            -f docker/Dockerfile \
-            --target python-artifacts \
-            --output type=local,dest=build \
-            .
+        run: python3 scripts/nvx.py build-python-initramfs --docker --dest build
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
@@ -126,12 +126,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate shell scripts
-        run: |
-          set -euo pipefail
-          while IFS= read -r -d '' script; do
-            bash -n "$script"
-          done < <(find scripts -type f -name '*.sh' -print0)
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate Python tooling
+        run: python3 -m compileall -q scripts alpine
 
       - name: Validate GitHub Actions workflow
         run: |
@@ -153,6 +154,7 @@ jobs:
 
       - name: Toolchain versions
         run: |
+          python3 --version
           rustc --version
           cargo --version
 
@@ -162,8 +164,8 @@ jobs:
       - name: Unit tests
         run: cargo test --release
 
-      - name: Performance tooling tests
-        run: python3 -m unittest scripts/test_performance.py
+      - name: Python tooling tests
+        run: python3 -m unittest scripts/test_performance.py scripts/tests/test_nvx_tools.py -v
 
       - name: Download artifacts
         uses: actions/download-artifact@v7
@@ -175,7 +177,7 @@ jobs:
         run: ./target/release/microvm --selftest
 
       - name: Boot smoke test
-        run: scripts/test-boot.sh
+        run: python3 scripts/nvx.py test-boot
 
       - name: Prepare performance logs
         if: env.RUN_BENCH == 'true'
@@ -185,26 +187,26 @@ jobs:
 
       - name: Benchmark — cold-start
         if: env.RUN_BENCH == 'true'
-        run: scripts/measure-coldstart.sh | tee build/performance/cold-start.log
+        run: python3 scripts/nvx.py measure-coldstart | tee build/performance/cold-start.log
         env:
           N: 5
 
       - name: Benchmark — virt-fs
         if: env.RUN_BENCH == 'true'
-        run: scripts/bench-virtfs.sh | tee build/performance/virtfs.log
+        run: python3 scripts/nvx.py bench-virtfs | tee build/performance/virtfs.log
         env:
           N: 3
 
       - name: Benchmark — snapshot/restore (Python)
         if: env.RUN_BENCH == 'true'
-        run: scripts/snapshot-demo.sh | tee build/performance/snapshot.log
+        run: python3 scripts/nvx.py snapshot-demo | tee build/performance/snapshot.log
         env:
           N: 5
           INITRD: ${{ github.workspace }}/build/initramfs-python.cpio.gz
 
       - name: Benchmark — snapshot/restore (shell)
         if: env.RUN_BENCH == 'true'
-        run: scripts/bench-snapshot-shell.sh | tee build/performance/shell-snapshot.log
+        run: python3 scripts/nvx.py bench-snapshot-shell | tee build/performance/shell-snapshot.log
         env:
           N: 5
 
@@ -214,7 +216,7 @@ jobs:
           N: 5
         run: |
           if sudo -n true 2>/dev/null; then
-            scripts/bench-net-snapshot.sh | tee build/performance/network.log
+            python3 scripts/nvx.py bench-net-snapshot | tee build/performance/network.log
           else
             echo "::notice::skipping networking benchmark (needs passwordless 'sudo ip' for the host TAP)"
           fi
@@ -227,7 +229,7 @@ jobs:
         run: |
           set -euo pipefail
           if sudo -n true 2>/dev/null; then
-            output=$(scripts/bench-net-snapshot-py.sh 2>&1)
+            output=$(python3 scripts/nvx.py bench-net-snapshot-py 2>&1)
             printf '%s\n' "$output"
             if grep -q 'NO DATA' <<<"$output"; then
               echo 'networked Python benchmark produced no data' >&2
@@ -247,7 +249,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$SNAP"
-          printf 'exit()\n' | timeout 90 scripts/snapshot-boot.sh
+          python3 scripts/nvx.py snapshot-boot --smoke-test
 
       - name: Upload performance logs
         if: always() && env.RUN_BENCH == 'true'
@@ -278,24 +280,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate PowerShell scripts
-        run: |
-          $failed = $false
-          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
-            $script = $_
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              $script.FullName,
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            foreach ($error in $errors) {
-              Write-Error "$($script.Name): $($error.Message)"
-              $failed = $true
-            }
-          }
-          if ($failed) { throw 'PowerShell syntax validation failed' }
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate Python tooling
+        run: python -m compileall -q scripts alpine
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -309,6 +300,7 @@ jobs:
 
       - name: Toolchain versions
         run: |
+          python --version
           rustc --version
           cargo --version
 
@@ -317,6 +309,9 @@ jobs:
 
       - name: Unit tests
         run: cargo test --release
+
+      - name: Python tooling tests
+        run: python -m unittest scripts/test_performance.py scripts/tests/test_nvx_tools.py -v
 
       - name: Download artifacts
         uses: actions/download-artifact@v7
@@ -329,7 +324,7 @@ jobs:
 
       - name: Boot smoke test
         timeout-minutes: 5
-        run: .\scripts\test-boot.ps1
+        run: python scripts\nvx.py test-boot
 
       - name: Prepare performance logs
         if: env.RUN_BENCH == 'true'
@@ -340,13 +335,13 @@ jobs:
       - name: Benchmark — cold-start
         if: env.RUN_BENCH == 'true'
         run: |
-          .\scripts\measure-coldstart.ps1 -N 5 *>&1 |
+          python scripts\nvx.py measure-coldstart --runs 5 *>&1 |
             Tee-Object -FilePath build\performance\cold-start.log
 
       - name: Benchmark — virt-fs
         if: env.RUN_BENCH == 'true'
         run: |
-          $output = .\scripts\bench-virtfs.ps1 -N 3 *>&1 |
+          $output = python scripts\nvx.py bench-virtfs --runs 3 *>&1 |
             Tee-Object -FilePath build\performance\virtfs.log |
             Out-String
           Write-Host $output
@@ -357,19 +352,19 @@ jobs:
       - name: Benchmark — snapshot/restore (Python)
         if: env.RUN_BENCH == 'true'
         run: |
-          .\scripts\snapshot-demo.ps1 -N 5 *>&1 |
+          python scripts\nvx.py snapshot-demo --runs 5 *>&1 |
             Tee-Object -FilePath build\performance\snapshot.log
 
       - name: Benchmark — networking + snapshot
         if: env.RUN_BENCH == 'true'
         run: |
-          .\scripts\bench-net-snapshot.ps1 -N 5 *>&1 |
+          python scripts\nvx.py bench-net-snapshot --runs 5 *>&1 |
             Tee-Object -FilePath build\performance\network.log
 
       - name: Smoke — networked Python snapshot
         if: env.RUN_BENCH == 'true'
         run: |
-          $output = .\scripts\bench-net-snapshot-py.ps1 -N 1 *>&1 | Out-String
+          $output = python scripts\nvx.py bench-net-snapshot-py --runs 1 *>&1 | Out-String
           Write-Host $output
           if ($output -match 'NO DATA') { throw 'networked Python benchmark produced no data' }
           if ($output -notmatch 'verified: HELLOPY-NET OK') { throw 'hello-world network verification missing' }
@@ -380,7 +375,7 @@ jobs:
         run: |
           $snap = Join-Path $env:RUNNER_TEMP 'nvx-pyrepl'
           Remove-Item -Recurse -Force $snap -ErrorAction SilentlyContinue
-          .\scripts\snapshot-boot.ps1 -Snap $snap -Mem 512 -SmokeTest
+          python scripts\nvx.py snapshot-boot --snapshot $snap --mem 512 --smoke-test
 
       - name: Upload performance logs
         if: always() && env.RUN_BENCH == 'true'

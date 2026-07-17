@@ -9,8 +9,8 @@
 #   docker build -f docker/Dockerfile --target artifacts --output type=local,dest=build .
 #
 # writes `build/vmlinux` and `build/initramfs.cpio.gz` onto the host. The kernel and initramfs
-# stages build in parallel. See scripts/build-linux-artifacts.ps1 (Windows) /
-# scripts/build-linux-artifacts.sh (POSIX) for a convenience wrapper.
+# stages build in parallel. See `python scripts/nvx.py build-linux-artifacts` for the
+# cross-platform convenience wrapper.
 
 ARG DEBIAN_IMAGE=debian:12-slim
 
@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tar \
         curl \
         ca-certificates \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /repo
 # Only the inputs the scripts consume (kept in sync with .dockerignore).
@@ -44,7 +45,7 @@ ENV HOME=/root \
     WORK=/build/kernel \
     OUT=/out/vmlinux \
     KVER=${KVER}
-RUN mkdir -p /out && bash /repo/scripts/build-kernel.sh
+RUN mkdir -p /out && python3 /repo/scripts/nvx.py build-kernel
 
 # ---- Initramfs: unpack the Alpine mini rootfs + install /init, pack a cpio.gz. ----
 FROM base AS initramfs
@@ -55,7 +56,7 @@ ENV HOME=/root \
     OUT=/out/initramfs.cpio.gz \
     AVER=${AVER} \
     ABRANCH=${ABRANCH}
-RUN mkdir -p /out && bash /repo/scripts/build-initramfs.sh
+RUN mkdir -p /out && python3 /repo/scripts/nvx.py build-initramfs
 
 # ---- Python initramfs: Alpine rootfs + CPython + numpy/pandas + the snapshot apps. ----
 FROM base AS python-initramfs
@@ -66,7 +67,7 @@ ENV HOME=/root \
     OUT=/out/initramfs-python.cpio.gz \
     AVER=${AVER} \
     ABRANCH=${ABRANCH}
-RUN mkdir -p /out && bash /repo/scripts/build-python-initramfs.sh
+RUN mkdir -p /out && python3 /repo/scripts/nvx.py build-python-initramfs --native
 
 # ---- Artifacts: a minimal stage carrying just the outputs, for `--output`. ----
 FROM scratch AS artifacts
