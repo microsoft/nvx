@@ -62,7 +62,6 @@ jobs:
       labels: [self-hosted, linux, x64]
     timeout-minutes: 60
     env:
-      DOCKER_CONFIG: ${{ runner.temp }}/docker-config
       RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
     steps:
       - name: Checkout
@@ -74,6 +73,8 @@ jobs:
           python-version: '3.12'
 
       - name: Reclaim stale Docker build cache
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
         run: |
           mkdir -p "$DOCKER_CONFIG"
           docker builder prune --all --force --filter until=168h
@@ -92,6 +93,7 @@ jobs:
         run: python3 scripts/nvx.py build-linux-artifacts --dest build
         env:
           DEST: build
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
 
       - name: Cache Python initramfs
         id: cache-python
@@ -104,6 +106,8 @@ jobs:
       - name: Build Python initramfs (Docker)
         if: env.RUN_BENCH == 'true' && steps.cache-python.outputs.cache-hit != 'true'
         run: python3 scripts/nvx.py build-python-initramfs --docker --dest build
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
@@ -125,7 +129,6 @@ jobs:
       labels: [self-hosted, linux, x64]
     timeout-minutes: 45
     env:
-      DOCKER_CONFIG: ${{ runner.temp }}/docker-config
       RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
       KERNEL: ${{ github.workspace }}/build/vmlinux
       INITRD: ${{ github.workspace }}/build/initramfs.cpio.gz
@@ -142,7 +145,10 @@ jobs:
         run: python3 -m compileall -q scripts alpine
 
       - name: Validate GitHub Actions workflow
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
         run: |
+          mkdir -p "$DOCKER_CONFIG"
           docker run --rm \
             -v "$PWD:/repo" \
             -w /repo \
