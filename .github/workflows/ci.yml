@@ -6,12 +6,12 @@
 #   * Windows / WHP — self-hosted runner in the 'benchmark' group, labels [self-hosted, windows, x64]
 #
 # Runner requirements (expected to be provisioned on the org's self-hosted runners):
-#   * Linux:   a stable Rust toolchain (edition 2024, >= 1.85), Docker (to build the Linux
+#   * Linux:   Python 3.10+, a stable Rust toolchain (edition 2024, >= 1.85), Docker (to build the Linux
 #              kernel + initramfs artifacts), and an accessible /dev/kvm for the KVM backend.
 #              e2fsprogs (mke2fs) is used by the virt-fs benchmark; passwordless `sudo ip` is
 #              used by the networking benchmark (that one benchmark is skipped if unavailable).
-#   * Windows: a stable Rust toolchain for x86_64-pc-windows-msvc (edition 2024), and the
-#              Windows Hypervisor Platform feature enabled for the WHP backend.
+#   * Windows: Python 3.10+, a stable Rust toolchain for x86_64-pc-windows-msvc (edition 2024),
+#              and the Windows Hypervisor Platform feature enabled for the WHP backend.
 #
 # The kernel + initramfs are built once, in Docker, on the Linux runner and shared with the
 # Windows job (Windows cannot compile the Linux kernel natively). Build, smoke tests, and the
@@ -155,12 +155,18 @@ jobs:
             rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
             -color
 
+      - name: Configure Cargo cache
+        run: |
+          rm -rf "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          mkdir -p "$RUNNER_TEMP/cargo-home"
+          echo "CARGO_HOME=$RUNNER_TEMP/cargo-home" >> "$GITHUB_ENV"
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ${{ runner.temp }}/cargo-home/registry
+            ${{ runner.temp }}/cargo-home/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
@@ -293,10 +299,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
+      - name: Validate Python version
+        run: >-
+          python -c "import sys; print(sys.version); assert sys.version_info >= (3, 10),
+          'Python 3.10 or newer is required'"
 
       - name: Validate Python tooling
         run: python -m compileall -q scripts alpine
