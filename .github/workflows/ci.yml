@@ -62,6 +62,7 @@ jobs:
       labels: [self-hosted, linux, x64]
     timeout-minutes: 60
     env:
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-config
       RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
     steps:
       - name: Checkout
@@ -73,7 +74,9 @@ jobs:
           python-version: '3.12'
 
       - name: Reclaim stale Docker build cache
-        run: docker builder prune --all --force --filter until=168h
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          docker builder prune --all --force --filter until=168h
 
       - name: Cache kernel + initramfs
         id: cache-base
@@ -122,6 +125,7 @@ jobs:
       labels: [self-hosted, linux, x64]
     timeout-minutes: 45
     env:
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-config
       RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
       KERNEL: ${{ github.workspace }}/build/vmlinux
       INITRD: ${{ github.workspace }}/build/initramfs.cpio.gz
