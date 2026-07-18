@@ -93,6 +93,25 @@ def _install(source: Path, destination: Path) -> None:
     destination.chmod(0o755)
 
 
+def _apk_add(root: Path, *packages: str) -> None:
+    loader = root / "lib" / "ld-musl-x86_64.so.1"
+    environment = os.environ.copy()
+    environment["LD_LIBRARY_PATH"] = f"{root / 'lib'}:{root / 'usr' / 'lib'}"
+    run_checked(
+        [
+            loader,
+            root / "sbin" / "apk",
+            "--root",
+            root,
+            "--no-cache",
+            "--no-interactive",
+            "add",
+            *packages,
+        ],
+        env=environment,
+    )
+
+
 def _pack_initramfs(root: Path, output: Path) -> None:
     require_tool("find")
     require_tool("cpio")
@@ -125,6 +144,11 @@ def _pack_initramfs(root: Path, output: Path) -> None:
 def build_initramfs(config: AlpineBuildConfig, backend: HostBackend) -> None:
     _require_linux(backend, "build-initramfs")
     root = _prepare_alpine_root(config)
+    print(">> installing busybox-extras into the rootfs")
+    _apk_add(root, "busybox-extras")
+    resolver = root / "etc" / "resolv.conf"
+    resolver.unlink(missing_ok=True)
+    resolver.touch()
     _install(REPO_ROOT / "alpine" / "init", root / "init")
     _pack_initramfs(root, config.output)
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
@@ -136,24 +160,7 @@ def build_python_initramfs_native(
     _require_linux(backend, "native build-python-initramfs")
     root = _prepare_alpine_root(config)
     print(">> installing python3 + pandas/numpy into the rootfs")
-    loader = root / "lib" / "ld-musl-x86_64.so.1"
-    environment = os.environ.copy()
-    environment["LD_LIBRARY_PATH"] = f"{root / 'lib'}:{root / 'usr' / 'lib'}"
-    run_checked(
-        [
-            loader,
-            root / "sbin" / "apk",
-            "--root",
-            root,
-            "--no-cache",
-            "--no-interactive",
-            "add",
-            "python3",
-            "py3-numpy",
-            "py3-pandas",
-        ],
-        env=environment,
-    )
+    _apk_add(root, "python3", "py3-numpy", "py3-pandas")
     for source_name, destination_name in (
         ("init.python", "init"),
         ("hello.py", "hello.py"),
