@@ -260,13 +260,13 @@ pub fn network_adapter_remove(
     network_adapter_modify("Remove", adapter_id, endpoint_id, mac_address)
 }
 
-/// Serializes reconnection of a restored network adapter to its external endpoint.
-pub fn network_adapter_update(
+/// Serializes recreation of a restored network adapter with its stable identity.
+pub fn network_adapter_add(
     adapter_id: &str,
     endpoint_id: &str,
     mac_address: &str,
 ) -> Result<String> {
-    network_adapter_modify("Update", adapter_id, endpoint_id, mac_address)
+    network_adapter_modify("Add", adapter_id, endpoint_id, mac_address)
 }
 
 fn network_adapter_modify(
@@ -368,7 +368,7 @@ mod tests {
 
         assert_eq!(
             ::serde_json::from_str::<::serde_json::Value>(
-                &network_adapter_update(
+                &network_adapter_add(
                     "01234567-89ab-4cde-8f01-23456789abcd",
                     "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                     "00-15-5D-52-C0-10",
@@ -377,7 +377,7 @@ mod tests {
             )
             .unwrap(),
             ::serde_json::json!({
-                "RequestType": "Update",
+                "RequestType": "Add",
                 "ResourcePath": "VirtualMachine/Devices/NetworkAdapters/01234567-89ab-4cde-8f01-23456789abcd",
                 "Settings": {
                     "EndpointId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",

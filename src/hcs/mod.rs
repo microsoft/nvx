@@ -251,14 +251,14 @@ fn run_plan(
         && let Some(endpoint) = borrowed_endpoint.as_ref()
     {
         let attachment = endpoint.attachment();
-        let update = schema::network_adapter_update(
+        let add = schema::network_adapter_add(
             attachment.adapter_id,
             attachment.endpoint_id,
             attachment.mac_address,
         )?;
         system.modify_network_adapter(
-            "HcsModifyComputeSystem(update restored network adapter)",
-            &update,
+            "HcsModifyComputeSystem(add restored network adapter)",
+            &add,
         )?;
     }
 
