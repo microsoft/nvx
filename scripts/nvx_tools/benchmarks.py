@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import statistics
+import sys
 import tempfile
 import threading
 import time
@@ -378,6 +379,10 @@ def _run_timed(
     started = time.perf_counter()
     result = run_capture(args, timeout=timeout, graceful_timeout=graceful_timeout)
     wall_ms = (time.perf_counter() - started) * 1000
+    if result.timed_out or result.returncode != 0:
+        diagnostic = _failure_tail(result.text, 80)
+        if diagnostic:
+            print(diagnostic, file=sys.stderr, flush=True)
     require_success(result, "VM benchmark run")
     match = METRIC_PATTERN.search(result.text)
     metric = float(match.group(1)) if match else None

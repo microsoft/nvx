@@ -544,6 +544,7 @@ jobs:
           )
 
       - name: Smoke — externally managed HCN endpoint + HCS
+        if: env.RUN_BENCH != 'true'
         timeout-minutes: 10
         run: |
           .\target\release\microvm.exe `

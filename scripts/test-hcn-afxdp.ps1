@@ -309,21 +309,25 @@ marker=NVX-HCN-AFXDP
 read guest_tx_packets < /sys/class/net/eth0/statistics/tx_packets; read guest_tx_errors < /sys/class/net/eth0/statistics/tx_errors; read guest_carrier < /sys/class/net/eth0/carrier; read guest_operstate < /sys/class/net/eth0/operstate; read host_response < /tmp/hcn-afxdp-http.log; echo "${marker}-GUEST-TX=${guest_tx_packets} ERRORS=${guest_tx_errors} CARRIER=${guest_carrier} OPERSTATE=${guest_operstate}"; echo "${marker}-HTTP=${host_response}"; if [ "${probe_status:-1}" -eq 0 ] && [ "${host_response}" = HELLO-HOST ]; then echo "${marker}-SMOKE-OK"; else echo "${marker}-SMOKE-FAIL"; fi; echo "${marker}-STOP"
 '@
     $guestProbe = $guestProbe.Replace('__GATEWAY__', $Gateway).Replace('__PORT__', [string]$WebPort) + "`n"
+    $inputStream = $process.StandardInput.BaseStream
+    # Windows PowerShell 5.1 may prepend a UTF-8 BOM when StandardInput is first opened.
+    $inputStream.WriteByte(10)
+    $inputStream.Flush()
     $inputBytes = $utf8.GetBytes($guestProbe)
-    $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
-    $process.StandardInput.BaseStream.Flush()
+    $inputStream.Write($inputBytes, 0, $inputBytes.Length)
+    $inputStream.Flush()
 
     if (-not $process.WaitForExit(30000)) {
         $interruptBytes = $utf8.GetBytes([string][char]3)
-        $process.StandardInput.BaseStream.Write($interruptBytes, 0, $interruptBytes.Length)
-        $process.StandardInput.BaseStream.Flush()
+        $inputStream.Write($interruptBytes, 0, $interruptBytes.Length)
+        $inputStream.Flush()
         [Threading.Tasks.Task]::Delay(500).Wait()
         $guestFallback = "`necho `"`${marker}-SMOKE-FAIL`"; echo `"`${marker}-STOP`"`n"
         $inputBytes = $utf8.GetBytes($guestFallback)
-        $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
-        $process.StandardInput.BaseStream.Flush()
+        $inputStream.Write($inputBytes, 0, $inputBytes.Length)
+        $inputStream.Flush()
     }
-    $process.StandardInput.BaseStream.Close()
+    $inputStream.Close()
 
     $processRemaining = $deadline - [DateTime]::UtcNow
     $waitMilliseconds = [int][Math]::Min(
