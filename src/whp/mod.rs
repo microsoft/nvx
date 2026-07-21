@@ -396,6 +396,12 @@ fn run_cold(cfg: Config) -> Result<()> {
         (None, None) => cfg.cmdline.clone(),
         (Some(_), Some(_)) => bail!("--net and --net-config are mutually exclusive"),
     };
+    if !cmdline
+        .split_ascii_whitespace()
+        .any(|arg| arg.starts_with("tsc_early_khz="))
+    {
+        cmdline.push_str(&format!(" tsc_early_khz={}", tsc_hz / 1000));
+    }
 
     // Optionally export a host directory to the guest as a virt-fs. The FAT image is mapped into
     // guest memory above reported RAM and pointed at via the kernel command line; `_virtfs` owns
@@ -679,10 +685,7 @@ fn execute(
     // The virtio-net NIC (if any) needs WHP's instruction emulator to service its MMIO window, and
     // a receive pump that feeds NAT frames into the guest and wakes this loop to inject the NIC's
     // IRQ. The pump is joined on shutdown, like the timer thread.
-    let emulator: Option<Emulator> = match &nic {
-        Some(_) => Some(Emulator::new()?),
-        None => None,
-    };
+    let emulator = Emulator::new()?;
     if let Some(nic) = nic.as_ref() {
         nic.backend
             .check_health()
@@ -848,29 +851,21 @@ fn execute(
             info!("guest reset (reboot/triple fault)");
             break;
         } else if reason == WHvRunVpExitReasonMemoryAccess {
-            // A guest access to the (unmapped) virtio-mmio window faults out here. Drive WHP's
-            // instruction emulator to decode it and dispatch to the NIC; without a NIC there is
-            // nothing to service, so report and stop rather than spin re-faulting.
-            match (&emulator, &nic) {
-                (Some(emu), Some(n)) => {
-                    if let Err(e) = handle_mmio(emu, handle, &exit, n) {
-                        run_err = Some(e);
-                        break;
-                    }
-                    // A transmit notification (QueueNotify) may have raised the NIC's interrupt.
-                    service_pending_irqs(
-                        &timer_pending,
-                        &nic,
-                        &mut pic,
-                        handle,
-                        &mut prefer_timer,
-                    );
-                }
-                _ => {
-                    error!("unhandled guest MMIO access");
-                    dump_vcpu(handle);
-                    break;
-                }
+            // Decode MMIO accesses through the instruction emulator. The NIC window is dispatched
+            // when present; other reads float to zero and writes are dropped like an empty bus.
+            if let Err(e) = handle_mmio(&emulator, handle, &exit, nic.as_ref()) {
+                run_err = Some(e);
+                break;
+            }
+            if nic.is_some() {
+                // A transmit notification (QueueNotify) may have raised the NIC's interrupt.
+                service_pending_irqs(
+                    &timer_pending,
+                    &nic,
+                    &mut pic,
+                    handle,
+                    &mut prefer_timer,
+                );
             }
         } else {
             debug!("unhandled vcpu exit reason {}", reason.0);
@@ -1405,7 +1400,7 @@ fn handle_mmio(
     emu: &Emulator,
     handle: WHV_PARTITION_HANDLE,
     exit: &WHV_RUN_VP_EXIT_CONTEXT,
-    nic: &Nic,
+    nic: Option<&Nic>,
 ) -> Result<()> {
     let vp: &WHV_VP_EXIT_CONTEXT = &exit.VpContext;
     // SAFETY: the exit reason selects the `MemoryAccess` arm of the union.
@@ -1417,14 +1412,16 @@ fn handle_mmio(
 /// MMIO dispatcher used by the instruction emulator: routes accesses in the virtio-mmio window to
 /// the NIC; other reads float to zero and other writes are dropped (the unoccupied-bus behaviour).
 struct NetMmio<'a> {
-    nic: &'a Nic,
+    nic: Option<&'a Nic>,
 }
 
 impl MmioHandler for NetMmio<'_> {
     fn mmio(&mut self, gpa: u64, is_write: bool, data: &mut [u8]) {
-        if (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&gpa) {
+        if let Some(nic) = self.nic
+            && (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&gpa)
+        {
             let off: u64 = gpa - net::NET_MMIO_BASE;
-            let mut dev = self.nic.dev.lock().expect("virt-net poisoned");
+            let mut dev = nic.dev.lock().expect("virt-net poisoned");
             if is_write {
                 dev.mmio_write(off, data);
             } else {
