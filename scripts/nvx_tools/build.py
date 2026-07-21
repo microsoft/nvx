@@ -150,6 +150,7 @@ def build_initramfs(config: AlpineBuildConfig, backend: HostBackend) -> None:
     resolver.unlink(missing_ok=True)
     resolver.touch()
     _install(REPO_ROOT / "alpine" / "init", root / "init")
+    _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
     _pack_initramfs(root, config.output)
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
 
@@ -169,6 +170,7 @@ def build_python_initramfs_native(
         ("net-pandas.py", "net-pandas.py"),
     ):
         _install(REPO_ROOT / "alpine" / source_name, root / destination_name)
+    _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
     _pack_initramfs(root, config.output)
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
 

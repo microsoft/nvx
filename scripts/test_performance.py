@@ -59,8 +59,79 @@ SHELL_SNAPSHOT_LOG = """
     speedup             : 83x (fast-path cold) .. 83x (median cold) faster via snapshot
 """
 
+HCS_SHELL_SNAPSHOT_LOG = """
+== 256 MiB ==
+    cold guest latency    :   420.0 ms  (min 410.0, max 430.0, n=5)
+    cold process wall     :   510.0 ms  (min 500.0, max 520.0, n=5)
+    one-off capture wall  : 780.0 ms
+    restore guest latency :    45.0 ms  (min 44.0, max 46.0, n=5)
+    restore process wall  :   130.0 ms  (min 125.0, max 135.0, n=5)
+
+== 512 MiB ==
+    cold guest latency    :   440.0 ms  (min 430.0, max 450.0, n=5)
+    cold process wall     :   530.0 ms  (min 520.0, max 540.0, n=5)
+    one-off capture wall  : 920.0 ms
+    restore guest latency :    52.0 ms  (min 51.0, max 53.0, n=5)
+    restore process wall  :   145.0 ms  (min 140.0, max 150.0, n=5)
+"""
+
+HCS_PYTHON_SNAPSHOT_LOG = """
+    cold guest latency    :  2,900.0 ms  (min 2,850.0, max 2,950.0, n=5)
+    cold process wall     :  3,010.0 ms  (min 2,960.0, max 3,060.0, n=5)
+    one-off capture wall  : 1,240.0 ms
+    restore guest latency :    160.0 ms  (min 158.0, max 162.0, n=5)
+    restore process wall  :    245.0 ms  (min 240.0, max 250.0, n=5)
+"""
+
+HCS_NETWORK_SNAPSHOT_LOG = """
+    cold guest latency    :    620.0 ms  (min 610.0, max 630.0, n=5)
+    cold process wall     :    740.0 ms  (min 730.0, max 750.0, n=5)
+    one-off capture wall  :  1,420.0 ms
+    restore guest latency :     95.0 ms  (min 92.0, max 98.0, n=5)
+    restore process wall  :    210.0 ms  (min 205.0, max 215.0, n=5)
+    verified marker       : HELLOPY-NET OK
+"""
+
 
 class PerformanceTests(unittest.TestCase):
+    def test_collects_hcs_metrics_into_separate_platform(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "hcs-shell-snapshot.log").write_text(
+                HCS_SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            (logs / "hcs-python-snapshot.log").write_text(
+                HCS_PYTHON_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            (logs / "hcs-network-snapshot.log").write_text(
+                HCS_NETWORK_SNAPSHOT_LOG, encoding="utf-8"
+            )
+
+            result_path = performance.collect_results(
+                "windows-hcs", "abc123", logs, root / "results"
+            )
+            results = performance.read_results(result_path)
+            by_metric = {result.metric: result for result in results}
+
+            self.assertEqual(result_path.name, "windows-hcs.csv")
+            self.assertEqual(len(results), 16)
+            self.assertEqual(by_metric["hcs_shell_256_mib_restore_guest"].p50, 45.0)
+            self.assertEqual(by_metric["hcs_python_cold_guest"].p50, 2900.0)
+            self.assertNotIn("hcs_python_save_wall", by_metric)
+            self.assertEqual(by_metric["hcs_network_restore_guest"].p50, 95.0)
+            self.assertTrue(all(result.direction == "lower" for result in results))
+
+    def test_hcs_shell_parser_rejects_duplicate_memory_section(self):
+        duplicated = HCS_SHELL_SNAPSHOT_LOG + HCS_SHELL_SNAPSHOT_LOG.split(
+            "== 512 MiB ==", maxsplit=1
+        )[0]
+        with self.assertRaisesRegex(
+            performance.PerformanceError, "duplicate 256 MiB section"
+        ):
+            performance._parse_hcs_shell_snapshot(duplicated)
+
     def test_windows_virtfs_reuse_uses_verified_metric(self):
         self.assertEqual(
             performance._platform_metric_name("windows-whp", "virtfs_reuse"),

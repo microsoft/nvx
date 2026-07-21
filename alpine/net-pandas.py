@@ -5,10 +5,10 @@
 # DataFrame computation to warm every hot path, so the snapshot captures a fully warmed interpreter
 # *and* a live NIC. After a restore it re-runs the computation (now hitting warm code and data) and
 # re-checks the link over the recreated host TAP, then prints the result -- demonstrating a heavy,
-# network-connected Python service resuming in milliseconds. The snapshot request (a single outb to
-# port 0x605 via /dev/port) is ignored on a plain cold boot.
-import os
+# network-connected Python service resuming in milliseconds. The shared snapshot helper is a no-op
+# from the guest's perspective when the active VMM was not configured to capture.
 import socket
+import subprocess
 
 import numpy as np
 import pandas as pd
@@ -76,13 +76,7 @@ port = helper_port()
 if not is_cold_measurement():
     work()       # warm the numpy/pandas hot paths before snapshotting
     link_ok(gw, port)  # warm the link (ARP + a round-trip)
-    try:
-        fd = os.open("/dev/port", os.O_WRONLY)
-        os.lseek(fd, 0x605, os.SEEK_SET)
-        os.write(fd, b"\x01")
-        os.close(fd)
-    except OSError:
-        pass
+    subprocess.run(["/sbin/nvx-snapshot"], check=False)
 
 # ---- on restore, execution resumes here ----
 result = work()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import json
 import re
 import shutil
 import statistics
@@ -22,6 +23,7 @@ from .common import (
     ScriptError,
     diagnostic_tail,
     format_size,
+    remove_tree,
     require_success,
     run_capture,
 )
@@ -39,6 +41,10 @@ from .vm import (
 
 QUIET_CMDLINE = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
 VIRTFS_CMDLINE = "console=hvc0 quiet loglevel=0 reboot=t panic=-1"
+HCS_QUIET_CMDLINE = (
+    "console=ttyS0,115200 8250_core.nr_uarts=2 "
+    "8250_core.skip_txen_test=1 quiet loglevel=0 panic=-1"
+)
 RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 CHECKSUM_PATTERN = re.compile(r"(?m)^\s*([0-9]+)\s+[0-9]+\s+.*data\.bin\s*$")
 METRIC_PATTERN = re.compile(r"(?:cold-start|restore):\s*([0-9.]+)")
@@ -75,6 +81,86 @@ class NetworkPythonConfig:
     vcpus: int = 1
     net: str = "10.0.0.2/24"
     port: int = 8099
+
+
+@dataclass(frozen=True)
+class HcsNetworkSnapshotConfig:
+    kernel: Path
+    initrd: Path
+    snapshot: Path
+    mem: int = 512
+    runs: int = 8
+    net: str = "10.0.0.2/24"
+    port: int = 8099
+
+
+def hcs_cold_boot_args(
+    executable: Path,
+    config: SnapshotConfig,
+    memory_mib: int,
+    cmdline: str,
+    marker: str,
+) -> list[str | Path]:
+    return [
+        executable,
+        "--backend",
+        "hcs",
+        "--kernel",
+        config.kernel,
+        "--initrd",
+        config.initrd,
+        "--mem",
+        str(memory_mib),
+        "--cmdline",
+        cmdline,
+        "--exit-on-boot",
+        "--quiet",
+        "--boot-marker",
+        marker,
+    ]
+
+
+def hcs_snapshot_capture_args(
+    executable: Path,
+    config: SnapshotConfig,
+    snapshot: Path,
+    memory_mib: int,
+    cmdline: str,
+) -> list[str | Path]:
+    return [
+        executable,
+        "--backend",
+        "hcs",
+        "--kernel",
+        config.kernel,
+        "--initrd",
+        config.initrd,
+        "--mem",
+        str(memory_mib),
+        "--cmdline",
+        cmdline,
+        "--snapshot",
+        snapshot,
+        "--quiet",
+        "--log-level",
+        "info",
+    ]
+
+
+def hcs_snapshot_restore_args(
+    executable: Path, snapshot: Path, marker: str
+) -> list[str | Path]:
+    return [
+        executable,
+        "--backend",
+        "hcs",
+        "--restore",
+        snapshot,
+        "--exit-on-boot",
+        "--quiet",
+        "--boot-marker",
+        marker,
+    ]
 
 
 def _failure_tail(text: str, lines: int = 30) -> str:
@@ -285,14 +371,317 @@ def _print_host_image_confirmation(path: Path, backend: HostBackend) -> None:
     print(f"  host sees /data.bin in image      : {value} bytes (debugfs)")
 
 
-def _run_timed(args: Sequence[str | Path], timeout: int) -> tuple[float | None, float, CommandResult]:
+def _run_timed(
+    args: Sequence[str | Path], timeout: int, *, graceful_timeout: bool = False
+) -> tuple[float | None, float, CommandResult]:
     started = time.perf_counter()
-    result = run_capture(args, timeout=timeout)
+    result = run_capture(args, timeout=timeout, graceful_timeout=graceful_timeout)
     wall_ms = (time.perf_counter() - started) * 1000
     require_success(result, "VM benchmark run")
     match = METRIC_PATTERN.search(result.text)
     metric = float(match.group(1)) if match else None
     return metric, wall_ms, result
+
+
+def _require_hcs_benchmark(config: SnapshotConfig, backend: HostBackend) -> Path:
+    if backend.name != "windows-whp":
+        raise ScriptError("HCS snapshot benchmarks require a Windows host")
+    executable = require_vm_inputs(
+        VmConfig(config.kernel, config.initrd, config.mem), backend
+    )
+    preflight = run_capture(
+        [executable, "--backend", "hcs", "--selftest", "--log-level", "warn"],
+        timeout=30,
+    )
+    require_success(preflight, "HCS benchmark preflight")
+    return executable
+
+
+def _collect_hcs_timings(
+    args: Sequence[str | Path],
+    runs: int,
+    label: str,
+    timeout: int,
+    *,
+    required_text: str | None = None,
+) -> tuple[list[float], list[float]]:
+    guest: list[float] = []
+    wall: list[float] = []
+    for run_number in range(1, runs + 1):
+        print(
+            f"  {label}: run {run_number}/{runs} (timeout {timeout}s)...",
+            flush=True,
+        )
+        metric, wall_ms, result = _run_timed(args, timeout, graceful_timeout=True)
+        if metric is None:
+            raise ScriptError(
+                f"{label} run {run_number}/{runs} did not report a timing marker\n"
+                + _failure_tail(result.text)
+            )
+        if required_text is not None and required_text not in result.text:
+            raise ScriptError(
+                f"{label} run {run_number}/{runs} did not emit {required_text!r}\n"
+                + _failure_tail(result.text)
+            )
+        guest.append(metric)
+        wall.append(wall_ms)
+        print(
+            f"  {label}: run {run_number}/{runs} complete "
+            f"(guest {metric:.1f} ms, wall {wall_ms:.1f} ms)",
+            flush=True,
+        )
+    return guest, wall
+
+
+def _validate_hcs_snapshot(
+    snapshot: Path, *, require_network: bool = False
+) -> tuple[Path, Path]:
+    manifest = snapshot / "manifest.json"
+    state = snapshot / "runtime.vmrs"
+    if not manifest.is_file() or not state.is_file():
+        raise ScriptError(
+            f"HCS snapshot is incomplete: expected {manifest} and {state}"
+        )
+    try:
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ScriptError(f"could not parse HCS snapshot manifest {manifest}: {error}") from error
+    if not isinstance(document, dict) or (
+        document.get("format") != "NVXHCSS1"
+        or document.get("version") not in (1, 2)
+        or document.get("backend") != "hcs"
+    ):
+        raise ScriptError(f"unexpected HCS snapshot manifest contract in {manifest}")
+    if state.stat().st_size == 0:
+        raise ScriptError(f"HCS snapshot state is empty: {state}")
+    if require_network:
+        network = document.get("network")
+        if document.get("version") != 2 or not isinstance(network, dict):
+            raise ScriptError(
+                f"HCS network snapshot lacks manifest v2 network identity in {manifest}"
+            )
+        required = {
+            "network_id",
+            "endpoint_id",
+            "adapter_id",
+            "guest_ip",
+            "prefix",
+            "gateway",
+            "mac_address",
+        }
+        if required - network.keys() or not network.get("mac_address"):
+            raise ScriptError(f"HCS network snapshot identity is incomplete in {manifest}")
+    return manifest, state
+
+
+def _capture_hcs_snapshot(
+    args: Sequence[str | Path],
+    snapshot: Path,
+    timeout: int,
+    *,
+    require_network: bool = False,
+) -> float:
+    remove_tree(snapshot, label="HCS snapshot")
+    print(f"  HCS snapshot capture: {snapshot}...", flush=True)
+    started = time.perf_counter()
+    result = run_capture(args, timeout=timeout, graceful_timeout=True)
+    wall_ms = (time.perf_counter() - started) * 1000
+    try:
+        require_success(result, "HCS snapshot capture")
+        _validate_hcs_snapshot(snapshot, require_network=require_network)
+    except (OSError, ScriptError):
+        remove_tree(snapshot, label="incomplete HCS snapshot")
+        raise
+    print(f"  HCS snapshot capture complete ({wall_ms:.1f} ms)", flush=True)
+    return wall_ms
+
+
+def _print_hcs_snapshot_summary(
+    cold: Sequence[float],
+    cold_wall: Sequence[float],
+    capture_wall_ms: float,
+    restored: Sequence[float],
+    restore_wall: Sequence[float],
+    snapshot: Path,
+    backend: HostBackend,
+) -> None:
+    manifest, state = _validate_hcs_snapshot(snapshot)
+    allocated = backend.allocated_size(state)
+    print(f"  cold guest latency    : {format_median(cold)}")
+    print(f"  cold process wall     : {format_median(cold_wall)}")
+    print(f"  one-off capture wall  : {capture_wall_ms:.1f} ms")
+    print(f"  restore guest latency : {format_median(restored)}")
+    print(f"  restore process wall  : {format_median(restore_wall)}")
+    print(
+        f"  snapshot files        : manifest {format_size(manifest.stat().st_size)}, "
+        f"VMRS {format_size(state.stat().st_size)} logical / {format_size(allocated)} allocated"
+    )
+    if cold and restored and statistics.median(restored) > 0:
+        print(
+            f"  guest-latency speedup : "
+            f"{statistics.median(cold) / statistics.median(restored):.1f}x"
+        )
+
+
+def benchmark_hcs_snapshot_shell(
+    config: SnapshotConfig, backend: HostBackend, memories: Sequence[int]
+) -> None:
+    if config.runs < 1:
+        raise ScriptError("number of runs must be at least 1")
+    if not memories or any(memory < 1 for memory in memories):
+        raise ScriptError("HCS benchmark memory sizes must be positive")
+    executable = _require_hcs_benchmark(config, backend)
+    print(
+        f"HCS shell snapshot benchmark, median of {config.runs} runs per memory size"
+    )
+    print(f'  marker: "{BOOT_MARKER}"')
+    print(f"  kernel: {config.kernel}")
+    print(f"  initrd: {config.initrd}")
+    print()
+
+    for memory_mib in memories:
+        snapshot = Path(f"{config.snapshot}-{memory_mib}")
+        cold_args = hcs_cold_boot_args(
+            executable,
+            config,
+            memory_mib,
+            HCS_QUIET_CMDLINE,
+            BOOT_MARKER,
+        )
+        capture_args = hcs_snapshot_capture_args(
+            executable,
+            config,
+            snapshot,
+            memory_mib,
+            f"{HCS_QUIET_CMDLINE} shellsnap",
+        )
+        restore_args = hcs_snapshot_restore_args(executable, snapshot, BOOT_MARKER)
+
+        cold, cold_wall = _collect_hcs_timings(
+            cold_args, config.runs, f"HCS cold boot ({memory_mib} MiB)", 90
+        )
+        capture_wall_ms = _capture_hcs_snapshot(capture_args, snapshot, 120)
+        restored, restore_wall = _collect_hcs_timings(
+            restore_args, config.runs, f"HCS restore ({memory_mib} MiB)", 90
+        )
+        print(f"== {memory_mib} MiB ==")
+        _print_hcs_snapshot_summary(
+            cold,
+            cold_wall,
+            capture_wall_ms,
+            restored,
+            restore_wall,
+            snapshot,
+            backend,
+        )
+        print()
+
+
+def benchmark_hcs_snapshot_python(
+    config: SnapshotConfig, backend: HostBackend
+) -> None:
+    if config.runs < 1:
+        raise ScriptError("number of runs must be at least 1")
+    executable = _require_hcs_benchmark(config, backend)
+    marker = "{'x': 10, 'y': 30}"
+    cmdline = f"{HCS_QUIET_CMDLINE} pyapp=hello.py"
+    cold_args = hcs_cold_boot_args(
+        executable, config, config.mem, cmdline, marker
+    )
+    capture_args = hcs_snapshot_capture_args(
+        executable, config, config.snapshot, config.mem, cmdline
+    )
+    restore_args = hcs_snapshot_restore_args(executable, config.snapshot, marker)
+
+    print(
+        f"HCS warmed Python snapshot benchmark, median of {config.runs} runs, "
+        f"{config.mem} MiB"
+    )
+    cold, cold_wall = _collect_hcs_timings(
+        cold_args, config.runs, "HCS Python cold boot", 150
+    )
+    capture_wall_ms = _capture_hcs_snapshot(capture_args, config.snapshot, 180)
+    restored, restore_wall = _collect_hcs_timings(
+        restore_args, config.runs, "HCS Python restore", 120
+    )
+    _print_hcs_snapshot_summary(
+        cold,
+        cold_wall,
+        capture_wall_ms,
+        restored,
+        restore_wall,
+        config.snapshot,
+        backend,
+    )
+
+
+def benchmark_hcs_network_snapshot_python(
+    config: HcsNetworkSnapshotConfig, backend: HostBackend
+) -> None:
+    if config.runs < 1:
+        raise ScriptError("number of runs must be at least 1")
+    snapshot_config = SnapshotConfig(
+        config.kernel, config.initrd, config.snapshot, config.mem, config.runs
+    )
+    executable = _require_hcs_benchmark(snapshot_config, backend)
+    marker = "HELLOPY-NET OK"
+    cold_completion_marker = "NVX-HCS-NETWORK-DONE"
+    cold_cmdline = (
+        f"{HCS_QUIET_CMDLINE} pyapp=net-hello.py "
+        f"netbench_cold=1 netbench_port={config.port}"
+    )
+    capture_cmdline = (
+        f"{HCS_QUIET_CMDLINE} pyapp=net-hello.py netbench_port={config.port}"
+    )
+    cold_args = hcs_cold_boot_args(
+        executable,
+        snapshot_config,
+        config.mem,
+        cold_cmdline,
+        cold_completion_marker,
+    )
+    cold_args.extend(["--net", config.net])
+    cold_args.remove("--quiet")
+    capture_args = hcs_snapshot_capture_args(
+        executable,
+        snapshot_config,
+        config.snapshot,
+        config.mem,
+        capture_cmdline,
+    )
+    capture_args.extend(["--net", config.net])
+    capture_args.remove("--quiet")
+    restore_args = hcs_snapshot_restore_args(executable, config.snapshot, marker)
+    restore_args.remove("--quiet")
+
+    with helper_server(config.port):
+        print(
+            f"HCS networked Python snapshot benchmark, median of {config.runs} runs, "
+            f"{config.mem} MiB, --net {config.net}"
+        )
+        cold, cold_wall = _collect_hcs_timings(
+            cold_args,
+            config.runs,
+            "HCS network cold boot",
+            300,
+            required_text=marker,
+        )
+        capture_wall_ms = _capture_hcs_snapshot(
+            capture_args, config.snapshot, 300, require_network=True
+        )
+        restored, restore_wall = _collect_hcs_timings(
+            restore_args, config.runs, "HCS network restore", 300
+        )
+        _print_hcs_snapshot_summary(
+            cold,
+            cold_wall,
+            capture_wall_ms,
+            restored,
+            restore_wall,
+            config.snapshot,
+            backend,
+        )
+        print(f"  verified marker       : {marker}")
 
 
 def benchmark_network_snapshot(
@@ -550,4 +939,4 @@ def _benchmark_python_app(
             )
         print(f"  verified: {match.group(0).strip()}")
     finally:
-        shutil.rmtree(snapshot, ignore_errors=True)
+        remove_tree(snapshot, label="temporary network snapshot")

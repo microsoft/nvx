@@ -9,6 +9,7 @@
 
 use ::std::collections::HashSet;
 use ::std::net::Ipv4Addr;
+#[cfg(target_os = "windows")]
 use ::std::path::Path;
 
 use ::anyhow::{Context, Result, bail};
@@ -19,6 +20,8 @@ use ::sha2::{Digest, Sha256};
 
 const CONTRACT_VERSION: u32 = 2;
 const BOOTSTRAP_IDENTITY_VERSION: u32 = 1;
+pub const EXTERNAL_AFXDP_BACKEND: &str = "afxdp-l2bridge";
+pub const HCN_AFXDP_BACKEND: &str = "hcn-afxdp-l2bridge";
 const MAX_CONTROL_PIPE: usize = 240;
 const MAX_CMDLINE_FRAGMENT: usize = 2048;
 const MAX_DNS_SERVERS: usize = 3;
@@ -26,12 +29,14 @@ const MAX_DNS_SEARCH_DOMAINS: usize = 6;
 const MAX_RESOLV_SEARCH_TOKEN: usize = 247;
 const MAX_EXPLICIT_ROUTES: usize = 32;
 /// The initramfs transport must fit the kernel command-line limit without truncation.
+#[cfg(target_os = "windows")]
 pub const MAX_GUEST_CMDLINE: usize = 2048;
 /// Smallest IPv4 MTU accepted by the external-network contract.
 pub const MIN_EXTERNAL_MTU: u32 = 576;
 /// Largest MTU accepted by the version-1 wire contract.
 pub const MAX_EXTERNAL_MTU: u32 = 65_521;
 /// Largest MTU supported by the AF_XDP data-plane frame layout.
+#[cfg(target_os = "windows")]
 pub const MAX_AFXDP_MTU: u32 = 4082;
 /// Largest RSS queue set supported by the external data-plane contract.
 pub const MAX_EXTERNAL_QUEUES: usize = 64;
@@ -52,7 +57,9 @@ pub struct L2BridgeConfig {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Attachment {
     pub backend: String,
+    #[serde(default)]
     pub interface_index: u32,
+    #[serde(default)]
     pub interface_luid: u64,
     pub queue_selection: QueueSelection,
 }
@@ -119,6 +126,7 @@ pub struct ExternalIdentity {
 
 impl L2BridgeConfig {
     /// Loads, rejects duplicate JSON keys, and validates every supported v1 field.
+    #[cfg(target_os = "windows")]
     pub fn from_path(path: &Path) -> Result<Self> {
         let bytes: Vec<u8> = ::std::fs::read(path)
             .with_context(|| format!("reading --net-config {}", path.display()))?;
@@ -147,17 +155,28 @@ impl L2BridgeConfig {
                 self.version
             );
         }
-        if self.attachment.backend != "afxdp-l2bridge" {
-            bail!(
+        match self.attachment.backend.as_str() {
+            EXTERNAL_AFXDP_BACKEND => {
+                if self.attachment.interface_index == 0 {
+                    bail!(
+                        "attachment.interfaceIndex must be a non-zero Windows interface index"
+                    );
+                }
+                if self.attachment.interface_luid == 0 {
+                    bail!("attachment.interfaceLuid must be a non-zero Windows interface LUID");
+                }
+            }
+            HCN_AFXDP_BACKEND => {
+                if self.attachment.interface_index != 0 || self.attachment.interface_luid != 0 {
+                    bail!(
+                        "HCN provisioning owns interfaceIndex/interfaceLuid; omit them or set both to zero"
+                    );
+                }
+            }
+            _ => bail!(
                 "unsupported external network backend {:?}",
                 self.attachment.backend
-            );
-        }
-        if self.attachment.interface_index == 0 {
-            bail!("attachment.interfaceIndex must be a non-zero Windows interface index");
-        }
-        if self.attachment.interface_luid == 0 {
-            bail!("attachment.interfaceLuid must be a non-zero Windows interface LUID");
+            ),
         }
         match self.attachment.queue_selection.mode.as_str() {
             "auto" if self.attachment.queue_selection.queues.is_empty() => {}
@@ -197,6 +216,25 @@ impl L2BridgeConfig {
         }
         if ip.is_unspecified() || gateway.is_unspecified() {
             bail!("guestBootstrap IPv4 address and gateway must not be unspecified");
+        }
+        if self.provisions_hcn_vnic() {
+            let prefix = self.guest_bootstrap.ipv4.prefix_length;
+            if prefix > 30 {
+                bail!("HCN provisioning requires guestBootstrap.ipv4.prefixLength in 1..=30");
+            }
+            let mask = u32::MAX << (32 - prefix);
+            let network = u32::from(ip) & mask;
+            let broadcast = network | !mask;
+            let expected_gateway = network + 1;
+            if u32::from(ip) == network
+                || u32::from(ip) == broadcast
+                || ip == gateway
+                || u32::from(gateway) != expected_gateway
+            {
+                bail!(
+                    "HCN provisioning requires a usable guest address and the first subnet address as gateway"
+                );
+            }
         }
         let default_routes = self
             .guest_bootstrap
@@ -248,6 +286,10 @@ impl L2BridgeConfig {
         }
         let _ = self.guest_cmdline_fragment()?;
         Ok(())
+    }
+
+    pub fn provisions_hcn_vnic(&self) -> bool {
+        self.attachment.backend == HCN_AFXDP_BACKEND
     }
 
     /// Returns the exact CNI/HCN endpoint MAC; it is never derived from the address.
@@ -558,6 +600,41 @@ mod tests {
             encoded["runtime"]["controlPipe"],
             r"\\.\pipe\aci-nvx-network-sandbox"
         );
+    }
+
+    #[test]
+    fn hcn_manifest_owns_interface_identity() {
+        let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
+        value["attachment"]["backend"] = Value::String(HCN_AFXDP_BACKEND.to_owned());
+        let attachment = value["attachment"].as_object_mut().unwrap();
+        attachment.remove("interfaceIndex");
+        attachment.remove("interfaceLuid");
+        let cfg = L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(cfg.provisions_hcn_vnic());
+        assert_eq!(cfg.attachment.interface_index, 0);
+        assert_eq!(cfg.attachment.interface_luid, 0);
+
+        let with_external_identity = CONFIG.replace(EXTERNAL_AFXDP_BACKEND, HCN_AFXDP_BACKEND);
+        assert!(L2BridgeConfig::from_json(with_external_identity.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn hcn_manifest_rejects_unusable_addressing() {
+        let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
+        value["attachment"]["backend"] = Value::String(HCN_AFXDP_BACKEND.to_owned());
+        let attachment = value["attachment"].as_object_mut().unwrap();
+        attachment.remove("interfaceIndex");
+        attachment.remove("interfaceLuid");
+
+        let mut bad_gateway = value.clone();
+        bad_gateway["guestBootstrap"]["ipv4"]["gateway"] =
+            Value::String("192.168.0.9".to_owned());
+        assert!(
+            L2BridgeConfig::from_json(&::serde_json::to_vec(&bad_gateway).unwrap()).is_err()
+        );
+
+        value["guestBootstrap"]["ipv4"]["prefixLength"] = Value::from(31);
+        assert!(L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

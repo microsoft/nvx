@@ -22,11 +22,25 @@ DIRECTIONS = {"lower", "higher"}
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
+HCS_SHELL_SNAPSHOT_MEMORIES_MIB = (256, 512)
 SHELL_SNAPSHOT_SECTION = re.compile(
     r"^==\s*(?P<memory>[0-9]+)\s+MiB\s*==\s*$"
     r"(?P<body>.*?)(?=^==\s*[0-9]+\s+MiB\s*==\s*$|\Z)",
     re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
+
+
+def _snapshot_section(text: str, memory_mib: int, source: str) -> str:
+    sections = [
+        match.group("body")
+        for match in SHELL_SNAPSHOT_SECTION.finditer(text)
+        if int(match.group("memory")) == memory_mib
+    ]
+    if not sections:
+        raise PerformanceError(f"missing {memory_mib} MiB section in {source}")
+    if len(sections) > 1:
+        raise PerformanceError(f"duplicate {memory_mib} MiB section in {source}")
+    return sections[0]
 
 
 class PerformanceError(RuntimeError):
@@ -204,6 +218,62 @@ def _parse_network(text: str) -> dict[str, MetricValue]:
     return _parse_fixed(text, "network.log", patterns)
 
 
+def _parse_hcs_summary(
+    text: str, source: str, prefix: str
+) -> dict[str, MetricValue]:
+    return _parse_fixed(
+        text,
+        source,
+        [
+            (
+                f"{prefix}_cold_guest",
+                "ms",
+                "lower",
+                rf"^\s*cold guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            ),
+            (
+                f"{prefix}_cold_wall",
+                "ms",
+                "lower",
+                rf"^\s*cold process wall\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            ),
+            (
+                f"{prefix}_restore_guest",
+                "ms",
+                "lower",
+                rf"^\s*restore guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            ),
+            (
+                f"{prefix}_restore_wall",
+                "ms",
+                "lower",
+                rf"^\s*restore process wall\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            ),
+        ],
+    )
+
+
+def _parse_hcs_shell_snapshot(text: str) -> dict[str, MetricValue]:
+    metrics: dict[str, MetricValue] = {}
+    for memory_mib in HCS_SHELL_SNAPSHOT_MEMORIES_MIB:
+        metrics.update(
+            _parse_hcs_summary(
+                _snapshot_section(text, memory_mib, "hcs-shell-snapshot.log"),
+                f"hcs-shell-snapshot.log ({memory_mib} MiB)",
+                f"hcs_shell_{memory_mib}_mib",
+            )
+        )
+    return metrics
+
+
+def _parse_hcs_python_snapshot(text: str) -> dict[str, MetricValue]:
+    return _parse_hcs_summary(text, "hcs-python-snapshot.log", "hcs_python")
+
+
+def _parse_hcs_network_snapshot(text: str) -> dict[str, MetricValue]:
+    return _parse_hcs_summary(text, "hcs-network-snapshot.log", "hcs_network")
+
+
 def _parse_virtfs(text: str) -> dict[str, MetricValue]:
     write_pattern = re.compile(
         rf"^\s*rw\s+(?P<kind>ephemeral|persistent)\b.*?\bwrite\s+"
@@ -279,6 +349,12 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "snapshot.log": (_parse_snapshot, True),
     "shell-snapshot.log": (_parse_shell_snapshot, False),
     "network.log": (_parse_network, False),
+}
+
+HCS_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
+    "hcs-shell-snapshot.log": (_parse_hcs_shell_snapshot, True),
+    "hcs-python-snapshot.log": (_parse_hcs_python_snapshot, True),
+    "hcs-network-snapshot.log": (_parse_hcs_network_snapshot, False),
 }
 
 
@@ -373,8 +449,9 @@ def collect_results(
         "network.log": require_network,
         "shell-snapshot.log": require_shell_snapshot,
     }
+    parsers = HCS_LOG_PARSERS if platform == "windows-hcs" else LOG_PARSERS
     collected: dict[str, MetricValue] = {}
-    for filename, (parser, required) in LOG_PARSERS.items():
+    for filename, (parser, required) in parsers.items():
         path = input_dir / filename
         if not path.exists():
             if required or required_optional_logs.get(filename, False):

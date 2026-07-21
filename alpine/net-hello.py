@@ -3,13 +3,13 @@
 #
 # It proves the guest NIC survives snapshot/restore without any heavy imports, so it measures
 # resuming a bare CPython interpreter that has a *live* link. It warms the link (so ARP for the
-# gateway is populated when the snapshot is taken), asks the VMM for a snapshot with a single outb
-# to I/O port 0x605 via /dev/port, and -- after a later restore, where execution resumes on the
+# gateway is populated when the snapshot is taken), asks the backend through /sbin/nvx-snapshot,
+# and -- after a later restore, where execution resumes on the
 # very next line -- re-checks the link over the freshly recreated host TAP and prints a marker the
 # benchmark greps for. On a plain cold boot (no --snapshot) the port write is ignored and the app
 # simply runs straight through.
-import os
 import socket
+import subprocess
 
 # Host HTTP port the benchmark's helper server listens on.
 DEFAULT_PORT = 8099
@@ -67,16 +67,18 @@ def link_ok(host, port, timeout=3, attempts=3):
 gw = gateway()
 port = helper_port()
 if not is_cold_measurement():
-    link_ok(gw, port)  # warm the link (ARP + a round-trip) before snapshotting
-    try:
-        fd = os.open("/dev/port", os.O_WRONLY)
-        os.lseek(fd, 0x605, os.SEEK_SET)
-        os.write(fd, b"\x01")
-        os.close(fd)
-    except OSError:
-        pass
+    if not link_ok(gw, port):
+        print("HELLOPY-NET PRECAPTURE-FAIL", flush=True)
+        subprocess.run(["reboot", "-f"], check=False)
+        raise SystemExit(1)
+    print("HELLOPY-NET PRECAPTURE-OK")
+    subprocess.run(["/sbin/nvx-snapshot"], check=True)
 
 # ---- on restore, execution resumes here ----
 ok = link_ok(gw, port)
 print("hello world")
-print("HELLOPY-NET " + ("OK" if ok else "FAIL"))
+print("HELLOPY-NET " + ("OK" if ok else "FAIL"), flush=True)
+print("NVX-HCS-NETWORK-DONE", flush=True)
+if not ok:
+    subprocess.run(["reboot", "-f"], check=False)
+    raise SystemExit(1)

@@ -22,17 +22,27 @@ from nvx_tools.build import (
     docker_build_command,
 )
 from nvx_tools.benchmarks import (
+    HcsNetworkSnapshotConfig,
     NetworkSnapshotConfig,
+    _capture_hcs_snapshot,
+    _validate_hcs_snapshot,
+    benchmark_hcs_snapshot_python,
+    benchmark_hcs_snapshot_shell,
+    benchmark_hcs_network_snapshot_python,
     benchmark_network_snapshot,
     format_rate_median,
+    hcs_cold_boot_args,
+    hcs_snapshot_capture_args,
+    hcs_snapshot_restore_args,
     parse_data_checksum,
     parse_dd_rate,
 )
-from nvx_tools.common import CommandResult, REPO_ROOT, ScriptError
+from nvx_tools.common import CommandResult, REPO_ROOT, ScriptError, remove_tree
 from nvx_tools.cli import build_parser
 from nvx_tools.vm import (
     BOOT_MARKER,
     BootTestConfig,
+    SnapshotConfig,
     VmConfig,
     cold_boot_args,
     format_median,
@@ -68,6 +78,20 @@ class BackendTests(unittest.TestCase):
         args = build_parser().parse_args(["bench-snapshot-shell"])
 
         self.assertFalse(args.python_initrd)
+
+    def test_hcs_snapshot_benchmarks_select_expected_guest_images(self) -> None:
+        shell = build_parser().parse_args(["bench-hcs-snapshot-shell"])
+        python = build_parser().parse_args(["bench-hcs-snapshot-py"])
+        network = build_parser().parse_args(["bench-hcs-net-snapshot-py"])
+
+        self.assertFalse(shell.python_initrd)
+        self.assertEqual(shell.memories, "256 512")
+        self.assertEqual(shell.snapshot_name, "hcs-shellsnap")
+        self.assertTrue(python.python_initrd)
+        self.assertEqual(python.snapshot_name, "hcs-pysnap")
+        self.assertTrue(network.python_initrd)
+        self.assertEqual(network.snapshot_name, "hcs-net-pysnap")
+        self.assertEqual(network.net, "10.0.0.2/24")
 
     def test_network_snapshot_exposes_vcpus(self) -> None:
         args = build_parser().parse_args(["bench-net-snapshot", "--vcpus", "3"])
@@ -197,6 +221,104 @@ class BuildTests(unittest.TestCase):
 
 
 class BenchmarkParserTests(unittest.TestCase):
+    def test_remove_tree_rejects_protected_directories_and_ancestors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repo"
+            repository.mkdir()
+            with patch("nvx_tools.common.REPO_ROOT", repository):
+                with self.assertRaisesRegex(ScriptError, "unsafe snapshot"):
+                    remove_tree(repository, label="snapshot")
+                with self.assertRaisesRegex(ScriptError, "unsafe snapshot"):
+                    remove_tree(root, label="snapshot")
+            self.assertTrue(repository.is_dir())
+
+    def test_remove_tree_allows_snapshot_below_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            snapshot = repository / "build" / "snapshot"
+            snapshot.mkdir(parents=True)
+            with patch("nvx_tools.common.REPO_ROOT", repository):
+                remove_tree(snapshot, label="snapshot")
+            self.assertFalse(snapshot.exists())
+            self.assertTrue(repository.is_dir())
+
+    def test_hcs_benchmarks_reject_non_windows_host_before_vm_setup(self) -> None:
+        config = SnapshotConfig(
+            Path("kernel"), Path("initrd"), Path("snapshot"), runs=1
+        )
+        with self.assertRaisesRegex(ScriptError, "Windows host"):
+            benchmark_hcs_snapshot_shell(config, LinuxBackend(), [256])
+        with self.assertRaisesRegex(ScriptError, "Windows host"):
+            benchmark_hcs_snapshot_python(config, LinuxBackend())
+
+    def test_hcs_snapshot_artifact_contract_and_failed_capture_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            (snapshot / "runtime.vmrs").write_bytes(b"opaque state")
+            (snapshot / "manifest.json").write_text(
+                '{"format":"NVXHCSS1","version":2,"backend":"hcs"}',
+                encoding="utf-8",
+            )
+            manifest, state = _validate_hcs_snapshot(snapshot)
+            self.assertEqual(manifest.name, "manifest.json")
+            self.assertEqual(state.name, "runtime.vmrs")
+            with self.assertRaisesRegex(ScriptError, "network identity"):
+                _validate_hcs_snapshot(snapshot, require_network=True)
+
+            (snapshot / "manifest.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ScriptError, "manifest contract"):
+                _validate_hcs_snapshot(snapshot)
+
+            (snapshot / "manifest.json").write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(ScriptError, "manifest contract"):
+                _validate_hcs_snapshot(snapshot)
+
+            with patch(
+                "nvx_tools.benchmarks.run_capture",
+                return_value=CommandResult(("microvm",), 0, b"", b""),
+            ):
+                with self.assertRaisesRegex(ScriptError, "incomplete"):
+                    _capture_hcs_snapshot(["microvm"], snapshot, 1)
+            self.assertFalse(snapshot.exists())
+
+    def test_hcs_snapshot_commands_use_hcs_native_contract(self) -> None:
+        config = SnapshotConfig(
+            Path("kernel"), Path("initrd"), Path("snapshot"), mem=384, runs=3
+        )
+        cold = [
+            str(value)
+            for value in hcs_cold_boot_args(
+                Path("microvm.exe"), config, 384, "console=ttyS0", "READY"
+            )
+        ]
+        capture = [
+            str(value)
+            for value in hcs_snapshot_capture_args(
+                Path("microvm.exe"),
+                config,
+                Path("snapshot-384"),
+                384,
+                "console=ttyS0 shellsnap",
+            )
+        ]
+        restore = [
+            str(value)
+            for value in hcs_snapshot_restore_args(
+                Path("microvm.exe"), Path("snapshot-384"), "READY"
+            )
+        ]
+
+        for command in (cold, capture, restore):
+            self.assertEqual(command[1:3], ["--backend", "hcs"])
+        self.assertIn("--kernel", cold)
+        self.assertIn("--snapshot", capture)
+        self.assertNotIn("--kernel", restore)
+        self.assertNotIn("--initrd", restore)
+        self.assertNotIn("--mem", restore)
+
     def test_network_snapshot_rejects_zero_runs_before_starting_vm(self) -> None:
         with self.assertRaisesRegex(ScriptError, "at least 1"):
             benchmark_network_snapshot(
@@ -221,6 +343,145 @@ class BenchmarkParserTests(unittest.TestCase):
     def test_rate_output_keeps_performance_parser_contract(self) -> None:
         formatted = format_rate_median([100.0, 300.0, 200.0])
         self.assertRegex(formatted, r"200\.0 MB/s")
+
+
+class HcsBenchmarkWorkflowTests(unittest.TestCase):
+    def test_shell_and_python_workflows_run_preflight_capture_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            backend = HostBackend(
+                "windows-whp", ".exe", root / "build", "tsc", False, root
+            )
+            executable = backend.executable()
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            kernel = root / "build" / "vmlinux"
+            base_initrd = root / "build" / "initramfs.cpio.gz"
+            python_initrd = root / "build" / "initramfs-python.cpio.gz"
+            kernel.parent.mkdir(exist_ok=True)
+            for artifact in (kernel, base_initrd, python_initrd):
+                artifact.write_bytes(b"fixture")
+
+            calls: list[tuple[str, ...]] = []
+            timeouts: dict[tuple[str, ...], object] = {}
+            graceful_timeouts: dict[tuple[str, ...], object] = {}
+
+            def fake_runner(args: object, **kwargs: object) -> CommandResult:
+                command = tuple(str(value) for value in args)
+                calls.append(command)
+                timeouts[command] = kwargs.get("timeout")
+                graceful_timeouts[command] = kwargs.get("graceful_timeout")
+                if "--snapshot" in command:
+                    snapshot = Path(command[command.index("--snapshot") + 1])
+                    snapshot.mkdir()
+                    (snapshot / "manifest.json").write_text(
+                        '{"format":"NVXHCSS1","version":2,"backend":"hcs",'
+                        '"network":{"network_id":"n","endpoint_id":"e",'
+                        '"adapter_id":"a","guest_ip":"10.0.0.2","prefix":24,'
+                        '"gateway":"10.0.0.1","mac_address":"00-15-5D-00-00-01"}}',
+                        encoding="utf-8",
+                    )
+                    (snapshot / "runtime.vmrs").write_bytes(b"opaque state")
+                    return CommandResult(command, 0, b"", b"")
+                if "--selftest" in command:
+                    return CommandResult(command, 0, b"", b"")
+                metric = (
+                    b"restore: 5.0 ms"
+                    if "--restore" in command
+                    else b"cold-start: 20.0 ms\nHELLOPY-NET OK"
+                )
+                return CommandResult(command, 0, b"", metric)
+
+            output = io.StringIO()
+            with (
+                patch("nvx_tools.benchmarks.run_capture", side_effect=fake_runner),
+                patch.object(HostBackend, "allocated_size", return_value=12),
+                patch(
+                    "nvx_tools.benchmarks.helper_server",
+                    return_value=contextlib.nullcontext(),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                benchmark_hcs_snapshot_shell(
+                    SnapshotConfig(
+                        kernel,
+                        base_initrd,
+                        root / "build" / "hcs-shell",
+                        mem=256,
+                        runs=2,
+                    ),
+                    backend,
+                    [256],
+                )
+                benchmark_hcs_snapshot_python(
+                    SnapshotConfig(
+                        kernel,
+                        python_initrd,
+                        root / "build" / "hcs-python",
+                        mem=512,
+                        runs=1,
+                    ),
+                    backend,
+                )
+                benchmark_hcs_network_snapshot_python(
+                    HcsNetworkSnapshotConfig(
+                        kernel,
+                        python_initrd,
+                        root / "build" / "hcs-network",
+                        mem=512,
+                        runs=1,
+                        net="10.0.0.2/24",
+                        port=8099,
+                    ),
+                    backend,
+                )
+
+            captures = [command for command in calls if "--snapshot" in command]
+            restores = [command for command in calls if "--restore" in command]
+            preflights = [command for command in calls if "--selftest" in command]
+            self.assertEqual(len(captures), 3)
+            self.assertEqual(len(restores), 4)
+            self.assertEqual(len(preflights), 3)
+            network_capture = next(
+                command
+                for command in captures
+                if command[command.index("--snapshot") + 1].endswith("hcs-network")
+            )
+            network_restore = next(
+                command
+                for command in restores
+                if command[command.index("--restore") + 1].endswith("hcs-network")
+            )
+            network_cold = next(
+                command
+                for command in calls
+                if "--net" in command and "--exit-on-boot" in command
+            )
+            self.assertIn("--net", network_capture)
+            self.assertNotIn("--net", network_restore)
+            self.assertNotIn("--quiet", network_cold)
+            self.assertNotIn("--quiet", network_capture)
+            self.assertNotIn("--quiet", network_restore)
+            self.assertEqual(
+                network_cold[network_cold.index("--boot-marker") + 1],
+                "NVX-HCS-NETWORK-DONE",
+            )
+            self.assertEqual(timeouts[network_cold], 300)
+            self.assertEqual(timeouts[network_capture], 300)
+            self.assertEqual(timeouts[network_restore], 300)
+            self.assertIs(graceful_timeouts[network_cold], True)
+            self.assertIs(graceful_timeouts[network_capture], True)
+            self.assertIs(graceful_timeouts[network_restore], True)
+            self.assertIn("cold guest latency", output.getvalue())
+            self.assertIn("restore process wall", output.getvalue())
+            self.assertIn("HELLOPY-NET OK", output.getvalue())
+
+    def test_guest_network_mac_match_ignores_hcn_separators(self) -> None:
+        for name in ("init", "init.python"):
+            script = (REPO_ROOT / "alpine" / name).read_text(encoding="utf-8")
+            self.assertIn("tr -d ':' | tr -d '-'", script)
+            self.assertIn('fatal "virtnet: no non-loopback interface appeared', script)
+            self.assertIn('while [ "$tries" -lt 600 ]', script)
 
 
 class BootTestTests(unittest.TestCase):

@@ -22,9 +22,13 @@ from .build import (
     build_python_initramfs_native,
 )
 from .benchmarks import (
+    HcsNetworkSnapshotConfig,
     NetworkPythonConfig,
     NetworkSnapshotConfig,
     VirtfsConfig,
+    benchmark_hcs_snapshot_python,
+    benchmark_hcs_snapshot_shell,
+    benchmark_hcs_network_snapshot_python,
     benchmark_network_python,
     benchmark_network_snapshot,
     benchmark_virtfs,
@@ -159,6 +163,49 @@ def build_parser() -> argparse.ArgumentParser:
         "--memories",
         default=os.environ.get("MEMS", "64 128 256 512"),
         help="space-separated guest memory sizes in MiB",
+    )
+
+    hcs_shell_snapshot = subparsers.add_parser(
+        "bench-hcs-snapshot-shell",
+        help="benchmark HCS cold boot against native snapshot restore",
+    )
+    _add_snapshot_arguments(
+        hcs_shell_snapshot,
+        default_name="hcs-shellsnap",
+        default_runs=10,
+        include_mem=False,
+    )
+    hcs_shell_snapshot.set_defaults(python_initrd=False)
+    hcs_shell_snapshot.add_argument(
+        "--memories",
+        default=os.environ.get("MEMS", "256 512"),
+        help="space-separated HCS guest memory sizes in MiB",
+    )
+
+    hcs_python_snapshot = subparsers.add_parser(
+        "bench-hcs-snapshot-py",
+        help="benchmark a warmed Python workload restored by HCS",
+    )
+    _add_snapshot_arguments(
+        hcs_python_snapshot,
+        default_name="hcs-pysnap",
+        default_runs=8,
+    )
+
+    hcs_network_snapshot = subparsers.add_parser(
+        "bench-hcs-net-snapshot-py",
+        help="benchmark HCN-backed HCS snapshot restore with a real HTTP request",
+    )
+    _add_snapshot_arguments(
+        hcs_network_snapshot,
+        default_name="hcs-net-pysnap",
+        default_runs=8,
+    )
+    hcs_network_snapshot.add_argument(
+        "--net", "-Net", default=os.environ.get("NET", "10.0.0.2/24")
+    )
+    hcs_network_snapshot.add_argument(
+        "--port", "-Port", type=int, default=_int_default("PORT", 8099)
     )
 
     snapshot_repl = subparsers.add_parser(
@@ -423,6 +470,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             except ValueError as error:
                 raise ScriptError("--memories must contain integer MiB values") from error
             benchmark_shell_snapshot(_snapshot_config(args, backend), backend, memories)
+            return 0
+        if args.command == "bench-hcs-snapshot-shell":
+            try:
+                memories = [int(value) for value in args.memories.split()]
+            except ValueError as error:
+                raise ScriptError("--memories must contain integer MiB values") from error
+            benchmark_hcs_snapshot_shell(
+                _snapshot_config(args, backend), backend, memories
+            )
+            return 0
+        if args.command == "bench-hcs-snapshot-py":
+            benchmark_hcs_snapshot_python(_snapshot_config(args, backend), backend)
+            return 0
+        if args.command == "bench-hcs-net-snapshot-py":
+            snapshot = _snapshot_config(args, backend)
+            benchmark_hcs_network_snapshot_python(
+                HcsNetworkSnapshotConfig(
+                    snapshot.kernel,
+                    snapshot.initrd,
+                    snapshot.snapshot,
+                    snapshot.mem,
+                    snapshot.runs,
+                    args.net,
+                    args.port,
+                ),
+                backend,
+            )
             return 0
         if args.command == "snapshot-boot":
             return snapshot_boot(

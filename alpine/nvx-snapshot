@@ -1,0 +1,26 @@
+#!/bin/sh
+# Request a snapshot at this execution boundary. HCS exposes COM2 and resumes this helper with a
+# versioned acknowledgment; KVM/WHP retain the existing port 0x605 control ABI.
+case " $(cat /proc/cmdline) " in
+*" nvx_snapshot_transport=hcs-com2 "*)
+    if [ ! -c /dev/ttyS1 ]; then
+        echo "nvx-snapshot: HCS control port /dev/ttyS1 is missing" >&2
+        exit 1
+    fi
+    if ! stty -F /dev/ttyS1 115200 raw -echo 2>/dev/null; then
+        echo "nvx-snapshot: failed to configure HCS control port" >&2
+        exit 1
+    fi
+    exec 3<>/dev/ttyS1
+    printf 'NVX-HCS-SNAPSHOT/1 REQUEST\n' >&3
+    IFS= read -r reply <&3
+    exec 3>&-
+    if [ "$reply" != 'NVX-HCS-SNAPSHOT/1 RESTORED' ]; then
+        echo "nvx-snapshot: invalid HCS restore acknowledgment: $reply" >&2
+        exit 1
+    fi
+    ;;
+*)
+    printf '\001' | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null
+    ;;
+esac

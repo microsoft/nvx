@@ -10,6 +10,7 @@
 use ::core::ffi::c_void;
 use ::std::fs::{File, OpenOptions};
 use ::std::io::{BufReader, ErrorKind, Read, Write};
+use ::std::net::Ipv4Addr;
 use ::std::panic::{AssertUnwindSafe, catch_unwind};
 use ::std::pin::Pin;
 use ::std::sync::atomic::{
@@ -1055,6 +1056,7 @@ impl Queue {
                 counters.rx_dropped.fetch_add(1, Ordering::Relaxed);
             } else {
                 let frame = &self.umem[offset..end];
+                trace_frame("host RX", frame);
                 if out.try_send(frame.to_vec()).is_ok() {
                     counters.rx_received.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -1199,7 +1201,9 @@ struct Afxdp {
     tx_guard: Mutex<Option<OwnedHandle>>,
     tx_sender: SyncSender<Vec<u8>>,
     tx_wake: Arc<Event>,
+    rx_sender: SyncSender<Vec<u8>>,
     receiver: Mutex<Receiver<Vec<u8>>>,
+    arp_proxy: Option<ArpProxy>,
     max_frame_size: usize,
     shared: Arc<SharedState>,
     controls: Vec<Arc<Event>>,
@@ -1209,9 +1213,10 @@ struct Afxdp {
 impl Afxdp {
     fn new(
         api: Arc<XdpApi>,
-        guard: OwnedHandle,
+        guard: Option<OwnedHandle>,
         queues: Vec<Queue>,
         max_frame_size: usize,
+        arp_proxy: Option<ArpProxy>,
     ) -> Result<Arc<Self>> {
         let (out, receiver) = sync_channel(RX_CHANNEL_DEPTH);
         let (tx_sender, tx_receiver) = sync_channel(TX_FRAME_COUNT);
@@ -1276,10 +1281,12 @@ impl Afxdp {
         );
         Ok(Arc::new(Self {
             _api: api,
-            tx_guard: Mutex::new(Some(guard)),
+            tx_guard: Mutex::new(guard),
             tx_sender,
             tx_wake,
+            rx_sender: out,
             receiver: Mutex::new(receiver),
+            arp_proxy,
             max_frame_size,
             shared,
             controls,
@@ -1326,6 +1333,36 @@ impl FrameBackend for Afxdp {
                 .tx_dropped
                 .fetch_add(1, Ordering::Relaxed);
             return FrameSend::Dropped;
+        }
+        trace_frame("guest TX", &frame);
+        if let Some(reply) = self
+            .arp_proxy
+            .as_ref()
+            .and_then(|proxy| proxy.reply(&frame))
+        {
+            trace_frame("HCN ARP proxy RX", &reply);
+            return match self.rx_sender.try_send(reply) {
+                Ok(()) => {
+                    self.shared
+                        .counters
+                        .tx_accepted
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.shared
+                        .counters
+                        .rx_received
+                        .fetch_add(1, Ordering::Relaxed);
+                    FrameSend::Accepted
+                }
+                Err(::std::sync::mpsc::TrySendError::Full(_)) => FrameSend::Backpressure,
+                Err(::std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    self.shared
+                        .counters
+                        .tx_dropped
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.shared.fail("HCN ARP proxy receiver disconnected");
+                    FrameSend::Dropped
+                }
+            };
         }
         self.shared.inflight.fetch_add(1, Ordering::AcqRel);
         match self.tx_sender.try_send(frame) {
@@ -1667,6 +1704,58 @@ fn check(status: HResult, operation: &str) -> Result<()> {
     Ok(())
 }
 
+fn trace_frame(direction: &str, frame: &[u8]) {
+    if !::log::log_enabled!(::log::Level::Trace) || frame.len() < 14 {
+        return;
+    }
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    let mut detail = String::new();
+    if ethertype == 0x0806 && frame.len() >= 42 {
+        let operation = u16::from_be_bytes([frame[20], frame[21]]);
+        detail = format!(
+            " arp op={} sha={} spa={}.{}.{}.{} tha={} tpa={}.{}.{}.{}",
+            operation,
+            frame_mac(&frame[22..28]),
+            frame[28],
+            frame[29],
+            frame[30],
+            frame[31],
+            frame_mac(&frame[32..38]),
+            frame[38],
+            frame[39],
+            frame[40],
+            frame[41],
+        );
+    } else if ethertype == 0x0800 && frame.len() >= 34 {
+        detail = format!(
+            " ipv4 proto={} src={}.{}.{}.{} dst={}.{}.{}.{}",
+            frame[23],
+            frame[26],
+            frame[27],
+            frame[28],
+            frame[29],
+            frame[30],
+            frame[31],
+            frame[32],
+            frame[33],
+        );
+    }
+    ::log::trace!(
+        "virt-net: AF_XDP {direction} len={} dst={} src={} ethertype={ethertype:#06x}{detail}",
+        frame.len(),
+        frame_mac(&frame[..6]),
+        frame_mac(&frame[6..12]),
+    );
+}
+
+fn frame_mac(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 fn interface_luid(interface_index: u32) -> Result<u64> {
     let mut luid = 0_u64;
     let status = unsafe { ConvertInterfaceIndexToLuid(interface_index, &mut luid) };
@@ -1742,7 +1831,41 @@ pub struct BackendStart {
     pub interface_luid: u64,
 }
 
-pub fn start(config: &L2BridgeConfig) -> Result<BackendStart> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArpProxy {
+    pub guest_mac: [u8; 6],
+    pub guest_ip: Ipv4Addr,
+    pub gateway_mac: [u8; 6],
+    pub gateway_ip: Ipv4Addr,
+}
+
+impl ArpProxy {
+    fn reply(&self, request: &[u8]) -> Option<Vec<u8>> {
+        if request.len() < 42
+            || request[12..14] != [0x08, 0x06]
+            || request[14..20] != [0x00, 0x01, 0x08, 0x00, 0x06, 0x04]
+            || request[20..22] != [0x00, 0x01]
+            || request[22..28] != self.guest_mac
+            || request[28..32] != self.guest_ip.octets()
+            || request[38..42] != self.gateway_ip.octets()
+        {
+            return None;
+        }
+        let mut reply = vec![0; 42];
+        reply[..6].copy_from_slice(&self.guest_mac);
+        reply[6..12].copy_from_slice(&self.gateway_mac);
+        reply[12..14].copy_from_slice(&[0x08, 0x06]);
+        reply[14..20].copy_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04]);
+        reply[20..22].copy_from_slice(&[0x00, 0x02]);
+        reply[22..28].copy_from_slice(&self.gateway_mac);
+        reply[28..32].copy_from_slice(&self.gateway_ip.octets());
+        reply[32..38].copy_from_slice(&self.guest_mac);
+        reply[38..42].copy_from_slice(&self.guest_ip.octets());
+        Some(reply)
+    }
+}
+
+pub fn start(config: &L2BridgeConfig, arp_proxy: Option<ArpProxy>) -> Result<BackendStart> {
     let expected_luid = config.attachment.interface_luid;
     validate_interface_identity(config.attachment.interface_index, expected_luid)?;
     let (max_frame_size, chunk_size) = frame_layout(config.device.mtu)?;
@@ -1772,10 +1895,15 @@ pub fn start(config: &L2BridgeConfig) -> Result<BackendStart> {
         ids.len().div_ceil(MAX_QUEUES_PER_WORKER),
         total_umem as f64 / (1024.0 * 1024.0),
     );
-    let guard = create_tx_guard(&api, config.attachment.interface_index)?;
+    let guard = if config.provisions_hcn_vnic() {
+        None
+    } else {
+        Some(create_tx_guard(&api, config.attachment.interface_index)?)
+    };
     let observed_luid =
         validate_interface_identity(config.attachment.interface_index, expected_luid)?;
-    let backend: Arc<dyn FrameBackend> = Afxdp::new(api, guard, queues, max_frame_size)?;
+    let backend: Arc<dyn FrameBackend> =
+        Afxdp::new(api, guard, queues, max_frame_size, arp_proxy)?;
     Ok(BackendStart {
         backend,
         queues: ids,
@@ -1886,6 +2014,37 @@ mod tests {
         let command: StartVm = ::serde_json::from_str(r#"{"type":"StartVm"}"#).unwrap();
         assert_eq!(command.kind, "StartVm");
         assert!(::serde_json::from_str::<StartVm>(r#"{"type":"StartVm","extra":true}"#).is_err());
+    }
+
+    #[test]
+    fn hcn_arp_proxy_answers_only_its_gateway_request() {
+        let proxy = ArpProxy {
+            guest_mac: [0x00, 0x15, 0x5d, 0x52, 0xc0, 0x10],
+            guest_ip: Ipv4Addr::new(192, 168, 240, 2),
+            gateway_mac: [0x00, 0x15, 0x5d, 0x52, 0xcf, 0x2b],
+            gateway_ip: Ipv4Addr::new(192, 168, 240, 1),
+        };
+        let mut request = vec![0xff; 42];
+        request[6..12].copy_from_slice(&proxy.guest_mac);
+        request[12..14].copy_from_slice(&[0x08, 0x06]);
+        request[14..20].copy_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04]);
+        request[20..22].copy_from_slice(&[0x00, 0x01]);
+        request[22..28].copy_from_slice(&proxy.guest_mac);
+        request[28..32].copy_from_slice(&proxy.guest_ip.octets());
+        request[32..38].fill(0);
+        request[38..42].copy_from_slice(&proxy.gateway_ip.octets());
+
+        let reply = proxy.reply(&request).unwrap();
+        assert_eq!(&reply[..6], &proxy.guest_mac);
+        assert_eq!(&reply[6..12], &proxy.gateway_mac);
+        assert_eq!(&reply[20..22], &[0x00, 0x02]);
+        assert_eq!(&reply[22..28], &proxy.gateway_mac);
+        assert_eq!(&reply[28..32], &proxy.gateway_ip.octets());
+        assert_eq!(&reply[32..38], &proxy.guest_mac);
+        assert_eq!(&reply[38..42], &proxy.guest_ip.octets());
+
+        request[38..42].copy_from_slice(&Ipv4Addr::new(192, 168, 240, 9).octets());
+        assert!(proxy.reply(&request).is_none());
     }
 
     #[test]

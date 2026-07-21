@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import shutil
 import subprocess
 import urllib.error
@@ -57,31 +58,55 @@ def run_capture(
     timeout: float | None = None,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    graceful_timeout: bool = False,
 ) -> CommandResult:
     command = tuple(os.fspath(arg) for arg in args)
+    creationflags = (
+        subprocess.CREATE_NEW_PROCESS_GROUP
+        if graceful_timeout and os.name == "nt"
+        else 0
+    )
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+        creationflags=creationflags,
+    )
     try:
-        completed = subprocess.run(
-            command,
-            input=input_text.encode("utf-8"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            cwd=cwd,
-            env=env,
-            check=False,
+        stdout, stderr = process.communicate(
+            input=input_text.encode("utf-8"), timeout=timeout
         )
         return CommandResult(
             command,
-            completed.returncode,
-            completed.stdout,
-            completed.stderr,
+            process.returncode,
+            stdout,
+            stderr,
         )
-    except subprocess.TimeoutExpired as error:
+    except subprocess.TimeoutExpired:
+        if graceful_timeout:
+            timeout_signal = (
+                signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT
+            )
+            try:
+                process.send_signal(timeout_signal)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+        else:
+            process.kill()
+            stdout, stderr = process.communicate()
         return CommandResult(
             command,
             None,
-            error.stdout or b"",
-            error.stderr or b"",
+            stdout,
+            stderr,
             timed_out=True,
         )
 
@@ -96,6 +121,16 @@ def require_tool(name: str, message: str | None = None) -> str:
     if executable is None:
         raise ScriptError(message or f"{name} was not found on PATH")
     return executable
+
+
+def remove_tree(path: Path, *, label: str) -> None:
+    target = path.expanduser().resolve()
+    protected = (REPO_ROOT.resolve(), Path.cwd().resolve(), Path.home().resolve())
+    if any(location == target or location.is_relative_to(target) for location in protected):
+        raise ScriptError(
+            f"refusing to remove unsafe {label} directory {path} (resolves to {target})"
+        )
+    shutil.rmtree(target, ignore_errors=True)
 
 
 def run_checked(

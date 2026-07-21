@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import statistics
 import subprocess
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from .common import (
     CommandResult,
     ScriptError,
     diagnostic_tail,
+    remove_tree,
     require_file,
     require_success,
     run_capture,
@@ -287,7 +287,7 @@ def capture_snapshot(
     timeout: int = 40,
     runner: Runner = run_capture,
 ) -> CommandResult:
-    shutil.rmtree(snapshot, ignore_errors=True)
+    remove_tree(snapshot, label="snapshot")
     result = runner(args, timeout=timeout)
     state = snapshot / "state.bin"
     memory = snapshot / "mem.bin"

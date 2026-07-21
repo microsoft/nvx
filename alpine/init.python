@@ -8,18 +8,156 @@ mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 
-# virt-net: if the VMM attached a NIC (see --net), configure it from the kernel command line
-# tokens ("virtnet_ip=<ip>", "virtnet_mask=<dotted>", "virtnet_gw=<host>") so the Python app
-# resumes with a live link. Uses ifconfig (busybox's ip-addr needs AF_UNIX, omitted from this
-# kernel); the default route points at the host side of the point-to-point link.
+fatal() {
+    echo "$*" >&2
+    echo "NVX-HCS-NETWORK-DONE"
+    /bin/busybox reboot -f
+    exit 1
+}
+
+# virt-net: configure standalone --net or the fail-closed L2Bridge/HCN contract before Python.
+nrequired=$(sed -n 's/.*virtnet_required=\([^ ]*\).*/\1/p' /proc/cmdline)
 nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
-if [ -n "$nip" ]; then
+if [ "$nrequired" = 1 ] || [ -n "$nip" ]; then
     nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
     ngw=$(sed -n 's/.*virtnet_gw=\([^ ]*\).*/\1/p' /proc/cmdline)
-    ndev=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -n1)
+    nprefix=$(sed -n 's/.*virtnet_prefix=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nmac=$(sed -n 's/.*virtnet_mac=\([^ ]*\).*/\1/p' /proc/cmdline | tr 'A-F' 'a-f' | tr -d ':' | tr -d '-')
+    nmtu=$(sed -n 's/.*virtnet_mtu=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nroutes=$(sed -n 's/.*virtnet_routes=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ndns=$(sed -n 's/.*virtnet_dns=\([^ ]*\).*/\1/p' /proc/cmdline)
+    nsearch=$(sed -n 's/.*virtnet_search=\([^ ]*\).*/\1/p' /proc/cmdline)
+    virtnet_ok=1
+    virtnet_error() {
+        virtnet_ok=0
+        if [ "$nrequired" = 1 ]; then
+            fatal "VIRTNET-FAIL: $*"
+        fi
+        echo "virtnet: $*" >&2
+    }
+
+    [ -n "$nip" ] || virtnet_error "missing virtnet_ip"
+    ndev=
+    candidate_mac=
+    tries=0
+    while [ "$tries" -lt 600 ] && [ -z "$ndev" ]; do
+        for npath in /sys/class/net/*; do
+            [ -e "$npath" ] || continue
+            candidate=${npath##*/}
+            [ "$candidate" = lo ] && continue
+            candidate_mac=$(cat "$npath/address" 2>/dev/null | tr 'A-F' 'a-f' | tr -d ':' | tr -d '-')
+            ndev=$candidate
+            break
+        done
+        [ -n "$ndev" ] || sleep 0.05
+        tries=$((tries + 1))
+    done
     if [ -n "$ndev" ]; then
-        ifconfig "$ndev" "$nip" netmask "${nmask:-255.255.255.0}" up
-        [ -n "$ngw" ] && ip route add default via "$ngw" 2>/dev/null
+        if [ "$nrequired" = 1 ] && [ -z "$nmac" ]; then
+            virtnet_error "missing virtnet_mac"
+        fi
+        if [ -n "$nmac" ] && [ "$candidate_mac" != "$nmac" ]; then
+            configured_mac=$(echo "$nmac" | sed 's/../&:/g; s/:$//')
+            if ! ifconfig "$ndev" down || ! ifconfig "$ndev" hw ether "$configured_mac"; then
+                virtnet_error "$ndev has MAC ${candidate_mac:-unknown}; failed to set $configured_mac"
+            fi
+            echo "virtnet: changed $ndev MAC from ${candidate_mac:-unknown} to $configured_mac"
+        fi
+        if [ "$nrequired" = 1 ] && [ -z "$nmtu" ]; then
+            virtnet_error "missing virtnet_mtu"
+        elif [ -n "$nmtu" ] && ! ifconfig "$ndev" mtu "$nmtu"; then
+            virtnet_error "failed to set $ndev MTU to $nmtu"
+        fi
+        if [ "$nrequired" = 1 ] && [ -z "$nprefix" ]; then
+            virtnet_error "missing virtnet_prefix"
+        fi
+        if [ -z "$nmask" ]; then
+            if [ "$nrequired" = 1 ]; then
+                virtnet_error "missing virtnet_mask"
+            else
+                nmask=255.255.255.0
+            fi
+        fi
+        if ! ifconfig "$ndev" "$nip" netmask "$nmask" up; then
+            virtnet_error "failed to configure $ndev as $nip/$nmask"
+        fi
+        if [ "$nrequired" != 1 ] && [ -n "$ngw" ]; then
+            route del default dev "$ndev" 2>/dev/null
+            route add -host "$ngw" dev "$ndev" 2>/dev/null
+            if ! route add default gw "$ngw" dev "$ndev"; then
+                virtnet_error "failed to install standalone default route via $ngw"
+            fi
+        fi
+
+        oldifs=$IFS
+        IFS=,
+        for route in $nroutes; do
+            case "$route" in
+                *@*)
+                    dest=${route%%@*}
+                    hop=${route#*@}
+                    ;;
+                *)
+                    virtnet_error "invalid route token $route"
+                    continue
+                    ;;
+            esac
+            if [ -z "$dest" ]; then
+                virtnet_error "route has an empty destination"
+                continue
+            fi
+            if [ -n "$hop" ]; then
+                route del -host "$hop" dev "$ndev" 2>/dev/null
+                if ! route add -host "$hop" dev "$ndev"; then
+                    virtnet_error "failed to mark route next hop $hop on-link via $ndev"
+                elif [ "$dest" = "0.0.0.0/0" ]; then
+                    route del default dev "$ndev" 2>/dev/null
+                    if ! route add default gw "$hop" dev "$ndev"; then
+                        virtnet_error "failed to install route $dest via $hop dev $ndev"
+                    fi
+                else
+                    route del -net "$dest" dev "$ndev" 2>/dev/null
+                    if ! route add -net "$dest" gw "$hop" dev "$ndev"; then
+                        virtnet_error "failed to install route $dest via $hop dev $ndev"
+                    fi
+                fi
+            else
+                route del -net "$dest" dev "$ndev" 2>/dev/null
+                if ! route add -net "$dest" dev "$ndev"; then
+                    virtnet_error "failed to install on-link route $dest dev $ndev"
+                fi
+            fi
+        done
+        IFS=$oldifs
+
+        if [ "$nrequired" = 1 ] || [ -n "$ndns" ] || [ -n "$nsearch" ]; then
+            if ! : > /etc/resolv.conf; then
+                virtnet_error "failed to replace /etc/resolv.conf"
+            fi
+            oldifs=$IFS
+            IFS=,
+            for server in $ndns; do
+                if [ -n "$server" ] && ! printf 'nameserver %s\n' "$server" >> /etc/resolv.conf; then
+                    virtnet_error "failed to write DNS server $server"
+                fi
+            done
+            IFS=$oldifs
+            if [ -n "$nsearch" ]; then
+                search_domains=$(printf '%s' "$nsearch" | tr ',' ' ')
+                if ! printf 'search %s\n' "$search_domains" >> /etc/resolv.conf; then
+                    virtnet_error "failed to write DNS search domains"
+                fi
+            fi
+        fi
+        if [ "$virtnet_ok" = 1 ]; then
+            echo "VIRTNET-OK: configured $ndev as $nip/${nprefix:-$nmask} (mtu ${nmtu:-default})"
+        fi
+    else
+        observed=$(for npath in /sys/class/net/*; do [ -e "$npath" ] && printf '%s=%s ' "${npath##*/}" "$(cat "$npath/address" 2>/dev/null)"; done)
+        if [ "$nrequired" = 1 ]; then
+            fatal "virtnet: no non-loopback interface appeared (expected MAC ${nmac:-any}; observed ${observed:-none})"
+        fi
+        virtnet_error "no network interface found after 30s"
     fi
 fi
 

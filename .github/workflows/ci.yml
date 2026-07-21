@@ -12,6 +12,9 @@
 #              used by the networking benchmark (that one benchmark is skipped if unavailable).
 #   * Windows: Python 3.10+, a stable Rust toolchain for x86_64-pc-windows-msvc (edition 2024),
 #              and the Windows Hypervisor Platform feature enabled for the WHP backend.
+#   * HCN/XDP: The Windows runner additionally needs Hyper-V Administrator/HNS privileges and the
+#              signed XDP-for-Windows v1.3.0 package. This privileged lane is opt-in and never runs
+#              for pull requests.
 #
 # The kernel + initramfs are built once, in Docker, on the Linux runner and shared with the
 # Windows job (Windows cannot compile the Linux kernel natively). Build, smoke tests, and the
@@ -35,6 +38,10 @@ on:
         description: Run the benchmark suite
         type: boolean
         default: true
+      run_hcn_afxdp:
+        description: Run the privileged HCN-created vNIC + AF_XDP smoke test
+        type: boolean
+        default: false
 
 concurrency:
   # Cancel superseded runs of the same PR, but retain every merged-commit run.
@@ -311,6 +318,20 @@ jobs:
       - name: Validate Python tooling
         run: python -m compileall -q scripts alpine
 
+      - name: Validate PowerShell tooling
+        run: |
+          $tokens = $null
+          $errors = $null
+          [Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path scripts\test-hcn-afxdp.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) {
+            $errors | Format-List Message, Extent
+            throw 'PowerShell syntax validation failed'
+          }
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -407,6 +428,81 @@ jobs:
           name: performance-logs-windows-whp
           path: build/performance/*.log
           if-no-files-found: error
+          retention-days: 7
+
+  # -----------------------------------------------------------------------------------------------
+  # Privileged Windows networking: create an HCN NAT endpoint, attach it to the host namespace as
+  # a vNIC, bind every AF_XDP RSS queue, boot the WHP guest, and require an HTTP round trip to the
+  # HCN gateway. Enable automatic main-branch runs with repository variable NVX_HCN_AFXDP_CI=true,
+  # or opt in manually. This job deliberately does not run for pull requests because it mutates
+  # privileged host networking state.
+  # -----------------------------------------------------------------------------------------------
+  windows-hcn-afxdp:
+    name: Windows / HCN + AF_XDP
+    needs: [artifacts, windows]
+    if: >-
+      ${{
+        (github.event_name == 'push' && vars.NVX_HCN_AFXDP_CI == 'true') ||
+        (github.event_name == 'workflow_dispatch' && inputs.run_hcn_afxdp)
+      }}
+    runs-on: [self-hosted, windows, x64, hcn-afxdp]
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    env:
+      NVX_HCN_AFXDP_GUEST_ADDRESS: ${{ vars.NVX_HCN_AFXDP_GUEST_ADDRESS || '192.168.240.2' }}
+      NVX_HCN_AFXDP_GATEWAY: ${{ vars.NVX_HCN_AFXDP_GATEWAY || '192.168.240.1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Toolchain versions
+        run: |
+          Write-Host $PSVersionTable.PSVersion
+          rustc --version
+          cargo --version
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-artifacts
+          path: build
+
+      - name: Smoke — HCN-created vNIC + AF_XDP
+        timeout-minutes: 10
+        run: |
+          .\scripts\test-hcn-afxdp.ps1 `
+            -GuestAddress $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
+            -Gateway $env:NVX_HCN_AFXDP_GATEWAY `
+            -TimeoutSeconds 300 `
+            -LogPath build\performance\hcn-afxdp-smoke.log
+
+      - name: Upload HCN AF_XDP log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: hcn-afxdp-smoke-log
+          path: build/performance/hcn-afxdp-smoke.log
+          if-no-files-found: warn
           retention-days: 7
 
   # -----------------------------------------------------------------------------------------------

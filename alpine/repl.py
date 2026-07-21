@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # An *interactive* Python interpreter that is resumed from a snapshot.
 #
-# It warms up a full CPython interpreter, then asks the VMM to take a snapshot by writing one
-# byte to I/O port 0x605 through /dev/port (a single `outb`, which the VMM intercepts as a
-# snapshot request). On a snapshot run the VMM captures the VM at exactly this warmed point and
+# It warms up a full CPython interpreter, then asks the active backend to take a snapshot through
+# /sbin/nvx-snapshot. On a snapshot run the VMM captures the VM at exactly this warmed point and
 # stops; on a later restore, execution resumes on the next line and drops straight into an
 # interactive ">>>" prompt on the console -- skipping the kernel boot and the entire
 # Python startup.
@@ -19,17 +18,12 @@ import itertools  # noqa: F401
 import json  # noqa: F401
 import math  # noqa: F401
 import re  # noqa: F401
+import subprocess
 
 
 def request_snapshot():
-    """Ask the VMM to snapshot the VM here (one outb to control port 0x605)."""
-    try:
-        fd = os.open("/dev/port", os.O_WRONLY)
-        os.lseek(fd, 0x605, os.SEEK_SET)
-        os.write(fd, b"\x01")
-        os.close(fd)
-    except OSError:
-        pass
+    """Ask the active backend to snapshot the VM at this execution boundary."""
+    subprocess.run(["/sbin/nvx-snapshot"], check=False)
 
 
 request_snapshot()

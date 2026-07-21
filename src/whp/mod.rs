@@ -62,12 +62,6 @@ use ::std::time::{Duration, Instant};
 
 use ::anyhow::{Context, Result, bail};
 use ::log::{debug, error, info, warn};
-use ::windows::Win32::Foundation::HANDLE;
-use ::windows::Win32::System::Console::{
-    CONSOLE_MODE, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_OUTPUT,
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
-    STD_OUTPUT_HANDLE, SetConsoleMode,
-};
 use ::windows::Win32::System::Hypervisor::{
     WHV_EXTENDED_VM_EXITS, WHV_INTERRUPT_CONTROL, WHV_MEMORY_ACCESS_CONTEXT, WHV_PARTITION_HANDLE,
     WHV_PARTITION_PROPERTY_CODE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
@@ -90,6 +84,7 @@ use crate::boot::pvh;
 use crate::console::{Console, TimingMarker};
 use crate::devices::portb::PortConsole;
 use crate::devices::{DeviceBus, PioAction};
+use crate::hcs::{HcnNetworkConfig, OwnedHcnNetwork};
 use crate::l2bridge::{ExternalIdentity, L2BridgeConfig};
 use crate::whp::emulator::{Emulator, MmioHandler};
 use crate::whp::memory::GuestMemory;
@@ -99,6 +94,7 @@ use crate::whp::pic::Pic;
 use crate::whp::pit::Pit;
 use crate::whp::rtc::Rtc;
 use crate::whp::snapshot::Snapshot;
+use crate::windows_terminal::ConsoleGuard;
 
 /// Index of the single guest virtual processor.
 const VP_INDEX: u32 = 0;
@@ -153,6 +149,8 @@ struct Nic {
     backend: Arc<dyn FrameBackend>,
     /// Snapshot header containing guest identity only, never host attachment state.
     snapshot_header: Vec<u8>,
+    /// HCN must outlive every AF_XDP handle that targets its host vNIC.
+    _hcn_network: Option<OwnedHcnNetwork>,
 }
 
 impl Nic {
@@ -169,6 +167,7 @@ impl Nic {
             dev,
             backend,
             snapshot_header: ncfg.save_header(),
+            _hcn_network: None,
         }
     }
 
@@ -178,7 +177,34 @@ impl Nic {
         // XDP so an initialization failure can be reported, then do not enter the vCPU loop until
         // the Agent explicitly acknowledges the ready data plane with StartVm.
         let pipe = xdp::ControlPipe::connect(&config.runtime.control_pipe)?;
-        let started = match xdp::start(config) {
+        let mut effective_config = config.clone();
+        let mut hcn_network = None;
+        let mut arp_proxy = None;
+        if config.provisions_hcn_vnic() {
+            let provisioned = (|| -> Result<OwnedHcnNetwork> {
+                let hcn_config = HcnNetworkConfig::from_l2bridge(config)?;
+                let mut network = OwnedHcnNetwork::create(hcn_config)?;
+                let attachment = network.attach_to_host()?;
+                effective_config.attachment.interface_index = attachment.interface_index;
+                effective_config.attachment.interface_luid = attachment.interface_luid;
+                arp_proxy = Some(xdp::ArpProxy {
+                    guest_mac: config.mac()?,
+                    guest_ip: config.guest_bootstrap.ipv4.address.parse()?,
+                    gateway_mac: attachment.gateway_mac,
+                    gateway_ip: config.guest_bootstrap.ipv4.gateway.parse()?,
+                });
+                Ok(network)
+            })();
+            match provisioned {
+                Ok(network) => hcn_network = Some(network),
+                Err(error) => {
+                    pipe.data_plane_error(&format!("{error:#}"));
+                    return Err(error);
+                }
+            }
+        }
+
+        let started = match xdp::start(&effective_config, arp_proxy) {
             Ok(started) => started,
             Err(error) => {
                 pipe.data_plane_error(&format!("{error:#}"));
@@ -207,6 +233,7 @@ impl Nic {
             dev,
             backend,
             snapshot_header: NetConfig::save_external_header(&identity),
+            _hcn_network: hcn_network,
         })
     }
 }
@@ -294,58 +321,6 @@ impl Drop for Partition {
                 let _ = WHvDeleteVirtualProcessor(self.handle, VP_INDEX);
             }
             let _ = WHvDeletePartition(self.handle);
-        }
-    }
-}
-
-/// Restores the console mode on drop; puts stdin in char-at-a-time mode and enables ANSI
-/// output while the guest runs. A no-op when standard handles are not consoles (pipes/files).
-struct ConsoleGuard {
-    stdin: Option<(HANDLE, CONSOLE_MODE)>,
-    stdout: Option<(HANDLE, CONSOLE_MODE)>,
-}
-
-impl ConsoleGuard {
-    fn new() -> Self {
-        let stdin: Option<(HANDLE, CONSOLE_MODE)> = configure_console(STD_INPUT_HANDLE, |m| {
-            CONSOLE_MODE(m.0 & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0))
-        });
-        let stdout: Option<(HANDLE, CONSOLE_MODE)> = configure_console(STD_OUTPUT_HANDLE, |m| {
-            CONSOLE_MODE(m.0 | ENABLE_PROCESSED_OUTPUT.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0)
-        });
-        Self { stdin, stdout }
-    }
-}
-
-impl Drop for ConsoleGuard {
-    fn drop(&mut self) {
-        for entry in [self.stdin.take(), self.stdout.take()]
-            .into_iter()
-            .flatten()
-        {
-            // SAFETY: `entry.0` is a console handle previously returned by `GetStdHandle`.
-            unsafe {
-                let _ = SetConsoleMode(entry.0, entry.1);
-            }
-        }
-    }
-}
-
-/// Reads a standard handle's console mode, applies `f`, and installs the result. Returns the
-/// `(handle, saved_mode)` pair to restore later, or `None` if the handle is not a console.
-fn configure_console(
-    which: ::windows::Win32::System::Console::STD_HANDLE,
-    f: impl FnOnce(CONSOLE_MODE) -> CONSOLE_MODE,
-) -> Option<(HANDLE, CONSOLE_MODE)> {
-    // SAFETY: All three console calls take a valid handle and a stack-allocated mode.
-    unsafe {
-        let handle: HANDLE = GetStdHandle(which).ok()?;
-        let mut mode: CONSOLE_MODE = CONSOLE_MODE(0);
-        GetConsoleMode(handle, &mut mode).ok()?;
-        if SetConsoleMode(handle, f(mode)).is_ok() {
-            Some((handle, mode))
-        } else {
-            None
         }
     }
 }
@@ -509,12 +484,20 @@ fn run_cold(cfg: Config) -> Result<()> {
             Some(Nic::build_slirp(&mem, ncfg))
         }
         (None, Some(config)) => {
-            info!(
-                "virt-net: initializing external L2Bridge NIC at {:#x} (ifIndex {}, MTU {})",
-                net::NET_MMIO_BASE,
-                config.attachment.interface_index,
-                config.device.mtu
-            );
+            if config.provisions_hcn_vnic() {
+                info!(
+                    "virt-net: provisioning HCN AF_XDP NIC at {:#x} (MTU {})",
+                    net::NET_MMIO_BASE,
+                    config.device.mtu
+                );
+            } else {
+                info!(
+                    "virt-net: initializing external L2Bridge NIC at {:#x} (ifIndex {}, MTU {})",
+                    net::NET_MMIO_BASE,
+                    config.attachment.interface_index,
+                    config.device.mtu
+                );
+            }
             Some(Nic::build_l2bridge(&mem, config)?)
         }
         (None, None) => None,
@@ -743,7 +726,7 @@ fn execute(
     // partition. The input thread makes no WHP calls, so it can stay detached.
     let timer_pending: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let defer_input: bool =
-        cfg.defer_stdin_until_boot && guard.stdin.is_none() && cfg.restore.is_none();
+        cfg.defer_stdin_until_boot && !guard.stdin_is_console() && cfg.restore.is_none();
     spawn_input_thread(
         bus.console(),
         Arc::clone(console),
@@ -1210,11 +1193,12 @@ fn advance_rip(handle: WHV_PARTITION_HANDLE, exit: &WHV_RUN_VP_EXIT_CONTEXT) -> 
 /// PIC, and write it back — the effect of an EOI without
 /// accidentally clearing a concurrently in-service timer or NIC vector. Best-effort: any failure
 /// is ignored.
-fn lapic_eoi(handle: WHV_PARTITION_HANDLE, vector: u8) {
-    /// Offset of the in-service register (ISR) in WHP's architectural local-APIC page.
+fn legacy_apic_isr_offset(vector: u8) -> usize {
     const APIC_ISR: usize = 0x100;
-    const APIC_REGISTER_STRIDE: usize = 0x10;
+    APIC_ISR + usize::from(vector / 32) * size_of::<u32>()
+}
 
+fn lapic_eoi(handle: WHV_PARTITION_HANDLE, vector: u8) {
     let mut state: [u8; 4096] = [0; 4096];
     let mut written: u32 = 0;
     // SAFETY: `state` is a 4096-byte buffer; `written` receives the actual size.
@@ -1227,13 +1211,12 @@ fn lapic_eoi(handle: WHV_PARTITION_HANDLE, vector: u8) {
             Some(&mut written),
         )
     };
-    if got.is_err() || (written as usize) < APIC_ISR + 8 * APIC_REGISTER_STRIDE {
+    if got.is_err() || (written as usize) < legacy_apic_isr_offset(u8::MAX) + size_of::<u32>() {
         return;
     }
 
-    let reg: usize = usize::from(vector / 32);
     let bit: u32 = u32::from(vector % 32);
-    let off: usize = APIC_ISR + reg * APIC_REGISTER_STRIDE;
+    let off: usize = legacy_apic_isr_offset(vector);
     let mut word = u32::from_le_bytes([state[off], state[off + 1], state[off + 2], state[off + 3]]);
     if word & (1 << bit) == 0 {
         return;
@@ -1640,5 +1623,18 @@ fn dump_vcpu(handle: WHV_PARTITION_HANDLE) {
             "  cr0={:#018x} cr3={:#018x} cr4={:#018x} efer={:#018x}",
             values[4].Reg64, values[5].Reg64, values[6].Reg64, values[7].Reg64
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::legacy_apic_isr_offset;
+
+    #[test]
+    fn legacy_lapic_state_packs_isr_words() {
+        assert_eq!(legacy_apic_isr_offset(0), 0x100);
+        assert_eq!(legacy_apic_isr_offset(31), 0x100);
+        assert_eq!(legacy_apic_isr_offset(32), 0x104);
+        assert_eq!(legacy_apic_isr_offset(255), 0x11c);
     }
 }
