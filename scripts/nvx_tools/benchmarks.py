@@ -420,9 +420,12 @@ def _collect_hcs_timings(
         )
         metric, wall_ms, result = _run_timed(args, timeout, graceful_timeout=True)
         if metric is None:
+            diagnostic = _failure_tail(result.text, 80)
+            if diagnostic:
+                print(diagnostic, flush=True)
             raise ScriptError(
                 f"{label} run {run_number}/{runs} did not report a timing marker\n"
-                + _failure_tail(result.text)
+                + diagnostic
             )
         if required_text is not None and required_text not in result.text:
             diagnostic = _failure_tail(result.text, 80)

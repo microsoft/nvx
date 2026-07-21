@@ -25,6 +25,7 @@ from nvx_tools.benchmarks import (
     HcsNetworkSnapshotConfig,
     NetworkSnapshotConfig,
     _capture_hcs_snapshot,
+    _collect_hcs_timings,
     _validate_hcs_snapshot,
     benchmark_hcs_snapshot_python,
     benchmark_hcs_snapshot_shell,
@@ -221,6 +222,20 @@ class BuildTests(unittest.TestCase):
 
 
 class BenchmarkParserTests(unittest.TestCase):
+    def test_hcs_missing_timing_marker_preserves_child_diagnostics(self) -> None:
+        result = CommandResult(("microvm",), 0, b"guest reached restore point", b"")
+        output = io.StringIO()
+        with (
+            patch(
+                "nvx_tools.benchmarks._run_timed",
+                return_value=(None, 12.0, result),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            with self.assertRaisesRegex(ScriptError, "did not report a timing marker"):
+                _collect_hcs_timings(["microvm"], 1, "HCS restore", 30)
+        self.assertIn("guest reached restore point", output.getvalue())
+
     def test_remove_tree_rejects_protected_directories_and_ancestors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
