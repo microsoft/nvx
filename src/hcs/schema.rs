@@ -190,7 +190,9 @@ pub fn compute_system_document(
         );
     }
     let mut network_adapters: BTreeMap<String, NetworkAdapter> = BTreeMap::new();
-    if let Some((adapter_id, endpoint_id, mac_address)) = options.network_adapter {
+    if options.restore_state.is_none()
+        && let Some((adapter_id, endpoint_id, mac_address)) = options.network_adapter
+    {
         network_adapters.insert(
             adapter_id.to_string(),
             NetworkAdapter {
@@ -367,7 +369,7 @@ mod tests {
             })
         );
 
-        let document = compute_system_document(
+        let cold_document = compute_system_document(
             r"C:\build\vmlinux",
             r"C:\build\initramfs.cpio.gz",
             "console=ttyS0,115200",
@@ -375,7 +377,7 @@ mod tests {
             r"\\.\pipe\nvx-test-com1",
             ComputeSystemOptions {
                 control_pipe: Some(r"\\.\pipe\nvx-test-com2"),
-                restore_state: Some(r"C:\snap\runtime.vmrs"),
+                restore_state: None,
                 network_adapter: Some((
                     "01234567-89ab-4cde-8f01-23456789abcd",
                     "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -384,21 +386,45 @@ mod tests {
             },
         )
         .unwrap();
-        let actual: ::serde_json::Value = ::serde_json::from_str(&document).unwrap();
+        let cold: ::serde_json::Value = ::serde_json::from_str(&cold_document).unwrap();
         assert_eq!(
-            actual["VirtualMachine"]["Devices"]["ComPorts"]["1"]["NamedPipe"],
+            cold["VirtualMachine"]["Devices"]["ComPorts"]["1"]["NamedPipe"],
             r"\\.\pipe\nvx-test-com2"
         );
         assert_eq!(
-            actual["VirtualMachine"]["RestoreState"]["SaveStateFilePath"],
-            r"C:\snap\runtime.vmrs"
-        );
-        assert_eq!(
-            actual["VirtualMachine"]["Devices"]["NetworkAdapters"]["01234567-89ab-4cde-8f01-23456789abcd"],
+            cold["VirtualMachine"]["Devices"]["NetworkAdapters"]["01234567-89ab-4cde-8f01-23456789abcd"],
             ::serde_json::json!({
                 "EndpointId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                 "MacAddress": "00-15-5D-52-C0-10"
             })
+        );
+
+        let restore_document = compute_system_document(
+            r"C:\build\vmlinux",
+            r"C:\build\initramfs.cpio.gz",
+            "console=ttyS0,115200",
+            512,
+            r"\\.\pipe\nvx-test-com1",
+            ComputeSystemOptions {
+                restore_state: Some(r"C:\snap\runtime.vmrs"),
+                network_adapter: Some((
+                    "01234567-89ab-4cde-8f01-23456789abcd",
+                    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "00-15-5D-52-C0-10",
+                )),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let restore: ::serde_json::Value = ::serde_json::from_str(&restore_document).unwrap();
+        assert_eq!(
+            restore["VirtualMachine"]["RestoreState"]["SaveStateFilePath"],
+            r"C:\snap\runtime.vmrs"
+        );
+        assert!(
+            restore["VirtualMachine"]["Devices"]
+                .get("NetworkAdapters")
+                .is_none()
         );
 
         assert_eq!(
