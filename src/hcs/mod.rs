@@ -431,9 +431,6 @@ fn save_snapshot(
     host: snapshot::HostVersion,
     network: Option<&network::NetworkConfig>,
 ) -> Result<()> {
-    let pause_options: String = schema::pause_options()?;
-    info!("pausing HCS guest {} for snapshot", plan.vm_id);
-    system.pause(&pause_options)?;
     if let Some(network) = network {
         let mac_address = network
             .mac_address
@@ -453,6 +450,9 @@ fn save_snapshot(
             &remove,
         )?;
     }
+    let pause_options: String = schema::pause_options()?;
+    info!("pausing HCS guest {} for snapshot", plan.vm_id);
+    system.pause(&pause_options)?;
     let save_options: String = schema::save_options(&capture.state().to_string_lossy())?;
     info!("saving HCS guest {} to {:?}", plan.vm_id, capture.state());
     system.save(&save_options)?;
