@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <linux/vm_sockets.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,11 @@ static void retry_delay(void)
 {
     const struct timespec delay = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
     nanosleep(&delay, NULL);
+}
+
+static void mount_timeout(int signal_number)
+{
+    (void)signal_number;
 }
 
 int main(int argc, char **argv)
@@ -71,7 +77,20 @@ int main(int argc, char **argv)
     if (strcmp(argv[2], "ro") == 0) {
         flags |= MS_RDONLY;
     }
-    if (mount(argv[3], argv[1], "9p", flags, options) != 0) {
+    struct sigaction action = { 0 };
+    action.sa_handler = mount_timeout;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGALRM, &action, NULL) != 0) {
+        perror("hcs-plan9: sigaction");
+        close(socket_fd);
+        return 1;
+    }
+    alarm(15);
+    int mount_result = mount(argv[3], argv[1], "9p", flags, options);
+    int mount_errno = errno;
+    alarm(0);
+    if (mount_result != 0) {
+        errno = mount_errno;
         perror("hcs-plan9: mount");
         close(socket_fd);
         return 1;

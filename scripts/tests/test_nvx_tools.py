@@ -405,8 +405,32 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn('/sbin/hcs-plan9 "$vdir" "$vmode" "$vaname"', init)
         self.assertIn('fatal "virtfs: failed to mount HCS Plan9 share', init)
         self.assertIn("socket(AF_VSOCK, SOCK_STREAM, 0)", helper)
+        self.assertIn("alarm(15)", helper)
         self.assertNotIn("noload", helper)
         self.assertIn('root / "sbin" / "hcs-plan9"', build)
+
+        schema = (REPO_ROOT / "src" / "hcs" / "schema.rs").read_text(
+            encoding="utf-8"
+        )
+        orchestration = (REPO_ROOT / "src" / "hcs" / "mod.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('resource_path: "VirtualMachine/Devices/Plan9/Shares"', schema)
+        self.assertIn("Some(Plan9 { shares: Vec::new() })", schema)
+        self.assertIn("system.start()?;", orchestration)
+        self.assertLess(
+            orchestration.index("system.start()?;"),
+            orchestration.index('HcsModifyComputeSystem(add Plan9 share)'),
+        )
+
+    def test_shared_virtfs_allows_slow_hardware_runs(self) -> None:
+        source = (REPO_ROOT / "scripts" / "nvx_tools" / "benchmarks.py").read_text(
+            encoding="utf-8"
+        )
+        guest_run = source.split("def _guest_run(", 1)[1].split(
+            "\ndef parse_dd_rate", 1
+        )[0]
+        self.assertIn("timeout=300", guest_run)
 
     def test_shell_and_python_workflows_run_preflight_capture_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

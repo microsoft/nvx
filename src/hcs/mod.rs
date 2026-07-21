@@ -295,6 +295,14 @@ fn run_plan(
     let terminal_guard: ConsoleGuard = ConsoleGuard::new();
     let control_guard: console::ControlHandler = console::ControlHandler::install()?;
     system.start()?;
+    if let Some(share) = &plan.plan9 {
+        let add = schema::plan9_share_add(
+            "0",
+            &share.path.to_string_lossy(),
+            share.read_only,
+        )?;
+        system.modify("HcsModifyComputeSystem(add Plan9 share)", &add)?;
+    }
     if plan.restore_state.is_some()
         && let Some(endpoint) = borrowed_endpoint.as_ref()
     {
@@ -304,7 +312,7 @@ fn run_plan(
             attachment.endpoint_id,
             attachment.mac_address,
         )?;
-        system.modify_network_adapter(
+        system.modify(
             "HcsModifyComputeSystem(add restored network adapter)",
             &add,
         )?;
@@ -418,7 +426,7 @@ fn run_plan(
                     attachment.endpoint_id,
                     attachment.mac_address,
                 )?;
-                system.modify_network_adapter(
+                system.modify(
                     "HcsModifyComputeSystem(remove network adapter)",
                     &document,
                 )
@@ -493,7 +501,7 @@ fn save_snapshot(
             "detaching external HCN endpoint {} before snapshot",
             network.endpoint_id
         );
-        system.modify_network_adapter(
+        system.modify(
             "HcsModifyComputeSystem(remove network adapter before save)",
             &remove,
         )?;

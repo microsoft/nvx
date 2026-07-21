@@ -99,14 +99,15 @@ struct NetworkAdapter {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct Plan9 {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     shares: Vec<Plan9Share>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct Plan9Share {
-    name: &'static str,
-    access_name: &'static str,
+    name: String,
+    access_name: String,
     path: String,
     port: u32,
     flags: u32,
@@ -130,6 +131,14 @@ struct ModifySettingRequest {
     request_type: &'static str,
     resource_path: String,
     settings: NetworkAdapter,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct Plan9ModifySettingRequest {
+    request_type: &'static str,
+    resource_path: &'static str,
+    settings: Plan9Share,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,25 +244,14 @@ pub fn compute_system_document(
         );
     }
     let (plan9, hv_socket) = match options.plan9_share {
-        Some((path, read_only)) => {
-            let flags = 0x0000_0004 | u32::from(read_only);
-            (
-                Some(Plan9 {
-                    shares: vec![Plan9Share {
-                        name: "0",
-                        access_name: "0",
-                        path: path.to_string(),
-                        port: 564,
-                        flags,
-                    }],
-                }),
-                Some(HvSocket {
-                    hv_socket_config: HvSocketConfig {
-                        default_bind_security_descriptor: "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
-                    },
-                }),
-            )
-        }
+        Some(_) => (
+            Some(Plan9 { shares: Vec::new() }),
+            Some(HvSocket {
+                hv_socket_config: HvSocketConfig {
+                    default_bind_security_descriptor: "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+                },
+            }),
+        ),
         None => (None, None),
     };
     let document = ComputeSystem {
@@ -324,6 +322,22 @@ pub fn network_adapter_add(
     mac_address: &str,
 ) -> Result<String> {
     network_adapter_modify("Add", adapter_id, endpoint_id, mac_address)
+}
+
+/// Serializes hot-addition of a host directory to the running HCS Plan9 provider.
+pub fn plan9_share_add(name: &str, path: &str, read_only: bool) -> Result<String> {
+    ::serde_json::to_string(&Plan9ModifySettingRequest {
+        request_type: "Add",
+        resource_path: "VirtualMachine/Devices/Plan9/Shares",
+        settings: Plan9Share {
+            name: name.to_string(),
+            access_name: name.to_string(),
+            path: path.to_string(),
+            port: 564,
+            flags: 0x0000_0004 | u32::from(read_only),
+        },
+    })
+    .context("serializing HCS Plan9 share addition")
 }
 
 fn network_adapter_modify(
@@ -560,19 +574,30 @@ mod tests {
         .unwrap();
         let actual: ::serde_json::Value = ::serde_json::from_str(&document).unwrap();
         assert_eq!(
-            actual["VirtualMachine"]["Devices"]["Plan9"]["Shares"][0],
-            ::serde_json::json!({
-                "Name": "0",
-                "AccessName": "0",
-                "Path": r"C:\host\share",
-                "Port": 564,
-                "Flags": 4
-            })
+            actual["VirtualMachine"]["Devices"]["Plan9"],
+            ::serde_json::json!({})
         );
         assert_eq!(
             actual["VirtualMachine"]["Devices"]["HvSocket"]["HvSocketConfig"]
                 ["DefaultBindSecurityDescriptor"],
             "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+        );
+        assert_eq!(
+            ::serde_json::from_str::<::serde_json::Value>(
+                &plan9_share_add("0", r"C:\host\share", false).unwrap()
+            )
+            .unwrap(),
+            ::serde_json::json!({
+                "RequestType": "Add",
+                "ResourcePath": "VirtualMachine/Devices/Plan9/Shares",
+                "Settings": {
+                    "Name": "0",
+                    "AccessName": "0",
+                    "Path": r"C:\host\share",
+                    "Port": 564,
+                    "Flags": 4
+                }
+            })
         );
     }
 

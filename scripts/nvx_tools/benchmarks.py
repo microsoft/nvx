@@ -204,7 +204,7 @@ def _guest_run(
             *mount_args,
         ],
     )
-    result = run_capture(args, input_text=script, timeout=120)
+    result = run_capture(args, input_text=script, timeout=300)
     require_success(result, "virt-fs guest run")
     return result
 
@@ -504,6 +504,10 @@ def _hcs_plan9_guest_run(
         "--mount-rw",
     ]
     result = run_capture(args, input_text=script, timeout=180)
+    if result.timed_out or result.returncode != 0:
+        diagnostic = _failure_tail(result.text, 80)
+        if diagnostic:
+            print(diagnostic, flush=True)
     require_success(result, "HCS Plan9 guest run")
     return result
 

@@ -105,7 +105,7 @@ impl ComputeSystem {
         Ok(())
     }
 
-    pub fn modify_network_adapter(&mut self, operation_name: &str, document: &str) -> Result<()> {
+    pub fn modify(&mut self, operation_name: &str, document: &str) -> Result<()> {
         let operation: Operation = Operation::new()?;
         let document: HSTRING = HSTRING::from(document);
         // SAFETY: The compute system and operation handles are live for this call; no caller
