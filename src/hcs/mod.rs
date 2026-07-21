@@ -6,12 +6,12 @@
 mod api;
 mod compute;
 mod console;
+#[path = "hcn_endpoint.rs"]
 mod network;
 mod schema;
 mod snapshot;
 
 pub use network::NetConfig;
-pub(crate) use network::{NetworkConfig as HcnNetworkConfig, OwnedNetwork as OwnedHcnNetwork};
 
 use ::std::fs::File;
 use ::std::path::PathBuf;
@@ -42,6 +42,7 @@ pub struct Config {
     pub snapshot: Option<PathBuf>,
     pub restore: Option<PathBuf>,
     pub net: Option<NetConfig>,
+    pub hcn_endpoint_config: Option<PathBuf>,
 }
 
 struct VmPlan {
@@ -102,27 +103,46 @@ pub fn run(cfg: Config) -> Result<()> {
     preflight()?;
 
     let (plan, mut capture): (VmPlan, Option<snapshot::Capture>) = match restored {
-        Some(restored) => (
-            VmPlan {
-                vm_id: restored.manifest.vm_id.clone(),
-                kernel: restored.kernel,
-                initrd: restored.initrd,
-                cmdline: restored.manifest.cmdline.clone(),
-                memory_mib: restored.manifest.memory_mib,
-                restore_state: Some(restored.state),
-                network: restored.manifest.network.clone(),
-            },
-            None,
-        ),
+        Some(restored) => {
+            let network = match cfg.hcn_endpoint_config.as_deref() {
+                Some(path) => {
+                    let external = network::NetworkConfig::from_external(path, None)?;
+                    if restored.manifest.network.as_ref() != Some(&external) {
+                        bail!(
+                            "external HCN endpoint descriptor does not match the restored snapshot identity"
+                        );
+                    }
+                    Some(external)
+                }
+                None if restored.manifest.network.is_some() => {
+                    bail!("networked HCS restore requires --hcn-endpoint-config")
+                }
+                None => None,
+            };
+            (
+                VmPlan {
+                    vm_id: restored.manifest.vm_id.clone(),
+                    kernel: restored.kernel,
+                    initrd: restored.initrd,
+                    cmdline: restored.manifest.cmdline.clone(),
+                    memory_mib: restored.manifest.memory_mib,
+                    restore_state: Some(restored.state),
+                    network,
+                },
+                None,
+            )
+        }
         None => {
             let kernel: PathBuf = canonical_artifact(cfg.kernel.as_ref(), "--kernel")?;
             let initrd: PathBuf = canonical_artifact(cfg.initrd.as_ref(), "--initrd")?;
             let vm_id: String = api::new_guid()?;
-            let network: Option<network::NetworkConfig> = cfg
-                .net
-                .clone()
-                .map(network::NetworkConfig::new)
-                .transpose()?;
+            let network = match cfg.hcn_endpoint_config.as_deref() {
+                Some(path) => Some(network::NetworkConfig::from_external(path, cfg.net.as_ref())?),
+                None if cfg.net.is_some() => {
+                    bail!("HCS --net requires --hcn-endpoint-config")
+                }
+                None => None,
+            };
             let capture: Option<snapshot::Capture> = match cfg.snapshot.as_deref() {
                 Some(directory) => {
                     let capture: snapshot::Capture = snapshot::Capture::prepare(directory)?;
@@ -161,20 +181,20 @@ fn run_plan(
     let control_pipe_name: Option<String> =
         control_enabled.then(|| format!(r"\\.\pipe\nvx-{vm_id}-com2"));
 
-    let mut owned_network: Option<network::OwnedNetwork> = plan
+    let mut borrowed_endpoint: Option<network::BorrowedEndpoint> = plan
         .network
         .clone()
-        .map(network::OwnedNetwork::create)
+        .map(network::BorrowedEndpoint::open)
         .transpose()?;
     let mut effective_cmdline: String = plan.cmdline.clone();
-    if let Some(owned) = &owned_network {
-        let mac: &str = owned
+    if let Some(endpoint) = &borrowed_endpoint {
+        let mac: &str = endpoint
             .config()
             .mac_address
             .as_deref()
             .context("queried HCN endpoint has no MAC address")?;
         effective_cmdline.push(' ');
-        effective_cmdline.push_str(&owned.config().cmdline_fragment(mac));
+        effective_cmdline.push_str(&endpoint.config().cmdline_fragment(mac));
     }
 
     api::grant_vm_access(vm_id, &plan.kernel)?;
@@ -196,8 +216,8 @@ fn run_plan(
                 .as_ref()
                 .map(|path| path.to_string_lossy())
                 .as_deref(),
-            network_adapter: owned_network.as_ref().map(|owned| {
-                let attachment = owned.attachment();
+            network_adapter: borrowed_endpoint.as_ref().map(|endpoint| {
+                let attachment = endpoint.attachment();
                 (
                     attachment.adapter_id,
                     attachment.endpoint_id,
@@ -301,7 +321,9 @@ fn run_plan(
                 capture,
                 plan,
                 host,
-                owned_network.as_ref().map(network::OwnedNetwork::config),
+                borrowed_endpoint
+                    .as_ref()
+                    .map(network::BorrowedEndpoint::config),
             )
         }
         StopReason::GuestExit(document) => {
@@ -330,8 +352,8 @@ fn run_plan(
         Ok(())
     };
     drop(system);
-    let network_result: Result<()> = match owned_network.as_mut() {
-        Some(network) => network.cleanup(),
+    let endpoint_result: Result<()> = match borrowed_endpoint.as_mut() {
+        Some(endpoint) => endpoint.cleanup(),
         None => Ok(()),
     };
     drop(control_pipe);
@@ -351,15 +373,15 @@ fn run_plan(
         if let Err(error) = control_result {
             warn!("HCS control cleanup after primary failure also failed: {error:#}");
         }
-        if let Err(error) = network_result {
-            warn!("HCN cleanup after primary failure also failed: {error:#}");
+        if let Err(error) = endpoint_result {
+            warn!("HCN endpoint close after primary failure also failed: {error:#}");
         }
         return Err(primary);
     }
     cleanup_result?;
     console_result?;
     control_result?;
-    network_result?;
+    endpoint_result?;
     report_timings(cfg, &shared_console);
     Ok(())
 }

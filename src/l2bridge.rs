@@ -61,6 +61,8 @@ pub struct Attachment {
     pub interface_index: u32,
     #[serde(default)]
     pub interface_luid: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gateway_mac: String,
     pub queue_selection: QueueSelection,
 }
 
@@ -167,11 +169,17 @@ impl L2BridgeConfig {
                 }
             }
             HCN_AFXDP_BACKEND => {
-                if self.attachment.interface_index != 0 || self.attachment.interface_luid != 0 {
+                if self.attachment.interface_index == 0 {
                     bail!(
-                        "HCN provisioning owns interfaceIndex/interfaceLuid; omit them or set both to zero"
+                        "attachment.interfaceIndex must identify the externally created HCN host vNIC"
                     );
                 }
+                if self.attachment.interface_luid == 0 {
+                    bail!(
+                        "attachment.interfaceLuid must identify the externally created HCN host vNIC"
+                    );
+                }
+                let _ = self.gateway_mac()?;
             }
             _ => bail!(
                 "unsupported external network backend {:?}",
@@ -217,10 +225,10 @@ impl L2BridgeConfig {
         if ip.is_unspecified() || gateway.is_unspecified() {
             bail!("guestBootstrap IPv4 address and gateway must not be unspecified");
         }
-        if self.provisions_hcn_vnic() {
+        if self.uses_hcn_vnic() {
             let prefix = self.guest_bootstrap.ipv4.prefix_length;
             if prefix > 30 {
-                bail!("HCN provisioning requires guestBootstrap.ipv4.prefixLength in 1..=30");
+                bail!("HCN host vNIC requires guestBootstrap.ipv4.prefixLength in 1..=30");
             }
             let mask = u32::MAX << (32 - prefix);
             let network = u32::from(ip) & mask;
@@ -232,7 +240,7 @@ impl L2BridgeConfig {
                 || u32::from(gateway) != expected_gateway
             {
                 bail!(
-                    "HCN provisioning requires a usable guest address and the first subnet address as gateway"
+                    "HCN host vNIC requires a usable guest address and the first subnet address as gateway"
                 );
             }
         }
@@ -288,26 +296,18 @@ impl L2BridgeConfig {
         Ok(())
     }
 
-    pub fn provisions_hcn_vnic(&self) -> bool {
+    pub fn uses_hcn_vnic(&self) -> bool {
         self.attachment.backend == HCN_AFXDP_BACKEND
     }
 
     /// Returns the exact CNI/HCN endpoint MAC; it is never derived from the address.
     pub fn mac(&self) -> Result<[u8; 6]> {
-        let parts: Vec<&str> = self.device.mac_address.split('-').collect();
-        if parts.len() != 6 || parts.iter().any(|p| p.len() != 2) {
-            bail!(
-                "device.macAddress must use six uppercase-or-lowercase hexadecimal octets separated by '-'"
-            );
-        }
-        let mut mac = [0; 6];
-        for (out, part) in mac.iter_mut().zip(parts) {
-            *out = u8::from_str_radix(part, 16).context("invalid device.macAddress")?;
-        }
-        if mac[0] & 1 != 0 || mac == [0; 6] {
-            bail!("device.macAddress must be a nonzero unicast MAC");
-        }
-        Ok(mac)
+        parse_mac(&self.device.mac_address, "device.macAddress")
+    }
+
+    /// Returns the externally provisioned HCN gateway MAC used by the local ARP proxy.
+    pub fn gateway_mac(&self) -> Result<[u8; 6]> {
+        parse_mac(&self.attachment.gateway_mac, "attachment.gatewayMac")
     }
 
     /// A bounded kernel-command-line transport for the minimal Alpine guest.
@@ -385,6 +385,23 @@ impl L2BridgeConfig {
             bootstrap_digest,
         })
     }
+}
+
+fn parse_mac(value: &str, field: &str) -> Result<[u8; 6]> {
+    let parts: Vec<&str> = value.split('-').collect();
+    if parts.len() != 6 || parts.iter().any(|p| p.len() != 2) {
+        bail!(
+            "{field} must use six uppercase-or-lowercase hexadecimal octets separated by '-'"
+        );
+    }
+    let mut mac = [0; 6];
+    for (out, part) in mac.iter_mut().zip(parts) {
+        *out = u8::from_str_radix(part, 16).with_context(|| format!("invalid {field}"))?;
+    }
+    if mac[0] & 1 != 0 || mac == [0; 6] {
+        bail!("{field} must be a nonzero unicast MAC");
+    }
+    Ok(mac)
 }
 
 impl ExternalIdentity {
@@ -603,28 +620,25 @@ mod tests {
     }
 
     #[test]
-    fn hcn_manifest_owns_interface_identity() {
+    fn hcn_manifest_uses_external_interface_identity() {
         let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
         value["attachment"]["backend"] = Value::String(HCN_AFXDP_BACKEND.to_owned());
-        let attachment = value["attachment"].as_object_mut().unwrap();
-        attachment.remove("interfaceIndex");
-        attachment.remove("interfaceLuid");
+        value["attachment"]["gatewayMac"] = Value::String("00-15-5D-52-CF-2B".to_owned());
         let cfg = L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(cfg.provisions_hcn_vnic());
-        assert_eq!(cfg.attachment.interface_index, 0);
-        assert_eq!(cfg.attachment.interface_luid, 0);
+        assert!(cfg.uses_hcn_vnic());
+        assert_eq!(cfg.attachment.interface_index, 123);
+        assert_eq!(cfg.attachment.interface_luid, 456);
+        assert_eq!(cfg.gateway_mac().unwrap(), [0, 0x15, 0x5d, 0x52, 0xcf, 0x2b]);
 
-        let with_external_identity = CONFIG.replace(EXTERNAL_AFXDP_BACKEND, HCN_AFXDP_BACKEND);
-        assert!(L2BridgeConfig::from_json(with_external_identity.as_bytes()).is_err());
+        value["attachment"].as_object_mut().unwrap().remove("interfaceIndex");
+        assert!(L2BridgeConfig::from_json(&::serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]
     fn hcn_manifest_rejects_unusable_addressing() {
         let mut value: Value = ::serde_json::from_str(CONFIG).unwrap();
         value["attachment"]["backend"] = Value::String(HCN_AFXDP_BACKEND.to_owned());
-        let attachment = value["attachment"].as_object_mut().unwrap();
-        attachment.remove("interfaceIndex");
-        attachment.remove("interfaceLuid");
+        value["attachment"]["gatewayMac"] = Value::String("00-15-5D-52-CF-2B".to_owned());
 
         let mut bad_gateway = value.clone();
         bad_gateway["guestBootstrap"]["ipv4"]["gateway"] =

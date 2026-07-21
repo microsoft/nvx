@@ -181,6 +181,11 @@ struct Args {
     #[arg(long, value_name = "JSON", conflicts_with = "net")]
     net_config: Option<PathBuf>,
 
+    /// Descriptor for an externally managed HCN endpoint. Native HCS consumes the endpoint ID;
+    /// it never creates or deletes the network or endpoint described by this file.
+    #[arg(long, value_name = "JSON", conflicts_with = "net_config")]
+    hcn_endpoint_config: Option<PathBuf>,
+
     /// Attach to this pre-existing, user-owned host TAP instead of creating one per run. The TAP
     /// must already be configured (MAC, address, up); the VMM binds to it with a single ioctl (no
     /// privileged `ip` calls) and leaves it in place on exit. This lets `--restore` resume a
@@ -272,6 +277,9 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net_config.is_some() {
         bail!("--net-config is only available on the Windows/WHP backend");
     }
+    if args.hcn_endpoint_config.is_some() {
+        bail!("--hcn-endpoint-config is only available on the Windows/HCS backend");
+    }
     if args.restore_ready_pipe.is_some() {
         bail!("--restore-ready-pipe is only available on the Windows/WHP backend");
     }
@@ -340,6 +348,9 @@ fn dispatch_whp(args: Args, mem_bytes: u64) -> Result<()> {
     if args.vcpus > 1 {
         bail!("--vcpus > 1 is only available on the Linux/KVM backend (WHP is single-vCPU)");
     }
+    if args.hcn_endpoint_config.is_some() {
+        bail!("--hcn-endpoint-config is only available on the HCS backend");
+    }
 
     let net: Option<whp::NetConfig> = match &args.net {
         Some(spec) => Some(whp::NetConfig::parse(spec)?),
@@ -389,7 +400,13 @@ fn dispatch_hcs(args: Args, mem_bytes: u64) -> Result<()> {
         bail!("--mount, --mount-rw, --mount-image and --mount-size are not supported by HCS yet");
     }
     if args.net_tap.is_some() {
-        bail!("--net-tap is not supported by the HCS backend (HCN owns the host link)");
+        bail!("--net-tap is not supported by the HCS backend (HCS consumes an HCN endpoint)");
+    }
+    if args.net_config.is_some() {
+        bail!("--net-config is only available on the WHP backend");
+    }
+    if args.net.is_some() && args.hcn_endpoint_config.is_none() {
+        bail!("HCS --net requires --hcn-endpoint-config");
     }
     if args.restore.is_some() && args.net.is_some() {
         bail!("--net cannot override networking stored in an HCS snapshot");
@@ -445,6 +462,7 @@ fn dispatch_hcs(args: Args, mem_bytes: u64) -> Result<()> {
         snapshot: args.snapshot,
         restore: args.restore,
         net,
+        hcn_endpoint_config: args.hcn_endpoint_config,
     })
 }
 

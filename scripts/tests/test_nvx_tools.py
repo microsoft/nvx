@@ -361,6 +361,8 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
             kernel.parent.mkdir(exist_ok=True)
             for artifact in (kernel, base_initrd, python_initrd):
                 artifact.write_bytes(b"fixture")
+            endpoint_config = root / "build" / "hcn-endpoint.json"
+            endpoint_config.write_text("{}", encoding="utf-8")
 
             calls: list[tuple[str, ...]] = []
             timeouts: dict[tuple[str, ...], object] = {}
@@ -375,7 +377,7 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
                     snapshot = Path(command[command.index("--snapshot") + 1])
                     snapshot.mkdir()
                     (snapshot / "manifest.json").write_text(
-                        '{"format":"NVXHCSS1","version":2,"backend":"hcs",'
+                        '{"format":"NVXHCSS1","version":3,"backend":"hcs",'
                         '"network":{"network_id":"n","endpoint_id":"e",'
                         '"adapter_id":"a","guest_ip":"10.0.0.2","prefix":24,'
                         '"gateway":"10.0.0.1","mac_address":"00-15-5D-00-00-01"}}',
@@ -432,6 +434,7 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
                         runs=1,
                         net="10.0.0.2/24",
                         port=8099,
+                        endpoint_config=endpoint_config,
                     ),
                     backend,
                 )
@@ -459,6 +462,11 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
             )
             self.assertIn("--net", network_capture)
             self.assertNotIn("--net", network_restore)
+            for command in (network_cold, network_capture, network_restore):
+                self.assertEqual(
+                    command[command.index("--hcn-endpoint-config") + 1],
+                    str(endpoint_config),
+                )
             self.assertNotIn("--quiet", network_cold)
             self.assertNotIn("--quiet", network_capture)
             self.assertNotIn("--quiet", network_restore)

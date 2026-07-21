@@ -1895,7 +1895,7 @@ pub fn start(config: &L2BridgeConfig, arp_proxy: Option<ArpProxy>) -> Result<Bac
         ids.len().div_ceil(MAX_QUEUES_PER_WORKER),
         total_umem as f64 / (1024.0 * 1024.0),
     );
-    let guard = if config.provisions_hcn_vnic() {
+    let guard = if config.uses_hcn_vnic() {
         None
     } else {
         Some(create_tx_guard(&api, config.attachment.interface_index)?)

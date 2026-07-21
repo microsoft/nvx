@@ -84,7 +84,6 @@ use crate::boot::pvh;
 use crate::console::{Console, TimingMarker};
 use crate::devices::portb::PortConsole;
 use crate::devices::{DeviceBus, PioAction};
-use crate::hcs::{HcnNetworkConfig, OwnedHcnNetwork};
 use crate::l2bridge::{ExternalIdentity, L2BridgeConfig};
 use crate::whp::emulator::{Emulator, MmioHandler};
 use crate::whp::memory::GuestMemory;
@@ -149,8 +148,6 @@ struct Nic {
     backend: Arc<dyn FrameBackend>,
     /// Snapshot header containing guest identity only, never host attachment state.
     snapshot_header: Vec<u8>,
-    /// HCN must outlive every AF_XDP handle that targets its host vNIC.
-    _hcn_network: Option<OwnedHcnNetwork>,
 }
 
 impl Nic {
@@ -167,7 +164,6 @@ impl Nic {
             dev,
             backend,
             snapshot_header: ncfg.save_header(),
-            _hcn_network: None,
         }
     }
 
@@ -177,34 +173,19 @@ impl Nic {
         // XDP so an initialization failure can be reported, then do not enter the vCPU loop until
         // the Agent explicitly acknowledges the ready data plane with StartVm.
         let pipe = xdp::ControlPipe::connect(&config.runtime.control_pipe)?;
-        let mut effective_config = config.clone();
-        let mut hcn_network = None;
-        let mut arp_proxy = None;
-        if config.provisions_hcn_vnic() {
-            let provisioned = (|| -> Result<OwnedHcnNetwork> {
-                let hcn_config = HcnNetworkConfig::from_l2bridge(config)?;
-                let mut network = OwnedHcnNetwork::create(hcn_config)?;
-                let attachment = network.attach_to_host()?;
-                effective_config.attachment.interface_index = attachment.interface_index;
-                effective_config.attachment.interface_luid = attachment.interface_luid;
-                arp_proxy = Some(xdp::ArpProxy {
+        let arp_proxy = config
+            .uses_hcn_vnic()
+            .then(|| -> Result<xdp::ArpProxy> {
+                Ok(xdp::ArpProxy {
                     guest_mac: config.mac()?,
                     guest_ip: config.guest_bootstrap.ipv4.address.parse()?,
-                    gateway_mac: attachment.gateway_mac,
+                    gateway_mac: config.gateway_mac()?,
                     gateway_ip: config.guest_bootstrap.ipv4.gateway.parse()?,
-                });
-                Ok(network)
-            })();
-            match provisioned {
-                Ok(network) => hcn_network = Some(network),
-                Err(error) => {
-                    pipe.data_plane_error(&format!("{error:#}"));
-                    return Err(error);
-                }
-            }
-        }
+                })
+            })
+            .transpose()?;
 
-        let started = match xdp::start(&effective_config, arp_proxy) {
+        let started = match xdp::start(config, arp_proxy) {
             Ok(started) => started,
             Err(error) => {
                 pipe.data_plane_error(&format!("{error:#}"));
@@ -233,7 +214,6 @@ impl Nic {
             dev,
             backend,
             snapshot_header: NetConfig::save_external_header(&identity),
-            _hcn_network: hcn_network,
         })
     }
 }
@@ -484,10 +464,11 @@ fn run_cold(cfg: Config) -> Result<()> {
             Some(Nic::build_slirp(&mem, ncfg))
         }
         (None, Some(config)) => {
-            if config.provisions_hcn_vnic() {
+            if config.uses_hcn_vnic() {
                 info!(
-                    "virt-net: provisioning HCN AF_XDP NIC at {:#x} (MTU {})",
+                    "virt-net: initializing external HCN AF_XDP NIC at {:#x} (ifIndex {}, MTU {})",
                     net::NET_MMIO_BASE,
+                    config.attachment.interface_index,
                     config.device.mtu
                 );
             } else {

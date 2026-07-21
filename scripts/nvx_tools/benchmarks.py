@@ -92,6 +92,7 @@ class HcsNetworkSnapshotConfig:
     runs: int = 8
     net: str = "10.0.0.2/24"
     port: int = 8099
+    endpoint_config: Path | None = None
 
 
 def hcs_cold_boot_args(
@@ -448,7 +449,7 @@ def _validate_hcs_snapshot(
         raise ScriptError(f"could not parse HCS snapshot manifest {manifest}: {error}") from error
     if not isinstance(document, dict) or (
         document.get("format") != "NVXHCSS1"
-        or document.get("version") not in (1, 2)
+        or document.get("version") not in (1, 2, 3)
         or document.get("backend") != "hcs"
     ):
         raise ScriptError(f"unexpected HCS snapshot manifest contract in {manifest}")
@@ -456,9 +457,9 @@ def _validate_hcs_snapshot(
         raise ScriptError(f"HCS snapshot state is empty: {state}")
     if require_network:
         network = document.get("network")
-        if document.get("version") != 2 or not isinstance(network, dict):
+        if document.get("version") != 3 or not isinstance(network, dict):
             raise ScriptError(
-                f"HCS network snapshot lacks manifest v2 network identity in {manifest}"
+                f"HCS network snapshot lacks manifest v3 external network identity in {manifest}"
             )
         required = {
             "network_id",
@@ -623,6 +624,10 @@ def benchmark_hcs_network_snapshot_python(
     snapshot_config = SnapshotConfig(
         config.kernel, config.initrd, config.snapshot, config.mem, config.runs
     )
+    if config.endpoint_config is None or not config.endpoint_config.is_file():
+        raise ScriptError(
+            "HCS network benchmark requires --hcn-endpoint-config from setup-hcn-endpoint.ps1"
+        )
     executable = _require_hcs_benchmark(snapshot_config, backend)
     marker = "HELLOPY-NET OK"
     cold_completion_marker = "NVX-HCS-NETWORK-DONE"
@@ -640,7 +645,8 @@ def benchmark_hcs_network_snapshot_python(
         cold_cmdline,
         cold_completion_marker,
     )
-    cold_args.extend(["--net", config.net])
+    endpoint_args = ["--hcn-endpoint-config", config.endpoint_config]
+    cold_args.extend(["--net", config.net, *endpoint_args])
     cold_args.remove("--quiet")
     capture_args = hcs_snapshot_capture_args(
         executable,
@@ -649,9 +655,10 @@ def benchmark_hcs_network_snapshot_python(
         config.mem,
         capture_cmdline,
     )
-    capture_args.extend(["--net", config.net])
+    capture_args.extend(["--net", config.net, *endpoint_args])
     capture_args.remove("--quiet")
     restore_args = hcs_snapshot_restore_args(executable, config.snapshot, marker)
+    restore_args.extend(endpoint_args)
     restore_args.remove("--quiet")
 
     with helper_server(config.port):

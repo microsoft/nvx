@@ -15,8 +15,9 @@ use ::windows::core::GUID;
 use super::network::NetworkConfig;
 
 const FORMAT: &str = "NVXHCSS1";
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
 const MINIMUM_VERSION: u32 = 1;
+const NON_NETWORK_VERSION: u32 = 2;
 const BACKEND: &str = "hcs";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const STATE_FILE: &str = "runtime.vmrs";
@@ -154,9 +155,14 @@ impl Manifest {
         initrd: &Path,
         network: Option<NetworkConfig>,
     ) -> Result<Self> {
+        let version = if network.is_some() {
+            CURRENT_VERSION
+        } else {
+            NON_NETWORK_VERSION
+        };
         Ok(Self {
             format: FORMAT.to_string(),
-            version: CURRENT_VERSION,
+            version,
             backend: BACKEND.to_string(),
             vm_id,
             host,
@@ -217,8 +223,11 @@ impl Manifest {
         if self.memory_mib == 0 {
             bail!("invalid HCS snapshot memory size 0 MiB");
         }
-        if self.version == 1 && self.network.is_some() {
-            bail!("HCS snapshot version 1 cannot contain network identity");
+        if self.version < CURRENT_VERSION && self.network.is_some() {
+            bail!(
+                "networked HCS snapshot version {} predates externally managed HCN endpoints; recapture it with version {CURRENT_VERSION}",
+                self.version
+            );
         }
         if let Some(network) = &self.network {
             network.validate()?;
@@ -480,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn network_identity_round_trips_and_requires_manifest_v2() {
+    fn network_identity_round_trips_and_requires_manifest_v3() {
         let (directory, kernel, initrd, host) = fixture();
         let network = network_config();
         let mut manifest = Manifest::capture(
@@ -496,15 +505,16 @@ mod tests {
         manifest.write(&directory).unwrap();
         let loaded = load(&directory, host).unwrap();
         assert_eq!(loaded.manifest.network, Some(network));
+        assert_eq!(loaded.manifest.version, 3);
 
-        manifest.version = 1;
+        manifest.version = 2;
         manifest.write(&directory).unwrap();
         assert!(
             load(&directory, host)
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("version 1")
+                .contains("predates externally managed HCN endpoints")
         );
         fs::remove_dir_all(directory).unwrap();
     }

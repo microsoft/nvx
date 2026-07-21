@@ -5,6 +5,8 @@ param(
     [string]$Microvm,
     [string]$Kernel,
     [string]$Initrd,
+    [Parameter(Mandatory)]
+    [string]$EndpointConfig,
     [string]$GuestAddress = $(
         if ($env:NVX_HCN_AFXDP_GUEST_ADDRESS) {
             $env:NVX_HCN_AFXDP_GUEST_ADDRESS
@@ -68,6 +70,7 @@ if ($env:OS -ne 'Windows_NT') {
 $Microvm = (Resolve-Path $Microvm).Path
 $Kernel = (Resolve-Path $Kernel).Path
 $Initrd = (Resolve-Path $Initrd).Path
+$EndpointConfig = (Resolve-Path $EndpointConfig).Path
 Assert-IPv4Address $GuestAddress 'GuestAddress'
 Assert-IPv4Address $Gateway 'Gateway'
 
@@ -89,25 +92,39 @@ if ($LASTEXITCODE -ne 0) {
     throw "HCS preflight failed with exit code $LASTEXITCODE"
 }
 
+$endpoint = Get-Content -LiteralPath $EndpointConfig -Raw | ConvertFrom-Json
+if (-not $endpoint.hostAttached -or
+    [uint32]$endpoint.interfaceIndex -eq 0 -or
+    [uint64]$endpoint.interfaceLuid -eq 0 -or
+    -not $endpoint.gatewayMac) {
+    throw "HCN endpoint descriptor does not contain a host-attached vNIC: $EndpointConfig"
+}
+if ($endpoint.guestAddress -ne $GuestAddress -or
+    [int]$endpoint.prefixLength -ne $PrefixLength -or
+    $endpoint.gateway -ne $Gateway) {
+    throw "HCN endpoint descriptor addressing does not match the smoke-test parameters"
+}
+
 $python = (Get-Command python -ErrorAction Stop).Source
 $webRoot = Join-Path ([IO.Path]::GetTempPath()) ('nvx-hcn-afxdp-www-' + [Guid]::NewGuid().ToString('N'))
 
 $pipeName = 'nvx-hcn-afxdp-' + [Guid]::NewGuid().ToString('N')
 $pipePath = '\\.\pipe\' + $pipeName
-$guidBytes = [Guid]::NewGuid().ToByteArray()
-$macAddress = '00-15-5D-52-{0:X2}-{1:X2}' -f (0xC0 + ($guidBytes[0] -band 0x0F)), $guidBytes[1]
 $manifestPath = Join-Path ([IO.Path]::GetTempPath()) ("$pipeName.json")
 
 $manifest = [ordered]@{
     version = 2
     attachment = [ordered]@{
         backend = 'hcn-afxdp-l2bridge'
+        interfaceIndex = [uint32]$endpoint.interfaceIndex
+        interfaceLuid = [uint64]$endpoint.interfaceLuid
+        gatewayMac = [string]$endpoint.gatewayMac
         queueSelection = [ordered]@{
             mode = 'auto'
         }
     }
     device = [ordered]@{
-        macAddress = $macAddress
+        macAddress = [string]$endpoint.macAddress
         mtu = $Mtu
     }
     guestBootstrap = [ordered]@{
@@ -157,7 +174,6 @@ $serverStdoutTask = $null
 $serverStderrTask = $null
 $serverStdout = ''
 $serverStderr = ''
-$hcnCleanupFailure = $null
 
 try {
     $pipe = New-Object IO.Pipes.NamedPipeServerStream(
@@ -332,24 +348,6 @@ read guest_tx_packets < /sys/class/net/eth0/statistics/tx_packets; read guest_tx
             # The VM exited between HasExited and Kill/WaitForExit.
         }
     }
-    try {
-        $normalizedMac = $macAddress.Replace('-', '')
-        $ownedEndpoint = Get-HnsEndpoint | Where-Object {
-            $_.Owner -eq 'nvx' -and
-            $_.MacAddress -and
-            $_.MacAddress.Replace('-', '').Replace(':', '') -eq $normalizedMac
-        } | Select-Object -First 1
-        if ($ownedEndpoint) {
-            $ownedNetworkId = [string]$ownedEndpoint.VirtualNetwork
-            $ownedEndpoint | Remove-HnsEndpoint | Out-Null
-            Get-HnsNetwork | Where-Object {
-                $_.Owner -eq 'nvx' -and $_.ID -eq $ownedNetworkId
-            } | Remove-HnsNetwork | Out-Null
-            $hcnCleanupFailure = "microvm.exe left HCN endpoint $($ownedEndpoint.ID) after exit"
-        }
-    } catch {
-        $hcnCleanupFailure = "last-resort HCN cleanup failed: $($_.Exception.Message)"
-    }
     if ($null -ne $stdoutTask) {
         try {
             $stdout = ($stdoutPrefix -join [Environment]::NewLine)
@@ -409,9 +407,6 @@ Write-Host $stdout
 if ($null -ne $failure) {
     throw $failure
 }
-if ($null -ne $hcnCleanupFailure) {
-    throw $hcnCleanupFailure
-}
 if ($exitCode -ne 0) {
     throw "microvm.exe exited with code $exitCode"
 }
@@ -419,4 +414,4 @@ if ($stdout -notmatch '(?m)^NVX-HCN-AFXDP-SMOKE-OK\r?$') {
     throw "guest-to-HCN gateway verification failed; see $LogPath"
 }
 
-Write-Host "PASS: HCN-created vNIC attached to AF_XDP (LUID $($ready.interfaceLuid), queues $($readyQueues -join ','))"
+Write-Host "PASS: externally managed HCN vNIC attached to AF_XDP (LUID $($ready.interfaceLuid), queues $($readyQueues -join ','))"

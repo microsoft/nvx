@@ -207,6 +207,12 @@ def build_parser() -> argparse.ArgumentParser:
     hcs_network_snapshot.add_argument(
         "--port", "-Port", type=int, default=_int_default("PORT", 8099)
     )
+    hcs_network_snapshot.add_argument(
+        "--hcn-endpoint-config",
+        type=Path,
+        default=os.environ.get("NVX_HCN_ENDPOINT_CONFIG"),
+        help="descriptor produced by setup-hcn-endpoint.ps1",
+    )
 
     snapshot_repl = subparsers.add_parser(
         "snapshot-boot", help="capture once and resume an interactive Python REPL"
@@ -494,6 +500,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     snapshot.runs,
                     args.net,
                     args.port,
+                    args.hcn_endpoint_config,
                 ),
                 backend,
             )
