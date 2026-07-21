@@ -281,6 +281,18 @@ jobs:
           rm -rf "$SNAP"
           python3 scripts/nvx.py snapshot-boot --smoke-test
 
+      - name: Publish Linux / KVM benchmark table
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python3 scripts/performance.py collect \
+            --platform linux-kvm \
+            --commit "${GITHUB_SHA}" \
+            --input-dir build/performance \
+            --output-dir build/performance-results \
+            --require-network \
+            --require-shell-snapshot \
+            --summary "${GITHUB_STEP_SUMMARY}"
+
       - name: Stage Linux / KVM performance logs
         if: always() && env.RUN_BENCH == 'true'
         run: |
@@ -449,6 +461,18 @@ jobs:
           Remove-Item -Recurse -Force $snap -ErrorAction SilentlyContinue
           python scripts\nvx.py snapshot-boot --snapshot $snap --mem 512 --smoke-test
 
+      - name: Publish Windows / WHP benchmark table
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\performance.py collect `
+            --platform windows-whp `
+            --commit $env:GITHUB_SHA `
+            --input-dir build\performance `
+            --output-dir build\performance-results `
+            --require-network `
+            --require-shell-snapshot `
+            --summary $env:GITHUB_STEP_SUMMARY
+
       - name: Stage Windows / WHP performance logs
         if: always() && env.RUN_BENCH == 'true'
         run: |
@@ -604,7 +628,7 @@ jobs:
         if: always() && env.NVX_HCS_FIREWALL_RULE != ''
         run: Remove-NetFirewallRule -Name $env:NVX_HCS_FIREWALL_RULE -ErrorAction SilentlyContinue
 
-      - name: Validate HCS benchmark logs
+      - name: Publish Windows / HCS benchmark table
         if: env.RUN_BENCH == 'true'
         run: |
           python scripts\performance.py collect `
@@ -612,7 +636,8 @@ jobs:
             --commit $env:GITHUB_SHA `
             --input-dir build\performance-hcs `
             --output-dir build\performance-results `
-            --require-network
+            --require-network `
+            --summary $env:GITHUB_STEP_SUMMARY
 
       - name: Clean up external HCN endpoint
         if: always()
@@ -745,14 +770,15 @@ jobs:
             -LogDirectory build\performance-hcn-afxdp\runs *>&1 |
             Tee-Object -FilePath build\performance-hcn-afxdp\hcn-afxdp.log
 
-      - name: Validate HCN AF_XDP benchmark logs
+      - name: Publish Windows / HCN AF_XDP benchmark table
         if: env.RUN_BENCH == 'true'
         run: |
           python scripts\performance.py collect `
             --platform windows-hcn-afxdp `
             --commit $env:GITHUB_SHA `
             --input-dir build\performance-hcn-afxdp `
-            --output-dir build\performance-results
+            --output-dir build\performance-results `
+            --summary $env:GITHUB_STEP_SUMMARY
 
       - name: Clean up external HCN host vNIC
         if: always()

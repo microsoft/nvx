@@ -105,6 +105,35 @@ HCN AF_XDP verified network benchmark, median of 5 runs
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_collect_appends_ci_benchmark_table(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            summary = root / "summary.md"
+            logs.mkdir()
+            summary.write_text("Existing summary", encoding="utf-8")
+            (logs / "hcn-afxdp.log").write_text(
+                HCN_AFXDP_LOG, encoding="utf-8"
+            )
+
+            performance.collect_results(
+                "windows-hcn-afxdp",
+                "abc123",
+                logs,
+                root / "results",
+                summary_path=summary,
+            )
+
+            markdown = summary.read_text(encoding="utf-8")
+            self.assertTrue(markdown.startswith("Existing summary\n##"))
+            self.assertIn("## Windows / HCN + AF_XDP benchmark results", markdown)
+            self.assertIn("| Metric | p50 | Preferred direction |", markdown)
+            self.assertIn(
+                "| `hcn_afxdp_verified_network_wall` | 806.10 ms | Lower is better |",
+                markdown,
+            )
+            self.assertIn("Commit: `abc123`", markdown)
+
     def test_collects_hcn_afxdp_verified_network_metric(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -250,6 +279,7 @@ class PerformanceTests(unittest.TestCase):
                 output,
                 require_network=True,
                 require_shell_snapshot=True,
+                summary_path=root / "summary.md",
             )
             results = performance.read_results(result_path)
 
@@ -265,6 +295,11 @@ class PerformanceTests(unittest.TestCase):
             self.assertEqual(
                 by_metric["shell_snapshot_restore_512_mib"].p50, 7.0
             )
+            markdown = (root / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("## Linux / KVM benchmark results", markdown)
+            self.assertEqual(markdown.count("\n| `"), 23)
+            self.assertIn("| `virtfs_ephemeral_read` | 1200.00 MB/s | Higher is better |", markdown)
+            self.assertIn("| `network_snapshot_restore` | 40.00 ms | Lower is better |", markdown)
 
     def test_shell_snapshot_requires_every_memory_size(self):
         incomplete_log = SHELL_SNAPSHOT_LOG.split("== 512 MiB ==", maxsplit=1)[0]

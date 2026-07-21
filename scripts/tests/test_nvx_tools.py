@@ -580,6 +580,35 @@ class CiWorkflowParityTests(unittest.TestCase):
         self.assertIn("-Runs 5", hcn_afxdp)
         self.assertIn("--platform windows-hcn-afxdp", hcn_afxdp)
 
+    def test_each_backend_job_publishes_its_benchmark_table(self) -> None:
+        jobs = {
+            "linux-kvm": (
+                "Linux / KVM",
+                self.job("linux", "windows"),
+            ),
+            "windows-whp": (
+                "Windows / WHP",
+                self.job("windows", "windows-hcs"),
+            ),
+            "windows-hcs": (
+                "Windows / HCS",
+                self.job("windows-hcs", "windows-hcn-afxdp"),
+            ),
+            "windows-hcn-afxdp": (
+                "Windows / HCN AF_XDP",
+                self.job("windows-hcn-afxdp", "performance-gate"),
+            ),
+        }
+
+        for platform, (step_name, job) in jobs.items():
+            publish_step = job.split(
+                f"- name: Publish {step_name} benchmark table\n", 1
+            )[1].split("\n      - name:", 1)[0]
+            self.assertIn("performance.py collect", publish_step)
+            self.assertIn(f"--platform {platform}", publish_step)
+            self.assertIn("--summary", publish_step)
+            self.assertIn("GITHUB_STEP_SUMMARY", publish_step)
+
     def test_main_persistence_includes_successful_privileged_lanes(self) -> None:
         persistence = self.workflow.split("  performance-persist:\n", 1)[1]
 

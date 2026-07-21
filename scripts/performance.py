@@ -388,6 +388,13 @@ HCN_AFXDP_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "hcn-afxdp.log": (_parse_hcn_afxdp, True),
 }
 
+PLATFORM_NAMES = {
+    "linux-kvm": "Linux / KVM",
+    "windows-whp": "Windows / WHP",
+    "windows-hcs": "Windows / HCS",
+    "windows-hcn-afxdp": "Windows / HCN + AF_XDP",
+}
+
 
 def _platform_metric_name(platform: str, metric: str) -> str:
     # Earlier Windows virt-fs runs could queue commands before the guest shell was ready and record
@@ -463,6 +470,31 @@ def read_results(path: Path) -> list[Result]:
     return results
 
 
+def append_results_summary(
+    path: Path, platform: str, results: Sequence[Result]
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    title = PLATFORM_NAMES.get(platform, platform)
+    lines = [
+        f"## {title} benchmark results",
+        "",
+        "| Metric | p50 | Preferred direction |",
+        "| --- | ---: | --- |",
+    ]
+    for result in results:
+        direction = (
+            "Lower is better"
+            if result.direction == "lower"
+            else "Higher is better"
+        )
+        lines.append(
+            f"| `{result.metric}` | {_format_value(result.p50, result.unit)} | {direction} |"
+        )
+    lines.extend(["", f"Commit: `{results[0].commit}`", ""])
+    with path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write("\n" + "\n".join(lines))
+
+
 def collect_results(
     platform: str,
     commit: str,
@@ -470,6 +502,7 @@ def collect_results(
     output_dir: Path,
     require_network: bool = False,
     require_shell_snapshot: bool = False,
+    summary_path: Path | None = None,
 ) -> Path:
     if not platform or "/" in platform or platform in {".", ".."}:
         raise PerformanceError(f"invalid platform name: {platform!r}")
@@ -509,6 +542,8 @@ def collect_results(
     ]
     output_path = output_dir / f"{platform}.csv"
     write_results(output_path, results)
+    if summary_path is not None:
+        append_results_summary(summary_path, platform, results)
     print(f"Collected {len(results)} p50 metric(s) for {platform}: {output_path}")
     return output_path
 
@@ -687,6 +722,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--output-dir", type=Path, required=True)
     collect.add_argument("--require-network", action="store_true")
     collect.add_argument("--require-shell-snapshot", action="store_true")
+    collect.add_argument("--summary", type=Path)
 
     gate = commands.add_parser("gate", help="check current p50 values for regressions")
     gate.add_argument("--baseline-dir", type=Path, required=True)
@@ -714,6 +750,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_dir,
                 require_network=args.require_network,
                 require_shell_snapshot=args.require_shell_snapshot,
+                summary_path=args.summary,
             )
             return 0
         if args.command == "gate":

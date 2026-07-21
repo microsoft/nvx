@@ -688,6 +688,8 @@ on the PR's base branch. A regression greater than 40% fails the `Performance re
 lower latency and higher throughput are treated as improvements. Metrics without history are
 reported as warmups until a baseline exists. The workflow needs `contents: write` permission (and,
 if `main` is protected, a rule allowing `github-actions[bot]`) to persist the baseline commit.
+Every backend that runs benchmarks also publishes its collected p50 values as a Markdown table in
+its GitHub Actions job summary, including the metric unit and preferred direction.
 HCS and HCN/AF_XDP results join that baseline when their opt-in main-branch hardware jobs run;
 KVM and WHP results remain mandatory. Privileged jobs do not run on untrusted pull requests, so
 their new metrics warm up on main rather than participating in the pull-request gate.
