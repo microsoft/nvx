@@ -159,12 +159,13 @@ impl NetworkConfig {
             .join(",");
         format!(
             "virtnet_required=1 virtnet_ip={} virtnet_prefix={} virtnet_mask={} \
-             virtnet_mac={} virtnet_mtu=1500 virtnet_routes=0.0.0.0/0@{} \
+             virtnet_mac={} virtnet_mtu=1500 virtnet_gw={} virtnet_routes=0.0.0.0/0@{} \
              virtnet_dns={} virtnet_search=",
             self.guest_ip,
             self.prefix,
             self.netmask,
             mac_address.replace('-', ":"),
+            self.gateway,
             self.gateway,
             dns
         )
@@ -469,7 +470,17 @@ mod tests {
             config.cmdline_fragment(config.mac_address.as_deref().unwrap()),
             "virtnet_required=1 virtnet_ip=10.0.0.2 virtnet_prefix=24 \
              virtnet_mask=255.255.255.0 virtnet_mac=00:15:5D:52:C0:10 virtnet_mtu=1500 \
-             virtnet_routes=0.0.0.0/0@10.0.0.1 virtnet_dns=1.1.1.1 virtnet_search="
+             virtnet_gw=10.0.0.1 virtnet_routes=0.0.0.0/0@10.0.0.1 \
+             virtnet_dns=1.1.1.1 virtnet_search="
+        );
+        let mut non_default = config.clone();
+        non_default.guest_ip = Ipv4Addr::new(192, 168, 241, 2);
+        non_default.network = Ipv4Addr::new(192, 168, 241, 0);
+        non_default.gateway = Ipv4Addr::new(192, 168, 241, 1);
+        assert!(
+            non_default
+                .cmdline_fragment(non_default.mac_address.as_deref().unwrap())
+                .contains("virtnet_gw=192.168.241.1")
         );
         config.mac_address = Some("invalid".to_string());
         assert!(config.validate().is_err());

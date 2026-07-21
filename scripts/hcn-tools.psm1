@@ -381,10 +381,12 @@ function Wait-NvxHcnInterface {
     )
 
     $normalizedMac = $MacAddress.Replace('-', '').Replace(':', '')
+    $expectedAlias = "vEthernet ($EndpointName)"
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         $matches = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {
             $_.ifIndex -ne 0 -and
+            $_.Name -eq $expectedAlias -and
             $_.MacAddress -and
             $_.MacAddress.Replace('-', '').Replace(':', '') -eq $normalizedMac
         })
@@ -414,7 +416,7 @@ function Wait-NvxHcnInterface {
                 }
             }
         } elseif ($matches.Count -gt 1) {
-            throw "multiple host interfaces expose HCN endpoint MAC $MacAddress"
+            throw "multiple host interfaces expose HCN endpoint alias '$expectedAlias' with MAC $MacAddress"
         }
         [Threading.Tasks.Task]::Delay(50).Wait()
     } while ([DateTime]::UtcNow -lt $deadline)
