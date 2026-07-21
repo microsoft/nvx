@@ -575,6 +575,25 @@ jobs:
           python scripts\nvx.py bench-hcs-snapshot-py --runs 5 --mem 512 *>&1 |
             Tee-Object -FilePath build\performance-hcs\hcs-python-snapshot.log
 
+      - name: Allow HCS benchmark helper through Windows Firewall
+        if: env.RUN_BENCH == 'true'
+        run: |
+          $rule = "nvx-hcs-${env:GITHUB_RUN_ID}-${env:GITHUB_RUN_ATTEMPT}"
+          New-NetFirewallRule `
+            -Name $rule `
+            -DisplayName $rule `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 8099 `
+            -Profile Any | Out-Null
+          $utf8 = New-Object Text.UTF8Encoding($false)
+          [IO.File]::AppendAllText(
+            $env:GITHUB_ENV,
+            "NVX_HCS_FIREWALL_RULE=$rule$([Environment]::NewLine)",
+            $utf8
+          )
+
       - name: Benchmark — external HCN endpoint + HCS snapshot
         if: env.RUN_BENCH == 'true'
         run: |
@@ -584,6 +603,10 @@ jobs:
             --net "$env:NVX_HCS_GUEST_ADDRESS/24" `
             --hcn-endpoint-config $env:NVX_HCN_ENDPOINT_CONFIG *>&1 |
             Tee-Object -FilePath build\performance-hcs\hcs-network-snapshot.log
+
+      - name: Remove HCS benchmark firewall rule
+        if: always() && env.NVX_HCS_FIREWALL_RULE != ''
+        run: Remove-NetFirewallRule -Name $env:NVX_HCS_FIREWALL_RULE -ErrorAction SilentlyContinue
 
       - name: Validate HCS benchmark logs
         if: env.RUN_BENCH == 'true'

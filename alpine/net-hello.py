@@ -68,6 +68,7 @@ def link_ok(host, port, timeout=3, attempts=3):
 
 gw = target_host()
 port = helper_port()
+print(f"HELLOPY-NET TARGET={gw}:{port}", flush=True)
 if not is_cold_measurement():
     if not link_ok(gw, port):
         print("HELLOPY-NET PRECAPTURE-FAIL", flush=True)

@@ -426,9 +426,12 @@ def _collect_hcs_timings(
                 + _failure_tail(result.text)
             )
         if required_text is not None and required_text not in result.text:
+            diagnostic = _failure_tail(result.text, 80)
+            if diagnostic:
+                print(diagnostic, file=sys.stderr, flush=True)
             raise ScriptError(
                 f"{label} run {run_number}/{runs} did not emit {required_text!r}\n"
-                + _failure_tail(result.text)
+                + diagnostic
             )
         guest.append(metric)
         wall.append(wall_ms)
