@@ -82,12 +82,17 @@ class BackendTests(unittest.TestCase):
 
     def test_hcs_snapshot_benchmarks_select_expected_guest_images(self) -> None:
         shell = build_parser().parse_args(["bench-hcs-snapshot-shell"])
+        coldstart = build_parser().parse_args(["bench-hcs-coldstart"])
+        virtfs = build_parser().parse_args(["bench-hcs-virtfs"])
         python = build_parser().parse_args(["bench-hcs-snapshot-py"])
         network = build_parser().parse_args(["bench-hcs-net-snapshot-py"])
 
         self.assertFalse(shell.python_initrd)
-        self.assertEqual(shell.memories, "256 512")
+        self.assertEqual(shell.memories, "64 128 256 512")
         self.assertEqual(shell.snapshot_name, "hcs-shellsnap")
+        self.assertFalse(coldstart.python_initrd)
+        self.assertFalse(virtfs.python_initrd)
+        self.assertEqual(virtfs.payload_mib, 64)
         self.assertTrue(python.python_initrd)
         self.assertEqual(python.snapshot_name, "hcs-pysnap")
         self.assertTrue(network.python_initrd)
@@ -376,6 +381,33 @@ class BenchmarkParserTests(unittest.TestCase):
 
 
 class HcsBenchmarkWorkflowTests(unittest.TestCase):
+    def test_hcs_plan9_guest_support_is_built_in_and_fail_fast(self) -> None:
+        kernel = (REPO_ROOT / "kernel" / "config-microvm").read_text(
+            encoding="utf-8"
+        )
+        for option in (
+            "CONFIG_VSOCKETS=y",
+            "CONFIG_HYPERV_VSOCKETS=y",
+            "CONFIG_NET_9P=y",
+            "CONFIG_NET_9P_FD=y",
+            "CONFIG_NETFS_SUPPORT=y",
+            "CONFIG_9P_FS=y",
+        ):
+            self.assertIn(option, kernel)
+
+        init = (REPO_ROOT / "alpine" / "init").read_text(encoding="utf-8")
+        helper = (REPO_ROOT / "alpine" / "hcs-plan9.c").read_text(
+            encoding="utf-8"
+        )
+        build = (REPO_ROOT / "scripts" / "nvx_tools" / "build.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('/sbin/hcs-plan9 "$vdir" "$vmode" "$vaname"', init)
+        self.assertIn('fatal "virtfs: failed to mount HCS Plan9 share', init)
+        self.assertIn("socket(AF_VSOCK, SOCK_STREAM, 0)", helper)
+        self.assertNotIn("noload", helper)
+        self.assertIn('root / "sbin" / "hcs-plan9"', build)
+
     def test_shell_and_python_workflows_run_preflight_capture_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -572,11 +604,22 @@ class CiWorkflowParityTests(unittest.TestCase):
 
         for job in (hcs, hcn_afxdp):
             self.assertIn("needs: [artifacts, windows]", job)
+            self.assertIn("--require-shared-suite", job)
+        self.assertIn("bench-hcs-coldstart --runs 5", hcs)
+        self.assertIn("bench-hcs-virtfs --runs 3", hcs)
         self.assertIn("bench-hcs-snapshot-shell --runs 5", hcs)
+        self.assertIn('--memories "64 128 256 512"', hcs)
         self.assertIn("bench-hcs-snapshot-py --runs 5", hcs)
         self.assertIn("bench-hcs-net-snapshot-py", hcs)
         self.assertIn("--require-network", hcs)
-        self.assertIn("benchmark-hcn-afxdp.ps1", hcn_afxdp)
+        for command in (
+            "measure-coldstart --runs 5",
+            "bench-virtfs --runs 3",
+            "snapshot-demo --runs 5",
+            "bench-snapshot-shell --runs 5",
+            "benchmark-hcn-afxdp-snapshot.ps1",
+        ):
+            self.assertIn(command, hcn_afxdp)
         self.assertIn("-Runs 5", hcn_afxdp)
         self.assertIn("--platform windows-hcn-afxdp", hcn_afxdp)
 
@@ -607,6 +650,7 @@ class CiWorkflowParityTests(unittest.TestCase):
             self.assertIn("performance.py collect", publish_step)
             self.assertIn(f"--platform {platform}", publish_step)
             self.assertIn("--summary", publish_step)
+            self.assertIn("--require-shared-suite", publish_step)
             self.assertIn("GITHUB_STEP_SUMMARY", publish_step)
 
     def test_main_persistence_includes_successful_privileged_lanes(self) -> None:

@@ -19,10 +19,36 @@ from typing import Callable, Iterable, Sequence
 
 CSV_FIELDS = ["commit", "metric", "unit", "direction", "p50"]
 DIRECTIONS = {"lower", "higher"}
+SHARED_METRICS = frozenset(
+    {
+        "cold_start_kernel_handoff_loud",
+        "cold_start_kernel_handoff_quiet",
+        "cold_start_shell_loud",
+        "cold_start_shell_silent",
+        "cold_start_fast",
+        "virtfs_ephemeral_write",
+        "virtfs_ephemeral_read",
+        "virtfs_persistent_write",
+        "virtfs_persistent_read",
+        "virtfs_reuse",
+        "python_snapshot_cold",
+        "python_snapshot_restore",
+        "shell_snapshot_cold_64_mib",
+        "shell_snapshot_restore_64_mib",
+        "shell_snapshot_cold_128_mib",
+        "shell_snapshot_restore_128_mib",
+        "shell_snapshot_cold_256_mib",
+        "shell_snapshot_restore_256_mib",
+        "shell_snapshot_cold_512_mib",
+        "shell_snapshot_restore_512_mib",
+        "network_snapshot_cold",
+        "network_snapshot_restore",
+        "network_snapshot_restore_wall",
+    }
+)
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
-HCS_SHELL_SNAPSHOT_MEMORIES_MIB = (256, 512)
 SHELL_SNAPSHOT_SECTION = re.compile(
     r"^==\s*(?P<memory>[0-9]+)\s+MiB\s*==\s*$"
     r"(?P<body>.*?)(?=^==\s*[0-9]+\s+MiB\s*==\s*$|\Z)",
@@ -218,33 +244,77 @@ def _parse_network(text: str) -> dict[str, MetricValue]:
     return _parse_fixed(text, "network.log", patterns)
 
 
-def _parse_hcs_summary(
-    text: str, source: str, prefix: str
-) -> dict[str, MetricValue]:
+def _parse_hcs_shell_snapshot(text: str) -> dict[str, MetricValue]:
+    metrics: dict[str, MetricValue] = {}
+    for memory_mib in SHELL_SNAPSHOT_MEMORIES_MIB:
+        section = _snapshot_section(text, memory_mib, "hcs-shell-snapshot.log")
+        metrics.update(
+            _parse_fixed(
+                section,
+                f"hcs-shell-snapshot.log ({memory_mib} MiB)",
+                [
+                    (
+                        f"shell_snapshot_cold_{memory_mib}_mib",
+                        "ms",
+                        "lower",
+                        rf"^\s*cold guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+                    ),
+                    (
+                        f"shell_snapshot_restore_{memory_mib}_mib",
+                        "ms",
+                        "lower",
+                        rf"^\s*restore guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+                    ),
+                ],
+            )
+        )
+    return metrics
+
+
+def _parse_hcs_python_snapshot(text: str) -> dict[str, MetricValue]:
     return _parse_fixed(
         text,
-        source,
+        "hcs-python-snapshot.log",
         [
             (
-                f"{prefix}_cold_guest",
+                "python_snapshot_cold",
                 "ms",
                 "lower",
                 rf"^\s*cold guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
             ),
             (
-                f"{prefix}_cold_wall",
+                "python_snapshot_restore",
                 "ms",
                 "lower",
-                rf"^\s*cold process wall\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+                rf"^\s*restore guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            ),
+        ],
+    )
+
+
+def _parse_hcs_network_snapshot(text: str) -> dict[str, MetricValue]:
+    if re.search(r"^\s*verified marker\s*:\s*HELLOPY-NET OK\s*$", text, re.MULTILINE) is None:
+        raise PerformanceError(
+            "missing verified marker 'HELLOPY-NET OK' in hcs-network-snapshot.log"
+        )
+    return _parse_fixed(
+        text,
+        "hcs-network-snapshot.log",
+        [
+            (
+                "network_snapshot_cold",
+                "ms",
+                "lower",
+                rf"^\s*cold guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
             ),
             (
-                f"{prefix}_restore_guest",
+                "network_snapshot_restore",
                 "ms",
                 "lower",
                 rf"^\s*restore guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
             ),
             (
-                f"{prefix}_restore_wall",
+                "network_snapshot_restore_wall",
                 "ms",
                 "lower",
                 rf"^\s*restore process wall\s*:\s*(?P<value>{NUMBER})\s*ms\b",
@@ -253,52 +323,16 @@ def _parse_hcs_summary(
     )
 
 
-def _parse_hcs_shell_snapshot(text: str) -> dict[str, MetricValue]:
-    metrics: dict[str, MetricValue] = {}
-    for memory_mib in HCS_SHELL_SNAPSHOT_MEMORIES_MIB:
-        metrics.update(
-            _parse_hcs_summary(
-                _snapshot_section(text, memory_mib, "hcs-shell-snapshot.log"),
-                f"hcs-shell-snapshot.log ({memory_mib} MiB)",
-                f"hcs_shell_{memory_mib}_mib",
-            )
-        )
-    return metrics
-
-
-def _parse_hcs_python_snapshot(text: str) -> dict[str, MetricValue]:
-    return _parse_hcs_summary(text, "hcs-python-snapshot.log", "hcs_python")
-
-
-def _parse_hcs_network_snapshot(text: str) -> dict[str, MetricValue]:
-    if re.search(r"^\s*verified marker\s*:\s*HELLOPY-NET OK\s*$", text, re.MULTILINE) is None:
-        raise PerformanceError(
-            "missing verified marker 'HELLOPY-NET OK' in hcs-network-snapshot.log"
-        )
-    return _parse_hcs_summary(text, "hcs-network-snapshot.log", "hcs_network")
-
-
-def _parse_hcn_afxdp(text: str) -> dict[str, MetricValue]:
+def _parse_hcn_afxdp_network_snapshot(text: str) -> dict[str, MetricValue]:
     if re.search(
-        r"^\s*verified marker\s*:\s*NVX-HCN-AFXDP-SMOKE-OK\s*$",
+        r"^\s*verified marker\s*:\s*NETSNAP-RESTORE-OK\s*$",
         text,
         re.MULTILINE,
     ) is None:
         raise PerformanceError(
-            "missing verified marker 'NVX-HCN-AFXDP-SMOKE-OK' in hcn-afxdp.log"
+            "missing verified marker 'NETSNAP-RESTORE-OK' in network.log"
         )
-    return _parse_fixed(
-        text,
-        "hcn-afxdp.log",
-        [
-            (
-                "hcn_afxdp_verified_network_wall",
-                "ms",
-                "lower",
-                rf"^\s*verified network wall\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-            )
-        ],
-    )
+    return _parse_network(text)
 
 
 def _parse_virtfs(text: str) -> dict[str, MetricValue]:
@@ -379,13 +413,16 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
 }
 
 HCS_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
+    "hcs-cold-start.log": (_parse_cold_start, True),
+    "hcs-virtfs.log": (_parse_virtfs, True),
     "hcs-shell-snapshot.log": (_parse_hcs_shell_snapshot, True),
     "hcs-python-snapshot.log": (_parse_hcs_python_snapshot, True),
     "hcs-network-snapshot.log": (_parse_hcs_network_snapshot, False),
 }
 
 HCN_AFXDP_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
-    "hcn-afxdp.log": (_parse_hcn_afxdp, True),
+    **LOG_PARSERS,
+    "network.log": (_parse_hcn_afxdp_network_snapshot, False),
 }
 
 PLATFORM_NAMES = {
@@ -397,11 +434,6 @@ PLATFORM_NAMES = {
 
 
 def _platform_metric_name(platform: str, metric: str) -> str:
-    # Earlier Windows virt-fs runs could queue commands before the guest shell was ready and record
-    # a fast no-op as `virtfs_reuse`. Keep Linux history intact, but warm a new Windows baseline for
-    # the now fail-fast, checksum-verified workload.
-    if platform == "windows-whp" and metric == "virtfs_reuse":
-        return "virtfs_verified_reuse"
     return metric
 
 
@@ -502,6 +534,7 @@ def collect_results(
     output_dir: Path,
     require_network: bool = False,
     require_shell_snapshot: bool = False,
+    require_shared_suite: bool = False,
     summary_path: Path | None = None,
 ) -> Path:
     if not platform or "/" in platform or platform in {".", ".."}:
@@ -535,6 +568,19 @@ def collect_results(
 
     if not collected:
         raise PerformanceError(f"no performance metrics found in {input_dir}")
+    if require_shared_suite and collected.keys() != SHARED_METRICS:
+        missing = sorted(SHARED_METRICS - collected.keys())
+        extra = sorted(collected.keys() - SHARED_METRICS)
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if extra:
+            details.append("unexpected: " + ", ".join(extra))
+        raise PerformanceError(
+            "shared benchmark suite must contain exactly 23 metrics ("
+            + "; ".join(details)
+            + ")"
+        )
 
     results = [
         Result(commit, metric, unit, direction, p50)
@@ -722,6 +768,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--output-dir", type=Path, required=True)
     collect.add_argument("--require-network", action="store_true")
     collect.add_argument("--require-shell-snapshot", action="store_true")
+    collect.add_argument("--require-shared-suite", action="store_true")
     collect.add_argument("--summary", type=Path)
 
     gate = commands.add_parser("gate", help="check current p50 values for regressions")
@@ -750,6 +797,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_dir,
                 require_network=args.require_network,
                 require_shell_snapshot=args.require_shell_snapshot,
+                require_shared_suite=args.require_shared_suite,
                 summary_path=args.summary,
             )
             return 0

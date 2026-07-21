@@ -29,6 +29,8 @@ from .benchmarks import (
     benchmark_hcs_snapshot_python,
     benchmark_hcs_snapshot_shell,
     benchmark_hcs_network_snapshot_python,
+    benchmark_hcs_coldstart,
+    benchmark_hcs_virtfs,
     benchmark_network_python,
     benchmark_network_snapshot,
     benchmark_virtfs,
@@ -178,8 +180,33 @@ def build_parser() -> argparse.ArgumentParser:
     hcs_shell_snapshot.set_defaults(python_initrd=False)
     hcs_shell_snapshot.add_argument(
         "--memories",
-        default=os.environ.get("MEMS", "256 512"),
+        default=os.environ.get("MEMS", "64 128 256 512"),
         help="space-separated HCS guest memory sizes in MiB",
+    )
+
+    hcs_coldstart = subparsers.add_parser(
+        "bench-hcs-coldstart", help="benchmark native HCS cold-start configurations"
+    )
+    _add_snapshot_arguments(
+        hcs_coldstart,
+        default_name="unused-hcs-coldstart",
+        default_runs=6,
+    )
+    hcs_coldstart.set_defaults(python_initrd=False)
+
+    hcs_virtfs = subparsers.add_parser(
+        "bench-hcs-virtfs", help="benchmark a writable native HCS Plan9 share"
+    )
+    _add_vm_arguments(hcs_virtfs, python_initrd=False)
+    hcs_virtfs.add_argument(
+        "--runs", "--n", "-N", type=int, default=_int_default("N", 5)
+    )
+    hcs_virtfs.add_argument(
+        "--payload-mib",
+        "--payload-mb",
+        "-PayloadMB",
+        type=int,
+        default=_int_default("PAYLOAD_MB", 64),
     )
 
     hcs_python_snapshot = subparsers.add_parser(
@@ -484,6 +511,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ScriptError("--memories must contain integer MiB values") from error
             benchmark_hcs_snapshot_shell(
                 _snapshot_config(args, backend), backend, memories
+            )
+            return 0
+        if args.command == "bench-hcs-coldstart":
+            benchmark_hcs_coldstart(_snapshot_config(args, backend), backend)
+            return 0
+        if args.command == "bench-hcs-virtfs":
+            kernel, initrd = _vm_paths(args, backend)
+            benchmark_hcs_virtfs(
+                VirtfsConfig(
+                    kernel,
+                    initrd,
+                    args.mem,
+                    args.runs,
+                    args.vcpus,
+                    args.payload_mib,
+                    args.payload_mib,
+                ),
+                backend,
             )
             return 0
         if args.command == "bench-hcs-snapshot-py":

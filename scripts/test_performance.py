@@ -60,6 +60,20 @@ SHELL_SNAPSHOT_LOG = """
 """
 
 HCS_SHELL_SNAPSHOT_LOG = """
+== 64 MiB ==
+    cold guest latency    :   400.0 ms  (min 390.0, max 410.0, n=5)
+    cold process wall     :   490.0 ms  (min 480.0, max 500.0, n=5)
+    one-off capture wall  : 720.0 ms
+    restore guest latency :    40.0 ms  (min 39.0, max 41.0, n=5)
+    restore process wall  :   120.0 ms  (min 115.0, max 125.0, n=5)
+
+== 128 MiB ==
+    cold guest latency    :   410.0 ms  (min 400.0, max 420.0, n=5)
+    cold process wall     :   500.0 ms  (min 490.0, max 510.0, n=5)
+    one-off capture wall  : 750.0 ms
+    restore guest latency :    42.0 ms  (min 41.0, max 43.0, n=5)
+    restore process wall  :   125.0 ms  (min 120.0, max 130.0, n=5)
+
 == 256 MiB ==
     cold guest latency    :   420.0 ms  (min 410.0, max 430.0, n=5)
     cold process wall     :   510.0 ms  (min 500.0, max 520.0, n=5)
@@ -92,16 +106,7 @@ HCS_NETWORK_SNAPSHOT_LOG = """
     verified marker       : HELLOPY-NET OK
 """
 
-HCN_AFXDP_LOG = """
-HCN AF_XDP verified network benchmark, median of 5 runs
-    verified network: run 1/5 complete (wall 810.2 ms)
-    verified network: run 2/5 complete (wall 802.4 ms)
-    verified network: run 3/5 complete (wall 806.1 ms)
-    verified network: run 4/5 complete (wall 804.8 ms)
-    verified network: run 5/5 complete (wall 808.7 ms)
-    verified network wall : 806.1 ms  (min 802.4, max 810.2, n=5)
-    verified marker       : NVX-HCN-AFXDP-SMOKE-OK
-"""
+HCN_AFXDP_NETWORK_LOG = NETWORK_LOG + "\n  verified marker: NETSNAP-RESTORE-OK\n"
 
 
 class PerformanceTests(unittest.TestCase):
@@ -112,8 +117,14 @@ class PerformanceTests(unittest.TestCase):
             summary = root / "summary.md"
             logs.mkdir()
             summary.write_text("Existing summary", encoding="utf-8")
-            (logs / "hcn-afxdp.log").write_text(
-                HCN_AFXDP_LOG, encoding="utf-8"
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
+            (logs / "shell-snapshot.log").write_text(
+                SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            (logs / "network.log").write_text(
+                HCN_AFXDP_NETWORK_LOG, encoding="utf-8"
             )
 
             performance.collect_results(
@@ -121,6 +132,9 @@ class PerformanceTests(unittest.TestCase):
                 "abc123",
                 logs,
                 root / "results",
+                require_network=True,
+                require_shell_snapshot=True,
+                require_shared_suite=True,
                 summary_path=summary,
             )
 
@@ -129,48 +143,58 @@ class PerformanceTests(unittest.TestCase):
             self.assertIn("## Windows / HCN + AF_XDP benchmark results", markdown)
             self.assertIn("| Metric | p50 | Preferred direction |", markdown)
             self.assertIn(
-                "| `hcn_afxdp_verified_network_wall` | 806.10 ms | Lower is better |",
+                "| `network_snapshot_restore_wall` | 50.00 ms | Lower is better |",
                 markdown,
             )
             self.assertIn("Commit: `abc123`", markdown)
 
-    def test_collects_hcn_afxdp_verified_network_metric(self):
+    def test_collects_hcn_afxdp_shared_metrics(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             logs = root / "logs"
             logs.mkdir()
-            (logs / "hcn-afxdp.log").write_text(
-                HCN_AFXDP_LOG, encoding="utf-8"
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
+            (logs / "shell-snapshot.log").write_text(
+                SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            (logs / "network.log").write_text(
+                HCN_AFXDP_NETWORK_LOG, encoding="utf-8"
             )
 
             result_path = performance.collect_results(
-                "windows-hcn-afxdp", "abc123", logs, root / "results"
+                "windows-hcn-afxdp",
+                "abc123",
+                logs,
+                root / "results",
+                require_network=True,
+                require_shell_snapshot=True,
+                require_shared_suite=True,
             )
             results = performance.read_results(result_path)
 
             self.assertEqual(result_path.name, "windows-hcn-afxdp.csv")
+            self.assertEqual(len(results), 23)
             self.assertEqual(
+                {result.metric for result in results}, performance.SHARED_METRICS
+            )
+            self.assertIn(
+                performance.Result(
+                    "abc123", "network_snapshot_restore_wall", "ms", "lower", 50.0
+                ),
                 results,
-                [
-                    performance.Result(
-                        "abc123",
-                        "hcn_afxdp_verified_network_wall",
-                        "ms",
-                        "lower",
-                        806.1,
-                    )
-                ],
             )
 
-    def test_hcn_afxdp_collection_requires_verified_marker(self):
+    def test_hcn_afxdp_collection_requires_restored_network_marker(self):
         with self.assertRaisesRegex(
             performance.PerformanceError,
-            "missing verified marker 'NVX-HCN-AFXDP-SMOKE-OK'",
+            "missing verified marker 'NETSNAP-RESTORE-OK'",
         ):
-            performance._parse_hcn_afxdp(
-                HCN_AFXDP_LOG.replace(
-                    "verified marker       : NVX-HCN-AFXDP-SMOKE-OK",
-                    "verified marker       : NVX-HCN-AFXDP-SMOKE-FAIL",
+            performance._parse_hcn_afxdp_network_snapshot(
+                HCN_AFXDP_NETWORK_LOG.replace(
+                    "verified marker: NETSNAP-RESTORE-OK",
+                    "verified marker: NETSNAP-RESTORE-FAIL",
                 )
             )
 
@@ -182,6 +206,12 @@ class PerformanceTests(unittest.TestCase):
             (logs / "hcs-shell-snapshot.log").write_text(
                 HCS_SHELL_SNAPSHOT_LOG, encoding="utf-8"
             )
+            (logs / "hcs-cold-start.log").write_text(
+                COLD_START_LOG, encoding="utf-8"
+            )
+            (logs / "hcs-virtfs.log").write_text(
+                VIRTFS_LOG, encoding="utf-8"
+            )
             (logs / "hcs-python-snapshot.log").write_text(
                 HCS_PYTHON_SNAPSHOT_LOG, encoding="utf-8"
             )
@@ -190,18 +220,26 @@ class PerformanceTests(unittest.TestCase):
             )
 
             result_path = performance.collect_results(
-                "windows-hcs", "abc123", logs, root / "results"
+                "windows-hcs",
+                "abc123",
+                logs,
+                root / "results",
+                require_network=True,
+                require_shared_suite=True,
             )
             results = performance.read_results(result_path)
             by_metric = {result.metric: result for result in results}
 
             self.assertEqual(result_path.name, "windows-hcs.csv")
-            self.assertEqual(len(results), 16)
-            self.assertEqual(by_metric["hcs_shell_256_mib_restore_guest"].p50, 45.0)
-            self.assertEqual(by_metric["hcs_python_cold_guest"].p50, 2900.0)
-            self.assertNotIn("hcs_python_save_wall", by_metric)
-            self.assertEqual(by_metric["hcs_network_restore_guest"].p50, 95.0)
-            self.assertTrue(all(result.direction == "lower" for result in results))
+            self.assertEqual(len(results), 23)
+            self.assertEqual(
+                {result.metric for result in results}, performance.SHARED_METRICS
+            )
+            self.assertEqual(by_metric["shell_snapshot_restore_256_mib"].p50, 45.0)
+            self.assertEqual(by_metric["python_snapshot_cold"].p50, 2900.0)
+            self.assertEqual(by_metric["network_snapshot_restore"].p50, 95.0)
+            self.assertEqual(by_metric["virtfs_ephemeral_read"].p50, 1200.0)
+            self.assertEqual(by_metric["virtfs_ephemeral_read"].direction, "higher")
 
     def test_hcs_collection_can_require_network_results(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -210,6 +248,12 @@ class PerformanceTests(unittest.TestCase):
             logs.mkdir()
             (logs / "hcs-shell-snapshot.log").write_text(
                 HCS_SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            (logs / "hcs-cold-start.log").write_text(
+                COLD_START_LOG, encoding="utf-8"
+            )
+            (logs / "hcs-virtfs.log").write_text(
+                VIRTFS_LOG, encoding="utf-8"
             )
             (logs / "hcs-python-snapshot.log").write_text(
                 HCS_PYTHON_SNAPSHOT_LOG, encoding="utf-8"
@@ -244,14 +288,14 @@ class PerformanceTests(unittest.TestCase):
             "== 512 MiB ==", maxsplit=1
         )[0]
         with self.assertRaisesRegex(
-            performance.PerformanceError, "duplicate 256 MiB section"
+            performance.PerformanceError, "duplicate 64 MiB section"
         ):
             performance._parse_hcs_shell_snapshot(duplicated)
 
-    def test_windows_virtfs_reuse_uses_verified_metric(self):
+    def test_windows_virtfs_reuse_uses_shared_metric_name(self):
         self.assertEqual(
             performance._platform_metric_name("windows-whp", "virtfs_reuse"),
-            "virtfs_verified_reuse",
+            "virtfs_reuse",
         )
         self.assertEqual(
             performance._platform_metric_name("linux-kvm", "virtfs_reuse"),
@@ -279,6 +323,7 @@ class PerformanceTests(unittest.TestCase):
                 output,
                 require_network=True,
                 require_shell_snapshot=True,
+                require_shared_suite=True,
                 summary_path=root / "summary.md",
             )
             results = performance.read_results(result_path)
@@ -300,6 +345,31 @@ class PerformanceTests(unittest.TestCase):
             self.assertEqual(markdown.count("\n| `"), 23)
             self.assertIn("| `virtfs_ephemeral_read` | 1200.00 MB/s | Higher is better |", markdown)
             self.assertIn("| `network_snapshot_restore` | 40.00 ms | Lower is better |", markdown)
+
+    def test_shared_suite_rejects_missing_scenarios(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
+            (logs / "shell-snapshot.log").write_text(
+                SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"exactly 23 metrics \(missing: network_snapshot_cold",
+            ):
+                performance.collect_results(
+                    "linux-kvm",
+                    "abc123",
+                    logs,
+                    root / "results",
+                    require_shell_snapshot=True,
+                    require_shared_suite=True,
+                )
 
     def test_shell_snapshot_requires_every_memory_size(self):
         incomplete_log = SHELL_SNAPSHOT_LOG.split("== 512 MiB ==", maxsplit=1)[0]

@@ -12,11 +12,26 @@ fatal() {
     /bin/busybox reboot -f
     exit 1
 }
-# virt-fs: if the VMM exported a host directory (see --mount), the kernel's phram/mtdblock
+# virt-fs: native HCS exposes a Plan9 share over Hyper-V sockets; KVM/WHP expose a
+# phram/mtdblock image. Mount either transport at the requested target.
 # driver surfaces it as /dev/mtdblock0. Mount it at the requested point using the filesystem type
 # and access mode the VMM chose (all passed on the kernel command line: "virtfs_dir=<path>",
 # "virtfs_fs=<type>", "virtfs_mode=<ro|rw>"; defaults: /mnt/host, squashfs, ro).
-if [ -e /dev/mtdblock0 ]; then
+plan9=$(sed -n 's/.*virtfs_plan9=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ "$plan9" = 1 ]; then
+    vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
+    [ -n "$vdir" ] || vdir=/mnt/host
+    vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
+    [ -n "$vmode" ] || vmode=ro
+    vaname=$(sed -n 's/.*virtfs_aname=\([^ ]*\).*/\1/p' /proc/cmdline)
+    [ -n "$vaname" ] || vaname=0
+    mkdir -p "$vdir"
+    if /sbin/hcs-plan9 "$vdir" "$vmode" "$vaname"; then
+        echo "virtfs: mounted HCS Plan9 share at $vdir ($vmode)"
+    else
+        fatal "virtfs: failed to mount HCS Plan9 share at $vdir"
+    fi
+elif [ -e /dev/mtdblock0 ]; then
     vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
     [ -n "$vdir" ] || vdir=/mnt/host
     vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)
@@ -253,7 +268,18 @@ case " $(cat /proc/cmdline) " in
         /sbin/nvx-snapshot
         # ---- on restore, execution resumes here ----
         if link_up; then
-            echo "NETSNAP-RESTORE-OK"
+            if [ -n "$nprobe" ]; then
+                if ping -c 3 -W 2 "$nprobe" >/tmp/netsnap-restore-probe.log 2>&1; then
+                    echo "NETSNAP-RESTORE-PROBE-OK: $nprobe"
+                    echo "NETSNAP-RESTORE-OK"
+                else
+                    cat /tmp/netsnap-restore-probe.log >&2
+                    echo "NETSNAP-RESTORE-PROBE-FAIL: $nprobe" >&2
+                    echo "NETSNAP-RESTORE-FAIL"
+                fi
+            else
+                echo "NETSNAP-RESTORE-OK"
+            fi
         else
             echo "NETSNAP-RESTORE-FAIL"
         fi

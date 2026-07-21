@@ -46,6 +46,11 @@ HCS_QUIET_CMDLINE = (
     "console=ttyS0,115200 8250_core.nr_uarts=2 "
     "8250_core.skip_txen_test=1 quiet loglevel=0 panic=-1"
 )
+HCS_BASE_CMDLINE = (
+    "console=ttyS0,115200 8250_core.nr_uarts=1 "
+    "8250_core.skip_txen_test=1 panic=-1"
+)
+HCS_VIRTFS_CMDLINE = f"{HCS_BASE_CMDLINE} quiet loglevel=0 reboot=t"
 RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 CHECKSUM_PATTERN = re.compile(r"(?m)^\s*([0-9]+)\s+[0-9]+\s+.*data\.bin\s*$")
 METRIC_PATTERN = re.compile(r"(?:cold-start|restore):\s*([0-9.]+)")
@@ -102,8 +107,10 @@ def hcs_cold_boot_args(
     memory_mib: int,
     cmdline: str,
     marker: str,
+    *,
+    quiet: bool = True,
 ) -> list[str | Path]:
-    return [
+    args: list[str | Path] = [
         executable,
         "--backend",
         "hcs",
@@ -116,10 +123,12 @@ def hcs_cold_boot_args(
         "--cmdline",
         cmdline,
         "--exit-on-boot",
-        "--quiet",
         "--boot-marker",
         marker,
     ]
+    if quiet:
+        args.append("--quiet")
+    return args
 
 
 def hcs_snapshot_capture_args(
@@ -401,6 +410,224 @@ def _require_hcs_benchmark(config: SnapshotConfig, backend: HostBackend) -> Path
     )
     require_success(preflight, "HCS benchmark preflight")
     return executable
+
+
+def benchmark_hcs_coldstart(
+    config: SnapshotConfig, backend: HostBackend
+) -> None:
+    if config.runs < 1:
+        raise ScriptError("number of runs must be at least 1")
+    executable = _require_hcs_benchmark(config, backend)
+    silent = f"{HCS_BASE_CMDLINE} quiet loglevel=0"
+    fast = (
+        "clocksource=tsc tsc=reliable no_timer_check random.trust_cpu=on "
+        "rcupdate.rcu_expedited=1 nokaslr mitigations=off cryptomgr.notests "
+        f"{silent}"
+    )
+
+    def measure(marker: str, cmdline: str, *, quiet: bool, memory_mib: int) -> str:
+        args = hcs_cold_boot_args(
+            executable,
+            config,
+            memory_mib,
+            cmdline,
+            marker,
+            quiet=quiet,
+        )
+        samples, _ = _collect_hcs_timings(
+            args, config.runs, f"HCS cold start ({marker})", 90
+        )
+        return format_median(samples, width=8)
+
+    runinit = "Run /init as init process"
+    banner = BOOT_MARKER
+    print(
+        f"HCS cold-start (guest start -> marker), median of {config.runs} runs, "
+        f"{config.mem} MiB, 1 vCPU"
+    )
+    print()
+    print("serial console, to kernel->userspace handoff, full logs:")
+    print(
+        f"  loud (rendered)    : "
+        f"{measure(runinit, HCS_BASE_CMDLINE, quiet=False, memory_mib=config.mem)}"
+    )
+    print(
+        f"  quiet (discarded)  : "
+        f"{measure(runinit, HCS_BASE_CMDLINE, quiet=True, memory_mib=config.mem)}"
+    )
+    print()
+    print("end-to-end (to interactive shell):")
+    print(
+        f"  loud full logs     : "
+        f"{measure(banner, HCS_BASE_CMDLINE, quiet=False, memory_mib=config.mem)}"
+    )
+    print(
+        f"  silent (quiet klog): "
+        f"{measure(banner, silent, quiet=True, memory_mib=config.mem)}"
+    )
+    print()
+    print("fastest (silent, 128 MiB, tuned cmdline):")
+    print(
+        f"  fast               : "
+        f"{measure(banner, fast, quiet=True, memory_mib=128)}"
+    )
+
+
+def _hcs_plan9_guest_run(
+    config: VirtfsConfig,
+    backend: HostBackend,
+    share: Path,
+    script: str,
+) -> CommandResult:
+    executable = backend.executable()
+    args: list[str | Path] = [
+        executable,
+        "--backend",
+        "hcs",
+        "--kernel",
+        config.kernel,
+        "--initrd",
+        config.initrd,
+        "--mem",
+        str(config.mem),
+        "--cmdline",
+        HCS_VIRTFS_CMDLINE,
+        "--log-level",
+        "off",
+        "--defer-stdin-until-boot",
+        "--boot-marker",
+        "/ # ",
+        "--mount",
+        share,
+        "--mount-target",
+        "/mnt/host",
+        "--mount-rw",
+    ]
+    result = run_capture(args, input_text=script, timeout=180)
+    require_success(result, "HCS Plan9 guest run")
+    return result
+
+
+def _run_hcs_plan9_io(
+    label: str,
+    share: Path,
+    config: VirtfsConfig,
+    backend: HostBackend,
+    script: str,
+    *,
+    fresh_share_each_run: bool = False,
+) -> None:
+    write_rates: list[float] = []
+    read_rates: list[float] = []
+    for run_number in range(1, config.runs + 1):
+        run_share = share
+        if fresh_share_each_run:
+            run_share = share / f"run-{run_number}"
+            run_share.mkdir()
+            (run_share / "README").write_text(
+                "HCS Plan9 ephemeral benchmark seed", encoding="utf-8"
+            )
+        result = _hcs_plan9_guest_run(config, backend, run_share, script)
+        write_rate = parse_dd_rate(result.text, 1)
+        read_rate = parse_dd_rate(result.text, 2)
+        if write_rate is None or read_rate is None:
+            raise ScriptError(
+                f"{label} run {run_number}/{config.runs} did not report both dd rates\n"
+                + _failure_tail(result.text)
+            )
+        write_rates.append(write_rate)
+        read_rates.append(read_rate)
+    print(f"  {label:<27} write {format_rate_median(write_rates)}")
+    print(f"  {'':<27} read  {format_rate_median(read_rates)}")
+
+
+def benchmark_hcs_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
+    snapshot_config = SnapshotConfig(
+        config.kernel, config.initrd, Path("unused"), config.mem, config.runs
+    )
+    _require_hcs_benchmark(snapshot_config, backend)
+    if config.runs < 1 or config.payload_mib < 1:
+        raise ScriptError("runs and payload MiB must be positive")
+
+    ready = (
+        "until /bin/busybox mountpoint -q /mnt/host 2>/dev/null; "
+        "do /bin/busybox sleep 0.01; done\n"
+    )
+    io_script = (
+        ready
+        + f"dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count={config.payload_mib} conv=fsync 2>&1\n"
+        + "sync\necho 3 > /proc/sys/vm/drop_caches 2>/dev/null\n"
+        + "dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1\n"
+        + "sync\nreboot -f\n"
+    )
+    create_script = (
+        ready
+        + f"dd if=/dev/zero of=/mnt/host/data.bin bs=1M count={config.payload_mib} 2>/dev/null\n"
+        + "cksum /mnt/host/data.bin\nsync\nreboot -f\n"
+    )
+    verify_script = ready + "cksum /mnt/host/data.bin 2>/dev/null\nreboot -f\n"
+
+    with tempfile.TemporaryDirectory(prefix="nvx-hcs-plan9-") as temporary:
+        work = Path(temporary)
+        ephemeral = work / "ephemeral"
+        persistent = work / "persistent"
+        round_share = work / "round"
+        for share in (ephemeral, persistent, round_share):
+            share.mkdir()
+            (share / "README").write_text("HCS Plan9 benchmark seed", encoding="utf-8")
+
+        print(
+            f"HCS Plan9 virt-fs benchmark: {config.payload_mib} MiB payload, "
+            f"{config.mem} MiB guest, median of {config.runs} runs"
+        )
+        print()
+        print("== sequential throughput (guest dd, conv=fsync writes) ==")
+        _run_hcs_plan9_io(
+            "rw ephemeral (fresh share)",
+            ephemeral,
+            config,
+            backend,
+            io_script,
+            fresh_share_each_run=True,
+        )
+        _run_hcs_plan9_io(
+            "rw persistent (file-backed)",
+            persistent,
+            config,
+            backend,
+            io_script,
+        )
+        print()
+        print("== persistence round-trip (cold HCS Plan9 attachment each run) ==")
+        started = time.perf_counter()
+        create_result = _hcs_plan9_guest_run(config, backend, round_share, create_script)
+        create_ms = (time.perf_counter() - started) * 1000
+        checksum = parse_data_checksum(create_result.text)
+        if checksum is None:
+            raise ScriptError(
+                "HCS Plan9 creation did not report a checksum\n"
+                + _failure_tail(create_result.text)
+            )
+        print(f"  create share + write {config.payload_mib} MiB       : {create_ms:.0f} ms")
+
+        reuse: list[float] = []
+        verified = 0
+        for run_number in range(1, config.runs + 1):
+            started = time.perf_counter()
+            result = _hcs_plan9_guest_run(config, backend, round_share, verify_script)
+            reuse.append((time.perf_counter() - started) * 1000)
+            actual = parse_data_checksum(result.text)
+            if actual != checksum:
+                raise ScriptError(
+                    f"HCS Plan9 verification {run_number}/{config.runs} checksum "
+                    f"mismatch ({actual} != {checksum})\n{_failure_tail(result.text)}"
+                )
+            verified += 1
+        print(f"  reuse image + verify (cold each)  : {format_median(reuse, width=7)}")
+        print(
+            f"  payload survived across runs      : {verified}/{config.runs} runs "
+            f"(cksum {checksum})"
+        )
 
 
 def _collect_hcs_timings(

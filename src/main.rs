@@ -392,12 +392,11 @@ fn dispatch_hcs(args: Args, mem_bytes: u64) -> Result<()> {
     if args.snapshot.is_some() && args.restore.is_some() {
         bail!("--snapshot and --restore cannot be combined on the HCS backend");
     }
-    if args.mount.is_some()
-        || args.mount_rw
-        || args.mount_image.is_some()
-        || args.mount_size.is_some()
-    {
-        bail!("--mount, --mount-rw, --mount-image and --mount-size are not supported by HCS yet");
+    if args.mount.is_some() && (args.snapshot.is_some() || args.restore.is_some()) {
+        bail!("HCS Plan9 shares are not supported during snapshot capture or restore");
+    }
+    if args.mount_image.is_some() || args.mount_size.is_some() {
+        bail!("--mount-image and --mount-size are not supported by HCS Plan9 shares");
     }
     if args.net_tap.is_some() {
         bail!("--net-tap is not supported by the HCS backend (HCS consumes an HCN endpoint)");
@@ -463,6 +462,9 @@ fn dispatch_hcs(args: Args, mem_bytes: u64) -> Result<()> {
         restore: args.restore,
         net,
         hcn_endpoint_config: args.hcn_endpoint_config,
+        mount: args.mount,
+        mount_target: args.mount_target,
+        mount_read_only: !args.mount_rw,
     })
 }
 

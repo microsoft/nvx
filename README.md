@@ -377,12 +377,15 @@ capture/restore sequence and pass the descriptor on restore; NVX verifies it aga
 manifest and leaves it intact after the compute system closes.
 
 Run the HCS-native benchmarks from an elevated terminal or as a member of **Hyper-V
-Administrators**. The shell workflow reports each configured memory size; the Python workflow uses
-the Python initramfs and snapshots a warmed pandas/numpy process. Both report guest marker latency,
-full process wall time, one-off capture wall time, and logical/allocated VMRS size:
+Administrators**. Native HCS runs the same 23 collected scenarios as KVM and WHP: five cold-start
+modes, five Plan9 file-sharing measurements, two warmed-Python measurements, shell cold/restore at
+64/128/256/512 MiB, and three network snapshot measurements. HCS logs retain process-wall and VMRS
+details in addition to the shared p50 rows:
 
 ```powershell
-python scripts\nvx.py bench-hcs-snapshot-shell --runs 10 --memories "256 512"
+python scripts\nvx.py bench-hcs-coldstart --runs 10 --mem 512
+python scripts\nvx.py bench-hcs-virtfs --runs 5 --mem 512
+python scripts\nvx.py bench-hcs-snapshot-shell --runs 10 --memories "64 128 256 512"
 python scripts\nvx.py bench-hcs-snapshot-py --runs 8 --mem 512
 $endpoint = Join-Path $env:TEMP 'nvx-hcs-benchmark-endpoint.json'
 .\scripts\setup-hcn-endpoint.ps1 -OutputPath $endpoint `
@@ -399,6 +402,10 @@ To collect a machine-readable baseline without mixing it with WHP history:
 
 ```powershell
 New-Item -ItemType Directory -Force build\performance-hcs | Out-Null
+python scripts\nvx.py bench-hcs-coldstart --runs 10 *>&1 |
+  Tee-Object build\performance-hcs\hcs-cold-start.log
+python scripts\nvx.py bench-hcs-virtfs --runs 5 *>&1 |
+  Tee-Object build\performance-hcs\hcs-virtfs.log
 python scripts\nvx.py bench-hcs-snapshot-shell --runs 10 *>&1 |
   Tee-Object build\performance-hcs\hcs-shell-snapshot.log
 python scripts\nvx.py bench-hcs-snapshot-py --runs 8 *>&1 |
@@ -417,20 +424,23 @@ python scripts\performance.py collect `
   --platform windows-hcs `
   --commit (git rev-parse HEAD) `
   --input-dir build\performance-hcs `
-  --output-dir build\performance-results
+  --output-dir build\performance-results `
+  --require-network `
+  --require-shared-suite
 ```
 
-This produces `windows-hcs.csv` with repeated cold/restore guest and process-wall p50 metrics,
-including networked restore when `hcs-network-snapshot.log` is present.
-One-off capture wall time remains in the human-readable logs. HCS benchmarks are not part of hosted CI;
-they require a separately labeled, privileged Hyper-V runner.
+This produces `windows-hcs.csv` with the same 23 metric names as `linux-kvm.csv` and
+`windows-whp.csv`. One-off capture and extra process-wall details remain in the human-readable logs.
+HCS benchmarks are not part of hosted CI; they require a separately labeled, privileged Hyper-V
+runner.
 
 The CI workflow defines opt-in **Windows / HCS** and **Windows / HCN + AF_XDP** hardware jobs. Both
 call `setup-hcn-endpoint.ps1` before testing and `cleanup-hcn-endpoint.ps1` in an `always()` step.
-The AF_XDP job requests `-AttachToHost`, then uses `scripts/benchmark-hcn-afxdp.ps1` for five
-independent boots. Every sample must pass the same guest TX, carrier, control-pipe, and HTTP checks
-as `scripts/test-hcn-afxdp.ps1`; the benchmark records their verified end-to-end wall-time p50.
-These jobs are excluded from pull requests because they create privileged host networking objects.
+The AF_XDP job requests `-AttachToHost`, runs the same 20 non-network WHP scenarios, then uses
+`scripts/benchmark-hcn-afxdp-snapshot.ps1` for five external-L2Bridge cold boots, one capture, and
+five restores. Every restored sample must rebind all selected AF_XDP queues and ping the HCN gateway
+before it contributes to the shared network p50 rows. These jobs are excluded from pull requests
+because they create privileged host networking objects.
 
 Runner requirements:
 
@@ -677,10 +687,12 @@ also reports full process wall time so service and compute-system lifecycle over
 | `bench-net-snapshot-py` | networked Python (bare + numpy/pandas) cold vs. restore with a real HTTP round-trip                 |
 | `bench-virtfs`          | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip                             |
 | `bench-snapshot-shell`  | cold shell boot vs. shell-ready snapshot restore across memory sizes                              |
+| `bench-hcs-coldstart`      | native HCS cold-start modes matching the shared five cold-start metrics                         |
+| `bench-hcs-virtfs`         | native HCS writable Plan9 throughput and persistence verification                               |
 | `bench-hcs-snapshot-shell` | HCS cold shell boot vs. native VMRS restore, including guest and process-wall latency          |
 | `bench-hcs-snapshot-py`    | HCS cold Python/pandas startup vs. restore of the warmed interpreter                            |
 | `bench-hcs-net-snapshot-py` | HCN-backed HCS restore with a real guest-to-host HTTP request after every restore              |
-| `scripts/benchmark-hcn-afxdp.ps1` | repeated WHP boots with an external HCN vNIC, all AF_XDP RSS queues, and verified HTTP |
+| `scripts/benchmark-hcn-afxdp-snapshot.ps1` | external HCN/AF_XDP cold boot vs. snapshot restore with a restored gateway probe |
 
 CI records each merged commit's benchmark p50 values in `data/performance/`. On pull requests,
 `scripts/performance.py` compares each metric with the arithmetic mean of its latest 10 p50 values

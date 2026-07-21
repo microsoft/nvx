@@ -9,7 +9,6 @@ commit,metric,unit,direction,p50
 2486f1e8c620a198b6442f4a87cecd3267de5e1e,network_snapshot_restore_wall,ms,lower,149.5
 2486f1e8c620a198b6442f4a87cecd3267de5e1e,python_snapshot_cold,ms,lower,2767.7
 2486f1e8c620a198b6442f4a87cecd3267de5e1e,python_snapshot_restore,ms,lower,152.4
-2486f1e8c620a198b6442f4a87cecd3267de5e1e,virtfs_reuse,ms,lower,499
 9e9f78bdc155d25c50099d77be03b89b73fc133e,cold_start_fast,ms,lower,274.7
 9e9f78bdc155d25c50099d77be03b89b73fc133e,cold_start_kernel_handoff_loud,ms,lower,703.6
 9e9f78bdc155d25c50099d77be03b89b73fc133e,cold_start_kernel_handoff_quiet,ms,lower,565.6
@@ -20,7 +19,6 @@ commit,metric,unit,direction,p50
 9e9f78bdc155d25c50099d77be03b89b73fc133e,network_snapshot_restore_wall,ms,lower,130.4
 9e9f78bdc155d25c50099d77be03b89b73fc133e,python_snapshot_cold,ms,lower,2778.6
 9e9f78bdc155d25c50099d77be03b89b73fc133e,python_snapshot_restore,ms,lower,152.3
-9e9f78bdc155d25c50099d77be03b89b73fc133e,virtfs_reuse,ms,lower,499
 b99a74eb60bf444a69d2767a825048d83d8ac883,cold_start_fast,ms,lower,274.1
 b99a74eb60bf444a69d2767a825048d83d8ac883,cold_start_kernel_handoff_loud,ms,lower,706.5
 b99a74eb60bf444a69d2767a825048d83d8ac883,cold_start_kernel_handoff_quiet,ms,lower,566.3
@@ -31,7 +29,6 @@ b99a74eb60bf444a69d2767a825048d83d8ac883,network_snapshot_restore,ms,lower,53.9
 b99a74eb60bf444a69d2767a825048d83d8ac883,network_snapshot_restore_wall,ms,lower,155.1
 b99a74eb60bf444a69d2767a825048d83d8ac883,python_snapshot_cold,ms,lower,2763.5
 b99a74eb60bf444a69d2767a825048d83d8ac883,python_snapshot_restore,ms,lower,151.4
-b99a74eb60bf444a69d2767a825048d83d8ac883,virtfs_reuse,ms,lower,510
 08bb2bb814ea3596ba02d53cc42a30eb7c13880a,cold_start_fast,ms,lower,277.6
 08bb2bb814ea3596ba02d53cc42a30eb7c13880a,cold_start_kernel_handoff_loud,ms,lower,676.8
 08bb2bb814ea3596ba02d53cc42a30eb7c13880a,cold_start_kernel_handoff_quiet,ms,lower,572.5
@@ -42,7 +39,6 @@ b99a74eb60bf444a69d2767a825048d83d8ac883,virtfs_reuse,ms,lower,510
 08bb2bb814ea3596ba02d53cc42a30eb7c13880a,network_snapshot_restore_wall,ms,lower,129.4
 08bb2bb814ea3596ba02d53cc42a30eb7c13880a,python_snapshot_cold,ms,lower,2775.2
 08bb2bb814ea3596ba02d53cc42a30eb7c13880a,python_snapshot_restore,ms,lower,152.8
-08bb2bb814ea3596ba02d53cc42a30eb7c13880a,virtfs_reuse,ms,lower,498
 ae73bb2d027a4b46c47d811dfe407f6d50af78a4,cold_start_fast,ms,lower,279.5
 ae73bb2d027a4b46c47d811dfe407f6d50af78a4,cold_start_kernel_handoff_loud,ms,lower,707.2
 ae73bb2d027a4b46c47d811dfe407f6d50af78a4,cold_start_kernel_handoff_quiet,ms,lower,568.7
@@ -53,7 +49,6 @@ ae73bb2d027a4b46c47d811dfe407f6d50af78a4,network_snapshot_restore,ms,lower,54.6
 ae73bb2d027a4b46c47d811dfe407f6d50af78a4,network_snapshot_restore_wall,ms,lower,140.8
 ae73bb2d027a4b46c47d811dfe407f6d50af78a4,python_snapshot_cold,ms,lower,2770.8
 ae73bb2d027a4b46c47d811dfe407f6d50af78a4,python_snapshot_restore,ms,lower,151.6
-ae73bb2d027a4b46c47d811dfe407f6d50af78a4,virtfs_reuse,ms,lower,499
 71e9aac488c523c078343669ce0cdf580582cafd,cold_start_fast,ms,lower,278.2
 71e9aac488c523c078343669ce0cdf580582cafd,cold_start_kernel_handoff_loud,ms,lower,702.3
 71e9aac488c523c078343669ce0cdf580582cafd,cold_start_kernel_handoff_quiet,ms,lower,569.4
@@ -68,7 +63,7 @@ ae73bb2d027a4b46c47d811dfe407f6d50af78a4,virtfs_reuse,ms,lower,499
 71e9aac488c523c078343669ce0cdf580582cafd,virtfs_ephemeral_write,MB/s,higher,34.9
 71e9aac488c523c078343669ce0cdf580582cafd,virtfs_persistent_read,MB/s,higher,84.6
 71e9aac488c523c078343669ce0cdf580582cafd,virtfs_persistent_write,MB/s,higher,34.6
-71e9aac488c523c078343669ce0cdf580582cafd,virtfs_verified_reuse,ms,lower,2248
+71e9aac488c523c078343669ce0cdf580582cafd,virtfs_reuse,ms,lower,2248
 60282f02d15ded1c8965fa605fb00882c5358798,cold_start_fast,ms,lower,279.8
 60282f02d15ded1c8965fa605fb00882c5358798,cold_start_kernel_handoff_loud,ms,lower,712.6
 60282f02d15ded1c8965fa605fb00882c5358798,cold_start_kernel_handoff_quiet,ms,lower,570.2
@@ -83,7 +78,7 @@ ae73bb2d027a4b46c47d811dfe407f6d50af78a4,virtfs_reuse,ms,lower,499
 60282f02d15ded1c8965fa605fb00882c5358798,virtfs_ephemeral_write,MB/s,higher,35.1
 60282f02d15ded1c8965fa605fb00882c5358798,virtfs_persistent_read,MB/s,higher,84.3
 60282f02d15ded1c8965fa605fb00882c5358798,virtfs_persistent_write,MB/s,higher,34.8
-60282f02d15ded1c8965fa605fb00882c5358798,virtfs_verified_reuse,ms,lower,2254
+60282f02d15ded1c8965fa605fb00882c5358798,virtfs_reuse,ms,lower,2254
 bc406c80736ce0235173587b90096d6193f47164,cold_start_fast,ms,lower,279.5
 bc406c80736ce0235173587b90096d6193f47164,cold_start_kernel_handoff_loud,ms,lower,650.6
 bc406c80736ce0235173587b90096d6193f47164,cold_start_kernel_handoff_quiet,ms,lower,565.8
@@ -98,4 +93,4 @@ bc406c80736ce0235173587b90096d6193f47164,virtfs_ephemeral_read,MB/s,higher,83.9
 bc406c80736ce0235173587b90096d6193f47164,virtfs_ephemeral_write,MB/s,higher,34.8
 bc406c80736ce0235173587b90096d6193f47164,virtfs_persistent_read,MB/s,higher,84.4
 bc406c80736ce0235173587b90096d6193f47164,virtfs_persistent_write,MB/s,higher,34.5
-bc406c80736ce0235173587b90096d6193f47164,virtfs_verified_reuse,ms,lower,2248.3
+bc406c80736ce0235173587b90096d6193f47164,virtfs_reuse,ms,lower,2248.3

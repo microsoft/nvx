@@ -77,6 +77,10 @@ struct Devices {
     com_ports: BTreeMap<String, ComPort>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     network_adapters: BTreeMap<String, NetworkAdapter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan9: Option<Plan9>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hv_socket: Option<HvSocket>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +94,34 @@ struct ComPort {
 struct NetworkAdapter {
     endpoint_id: String,
     mac_address: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct Plan9 {
+    shares: Vec<Plan9Share>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct Plan9Share {
+    name: &'static str,
+    access_name: &'static str,
+    path: String,
+    port: u32,
+    flags: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct HvSocket {
+    hv_socket_config: HvSocketConfig,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct HvSocketConfig {
+    default_bind_security_descriptor: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -150,6 +182,7 @@ pub struct ComputeSystemOptions<'a> {
     pub control_pipe: Option<&'a str>,
     pub restore_state: Option<&'a str>,
     pub network_adapter: Option<(&'a str, &'a str, &'a str)>,
+    pub plan9_share: Option<(&'a str, bool)>,
 }
 
 /// Parses the schema versions returned by a basic HCS service-property query.
@@ -201,6 +234,28 @@ pub fn compute_system_document(
             },
         );
     }
+    let (plan9, hv_socket) = match options.plan9_share {
+        Some((path, read_only)) => {
+            let flags = 0x0000_0004 | u32::from(read_only);
+            (
+                Some(Plan9 {
+                    shares: vec![Plan9Share {
+                        name: "0",
+                        access_name: "0",
+                        path: path.to_string(),
+                        port: 564,
+                        flags,
+                    }],
+                }),
+                Some(HvSocket {
+                    hv_socket_config: HvSocketConfig {
+                        default_bind_security_descriptor: "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+                    },
+                }),
+            )
+        }
+        None => (None, None),
+    };
     let document = ComputeSystem {
         owner: "nvx",
         schema_version: Version { major: 2, minor: 2 },
@@ -224,6 +279,8 @@ pub fn compute_system_document(
             devices: Devices {
                 com_ports,
                 network_adapters,
+                plan9,
+                hv_socket,
             },
             restore_state: options.restore_state.map(|path| RestoreState {
                 save_state_file_path: path.to_string(),
@@ -421,6 +478,7 @@ mod tests {
                     "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                     "00-15-5D-52-C0-10",
                 )),
+                plan9_share: None,
             },
         )
         .unwrap();
@@ -483,6 +541,38 @@ mod tests {
                     "MacAddress": "00-15-5D-52-C0-10"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn serializes_plan9_share_with_hyper_v_socket_transport() {
+        let document = compute_system_document(
+            r"C:\build\vmlinux",
+            r"C:\build\initramfs.cpio.gz",
+            "console=ttyS0,115200",
+            512,
+            r"\\.\pipe\nvx-test-com1",
+            ComputeSystemOptions {
+                plan9_share: Some((r"C:\host\share", false)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let actual: ::serde_json::Value = ::serde_json::from_str(&document).unwrap();
+        assert_eq!(
+            actual["VirtualMachine"]["Devices"]["Plan9"]["Shares"][0],
+            ::serde_json::json!({
+                "Name": "0",
+                "AccessName": "0",
+                "Path": r"C:\host\share",
+                "Port": 564,
+                "Flags": 4
+            })
+        );
+        assert_eq!(
+            actual["VirtualMachine"]["Devices"]["HvSocket"]["HvSocketConfig"]
+                ["DefaultBindSecurityDescriptor"],
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
         );
     }
 

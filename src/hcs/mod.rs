@@ -43,6 +43,16 @@ pub struct Config {
     pub restore: Option<PathBuf>,
     pub net: Option<NetConfig>,
     pub hcn_endpoint_config: Option<PathBuf>,
+    pub mount: Option<PathBuf>,
+    pub mount_target: String,
+    pub mount_read_only: bool,
+}
+
+#[derive(Clone)]
+struct Plan9Share {
+    path: PathBuf,
+    target: String,
+    read_only: bool,
 }
 
 struct VmPlan {
@@ -53,6 +63,7 @@ struct VmPlan {
     memory_mib: u64,
     restore_state: Option<PathBuf>,
     network: Option<network::NetworkConfig>,
+    plan9: Option<Plan9Share>,
 }
 
 enum StopReason {
@@ -128,6 +139,7 @@ pub fn run(cfg: Config) -> Result<()> {
                     memory_mib: restored.manifest.memory_mib,
                     restore_state: Some(restored.state),
                     network,
+                    plan9: None,
                 },
                 None,
             )
@@ -152,6 +164,29 @@ pub fn run(cfg: Config) -> Result<()> {
                 }
                 None => None,
             };
+            let plan9 = match cfg.mount.as_deref() {
+                Some(path) => {
+                    let path = path
+                        .canonicalize()
+                        .with_context(|| format!("resolving HCS Plan9 share {path:?}"))?;
+                    if !path.is_dir() {
+                        bail!("HCS Plan9 --mount must name a directory: {path:?}");
+                    }
+                    if !cfg.mount_target.starts_with('/')
+                        || cfg.mount_target.split_whitespace().count() != 1
+                    {
+                        bail!(
+                            "HCS Plan9 --mount-target must be an absolute path without whitespace"
+                        );
+                    }
+                    Some(Plan9Share {
+                        path,
+                        target: cfg.mount_target.clone(),
+                        read_only: cfg.mount_read_only,
+                    })
+                }
+                None => None,
+            };
             (
                 VmPlan {
                     vm_id,
@@ -161,6 +196,7 @@ pub fn run(cfg: Config) -> Result<()> {
                     memory_mib: cfg.mem_bytes >> 20,
                     restore_state: None,
                     network,
+                    plan9,
                 },
                 capture,
             )
@@ -196,6 +232,12 @@ fn run_plan(
         effective_cmdline.push(' ');
         effective_cmdline.push_str(&endpoint.config().cmdline_fragment(mac));
     }
+    if let Some(share) = &plan.plan9 {
+        effective_cmdline.push_str(" virtfs_plan9=1 virtfs_aname=0 virtfs_dir=");
+        effective_cmdline.push_str(&share.target);
+        effective_cmdline.push_str(" virtfs_mode=");
+        effective_cmdline.push_str(if share.read_only { "ro" } else { "rw" });
+    }
 
     api::grant_vm_access(vm_id, &plan.kernel)?;
     api::grant_vm_access(vm_id, &plan.initrd)?;
@@ -224,6 +266,12 @@ fn run_plan(
                     attachment.mac_address,
                 )
             }),
+            plan9_share: plan
+                .plan9
+                .as_ref()
+                .map(|share| (share.path.to_string_lossy(), share.read_only))
+                .as_ref()
+                .map(|(path, read_only)| (path.as_ref(), *read_only)),
         },
     )?;
     debug!("HCS create document for {vm_id}: {document}");

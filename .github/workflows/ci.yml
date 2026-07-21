@@ -97,7 +97,7 @@ jobs:
           path: |
             build/vmlinux
             build/initramfs.cpio.gz
-          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'kernel/**', 'alpine/init') }}
+          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'kernel/**', 'alpine/init', 'alpine/hcs-plan9.c') }}
 
       - name: Build kernel + initramfs (Docker)
         if: steps.cache-base.outputs.cache-hit != 'true'
@@ -244,7 +244,7 @@ jobs:
 
       - name: Benchmark — snapshot/restore (shell)
         if: env.RUN_BENCH == 'true'
-        run: python3 scripts/nvx.py bench-snapshot-shell --runs 5 | tee build/performance/shell-snapshot.log
+        run: python3 scripts/nvx.py bench-snapshot-shell --runs 5 --memories "64 128 256 512" | tee build/performance/shell-snapshot.log
 
       - name: Benchmark — networking + snapshot
         if: env.RUN_BENCH == 'true'
@@ -291,6 +291,7 @@ jobs:
             --output-dir build/performance-results \
             --require-network \
             --require-shell-snapshot \
+            --require-shared-suite \
             --summary "${GITHUB_STEP_SUMMARY}"
 
       - name: Stage Linux / KVM performance logs
@@ -339,6 +340,7 @@ jobs:
         run: |
           $files = @(
             'scripts\benchmark-hcn-afxdp.ps1',
+            'scripts\benchmark-hcn-afxdp-snapshot.ps1',
             'scripts\hcn-tools.psm1',
             'scripts\setup-hcn-endpoint.ps1',
             'scripts\cleanup-hcn-endpoint.ps1',
@@ -436,7 +438,7 @@ jobs:
       - name: Benchmark — snapshot/restore (shell)
         if: env.RUN_BENCH == 'true'
         run: |
-          python scripts\nvx.py bench-snapshot-shell --runs 5 *>&1 |
+          python scripts\nvx.py bench-snapshot-shell --runs 5 --memories "64 128 256 512" *>&1 |
             Tee-Object -FilePath build\performance\shell-snapshot.log
 
       - name: Benchmark — networking + snapshot
@@ -471,6 +473,7 @@ jobs:
             --output-dir build\performance-results `
             --require-network `
             --require-shell-snapshot `
+            --require-shared-suite `
             --summary $env:GITHUB_STEP_SUMMARY
 
       - name: Stage Windows / WHP performance logs
@@ -583,10 +586,22 @@ jobs:
           Remove-Item -Recurse -Force build\performance-hcs -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path build\performance-hcs | Out-Null
 
+      - name: Benchmark — HCS cold-start
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\nvx.py bench-hcs-coldstart --runs 5 --mem 512 *>&1 |
+            Tee-Object -FilePath build\performance-hcs\hcs-cold-start.log
+
+      - name: Benchmark — HCS Plan9 virt-fs
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\nvx.py bench-hcs-virtfs --runs 3 --mem 512 *>&1 |
+            Tee-Object -FilePath build\performance-hcs\hcs-virtfs.log
+
       - name: Benchmark — HCS snapshot/restore (shell)
         if: env.RUN_BENCH == 'true'
         run: |
-          python scripts\nvx.py bench-hcs-snapshot-shell --runs 5 --memories "256 512" *>&1 |
+          python scripts\nvx.py bench-hcs-snapshot-shell --runs 5 --memories "64 128 256 512" *>&1 |
             Tee-Object -FilePath build\performance-hcs\hcs-shell-snapshot.log
 
       - name: Benchmark — HCS snapshot/restore (Python)
@@ -637,6 +652,7 @@ jobs:
             --input-dir build\performance-hcs `
             --output-dir build\performance-results `
             --require-network `
+            --require-shared-suite `
             --summary $env:GITHUB_STEP_SUMMARY
 
       - name: Clean up external HCN endpoint
@@ -731,6 +747,30 @@ jobs:
           Remove-Item -Recurse -Force build\performance-hcn-afxdp -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path build\performance-hcn-afxdp | Out-Null
 
+      - name: Benchmark — HCN AF_XDP cold-start
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\nvx.py measure-coldstart --runs 5 *>&1 |
+            Tee-Object -FilePath build\performance-hcn-afxdp\cold-start.log
+
+      - name: Benchmark — HCN AF_XDP virt-fs
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\nvx.py bench-virtfs --runs 3 *>&1 |
+            Tee-Object -FilePath build\performance-hcn-afxdp\virtfs.log
+
+      - name: Benchmark — HCN AF_XDP snapshot/restore (Python)
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\nvx.py snapshot-demo --runs 5 *>&1 |
+            Tee-Object -FilePath build\performance-hcn-afxdp\snapshot.log
+
+      - name: Benchmark — HCN AF_XDP snapshot/restore (shell)
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\nvx.py bench-snapshot-shell --runs 5 --memories "64 128 256 512" *>&1 |
+            Tee-Object -FilePath build\performance-hcn-afxdp\shell-snapshot.log
+
       - name: Set up external HCN host vNIC
         run: |
           $descriptor = Join-Path $env:RUNNER_TEMP 'nvx-hcn-afxdp-endpoint.json'
@@ -757,18 +797,18 @@ jobs:
             -TimeoutSeconds 300 `
             -LogPath build\performance\hcn-afxdp-smoke.log
 
-      - name: Benchmark — external HCN vNIC + AF_XDP
+      - name: Benchmark — external HCN vNIC + AF_XDP snapshot
         if: env.RUN_BENCH == 'true'
         timeout-minutes: 15
         run: |
-          .\scripts\benchmark-hcn-afxdp.ps1 `
+          .\scripts\benchmark-hcn-afxdp-snapshot.ps1 `
             -Runs 5 `
             -EndpointConfig $env:NVX_HCN_ENDPOINT_CONFIG `
             -GuestAddress $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
             -Gateway $env:NVX_HCN_AFXDP_GATEWAY `
             -TimeoutSeconds 300 `
-            -LogDirectory build\performance-hcn-afxdp\runs *>&1 |
-            Tee-Object -FilePath build\performance-hcn-afxdp\hcn-afxdp.log
+            -SnapshotPath build\hcn-afxdp-netsnap *>&1 |
+            Tee-Object -FilePath build\performance-hcn-afxdp\network.log
 
       - name: Publish Windows / HCN AF_XDP benchmark table
         if: env.RUN_BENCH == 'true'
@@ -778,6 +818,9 @@ jobs:
             --commit $env:GITHUB_SHA `
             --input-dir build\performance-hcn-afxdp `
             --output-dir build\performance-results `
+            --require-network `
+            --require-shell-snapshot `
+            --require-shared-suite `
             --summary $env:GITHUB_STEP_SUMMARY
 
       - name: Clean up external HCN host vNIC
@@ -794,14 +837,14 @@ jobs:
           key: hcn-afxdp-smoke-log-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Stage Windows / HCN AF_XDP performance logs
-        if: always() && env.RUN_BENCH == 'true' && hashFiles('build/performance-hcn-afxdp/hcn-afxdp.log') != ''
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('build/performance-hcn-afxdp/network.log') != ''
         run: |
           Remove-Item -Recurse -Force performance-logs\windows-hcn-afxdp -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path performance-logs\windows-hcn-afxdp | Out-Null
           Copy-Item build\performance-hcn-afxdp\* performance-logs\windows-hcn-afxdp\ -Recurse
 
       - name: Save Windows / HCN AF_XDP performance logs
-        if: always() && env.RUN_BENCH == 'true' && hashFiles('performance-logs/windows-hcn-afxdp/hcn-afxdp.log') != ''
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('performance-logs/windows-hcn-afxdp/network.log') != ''
         uses: actions/cache/save@v5
         with:
           path: performance-logs/windows-hcn-afxdp
@@ -853,14 +896,16 @@ jobs:
             --input-dir performance-logs/linux-kvm \
             --output-dir performance-results \
             --require-network \
-            --require-shell-snapshot
+            --require-shell-snapshot \
+            --require-shared-suite
           python3 scripts/performance.py collect \
             --platform windows-whp \
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/windows-whp \
             --output-dir performance-results \
             --require-network \
-            --require-shell-snapshot
+            --require-shell-snapshot \
+            --require-shared-suite
 
       - name: Load base branch performance history
         env:
@@ -957,14 +1002,16 @@ jobs:
             --input-dir performance-logs/linux-kvm \
             --output-dir performance-results \
             --require-network \
-            --require-shell-snapshot
+            --require-shell-snapshot \
+            --require-shared-suite
           python3 scripts/performance.py collect \
             --platform windows-whp \
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/windows-whp \
             --output-dir performance-results \
             --require-network \
-            --require-shell-snapshot
+            --require-shell-snapshot \
+            --require-shared-suite
 
       - name: Collect Windows / HCS p50 results
         if: needs.windows-hcs.result == 'success'
@@ -974,7 +1021,8 @@ jobs:
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/windows-hcs \
             --output-dir performance-results \
-            --require-network
+            --require-network \
+            --require-shared-suite
 
       - name: Collect Windows / HCN AF_XDP p50 results
         if: needs.windows-hcn-afxdp.result == 'success'
@@ -983,7 +1031,10 @@ jobs:
             --platform windows-hcn-afxdp \
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/windows-hcn-afxdp \
-            --output-dir performance-results
+            --output-dir performance-results \
+            --require-network \
+            --require-shell-snapshot \
+            --require-shared-suite
 
       - name: Persist results on main
         run: |
