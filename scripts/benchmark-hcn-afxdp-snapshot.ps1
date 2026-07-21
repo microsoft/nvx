@@ -63,6 +63,33 @@ function Format-Median {
         $ordered.Count
 }
 
+function Invoke-MicrovmSelfTest {
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Microvm
+    $startInfo.Arguments = '--selftest --log-level warn'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'failed to start WHP self-test' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        if ($stdout) { Write-Output $stdout }
+        if ($stderr) { Write-Output $stderr }
+        if ($process.ExitCode -ne 0) {
+            throw "WHP self-test failed with exit code $($process.ExitCode)"
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-AfxdpVm {
     param(
         [string[]]$Arguments,
@@ -227,8 +254,7 @@ if (-not $script:endpoint.hostAttached -or
     throw "HCN endpoint descriptor does not contain a host-attached vNIC: $EndpointConfig"
 }
 
-& $Microvm --selftest
-if ($LASTEXITCODE -ne 0) { throw "WHP self-test failed with exit code $LASTEXITCODE" }
+Invoke-MicrovmSelfTest
 
 $cmdline = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1 virtnet_probe=$Gateway"
 $cold = New-Object Collections.Generic.List[double]

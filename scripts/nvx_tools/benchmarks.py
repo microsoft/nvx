@@ -477,7 +477,7 @@ def _hcs_plan9_guest_run(
     config: VirtfsConfig,
     backend: HostBackend,
     share: Path,
-    script: str,
+    workload: str,
 ) -> CommandResult:
     executable = backend.executable()
     args: list[str | Path] = [
@@ -491,19 +491,24 @@ def _hcs_plan9_guest_run(
         "--mem",
         str(config.mem),
         "--cmdline",
-        HCS_VIRTFS_CMDLINE,
+        f"{HCS_VIRTFS_CMDLINE} virtfs_bench={workload} "
+        f"virtfs_payload_mib={config.payload_mib}",
         "--log-level",
         "off",
-        "--defer-stdin-until-boot",
+        "--exit-on-boot",
         "--boot-marker",
-        "/ # ",
+        "NVX-HCS-VIRTFS-DONE",
         "--mount",
         share,
         "--mount-target",
         "/mnt/host",
         "--mount-rw",
     ]
-    result = run_capture(args, input_text=script, timeout=180)
+    result = run_capture(args, timeout=180)
+    if "NVX-HCS-VIRTFS-FAIL" in result.text:
+        raise ScriptError(
+            "HCS Plan9 guest workload failed\n" + _failure_tail(result.text, 80)
+        )
     if result.timed_out or result.returncode != 0:
         diagnostic = _failure_tail(result.text, 80)
         if diagnostic:
@@ -517,7 +522,7 @@ def _run_hcs_plan9_io(
     share: Path,
     config: VirtfsConfig,
     backend: HostBackend,
-    script: str,
+    workload: str,
     *,
     fresh_share_each_run: bool = False,
 ) -> None:
@@ -531,7 +536,7 @@ def _run_hcs_plan9_io(
             (run_share / "README").write_text(
                 "HCS Plan9 ephemeral benchmark seed", encoding="utf-8"
             )
-        result = _hcs_plan9_guest_run(config, backend, run_share, script)
+        result = _hcs_plan9_guest_run(config, backend, run_share, workload)
         write_rate = parse_dd_rate(result.text, 1)
         read_rate = parse_dd_rate(result.text, 2)
         if write_rate is None or read_rate is None:
@@ -553,24 +558,6 @@ def benchmark_hcs_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
     if config.runs < 1 or config.payload_mib < 1:
         raise ScriptError("runs and payload MiB must be positive")
 
-    ready = (
-        "until /bin/busybox mountpoint -q /mnt/host 2>/dev/null; "
-        "do /bin/busybox sleep 0.01; done\n"
-    )
-    io_script = (
-        ready
-        + f"dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count={config.payload_mib} conv=fsync 2>&1\n"
-        + "sync\necho 3 > /proc/sys/vm/drop_caches 2>/dev/null\n"
-        + "dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1\n"
-        + "sync\nreboot -f\n"
-    )
-    create_script = (
-        ready
-        + f"dd if=/dev/zero of=/mnt/host/data.bin bs=1M count={config.payload_mib} 2>/dev/null\n"
-        + "cksum /mnt/host/data.bin\nsync\nreboot -f\n"
-    )
-    verify_script = ready + "cksum /mnt/host/data.bin 2>/dev/null\nreboot -f\n"
-
     with tempfile.TemporaryDirectory(prefix="nvx-hcs-plan9-") as temporary:
         work = Path(temporary)
         ephemeral = work / "ephemeral"
@@ -591,7 +578,7 @@ def benchmark_hcs_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
             ephemeral,
             config,
             backend,
-            io_script,
+            "io",
             fresh_share_each_run=True,
         )
         _run_hcs_plan9_io(
@@ -599,12 +586,12 @@ def benchmark_hcs_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
             persistent,
             config,
             backend,
-            io_script,
+            "io",
         )
         print()
         print("== persistence round-trip (cold HCS Plan9 attachment each run) ==")
         started = time.perf_counter()
-        create_result = _hcs_plan9_guest_run(config, backend, round_share, create_script)
+        create_result = _hcs_plan9_guest_run(config, backend, round_share, "create")
         create_ms = (time.perf_counter() - started) * 1000
         checksum = parse_data_checksum(create_result.text)
         if checksum is None:
@@ -618,7 +605,7 @@ def benchmark_hcs_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
         verified = 0
         for run_number in range(1, config.runs + 1):
             started = time.perf_counter()
-            result = _hcs_plan9_guest_run(config, backend, round_share, verify_script)
+            result = _hcs_plan9_guest_run(config, backend, round_share, "verify")
             reuse.append((time.perf_counter() - started) * 1000)
             actual = parse_data_checksum(result.text)
             if actual != checksum:

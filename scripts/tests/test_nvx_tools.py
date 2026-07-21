@@ -24,9 +24,11 @@ from nvx_tools.build import (
 from nvx_tools.benchmarks import (
     HcsNetworkSnapshotConfig,
     NetworkSnapshotConfig,
+    VirtfsConfig,
     _capture_hcs_snapshot,
     _collect_hcs_timings,
     _validate_hcs_snapshot,
+    benchmark_hcs_virtfs,
     benchmark_hcs_snapshot_python,
     benchmark_hcs_snapshot_shell,
     benchmark_hcs_network_snapshot_python,
@@ -381,6 +383,98 @@ class BenchmarkParserTests(unittest.TestCase):
 
 
 class HcsBenchmarkWorkflowTests(unittest.TestCase):
+    def test_hcs_plan9_workloads_run_from_cmdline_without_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            backend = HostBackend(
+                "windows-whp", ".exe", root / "build", "tsc", False, root
+            )
+            executable = backend.executable()
+            kernel = root / "build" / "vmlinux"
+            initrd = root / "build" / "initramfs.cpio.gz"
+            executable.parent.mkdir(parents=True)
+            kernel.parent.mkdir(exist_ok=True)
+            for artifact in (executable, kernel, initrd):
+                artifact.touch()
+
+            calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+            def fake_runner(args: object, **kwargs: object) -> CommandResult:
+                command = tuple(str(value) for value in args)
+                calls.append((command, kwargs))
+                if "--selftest" in command:
+                    return CommandResult(command, 0, b"", b"")
+                cmdline = command[command.index("--cmdline") + 1]
+                if "virtfs_bench=io" in cmdline:
+                    output = (
+                        b"1048576 bytes copied, 0.1 s, 10.0MB/s\n"
+                        b"1048576 bytes copied, 0.05 s, 20.0MB/s\n"
+                    )
+                else:
+                    output = b"12345 1048576 /mnt/host/data.bin\n"
+                return CommandResult(command, 0, output, b"")
+
+            with (
+                patch("nvx_tools.benchmarks.run_capture", side_effect=fake_runner),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                benchmark_hcs_virtfs(
+                    VirtfsConfig(kernel, initrd, mem=512, runs=1, payload_mib=1),
+                    backend,
+                )
+
+            guest_calls = [entry for entry in calls if "--selftest" not in entry[0]]
+            workloads = [
+                command[command.index("--cmdline") + 1].split("virtfs_bench=", 1)[1].split()[0]
+                for command, _ in guest_calls
+            ]
+            self.assertEqual(workloads, ["io", "io", "create", "verify"])
+            for command, kwargs in guest_calls:
+                self.assertIn("--exit-on-boot", command)
+                self.assertEqual(
+                    command[command.index("--boot-marker") + 1],
+                    "NVX-HCS-VIRTFS-DONE",
+                )
+                self.assertNotIn("input_text", kwargs)
+
+    def test_hcs_plan9_guest_failure_marker_cannot_report_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            backend = HostBackend(
+                "windows-whp", ".exe", root / "build", "tsc", False, root
+            )
+            executable = backend.executable()
+            kernel = root / "build" / "vmlinux"
+            initrd = root / "build" / "initramfs.cpio.gz"
+            share = root / "share"
+            executable.parent.mkdir(parents=True)
+            kernel.parent.mkdir()
+            share.mkdir()
+            for artifact in (executable, kernel, initrd):
+                artifact.touch()
+
+            def fake_runner(args: object, **kwargs: object) -> CommandResult:
+                command = tuple(str(value) for value in args)
+                if "--selftest" in command:
+                    return CommandResult(command, 0, b"", b"")
+                return CommandResult(
+                    command,
+                    0,
+                    b"virtfs: benchmark write failed\nNVX-HCS-VIRTFS-FAIL\n",
+                    b"",
+                )
+
+            with patch("nvx_tools.benchmarks.run_capture", side_effect=fake_runner):
+                with self.assertRaisesRegex(
+                    ScriptError, "HCS Plan9 guest workload failed"
+                ):
+                    benchmark_hcs_virtfs(
+                        VirtfsConfig(
+                            kernel, initrd, mem=512, runs=1, payload_mib=1
+                        ),
+                        backend,
+                    )
+
     def test_hcs_plan9_guest_support_is_built_in_and_fail_fast(self) -> None:
         kernel = (REPO_ROOT / "kernel" / "config-microvm").read_text(
             encoding="utf-8"
@@ -404,6 +498,11 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
         )
         self.assertIn('/sbin/hcs-plan9 "$vdir" "$vmode" "$vaname"', init)
         self.assertIn('fatal "virtfs: failed to mount HCS Plan9 share', init)
+        self.assertIn(r'virtfs_bench=\([^ ]*\)', init)
+        self.assertIn('echo "NVX-HCS-VIRTFS-DONE"', init)
+        self.assertIn('echo "NVX-HCS-VIRTFS-FAIL"', init)
+        fatal = init.split("fatal() {", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("NVX-HCS-VIRTFS-DONE", fatal)
         self.assertIn("socket(AF_VSOCK, SOCK_STREAM, 0)", helper)
         self.assertIn("alarm(15)", helper)
         self.assertNotIn("noload", helper)
@@ -422,6 +521,26 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
             orchestration.index("system.start()?;"),
             orchestration.index('HcsModifyComputeSystem(add Plan9 share)'),
         )
+
+        benchmark = (REPO_ROOT / "scripts" / "nvx_tools" / "benchmarks.py").read_text(
+            encoding="utf-8"
+        )
+        guest_run = benchmark.split("def _hcs_plan9_guest_run(", 1)[1].split(
+            "\ndef _run_hcs_plan9_io", 1
+        )[0]
+        self.assertIn("virtfs_bench={workload}", guest_run)
+        self.assertIn('"--exit-on-boot"', guest_run)
+        self.assertIn('"NVX-HCS-VIRTFS-DONE"', guest_run)
+        self.assertNotIn("input_text=", guest_run)
+        self.assertNotIn("--defer-stdin-until-boot", guest_run)
+
+        afxdp = (REPO_ROOT / "scripts" / "benchmark-hcn-afxdp-snapshot.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function Invoke-MicrovmSelfTest", afxdp)
+        self.assertIn("RedirectStandardError = $true", afxdp)
+        self.assertIn("if ($stderr) { Write-Output $stderr }", afxdp)
+        self.assertIn("Invoke-MicrovmSelfTest", afxdp)
 
     def test_shared_virtfs_allows_slow_hardware_runs(self) -> None:
         source = (REPO_ROOT / "scripts" / "nvx_tools" / "benchmarks.py").read_text(
