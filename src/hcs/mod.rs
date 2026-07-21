@@ -434,6 +434,25 @@ fn save_snapshot(
     let pause_options: String = schema::pause_options()?;
     info!("pausing HCS guest {} for snapshot", plan.vm_id);
     system.pause(&pause_options)?;
+    if let Some(network) = network {
+        let mac_address = network
+            .mac_address
+            .as_deref()
+            .context("network snapshot endpoint has no MAC address")?;
+        let remove = schema::network_adapter_remove(
+            &network.adapter_id,
+            &network.endpoint_id,
+            mac_address,
+        )?;
+        info!(
+            "detaching external HCN endpoint {} before snapshot",
+            network.endpoint_id
+        );
+        system.modify_network_adapter(
+            "HcsModifyComputeSystem(remove network adapter before save)",
+            &remove,
+        )?;
+    }
     let save_options: String = schema::save_options(&capture.state().to_string_lossy())?;
     info!("saving HCS guest {} to {:?}", plan.vm_id, capture.state());
     system.save(&save_options)?;
