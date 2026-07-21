@@ -8,6 +8,7 @@
 # very next line -- re-checks the link over the freshly recreated host TAP and prints a marker the
 # benchmark greps for. On a plain cold boot (no --snapshot) the port write is ignored and the app
 # simply runs straight through.
+import signal
 import socket
 import subprocess
 
@@ -43,6 +44,14 @@ def is_cold_measurement():
     """True when the benchmark wants one cold-path link check without taking a snapshot."""
     try:
         return "netbench_cold=1" in open("/proc/cmdline").read().split()
+    except OSError:
+        return False
+
+
+def host_controls_shutdown():
+    """True when the host will terminate this PID 1 after observing the marker."""
+    try:
+        return "netbench_hold=1" in open("/proc/cmdline").read().split()
     except OSError:
         return False
 
@@ -85,3 +94,6 @@ print("NVX-HCS-NETWORK-DONE", flush=True)
 if not ok:
     subprocess.run(["reboot", "-f"], check=False)
     raise SystemExit(1)
+if host_controls_shutdown():
+    while True:
+        signal.pause()

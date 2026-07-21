@@ -473,6 +473,7 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
             for command in (network_cold, network_capture):
                 cmdline = command[command.index("--cmdline") + 1]
                 self.assertIn("netbench_host=192.0.2.10", cmdline)
+                self.assertIn("netbench_hold=1", cmdline)
             self.assertEqual(
                 network_cold[network_cold.index("--boot-marker") + 1],
                 "NVX-HCS-NETWORK-DONE",
@@ -493,6 +494,11 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
             self.assertIn("tr -d ':' | tr -d '-'", script)
             self.assertIn('fatal "virtnet: no non-loopback interface appeared', script)
             self.assertIn('while [ "$tries" -lt 600 ]', script)
+
+    def test_hcs_network_guest_waits_for_host_teardown(self) -> None:
+        script = (REPO_ROOT / "alpine" / "net-hello.py").read_text(encoding="utf-8")
+        self.assertIn('"netbench_hold=1"', script)
+        self.assertIn("signal.pause()", script)
 
 
 class BootTestTests(unittest.TestCase):

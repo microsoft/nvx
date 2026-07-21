@@ -641,10 +641,11 @@ def benchmark_hcs_network_snapshot_python(
     cold_completion_marker = "NVX-HCS-NETWORK-DONE"
     cold_cmdline = (
         f"{HCS_QUIET_CMDLINE} pyapp=net-hello.py "
-        f"netbench_cold=1 netbench_port={config.port}"
+        f"netbench_cold=1 netbench_hold=1 netbench_port={config.port}"
     )
     capture_cmdline = (
-        f"{HCS_QUIET_CMDLINE} pyapp=net-hello.py netbench_port={config.port}"
+        f"{HCS_QUIET_CMDLINE} pyapp=net-hello.py "
+        f"netbench_hold=1 netbench_port={config.port}"
     )
     cold_args = hcs_cold_boot_args(
         executable,
