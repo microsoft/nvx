@@ -4,9 +4,11 @@
 //! Minimal ownership-safe wrappers around the flat HCS API.
 
 use ::core::ffi::c_void;
+use ::std::error::Error;
+use ::std::fmt;
 use ::std::path::Path;
 
-use ::anyhow::{Context, Result, anyhow, bail};
+use ::anyhow::{Context, Result, bail};
 use ::windows::Wdk::System::SystemServices::RtlGetVersion;
 use ::windows::Win32::Foundation::{
     ERROR_TIMEOUT, HCS_E_OPERATION_TIMEOUT, HLOCAL, LocalFree, WAIT_TIMEOUT,
@@ -21,6 +23,27 @@ use ::windows::core::{Error as WindowsError, GUID, HRESULT, HSTRING, PWSTR};
 use super::snapshot::HostVersion;
 
 const OPERATION_TIMEOUT_MS: u32 = 120_000;
+
+#[derive(Debug)]
+struct HcsApiError {
+    operation: String,
+    resource_id: String,
+    message: String,
+    code: HRESULT,
+    document: String,
+}
+
+impl fmt::Display for HcsApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} failed for compute system {}: {} (HRESULT 0x{:08X}); result: {}",
+            self.operation, self.resource_id, self.message, self.code.0 as u32, self.document,
+        )
+    }
+}
+
+impl Error for HcsApiError {}
 
 /// A wide string returned by HCS and owned by the process-local allocator.
 struct LocalWideString(PWSTR);
@@ -180,16 +203,21 @@ pub fn hcs_error(
     error: WindowsError,
     document: &str,
 ) -> ::anyhow::Error {
-    let code: u32 = error.code().0 as u32;
-    let result: &str = if document.is_empty() {
-        "<none>"
-    } else {
-        document
-    };
-    anyhow!(
-        "{operation} failed for compute system {resource_id}: {error} \
-         (HRESULT 0x{code:08X}); result: {result}"
-    )
+    ::anyhow::Error::new(HcsApiError {
+        operation: operation.to_string(),
+        resource_id: resource_id.to_string(),
+        message: error.to_string(),
+        code: error.code(),
+        document: if document.is_empty() {
+            "<none>".to_string()
+        } else {
+            document.to_string()
+        },
+    })
+}
+
+pub fn error_code(error: &::anyhow::Error) -> Option<HRESULT> {
+    error.downcast_ref::<HcsApiError>().map(|error| error.code)
 }
 
 #[cfg(test)]
@@ -202,5 +230,20 @@ mod tests {
         assert!(is_timeout(HRESULT::from_win32(WAIT_TIMEOUT.0)));
         assert!(is_timeout(HRESULT::from_win32(ERROR_TIMEOUT.0)));
         assert!(!is_timeout(HRESULT(0x8000_4005u32 as i32)));
+    }
+
+    #[test]
+    fn preserves_hresult_through_anyhow_context() {
+        let code = HRESULT(0x803B_0014u32 as i32);
+        let error = ::anyhow::Error::new(HcsApiError {
+            operation: "create".to_string(),
+            resource_id: "vm".to_string(),
+            message: "busy".to_string(),
+            code,
+            document: "<none>".to_string(),
+        })
+        .context("outer context");
+        assert_eq!(error_code(&error), Some(code));
+        assert!(error.to_string().contains("outer context"));
     }
 }

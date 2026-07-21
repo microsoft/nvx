@@ -3,17 +3,26 @@
 
 //! HCS compute-system lifecycle.
 
-use ::anyhow::Result;
-use ::log::warn;
-use ::windows::Win32::Foundation::{ERROR_TIMEOUT, HCS_E_OPERATION_TIMEOUT, WAIT_TIMEOUT};
+use ::std::thread;
+use ::std::time::Duration;
+
+use ::anyhow::{Error, Result};
+use ::log::{debug, warn};
+use ::windows::Win32::Foundation::{
+    ERROR_TIMEOUT, HCN_E_ENDPOINT_ALREADY_ATTACHED, HCS_E_OPERATION_TIMEOUT,
+    HCS_E_SYSTEM_ALREADY_EXISTS, WAIT_TIMEOUT,
+};
 use ::windows::Win32::System::HostComputeSystem::{
     HCS_SYSTEM, HcsCloseComputeSystem, HcsCreateComputeSystem, HcsModifyComputeSystem,
-    HcsPauseComputeSystem, HcsSaveComputeSystem, HcsStartComputeSystem,
-    HcsTerminateComputeSystem, HcsWaitForComputeSystemExit,
+    HcsPauseComputeSystem, HcsSaveComputeSystem, HcsStartComputeSystem, HcsTerminateComputeSystem,
+    HcsWaitForComputeSystemExit,
 };
 use ::windows::core::{HRESULT, HSTRING, PWSTR};
 
 use super::api::{self, Operation};
+
+const CREATE_RELEASE_RETRIES: u32 = 50;
+const CREATE_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// An HCS compute system with ordered termination and close semantics.
 pub struct ComputeSystem {
@@ -24,6 +33,24 @@ pub struct ComputeSystem {
 
 impl ComputeSystem {
     pub fn create(id: &str, document: &str) -> Result<Self> {
+        for retry in 0..=CREATE_RELEASE_RETRIES {
+            match Self::create_once(id, document) {
+                Ok(system) => return Ok(system),
+                Err(error) if retry < CREATE_RELEASE_RETRIES && is_release_pending(&error) => {
+                    debug!(
+                        "HCS resources for {id} are still being released; retrying create ({}/{})",
+                        retry + 1,
+                        CREATE_RELEASE_RETRIES,
+                    );
+                    thread::sleep(CREATE_RELEASE_RETRY_DELAY);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("bounded HCS create loop always returns")
+    }
+
+    fn create_once(id: &str, document: &str) -> Result<Self> {
         let operation: Operation = Operation::new()?;
         let id_string: HSTRING = HSTRING::from(id);
         let document: HSTRING = HSTRING::from(document);
@@ -92,10 +119,7 @@ impl ComputeSystem {
                     "",
                 )
             })?;
-        operation.wait(
-            "HcsModifyComputeSystem(remove network adapter)",
-            &self.id,
-        )?;
+        operation.wait("HcsModifyComputeSystem(remove network adapter)", &self.id)?;
         Ok(())
     }
 
@@ -140,6 +164,14 @@ impl ComputeSystem {
     }
 }
 
+fn is_release_pending(error: &Error) -> bool {
+    is_release_pending_code(api::error_code(error))
+}
+
+fn is_release_pending_code(code: Option<HRESULT>) -> bool {
+    code == Some(HCN_E_ENDPOINT_ALREADY_ATTACHED) || code == Some(HCS_E_SYSTEM_ALREADY_EXISTS)
+}
+
 fn is_wait_timeout(code: HRESULT) -> bool {
     code == HCS_E_OPERATION_TIMEOUT
         || code == HRESULT::from_win32(WAIT_TIMEOUT.0)
@@ -173,5 +205,16 @@ mod tests {
         assert!(is_wait_timeout(HCS_E_OPERATION_TIMEOUT));
         assert!(is_wait_timeout(HRESULT::from_win32(ERROR_TIMEOUT.0)));
         assert!(!is_wait_timeout(HRESULT(0x8000_4005u32 as i32)));
+    }
+
+    #[test]
+    fn retries_only_create_errors_caused_by_pending_release() {
+        for code in [HCN_E_ENDPOINT_ALREADY_ATTACHED, HCS_E_SYSTEM_ALREADY_EXISTS] {
+            assert!(is_release_pending_code(Some(code)));
+        }
+        assert!(!is_release_pending_code(Some(
+            ::windows::Win32::Foundation::HCS_E_ACCESS_DENIED
+        )));
+        assert!(!is_release_pending_code(None));
     }
 }
