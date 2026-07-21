@@ -7,6 +7,7 @@ import http.server
 import json
 import re
 import shutil
+import socket
 import statistics
 import sys
 import tempfile
@@ -666,10 +667,13 @@ def benchmark_hcs_network_snapshot_python(
     restore_args.extend(endpoint_args)
     restore_args.remove("--quiet")
 
-    with helper_server(config.port):
+    with helper_server(config.port) as host_address:
+        for args in (cold_args, capture_args):
+            cmdline_index = args.index("--cmdline") + 1
+            args[cmdline_index] = f"{args[cmdline_index]} netbench_host={host_address}"
         print(
             f"HCS networked Python snapshot benchmark, median of {config.runs} runs, "
-            f"{config.mem} MiB, --net {config.net}"
+            f"{config.mem} MiB, --net {config.net}, helper {host_address}:{config.port}"
         )
         cold, cold_wall = _collect_hcs_timings(
             cold_args,
@@ -787,8 +791,22 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
         return None
 
 
+def default_route_ipv4() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("1.1.1.1", 53))
+            address = probe.getsockname()[0]
+    except OSError as error:
+        raise ScriptError(
+            f"could not resolve the host default-route IPv4 address: {error}"
+        ) from error
+    if address == "0.0.0.0" or address.startswith("127."):
+        raise ScriptError(f"host default route resolved to unusable address {address}")
+    return address
+
+
 @contextmanager
-def helper_server(port: int) -> Iterator[None]:
+def helper_server(port: int) -> Iterator[str]:
     if not 1 <= port <= 65535:
         raise ScriptError("HTTP helper port must be between 1 and 65535")
     with tempfile.TemporaryDirectory(prefix="nvx-www-") as temporary:
@@ -807,7 +825,7 @@ def helper_server(port: int) -> Iterator[None]:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
                 if b"HELLO-HOST" not in response.read():
                     raise ScriptError("host helper server returned unexpected content")
-            yield
+            yield default_route_ipv4()
         finally:
             server.shutdown()
             server.server_close()

@@ -15,10 +15,12 @@ import subprocess
 DEFAULT_PORT = 8099
 
 
-def gateway():
-    """The host side of the link, taken from the virtnet_gw kernel-command-line token."""
+def target_host():
+    """The benchmark helper address, falling back to the network gateway."""
     try:
         for tok in open("/proc/cmdline").read().split():
+            if tok.startswith("netbench_host="):
+                return tok.split("=", 1)[1]
             if tok.startswith("virtnet_gw="):
                 return tok.split("=", 1)[1]
     except OSError:
@@ -64,7 +66,7 @@ def link_ok(host, port, timeout=3, attempts=3):
     return False
 
 
-gw = gateway()
+gw = target_host()
 port = helper_port()
 if not is_cold_measurement():
     if not link_ok(gw, port):

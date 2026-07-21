@@ -400,7 +400,7 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
                 patch.object(HostBackend, "allocated_size", return_value=12),
                 patch(
                     "nvx_tools.benchmarks.helper_server",
-                    return_value=contextlib.nullcontext(),
+                    return_value=contextlib.nullcontext("192.0.2.10"),
                 ),
                 contextlib.redirect_stdout(output),
             ):
@@ -470,6 +470,9 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
             self.assertNotIn("--quiet", network_cold)
             self.assertNotIn("--quiet", network_capture)
             self.assertNotIn("--quiet", network_restore)
+            for command in (network_cold, network_capture):
+                cmdline = command[command.index("--cmdline") + 1]
+                self.assertIn("netbench_host=192.0.2.10", cmdline)
             self.assertEqual(
                 network_cold[network_cold.index("--boot-marker") + 1],
                 "NVX-HCS-NETWORK-DONE",
