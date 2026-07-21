@@ -105,21 +105,14 @@ impl ComputeSystem {
         Ok(())
     }
 
-    pub fn remove_network_adapter(&mut self, document: &str) -> Result<()> {
+    pub fn modify_network_adapter(&mut self, operation_name: &str, document: &str) -> Result<()> {
         let operation: Operation = Operation::new()?;
         let document: HSTRING = HSTRING::from(document);
         // SAFETY: The compute system and operation handles are live for this call; no caller
-        // identity is required for removing a device owned by this compute system.
+        // identity is required for modifying a device owned by this compute system.
         unsafe { HcsModifyComputeSystem(self.handle, operation.handle(), &document, None) }
-            .map_err(|error| {
-                api::hcs_error(
-                    "HcsModifyComputeSystem(remove network adapter) (immediate)",
-                    &self.id,
-                    error,
-                    "",
-                )
-            })?;
-        operation.wait("HcsModifyComputeSystem(remove network adapter)", &self.id)?;
+            .map_err(|error| api::hcs_error(operation_name, &self.id, error, ""))?;
+        operation.wait(operation_name, &self.id)?;
         Ok(())
     }
 

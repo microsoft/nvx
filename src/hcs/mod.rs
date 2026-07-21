@@ -229,6 +229,20 @@ fn run_plan(
     debug!("HCS create document for {vm_id}: {document}");
 
     let mut system: compute::ComputeSystem = compute::ComputeSystem::create(vm_id, &document)?;
+    if plan.restore_state.is_some()
+        && let Some(endpoint) = borrowed_endpoint.as_ref()
+    {
+        let attachment = endpoint.attachment();
+        let update = schema::network_adapter_update(
+            attachment.adapter_id,
+            attachment.endpoint_id,
+            attachment.mac_address,
+        )?;
+        system.modify_network_adapter(
+            "HcsModifyComputeSystem(update restored network adapter)",
+            &update,
+        )?;
+    }
     let console_before_start = console::connect(&console_pipe_name, Duration::from_millis(250))?;
     let control_before_start: Option<File> = match control_pipe_name.as_deref() {
         Some(path) => console::connect(path, Duration::from_millis(250))?,
@@ -356,7 +370,10 @@ fn run_plan(
                     attachment.endpoint_id,
                     attachment.mac_address,
                 )?;
-                system.remove_network_adapter(&document)
+                system.modify_network_adapter(
+                    "HcsModifyComputeSystem(remove network adapter)",
+                    &document,
+                )
             })
             .transpose()
             .map(|_| ())

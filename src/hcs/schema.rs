@@ -257,8 +257,26 @@ pub fn network_adapter_remove(
     endpoint_id: &str,
     mac_address: &str,
 ) -> Result<String> {
+    network_adapter_modify("Remove", adapter_id, endpoint_id, mac_address)
+}
+
+/// Serializes reconnection of a restored network adapter to its external endpoint.
+pub fn network_adapter_update(
+    adapter_id: &str,
+    endpoint_id: &str,
+    mac_address: &str,
+) -> Result<String> {
+    network_adapter_modify("Update", adapter_id, endpoint_id, mac_address)
+}
+
+fn network_adapter_modify(
+    request_type: &'static str,
+    adapter_id: &str,
+    endpoint_id: &str,
+    mac_address: &str,
+) -> Result<String> {
     ::serde_json::to_string(&ModifySettingRequest {
-        request_type: "Remove",
+        request_type,
         resource_path: format!("VirtualMachine/Devices/NetworkAdapters/{adapter_id}"),
         settings: NetworkAdapter {
             endpoint_id: endpoint_id.to_string(),
@@ -344,6 +362,26 @@ mod tests {
                             "0": { "NamedPipe": r"\\.\pipe\nvx-test-com1" }
                         }
                     }
+                }
+            })
+        );
+
+        assert_eq!(
+            ::serde_json::from_str::<::serde_json::Value>(
+                &network_adapter_update(
+                    "01234567-89ab-4cde-8f01-23456789abcd",
+                    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "00-15-5D-52-C0-10",
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            ::serde_json::json!({
+                "RequestType": "Update",
+                "ResourcePath": "VirtualMachine/Devices/NetworkAdapters/01234567-89ab-4cde-8f01-23456789abcd",
+                "Settings": {
+                    "EndpointId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "MacAddress": "00-15-5D-52-C0-10"
                 }
             })
         );
