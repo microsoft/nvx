@@ -14,9 +14,10 @@ Hyper-V/VMBus, and NetVSC support into the image while retaining KVM/PVH support
 Experimental HCS-native snapshot/restore is also implemented behind the existing flags. It uses a
 versioned COM2 guest handshake, `HcsPauseComputeSystem`/`HcsSaveComputeSystem`, an opaque VMRS file,
 and an incompatible `NVXHCSS1` manifest that validates the exact host build and boot-artifact hashes.
-The network path creates an owned HCN NAT network and endpoint, cold-attaches it through a stable HCS
-adapter GUID, stores all identity in manifest v2, and recreates it before restore. Privileged traffic,
-repeated-restore, and leak soak gates remain outstanding.
+The network path now consumes an externally provisioned HCN endpoint, cold-attaches it through a
+stable HCS adapter GUID, and stores its identity in manifest v3. PowerShell setup/cleanup scripts own
+the persistent HCN network and endpoint; NVX only opens, queries, and closes the endpoint handle.
+Privileged traffic, repeated-restore, and leak soak gates remain outstanding.
 
 The central launcher includes `bench-hcs-snapshot-shell` and `bench-hcs-snapshot-py`. They measure
 guest marker latency and end-to-end process wall time separately, record one-off capture wall time and VMRS
@@ -220,7 +221,7 @@ src/hcs/
     api.rs          Minimal HCS/HCN ABI, UTF-16 buffers, errors, and RAII handles
     schema.rs       Typed serde models for the JSON documents nvx emits
     compute.rs      Compute-system create/start/wait/terminate lifecycle
-    network.rs      NetConfig parsing and owned HCN network/endpoint lifecycle
+    hcn_endpoint.rs NetConfig parsing and borrowed HCN endpoint validation
     console.rs      COM named-pipe connection and shared Console integration
 ```
 
@@ -229,7 +230,7 @@ remain explicit:
 
 - `api.rs` must not know nvx CLI policy;
 - `schema.rs` must not perform calls or cleanup;
-- `network.rs` must return the canonical endpoint ID and MAC queried from HCN;
+- `hcn_endpoint.rs` must return the canonical endpoint ID and MAC queried from HCN;
 - `compute.rs` must not create HCN objects; and
 - `mod.rs` owns ordering and rollback across all resources.
 
@@ -316,11 +317,9 @@ that order.
 
 ### Required HCN calls
 
-Minimum owned-network lifecycle:
-
-- create/open/query/close/delete network;
-- create/open/query/close/delete endpoint; and
-- enumerate/query calls needed for collision detection and stale-resource cleanup.
+The VMM's borrowed-endpoint lifecycle is limited to open/query/close endpoint. The external
+PowerShell setup scripts create the network and endpoint, optionally attach the endpoint to the
+`HostDefault` namespace for AF_XDP, and explicitly reverse those operations during cleanup.
 
 HCN calls are synchronous but return optional JSON error records. Preserve those records in the
 Rust error chain. HCN property and error buffers are released with `CoTaskMemFree`. Closing an HCN
@@ -390,20 +389,20 @@ hcsshim's historical behavior of placing `LinuxKernelDirect` in a nominal schema
 
 ### Resource model
 
-For the first implementation, each networked VM owns:
+For the first implementation, an external setup invocation owns:
 
 - one non-persistently named HCN NAT network for the requested prefix;
 - one endpoint with the requested static guest IP;
 - one HCS adapter GUID; and
-- a run manifest in memory recording exactly which objects this process created.
+- a descriptor recording the exact IDs and guest-visible identity it created.
 
 Names should include an `nvx-` prefix and run GUID. Store the same owner/run GUID in every schema
 field that permits it. Do not delete an object merely because its name starts with `nvx-`; cleanup
 must match recorded IDs or an explicit stale-resource command.
 
-Creating one network per VM is simple but prevents concurrent runs on the same prefix and adds
-startup cost. Once the path is stable, add an explicit option to reuse a pre-existing HCN network.
-Do not silently adopt a network by name because its subnet appears compatible.
+Creating one network per setup invocation is simple but prevents concurrent runs on the same prefix
+and adds startup cost. The VMM never silently adopts a network by name; it consumes only the exact
+endpoint ID in the supplied descriptor.
 
 ### Address contract
 
@@ -415,7 +414,7 @@ Preserve `--net <guest-ip>/<prefix>`:
 - MAC: let HCN allocate it initially, then query and pass the canonical value to HCS; and
 - DNS: explicit CLI/default values passed both to endpoint metadata and the guest command line.
 
-Validate before creating resources:
+The setup script validates before creating resources:
 
 - guest and gateway are usable host addresses;
 - guest is not the gateway;
@@ -451,8 +450,8 @@ Validate before creating resources:
 }
 ```
 
-The exact NAT route/gateway behavior is a Phase 2 acceptance test, not an assumption. Query the
-created network and endpoint and log their canonical properties at debug level.
+The exact NAT route/gateway behavior is a Phase 2 acceptance test, not an assumption. The setup
+script queries the created endpoint and records its canonical properties in the descriptor.
 
 ### Illustrative endpoint
 
@@ -479,29 +478,27 @@ request object, are the source of truth for the HCS adapter.
 
 ### Creation and teardown order
 
-Creation:
+External setup and launch:
 
 1. Preflight OS build, HCS schema, Hyper-V services, privileges, and artifacts.
-2. Generate run, VM, adapter, network, and endpoint GUIDs.
-3. Create/query the HCN network.
-4. Create/query the HCN endpoint.
-5. Grant the VM identity access to kernel and initrd.
-6. Prepare the COM1 pipe endpoint.
-7. Create the HCS compute system with the endpoint cold-attached.
-8. Start console I/O and the compute system.
-9. Wait for a marker, guest exit, Ctrl-C, or an error.
+2. Run `setup-hcn-endpoint.ps1` to create/query the HCN network and endpoint.
+3. Open/query the endpoint from NVX and validate the descriptor identity.
+4. Grant the VM identity access to kernel and initrd.
+5. Prepare the COM1 pipe endpoint.
+6. Create the HCS compute system with the endpoint cold-attached.
+7. Start console I/O and the compute system.
+8. Wait for a marker, guest exit, Ctrl-C, or an error.
 
 Teardown:
 
 1. Terminate a running compute system and wait for its exit.
 2. Close the compute-system handle.
-3. Close, then delete, the endpoint.
-4. Close, then delete, the owned network.
-5. Close pipe and console threads.
-6. Report all cleanup failures and retain IDs in the error so an operator can remove stale objects.
+3. Close the borrowed endpoint handle without deleting it.
+4. Close pipe and console threads.
+5. Let the external owner call `cleanup-hcn-endpoint.ps1` after all consumers have stopped.
 
-Implement teardown as an idempotent state machine. Exercise failure injection after every creation
-step in unit tests so a failed HCS create cannot strand a network and endpoint.
+Implement teardown as an idempotent state machine. Exercise setup rollback independently; a failed
+HCS create must close its borrowed handle without deleting the externally owned endpoint.
 
 ## Guest changes
 
@@ -818,7 +815,8 @@ and all of the following are true:
 - the boot marker and interactive shell appear over `ttyS0`;
 - the guest interface is driven by NetVSC and has the requested address;
 - gateway, host, and promised outbound traffic work through HCN;
-- exit and Ctrl-C tear down the compute system, endpoint, and owned network;
+- exit and Ctrl-C tear down the compute system and close the endpoint handle without deleting it;
+- external cleanup removes the endpoint and network after all consumers stop;
 - a subsequent identical run succeeds without manual repair;
 - unsupported snapshot/mount combinations fail before resource creation; and
 - KVM behavior and artifacts remain supported.

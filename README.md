@@ -18,7 +18,8 @@ It runs on **two hypervisor backends** from the same codebase:
   that PVH-boots the *same* kernel + initramfs with the same portb console, and also supports
   `--snapshot`/`--restore` (capture and resume the whole VM) and `--net` (a virtio-net NIC backed
   by a built-in user-mode NAT — no TAP driver or admin rights needed). `--net-config` can instead
-  bind AF_XDP to an externally managed interface or provision an HCN NAT endpoint and host vNIC.
+  bind AF_XDP to an externally managed interface, including an externally provisioned HCN host
+  vNIC.
   See [Running on Windows (WHP backend)](#running-on-windows-whp-backend).
 
 The Linux/KVM backend is a standalone extraction and reworking of the **KVM (Linux) backend of the
@@ -118,7 +119,7 @@ uid=0(root) gid=0(root)
 | `src/whp/virtfs.rs`                           | *(Windows/WHP)* virt-fs (`--mount`): a FAT image built in pure Rust (`fatfs`), mapped above RAM via `WHvMapGpaRange`; the guest mounts it as `vfat`                                                                                                                                            |
 | `src/whp/xdp.rs`                              | *(Windows/WHP)* bounded AF_XDP frame backend, queue discovery, control-pipe handshake, and XDP program lifecycle                                                                                                                                                                             |
 | `src/l2bridge.rs`                             | *(shared)* strict versioned `--net-config` schema, guest bootstrap, and snapshot-safe external NIC identity                                                                                                                                                                                  |
-| `src/hcs/`                                    | *(Windows/HCS + WHP HCN mode)* HCS compute/snapshot backend and owned HCN network, endpoint, host-namespace, and vNIC lifecycle                                                                                                                                                               |
+| `src/hcs/`                                    | *(Windows/HCS)* HCS compute/snapshot backend and borrowed HCN endpoint validation/attachment                                                                                                                                                                                               |
 | `src/windows_terminal.rs`                     | *(Windows)* shared console mode guard for WHP and HCS                                                                                                                                                                                                                                         |
 | `docker/Dockerfile`                           | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows)                                                                                                                                                                                              |
 | `kernel/config-microvm`                       | Minimal Linux kernel configuration                                                                                                                                                                                                                                                             |
@@ -321,9 +322,34 @@ Then boot with the Hyper-V-capable kernel built by the artifact workflow:
 The HCS default command line uses `ttyS0`; a user-provided `--cmdline` is preserved. During snapshot
 capture nvx appends only its reserved `nvx_snapshot_transport=hcs-com2` control token. This Phase 0
 path supports console, quiet mode, boot/timing markers, redirected-stdin deferral, clean termination,
-resource-handle cleanup, experimental HCS-native snapshot/restore, and `--net IP/PREFIX` through an
-owned HCN NAT network and endpoint. Mounts, `--net-config`, `--net-tap`, and more than one vCPU are
-rejected before HCS creates a compute system. WHP remains the Windows default.
+resource-handle cleanup, experimental HCS-native snapshot/restore, and a NetVSC adapter backed by an
+externally managed HCN endpoint. Mounts, `--net-config`, `--net-tap`, and more than one vCPU are
+rejected before HCS creates a compute system. WHP remains the Windows default. NVX opens, queries,
+and closes the endpoint handle; it never creates, host-attaches, or deletes persistent HCN objects.
+
+Create an endpoint from an elevated PowerShell session, then pass its descriptor with every HCS
+network launch. `--net` is optional when the descriptor is present; when supplied, NVX verifies that
+both sources describe the same address:
+
+```powershell
+$endpoint = Join-Path $env:TEMP 'nvx-hcs-endpoint.json'
+.\scripts\setup-hcn-endpoint.ps1 `
+  -OutputPath $endpoint `
+  -GuestAddress 192.168.241.2 `
+  -Gateway 192.168.241.1
+
+try {
+  .\target\release\microvm.exe `
+    --backend hcs `
+    --kernel build\vmlinux `
+    --initrd build\initramfs.cpio.gz `
+    --net 192.168.241.2/24 `
+    --hcn-endpoint-config $endpoint `
+    --exit-on-boot
+} finally {
+  .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $endpoint
+}
+```
 
 HCS snapshots are deliberately incompatible with WHP snapshots. The guest helper uses a versioned
 COM2 request, HCS writes opaque state to `runtime.vmrs`, and nvx commits an `NVXHCSS1`
@@ -345,9 +371,10 @@ not already exist. For example, `shellsnap` requests a snapshot before the norma
   --exit-on-boot
 ```
 
-Manifest v2 records the HCN network, endpoint, adapter, MAC, addressing, and DNS identity. Capture
-cleanup removes the per-run HCN objects; each restore recreates those exact identities before HCS
-consumes the VMRS state, then removes them again after the compute system closes.
+Manifest v3 records the external HCN network, endpoint, adapter, MAC, addressing, and DNS identity. Capture
+and restore borrow the same externally owned endpoint identity. Keep that endpoint alive across the
+capture/restore sequence and pass the descriptor on restore; NVX verifies it against the snapshot
+manifest and leaves it intact after the compute system closes.
 
 Run the HCS-native benchmarks from an elevated terminal or as a member of **Hyper-V
 Administrators**. The shell workflow reports each configured memory size; the Python workflow uses
@@ -357,7 +384,15 @@ full process wall time, one-off capture wall time, and logical/allocated VMRS si
 ```powershell
 python scripts\nvx.py bench-hcs-snapshot-shell --runs 10 --memories "256 512"
 python scripts\nvx.py bench-hcs-snapshot-py --runs 8 --mem 512
-python scripts\nvx.py bench-hcs-net-snapshot-py --runs 8 --mem 512 --net 10.0.0.2/24
+$endpoint = Join-Path $env:TEMP 'nvx-hcs-benchmark-endpoint.json'
+.\scripts\setup-hcn-endpoint.ps1 -OutputPath $endpoint `
+  -GuestAddress 192.168.241.2 -Gateway 192.168.241.1
+try {
+  python scripts\nvx.py bench-hcs-net-snapshot-py --runs 8 --mem 512 `
+    --net 192.168.241.2/24 --hcn-endpoint-config $endpoint
+} finally {
+  .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $endpoint
+}
 ```
 
 To collect a machine-readable baseline without mixing it with WHP history:
@@ -368,8 +403,16 @@ python scripts\nvx.py bench-hcs-snapshot-shell --runs 10 *>&1 |
   Tee-Object build\performance-hcs\hcs-shell-snapshot.log
 python scripts\nvx.py bench-hcs-snapshot-py --runs 8 *>&1 |
   Tee-Object build\performance-hcs\hcs-python-snapshot.log
-python scripts\nvx.py bench-hcs-net-snapshot-py --runs 8 *>&1 |
-  Tee-Object build\performance-hcs\hcs-network-snapshot.log
+$endpoint = Join-Path $env:TEMP 'nvx-hcs-benchmark-endpoint.json'
+.\scripts\setup-hcn-endpoint.ps1 -OutputPath $endpoint `
+  -GuestAddress 192.168.241.2 -Gateway 192.168.241.1
+try {
+  python scripts\nvx.py bench-hcs-net-snapshot-py --runs 8 `
+    --net 192.168.241.2/24 --hcn-endpoint-config $endpoint *>&1 |
+    Tee-Object build\performance-hcs\hcs-network-snapshot.log
+} finally {
+  .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $endpoint
+}
 python scripts\performance.py collect `
   --platform windows-hcs `
   --commit (git rev-parse HEAD) `
@@ -382,12 +425,11 @@ including networked restore when `hcs-network-snapshot.log` is present.
 One-off capture wall time remains in the human-readable logs. HCS benchmarks are not part of hosted CI;
 they require a separately labeled, privileged Hyper-V runner.
 
-The CI workflow also defines an opt-in **Windows / HCN + AF_XDP** hardware job. It uses
-`scripts/test-hcn-afxdp.ps1` as a minimal control-pipe Agent, creates an HCN endpoint and host vNIC,
-binds every discovered AF_XDP RSS queue with a nonzero interface LUID, then boots a WHP guest and
-requires an HTTP round trip to a temporary host service through the HCN gateway. It is intentionally
-excluded from pull requests because it creates privileged host networking objects and runs with HCN
-privileges.
+The CI workflow defines opt-in **Windows / HCS** and **Windows / HCN + AF_XDP** hardware jobs. Both
+call `setup-hcn-endpoint.ps1` before testing and `cleanup-hcn-endpoint.ps1` in an `always()` step.
+The AF_XDP job requests `-AttachToHost`, then uses `scripts/test-hcn-afxdp.ps1` as a minimal
+control-pipe Agent and requires an HTTP round trip through the HCN gateway. These jobs are excluded
+from pull requests because they create privileged host networking objects.
 
 Runner requirements:
 
@@ -401,8 +443,9 @@ Runner requirements:
 
 Enable automatic merged-main runs with repository variable `NVX_HCN_AFXDP_CI=true`. Optional
 variables `NVX_HCN_AFXDP_GUEST_ADDRESS` and `NVX_HCN_AFXDP_GATEWAY` select a non-overlapping pair
-(defaults: `192.168.240.2` and `192.168.240.1`). For a one-off branch validation, dispatch the CI
-workflow manually with **Run the privileged HCN-created vNIC + AF_XDP smoke test** enabled.
+(defaults: `192.168.240.2` and `192.168.240.1`). Native HCS runs use `NVX_HCS_CI=true` and optional
+`NVX_HCS_GUEST_ADDRESS`/`NVX_HCS_GATEWAY` variables (defaults: `192.168.241.2` and
+`192.168.241.1`). A manual dispatch can enable either privileged lane independently.
 
 ### 1. Build the Linux artifacts (Docker)
 
@@ -514,12 +557,11 @@ Two attachment modes use the same guest/device contract:
 
 - `afxdp-l2bridge` binds an existing interface; `interfaceIndex` and `interfaceLuid` must both be
   nonzero and identify the same interface.
-- `hcn-afxdp-l2bridge` creates an ephemeral HCN NAT network and endpoint, attaches the endpoint to
-  the `HostDefault` namespace to create a host vNIC, resolves its index/LUID, and starts AF_XDP on
-  that vNIC. Omit `interfaceIndex`/`interfaceLuid` (or set both to zero). Shutdown reverses the
-  order: AF_XDP stops first, then HCN detaches and deletes the endpoint and network.
+- `hcn-afxdp-l2bridge` binds an externally provisioned HCN host vNIC. The manifest must provide its
+  nonzero `interfaceIndex`/`interfaceLuid` and `gatewayMac`; NVX uses the gateway MAC for its local
+  ARP proxy and leaves the interface, endpoint, and network intact on shutdown.
 
-Use `queueSelection.mode = "auto"` for HCN-created vNICs. RSS can place return traffic on any receive
+Use `queueSelection.mode = "auto"` for HCN host vNICs. RSS can place return traffic on any receive
 queue; binding only queue 0 makes connectivity depend on the flow hash. Explicit queue selection is
 intended for externally managed interfaces whose steering is controlled by the Agent.
 
@@ -530,6 +572,9 @@ Example HCN-provisioned manifest:
   "version": 2,
   "attachment": {
     "backend": "hcn-afxdp-l2bridge",
+    "interfaceIndex": 42,
+    "interfaceLuid": 1689399632855040,
+    "gatewayMac": "00-15-5D-52-CF-2B",
     "queueSelection": { "mode": "auto" }
   },
   "device": { "macAddress": "00-15-5D-01-02-03", "mtu": 1500 },
@@ -550,7 +595,8 @@ Example HCN-provisioned manifest:
 
 The HCN mode requires a usable `/1` through `/30` guest address and the first usable subnet
 address as its gateway. The manifest MAC, MTU, routes, and DNS form the snapshot identity; restore
-recreates host attachment state but rejects guest-visible identity changes.
+requires the external owner to make the same interface identity available and rejects guest-visible
+identity changes.
 
 ### Snapshot / restore
 
