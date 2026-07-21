@@ -528,6 +528,8 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
     def test_hcs_network_guest_waits_for_host_teardown(self) -> None:
         script = (REPO_ROOT / "alpine" / "net-hello.py").read_text(encoding="utf-8")
         self.assertIn('"netbench_hold=1"', script)
+        self.assertIn("restore_hcs_network()", script)
+        self.assertIn("HELLOPY-NET RECONFIGURE-", script)
         self.assertIn("signal.pause()", script)
 
 
