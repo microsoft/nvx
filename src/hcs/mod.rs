@@ -346,19 +346,23 @@ fn run_plan(
             Ok(())
         }
     });
-    let detach_result: Result<()> = borrowed_endpoint
-        .as_ref()
-        .map(|endpoint| {
-            let attachment = endpoint.attachment();
-            let document = schema::network_adapter_remove(
-                attachment.adapter_id,
-                attachment.endpoint_id,
-                attachment.mac_address,
-            )?;
-            system.remove_network_adapter(&document)
-        })
-        .transpose()
-        .map(|_| ());
+    let detach_result: Result<()> = if system.is_running() {
+        borrowed_endpoint
+            .as_ref()
+            .map(|endpoint| {
+                let attachment = endpoint.attachment();
+                let document = schema::network_adapter_remove(
+                    attachment.adapter_id,
+                    attachment.endpoint_id,
+                    attachment.mac_address,
+                )?;
+                system.remove_network_adapter(&document)
+            })
+            .transpose()
+            .map(|_| ())
+    } else {
+        Ok(())
+    };
     let cleanup_result: Result<()> = if system.is_running() {
         system.terminate()
     } else {
