@@ -7,9 +7,9 @@ use ::anyhow::Result;
 use ::log::warn;
 use ::windows::Win32::Foundation::{ERROR_TIMEOUT, HCS_E_OPERATION_TIMEOUT, WAIT_TIMEOUT};
 use ::windows::Win32::System::HostComputeSystem::{
-    HCS_SYSTEM, HcsCloseComputeSystem, HcsCreateComputeSystem, HcsPauseComputeSystem,
-    HcsSaveComputeSystem, HcsStartComputeSystem, HcsTerminateComputeSystem,
-    HcsWaitForComputeSystemExit,
+    HCS_SYSTEM, HcsCloseComputeSystem, HcsCreateComputeSystem, HcsModifyComputeSystem,
+    HcsPauseComputeSystem, HcsSaveComputeSystem, HcsStartComputeSystem,
+    HcsTerminateComputeSystem, HcsWaitForComputeSystemExit,
 };
 use ::windows::core::{HRESULT, HSTRING, PWSTR};
 
@@ -75,6 +75,27 @@ impl ComputeSystem {
         )?;
         operation.wait("HcsSaveComputeSystem", &self.id)?;
         self.running = false;
+        Ok(())
+    }
+
+    pub fn remove_network_adapter(&mut self, document: &str) -> Result<()> {
+        let operation: Operation = Operation::new()?;
+        let document: HSTRING = HSTRING::from(document);
+        // SAFETY: The compute system and operation handles are live for this call; no caller
+        // identity is required for removing a device owned by this compute system.
+        unsafe { HcsModifyComputeSystem(self.handle, operation.handle(), &document, None) }
+            .map_err(|error| {
+                api::hcs_error(
+                    "HcsModifyComputeSystem(remove network adapter) (immediate)",
+                    &self.id,
+                    error,
+                    "",
+                )
+            })?;
+        operation.wait(
+            "HcsModifyComputeSystem(remove network adapter)",
+            &self.id,
+        )?;
         Ok(())
     }
 

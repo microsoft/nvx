@@ -346,6 +346,19 @@ fn run_plan(
             Ok(())
         }
     });
+    let detach_result: Result<()> = borrowed_endpoint
+        .as_ref()
+        .map(|endpoint| {
+            let attachment = endpoint.attachment();
+            let document = schema::network_adapter_remove(
+                attachment.adapter_id,
+                attachment.endpoint_id,
+                attachment.mac_address,
+            )?;
+            system.remove_network_adapter(&document)
+        })
+        .transpose()
+        .map(|_| ());
     let cleanup_result: Result<()> = if system.is_running() {
         system.terminate()
     } else {
@@ -364,6 +377,9 @@ fn run_plan(
     };
 
     if let Err(primary) = lifecycle_result {
+        if let Err(error) = detach_result {
+            warn!("HCS network-adapter detach after primary failure also failed: {error:#}");
+        }
         if let Err(error) = cleanup_result {
             warn!("HCS cleanup after primary failure also failed: {error:#}");
         }
@@ -378,6 +394,7 @@ fn run_plan(
         }
         return Err(primary);
     }
+    detach_result?;
     cleanup_result?;
     console_result?;
     control_result?;

@@ -94,6 +94,14 @@ struct NetworkAdapter {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
+struct ModifySettingRequest {
+    request_type: &'static str,
+    resource_path: String,
+    settings: NetworkAdapter,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
 struct RestoreState {
     save_state_file_path: String,
 }
@@ -241,6 +249,23 @@ pub fn save_options(path: &str) -> Result<String> {
     .context("serializing HCS save options")
 }
 
+/// Serializes removal of an HCN-backed network adapter from a live HCS system.
+pub fn network_adapter_remove(
+    adapter_id: &str,
+    endpoint_id: &str,
+    mac_address: &str,
+) -> Result<String> {
+    ::serde_json::to_string(&ModifySettingRequest {
+        request_type: "Remove",
+        resource_path: format!("VirtualMachine/Devices/NetworkAdapters/{adapter_id}"),
+        settings: NetworkAdapter {
+            endpoint_id: endpoint_id.to_string(),
+            mac_address: mac_address.to_string(),
+        },
+    })
+    .context("serializing HCS network-adapter removal")
+}
+
 /// Rejects failed or unexpected natural compute-system exits.
 pub fn validate_exit_document(document: &str) -> Result<()> {
     let status: SystemExitStatus =
@@ -373,6 +398,26 @@ mod tests {
             ::serde_json::json!({
                 "EndpointId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                 "MacAddress": "00-15-5D-52-C0-10"
+            })
+        );
+
+        assert_eq!(
+            ::serde_json::from_str::<::serde_json::Value>(
+                &network_adapter_remove(
+                    "01234567-89ab-4cde-8f01-23456789abcd",
+                    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "00-15-5D-52-C0-10",
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            ::serde_json::json!({
+                "RequestType": "Remove",
+                "ResourcePath": "VirtualMachine/Devices/NetworkAdapters/01234567-89ab-4cde-8f01-23456789abcd",
+                "Settings": {
+                    "EndpointId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "MacAddress": "00-15-5D-52-C0-10"
+                }
             })
         );
     }
