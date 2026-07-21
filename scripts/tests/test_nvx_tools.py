@@ -284,6 +284,21 @@ class BenchmarkParserTests(unittest.TestCase):
                     _capture_hcs_snapshot(["microvm"], snapshot, 1)
             self.assertFalse(snapshot.exists())
 
+            output = io.StringIO()
+            with (
+                patch(
+                    "nvx_tools.benchmarks.run_capture",
+                    return_value=CommandResult(
+                        ("microvm",), 9, b"", b"capture failed"
+                    ),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                with self.assertRaisesRegex(ScriptError, "snapshot capture exited 9"):
+                    _capture_hcs_snapshot(["microvm"], snapshot, 1)
+            self.assertIn("capture failed", output.getvalue())
+            self.assertFalse(snapshot.exists())
+
     def test_hcs_snapshot_commands_use_hcs_native_contract(self) -> None:
         config = SnapshotConfig(
             Path("kernel"), Path("initrd"), Path("snapshot"), mem=384, runs=3

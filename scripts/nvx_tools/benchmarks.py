@@ -495,6 +495,10 @@ def _capture_hcs_snapshot(
     started = time.perf_counter()
     result = run_capture(args, timeout=timeout, graceful_timeout=True)
     wall_ms = (time.perf_counter() - started) * 1000
+    if result.timed_out or result.returncode != 0:
+        diagnostic = _failure_tail(result.text, 80)
+        if diagnostic:
+            print(diagnostic, flush=True)
     try:
         require_success(result, "HCS snapshot capture")
         _validate_hcs_snapshot(snapshot, require_network=require_network)
