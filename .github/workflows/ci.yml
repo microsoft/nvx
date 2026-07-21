@@ -9,7 +9,7 @@
 #   * Linux:   Python 3.10+, a stable Rust toolchain (edition 2024, >= 1.85), Docker (to build the Linux
 #              kernel + initramfs artifacts), and an accessible /dev/kvm for the KVM backend.
 #              e2fsprogs (mke2fs) is used by the virt-fs benchmark; passwordless `sudo ip` is
-#              used by the networking benchmark (that one benchmark is skipped if unavailable).
+#              required by the networking benchmarks.
 #   * Windows: Python 3.10+, a stable Rust toolchain for x86_64-pc-windows-msvc (edition 2024),
 #              and the Windows Hypervisor Platform feature enabled for the WHP backend.
 #   * HCN/XDP: The Windows runner additionally needs Hyper-V Administrator/HNS privileges and the
@@ -39,7 +39,7 @@ on:
         type: boolean
         default: true
       run_hcn_afxdp:
-        description: Run the privileged external HCN vNIC + AF_XDP smoke test
+        description: Run privileged external HCN vNIC + AF_XDP tests and benchmarks
         type: boolean
         default: false
       run_hcs:
@@ -244,20 +244,13 @@ jobs:
 
       - name: Benchmark — snapshot/restore (shell)
         if: env.RUN_BENCH == 'true'
-        run: python3 scripts/nvx.py bench-snapshot-shell | tee build/performance/shell-snapshot.log
-        env:
-          N: 5
+        run: python3 scripts/nvx.py bench-snapshot-shell --runs 5 | tee build/performance/shell-snapshot.log
 
       - name: Benchmark — networking + snapshot
         if: env.RUN_BENCH == 'true'
         env:
           N: 5
-        run: |
-          if sudo -n true 2>/dev/null; then
-            python3 scripts/nvx.py bench-net-snapshot | tee build/performance/network.log
-          else
-            echo "::notice::skipping networking benchmark (needs passwordless 'sudo ip' for the host TAP)"
-          fi
+        run: python3 scripts/nvx.py bench-net-snapshot | tee build/performance/network.log
 
       - name: Smoke — networked Python snapshot
         if: env.RUN_BENCH == 'true'
@@ -266,21 +259,17 @@ jobs:
           N: 1
         run: |
           set -euo pipefail
-          if sudo -n true 2>/dev/null; then
-            if ! output=$(python3 scripts/nvx.py bench-net-snapshot-py 2>&1); then
-              printf '%s\n' "$output"
-              exit 1
-            fi
+          if ! output=$(python3 scripts/nvx.py bench-net-snapshot-py 2>&1); then
             printf '%s\n' "$output"
-            if grep -q 'NO DATA' <<<"$output"; then
-              echo 'networked Python benchmark produced no data' >&2
-              exit 1
-            fi
-            grep -q 'verified: HELLOPY-NET OK' <<<"$output"
-            grep -q 'verified: PANDASPY-NET OK' <<<"$output"
-          else
-            echo "::notice::skipping networked Python smoke test (needs passwordless 'sudo ip' for the host TAP)"
+            exit 1
           fi
+          printf '%s\n' "$output"
+          if grep -q 'NO DATA' <<<"$output"; then
+            echo 'networked Python benchmark produced no data' >&2
+            exit 1
+          fi
+          grep -q 'verified: HELLOPY-NET OK' <<<"$output"
+          grep -q 'verified: PANDASPY-NET OK' <<<"$output"
 
       - name: Smoke — interactive snapshot boot
         if: env.RUN_BENCH == 'true'
@@ -337,6 +326,7 @@ jobs:
       - name: Validate PowerShell tooling
         run: |
           $files = @(
+            'scripts\benchmark-hcn-afxdp.ps1',
             'scripts\hcn-tools.psm1',
             'scripts\setup-hcn-endpoint.ps1',
             'scripts\cleanup-hcn-endpoint.ps1',
@@ -430,6 +420,12 @@ jobs:
         run: |
           python scripts\nvx.py snapshot-demo --runs 5 *>&1 |
             Tee-Object -FilePath build\performance\snapshot.log
+
+      - name: Benchmark — snapshot/restore (shell)
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\nvx.py bench-snapshot-shell --runs 5 *>&1 |
+            Tee-Object -FilePath build\performance\shell-snapshot.log
 
       - name: Benchmark — networking + snapshot
         if: env.RUN_BENCH == 'true'
@@ -615,7 +611,8 @@ jobs:
             --platform windows-hcs `
             --commit $env:GITHUB_SHA `
             --input-dir build\performance-hcs `
-            --output-dir build\performance-results
+            --output-dir build\performance-results `
+            --require-network
 
       - name: Clean up external HCN endpoint
         if: always()
@@ -653,11 +650,12 @@ jobs:
         (github.event_name == 'workflow_dispatch' && inputs.run_hcn_afxdp)
       }}
     runs-on: [self-hosted, windows, x64, hcn-afxdp]
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         shell: powershell
     env:
+      RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
       NVX_HCN_AFXDP_GUEST_ADDRESS: ${{ vars.NVX_HCN_AFXDP_GUEST_ADDRESS || '192.168.240.2' }}
       NVX_HCN_AFXDP_GATEWAY: ${{ vars.NVX_HCN_AFXDP_GATEWAY || '192.168.240.1' }}
     steps:
@@ -702,6 +700,12 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
+      - name: Prepare HCN AF_XDP performance logs
+        if: env.RUN_BENCH == 'true'
+        run: |
+          Remove-Item -Recurse -Force build\performance-hcn-afxdp -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path build\performance-hcn-afxdp | Out-Null
+
       - name: Set up external HCN host vNIC
         run: |
           $descriptor = Join-Path $env:RUNNER_TEMP 'nvx-hcn-afxdp-endpoint.json'
@@ -718,6 +722,7 @@ jobs:
           )
 
       - name: Smoke — external HCN vNIC + AF_XDP
+        if: env.RUN_BENCH != 'true'
         timeout-minutes: 10
         run: |
           .\scripts\test-hcn-afxdp.ps1 `
@@ -727,18 +732,55 @@ jobs:
             -TimeoutSeconds 300 `
             -LogPath build\performance\hcn-afxdp-smoke.log
 
+      - name: Benchmark — external HCN vNIC + AF_XDP
+        if: env.RUN_BENCH == 'true'
+        timeout-minutes: 15
+        run: |
+          .\scripts\benchmark-hcn-afxdp.ps1 `
+            -Runs 5 `
+            -EndpointConfig $env:NVX_HCN_ENDPOINT_CONFIG `
+            -GuestAddress $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
+            -Gateway $env:NVX_HCN_AFXDP_GATEWAY `
+            -TimeoutSeconds 300 `
+            -LogDirectory build\performance-hcn-afxdp\runs *>&1 |
+            Tee-Object -FilePath build\performance-hcn-afxdp\hcn-afxdp.log
+
+      - name: Validate HCN AF_XDP benchmark logs
+        if: env.RUN_BENCH == 'true'
+        run: |
+          python scripts\performance.py collect `
+            --platform windows-hcn-afxdp `
+            --commit $env:GITHUB_SHA `
+            --input-dir build\performance-hcn-afxdp `
+            --output-dir build\performance-results
+
       - name: Clean up external HCN host vNIC
         if: always()
         run: |
           $descriptor = Join-Path $env:RUNNER_TEMP 'nvx-hcn-afxdp-endpoint.json'
           .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $descriptor
 
-      - name: Save HCN AF_XDP log
-        if: always() && hashFiles('build/performance/hcn-afxdp-smoke.log') != ''
+      - name: Save HCN AF_XDP smoke log
+        if: always() && env.RUN_BENCH != 'true' && hashFiles('build/performance/hcn-afxdp-smoke.log') != ''
         uses: actions/cache/save@v5
         with:
           path: build/performance/hcn-afxdp-smoke.log
           key: hcn-afxdp-smoke-log-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Stage Windows / HCN AF_XDP performance logs
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('build/performance-hcn-afxdp/hcn-afxdp.log') != ''
+        run: |
+          Remove-Item -Recurse -Force performance-logs\windows-hcn-afxdp -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path performance-logs\windows-hcn-afxdp | Out-Null
+          Copy-Item build\performance-hcn-afxdp\* performance-logs\windows-hcn-afxdp\ -Recurse
+
+      - name: Save Windows / HCN AF_XDP performance logs
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('performance-logs/windows-hcn-afxdp/hcn-afxdp.log') != ''
+        uses: actions/cache/save@v5
+        with:
+          path: performance-logs/windows-hcn-afxdp
+          key: performance-logs-windows-hcn-afxdp-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
 
   # -----------------------------------------------------------------------------------------------
   # Pull requests compare their p50 values with the moving average stored on the PR base branch.
@@ -784,13 +826,15 @@ jobs:
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/linux-kvm \
             --output-dir performance-results \
+            --require-network \
             --require-shell-snapshot
           python3 scripts/performance.py collect \
             --platform windows-whp \
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/windows-whp \
             --output-dir performance-results \
-            --require-network
+            --require-network \
+            --require-shell-snapshot
 
       - name: Load base branch performance history
         env:
@@ -823,14 +867,17 @@ jobs:
   # -----------------------------------------------------------------------------------------------
   performance-persist:
     name: Persist performance baseline
-    needs: [linux, windows]
+    needs: [linux, windows, windows-hcs, windows-hcn-afxdp]
     if: >-
       ${{
+        always() &&
         github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
         !cancelled() &&
         needs.linux.result == 'success' &&
-        needs.windows.result == 'success'
+        needs.windows.result == 'success' &&
+        (needs.windows-hcs.result == 'success' || needs.windows-hcs.result == 'skipped') &&
+        (needs.windows-hcn-afxdp.result == 'success' || needs.windows-hcn-afxdp.result == 'skipped')
       }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -858,6 +905,24 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
+      - name: Restore Windows / HCS performance logs
+        if: needs.windows-hcs.result == 'success'
+        uses: actions/cache/restore@v5
+        with:
+          path: performance-logs/windows-hcs
+          key: performance-logs-windows-hcs-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Windows / HCN AF_XDP performance logs
+        if: needs.windows-hcn-afxdp.result == 'success'
+        uses: actions/cache/restore@v5
+        with:
+          path: performance-logs/windows-hcn-afxdp
+          key: performance-logs-windows-hcn-afxdp-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
       - name: Collect p50 results
         run: |
           python3 scripts/performance.py collect \
@@ -865,13 +930,34 @@ jobs:
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/linux-kvm \
             --output-dir performance-results \
+            --require-network \
             --require-shell-snapshot
           python3 scripts/performance.py collect \
             --platform windows-whp \
             --commit "${GITHUB_SHA}" \
             --input-dir performance-logs/windows-whp \
             --output-dir performance-results \
+            --require-network \
+            --require-shell-snapshot
+
+      - name: Collect Windows / HCS p50 results
+        if: needs.windows-hcs.result == 'success'
+        run: |
+          python3 scripts/performance.py collect \
+            --platform windows-hcs \
+            --commit "${GITHUB_SHA}" \
+            --input-dir performance-logs/windows-hcs \
+            --output-dir performance-results \
             --require-network
+
+      - name: Collect Windows / HCN AF_XDP p50 results
+        if: needs.windows-hcn-afxdp.result == 'success'
+        run: |
+          python3 scripts/performance.py collect \
+            --platform windows-hcn-afxdp \
+            --commit "${GITHUB_SHA}" \
+            --input-dir performance-logs/windows-hcn-afxdp \
+            --output-dir performance-results
 
       - name: Persist results on main
         run: |

@@ -533,6 +533,64 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("signal.pause()", script)
 
 
+class CiWorkflowParityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+    def job(self, name: str, next_name: str) -> str:
+        return self.workflow.split(f"  {name}:\n", 1)[1].split(
+            f"\n  {next_name}:\n", 1
+        )[0]
+
+    def test_kvm_and_whp_run_the_shared_test_and_benchmark_contract(self) -> None:
+        linux = self.job("linux", "windows")
+        windows = self.job("windows", "windows-hcs")
+
+        for job in (linux, windows):
+            self.assertIn("cargo test --release", job)
+            self.assertIn("scripts/test_performance.py", job)
+            self.assertIn("test-boot", job)
+            self.assertIn("measure-coldstart", job)
+            self.assertIn("bench-virtfs", job)
+            self.assertIn("snapshot-demo", job)
+            self.assertIn("bench-snapshot-shell --runs 5", job)
+            self.assertIn("bench-net-snapshot-py", job)
+            self.assertIn("snapshot-boot", job)
+
+        self.assertIn("scripts/nvx.py bench-net-snapshot |", linux)
+        self.assertIn("scripts\\nvx.py bench-net-snapshot --runs 5", windows)
+
+        self.assertNotIn("skipping networking benchmark", linux)
+        self.assertNotIn("skipping networked Python smoke test", linux)
+
+    def test_privileged_lanes_run_backend_specific_benchmarks(self) -> None:
+        hcs = self.job("windows-hcs", "windows-hcn-afxdp")
+        hcn_afxdp = self.job("windows-hcn-afxdp", "performance-gate")
+
+        for job in (hcs, hcn_afxdp):
+            self.assertIn("needs: [artifacts, windows]", job)
+        self.assertIn("bench-hcs-snapshot-shell --runs 5", hcs)
+        self.assertIn("bench-hcs-snapshot-py --runs 5", hcs)
+        self.assertIn("bench-hcs-net-snapshot-py", hcs)
+        self.assertIn("--require-network", hcs)
+        self.assertIn("benchmark-hcn-afxdp.ps1", hcn_afxdp)
+        self.assertIn("-Runs 5", hcn_afxdp)
+        self.assertIn("--platform windows-hcn-afxdp", hcn_afxdp)
+
+    def test_main_persistence_includes_successful_privileged_lanes(self) -> None:
+        persistence = self.workflow.split("  performance-persist:\n", 1)[1]
+
+        self.assertIn(
+            "needs: [linux, windows, windows-hcs, windows-hcn-afxdp]",
+            persistence,
+        )
+        self.assertIn("--platform windows-hcs", persistence)
+        self.assertIn("--platform windows-hcn-afxdp", persistence)
+
+
 class BootTestTests(unittest.TestCase):
     def test_boot_contract_and_marker_parsing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -427,9 +427,10 @@ they require a separately labeled, privileged Hyper-V runner.
 
 The CI workflow defines opt-in **Windows / HCS** and **Windows / HCN + AF_XDP** hardware jobs. Both
 call `setup-hcn-endpoint.ps1` before testing and `cleanup-hcn-endpoint.ps1` in an `always()` step.
-The AF_XDP job requests `-AttachToHost`, then uses `scripts/test-hcn-afxdp.ps1` as a minimal
-control-pipe Agent and requires an HTTP round trip through the HCN gateway. These jobs are excluded
-from pull requests because they create privileged host networking objects.
+The AF_XDP job requests `-AttachToHost`, then uses `scripts/benchmark-hcn-afxdp.ps1` for five
+independent boots. Every sample must pass the same guest TX, carrier, control-pipe, and HTTP checks
+as `scripts/test-hcn-afxdp.ps1`; the benchmark records their verified end-to-end wall-time p50.
+These jobs are excluded from pull requests because they create privileged host networking objects.
 
 Runner requirements:
 
@@ -679,6 +680,7 @@ also reports full process wall time so service and compute-system lifecycle over
 | `bench-hcs-snapshot-shell` | HCS cold shell boot vs. native VMRS restore, including guest and process-wall latency          |
 | `bench-hcs-snapshot-py`    | HCS cold Python/pandas startup vs. restore of the warmed interpreter                            |
 | `bench-hcs-net-snapshot-py` | HCN-backed HCS restore with a real guest-to-host HTTP request after every restore              |
+| `scripts/benchmark-hcn-afxdp.ps1` | repeated WHP boots with an external HCN vNIC, all AF_XDP RSS queues, and verified HTTP |
 
 CI records each merged commit's benchmark p50 values in `data/performance/`. On pull requests,
 `scripts/performance.py` compares each metric with the arithmetic mean of its latest 10 p50 values
@@ -686,6 +688,9 @@ on the PR's base branch. A regression greater than 40% fails the `Performance re
 lower latency and higher throughput are treated as improvements. Metrics without history are
 reported as warmups until a baseline exists. The workflow needs `contents: write` permission (and,
 if `main` is protected, a rule allowing `github-actions[bot]`) to persist the baseline commit.
+HCS and HCN/AF_XDP results join that baseline when their opt-in main-branch hardware jobs run;
+KVM and WHP results remain mandatory. Privileged jobs do not run on untrusted pull requests, so
+their new metrics warm up on main rather than participating in the pull-request gate.
 It compiles and unit-tests the shared Python tooling on both hosts, uses the shared boot test, and runs
 networked-Python plus interactive snapshot-boot smoke tests on both KVM and WHP.
 

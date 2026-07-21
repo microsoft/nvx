@@ -271,7 +271,34 @@ def _parse_hcs_python_snapshot(text: str) -> dict[str, MetricValue]:
 
 
 def _parse_hcs_network_snapshot(text: str) -> dict[str, MetricValue]:
+    if re.search(r"^\s*verified marker\s*:\s*HELLOPY-NET OK\s*$", text, re.MULTILINE) is None:
+        raise PerformanceError(
+            "missing verified marker 'HELLOPY-NET OK' in hcs-network-snapshot.log"
+        )
     return _parse_hcs_summary(text, "hcs-network-snapshot.log", "hcs_network")
+
+
+def _parse_hcn_afxdp(text: str) -> dict[str, MetricValue]:
+    if re.search(
+        r"^\s*verified marker\s*:\s*NVX-HCN-AFXDP-SMOKE-OK\s*$",
+        text,
+        re.MULTILINE,
+    ) is None:
+        raise PerformanceError(
+            "missing verified marker 'NVX-HCN-AFXDP-SMOKE-OK' in hcn-afxdp.log"
+        )
+    return _parse_fixed(
+        text,
+        "hcn-afxdp.log",
+        [
+            (
+                "hcn_afxdp_verified_network_wall",
+                "ms",
+                "lower",
+                rf"^\s*verified network wall\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            )
+        ],
+    )
 
 
 def _parse_virtfs(text: str) -> dict[str, MetricValue]:
@@ -355,6 +382,10 @@ HCS_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "hcs-shell-snapshot.log": (_parse_hcs_shell_snapshot, True),
     "hcs-python-snapshot.log": (_parse_hcs_python_snapshot, True),
     "hcs-network-snapshot.log": (_parse_hcs_network_snapshot, False),
+}
+
+HCN_AFXDP_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
+    "hcn-afxdp.log": (_parse_hcn_afxdp, True),
 }
 
 
@@ -447,9 +478,14 @@ def collect_results(
 
     required_optional_logs = {
         "network.log": require_network,
+        "hcs-network-snapshot.log": require_network,
         "shell-snapshot.log": require_shell_snapshot,
     }
-    parsers = HCS_LOG_PARSERS if platform == "windows-hcs" else LOG_PARSERS
+    platform_parsers = {
+        "windows-hcs": HCS_LOG_PARSERS,
+        "windows-hcn-afxdp": HCN_AFXDP_LOG_PARSERS,
+    }
+    parsers = platform_parsers.get(platform, LOG_PARSERS)
     collected: dict[str, MetricValue] = {}
     for filename, (parser, required) in parsers.items():
         path = input_dir / filename

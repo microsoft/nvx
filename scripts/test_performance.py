@@ -92,8 +92,59 @@ HCS_NETWORK_SNAPSHOT_LOG = """
     verified marker       : HELLOPY-NET OK
 """
 
+HCN_AFXDP_LOG = """
+HCN AF_XDP verified network benchmark, median of 5 runs
+    verified network: run 1/5 complete (wall 810.2 ms)
+    verified network: run 2/5 complete (wall 802.4 ms)
+    verified network: run 3/5 complete (wall 806.1 ms)
+    verified network: run 4/5 complete (wall 804.8 ms)
+    verified network: run 5/5 complete (wall 808.7 ms)
+    verified network wall : 806.1 ms  (min 802.4, max 810.2, n=5)
+    verified marker       : NVX-HCN-AFXDP-SMOKE-OK
+"""
+
 
 class PerformanceTests(unittest.TestCase):
+    def test_collects_hcn_afxdp_verified_network_metric(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "hcn-afxdp.log").write_text(
+                HCN_AFXDP_LOG, encoding="utf-8"
+            )
+
+            result_path = performance.collect_results(
+                "windows-hcn-afxdp", "abc123", logs, root / "results"
+            )
+            results = performance.read_results(result_path)
+
+            self.assertEqual(result_path.name, "windows-hcn-afxdp.csv")
+            self.assertEqual(
+                results,
+                [
+                    performance.Result(
+                        "abc123",
+                        "hcn_afxdp_verified_network_wall",
+                        "ms",
+                        "lower",
+                        806.1,
+                    )
+                ],
+            )
+
+    def test_hcn_afxdp_collection_requires_verified_marker(self):
+        with self.assertRaisesRegex(
+            performance.PerformanceError,
+            "missing verified marker 'NVX-HCN-AFXDP-SMOKE-OK'",
+        ):
+            performance._parse_hcn_afxdp(
+                HCN_AFXDP_LOG.replace(
+                    "verified marker       : NVX-HCN-AFXDP-SMOKE-OK",
+                    "verified marker       : NVX-HCN-AFXDP-SMOKE-FAIL",
+                )
+            )
+
     def test_collects_hcs_metrics_into_separate_platform(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -122,6 +173,42 @@ class PerformanceTests(unittest.TestCase):
             self.assertNotIn("hcs_python_save_wall", by_metric)
             self.assertEqual(by_metric["hcs_network_restore_guest"].p50, 95.0)
             self.assertTrue(all(result.direction == "lower" for result in results))
+
+    def test_hcs_collection_can_require_network_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "hcs-shell-snapshot.log").write_text(
+                HCS_SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            (logs / "hcs-python-snapshot.log").write_text(
+                HCS_PYTHON_SNAPSHOT_LOG, encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"required benchmark log not found: .*hcs-network-snapshot\.log",
+            ):
+                performance.collect_results(
+                    "windows-hcs",
+                    "abc123",
+                    logs,
+                    root / "results",
+                    require_network=True,
+                )
+
+    def test_hcs_network_collection_requires_verified_marker(self):
+        with self.assertRaisesRegex(
+            performance.PerformanceError,
+            "missing verified marker 'HELLOPY-NET OK'",
+        ):
+            performance._parse_hcs_network_snapshot(
+                HCS_NETWORK_SNAPSHOT_LOG.replace(
+                    "verified marker       : HELLOPY-NET OK",
+                    "verified marker       : HELLOPY-NET FAIL",
+                )
+            )
 
     def test_hcs_shell_parser_rejects_duplicate_memory_section(self):
         duplicated = HCS_SHELL_SNAPSHOT_LOG + HCS_SHELL_SNAPSHOT_LOG.split(
