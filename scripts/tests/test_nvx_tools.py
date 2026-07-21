@@ -541,6 +541,15 @@ class HcsBenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("RedirectStandardError = $true", afxdp)
         self.assertIn("if ($stderr) { Write-Output $stderr }", afxdp)
         self.assertIn("Invoke-MicrovmSelfTest", afxdp)
+        snapshot_runs = afxdp.split(
+            'Write-Output "HCN AF_XDP networking + snapshot benchmark', 1
+        )[1]
+        self.assertNotIn("'--quiet'", snapshot_runs)
+
+        network_guest = (REPO_ROOT / "alpine" / "net-hello.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def link_ok(host, port, timeout=3, attempts=10):", network_guest)
 
     def test_shared_virtfs_allows_slow_hardware_runs(self) -> None:
         source = (REPO_ROOT / "scripts" / "nvx_tools" / "benchmarks.py").read_text(

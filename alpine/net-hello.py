@@ -122,7 +122,7 @@ def restore_hcs_network(timeout=5):
     return False
 
 
-def link_ok(host, port, timeout=3, attempts=3):
+def link_ok(host, port, timeout=3, attempts=10):
     """True if a real HTTP request to the host over the NIC round-trips."""
     for _ in range(attempts):
         try:

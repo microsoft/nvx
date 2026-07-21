@@ -270,7 +270,6 @@ try {
             '--mem', '256',
             '--cmdline', $cmdline,
             '--exit-on-boot',
-            '--quiet',
             '--boot-marker', 'ALPINE-MICROVM-BOOT-OK'
         )
         $cold.Add($result.Metric)
@@ -283,8 +282,7 @@ try {
         '--initrd', $Initrd,
         '--mem', '256',
         '--cmdline', "$cmdline netsnap",
-        '--snapshot', $SnapshotPath,
-        '--quiet'
+        '--snapshot', $SnapshotPath
     )
     if (-not (Test-Path -LiteralPath (Join-Path $SnapshotPath 'state.bin') -PathType Leaf) -or
         -not (Test-Path -LiteralPath (Join-Path $SnapshotPath 'mem.bin') -PathType Leaf)) {
@@ -297,7 +295,6 @@ try {
             '--restore', $SnapshotPath,
             '--mem', '256',
             '--exit-on-boot',
-            '--quiet',
             '--boot-marker', 'NETSNAP-RESTORE-OK'
         )
         $restored.Add($result.Metric)
