@@ -9,7 +9,6 @@ import re
 import shutil
 import socket
 import statistics
-import sys
 import tempfile
 import threading
 import time
@@ -383,7 +382,7 @@ def _run_timed(
     if result.timed_out or result.returncode != 0:
         diagnostic = _failure_tail(result.text, 80)
         if diagnostic:
-            print(diagnostic, file=sys.stderr, flush=True)
+            print(diagnostic, flush=True)
     require_success(result, "VM benchmark run")
     match = METRIC_PATTERN.search(result.text)
     metric = float(match.group(1)) if match else None
@@ -428,7 +427,7 @@ def _collect_hcs_timings(
         if required_text is not None and required_text not in result.text:
             diagnostic = _failure_tail(result.text, 80)
             if diagnostic:
-                print(diagnostic, file=sys.stderr, flush=True)
+                print(diagnostic, flush=True)
             raise ScriptError(
                 f"{label} run {run_number}/{runs} did not emit {required_text!r}\n"
                 + diagnostic
