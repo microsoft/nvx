@@ -116,13 +116,15 @@ jobs:
         env:
           DOCKER_CONFIG: ${{ runner.temp }}/docker-config
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+      - name: Save run artifacts
+        uses: actions/cache/save@v5
         with:
-          name: linux-artifacts
-          path: build/
-          if-no-files-found: error
-          retention-days: 1
+          path: |
+            build/vmlinux
+            build/initramfs.cpio.gz
+            build/initramfs-python.cpio.gz
+          key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
 
   # -----------------------------------------------------------------------------------------------
   # Linux / KVM: build the VMM, run the shared unit tests, the KVM protected-mode self-test, the
@@ -194,11 +196,16 @@ jobs:
       - name: Python tooling tests
         run: python3 -m unittest scripts/test_performance.py scripts/tests/test_nvx_tools.py -v
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v7
+      - name: Restore run artifacts
+        uses: actions/cache/restore@v5
         with:
-          name: linux-artifacts
-          path: build
+          path: |
+            build/vmlinux
+            build/initramfs.cpio.gz
+            build/initramfs-python.cpio.gz
+          key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Self-test (KVM protected-mode)
         run: ./target/release/microvm --selftest
@@ -281,14 +288,19 @@ jobs:
           rm -rf "$SNAP"
           python3 scripts/nvx.py snapshot-boot --smoke-test
 
-      - name: Upload performance logs
+      - name: Stage Linux / KVM performance logs
         if: always() && env.RUN_BENCH == 'true'
-        uses: actions/upload-artifact@v6
+        run: |
+          rm -rf performance-logs/linux-kvm
+          mkdir -p performance-logs/linux-kvm
+          cp build/performance/*.log performance-logs/linux-kvm/
+
+      - name: Save Linux / KVM performance logs
+        if: always() && env.RUN_BENCH == 'true'
+        uses: actions/cache/save@v5
         with:
-          name: performance-logs-linux-kvm
-          path: build/performance/*.log
-          if-no-files-found: error
-          retention-days: 7
+          path: performance-logs/linux-kvm
+          key: performance-logs-linux-kvm-${{ github.run_id }}-${{ github.run_attempt }}
 
   # -----------------------------------------------------------------------------------------------
   # Windows / WHP: build the VMM, run the shared unit tests, the WHP protected-mode self-test, the
@@ -332,6 +344,9 @@ jobs:
             throw 'PowerShell syntax validation failed'
           }
 
+      - name: Set up cross-OS cache tools
+        run: .\scripts\setup-cross-os-cache.ps1
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -357,11 +372,16 @@ jobs:
       - name: Python tooling tests
         run: python -m unittest scripts/test_performance.py scripts/tests/test_nvx_tools.py -v
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v7
+      - name: Restore run artifacts
+        uses: actions/cache/restore@v5
         with:
-          name: linux-artifacts
-          path: build
+          path: |
+            build/vmlinux
+            build/initramfs.cpio.gz
+            build/initramfs-python.cpio.gz
+          key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Self-test (WHP protected-mode)
         run: .\target\release\microvm.exe --selftest
@@ -421,14 +441,20 @@ jobs:
           Remove-Item -Recurse -Force $snap -ErrorAction SilentlyContinue
           python scripts\nvx.py snapshot-boot --snapshot $snap --mem 512 --smoke-test
 
-      - name: Upload performance logs
+      - name: Stage Windows / WHP performance logs
         if: always() && env.RUN_BENCH == 'true'
-        uses: actions/upload-artifact@v6
+        run: |
+          Remove-Item -Recurse -Force performance-logs\windows-whp -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path performance-logs\windows-whp | Out-Null
+          Copy-Item build\performance\*.log performance-logs\windows-whp\
+
+      - name: Save Windows / WHP performance logs
+        if: always() && env.RUN_BENCH == 'true'
+        uses: actions/cache/save@v5
         with:
-          name: performance-logs-windows-whp
-          path: build/performance/*.log
-          if-no-files-found: error
-          retention-days: 7
+          path: performance-logs/windows-whp
+          key: performance-logs-windows-whp-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
 
   # -----------------------------------------------------------------------------------------------
   # Privileged Windows networking: create an HCN NAT endpoint, attach it to the host namespace as
@@ -462,6 +488,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up cross-OS cache tools
+        run: .\scripts\setup-cross-os-cache.ps1
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -481,11 +510,16 @@ jobs:
       - name: Build (release)
         run: cargo build --release
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v7
+      - name: Restore run artifacts
+        uses: actions/cache/restore@v5
         with:
-          name: linux-artifacts
-          path: build
+          path: |
+            build/vmlinux
+            build/initramfs.cpio.gz
+            build/initramfs-python.cpio.gz
+          key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Smoke — HCN-created vNIC + AF_XDP
         timeout-minutes: 10
@@ -496,14 +530,12 @@ jobs:
             -TimeoutSeconds 300 `
             -LogPath build\performance\hcn-afxdp-smoke.log
 
-      - name: Upload HCN AF_XDP log
-        if: always()
-        uses: actions/upload-artifact@v6
+      - name: Save HCN AF_XDP log
+        if: always() && hashFiles('build/performance/hcn-afxdp-smoke.log') != ''
+        uses: actions/cache/save@v5
         with:
-          name: hcn-afxdp-smoke-log
           path: build/performance/hcn-afxdp-smoke.log
-          if-no-files-found: warn
-          retention-days: 7
+          key: hcn-afxdp-smoke-log-${{ github.run_id }}-${{ github.run_attempt }}
 
   # -----------------------------------------------------------------------------------------------
   # Pull requests compare their p50 values with the moving average stored on the PR base branch.
@@ -527,17 +559,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Download Linux / KVM performance logs
-        uses: actions/download-artifact@v7
+      - name: Restore Linux / KVM performance logs
+        uses: actions/cache/restore@v5
         with:
-          name: performance-logs-linux-kvm
           path: performance-logs/linux-kvm
+          key: performance-logs-linux-kvm-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
 
-      - name: Download Windows / WHP performance logs
-        uses: actions/download-artifact@v7
+      - name: Restore Windows / WHP performance logs
+        uses: actions/cache/restore@v5
         with:
-          name: performance-logs-windows-whp
           path: performance-logs/windows-whp
+          key: performance-logs-windows-whp-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Collect p50 results
         run: |
@@ -605,17 +640,20 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Download Linux / KVM performance logs
-        uses: actions/download-artifact@v7
+      - name: Restore Linux / KVM performance logs
+        uses: actions/cache/restore@v5
         with:
-          name: performance-logs-linux-kvm
           path: performance-logs/linux-kvm
+          key: performance-logs-linux-kvm-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
 
-      - name: Download Windows / WHP performance logs
-        uses: actions/download-artifact@v7
+      - name: Restore Windows / WHP performance logs
+        uses: actions/cache/restore@v5
         with:
-          name: performance-logs-windows-whp
           path: performance-logs/windows-whp
+          key: performance-logs-windows-whp-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Collect p50 results
         run: |
