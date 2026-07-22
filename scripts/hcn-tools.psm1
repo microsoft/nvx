@@ -314,7 +314,10 @@ function Get-HcnHostDefaultNamespace {
             )
             Complete-HcnCall $status $errorRecord "HcnQueryNamespaceProperties($namespaceId)"
             $document = (Get-HcnAllocatedString $properties) | ConvertFrom-Json
-            if ($document.Type -eq 'HostDefault') {
+            $typeProperty = $document.PSObject.Properties['Type']
+            $defaultProperty = $document.PSObject.Properties['IsDefault']
+            if (($null -ne $typeProperty -and $typeProperty.Value -eq 'HostDefault') -or
+                ($null -ne $defaultProperty -and [bool]$defaultProperty.Value)) {
                 return $namespaceId
             }
         } finally {
