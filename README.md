@@ -298,13 +298,12 @@ The CI workflow defines an opt-in **Windows / HCN + AF_XDP** hardware job. It ca
 `always()` step. The job runs the same 20 non-network WHP scenarios, then uses
 `scripts/benchmark-hcn-afxdp-snapshot.ps1` for five external-L2Bridge cold boots, one capture, and
 five restores. Every restored sample must rebind all selected AF_XDP queues and ping the HCN gateway
-before it contributes to the shared network p50 rows. The job is excluded from pull requests
-because it creates privileged host networking objects.
+before it contributes to the shared network p50 rows. The job runs for pull requests as well as
+opted-in main pushes and manual dispatches.
 
 Runner requirements:
 
-- a dedicated repository runner has labels `windows`, `x64`, and `hcn-afxdp`; do not assign this
-  label to a general pull-request runner;
+- a dedicated repository runner has labels `windows`, `x64`, and `hcn-afxdp`;
 - the dedicated runner service account is an Administrator or Local System;
 - Hyper-V, Windows Hypervisor Platform, and Host Network Service are enabled and running;
 - signed [XDP-for-Windows Runtime x64 v1.3.0](https://www.nuget.org/packages/Microsoft.XDP-for-Windows.Runtime.x64/1.3.0)

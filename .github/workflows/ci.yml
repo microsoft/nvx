@@ -13,8 +13,8 @@
 #   * Windows: Python 3.10+, a stable Rust toolchain for x86_64-pc-windows-msvc (edition 2024),
 #              and the Windows Hypervisor Platform feature enabled for the WHP backend.
 #   * HCN/XDP: The Windows runner additionally needs Hyper-V Administrator/HNS privileges and the
-#              signed XDP-for-Windows v1.3.0 package. This privileged lane is opt-in and never runs
-#              for pull requests.
+#              signed XDP-for-Windows v1.3.0 package. This privileged lane runs for pull requests,
+#              opted-in main pushes, and opted-in manual dispatches.
 #
 # The kernel + initramfs are built once, in Docker, on the Linux runner and shared with the
 # Windows job (Windows cannot compile the Linux kernel natively). Build, smoke tests, and the
@@ -490,14 +490,15 @@ jobs:
   # -----------------------------------------------------------------------------------------------
   # Privileged Windows networking: externally create an HCN NAT endpoint, attach it to the host
   # namespace as a vNIC, bind every AF_XDP RSS queue, boot the WHP guest, and require an HTTP round
-  # trip to the HCN gateway. Enable automatic main-branch runs with NVX_HCN_AFXDP_CI=true or opt in
-  # manually. This job deliberately does not run for pull requests.
+  # trip to the HCN gateway. It runs for pull requests; enable automatic main-branch runs with
+  # NVX_HCN_AFXDP_CI=true or opt in manually.
   # -----------------------------------------------------------------------------------------------
   windows-hcn-afxdp:
     name: Windows / HCN + AF_XDP
     needs: [artifacts, windows]
     if: >-
       ${{
+        github.event_name == 'pull_request' ||
         (github.event_name == 'push' && vars.NVX_HCN_AFXDP_CI == 'true') ||
         (github.event_name == 'workflow_dispatch' && inputs.run_hcn_afxdp)
       }}

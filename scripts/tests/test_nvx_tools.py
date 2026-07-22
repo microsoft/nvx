@@ -318,6 +318,7 @@ class CiWorkflowParityTests(unittest.TestCase):
         hcn_afxdp = self.job("windows-hcn-afxdp", "performance-gate")
 
         self.assertIn("needs: [artifacts, windows]", hcn_afxdp)
+        self.assertIn("github.event_name == 'pull_request'", hcn_afxdp)
         self.assertIn("--require-shared-suite", hcn_afxdp)
         for command in (
             "measure-coldstart --runs 5",
