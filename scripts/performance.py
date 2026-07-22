@@ -605,6 +605,37 @@ def _validate_current_results(path: Path, results: Sequence[Result]) -> None:
         seen.add(key)
 
 
+def _compatible_baseline_results(
+    platform: str, results: Sequence[Result]
+) -> list[Result]:
+    transition = next(
+        (
+            index
+            for index, result in enumerate(results)
+            if result.metric == "virtfs_verified_reuse"
+        ),
+        None,
+    )
+    if platform != "windows-whp" or transition is None:
+        return list(results)
+
+    compatible: list[Result] = []
+    for index, result in enumerate(results):
+        if result.metric == "virtfs_verified_reuse":
+            compatible.append(
+                Result(
+                    result.commit,
+                    "virtfs_reuse",
+                    result.unit,
+                    result.direction,
+                    result.p50,
+                )
+            )
+        elif result.metric != "virtfs_reuse" or index > transition:
+            compatible.append(result)
+    return compatible
+
+
 def persist_results(source_dir: Path, history_dir: Path) -> None:
     source_files = sorted(source_dir.glob("*.csv"))
     if not source_files:
@@ -673,7 +704,11 @@ def gate_results(
         targets = read_results(target_path)
         _validate_current_results(target_path, targets)
         baseline_path = baseline_dir / target_path.name
-        baselines = read_results(baseline_path) if baseline_path.exists() else []
+        baselines = (
+            _compatible_baseline_results(platform, read_results(baseline_path))
+            if baseline_path.exists()
+            else []
+        )
         history: dict[str, deque[Result]] = defaultdict(lambda: deque(maxlen=window))
         for result in baselines:
             history[result.metric].append(result)

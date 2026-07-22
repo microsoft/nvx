@@ -455,6 +455,61 @@ class PerformanceTests(unittest.TestCase):
                 performance.gate_results(baseline, target, 10, 40.0), 1
             )
 
+    def test_gate_uses_verified_windows_virtfs_reuse_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            summary = root / "summary.md"
+            performance.write_results(
+                baseline / "windows-whp.csv",
+                [
+                    *[
+                        performance.Result(
+                            f"legacy-{index}",
+                            "virtfs_reuse",
+                            "ms",
+                            "lower",
+                            500.0,
+                        )
+                        for index in range(5)
+                    ],
+                    *[
+                        performance.Result(
+                            f"verified-{index}",
+                            "virtfs_verified_reuse",
+                            "ms",
+                            "lower",
+                            2250.0,
+                        )
+                        for index in range(3)
+                    ],
+                    performance.Result(
+                        "canonical-after-transition",
+                        "virtfs_reuse",
+                        "ms",
+                        "lower",
+                        2280.0,
+                    ),
+                ],
+            )
+            performance.write_results(
+                target / "windows-whp.csv",
+                [
+                    performance.Result(
+                        "pr", "virtfs_reuse", "ms", "lower", 2270.0
+                    )
+                ],
+            )
+
+            self.assertEqual(
+                performance.gate_results(baseline, target, 10, 40.0, summary),
+                0,
+            )
+            markdown = summary.read_text(encoding="utf-8")
+            self.assertIn("2257.50 ms (4/10)", markdown)
+            self.assertNotIn("500.00 ms", markdown)
+
     def test_persist_is_idempotent_per_commit_and_metric(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
