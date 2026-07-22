@@ -25,6 +25,7 @@ from nvx_tools.benchmarks import (
     NetworkSnapshotConfig,
     benchmark_network_snapshot,
     format_rate_median,
+    network_gateway,
     parse_data_checksum,
     parse_dd_rate,
 )
@@ -74,6 +75,65 @@ class BackendTests(unittest.TestCase):
         args = build_parser().parse_args(["bench-net-snapshot", "--vcpus", "3"])
 
         self.assertEqual(args.vcpus, 3)
+
+    def test_network_snapshot_gateway_is_first_usable_address(self) -> None:
+        self.assertEqual(network_gateway("10.42.7.23/20"), "10.42.0.1")
+
+    def test_network_snapshot_rejects_non_ipv4_network(self) -> None:
+        with self.assertRaisesRegex(ScriptError, "invalid --net IPv4 CIDR"):
+            network_gateway("fd00::2/64")
+
+    def test_network_snapshot_times_one_gateway_probe_on_cold_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "snapshot"
+            snapshot.mkdir()
+            (snapshot / "state.bin").write_bytes(b"state")
+            (snapshot / "mem.bin").write_bytes(b"memory")
+            timed_results = [(12.0, 20.0, object()), (3.0, 10.0, object())]
+            with (
+                patch(
+                    "nvx_tools.benchmarks.require_vm_inputs",
+                    return_value=Path("microvm.exe"),
+                ),
+                patch(
+                    "nvx_tools.benchmarks._run_timed",
+                    side_effect=timed_results,
+                ) as run_timed,
+                patch("nvx_tools.benchmarks.capture_snapshot") as capture,
+                patch.object(WindowsBackend, "allocated_size", return_value=6),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                benchmark_network_snapshot(
+                    NetworkSnapshotConfig(
+                        Path("kernel"),
+                        Path("initrd"),
+                        snapshot,
+                        runs=1,
+                        net="10.42.7.23/20",
+                    ),
+                    WindowsBackend(),
+                )
+
+        cold_args = run_timed.call_args_list[0].args[0]
+        capture_args = capture.call_args.args[0]
+        restore_args = run_timed.call_args_list[1].args[0]
+        probe_cmdline = (
+            "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1 "
+            "virtnet_probe=10.42.0.1"
+        )
+        self.assertEqual(cold_args[cold_args.index("--cmdline") + 1], probe_cmdline)
+        self.assertEqual(
+            cold_args[cold_args.index("--boot-marker") + 1],
+            "VIRTNET-PROBE-OK: 10.42.0.1",
+        )
+        self.assertEqual(
+            capture_args[capture_args.index("--cmdline") + 1],
+            f"{probe_cmdline} netsnap",
+        )
+        self.assertEqual(
+            restore_args[restore_args.index("--boot-marker") + 1],
+            "NETSNAP-RESTORE-PROBE-OK: 10.42.0.1",
+        )
 
     def test_snapshot_boot_rejects_ignored_run_count(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -259,6 +319,12 @@ class RetainedWorkflowTests(unittest.TestCase):
             'Write-Output "HCN AF_XDP networking + snapshot benchmark', 1
         )[1]
         self.assertNotIn("'--quiet'", snapshot_runs)
+        self.assertIn("'--boot-marker', $coldMarker", snapshot_runs)
+        self.assertIn("'--boot-marker', $restoreMarker", snapshot_runs)
+        self.assertIn('$coldMarker = "VIRTNET-PROBE-OK: $Gateway"', afxdp)
+        self.assertIn(
+            '$restoreMarker = "NETSNAP-RESTORE-PROBE-OK: $Gateway"', afxdp
+        )
 
         network_guest = (REPO_ROOT / "alpine" / "net-hello.py").read_text(
             encoding="utf-8"
@@ -280,6 +346,12 @@ class RetainedWorkflowTests(unittest.TestCase):
             self.assertIn("tr -d ':' | tr -d '-'", script)
             self.assertIn('fatal "virtnet: no non-loopback interface appeared', script)
             self.assertIn('while [ "$tries" -lt 600 ]', script)
+
+    def test_network_snapshot_uses_one_echo_for_cold_and_restore(self) -> None:
+        script = (REPO_ROOT / "alpine" / "init").read_text(encoding="utf-8")
+
+        self.assertEqual(script.count('ping -c 1 -W 1 "$nprobe"'), 2)
+        self.assertNotIn('ping -c 3 -W 2 "$nprobe"', script)
 
 class CiWorkflowParityTests(unittest.TestCase):
     @classmethod

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import ipaddress
 import re
 import shutil
 import socket
@@ -76,6 +77,16 @@ class NetworkPythonConfig:
     vcpus: int = 1
     net: str = "10.0.0.2/24"
     port: int = 8099
+
+
+def network_gateway(spec: str) -> str:
+    try:
+        interface = ipaddress.IPv4Interface(spec)
+    except ValueError as error:
+        raise ScriptError(f"invalid --net IPv4 CIDR {spec!r}: {error}") from error
+    if not 1 <= interface.network.prefixlen <= 30:
+        raise ScriptError(f"--net prefix must be in 1..=30, got {spec!r}")
+    return str(interface.network.network_address + 1)
 
 
 def _failure_tail(text: str, lines: int = 30) -> str:
@@ -317,7 +328,11 @@ def benchmark_network_snapshot(
     )
     print()
     try:
-        print("== cold boot -> working-network shell (kernel boot + virtio-net + ifconfig) ==")
+        gateway = network_gateway(config.net)
+        probe_cmdline = f"{QUIET_CMDLINE} virtnet_probe={gateway}"
+        cold_marker = f"VIRTNET-PROBE-OK: {gateway}"
+        restore_marker = f"NETSNAP-RESTORE-PROBE-OK: {gateway}"
+        print("== cold boot -> verified gateway connectivity ==")
         cold_args = cold_boot_args(
             executable,
             VmConfig(
@@ -325,7 +340,7 @@ def benchmark_network_snapshot(
                 config.initrd,
                 config.mem,
                 config.vcpus,
-                QUIET_CMDLINE,
+                probe_cmdline,
             ),
             backend,
             [
@@ -334,7 +349,7 @@ def benchmark_network_snapshot(
                 "--exit-on-boot",
                 "--quiet",
                 "--boot-marker",
-                BOOT_MARKER,
+                cold_marker,
             ],
         )
         cold = [_run_timed(cold_args, 40)[0] for _ in range(config.runs)]
@@ -350,7 +365,7 @@ def benchmark_network_snapshot(
                 config.initrd,
                 config.mem,
                 1,
-                f"{QUIET_CMDLINE} netsnap",
+                f"{probe_cmdline} netsnap",
             ),
             backend,
             ["--net", config.net, "--snapshot", config.snapshot, "--quiet"],
@@ -364,7 +379,7 @@ def benchmark_network_snapshot(
             f"mem.bin footprint ~{footprint:.0f} MiB on disk)"
         )
 
-        print("== restore -> working-network shell (resume + rebuild backend + verify link) ==")
+        print("== restore -> verified gateway connectivity ==")
         restore_args: list[str | Path] = [
             executable,
             "--restore",
@@ -374,7 +389,7 @@ def benchmark_network_snapshot(
             "--exit-on-boot",
             "--quiet",
             "--boot-marker",
-            "NETSNAP-RESTORE-OK",
+            restore_marker,
         ]
         restore_results = [_run_timed(restore_args, 30) for _ in range(config.runs)]
         restore = [metric for metric, _, _ in restore_results if metric is not None]

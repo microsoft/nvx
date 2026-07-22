@@ -180,7 +180,7 @@ if [ "$nrequired" = 1 ] || [ -n "$nip" ]; then
 
         nprobe=$(sed -n 's/.*virtnet_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
         if [ -n "$nprobe" ]; then
-            if ping -c 3 -W 2 "$nprobe" >/tmp/virtnet-probe.log 2>&1; then
+            if ping -c 1 -W 1 "$nprobe" >/tmp/virtnet-probe.log 2>&1; then
                 echo "VIRTNET-PROBE-OK: $nprobe"
             else
                 cat /tmp/virtnet-probe.log >&2
@@ -265,7 +265,7 @@ case " $(cat /proc/cmdline) " in
         # ---- on restore, execution resumes here ----
         if link_up; then
             if [ -n "$nprobe" ]; then
-                if ping -c 3 -W 2 "$nprobe" >/tmp/netsnap-restore-probe.log 2>&1; then
+                if ping -c 1 -W 1 "$nprobe" >/tmp/netsnap-restore-probe.log 2>&1; then
                     echo "NETSNAP-RESTORE-PROBE-OK: $nprobe"
                     echo "NETSNAP-RESTORE-OK"
                 else

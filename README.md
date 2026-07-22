@@ -297,8 +297,9 @@ The CI workflow defines an opt-in **Windows / HCN + AF_XDP** hardware job. It ca
 `setup-hcn-endpoint.ps1 -AttachToHost` before testing and `cleanup-hcn-endpoint.ps1` in an
 `always()` step. The job runs the same 20 non-network WHP scenarios, then uses
 `scripts/benchmark-hcn-afxdp-snapshot.ps1` for five external-L2Bridge cold boots, one capture, and
-five restores. Every restored sample must rebind all selected AF_XDP queues and ping the HCN gateway
-before it contributes to the shared network p50 rows. The job runs for pull requests as well as
+five restores. Cold and restored samples use the same single-echo gateway probe as the shared
+network benchmark. Every restore must first rebind all selected AF_XDP queues before it contributes
+to the shared network p50 rows. The job runs for pull requests as well as
 opted-in main pushes and manual dispatches.
 
 Runner requirements:

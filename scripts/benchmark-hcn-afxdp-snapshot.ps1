@@ -257,6 +257,8 @@ if (-not $script:endpoint.hostAttached -or
 Invoke-MicrovmSelfTest
 
 $cmdline = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1 virtnet_probe=$Gateway"
+$coldMarker = "VIRTNET-PROBE-OK: $Gateway"
+$restoreMarker = "NETSNAP-RESTORE-PROBE-OK: $Gateway"
 $cold = New-Object Collections.Generic.List[double]
 $restored = New-Object Collections.Generic.List[double]
 $restoreWall = New-Object Collections.Generic.List[double]
@@ -264,13 +266,13 @@ $restoreWall = New-Object Collections.Generic.List[double]
 Write-Output "HCN AF_XDP networking + snapshot benchmark, median of $Runs, 256 MiB, 1 vCPU"
 try {
     for ($run = 1; $run -le $Runs; $run++) {
-        $result = Invoke-AfxdpVm -RequireMetric -RequiredMarker "VIRTNET-PROBE-OK: $Gateway" -Arguments @(
+        $result = Invoke-AfxdpVm -RequireMetric -RequiredMarker $coldMarker -Arguments @(
             '--kernel', $Kernel,
             '--initrd', $Initrd,
             '--mem', '256',
             '--cmdline', $cmdline,
             '--exit-on-boot',
-            '--boot-marker', 'ALPINE-MICROVM-BOOT-OK'
+            '--boot-marker', $coldMarker
         )
         $cold.Add($result.Metric)
         Write-Output "  AF_XDP cold boot: run $run/$Runs complete (guest $(Format-Milliseconds $result.Metric) ms)"
@@ -291,11 +293,11 @@ try {
     Write-Output "  AF_XDP snapshot capture complete ($(Format-Milliseconds $capture.Wall) ms)"
 
     for ($run = 1; $run -le $Runs; $run++) {
-        $result = Invoke-AfxdpVm -RequireMetric -RequiredMarker "NETSNAP-RESTORE-PROBE-OK: $Gateway" -Arguments @(
+        $result = Invoke-AfxdpVm -RequireMetric -RequiredMarker $restoreMarker -Arguments @(
             '--restore', $SnapshotPath,
             '--mem', '256',
             '--exit-on-boot',
-            '--boot-marker', 'NETSNAP-RESTORE-OK'
+            '--boot-marker', $restoreMarker
         )
         $restored.Add($result.Metric)
         $restoreWall.Add($result.Wall)
