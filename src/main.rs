@@ -36,8 +36,6 @@ mod vmm;
 
 // Windows backend: Windows Hypervisor Platform (WHP) VMM.
 #[cfg(target_os = "windows")]
-mod hcs;
-#[cfg(target_os = "windows")]
 mod whp;
 #[cfg(target_os = "windows")]
 mod windows_terminal;
@@ -46,27 +44,9 @@ use ::std::path::PathBuf;
 
 use ::anyhow::{Context, Result, bail};
 use ::clap::Parser;
-#[cfg(target_os = "windows")]
-use ::clap::ValueEnum;
 use ::log::LevelFilter;
 
 const PVH_DEFAULT_CMDLINE: &str = "earlycon=xe9 console=hvc0 reboot=t panic=-1";
-#[cfg(target_os = "windows")]
-const HCS_DEFAULT_CMDLINE: &str =
-    "console=ttyS0,115200 8250_core.nr_uarts=1 8250_core.skip_txen_test=1 panic=-1";
-#[cfg(target_os = "windows")]
-const HCS_SNAPSHOT_DEFAULT_CMDLINE: &str =
-    "console=ttyS0,115200 8250_core.nr_uarts=2 8250_core.skip_txen_test=1 panic=-1";
-
-/// Windows virtualization backend selected during the HCS migration.
-#[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum WindowsBackend {
-    /// Existing raw Windows Hypervisor Platform backend.
-    Whp,
-    /// Host Compute Service backend under development.
-    Hcs,
-}
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]
@@ -75,11 +55,6 @@ enum WindowsBackend {
     about = "Minimal x86_64 micro-VM that PVH-boots Linux from a RAM initramfs (optional KVM SMP via --vcpus)."
 )]
 struct Args {
-    /// Windows virtualization backend. WHP remains the default during the HCS rollout.
-    #[cfg(target_os = "windows")]
-    #[arg(long, value_enum, default_value_t = WindowsBackend::Whp)]
-    backend: WindowsBackend,
-
     /// Path to the uncompressed `vmlinux` (PVH) kernel image.
     #[arg(long)]
     kernel: Option<PathBuf>,
@@ -164,7 +139,7 @@ struct Args {
     #[arg(long, value_name = "MiB")]
     mount_size: Option<u64>,
 
-    /// Run the selected backend's self-test or capability preflight instead of booting.
+    /// Run the platform backend's protected-mode self-test instead of booting.
     #[arg(long)]
     selftest: bool,
 
@@ -180,11 +155,6 @@ struct Args {
     /// `--net`, which remains the standalone SLIRP configuration.
     #[arg(long, value_name = "JSON", conflicts_with = "net")]
     net_config: Option<PathBuf>,
-
-    /// Descriptor for an externally managed HCN endpoint. Native HCS consumes the endpoint ID;
-    /// it never creates or deletes the network or endpoint described by this file.
-    #[arg(long, value_name = "JSON", conflicts_with = "net_config")]
-    hcn_endpoint_config: Option<PathBuf>,
 
     /// Attach to this pre-existing, user-owned host TAP instead of creating one per run. The TAP
     /// must already be configured (MAC, address, up); the VMM binds to it with a single ioctl (no
@@ -262,13 +232,10 @@ fn selftest(_args: &Args) -> Result<()> {
     vmm::selftest()
 }
 
-/// Runs the selected Windows backend's self-test or capability preflight.
+/// Runs the WHP protected-mode self-test.
 #[cfg(target_os = "windows")]
-fn selftest(args: &Args) -> Result<()> {
-    match args.backend {
-        WindowsBackend::Whp => whp::selftest(),
-        WindowsBackend::Hcs => hcs::preflight(),
-    }
+fn selftest(_args: &Args) -> Result<()> {
+    whp::selftest()
 }
 
 /// Builds the backend configuration and runs the VM (Linux / KVM backend).
@@ -276,9 +243,6 @@ fn selftest(args: &Args) -> Result<()> {
 fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net_config.is_some() {
         bail!("--net-config is only available on the Windows/WHP backend");
-    }
-    if args.hcn_endpoint_config.is_some() {
-        bail!("--hcn-endpoint-config is only available on the Windows/HCS backend");
     }
     if args.restore_ready_pipe.is_some() {
         bail!("--restore-ready-pipe is only available on the Windows/WHP backend");
@@ -333,23 +297,11 @@ fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
 /// multi-vCPU (`--vcpus`, KVM-only) configurations are rejected here rather than silently ignored.
 #[cfg(target_os = "windows")]
 fn dispatch(args: Args, mem_bytes: u64) -> Result<()> {
-    match args.backend {
-        WindowsBackend::Whp => dispatch_whp(args, mem_bytes),
-        WindowsBackend::Hcs => dispatch_hcs(args, mem_bytes),
-    }
-}
-
-/// Builds and runs the legacy Windows/WHP backend.
-#[cfg(target_os = "windows")]
-fn dispatch_whp(args: Args, mem_bytes: u64) -> Result<()> {
     if args.net_tap.is_some() {
         bail!("--net-tap is only available on the Linux/KVM backend (WHP uses a user-mode NAT)");
     }
     if args.vcpus > 1 {
         bail!("--vcpus > 1 is only available on the Linux/KVM backend (WHP is single-vCPU)");
-    }
-    if args.hcn_endpoint_config.is_some() {
-        bail!("--hcn-endpoint-config is only available on the HCS backend");
     }
 
     let net: Option<whp::NetConfig> = match &args.net {
@@ -384,113 +336,4 @@ fn dispatch_whp(args: Args, mem_bytes: u64) -> Result<()> {
         mount_image: args.mount_image,
         mount_size: args.mount_size,
     })
-}
-
-/// Builds and runs the Windows/HCS Phase 0 backend.
-#[cfg(target_os = "windows")]
-fn dispatch_hcs(args: Args, mem_bytes: u64) -> Result<()> {
-    if args.snapshot.is_some() && args.restore.is_some() {
-        bail!("--snapshot and --restore cannot be combined on the HCS backend");
-    }
-    if args.mount.is_some() && (args.snapshot.is_some() || args.restore.is_some()) {
-        bail!("HCS Plan9 shares are not supported during snapshot capture or restore");
-    }
-    if args.mount_image.is_some() || args.mount_size.is_some() {
-        bail!("--mount-image and --mount-size are not supported by HCS Plan9 shares");
-    }
-    if args.net_tap.is_some() {
-        bail!("--net-tap is not supported by the HCS backend (HCS consumes an HCN endpoint)");
-    }
-    if args.net_config.is_some() {
-        bail!("--net-config is only available on the WHP backend");
-    }
-    if args.net.is_some() && args.hcn_endpoint_config.is_none() {
-        bail!("HCS --net requires --hcn-endpoint-config");
-    }
-    if args.restore.is_some() && args.net.is_some() {
-        bail!("--net cannot override networking stored in an HCS snapshot");
-    }
-    if args.vcpus > 1 {
-        bail!("--vcpus > 1 is not supported by the Phase 0 HCS backend yet");
-    }
-
-    let snapshot_enabled: bool = args.snapshot.is_some();
-    if args.cmdline.as_deref().is_some_and(|cmdline| {
-        cmdline
-            .split_whitespace()
-            .any(|token| token.starts_with("nvx_snapshot_transport="))
-    }) {
-        bail!("--cmdline must not set the reserved `nvx_snapshot_transport` option");
-    }
-    if snapshot_enabled
-        && args
-            .cmdline
-            .as_deref()
-            .and_then(hcs_uart_limit)
-            .is_some_and(|count| count < 2)
-    {
-        bail!(
-            "HCS snapshots require COM2; remove the `8250_core.nr_uarts` limit from --cmdline or set it to at least 2"
-        );
-    }
-    let default_cmdline: &str = if snapshot_enabled {
-        HCS_SNAPSHOT_DEFAULT_CMDLINE
-    } else {
-        HCS_DEFAULT_CMDLINE
-    };
-
-    let mut cmdline: String = args.cmdline.unwrap_or_else(|| default_cmdline.to_string());
-    if snapshot_enabled {
-        cmdline.push_str(" nvx_snapshot_transport=hcs-com2");
-    }
-    let net: Option<hcs::NetConfig> = match &args.net {
-        Some(spec) => Some(hcs::NetConfig::parse(spec)?),
-        None => None,
-    };
-
-    hcs::run(hcs::Config {
-        kernel: args.kernel,
-        initrd: args.initrd,
-        cmdline,
-        mem_bytes,
-        quiet: args.quiet,
-        exit_on_boot: args.exit_on_boot,
-        boot_marker: args.boot_marker,
-        timing_markers: args.timing_marker,
-        defer_stdin_until_boot: args.defer_stdin_until_boot,
-        snapshot: args.snapshot,
-        restore: args.restore,
-        net,
-        hcn_endpoint_config: args.hcn_endpoint_config,
-        mount: args.mount,
-        mount_target: args.mount_target,
-        mount_read_only: !args.mount_rw,
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn hcs_uart_limit(cmdline: &str) -> Option<u32> {
-    cmdline
-        .split_whitespace()
-        .filter_map(|token| token.strip_prefix("8250_core.nr_uarts="))
-        .filter_map(|value| value.parse().ok())
-        .next_back()
-}
-
-#[cfg(all(test, target_os = "windows"))]
-mod tests {
-    use super::hcs_uart_limit;
-
-    #[test]
-    fn hcs_uart_limit_uses_last_valid_value() {
-        assert_eq!(
-            hcs_uart_limit("8250_core.nr_uarts=1 foo 8250_core.nr_uarts=4"),
-            Some(4)
-        );
-        assert_eq!(
-            hcs_uart_limit("8250_core.nr_uarts=4 8250_core.nr_uarts=0"),
-            Some(0)
-        );
-        assert_eq!(hcs_uart_limit("console=ttyS0"), None);
-    }
 }

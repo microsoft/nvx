@@ -87,9 +87,9 @@ if ($hns.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
     throw "Host Network Service is not running (status: $($hns.Status))"
 }
 
-& $Microvm --backend hcs --selftest --log-level warn
+& $Microvm --selftest --log-level warn
 if ($LASTEXITCODE -ne 0) {
-    throw "HCS preflight failed with exit code $LASTEXITCODE"
+    throw "WHP self-test failed with exit code $LASTEXITCODE"
 }
 
 $endpoint = Get-Content -LiteralPath $EndpointConfig -Raw | ConvertFrom-Json

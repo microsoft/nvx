@@ -1,23 +1,19 @@
 # Benchmark Reference
 
-NVX runs the same 23-metric benchmark suite on Linux/KVM, Windows/WHP, Windows/HCS,
-and Windows/HCN + AF_XDP. CI reports the median (p50) for each metric in the job
+NVX runs the same 23-metric benchmark suite on Linux/KVM, Windows/WHP, and
+Windows/HCN + AF_XDP. CI reports the median (p50) for each metric in the job
 summary. Latency metrics are lower-is-better; throughput metrics are
 higher-is-better.
 
 ## Benchmark commands
 
-| Benchmark | KVM and WHP | HCS | HCN + AF_XDP | Description |
-| --- | --- | --- | --- | --- |
-| Cold start | `measure-coldstart` | `bench-hcs-coldstart` | `measure-coldstart` | Measures guest start to kernel/userspace or shell-ready markers under rendered, discarded, silent, and tuned configurations. |
-| Virtual file system | `bench-virtfs` | `bench-hcs-virtfs` | `bench-virtfs` | Measures sequential guest write/read throughput for ephemeral and persistent storage, then verifies data across cold VM launches. HCS uses a writable Plan9 share; WHP-based backends use virt-fs images. |
-| Python snapshot | `snapshot-demo` | `bench-hcs-snapshot-py` | `snapshot-demo` | Compares a cold Python start, including warmed pandas/numpy work, with restoration of the already-warmed interpreter. |
-| Shell snapshot | `bench-snapshot-shell` | `bench-hcs-snapshot-shell` | `bench-snapshot-shell` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
-| Network snapshot | `bench-net-snapshot` | `bench-hcs-net-snapshot-py` | `benchmark-hcn-afxdp-snapshot.ps1` | Compares a network-ready cold boot with snapshot restore. HCS verifies a guest-to-host HTTP request; HCN + AF_XDP verifies gateway connectivity after every restore. |
-
-The HCS commands use HCS-native VMRS snapshots and report additional process-wall
-and capture information in their human-readable logs. The shared 23-metric table
-selects the equivalent guest-latency values, plus the network restore wall time.
+| Benchmark | KVM and WHP | HCN + AF_XDP | Description |
+| --- | --- | --- | --- |
+| Cold start | `measure-coldstart` | `measure-coldstart` | Measures guest start to kernel/userspace or shell-ready markers under rendered, discarded, silent, and tuned configurations. |
+| Virtual file system | `bench-virtfs` | `bench-virtfs` | Measures sequential guest write/read throughput for ephemeral and persistent storage, then verifies data across cold VM launches. |
+| Python snapshot | `snapshot-demo` | `snapshot-demo` | Compares a cold Python start, including warmed pandas/numpy work, with restoration of the already-warmed interpreter. |
+| Shell snapshot | `bench-snapshot-shell` | `bench-snapshot-shell` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
+| Network snapshot | `bench-net-snapshot` | `benchmark-hcn-afxdp-snapshot.ps1` | Compares a network-ready cold boot with snapshot restore. HCN + AF_XDP verifies gateway connectivity after every restore. |
 
 ## Canonical metrics
 
@@ -88,5 +84,5 @@ backend-specific network verification marker is observed.
 `scripts/performance.py collect --require-shared-suite` rejects a backend result
 unless it contains exactly the 23 metrics above. Each backend job publishes its
 p50 table to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM
-and WHP results with the latest base-branch history; privileged HCS and HCN/AF_XDP
-results are collected when their hardware jobs are enabled.
+and WHP results with the latest base-branch history; privileged HCN/AF_XDP results
+are collected when the hardware job is enabled.

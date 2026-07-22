@@ -244,85 +244,6 @@ def _parse_network(text: str) -> dict[str, MetricValue]:
     return _parse_fixed(text, "network.log", patterns)
 
 
-def _parse_hcs_shell_snapshot(text: str) -> dict[str, MetricValue]:
-    metrics: dict[str, MetricValue] = {}
-    for memory_mib in SHELL_SNAPSHOT_MEMORIES_MIB:
-        section = _snapshot_section(text, memory_mib, "hcs-shell-snapshot.log")
-        metrics.update(
-            _parse_fixed(
-                section,
-                f"hcs-shell-snapshot.log ({memory_mib} MiB)",
-                [
-                    (
-                        f"shell_snapshot_cold_{memory_mib}_mib",
-                        "ms",
-                        "lower",
-                        rf"^\s*cold guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-                    ),
-                    (
-                        f"shell_snapshot_restore_{memory_mib}_mib",
-                        "ms",
-                        "lower",
-                        rf"^\s*restore guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-                    ),
-                ],
-            )
-        )
-    return metrics
-
-
-def _parse_hcs_python_snapshot(text: str) -> dict[str, MetricValue]:
-    return _parse_fixed(
-        text,
-        "hcs-python-snapshot.log",
-        [
-            (
-                "python_snapshot_cold",
-                "ms",
-                "lower",
-                rf"^\s*cold guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-            ),
-            (
-                "python_snapshot_restore",
-                "ms",
-                "lower",
-                rf"^\s*restore guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-            ),
-        ],
-    )
-
-
-def _parse_hcs_network_snapshot(text: str) -> dict[str, MetricValue]:
-    if re.search(r"^\s*verified marker\s*:\s*HELLOPY-NET OK\s*$", text, re.MULTILINE) is None:
-        raise PerformanceError(
-            "missing verified marker 'HELLOPY-NET OK' in hcs-network-snapshot.log"
-        )
-    return _parse_fixed(
-        text,
-        "hcs-network-snapshot.log",
-        [
-            (
-                "network_snapshot_cold",
-                "ms",
-                "lower",
-                rf"^\s*cold guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-            ),
-            (
-                "network_snapshot_restore",
-                "ms",
-                "lower",
-                rf"^\s*restore guest latency\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-            ),
-            (
-                "network_snapshot_restore_wall",
-                "ms",
-                "lower",
-                rf"^\s*restore process wall\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-            ),
-        ],
-    )
-
-
 def _parse_hcn_afxdp_network_snapshot(text: str) -> dict[str, MetricValue]:
     if re.search(
         r"^\s*verified marker\s*:\s*NETSNAP-RESTORE-OK\s*$",
@@ -412,14 +333,6 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "network.log": (_parse_network, False),
 }
 
-HCS_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
-    "hcs-cold-start.log": (_parse_cold_start, True),
-    "hcs-virtfs.log": (_parse_virtfs, True),
-    "hcs-shell-snapshot.log": (_parse_hcs_shell_snapshot, True),
-    "hcs-python-snapshot.log": (_parse_hcs_python_snapshot, True),
-    "hcs-network-snapshot.log": (_parse_hcs_network_snapshot, False),
-}
-
 HCN_AFXDP_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     **LOG_PARSERS,
     "network.log": (_parse_hcn_afxdp_network_snapshot, False),
@@ -428,7 +341,6 @@ HCN_AFXDP_LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
 PLATFORM_NAMES = {
     "linux-kvm": "Linux / KVM",
     "windows-whp": "Windows / WHP",
-    "windows-hcs": "Windows / HCS",
     "windows-hcn-afxdp": "Windows / HCN + AF_XDP",
 }
 
@@ -544,11 +456,9 @@ def collect_results(
 
     required_optional_logs = {
         "network.log": require_network,
-        "hcs-network-snapshot.log": require_network,
         "shell-snapshot.log": require_shell_snapshot,
     }
     platform_parsers = {
-        "windows-hcs": HCS_LOG_PARSERS,
         "windows-hcn-afxdp": HCN_AFXDP_LOG_PARSERS,
     }
     parsers = platform_parsers.get(platform, LOG_PARSERS)

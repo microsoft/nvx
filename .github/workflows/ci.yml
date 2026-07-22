@@ -42,10 +42,6 @@ on:
         description: Run privileged external HCN vNIC + AF_XDP tests and benchmarks
         type: boolean
         default: false
-      run_hcs:
-        description: Run native HCS smoke tests and benchmarks
-        type: boolean
-        default: false
 
 concurrency:
   # Cancel superseded runs of the same PR, but retain every merged-commit run.
@@ -97,7 +93,7 @@ jobs:
           path: |
             build/vmlinux
             build/initramfs.cpio.gz
-          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'kernel/**', 'alpine/init', 'alpine/hcs-plan9.c') }}
+          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'kernel/**', 'alpine/init') }}
 
       - name: Build kernel + initramfs (Docker)
         if: steps.cache-base.outputs.cache-hit != 'true'
@@ -492,191 +488,6 @@ jobs:
           enableCrossOsArchive: true
 
   # -----------------------------------------------------------------------------------------------
-  # Native HCS: externally provision one endpoint, verify HCS can borrow it without deleting it,
-  # and run the HCS snapshot benchmark family. This privileged lane is opt-in and never runs for
-  # pull requests because its setup script mutates persistent host networking state.
-  # -----------------------------------------------------------------------------------------------
-  windows-hcs:
-    name: Windows / HCS
-    needs: [artifacts, windows]
-    if: >-
-      ${{
-        (github.event_name == 'push' && vars.NVX_HCS_CI == 'true') ||
-        (github.event_name == 'workflow_dispatch' && inputs.run_hcs)
-      }}
-    runs-on: [self-hosted, windows, x64, hcn-afxdp]
-    timeout-minutes: 75
-    defaults:
-      run:
-        shell: powershell
-    env:
-      RUN_BENCH: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks == 'true' }}
-      NVX_HCS_GUEST_ADDRESS: ${{ vars.NVX_HCS_GUEST_ADDRESS || '192.168.241.2' }}
-      NVX_HCS_GATEWAY: ${{ vars.NVX_HCS_GATEWAY || '192.168.241.1' }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Set up cross-OS cache tools
-        run: .\scripts\setup-cross-os-cache.ps1
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
-
-      - name: Build (release)
-        run: cargo build --release
-
-      - name: Restore run artifacts
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            build/vmlinux
-            build/initramfs.cpio.gz
-            build/initramfs-python.cpio.gz
-          key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: HCS preflight
-        run: .\target\release\microvm.exe --backend hcs --selftest --log-level warn
-
-      - name: Set up external HCN endpoint
-        run: |
-          $descriptor = Join-Path $env:RUNNER_TEMP 'nvx-hcs-endpoint.json'
-          .\scripts\setup-hcn-endpoint.ps1 `
-            -OutputPath $descriptor `
-            -GuestAddress $env:NVX_HCS_GUEST_ADDRESS `
-            -Gateway $env:NVX_HCS_GATEWAY
-          $utf8 = New-Object Text.UTF8Encoding($false)
-          [IO.File]::AppendAllText(
-            $env:GITHUB_ENV,
-            "NVX_HCN_ENDPOINT_CONFIG=$descriptor$([Environment]::NewLine)",
-            $utf8
-          )
-
-      - name: Smoke — externally managed HCN endpoint + HCS
-        if: env.RUN_BENCH != 'true'
-        timeout-minutes: 10
-        run: |
-          .\target\release\microvm.exe `
-            --backend hcs `
-            --kernel build\vmlinux `
-            --initrd build\initramfs.cpio.gz `
-            --mem 256 `
-            --net "$env:NVX_HCS_GUEST_ADDRESS/24" `
-            --hcn-endpoint-config $env:NVX_HCN_ENDPOINT_CONFIG `
-            --exit-on-boot `
-            --quiet
-
-      - name: Prepare HCS performance logs
-        if: env.RUN_BENCH == 'true'
-        run: |
-          Remove-Item -Recurse -Force build\performance-hcs -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path build\performance-hcs | Out-Null
-
-      - name: Benchmark — HCS cold-start
-        if: env.RUN_BENCH == 'true'
-        run: |
-          python scripts\nvx.py bench-hcs-coldstart --runs 5 --mem 512 *>&1 |
-            Tee-Object -FilePath build\performance-hcs\hcs-cold-start.log
-
-      - name: Benchmark — HCS Plan9 virt-fs
-        if: env.RUN_BENCH == 'true'
-        run: |
-          python scripts\nvx.py bench-hcs-virtfs --runs 3 --mem 512 *>&1 |
-            Tee-Object -FilePath build\performance-hcs\hcs-virtfs.log
-
-      - name: Benchmark — HCS snapshot/restore (shell)
-        if: env.RUN_BENCH == 'true'
-        run: |
-          python scripts\nvx.py bench-hcs-snapshot-shell --runs 5 --memories "64 128 256 512" *>&1 |
-            Tee-Object -FilePath build\performance-hcs\hcs-shell-snapshot.log
-
-      - name: Benchmark — HCS snapshot/restore (Python)
-        if: env.RUN_BENCH == 'true'
-        run: |
-          python scripts\nvx.py bench-hcs-snapshot-py --runs 5 --mem 512 *>&1 |
-            Tee-Object -FilePath build\performance-hcs\hcs-python-snapshot.log
-
-      - name: Allow HCS benchmark helper through Windows Firewall
-        if: env.RUN_BENCH == 'true'
-        run: |
-          $rule = "nvx-hcs-${env:GITHUB_RUN_ID}-${env:GITHUB_RUN_ATTEMPT}"
-          New-NetFirewallRule `
-            -Name $rule `
-            -DisplayName $rule `
-            -Direction Inbound `
-            -Action Allow `
-            -Protocol TCP `
-            -LocalPort 8099 `
-            -Profile Any | Out-Null
-          $utf8 = New-Object Text.UTF8Encoding($false)
-          [IO.File]::AppendAllText(
-            $env:GITHUB_ENV,
-            "NVX_HCS_FIREWALL_RULE=$rule$([Environment]::NewLine)",
-            $utf8
-          )
-
-      - name: Benchmark — external HCN endpoint + HCS snapshot
-        if: env.RUN_BENCH == 'true'
-        run: |
-          python scripts\nvx.py bench-hcs-net-snapshot-py `
-            --runs 5 `
-            --mem 512 `
-            --net "$env:NVX_HCS_GUEST_ADDRESS/24" `
-            --hcn-endpoint-config $env:NVX_HCN_ENDPOINT_CONFIG *>&1 |
-            Tee-Object -FilePath build\performance-hcs\hcs-network-snapshot.log
-
-      - name: Remove HCS benchmark firewall rule
-        if: always() && env.NVX_HCS_FIREWALL_RULE != ''
-        run: Remove-NetFirewallRule -Name $env:NVX_HCS_FIREWALL_RULE -ErrorAction SilentlyContinue
-
-      - name: Publish Windows / HCS benchmark table
-        if: env.RUN_BENCH == 'true'
-        run: |
-          python scripts\performance.py collect `
-            --platform windows-hcs `
-            --commit $env:GITHUB_SHA `
-            --input-dir build\performance-hcs `
-            --output-dir build\performance-results `
-            --require-network `
-            --require-shared-suite `
-            --summary $env:GITHUB_STEP_SUMMARY
-
-      - name: Clean up external HCN endpoint
-        if: always()
-        run: |
-          $descriptor = Join-Path $env:RUNNER_TEMP 'nvx-hcs-endpoint.json'
-          .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $descriptor
-
-      - name: Stage Windows / HCS performance logs
-        if: always() && env.RUN_BENCH == 'true' && hashFiles('build/performance-hcs/*.log') != ''
-        run: |
-          Remove-Item -Recurse -Force performance-logs\windows-hcs -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path performance-logs\windows-hcs | Out-Null
-          Copy-Item build\performance-hcs\*.log performance-logs\windows-hcs\
-
-      - name: Save Windows / HCS performance logs
-        if: always() && env.RUN_BENCH == 'true' && hashFiles('performance-logs/windows-hcs/*.log') != ''
-        uses: actions/cache/save@v5
-        with:
-          path: performance-logs/windows-hcs
-          key: performance-logs-windows-hcs-${{ github.run_id }}-${{ github.run_attempt }}
-          enableCrossOsArchive: true
-
-  # -----------------------------------------------------------------------------------------------
   # Privileged Windows networking: externally create an HCN NAT endpoint, attach it to the host
   # namespace as a vNIC, bind every AF_XDP RSS queue, boot the WHP guest, and require an HTTP round
   # trip to the HCN gateway. Enable automatic main-branch runs with NVX_HCN_AFXDP_CI=true or opt in
@@ -938,7 +749,7 @@ jobs:
   # -----------------------------------------------------------------------------------------------
   performance-persist:
     name: Persist performance baseline
-    needs: [linux, windows, windows-hcs, windows-hcn-afxdp]
+    needs: [linux, windows, windows-hcn-afxdp]
     if: >-
       ${{
         always() &&
@@ -947,7 +758,6 @@ jobs:
         !cancelled() &&
         needs.linux.result == 'success' &&
         needs.windows.result == 'success' &&
-        (needs.windows-hcs.result == 'success' || needs.windows-hcs.result == 'skipped') &&
         (needs.windows-hcn-afxdp.result == 'success' || needs.windows-hcn-afxdp.result == 'skipped')
       }}
     runs-on: ubuntu-24.04
@@ -973,15 +783,6 @@ jobs:
         with:
           path: performance-logs/windows-whp
           key: performance-logs-windows-whp-${{ github.run_id }}-${{ github.run_attempt }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Windows / HCS performance logs
-        if: needs.windows-hcs.result == 'success'
-        uses: actions/cache/restore@v5
-        with:
-          path: performance-logs/windows-hcs
-          key: performance-logs-windows-hcs-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
@@ -1011,17 +812,6 @@ jobs:
             --output-dir performance-results \
             --require-network \
             --require-shell-snapshot \
-            --require-shared-suite
-
-      - name: Collect Windows / HCS p50 results
-        if: needs.windows-hcs.result == 'success'
-        run: |
-          python3 scripts/performance.py collect \
-            --platform windows-hcs \
-            --commit "${GITHUB_SHA}" \
-            --input-dir performance-logs/windows-hcs \
-            --output-dir performance-results \
-            --require-network \
             --require-shared-suite
 
       - name: Collect Windows / HCN AF_XDP p50 results

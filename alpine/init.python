@@ -10,7 +10,6 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 
 fatal() {
     echo "$*" >&2
-    echo "NVX-HCS-NETWORK-DONE"
     /bin/busybox reboot -f
     exit 1
 }

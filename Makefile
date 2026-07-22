@@ -10,7 +10,7 @@ KERNEL_IMG ?= $(BUILD_DIR)/vmlinux
 INITRD_IMG ?= $(BUILD_DIR)/initramfs.cpio.gz
 PY_INITRD ?= $(BUILD_DIR)/initramfs-python.cpio.gz
 
-.PHONY: all world release build test kernel initramfs python-initramfs artifacts run boot selftest boot-test measure bench-virtfs bench-net-snapshot bench-net-snapshot-py bench-snapshot-shell bench-hcs-snapshot-shell bench-hcs-snapshot-py bench-hcs-net-snapshot-py snapshot-demo snapshot-boot clean
+.PHONY: all world release build test kernel initramfs python-initramfs artifacts run boot selftest boot-test measure bench-virtfs bench-net-snapshot bench-net-snapshot-py bench-snapshot-shell snapshot-demo snapshot-boot clean
 
 all: release
 
@@ -80,17 +80,6 @@ bench-net-snapshot-py: release
 # restore from a snapshot captured at the shell-ready point, across 64/128/256/512 MiB of guest RAM.
 bench-snapshot-shell: release
 	$(PYTHON) scripts/nvx.py bench-snapshot-shell --kernel "$(KERNEL_IMG)" --initrd "$(INITRD_IMG)"
-
-# Benchmark HCS-native save/restore on Windows. These require an elevated process or membership in
-# Hyper-V Administrators and Linux artifacts built with the Hyper-V serial guest support.
-bench-hcs-snapshot-shell: release
-	$(PYTHON) scripts/nvx.py bench-hcs-snapshot-shell --kernel "$(KERNEL_IMG)" --initrd "$(INITRD_IMG)"
-
-bench-hcs-snapshot-py: release
-	$(PYTHON) scripts/nvx.py bench-hcs-snapshot-py --kernel "$(KERNEL_IMG)" --initrd "$(PY_INITRD)"
-
-bench-hcs-net-snapshot-py: release
-	$(PYTHON) scripts/nvx.py bench-hcs-net-snapshot-py --kernel "$(KERNEL_IMG)" --initrd "$(PY_INITRD)"
 
 snapshot-demo: release $(KERNEL_IMG) $(PY_INITRD)
 	$(PYTHON) scripts/nvx.py snapshot-demo --kernel "$(KERNEL_IMG)" --initrd "$(PY_INITRD)"

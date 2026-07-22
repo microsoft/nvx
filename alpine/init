@@ -8,65 +8,14 @@ mount -t tmpfs none /tmp
 
 fatal() {
     echo "$*" >&2
-    echo "NVX-HCS-NETWORK-DONE"
-    case " $(cat /proc/cmdline 2>/dev/null) " in
-        *" virtfs_bench="*) echo "NVX-HCS-VIRTFS-FAIL" ;;
-    esac
     /bin/busybox reboot -f
     exit 1
 }
-# virt-fs: native HCS exposes a Plan9 share over Hyper-V sockets; KVM/WHP expose a
-# phram/mtdblock image. Mount either transport at the requested target.
-# driver surfaces it as /dev/mtdblock0. Mount it at the requested point using the filesystem type
+# virt-fs: KVM/WHP expose a phram image, which the driver surfaces as /dev/mtdblock0.
+# Mount it at the requested point using the filesystem type
 # and access mode the VMM chose (all passed on the kernel command line: "virtfs_dir=<path>",
 # "virtfs_fs=<type>", "virtfs_mode=<ro|rw>"; defaults: /mnt/host, squashfs, ro).
-plan9=$(sed -n 's/.*virtfs_plan9=\([^ ]*\).*/\1/p' /proc/cmdline)
-if [ "$plan9" = 1 ]; then
-    vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
-    [ -n "$vdir" ] || vdir=/mnt/host
-    vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
-    [ -n "$vmode" ] || vmode=ro
-    vaname=$(sed -n 's/.*virtfs_aname=\([^ ]*\).*/\1/p' /proc/cmdline)
-    [ -n "$vaname" ] || vaname=0
-    mkdir -p "$vdir"
-    if /sbin/hcs-plan9 "$vdir" "$vmode" "$vaname"; then
-        echo "virtfs: mounted HCS Plan9 share at $vdir ($vmode)"
-    else
-        fatal "virtfs: failed to mount HCS Plan9 share at $vdir"
-    fi
-    vbench=$(sed -n 's/.*virtfs_bench=\([^ ]*\).*/\1/p' /proc/cmdline)
-    vpayload=$(sed -n 's/.*virtfs_payload_mib=\([^ ]*\).*/\1/p' /proc/cmdline)
-    case "$vbench" in
-        io|create)
-            case "$vpayload" in
-                ''|*[!0-9]*) fatal "virtfs: invalid benchmark payload '$vpayload'" ;;
-            esac
-            ;;
-        verify|'') ;;
-        *) fatal "virtfs: invalid benchmark workload '$vbench'" ;;
-    esac
-    case "$vbench" in
-        io)
-            /bin/busybox dd if=/dev/zero of="$vdir/bench.bin" bs=1M count="$vpayload" conv=fsync 2>&1 || fatal "virtfs: benchmark write failed"
-            /bin/busybox sync
-            echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-            /bin/busybox dd if="$vdir/bench.bin" of=/dev/null bs=1M 2>&1 || fatal "virtfs: benchmark read failed"
-            /bin/busybox sync
-            ;;
-        create)
-            /bin/busybox dd if=/dev/zero of="$vdir/data.bin" bs=1M count="$vpayload" 2>/dev/null || fatal "virtfs: benchmark data creation failed"
-            /bin/busybox cksum "$vdir/data.bin" || fatal "virtfs: benchmark checksum failed"
-            /bin/busybox sync
-            ;;
-        verify)
-            /bin/busybox cksum "$vdir/data.bin" 2>/dev/null || fatal "virtfs: benchmark verification failed"
-            ;;
-    esac
-    if [ -n "$vbench" ]; then
-        echo "NVX-HCS-VIRTFS-DONE"
-        while :; do /bin/busybox sleep 1; done
-    fi
-elif [ -e /dev/mtdblock0 ]; then
+if [ -e /dev/mtdblock0 ]; then
     vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
     [ -n "$vdir" ] || vdir=/mnt/host
     vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)

@@ -6,7 +6,7 @@ A minimal **x86_64 micro-VM** (single processor by default, optional functional 
 backend via `--vcpus`) that boots a Linux (Alpine) kernel through the **PVH boot protocol**,
 entirely from a **RAM initramfs**. The raw KVM/WHP machine model has no PCI, ACPI, or block device
 by default; its tiny always-on PMIO model is a bidirectional "portb" console plus the wall-clock
-registers of an RTC. The optional HCS backend supplies the normal Hyper-V platform devices.
+registers of an RTC.
 
 It runs on **two hypervisor backends** from the same codebase:
 
@@ -89,7 +89,7 @@ uid=0(root) gid=0(root)
 
 | Path                                          | Responsibility                                                                                                                                                                                                                                                                                 |
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/main.rs`                                 | CLI and entry point; dispatches to the KVM (Linux), WHP (Windows), or experimental HCS (Windows) backend                                                                                                                                                                                       |
+| `src/main.rs`                                 | CLI and entry point; dispatches to the KVM (Linux) or WHP (Windows) backend                                                                                                                                                                                                                    |
 | `src/console.rs`                              | *(shared)* Console sink: buffered/quiet output, byte count, cold-start timing                                                                                                                                                                                                                  |
 | `src/layout.rs`                               | *(shared)* Guest-physical memory map constants                                                                                                                                                                                                                                                 |
 | `src/devices/portb.rs`                        | *(shared)* portb console device: TX `outb` `0xE9`, RX poll `0xEA`/`0xE9`, host-input queue                                                                                                                                                                                                     |
@@ -119,8 +119,7 @@ uid=0(root) gid=0(root)
 | `src/whp/virtfs.rs`                           | *(Windows/WHP)* virt-fs (`--mount`): a FAT image built in pure Rust (`fatfs`), mapped above RAM via `WHvMapGpaRange`; the guest mounts it as `vfat`                                                                                                                                            |
 | `src/whp/xdp.rs`                              | *(Windows/WHP)* bounded AF_XDP frame backend, queue discovery, control-pipe handshake, and XDP program lifecycle                                                                                                                                                                             |
 | `src/l2bridge.rs`                             | *(shared)* strict versioned `--net-config` schema, guest bootstrap, and snapshot-safe external NIC identity                                                                                                                                                                                  |
-| `src/hcs/`                                    | *(Windows/HCS)* HCS compute/snapshot backend and borrowed HCN endpoint validation/attachment                                                                                                                                                                                               |
-| `src/windows_terminal.rs`                     | *(Windows)* shared console mode guard for WHP and HCS                                                                                                                                                                                                                                         |
+| `src/windows_terminal.rs`                     | *(Windows/WHP)* console mode guard                                                                                                                                                                                                                                                             |
 | `docker/Dockerfile`                           | Builds the PVH `vmlinux` + Alpine `initramfs.cpio.gz` in a Linux container (for use from Windows)                                                                                                                                                                                              |
 | `kernel/config-microvm`                       | Minimal Linux kernel configuration                                                                                                                                                                                                                                                             |
 | `kernel/hvc_xe9.c`                            | The portb `hvc0` console driver (installed into the tree by the Python kernel builder)                                                                                                                                                                                                         |
@@ -153,9 +152,7 @@ Probing absent hardware is at best wasted boot time and at worst a multi-second 
 | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CONFIG_PVH=y`                                                                                                 | Enter through the 32-bit PVH entry note, so the VMM loads an uncompressed `vmlinux` and skips the real-mode/bzImage setup and self-decompression path entirely.                                                                                                                                                                                                                                     |
 | `CONFIG_HYPERVISOR_GUEST=y`, `CONFIG_PARAVIRT=y`, `CONFIG_KVM_GUEST=y`, `CONFIG_PARAVIRT_CLOCK=y`              | Run as a KVM guest and take time from `kvm-clock`. The VMM also passes KVM's virtual TSC rate as `tsc_early_khz`, avoiding timing-sensitive PIT calibration before `kvm-clock` initializes.                                                                                                                                                                                                         |
-| `CONFIG_ACPI=y`, `CONFIG_PCI=y` (and no EFI)                                                                   | HCS kernel-direct guests need the Hyper-V platform discovery paths. The raw KVM/WHP backends still provide no ACPI tables or PCI devices, so these paths remain dormant there.                                                                                                                                                                                                                     |
-| `CONFIG_SERIAL_8250=y`, `CONFIG_SERIAL_8250_CONSOLE=y`, `CONFIG_HVC_XE9=y`                                      | Raw KVM/WHP use the portb `hvc0` driver (`kernel/hvc_xe9.c`); HCS uses its emulated COM ports through the built-in 8250 console. `CONFIG_SERIAL_EARLYCON` remains available for `earlycon=xe9`.                                                                                                                                                                                                    |
-| `CONFIG_HYPERV=y`, `CONFIG_HYPERV_NET=y`                                                                       | HCS boots on the Hyper-V synthetic platform and attaches its HCN endpoint through NetVSC/VMBus. The drivers are built in because the initramfs has no module tree.                                                                                                                                                                                                                                 |
+| `CONFIG_SERIAL_EARLYCON=y`, `CONFIG_HVC_XE9=y`                                                                 | KVM/WHP use the portb `hvc0` driver (`kernel/hvc_xe9.c`), with `earlycon=xe9` available before the full console initializes.                                                                                                                                                                                                                                                                        |
 | `# CONFIG_FB`, `# CONFIG_HID`, `# CONFIG_SOUND`, `# CONFIG_ATA`, `# CONFIG_SCSI`, `# CONFIG_RTC_CLASS`, no USB | None of these devices exist, so their drivers and boot-time probes are removed.                                                                                                                                                                                                                                                                                                                     |
 | `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_DEVTMPFS=y`, `CONFIG_TMPFS=y`                                               | The whole userland is the initramfs unpacked into RAM; there is no block device or virtio, hence no storage stack.                                                                                                                                                                                                                                                                                  |
 | `CONFIG_NET=y`, `CONFIG_INET=y`, `CONFIG_VIRTIO_MMIO=y` (+ `_CMDLINE_DEVICES`), `CONFIG_VIRTIO_NET=y`          | The minimal networking needed for `--net`: IPv4 over one virtio-net NIC on a virtio-mmio window declared via `virtio_mmio.device=` on the kernel command line. IPv6, wireless, NFS and the rest of the stack stay off. Boots without `--net` pay only a few ms for the dormant stack.                                                                                                               |
@@ -208,9 +205,6 @@ make run            # boot Alpine to an interactive shell over the portb console
 | `bench-virtfs`     | virt-fs throughput + persistent `--mount-image` round-trip.                                         |
 | `snapshot-demo`    | pandas/numpy snapshot/restore benchmark.                                                             |
 | `snapshot-boot`    | Resume an interactive Python interpreter from a snapshot.                                          |
-| `bench-hcs-snapshot-shell` | HCS-native shell snapshot restore across memory sizes (Windows, privileged).              |
-| `bench-hcs-snapshot-py` | HCS-native warmed Python snapshot restore (Windows, privileged).                              |
-| `bench-hcs-net-snapshot-py` | HCN-backed HCS restore with real HTTP verification (Windows, privileged).               |
 | `clean`            | `cargo clean`.                                                                                      |
 
 `make kernel` / `initramfs` / `python-initramfs` always re-run their Python workflow. `snapshot-demo`
@@ -253,7 +247,6 @@ Run directly:
 
 | Flag                    | Default                                       | Meaning                                                                                          |
 | ----------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `--backend <whp|hcs>`   | `whp` (Windows only)                          | Select the Windows backend during the HCS migration                                              |
 | `--kernel <path>`       | (required)                                    | Uncompressed `vmlinux` (PVH)                                                                     |
 | `--initrd <path>`       | (none)                                        | RAM initramfs image                                                                              |
 | `--cmdline <str>`       | backend-specific                              | Kernel command line; an explicit value is always used unchanged                                 |
@@ -267,14 +260,14 @@ Run directly:
 | `--defer-stdin-until-boot` |                                            | Delay redirected cold-boot input until the boot marker; terminals/restores remain immediate      |
 | `--snapshot <dir>`      |                                               | Take a backend-specific snapshot into `<dir>` when the guest requests one, then exit             |
 | `--restore <dir>`       |                                               | Restore and resume from a snapshot `<dir>` instead of booting                                    |
-| `--net <IP/PREFIX>`     |                                               | Attach standalone networking (KVM TAP, WHP user-mode NAT, or HCS HCN endpoint)                   |
+| `--net <IP/PREFIX>`     |                                               | Attach standalone networking (KVM TAP or WHP user-mode NAT)                                      |
 | `--net-config <json>`   |                                               | Attach WHP AF_XDP networking from a strict external or HCN-provisioned manifest                  |
 | `--mount <dir>`         |                                               | Export a host directory to the guest as a virt-fs (read-only SquashFS by default)                |
 | `--mount-target <path>` | `/mnt/host`                                   | Guest mount point for `--mount`                                                                  |
 | `--mount-rw`            |                                               | Mount the `--mount` export read-write (ext4); ephemeral without `--mount-image`                  |
 | `--mount-image <file>`  |                                               | Persist a read-write `--mount` to this host image file (implies `--mount-rw`)                    |
 | `--mount-size <MiB>`    |                                               | Size of the writable ext4 image (headroom for guest writes; rw only)                             |
-| `--selftest`            |                                               | Run the WHP protected-mode self-test or HCS capability preflight and exit                        |
+| `--selftest`            |                                               | Run the KVM/WHP protected-mode self-test and exit                                                 |
 
 To **suppress all logging**, pass `--log-level off` (mutes the `[… INFO microvm::…]` lines but
 still renders the guest console), or `--quiet` for a fully silent run (no guest console and no
@@ -298,149 +291,15 @@ Hypervisor Platform** instead of KVM. The kernel and initramfs still have to be 
 - A stable **Rust** toolchain for the `x86_64-pc-windows-msvc` target (edition 2024).
 - **Docker Desktop** (Linux engine) to build the kernel + initramfs.
 
-### Experimental HCS Phase 0
+### HCN + AF_XDP CI
 
-The non-default HCS backend can boot a kernel-direct VM with one vCPU and COM1 console I/O. It
-requires Windows 11 Pro/Enterprise or Windows Server 2022 or newer with the full **Hyper-V** feature,
-plus an elevated process or membership in **Hyper-V Administrators**. First run the non-destructive
-service/schema preflight:
-
-```powershell
-.\target\release\microvm.exe --backend hcs --selftest
-```
-
-Then boot with the Hyper-V-capable kernel built by the artifact workflow:
-
-```powershell
-.\target\release\microvm.exe `
-  --backend hcs `
-  --kernel build\vmlinux `
-  --initrd build\initramfs.cpio.gz `
-  --exit-on-boot
-```
-
-The HCS default command line uses `ttyS0`; a user-provided `--cmdline` is preserved. During snapshot
-capture nvx appends only its reserved `nvx_snapshot_transport=hcs-com2` control token. This Phase 0
-path supports console, quiet mode, boot/timing markers, redirected-stdin deferral, clean termination,
-resource-handle cleanup, experimental HCS-native snapshot/restore, and a NetVSC adapter backed by an
-externally managed HCN endpoint. Mounts, `--net-config`, `--net-tap`, and more than one vCPU are
-rejected before HCS creates a compute system. WHP remains the Windows default. NVX opens, queries,
-and closes the endpoint handle; it never creates, host-attaches, or deletes persistent HCN objects.
-
-Create an endpoint from an elevated PowerShell session, then pass its descriptor with every HCS
-network launch. `--net` is optional when the descriptor is present; when supplied, NVX verifies that
-both sources describe the same address:
-
-```powershell
-$endpoint = Join-Path $env:TEMP 'nvx-hcs-endpoint.json'
-.\scripts\setup-hcn-endpoint.ps1 `
-  -OutputPath $endpoint `
-  -GuestAddress 192.168.241.2 `
-  -Gateway 192.168.241.1
-
-try {
-  .\target\release\microvm.exe `
-    --backend hcs `
-    --kernel build\vmlinux `
-    --initrd build\initramfs.cpio.gz `
-    --net 192.168.241.2/24 `
-    --hcn-endpoint-config $endpoint `
-    --exit-on-boot
-} finally {
-  .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $endpoint
-}
-```
-
-HCS snapshots are deliberately incompatible with WHP snapshots. The guest helper uses a versioned
-COM2 request, HCS writes opaque state to `runtime.vmrs`, and nvx commits an `NVXHCSS1`
-`manifest.json` only after save succeeds. Restore requires the exact Windows host build and verifies
-the captured kernel and initrd hashes before creating a compute system. A snapshot directory must
-not already exist. For example, `shellsnap` requests a snapshot before the normal boot marker:
-
-```powershell
-.\target\release\microvm.exe `
-  --backend hcs `
-  --kernel build\vmlinux `
-  --initrd build\initramfs.cpio.gz `
-  --cmdline "console=ttyS0,115200 8250_core.skip_txen_test=1 panic=-1 shellsnap" `
-  --snapshot hcs-shellsnap
-
-.\target\release\microvm.exe `
-  --backend hcs `
-  --restore hcs-shellsnap `
-  --exit-on-boot
-```
-
-Manifest v3 records the external HCN network, endpoint, adapter, MAC, addressing, and DNS identity. Capture
-and restore borrow the same externally owned endpoint identity. Keep that endpoint alive across the
-capture/restore sequence and pass the descriptor on restore; NVX verifies it against the snapshot
-manifest and leaves it intact after the compute system closes.
-
-Run the HCS-native benchmarks from an elevated terminal or as a member of **Hyper-V
-Administrators**. Native HCS runs the same 23 collected scenarios as KVM and WHP: five cold-start
-modes, five Plan9 file-sharing measurements, two warmed-Python measurements, shell cold/restore at
-64/128/256/512 MiB, and three network snapshot measurements. HCS logs retain process-wall and VMRS
-details in addition to the shared p50 rows:
-
-```powershell
-python scripts\nvx.py bench-hcs-coldstart --runs 10 --mem 512
-python scripts\nvx.py bench-hcs-virtfs --runs 5 --mem 512
-python scripts\nvx.py bench-hcs-snapshot-shell --runs 10 --memories "64 128 256 512"
-python scripts\nvx.py bench-hcs-snapshot-py --runs 8 --mem 512
-$endpoint = Join-Path $env:TEMP 'nvx-hcs-benchmark-endpoint.json'
-.\scripts\setup-hcn-endpoint.ps1 -OutputPath $endpoint `
-  -GuestAddress 192.168.241.2 -Gateway 192.168.241.1
-try {
-  python scripts\nvx.py bench-hcs-net-snapshot-py --runs 8 --mem 512 `
-    --net 192.168.241.2/24 --hcn-endpoint-config $endpoint
-} finally {
-  .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $endpoint
-}
-```
-
-To collect a machine-readable baseline without mixing it with WHP history:
-
-```powershell
-New-Item -ItemType Directory -Force build\performance-hcs | Out-Null
-python scripts\nvx.py bench-hcs-coldstart --runs 10 *>&1 |
-  Tee-Object build\performance-hcs\hcs-cold-start.log
-python scripts\nvx.py bench-hcs-virtfs --runs 5 *>&1 |
-  Tee-Object build\performance-hcs\hcs-virtfs.log
-python scripts\nvx.py bench-hcs-snapshot-shell --runs 10 *>&1 |
-  Tee-Object build\performance-hcs\hcs-shell-snapshot.log
-python scripts\nvx.py bench-hcs-snapshot-py --runs 8 *>&1 |
-  Tee-Object build\performance-hcs\hcs-python-snapshot.log
-$endpoint = Join-Path $env:TEMP 'nvx-hcs-benchmark-endpoint.json'
-.\scripts\setup-hcn-endpoint.ps1 -OutputPath $endpoint `
-  -GuestAddress 192.168.241.2 -Gateway 192.168.241.1
-try {
-  python scripts\nvx.py bench-hcs-net-snapshot-py --runs 8 `
-    --net 192.168.241.2/24 --hcn-endpoint-config $endpoint *>&1 |
-    Tee-Object build\performance-hcs\hcs-network-snapshot.log
-} finally {
-  .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $endpoint
-}
-python scripts\performance.py collect `
-  --platform windows-hcs `
-  --commit (git rev-parse HEAD) `
-  --input-dir build\performance-hcs `
-  --output-dir build\performance-results `
-  --require-network `
-  --require-shared-suite
-```
-
-This produces `windows-hcs.csv` with the same 23 metric names as `linux-kvm.csv` and
-`windows-whp.csv`. One-off capture and extra process-wall details remain in the human-readable logs.
-HCS benchmarks are not part of hosted CI; they require a separately labeled, privileged Hyper-V
-runner.
-
-The CI workflow defines opt-in **Windows / HCS** and **Windows / HCN + AF_XDP** hardware jobs. Both
-call `setup-hcn-endpoint.ps1` before testing and `cleanup-hcn-endpoint.ps1` in an `always()` step.
-The AF_XDP job requests `-AttachToHost`, runs the same 20 non-network WHP scenarios, then uses
+The CI workflow defines an opt-in **Windows / HCN + AF_XDP** hardware job. It calls
+`setup-hcn-endpoint.ps1 -AttachToHost` before testing and `cleanup-hcn-endpoint.ps1` in an
+`always()` step. The job runs the same 20 non-network WHP scenarios, then uses
 `scripts/benchmark-hcn-afxdp-snapshot.ps1` for five external-L2Bridge cold boots, one capture, and
 five restores. Every restored sample must rebind all selected AF_XDP queues and ping the HCN gateway
-before it contributes to the shared network p50 rows. These jobs are excluded from pull requests
-because they create privileged host networking objects.
+before it contributes to the shared network p50 rows. The job is excluded from pull requests
+because it creates privileged host networking objects.
 
 Runner requirements:
 
@@ -454,9 +313,8 @@ Runner requirements:
 
 Enable automatic merged-main runs with repository variable `NVX_HCN_AFXDP_CI=true`. Optional
 variables `NVX_HCN_AFXDP_GUEST_ADDRESS` and `NVX_HCN_AFXDP_GATEWAY` select a non-overlapping pair
-(defaults: `192.168.240.2` and `192.168.240.1`). Native HCS runs use `NVX_HCS_CI=true` and optional
-`NVX_HCS_GUEST_ADDRESS`/`NVX_HCS_GATEWAY` variables (defaults: `192.168.241.2` and
-`192.168.241.1`). A manual dispatch can enable either privileged lane independently.
+(defaults: `192.168.240.2` and `192.168.240.1`). A manual dispatch can enable the privileged lane
+independently.
 
 ### 1. Build the Linux artifacts (Docker)
 
@@ -674,9 +532,8 @@ it as `vfat` (`CONFIG_VFAT_FS`), where the KVM backend uses SquashFS (read-only)
 
 ### Benchmarks
 
-Most Python benchmark commands run on both KVM and WHP; the HCS-native snapshot commands are
-explicitly named. Shared methodology parses the VMM's `cold-start:` / `restore:` lines, while HCS
-also reports full process wall time so service and compute-system lifecycle overhead remains visible:
+The Python benchmark commands run on both KVM and WHP. Shared methodology parses the VMM's
+`cold-start:` / `restore:` lines:
 
 | Command                    | Measures                                                                                         |
 | -------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -687,11 +544,6 @@ also reports full process wall time so service and compute-system lifecycle over
 | `bench-net-snapshot-py` | networked Python (bare + numpy/pandas) cold vs. restore with a real HTTP round-trip                 |
 | `bench-virtfs`          | virt-fs guest I/O throughput + a persistent `--mount-image` round-trip                             |
 | `bench-snapshot-shell`  | cold shell boot vs. shell-ready snapshot restore across memory sizes                              |
-| `bench-hcs-coldstart`      | native HCS cold-start modes matching the shared five cold-start metrics                         |
-| `bench-hcs-virtfs`         | native HCS writable Plan9 throughput and persistence verification                               |
-| `bench-hcs-snapshot-shell` | HCS cold shell boot vs. native VMRS restore, including guest and process-wall latency          |
-| `bench-hcs-snapshot-py`    | HCS cold Python/pandas startup vs. restore of the warmed interpreter                            |
-| `bench-hcs-net-snapshot-py` | HCN-backed HCS restore with a real guest-to-host HTTP request after every restore              |
 | `scripts/benchmark-hcn-afxdp-snapshot.ps1` | external HCN/AF_XDP cold boot vs. snapshot restore with a restored gateway probe |
 
 CI records each merged commit's benchmark p50 values in `data/performance/`. On pull requests,
@@ -702,9 +554,9 @@ reported as warmups until a baseline exists. The workflow needs `contents: write
 if `main` is protected, a rule allowing `github-actions[bot]`) to persist the baseline commit.
 Every backend that runs benchmarks also publishes its collected p50 values as a Markdown table in
 its GitHub Actions job summary, including the metric unit and preferred direction.
-HCS and HCN/AF_XDP results join that baseline when their opt-in main-branch hardware jobs run;
-KVM and WHP results remain mandatory. Privileged jobs do not run on untrusted pull requests, so
-their new metrics warm up on main rather than participating in the pull-request gate.
+HCN/AF_XDP results join that baseline when the opt-in main-branch hardware job runs; KVM and WHP
+results remain mandatory. The privileged job does not run on untrusted pull requests, so its new
+metrics warm up on main rather than participating in the pull-request gate.
 It compiles and unit-tests the shared Python tooling on both hosts, uses the shared boot test, and runs
 networked-Python plus interactive snapshot-boot smoke tests on both KVM and WHP.
 

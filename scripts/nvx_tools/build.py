@@ -93,23 +93,6 @@ def _install(source: Path, destination: Path) -> None:
     destination.chmod(0o755)
 
 
-def _install_hcs_plan9(root: Path) -> None:
-    destination = root / "sbin" / "hcs-plan9"
-    run_checked(
-        [
-            "cc",
-            "-static",
-            "-Os",
-            "-s",
-            "-Wall",
-            "-Wextra",
-            "-o",
-            destination,
-            REPO_ROOT / "alpine" / "hcs-plan9.c",
-        ]
-    )
-
-
 def _apk_add(root: Path, *packages: str) -> None:
     loader = root / "lib" / "ld-musl-x86_64.so.1"
     environment = os.environ.copy()
@@ -168,7 +151,6 @@ def build_initramfs(config: AlpineBuildConfig, backend: HostBackend) -> None:
     resolver.touch()
     _install(REPO_ROOT / "alpine" / "init", root / "init")
     _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
-    _install_hcs_plan9(root)
     _pack_initramfs(root, config.output)
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
 
