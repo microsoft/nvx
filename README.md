@@ -548,8 +548,10 @@ The Python benchmark commands run on both KVM and WHP. Shared methodology parses
 CI records each merged commit's benchmark p50 values in `data/performance/`. On pull requests,
 `scripts/performance.py` compares each metric with the arithmetic mean of its latest 10 p50 values
 on the PR's base branch. A regression greater than 40% fails the `Performance regression gate`;
-lower latency and higher throughput are treated as improvements. Metrics without history are
-reported as warmups until a baseline exists. The workflow needs `contents: write` permission (and,
+lower-is-better millisecond metrics must also increase by more than 5 ms, preventing tiny absolute
+timing differences from tripping the percentage threshold. Lower latency and higher throughput are
+treated as improvements. Metrics without history are reported as warmups until a baseline exists.
+The workflow needs `contents: write` permission (and,
 if `main` is protected, a rule allowing `github-actions[bot]`) to persist the baseline commit.
 Every backend that runs benchmarks also publishes its collected p50 values as a Markdown table in
 its GitHub Actions job summary, including the metric unit and preferred direction.

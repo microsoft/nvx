@@ -366,6 +366,15 @@ class CiWorkflowParityTests(unittest.TestCase):
         )
         self.assertIn("--platform windows-hcn-afxdp", persistence)
 
+    def test_performance_gate_uses_absolute_latency_tolerance(self) -> None:
+        gate = self.job("performance-gate", "performance-persist")
+
+        self.assertIn("PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 5", self.workflow)
+        self.assertIn(
+            '--absolute-tolerance-ms "${PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS}"',
+            gate,
+        )
+
 
 class BootTestTests(unittest.TestCase):
     def test_boot_contract_and_marker_parsing(self) -> None:

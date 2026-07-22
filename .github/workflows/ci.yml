@@ -55,6 +55,7 @@ env:
   PERFORMANCE_BASELINE_WINDOW: 10
   # Match Nanvix's tolerance for noisy bare-metal benchmark runners.
   PERFORMANCE_REGRESSION_THRESHOLD: 40
+  PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 5
 
 jobs:
   # -----------------------------------------------------------------------------------------------
@@ -743,6 +744,7 @@ jobs:
             --target-dir performance-results \
             --window "${PERFORMANCE_BASELINE_WINDOW}" \
             --threshold "${PERFORMANCE_REGRESSION_THRESHOLD}" \
+            --absolute-tolerance-ms "${PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS}" \
             --summary "${GITHUB_STEP_SUMMARY}"
 
   # -----------------------------------------------------------------------------------------------

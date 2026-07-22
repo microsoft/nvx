@@ -314,6 +314,87 @@ class PerformanceTests(unittest.TestCase):
                 performance.gate_results(baseline, target, 10, 40.0), 1
             )
 
+    def test_gate_requires_absolute_latency_regression_beyond_tolerance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            summary = root / "summary.md"
+            performance.write_results(
+                baseline / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        "base", "restore_latency", "ms", "lower", 7.0
+                    ),
+                    performance.Result(
+                        "base", "throughput", "MB/s", "higher", 100.0
+                    ),
+                ],
+            )
+            performance.write_results(
+                target / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        "pr", "restore_latency", "ms", "lower", 12.0
+                    ),
+                    performance.Result(
+                        "pr", "throughput", "MB/s", "higher", 100.0
+                    ),
+                ],
+            )
+
+            self.assertEqual(
+                performance.gate_results(
+                    baseline, target, 10, 40.0, summary, 5.0
+                ),
+                0,
+            )
+            self.assertIn("+71.4%, +5.00 ms", summary.read_text(encoding="utf-8"))
+
+            performance.write_results(
+                target / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        "pr", "restore_latency", "ms", "lower", 12.1
+                    ),
+                    performance.Result(
+                        "pr", "throughput", "MB/s", "higher", 100.0
+                    ),
+                ],
+            )
+            self.assertEqual(
+                performance.gate_results(
+                    baseline, target, 10, 40.0, absolute_tolerance_ms=5.0
+                ),
+                1,
+            )
+
+    def test_gate_does_not_apply_latency_tolerance_to_throughput(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            performance.write_results(
+                baseline / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        "base", "throughput", "MB/s", "higher", 10.0
+                    )
+                ],
+            )
+            performance.write_results(
+                target / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        "pr", "throughput", "MB/s", "higher", 5.0
+                    )
+                ],
+            )
+
+            self.assertEqual(
+                performance.gate_results(baseline, target, 10, 40.0), 1
+            )
+
     def test_gate_uses_verified_windows_virtfs_reuse_history(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

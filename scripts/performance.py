@@ -592,6 +592,7 @@ def gate_results(
     window: int,
     threshold: float,
     summary_path: Path | None = None,
+    absolute_tolerance_ms: float = 5.0,
 ) -> int:
     target_files = sorted(target_dir.glob("*.csv"))
     if not target_files:
@@ -603,7 +604,8 @@ def gate_results(
         "## Performance regression gate",
         "",
         f"PR p50 versus the base branch's latest {window}-point p50 moving average "
-        f"(failure threshold: >{threshold:g}%).",
+        f"(failure threshold: >{threshold:g}%; lower-is-better millisecond metrics "
+        f"must also increase by >{absolute_tolerance_ms:g} ms).",
         "",
         "| Platform | Metric | PR p50 | Base p50 average | Delta | Result |",
         "| --- | --- | ---: | ---: | ---: | --- |",
@@ -653,20 +655,35 @@ def gate_results(
                 delta = (baseline_average - target.p50) / baseline_average * 100
 
             checked += 1
-            regressed = delta > threshold
+            absolute_delta_ms = (
+                target.p50 - baseline_average
+                if target.direction == "lower" and target.unit == "ms"
+                else None
+            )
+            regressed = delta > threshold and (
+                absolute_delta_ms is None
+                or absolute_delta_ms > absolute_tolerance_ms
+            )
             regressions += int(regressed)
             status = "REGRESSION" if regressed else "OK"
+            absolute_detail = (
+                f", {absolute_delta_ms:+.2f} ms"
+                if absolute_delta_ms is not None
+                else ""
+            )
             print(
                 f"{status}: {platform}/{target.metric}: p50 "
                 f"{_format_value(target.p50, target.unit)} vs "
                 f"{len(samples)}-point base average "
-                f"{_format_value(baseline_average, target.unit)} ({delta:+.1f}%)"
+                f"{_format_value(baseline_average, target.unit)} "
+                f"({delta:+.1f}%{absolute_detail})"
             )
             summary.append(
                 f"| {platform} | `{target.metric}` | "
                 f"{_format_value(target.p50, target.unit)} | "
                 f"{_format_value(baseline_average, target.unit)} "
-                f"({len(samples)}/{window}) | {delta:+.1f}% | {status} |"
+                f"({len(samples)}/{window}) | {delta:+.1f}%{absolute_detail} | "
+                f"{status} |"
             )
 
     summary.extend(
@@ -683,7 +700,8 @@ def gate_results(
 
     print(
         f"Checked {checked} metric(s), found {regressions} regression(s) "
-        f"(threshold: >{threshold:g}% vs {window}-point moving average)."
+        f"(threshold: >{threshold:g}% vs {window}-point moving average; "
+        f"absolute latency tolerance: {absolute_tolerance_ms:g} ms)."
     )
     return 1 if regressions else 0
 
@@ -721,6 +739,15 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--target-dir", type=Path, required=True)
     gate.add_argument("--window", type=_positive_int, default=10)
     gate.add_argument("--threshold", type=_non_negative_float, default=40)
+    gate.add_argument(
+        "--absolute-tolerance-ms",
+        type=_non_negative_float,
+        default=5,
+        help=(
+            "absolute increase required in addition to --threshold for "
+            "lower-is-better millisecond metrics (default: 5)"
+        ),
+    )
     gate.add_argument("--summary", type=Path)
 
     persist = commands.add_parser(
@@ -753,6 +780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.window,
                 args.threshold,
                 args.summary,
+                args.absolute_tolerance_ms,
             )
         persist_results(args.source_dir, args.history_dir)
         return 0
