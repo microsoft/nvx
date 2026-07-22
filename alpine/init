@@ -214,10 +214,22 @@ case " $(cat /proc/cmdline) " in
             nthost=${ntcp%:*}
             ntport=${ntcp##*:}
             rm -f /tmp/netsnap-tcp.in /tmp/netsnap-tcp.out
-            mkfifo /tmp/netsnap-tcp.in
-            nc "$nthost" "$ntport" </tmp/netsnap-tcp.in >/tmp/netsnap-tcp.out 2>&1 &
+            : > /tmp/netsnap-tcp.in
+            follow_tcp_input() {
+                next_line=1
+                while :; do
+                    line=$(sed -n "${next_line}p" /tmp/netsnap-tcp.in)
+                    if [ -n "$line" ]; then
+                        printf '%s\n' "$line"
+                        next_line=$((next_line + 1))
+                    else
+                        sleep 0.05
+                    fi
+                done
+            }
+            follow_tcp_input |
+                nc "$nthost" "$ntport" >/tmp/netsnap-tcp.out 2>&1 &
             ncpid=$!
-            exec 3>/tmp/netsnap-tcp.in
             wait_for_tcp_ack() {
                 marker=$1
                 attempts=0
@@ -229,7 +241,7 @@ case " $(cat /proc/cmdline) " in
                 done
                 return 1
             }
-            echo PRE >&3
+            echo PRE >> /tmp/netsnap-tcp.in
             if wait_for_tcp_ack PRE; then
                 echo "netsnap: pre-snapshot TCP OK ($ntcp)"
             else
@@ -273,14 +285,13 @@ case " $(cat /proc/cmdline) " in
             echo "NETSNAP-ACTIVE-TX-RESTORE-OK: $ntxflood"
         fi
         if [ -n "$ntcp" ]; then
-            echo POST >&3
+            echo POST >> /tmp/netsnap-tcp.in
             if wait_for_tcp_ack POST; then
                 echo "NETSNAP-TCP-RESTORE-OK: $ntcp"
             else
                 cat /tmp/netsnap-tcp.out >&2
                 echo "NETSNAP-TCP-RESTORE-FAIL: $ntcp" >&2
             fi
-            exec 3>&-
             wait "$ncpid" 2>/dev/null
         fi
         ;;
