@@ -36,6 +36,7 @@ function ConvertFrom-IPv4Bytes {
 if ($env:OS -ne 'Windows_NT') {
     throw 'HCN endpoint setup requires Windows'
 }
+$OutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
 if (Test-Path -LiteralPath $OutputPath) {
     throw "HCN endpoint descriptor already exists; clean it up before reuse: $OutputPath"
 }

@@ -244,7 +244,7 @@ $Microvm = (Resolve-Path $Microvm).Path
 $Kernel = (Resolve-Path $Kernel).Path
 $Initrd = (Resolve-Path $Initrd).Path
 $EndpointConfig = (Resolve-Path $EndpointConfig).Path
-$SnapshotPath = [IO.Path]::GetFullPath($SnapshotPath)
+$SnapshotPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SnapshotPath)
 $script:utf8 = New-Object Text.UTF8Encoding($false)
 $script:endpoint = Get-Content -LiteralPath $EndpointConfig -Raw | ConvertFrom-Json
 if (-not $script:endpoint.hostAttached -or

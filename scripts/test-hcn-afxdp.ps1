@@ -41,6 +41,7 @@ if (-not $Initrd) { $Initrd = Join-Path $PSScriptRoot '..\build\initramfs.cpio.g
 if (-not $LogPath) {
     $LogPath = Join-Path $PSScriptRoot '..\build\performance\hcn-afxdp-smoke.log'
 }
+$LogPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogPath)
 
 function ConvertTo-NativeArgument {
     param([AllowEmptyString()][string]$Value)

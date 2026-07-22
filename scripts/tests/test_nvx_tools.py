@@ -307,6 +307,21 @@ class BenchmarkParserTests(unittest.TestCase):
 
 
 class RetainedWorkflowTests(unittest.TestCase):
+    def test_hcn_output_paths_follow_powershell_location(self) -> None:
+        output_paths = {
+            "test-hcn-afxdp.ps1": "LogPath",
+            "benchmark-hcn-afxdp.ps1": "LogDirectory",
+            "benchmark-hcn-afxdp-snapshot.ps1": "SnapshotPath",
+            "setup-hcn-endpoint.ps1": "OutputPath",
+        }
+        for script_name, variable in output_paths.items():
+            source = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+            self.assertIn(
+                f"${variable} = $ExecutionContext.SessionState.Path."
+                f"GetUnresolvedProviderPathFromPSPath(${variable})",
+                source,
+            )
+
     def test_hcn_afxdp_snapshot_runs_whp_selftest_and_visible_guests(self) -> None:
         afxdp = (REPO_ROOT / "scripts" / "benchmark-hcn-afxdp-snapshot.ps1").read_text(
             encoding="utf-8"

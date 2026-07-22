@@ -43,6 +43,7 @@ if (-not $Initrd) { $Initrd = Join-Path $PSScriptRoot '..\build\initramfs.cpio.g
 if (-not $LogDirectory) {
     $LogDirectory = Join-Path $PSScriptRoot '..\build\performance\hcn-afxdp-runs'
 }
+$LogDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogDirectory)
 
 function Get-Median {
     param([double[]]$Values)
