@@ -137,7 +137,7 @@ function Invoke-AfxdpVm {
     $stdoutTask = $null
     $stderrTask = $null
     $started = $false
-    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $stopwatch = [Diagnostics.Stopwatch]::new()
     try {
         $pipe = New-Object IO.Pipes.NamedPipeServerStream(
             $pipeName,
@@ -159,6 +159,8 @@ function Invoke-AfxdpVm {
         $startInfo.RedirectStandardError = $true
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $startInfo
+        # Measure only the native VMM lifetime; manifest and PowerShell setup are outside the path.
+        $stopwatch.Start()
         if (-not $process.Start()) { throw 'failed to start microvm.exe' }
         $started = $true
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
@@ -199,8 +201,8 @@ function Invoke-AfxdpVm {
         if ($remaining.TotalMilliseconds -le 0 -or -not $process.WaitForExit($waitMilliseconds)) {
             throw "AF_XDP VM run exceeded ${TimeoutSeconds}s"
         }
-        $process.WaitForExit()
         $stopwatch.Stop()
+        $process.WaitForExit()
         $stdout = $stdoutTask.Result
         $stderr = $stderrTask.Result
         $text = $stdout + [Environment]::NewLine + $stderr
