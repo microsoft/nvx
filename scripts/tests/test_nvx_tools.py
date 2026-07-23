@@ -456,7 +456,7 @@ class CiWorkflowParityTests(unittest.TestCase):
     def test_performance_gate_uses_absolute_latency_tolerance(self) -> None:
         gate = self.job("performance-gate", "performance-persist")
 
-        self.assertIn("PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 5", self.workflow)
+        self.assertIn("PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 10", self.workflow)
         self.assertIn(
             '--absolute-tolerance-ms "${PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS}"',
             gate,
