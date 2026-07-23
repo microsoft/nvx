@@ -292,14 +292,14 @@ jobs:
             --summary "${GITHUB_STEP_SUMMARY}"
 
       - name: Stage Linux / KVM performance logs
-        if: always() && env.RUN_BENCH == 'true'
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('build/performance/*.log') != ''
         run: |
           rm -rf performance-logs/linux-kvm
           mkdir -p performance-logs/linux-kvm
           cp build/performance/*.log performance-logs/linux-kvm/
 
       - name: Save Linux / KVM performance logs
-        if: always() && env.RUN_BENCH == 'true'
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('performance-logs/linux-kvm/*.log') != ''
         uses: actions/cache/save@v5
         with:
           path: performance-logs/linux-kvm
@@ -474,14 +474,14 @@ jobs:
             --summary $env:GITHUB_STEP_SUMMARY
 
       - name: Stage Windows / WHP performance logs
-        if: always() && env.RUN_BENCH == 'true'
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('build/performance/*.log') != ''
         run: |
           Remove-Item -Recurse -Force performance-logs\windows-whp -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path performance-logs\windows-whp | Out-Null
           Copy-Item build\performance\*.log performance-logs\windows-whp\
 
       - name: Save Windows / WHP performance logs
-        if: always() && env.RUN_BENCH == 'true'
+        if: always() && env.RUN_BENCH == 'true' && hashFiles('performance-logs/windows-whp/*.log') != ''
         uses: actions/cache/save@v5
         with:
           path: performance-logs/windows-whp
