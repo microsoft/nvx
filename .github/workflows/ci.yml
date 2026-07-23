@@ -54,8 +54,8 @@ permissions:
 env:
   PERFORMANCE_BASELINE_WINDOW: 10
   # Match Nanvix's tolerance for noisy bare-metal benchmark runners.
-  PERFORMANCE_REGRESSION_THRESHOLD: 40
-  PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 5
+  PERFORMANCE_REGRESSION_THRESHOLD: 50
+  PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 10
 
 jobs:
   # -----------------------------------------------------------------------------------------------
