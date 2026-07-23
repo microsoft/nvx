@@ -5,6 +5,30 @@ Windows/HCN + AF_XDP. CI reports the median (p50) for each metric in the job
 summary. Latency metrics are lower-is-better; throughput metrics are
 higher-is-better.
 
+Use this page for metric names and methodology. Current historical p50 values live in
+`data/performance/`; timings copied into old discussions or commit messages are not baselines.
+
+## Running locally
+
+Build the release VMM and required guest artifacts first. See [Building NVX](build.md).
+
+```console
+# Linux
+python3 scripts/nvx.py measure-coldstart --runs 5
+python3 scripts/nvx.py bench-virtfs --runs 3
+python3 scripts/nvx.py snapshot-demo --runs 5
+python3 scripts/nvx.py bench-snapshot-shell --runs 5 --memories "64 128 256 512"
+python3 scripts/nvx.py bench-net-snapshot --runs 5
+```
+
+Use `python scripts\nvx.py ...` on Windows. The Python snapshot benchmark requires
+`initramfs-python.cpio.gz`. KVM network benchmarks require permission to configure a TAP; the WHP
+standalone network uses user-mode NAT.
+
+Useful overrides include `KERNEL`, `INITRD`, `MEM`, `CORES`, `N`, `SNAP`, `NET`, `PAYLOAD_MB`, and
+`IMG_MB`. Each subcommand also accepts explicit options; run
+`python scripts/nvx.py <command> --help` for the exact surface.
+
 ## Benchmark commands
 
 | Benchmark | KVM and WHP | HCN + AF_XDP | Description |
@@ -88,3 +112,41 @@ unless it contains exactly the 23 metrics above. Each backend job publishes its
 p50 table to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM
 and WHP results with the latest base-branch history; privileged HCN/AF_XDP results
 are collected when the hardware job is enabled.
+
+The current workflow uses the latest 10 p50 samples on the pull request's base branch. A metric
+regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be
+more than 10 ms slower; higher-is-better metrics use the percentage comparison alone. A missing
+history is a warmup, not a failure. Successful main builds append collected results to
+`data/performance/`.
+
+## Cold-start methodology
+
+Cold-start timing begins at the first guest instruction and ends when the configured console
+substring appears. The standard suite distinguishes the kernel-to-userspace handoff from the
+shell-ready marker and separates rendered console output from discarded output. This matters
+because each portb byte is a VM exit.
+
+The `earlycon=xe9` and `hvc0` path uses one `outb` per byte. It replaced a 16550-style path that
+would normally require a line-status read plus a data write. `--quiet` discards bytes in the VMM,
+while `quiet loglevel=0` also suppresses most bytes in the guest; the benchmark records these as
+different scenarios.
+
+The fastest standard scenario uses 128 MiB and this class of trusted, single-tenant tuning:
+
+```text
+clocksource=<backend> tsc=reliable no_timer_check random.trust_cpu=on
+rcupdate.rcu_expedited=1 nokaslr mitigations=off cryptomgr.notests
+earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1
+```
+
+Major cold-start contributors identified while building the current kernel configuration were:
+
+- `PM_TRACE_RTC` wall-clock probing, which can wait on absent or minimal RTC behavior;
+- initialization and probing for hardware subsystems the machine does not expose;
+- per-page kernel metadata initialization as guest RAM grows;
+- console VM exits and terminal rendering.
+
+The checked-in kernel therefore omits unused PCI, storage, graphics, sound, power-management,
+tracing, and debug stacks, keeps a minimal RTC implementation, and uses a low tick rate with
+tickless idle. Treat these as design constraints when changing `kernel/config-microvm`; validate
+both boot correctness and the relevant cold-start metrics.
