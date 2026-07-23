@@ -260,6 +260,7 @@ $cmdline = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1 virtnet
 $coldMarker = "VIRTNET-PROBE-OK: $Gateway"
 $restoreMarker = "NETSNAP-RESTORE-PROBE-OK: $Gateway"
 $cold = New-Object Collections.Generic.List[double]
+$coldWall = New-Object Collections.Generic.List[double]
 $restored = New-Object Collections.Generic.List[double]
 $restoreWall = New-Object Collections.Generic.List[double]
 
@@ -275,7 +276,8 @@ try {
             '--boot-marker', $coldMarker
         )
         $cold.Add($result.Metric)
-        Write-Output "  AF_XDP cold boot: run $run/$Runs complete (guest $(Format-Milliseconds $result.Metric) ms)"
+        $coldWall.Add($result.Wall)
+        Write-Output "  AF_XDP cold boot: run $run/$Runs complete (guest $(Format-Milliseconds $result.Metric) ms, wall $(Format-Milliseconds $result.Wall) ms)"
     }
 
     Remove-Item -LiteralPath $SnapshotPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -305,6 +307,7 @@ try {
     }
 
     Write-Output "  cold  (guest start -> marker): $(Format-Median $cold.ToArray())"
+    Write-Output "  cold wall-clock               : $(Format-Median $coldWall.ToArray())"
     Write-Output "  restore (guest resume -> marker): $(Format-Median $restored.ToArray())"
     Write-Output "  restore wall-clock             : $(Format-Median $restoreWall.ToArray())"
     Write-Output '  verified marker                : NETSNAP-RESTORE-OK'

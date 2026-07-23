@@ -32,6 +32,7 @@ SNAPSHOT_LOG = """
 
 NETWORK_LOG = """
   cold  (guest start -> marker):   400.0 ms  (min 390.0, max 410.0, n=5)
+  cold wall-clock               :   450.0 ms  (min 440.0, max 460.0, n=5)
   restore (guest resume -> marker):  40.0 ms  (min 39.0, max 41.0, n=5)
   restore wall-clock             :   50.0 ms  (min 49.0, max 51.0, n=5)
 """
@@ -128,10 +129,13 @@ class PerformanceTests(unittest.TestCase):
             results = performance.read_results(result_path)
 
             self.assertEqual(result_path.name, "windows-hcn-afxdp.csv")
-            self.assertEqual(len(results), 23)
+            self.assertEqual(len(results), 24)
             self.assertEqual(
-                {result.metric for result in results}, performance.SHARED_METRICS
+                {result.metric for result in results},
+                performance.SHARED_METRICS | performance.HCN_AFXDP_ONLY_METRICS,
             )
+            by_metric = {result.metric: result for result in results}
+            self.assertEqual(by_metric["xdp_network_snapshot_cold_wall"].p50, 450.0)
             self.assertIn(
                 performance.Result(
                     "abc123", "network_snapshot_restore_wall", "ms", "lower", 50.0

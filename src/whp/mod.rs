@@ -495,6 +495,11 @@ fn run_cold(cfg: Config) -> Result<()> {
     };
 
     let (console, bus) = build_io(&cfg, None);
+    if cfg.net_config.is_some()
+        && let Err(error) = mem.populate()
+    {
+        warn!("could not pre-populate XDP guest memory: {error:#}");
+    }
     info!(
         "starting guest (mem={} MiB, cmdline={:?})",
         ram_size >> 20,

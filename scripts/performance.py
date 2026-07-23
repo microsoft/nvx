@@ -46,6 +46,7 @@ SHARED_METRICS = frozenset(
         "network_snapshot_restore_wall",
     }
 )
+HCN_AFXDP_ONLY_METRICS = frozenset({"xdp_network_snapshot_cold_wall"})
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
@@ -253,7 +254,22 @@ def _parse_hcn_afxdp_network_snapshot(text: str) -> dict[str, MetricValue]:
         raise PerformanceError(
             "missing verified marker 'NETSNAP-RESTORE-OK' in network.log"
         )
-    return _parse_network(text)
+    metrics = _parse_network(text)
+    metrics.update(
+        _parse_fixed(
+            text,
+            "network.log",
+            [
+                (
+                    "xdp_network_snapshot_cold_wall",
+                    "ms",
+                    "lower",
+                    rf"^\s*cold wall-clock\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+                )
+            ],
+        )
+    )
+    return metrics
 
 
 def _parse_virtfs(text: str) -> dict[str, MetricValue]:
@@ -478,16 +494,19 @@ def collect_results(
 
     if not collected:
         raise PerformanceError(f"no performance metrics found in {input_dir}")
-    if require_shared_suite and collected.keys() != SHARED_METRICS:
-        missing = sorted(SHARED_METRICS - collected.keys())
-        extra = sorted(collected.keys() - SHARED_METRICS)
+    expected_metrics = SHARED_METRICS
+    if platform == "windows-hcn-afxdp":
+        expected_metrics |= HCN_AFXDP_ONLY_METRICS
+    if require_shared_suite and collected.keys() != expected_metrics:
+        missing = sorted(expected_metrics - collected.keys())
+        extra = sorted(collected.keys() - expected_metrics)
         details = []
         if missing:
             details.append("missing: " + ", ".join(missing))
         if extra:
             details.append("unexpected: " + ", ".join(extra))
         raise PerformanceError(
-            "shared benchmark suite must contain exactly 23 metrics ("
+            f"shared benchmark suite must contain exactly {len(expected_metrics)} metrics ("
             + "; ".join(details)
             + ")"
         )

@@ -26,12 +26,18 @@ use ::windows::Win32::Foundation::{
 };
 use ::windows::Win32::System::IO::DeviceIoControl;
 use ::windows::Win32::System::Hypervisor::{
+    WHV_ADVISE_GPA_RANGE,
+    WHV_ADVISE_GPA_RANGE_CODE,
+    WHV_ADVISE_GPA_RANGE_POPULATE,
     WHV_MAP_GPA_RANGE_FLAGS,
+    WHV_MEMORY_RANGE_ENTRY,
     WHV_PARTITION_HANDLE,
+    WHvAdviseGpaRangeCodePopulate,
     WHvMapGpaRange,
     WHvMapGpaRangeFlagExecute,
     WHvMapGpaRangeFlagRead,
     WHvMapGpaRangeFlagWrite,
+    WHvMemoryAccessRead,
     WHvUnmapGpaRange,
 };
 use ::windows::Win32::System::Memory::{
@@ -48,7 +54,10 @@ use ::windows::Win32::System::Memory::{
     VirtualAlloc,
     VirtualFree,
 };
-use ::windows::core::PCWSTR;
+use ::windows::core::{
+    HRESULT,
+    PCWSTR,
+};
 
 use crate::boot::GuestWrite;
 use crate::layout::{
@@ -137,6 +146,37 @@ impl GuestMemory {
         }
 
         Ok(Self { regions, ram_size })
+    }
+
+    /// Pre-populates all guest RAM in WHP's host mappings and SLAT.
+    pub fn populate(&self) -> Result<()> {
+        let advise = whv_advise_gpa_range().context("WHvAdviseGpaRange is unavailable")?;
+        let ranges: Vec<WHV_MEMORY_RANGE_ENTRY> = self
+            .regions
+            .iter()
+            .map(|region| WHV_MEMORY_RANGE_ENTRY {
+                GuestAddress: region.guest_phys,
+                SizeInBytes: region.size as u64,
+            })
+            .collect();
+        let advice = WHV_ADVISE_GPA_RANGE {
+            Populate: WHV_ADVISE_GPA_RANGE_POPULATE {
+                Flags: Default::default(),
+                AccessType: WHvMemoryAccessRead,
+            },
+        };
+        unsafe {
+            advise(
+                self.regions[0].partition,
+                ranges.as_ptr(),
+                ranges.len() as u32,
+                WHvAdviseGpaRangeCodePopulate,
+                (&advice as *const WHV_ADVISE_GPA_RANGE).cast(),
+                size_of::<WHV_ADVISE_GPA_RANGE>() as u32,
+            )
+        }
+        .ok()
+        .context("populating guest GPA ranges")
     }
 
     ///
@@ -484,4 +524,42 @@ fn write_sparse(file: &mut ::std::fs::File, bytes: &[u8]) -> Result<()> {
         off = run_end;
     }
     Ok(())
+}
+
+type WhvAdviseGpaRangeFn = unsafe extern "system" fn(
+    WHV_PARTITION_HANDLE,
+    *const WHV_MEMORY_RANGE_ENTRY,
+    u32,
+    WHV_ADVISE_GPA_RANGE_CODE,
+    *const c_void,
+    u32,
+) -> HRESULT;
+
+fn whv_advise_gpa_range() -> Option<WhvAdviseGpaRangeFn> {
+    use ::std::sync::OnceLock;
+
+    static ADVISE: OnceLock<Option<WhvAdviseGpaRangeFn>> = OnceLock::new();
+    *ADVISE.get_or_init(|| {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryExW(name: *const u16, file: isize, flags: u32) -> isize;
+            fn GetProcAddress(module: isize, name: *const u8) -> *const c_void;
+        }
+
+        const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+        let name: Vec<u16> = "WinHvPlatform.dll"
+            .encode_utf16()
+            .chain(::core::iter::once(0))
+            .collect();
+        let module = unsafe { LoadLibraryExW(name.as_ptr(), 0, LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        if module == 0 {
+            return None;
+        }
+        let function =
+            unsafe { GetProcAddress(module, c"WHvAdviseGpaRange".as_ptr().cast::<u8>()) };
+        if function.is_null() {
+            return None;
+        }
+        Some(unsafe { ::core::mem::transmute::<*const c_void, WhvAdviseGpaRangeFn>(function) })
+    })
 }
