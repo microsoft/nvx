@@ -207,6 +207,7 @@ jobs:
           key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
+          restore-keys: run-artifacts-${{ github.run_id }}-
 
       - name: Self-test (KVM protected-mode)
         run: ./target/release/microvm --selftest
@@ -398,6 +399,7 @@ jobs:
           key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
+          restore-keys: run-artifacts-${{ github.run_id }}-
 
       - name: Self-test (WHP protected-mode)
         run: .\target\release\microvm.exe --selftest
@@ -556,6 +558,7 @@ jobs:
           key: run-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
+          restore-keys: run-artifacts-${{ github.run_id }}-
 
       - name: Prepare HCN AF_XDP performance logs
         if: env.RUN_BENCH == 'true'
@@ -695,12 +698,14 @@ jobs:
           path: performance-logs/linux-kvm
           key: performance-logs-linux-kvm-${{ github.run_id }}-${{ github.run_attempt }}
           fail-on-cache-miss: true
+          restore-keys: performance-logs-linux-kvm-${{ github.run_id }}-
 
       - name: Restore Windows / WHP performance logs
         uses: actions/cache/restore@v5
         with:
           path: performance-logs/windows-whp
           key: performance-logs-windows-whp-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: performance-logs-windows-whp-${{ github.run_id }}-
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
@@ -782,6 +787,7 @@ jobs:
         with:
           path: performance-logs/linux-kvm
           key: performance-logs-linux-kvm-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: performance-logs-linux-kvm-${{ github.run_id }}-
           fail-on-cache-miss: true
 
       - name: Restore Windows / WHP performance logs
@@ -789,6 +795,7 @@ jobs:
         with:
           path: performance-logs/windows-whp
           key: performance-logs-windows-whp-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: performance-logs-windows-whp-${{ github.run_id }}-
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
@@ -800,6 +807,7 @@ jobs:
           key: performance-logs-windows-hcn-afxdp-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
+          restore-keys: performance-logs-windows-hcn-afxdp-${{ github.run_id }}-
 
       - name: Collect p50 results
         run: |
