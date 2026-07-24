@@ -95,6 +95,9 @@ use crate::whp::pic::Pic;
 use crate::whp::pit::Pit;
 use crate::whp::rtc::Rtc;
 use crate::whp::snapshot::Snapshot;
+
+/// Console marker emitted by the Alpine init immediately before an `--exec` workload starts.
+pub const EXEC_OUTPUT_MARKER: &str = "NVX-EXEC-START";
 use crate::windows_terminal::ConsoleGuard;
 
 /// Index of the single guest virtual processor.
@@ -116,6 +119,8 @@ pub struct Config {
     pub exit_on_boot: bool,
     /// Console substring whose appearance marks boot completion.
     pub boot_marker: String,
+    /// Hide console output through this marker, when configured.
+    pub output_after_marker: Option<String>,
     /// Additional named console substrings timed from the first guest instruction.
     pub timing_markers: Vec<TimingMarker>,
     /// Delay redirected cold-boot stdin until the boot marker appears.
@@ -146,6 +151,8 @@ pub struct Config {
     pub profiling: Option<crate::profiler::ProfilingConfig>,
     /// Guest path to a mounted shell script executed once by the Alpine init.
     pub exec: Option<String>,
+    /// Snapshot at the guest's pre-exec rendezvous before reading virt-fs workload data.
+    pub snapshot_before_exec: bool,
 }
 
 /// A running virt-net NIC: the shared device model, raw-frame backend, and snapshot-safe identity.
@@ -416,6 +423,9 @@ fn run_cold(cfg: Config) -> Result<u8> {
         cmdline.push_str(" nvx_exec=");
         cmdline.push_str(exec);
     }
+    if cfg.snapshot_before_exec {
+        cmdline.push_str(" nvx_snapshot_before_exec=1");
+    }
 
     // Optionally export a host directory to the guest as a virt-fs. The FAT image is mapped into
     // guest memory above reported RAM and pointed at via the kernel command line; `_virtfs` owns
@@ -544,6 +554,25 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
     partition.create_vcpu()?;
     snap.apply(partition.handle)?;
 
+    // A run-once snapshot captures the initialized phram device but not its host mapping (which
+    // lives outside guest RAM). Reattach a fresh per-run image at the identical GPA before the
+    // vCPU resumes and the guest mounts it.
+    let _virtfs: Option<virtfs::VirtFs> = match &cfg.mount {
+        Some(mount) => {
+            let options = virtfs::Options {
+                dir: mount,
+                target: &cfg.mount_target,
+                writable: cfg.mount_rw || cfg.mount_image.is_some(),
+                image: cfg.mount_image.as_deref(),
+                size: cfg.mount_size.map(|mib| mib << 20),
+            };
+            let (filesystem, _) =
+                virtfs::load(partition.handle, snap.ram_size(), options)?;
+            Some(filesystem)
+        },
+        None => None,
+    };
+
     // Rebuild the emulated devices from the saved state.
     let mut pic: Pic = Pic::new();
     pic.load(snap.pic());
@@ -667,10 +696,15 @@ pub fn selftest() -> Result<()> {
 /// Builds the shared console sink, the portb console device, and the device bus. When
 /// `con_state` is provided (restore path), the device's pending input queue is reloaded from it.
 fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
-    let console: Arc<Mutex<Console>> = Arc::new(Mutex::new(Console::with_timing_markers(
+    let output_start_marker = cfg
+        .output_after_marker
+        .as_deref()
+        .or_else(|| cfg.exec.as_ref().map(|_| EXEC_OUTPUT_MARKER));
+    let console: Arc<Mutex<Console>> = Arc::new(Mutex::new(Console::with_output_start_marker(
         cfg.quiet,
         &cfg.boot_marker,
         &cfg.timing_markers,
+        output_start_marker,
     )));
     let con: Arc<Mutex<PortConsole>> = Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
     if let Some(state) = con_state {
@@ -967,7 +1001,10 @@ fn execute(
     if let Some(err) = run_err {
         return Err(err);
     }
-    if cfg.exec.is_some() && !guest_shutdown_seen {
+    if (cfg.exec.is_some() || cfg.output_after_marker.is_some())
+        && cfg.snapshot.is_none()
+        && !guest_shutdown_seen
+    {
         bail!("guest terminated without reporting an exec exit status");
     }
 

@@ -101,6 +101,11 @@ struct Args {
     #[arg(long, default_value = "ALPINE-MICROVM-BOOT-OK")]
     boot_marker: String,
 
+    /// Suppress guest console rendering until this substring is observed; the marker itself is
+    /// discarded. Intended for restored workload agents.
+    #[arg(long, value_name = "TEXT")]
+    output_after_marker: Option<String>,
+
     /// Additional console substring to time from the first guest instruction. Repeat as
     /// `--timing-marker LABEL=TEXT`; results are printed when the VM exits.
     #[arg(long, value_name = "LABEL=TEXT")]
@@ -151,14 +156,23 @@ struct Args {
     mount_size: Option<u64>,
 
     /// Execute this mounted guest shell script during a cold boot, then exit with its status.
-    /// Incompatible with snapshot/restore and `--exit-on-boot`.
+    /// Incompatible with restore, self-test, and `--exit-on-boot`.
     #[arg(
         long,
         value_name = "GUEST_PATH",
         requires = "mount",
-        conflicts_with_all = ["exit_on_boot", "restore", "snapshot", "selftest"]
+        conflicts_with_all = ["exit_on_boot", "restore", "selftest"]
     )]
     exec: Option<String>,
+
+    /// Ask the guest to snapshot immediately before executing `--exec`. Used to create a reusable
+    /// run-once restore point whose virt-fs contents can be replaced on each restore.
+    #[arg(
+        long,
+        requires_all = ["snapshot", "exec"],
+        conflicts_with = "restore"
+    )]
+    snapshot_before_exec: bool,
 
     /// Run the platform backend's protected-mode self-test instead of booting.
     #[arg(long)]
@@ -328,6 +342,9 @@ fn run(args: Args) -> Result<ExitCode> {
     if let Some(exec) = args.exec.as_deref() {
         validate_exec_path(exec)?;
     }
+    if args.output_after_marker.as_deref() == Some("") {
+        bail!("--output-after-marker must not be empty");
+    }
 
     let profiling = build_profiling_config(&args)?;
     dispatch(args, mem_bytes, profiling).map(ExitCode::from)
@@ -469,6 +486,12 @@ fn dispatch(
     if args.restore_ready_pipe.is_some() {
         bail!("--restore-ready-pipe is only available on the Windows/WHP backend");
     }
+    if args.snapshot_before_exec {
+        bail!("--snapshot-before-exec is only available on the Windows/WHP backend");
+    }
+    if args.output_after_marker.is_some() {
+        bail!("--output-after-marker is only available on the Windows/WHP backend");
+    }
     if (!args.allow_host.is_empty() || !args.block_host.is_empty())
         && args.net.is_none()
         && args.restore.is_none()
@@ -597,6 +620,7 @@ fn dispatch(
         quiet: args.quiet,
         exit_on_boot: args.exit_on_boot,
         boot_marker: args.boot_marker,
+        output_after_marker: args.output_after_marker,
         timing_markers: args.timing_marker,
         defer_stdin_until_boot: args.defer_stdin_until_boot,
         snapshot: args.snapshot,
@@ -612,6 +636,7 @@ fn dispatch(
         mount_size: args.mount_size,
         profiling,
         exec: args.exec,
+        snapshot_before_exec: args.snapshot_before_exec,
     })
 }
 
@@ -630,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_is_limited_to_cold_boot_without_snapshot_capture() {
+    fn exec_rejects_incompatible_modes() {
         assert!(
             Args::try_parse_from([
                 "microvm",
@@ -642,7 +667,21 @@ mod tests {
             .is_ok()
         );
 
-        for incompatible in ["--exit-on-boot", "--restore", "--snapshot", "--selftest"] {
+        assert!(
+            Args::try_parse_from([
+                "microvm",
+                "--mount",
+                "host",
+                "--exec",
+                "/mnt/host/run.sh",
+                "--snapshot",
+                "state",
+                "--snapshot-before-exec",
+            ])
+            .is_ok()
+        );
+
+        for incompatible in ["--exit-on-boot", "--restore", "--selftest"] {
             let mut args = vec![
                 "microvm",
                 "--mount",
@@ -651,7 +690,7 @@ mod tests {
                 "/mnt/host/run.sh",
                 incompatible,
             ];
-            if matches!(incompatible, "--restore" | "--snapshot") {
+            if incompatible == "--restore" {
                 args.push("state");
             }
             let error = Args::try_parse_from(args).unwrap_err();

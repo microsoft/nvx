@@ -114,14 +114,34 @@ pub struct Console {
     timing_markers: Vec<TrackedMarker>,
     /// Total bytes emitted by the guest.
     bytes_out: u64,
+    /// Optional marker after which guest output becomes visible.
+    output_start_marker: Vec<u8>,
+    /// Current match position within `output_start_marker`.
+    output_start_match_pos: usize,
+    /// Whether guest output is currently visible.
+    output_enabled: bool,
 }
 
 impl Console {
     /// Creates a console with additional named timing markers.
+    #[cfg(any(target_os = "linux", test))]
     pub fn with_timing_markers(
         quiet: bool,
         marker: &str,
         timing_markers: &[TimingMarker],
+    ) -> Self {
+        Self::with_output_start_marker(quiet, marker, timing_markers, None)
+    }
+
+    /// Creates a console that discards output until `output_start_marker` is observed.
+    ///
+    /// The marker itself is not rendered. This is used by non-interactive workload mode to hide
+    /// kernel and init output while preserving the workload's stdout.
+    pub fn with_output_start_marker(
+        quiet: bool,
+        marker: &str,
+        timing_markers: &[TimingMarker],
+        output_start_marker: Option<&str>,
     ) -> Self {
         let sink: Box<dyn Write + Send> = if quiet {
             Box::new(io::sink())
@@ -136,6 +156,9 @@ impl Console {
             cold_start: None,
             timing_markers: timing_markers.iter().cloned().map(TrackedMarker::new).collect(),
             bytes_out: 0,
+            output_start_marker: output_start_marker.unwrap_or_default().as_bytes().to_vec(),
+            output_start_match_pos: 0,
+            output_enabled: output_start_marker.is_none(),
         }
     }
 
@@ -147,13 +170,17 @@ impl Console {
     /// Emits one byte of guest console output.
     pub fn write_byte(&mut self, byte: u8) {
         self.bytes_out += 1;
-        let _ = self.sink.write_all(&[byte]);
-        if byte == b'\n' {
-            let _ = self.sink.flush();
-        }
         self.scan_marker(byte);
         for marker in &mut self.timing_markers {
             marker.scan(byte, self.start);
+        }
+        if self.output_enabled {
+            let _ = self.sink.write_all(&[byte]);
+            if byte == b'\n' {
+                let _ = self.sink.flush();
+            }
+        } else {
+            self.scan_output_start_marker(byte);
         }
     }
 
@@ -170,6 +197,22 @@ impl Console {
         } else {
             // Restart the match, allowing the current byte to begin a new one.
             self.match_pos = usize::from(byte == self.marker[0]);
+        }
+    }
+
+    /// Enables output once the configured marker has been consumed.
+    fn scan_output_start_marker(&mut self, byte: u8) {
+        if self.output_start_marker.is_empty() {
+            self.output_enabled = true;
+            return;
+        }
+        if byte == self.output_start_marker[self.output_start_match_pos] {
+            self.output_start_match_pos += 1;
+            if self.output_start_match_pos == self.output_start_marker.len() {
+                self.output_enabled = true;
+            }
+        } else {
+            self.output_start_match_pos = usize::from(byte == self.output_start_marker[0]);
         }
     }
 
@@ -204,6 +247,7 @@ impl Console {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn records_multiple_markers_from_one_start_in_cli_order() {
@@ -224,5 +268,32 @@ mod tests {
         assert!("=text".parse::<TimingMarker>().is_err());
         assert!("label=".parse::<TimingMarker>().is_err());
         assert!("bad label=text".parse::<TimingMarker>().is_err());
+    }
+
+    #[test]
+    fn suppresses_output_through_start_marker() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink = SharedWriter(Arc::clone(&output));
+        let mut console = Console::with_output_start_marker(false, "BOOT", &[], Some("EXEC"));
+        console.sink = Box::new(sink);
+
+        for byte in b"boot noise EXEChello\n" {
+            console.write_byte(*byte);
+        }
+
+        assert_eq!(&*output.lock().unwrap(), b"hello\n");
+    }
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }

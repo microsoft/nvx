@@ -13,23 +13,27 @@ fatal() {
     /bin/busybox reboot -f
     exit 1
 }
-# virt-fs: KVM/WHP expose a phram image, which the driver surfaces as /dev/mtdblock0.
-# Mount it at the requested point using the filesystem type
-# and access mode the VMM chose (all passed on the kernel command line: "virtfs_dir=<path>",
-# "virtfs_fs=<type>", "virtfs_mode=<ro|rw>"; defaults: /mnt/host, squashfs, ro).
-if [ -e /dev/mtdblock0 ]; then
-    vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
-    [ -n "$vdir" ] || vdir=/mnt/host
-    vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)
-    [ -n "$vfs" ] || vfs=squashfs
-    vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
-    [ -n "$vmode" ] || vmode=ro
-    mkdir -p "$vdir"
-    if mount -t "$vfs" -o "$vmode" /dev/mtdblock0 "$vdir" 2>/dev/null; then
-        echo "virtfs: mounted host directory at $vdir ($vfs,$vmode)"
-    else
-        echo "virtfs: failed to mount /dev/mtdblock0 at $vdir" >&2
+nvx_snapshot_before_exec=$(sed -n 's/.*nvx_snapshot_before_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
+mount_virtfs() {
+    # KVM/WHP expose a phram image as /dev/mtdblock0. A snapshot-before-exec run deliberately
+    # defers this first mount until restore has attached the per-run image.
+    if [ -e /dev/mtdblock0 ]; then
+        vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
+        [ -n "$vdir" ] || vdir=/mnt/host
+        vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)
+        [ -n "$vfs" ] || vfs=squashfs
+        vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
+        [ -n "$vmode" ] || vmode=ro
+        mkdir -p "$vdir"
+        if mount -t "$vfs" -o "$vmode" /dev/mtdblock0 "$vdir" 2>/dev/null; then
+            echo "virtfs: mounted host directory at $vdir ($vfs,$vmode)"
+        else
+            echo "virtfs: failed to mount /dev/mtdblock0 at $vdir" >&2
+        fi
     fi
+}
+if [ "$nvx_snapshot_before_exec" != 1 ]; then
+    mount_virtfs
 fi
 # virt-net: if the VMM attached a NIC (see --net or --net-config), configure the only
 # non-loopback interface from its virtnet_* command-line tokens. External networking includes
@@ -195,9 +199,16 @@ if [ "$nrequired" = 1 ] || [ -n "$nip" ]; then
         fi
     fi
 fi
+# snapshot-before-exec: capture after core/network initialization but before reading dynamic
+# workload data from virt-fs. Restore resumes at the next line with a fresh host mapping.
+if [ "$nvx_snapshot_before_exec" = 1 ]; then
+    /sbin/nvx-snapshot
+    mount_virtfs
+fi
 # run-once: execute a mounted shell script and report its status through the VMM control port.
 nvx_exec=$(sed -n 's/.*nvx_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$nvx_exec" ]; then
+    printf 'NVX-EXEC-START'
     if [ ! -f "$nvx_exec" ]; then
         echo "nvx: executable script not found: $nvx_exec" >&2
         /sbin/nvx-exit 127

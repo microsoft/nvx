@@ -15,6 +15,7 @@ fatal() {
     exit 1
 }
 
+nvx_snapshot_before_exec=$(sed -n 's/.*nvx_snapshot_before_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
 mount_virtfs() {
     if [ -e /dev/mtdblock0 ]; then
         vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
@@ -28,7 +29,9 @@ mount_virtfs() {
             fatal "virtfs: failed to mount /dev/mtdblock0 at $vdir"
     fi
 }
-mount_virtfs
+if [ "$nvx_snapshot_before_exec" != 1 ]; then
+    mount_virtfs
+fi
 
 # virt-net: configure standalone --net or the fail-closed L2Bridge/HCN contract before Python.
 nrequired=$(sed -n 's/.*virtnet_required=\([^ ]*\).*/\1/p' /proc/cmdline)
@@ -176,8 +179,14 @@ if [ "$nrequired" = 1 ] || [ -n "$nip" ]; then
     fi
 fi
 
+if [ "$nvx_snapshot_before_exec" = 1 ]; then
+    /sbin/nvx-snapshot
+    mount_virtfs
+fi
+
 nvx_exec=$(sed -n 's/.*nvx_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$nvx_exec" ]; then
+    printf 'NVX-EXEC-START'
     if [ ! -f "$nvx_exec" ]; then
         echo "nvx: executable script not found: $nvx_exec" >&2
         /sbin/nvx-exit 127
