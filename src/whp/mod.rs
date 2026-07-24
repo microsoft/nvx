@@ -195,9 +195,7 @@ impl Nic {
                 return Err(error);
             }
         };
-        if let Err(error) =
-            pipe.data_plane_ready(&started.queues, started.interface_luid)
-        {
+        if let Err(error) = pipe.data_plane_ready(&started.queues, started.interface_luid) {
             pipe.data_plane_error(&format!("{error:#}"));
             return Err(error);
         }
@@ -655,8 +653,7 @@ fn build_io(cfg: &Config, con_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, Dev
         &cfg.boot_marker,
         &cfg.timing_markers,
     )));
-    let con: Arc<Mutex<PortConsole>> =
-        Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
+    let con: Arc<Mutex<PortConsole>> = Arc::new(Mutex::new(PortConsole::new(Arc::clone(&console))));
     if let Some(state) = con_state {
         con.lock().expect("console poisoned").restore(state);
     }
@@ -745,8 +742,7 @@ fn execute(
         Arc::clone(&stop),
         defer_input,
     );
-    let timer_thread =
-        spawn_timer_thread(handle, Arc::clone(&timer_pending), Arc::clone(&stop));
+    let timer_thread = spawn_timer_thread(handle, Arc::clone(&timer_pending), Arc::clone(&stop));
     let sample_thread: Option<thread::JoinHandle<()>> = cfg.profiling.as_ref().map(|p| {
         spawn_profiler_thread(
             handle,
@@ -788,13 +784,7 @@ fn execute(
         // Deliver a pending timer tick (raised by the timer thread) as the guest's IRQ0, and
         // re-check the NIC on the same cadence so a receive interrupt that could not be injected
         // earlier (e.g. the line was briefly masked) self-heals within one tick.
-        service_pending_irqs(
-            &timer_pending,
-            &nic,
-            &mut pic,
-            handle,
-            &mut prefer_timer,
-        );
+        service_pending_irqs(&timer_pending, &nic, &mut pic, handle, &mut prefer_timer);
 
         let reason = exit.ExitReason;
         if reason == WHvRunVpExitReasonX64IoPortAccess {
@@ -818,13 +808,10 @@ fn execute(
                         PioAction::Snapshot => {
                             if cfg.snapshot.is_some() {
                                 if let Some(n) = nic.as_ref()
-                                    && let Err(error) =
-                                        n.backend.quiesce(Duration::from_secs(2))
+                                    && let Err(error) = n.backend.quiesce(Duration::from_secs(2))
                                 {
                                     run_err = Some(
-                                        error.context(
-                                            "quiescing network backend for snapshot",
-                                        ),
+                                        error.context("quiescing network backend for snapshot"),
                                     );
                                     break;
                                 }
@@ -874,13 +861,7 @@ fn execute(
         } else if reason == WHvRunVpExitReasonCanceled || reason == WHvRunVpExitReasonNone {
             // Woken by the timer, input thread, or the NIC receive pump: service a pending NIC
             // interrupt so a just-delivered frame is signalled to the guest with low latency.
-            service_pending_irqs(
-                &timer_pending,
-                &nic,
-                &mut pic,
-                handle,
-                &mut prefer_timer,
-            );
+            service_pending_irqs(&timer_pending, &nic, &mut pic, handle, &mut prefer_timer);
             if sample_pending.swap(false, Ordering::AcqRel) {
                 if let Some(prof) = guest_profiler.as_mut() {
                     sample_guest_whp(prof, handle, mem);
@@ -900,13 +881,7 @@ fn execute(
             }
             if nic.is_some() {
                 // A transmit notification (QueueNotify) may have raised the NIC's interrupt.
-                service_pending_irqs(
-                    &timer_pending,
-                    &nic,
-                    &mut pic,
-                    handle,
-                    &mut prefer_timer,
-                );
+                service_pending_irqs(&timer_pending, &nic, &mut pic, handle, &mut prefer_timer);
             }
         } else {
             debug!("unhandled vcpu exit reason {}", reason.0);
@@ -973,7 +948,10 @@ fn execute(
     if !cfg.timing_markers.is_empty() {
         let console = console.lock().expect("console poisoned");
         for (label, elapsed) in console.timings() {
-            eprintln!("timing-marker: {label} {:.1} ms", elapsed.as_secs_f64() * 1000.0);
+            eprintln!(
+                "timing-marker: {label} {:.1} ms",
+                elapsed.as_secs_f64() * 1000.0
+            );
         }
     }
 
@@ -1058,7 +1036,10 @@ fn take_snapshot(
     snapshot::write(dir, handle, mem, &devices)
         .with_context(|| format!("writing snapshot to {}", dir.display()))?;
     if !cfg.timing_markers.is_empty() {
-        eprintln!("snapshot-capture: {:.1} ms", capture_start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "snapshot-capture: {:.1} ms",
+            capture_start.elapsed().as_secs_f64() * 1000.0
+        );
     }
     info!("snapshot written to {}", dir.display());
     Ok(true)
@@ -1487,9 +1468,9 @@ fn service_pending_irqs(
     prefer_timer: &mut bool,
 ) {
     let timer_waiting = timer_pending.load(Ordering::Acquire);
-    let nic_waiting = nic.as_ref().is_some_and(|n| {
-        n.dev.lock().expect("virt-net poisoned").irq_asserted()
-    });
+    let nic_waiting = nic
+        .as_ref()
+        .is_some_and(|n| n.dev.lock().expect("virt-net poisoned").irq_asserted());
 
     if timer_waiting && nic_waiting {
         if *prefer_timer {

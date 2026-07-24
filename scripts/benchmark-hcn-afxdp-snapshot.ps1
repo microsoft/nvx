@@ -53,13 +53,14 @@ function Format-Median {
     $middle = [int][Math]::Floor($ordered.Count / 2)
     $median = if ($ordered.Count % 2 -eq 1) {
         $ordered[$middle]
-    } else {
+    }
+    else {
         ($ordered[$middle - 1] + $ordered[$middle]) / 2
     }
     return '{0} ms  (min {1}, max {2}, n={3})' -f `
-        (Format-Milliseconds $median), `
-        (Format-Milliseconds $ordered[0]), `
-        (Format-Milliseconds $ordered[-1]), `
+    (Format-Milliseconds $median), `
+    (Format-Milliseconds $ordered[0]), `
+    (Format-Milliseconds $ordered[-1]), `
         $ordered.Count
 }
 
@@ -85,7 +86,8 @@ function Invoke-MicrovmSelfTest {
         if ($process.ExitCode -ne 0) {
             throw "WHP self-test failed with exit code $($process.ExitCode)"
         }
-    } finally {
+    }
+    finally {
         $process.Dispose()
     }
 }
@@ -101,28 +103,28 @@ function Invoke-AfxdpVm {
     $pipePath = '\\.\pipe\' + $pipeName
     $manifestPath = Join-Path ([IO.Path]::GetTempPath()) ("$pipeName.json")
     $manifest = [ordered]@{
-        version = 2
-        attachment = [ordered]@{
-            backend = 'hcn-afxdp-l2bridge'
+        version        = 2
+        attachment     = [ordered]@{
+            backend        = 'hcn-afxdp-l2bridge'
             interfaceIndex = [uint32]$script:endpoint.interfaceIndex
-            interfaceLuid = [uint64]$script:endpoint.interfaceLuid
-            gatewayMac = [string]$script:endpoint.gatewayMac
+            interfaceLuid  = [uint64]$script:endpoint.interfaceLuid
+            gatewayMac     = [string]$script:endpoint.gatewayMac
             queueSelection = [ordered]@{ mode = 'auto' }
         }
-        device = [ordered]@{
+        device         = [ordered]@{
             macAddress = [string]$script:endpoint.macAddress
-            mtu = $Mtu
+            mtu        = $Mtu
         }
         guestBootstrap = [ordered]@{
-            ipv4 = [ordered]@{
-                address = $GuestAddress
+            ipv4   = [ordered]@{
+                address      = $GuestAddress
                 prefixLength = $PrefixLength
-                gateway = $Gateway
+                gateway      = $Gateway
             }
             routes = @([ordered]@{ destination = '0.0.0.0/0'; nextHop = $Gateway })
-            dns = [ordered]@{ servers = @('1.1.1.1'); search = @() }
+            dns    = [ordered]@{ servers = @('1.1.1.1'); search = @() }
         }
-        runtime = [ordered]@{ controlPipe = $pipePath }
+        runtime        = [ordered]@{ controlPipe = $pipePath }
     }
     [IO.File]::WriteAllText(
         $manifestPath,
@@ -151,8 +153,8 @@ function Invoke-AfxdpVm {
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.FileName = $Microvm
         $startInfo.Arguments = (($allArguments | ForEach-Object {
-            ConvertTo-NativeArgument ([string]$_)
-        }) -join ' ')
+                    ConvertTo-NativeArgument ([string]$_)
+                }) -join ' ')
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
@@ -225,10 +227,11 @@ function Invoke-AfxdpVm {
         }
         return [pscustomobject]@{
             Metric = $metric
-            Wall = $stopwatch.Elapsed.TotalMilliseconds
-            Text = $text
+            Wall   = $stopwatch.Elapsed.TotalMilliseconds
+            Text   = $text
         }
-    } finally {
+    }
+    finally {
         $stopwatch.Stop()
         if ($started -and -not $process.HasExited) {
             try { $process.Kill(); $process.WaitForExit() } catch [InvalidOperationException] {}
@@ -313,6 +316,7 @@ try {
     Write-Output "  restore (guest resume -> marker): $(Format-Median $restored.ToArray())"
     Write-Output "  restore wall-clock             : $(Format-Median $restoreWall.ToArray())"
     Write-Output '  verified marker                : NETSNAP-RESTORE-OK'
-} finally {
+}
+finally {
     Remove-Item -LiteralPath $SnapshotPath -Recurse -Force -ErrorAction SilentlyContinue
 }
