@@ -5,6 +5,8 @@ mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 mount -t tmpfs none /tmp
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+ifconfig lo 127.0.0.1 up
 
 fatal() {
     echo "$*" >&2
@@ -193,6 +195,21 @@ if [ "$nrequired" = 1 ] || [ -n "$nip" ]; then
         fi
     fi
 fi
+# run-once: execute a mounted shell script and report its status through the VMM control port.
+nvx_exec=$(sed -n 's/.*nvx_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$nvx_exec" ]; then
+    if [ ! -f "$nvx_exec" ]; then
+        echo "nvx: executable script not found: $nvx_exec" >&2
+        /sbin/nvx-exit 127
+    fi
+    /bin/sh "$nvx_exec"
+    nvx_status=$?
+    /bin/busybox sync
+    /sbin/nvx-exit "$nvx_status"
+    echo "nvx: failed to stop VM after workload exit" >&2
+    /bin/busybox reboot -f
+    exit "$nvx_status"
+fi
 # netsnap: optional snapshot self-test/benchmark for --net (see `scripts/nvx.py bench-net-snapshot`).
 # When the kernel command line contains "netsnap", check the link, then ask the VMM to take a
 # snapshot through /sbin/nvx-snapshot. On the snapshot run the VMM captures here
@@ -314,7 +331,6 @@ echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
 echo " uname: $(uname -a)"
 echo "=========================================="
 echo
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 # snap: optional snapshot benchmark for a plain (non-networked) shell (see the shell-snapshot
 # benchmark). When the kernel command line contains "snap", ask the VMM to take a snapshot at
 # this fully-booted, shell-ready point through /sbin/nvx-snapshot. On the

@@ -43,12 +43,14 @@ mod whp;
 mod windows_terminal;
 
 use ::std::path::PathBuf;
+use ::std::process::ExitCode;
 
 use ::anyhow::{Context, Result, bail};
 use ::clap::Parser;
 use ::log::LevelFilter;
 
 const PVH_DEFAULT_CMDLINE: &str = "earlycon=xe9 console=hvc0 reboot=t panic=-1";
+const HOST_ERROR_PREFIX: &str = "NVX-HOST-ERROR:";
 
 /// Maximum guest sampling frequency. 8190 Hz is a sane upper bound that keeps sampling overhead
 /// and the retained-sample memory footprint bounded while still giving fine resolution; higher
@@ -60,6 +62,7 @@ const MAX_PROFILE_HZ: u32 = 8_190;
 #[derive(Parser, Debug)]
 #[command(
     name = "microvm",
+    version,
     about = "Minimal x86_64 micro-VM that PVH-boots Linux from a RAM initramfs (optional KVM SMP via --vcpus)."
 )]
 struct Args {
@@ -146,6 +149,16 @@ struct Args {
     /// Applies to `--mount-rw`; ignored for a read-only mount or an existing `--mount-image`.
     #[arg(long, value_name = "MiB")]
     mount_size: Option<u64>,
+
+    /// Execute this mounted guest shell script during a cold boot, then exit with its status.
+    /// Incompatible with snapshot/restore and `--exit-on-boot`.
+    #[arg(
+        long,
+        value_name = "GUEST_PATH",
+        requires = "mount",
+        conflicts_with_all = ["exit_on_boot", "restore", "snapshot", "selftest"]
+    )]
+    exec: Option<String>,
 
     /// Run the platform backend's protected-mode self-test instead of booting.
     #[arg(long)]
@@ -242,9 +255,43 @@ fn parse_level(name: &str) -> Result<LevelFilter> {
     }
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+fn main() -> ExitCode {
+    ::std::panic::set_hook(Box::new(|info| {
+        eprintln!("{HOST_ERROR_PREFIX} host panic: {info}");
+    }));
+    let args = match Args::try_parse() {
+        Ok(args) => args,
+        Err(error) => return report_parse_error(error),
+    };
+    match run(args) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("{HOST_ERROR_PREFIX} {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
+fn report_parse_error(error: ::clap::Error) -> ExitCode {
+    let exit_code = u8::try_from(error.exit_code()).unwrap_or(1);
+    let rendered = format_parse_error(&error);
+    if error.use_stderr() {
+        eprint!("{rendered}");
+    } else {
+        print!("{rendered}");
+    }
+    ExitCode::from(exit_code)
+}
+
+fn format_parse_error(error: &::clap::Error) -> String {
+    if error.exit_code() == 0 {
+        error.to_string()
+    } else {
+        format!("{HOST_ERROR_PREFIX} {error}")
+    }
+}
+
+fn run(args: Args) -> Result<ExitCode> {
     // Determine the logging level: explicit --log-level wins, otherwise --quiet suppresses
     // all logging and the default is `info`. RUST_LOG still overrides via `parse_default_env`.
     let level: LevelFilter = match &args.log_level {
@@ -258,7 +305,8 @@ fn main() -> Result<()> {
         .init();
 
     if args.selftest {
-        return selftest(&args);
+        selftest(&args)?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     if args.mem == 0 {
@@ -277,9 +325,12 @@ fn main() -> Result<()> {
     {
         bail!("--mount-rw, --mount-image and --mount-size require --mount <dir>");
     }
+    if let Some(exec) = args.exec.as_deref() {
+        validate_exec_path(exec)?;
+    }
 
     let profiling = build_profiling_config(&args)?;
-    dispatch(args, mem_bytes, profiling)
+    dispatch(args, mem_bytes, profiling).map(ExitCode::from)
 }
 
 fn build_profiling_config(args: &Args) -> Result<Option<profiler::ProfilingConfig>> {
@@ -379,6 +430,20 @@ fn parse_u64_auto(s: &str) -> Option<u64> {
     }
 }
 
+/// Validates the kernel-command-line-safe guest path accepted by `--exec`.
+fn validate_exec_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') {
+        bail!("--exec must be an absolute guest path");
+    }
+    if path
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || byte == b'\0')
+    {
+        bail!("--exec must not contain whitespace or null bytes");
+    }
+    Ok(())
+}
+
 /// Runs the KVM protected-mode self-test.
 #[cfg(target_os = "linux")]
 fn selftest(_args: &Args) -> Result<()> {
@@ -397,7 +462,7 @@ fn dispatch(
     args: Args,
     mem_bytes: u64,
     profiling: Option<profiler::ProfilingConfig>,
-) -> Result<()> {
+) -> Result<u8> {
     if args.net_config.is_some() {
         bail!("--net-config is only available on the Windows/WHP backend");
     }
@@ -452,6 +517,7 @@ fn dispatch(
         egress_filter,
         vcpus: args.vcpus,
         profiling,
+        exec: args.exec,
     })
 }
 
@@ -496,7 +562,7 @@ fn dispatch(
     args: Args,
     mem_bytes: u64,
     profiling: Option<profiler::ProfilingConfig>,
-) -> Result<()> {
+) -> Result<u8> {
     if args.net_tap.is_some() {
         bail!("--net-tap is only available on the Linux/KVM backend (WHP uses a user-mode NAT)");
     }
@@ -545,5 +611,65 @@ fn dispatch(
         mount_image: args.mount_image,
         mount_size: args.mount_size,
         profiling,
+        exec: args.exec,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ::clap::{Parser, error::ErrorKind};
+
+    use super::{Args, HOST_ERROR_PREFIX, format_parse_error, validate_exec_path};
+
+    #[test]
+    fn exec_path_requires_safe_absolute_guest_path() {
+        assert!(validate_exec_path("/mnt/host/run.sh").is_ok());
+        assert!(validate_exec_path("mnt/host/run.sh").is_err());
+        assert!(validate_exec_path("/mnt/host/run script.sh").is_err());
+        assert!(validate_exec_path("/mnt/host/run\0script.sh").is_err());
+    }
+
+    #[test]
+    fn exec_is_limited_to_cold_boot_without_snapshot_capture() {
+        assert!(
+            Args::try_parse_from([
+                "microvm",
+                "--mount",
+                "host",
+                "--exec",
+                "/mnt/host/run.sh",
+            ])
+            .is_ok()
+        );
+
+        for incompatible in ["--exit-on-boot", "--restore", "--snapshot", "--selftest"] {
+            let mut args = vec![
+                "microvm",
+                "--mount",
+                "host",
+                "--exec",
+                "/mnt/host/run.sh",
+                incompatible,
+            ];
+            if matches!(incompatible, "--restore" | "--snapshot") {
+                args.push("state");
+            }
+            let error = Args::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            assert!(format_parse_error(&error).starts_with(HOST_ERROR_PREFIX));
+        }
+    }
+
+    #[test]
+    fn help_is_not_reported_as_a_host_failure() {
+        let help = Args::try_parse_from(["microvm", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), ErrorKind::DisplayHelp);
+        assert_eq!(help.exit_code(), 0);
+        assert!(!format_parse_error(&help).starts_with(HOST_ERROR_PREFIX));
+
+        let version = Args::try_parse_from(["microvm", "--version"]).unwrap_err();
+        assert_eq!(version.kind(), ErrorKind::DisplayVersion);
+        assert_eq!(version.exit_code(), 0);
+        assert!(!format_parse_error(&version).starts_with(HOST_ERROR_PREFIX));
+    }
 }

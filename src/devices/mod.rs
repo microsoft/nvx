@@ -42,12 +42,12 @@ pub const VMM_PORT: u16 = 0x604;
 pub const SNAPSHOT_PORT: u16 = 0x605;
 
 /// Action the VMM should take after servicing a guest port write.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PioAction {
     /// Continue running the guest.
     None,
-    /// Shut the VM down.
-    Shutdown,
+    /// Shut the VM down with the guest-provided process exit code.
+    Shutdown(u8),
     /// Take a snapshot of the VM.
     Snapshot,
 }
@@ -114,8 +114,11 @@ impl DeviceBus {
                 PioAction::None
             },
             VMM_PORT => {
-                ::log::info!("guest requested shutdown via control port {port:#06x}");
-                PioAction::Shutdown
+                let exit_code = data.first().copied().unwrap_or_default();
+                ::log::info!(
+                    "guest requested shutdown via control port {port:#06x} (exit code {exit_code})"
+                );
+                PioAction::Shutdown(exit_code)
             },
             SNAPSHOT_PORT => {
                 ::log::info!("guest requested snapshot via control port {port:#06x}");
@@ -168,7 +171,7 @@ impl DeviceBus {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::console::Console;
@@ -179,6 +182,12 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_preserves_guest_exit_code() {
+        assert_eq!(bus().pio_write(VMM_PORT, &[37]), PioAction::Shutdown(37));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn device_state_round_trips_rtc_index() {
         let source = bus();
         let _ = source.pio_write(rtc::RTC_INDEX, &[0x8b]);
@@ -187,6 +196,7 @@ mod tests {
         assert_eq!(restored.rtc.lock().unwrap().snapshot(), 0x0b);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn device_state_accepts_pre_rtc_snapshots() {
         let restored = bus();

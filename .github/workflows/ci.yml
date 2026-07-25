@@ -94,7 +94,7 @@ jobs:
           path: |
             build/vmlinux
             build/initramfs.cpio.gz
-          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'kernel/**', 'alpine/init') }}
+          key: microvm-artifacts-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'kernel/**', 'alpine/init', 'alpine/nvx-exit', 'alpine/nvx-snapshot') }}
 
       - name: Build kernel + initramfs (Docker)
         if: steps.cache-base.outputs.cache-hit != 'true'
@@ -109,7 +109,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: build/initramfs-python.cpio.gz
-          key: microvm-python-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'alpine/init.python', 'alpine/hello.py', 'alpine/repl.py', 'alpine/net-hello.py', 'alpine/net-pandas.py') }}
+          key: microvm-python-${{ hashFiles('docker/Dockerfile', 'scripts/nvx.py', 'scripts/nvx_tools/**', 'alpine/init.python', 'alpine/nvx-exit', 'alpine/nvx-snapshot', 'alpine/hello.py', 'alpine/repl.py', 'alpine/net-hello.py', 'alpine/net-pandas.py') }}
 
       - name: Build Python initramfs (Docker)
         if: env.RUN_BENCH == 'true' && steps.cache-python.outputs.cache-hit != 'true'
@@ -214,6 +214,13 @@ jobs:
 
       - name: Boot smoke test
         run: python3 scripts/nvx.py test-boot
+
+      - name: Guest exec smoke test
+        run: |
+          sh scripts/test-kvm-exec.sh
+          if [ "$RUN_BENCH" = true ]; then
+            INITRD=build/initramfs-python.cpio.gz MEM=512 sh scripts/test-kvm-exec.sh
+          fi
 
       - name: Profiling smoke test
         run: scripts/test-profiling.sh
@@ -345,7 +352,8 @@ jobs:
             'scripts\hcn-tools.psm1',
             'scripts\setup-hcn-endpoint.ps1',
             'scripts\cleanup-hcn-endpoint.ps1',
-            'scripts\test-hcn-afxdp.ps1'
+            'scripts\test-hcn-afxdp.ps1',
+            'scripts\test-whp-exec.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null
@@ -407,6 +415,16 @@ jobs:
       - name: Boot smoke test
         timeout-minutes: 5
         run: python scripts\nvx.py test-boot
+
+      - name: Guest exec smoke test
+        timeout-minutes: 5
+        run: |
+          .\scripts\test-whp-exec.ps1
+          if ($env:RUN_BENCH -eq 'true') {
+            .\scripts\test-whp-exec.ps1 `
+              -Initrd build\initramfs-python.cpio.gz `
+              -MemoryMiB 512
+          }
 
       - name: Prepare performance logs
         if: env.RUN_BENCH == 'true'
@@ -606,7 +624,6 @@ jobs:
           )
 
       - name: Smoke — external HCN vNIC + AF_XDP
-        if: env.RUN_BENCH != 'true'
         timeout-minutes: 10
         run: |
           .\scripts\test-hcn-afxdp.ps1 `

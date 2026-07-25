@@ -409,6 +409,26 @@ class RetainedWorkflowTests(unittest.TestCase):
                 source,
             )
 
+    def test_hcn_afxdp_smoke_runs_a_mounted_exec_workload(self) -> None:
+        source = (REPO_ROOT / "scripts" / "test-hcn-afxdp.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("'--mount', $workRoot", source)
+        self.assertIn("'--exec', '/mnt/host/hcn-afxdp-smoke.sh'", source)
+        self.assertIn("exit 42", source)
+        self.assertNotIn("RedirectStandardInput = $true", source)
+
+    def test_kvm_exec_smoke_covers_smp_exit_statuses(self) -> None:
+        source = (REPO_ROOT / "scripts" / "test-kvm-exec.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--vcpus 2", source)
+        self.assertIn("for exit_code in 0 37", source)
+        self.assertIn("/mnt/host/kvm-pin-ap", source)
+        self.assertIn("/sbin/nvx-exit 37", source)
+        self.assertIn("legacy KVM shutdown payload ignored", source)
+        self.assertIn("run_exec 127", source)
+
     def test_hcn_afxdp_snapshot_runs_whp_selftest_and_visible_guests(self) -> None:
         afxdp = (REPO_ROOT / "scripts" / "benchmark-hcn-afxdp-snapshot.ps1").read_text(
             encoding="utf-8"
@@ -484,6 +504,13 @@ class CiWorkflowParityTests(unittest.TestCase):
 
         self.assertIn("scripts/nvx.py bench-net-snapshot |", linux)
         self.assertIn("scripts\\nvx.py bench-net-snapshot --runs 5", windows)
+        self.assertIn("scripts/test-kvm-exec.sh", linux)
+        self.assertIn('if [ "$RUN_BENCH" = true ]', linux)
+        self.assertIn("INITRD=build/initramfs-python.cpio.gz MEM=512", linux)
+        self.assertIn("scripts\\test-whp-exec.ps1", windows)
+        self.assertIn("if ($env:RUN_BENCH -eq 'true')", windows)
+        self.assertIn("-Initrd build\\initramfs-python.cpio.gz", windows)
+        self.assertIn("-MemoryMiB 512", windows)
 
         self.assertNotIn("skipping networking benchmark", linux)
         self.assertNotIn("skipping networked Python smoke test", linux)
@@ -494,6 +521,11 @@ class CiWorkflowParityTests(unittest.TestCase):
         self.assertIn("needs: [artifacts, windows]", hcn_afxdp)
         self.assertIn("github.event_name == 'pull_request'", hcn_afxdp)
         self.assertIn("--require-shared-suite", hcn_afxdp)
+        exec_smoke = hcn_afxdp.split(
+            "- name: Smoke — external HCN vNIC + AF_XDP\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("test-hcn-afxdp.ps1", exec_smoke)
+        self.assertNotIn("if:", exec_smoke)
         for command in (
             "measure-coldstart --runs 5",
             "bench-virtfs --runs 3",

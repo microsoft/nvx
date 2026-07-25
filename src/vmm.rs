@@ -138,6 +138,8 @@ pub struct Config {
     pub vcpus: usize,
     /// Optional guest/host profiling configuration.
     pub profiling: Option<crate::profiler::ProfilingConfig>,
+    /// Guest path to a mounted shell script executed once by the Alpine init.
+    pub exec: Option<String>,
 }
 
 /// A running virt-net NIC: the shared device model plus the TAP descriptor the receive thread
@@ -163,15 +165,17 @@ struct NetDevice {
 /// exit, or a panic — records it here and kicks the other vCPUs so the whole VM stops together,
 /// rather than leaving the guest running with fewer processors than it believes it has.
 ///
-/// Only flat, cheap state lives here (an atomic stop flag, an optional fatal message, and the
-/// registered vCPU thread ids); the caller keeps any richer bookkeeping to itself. This mirrors
-/// cloud-hypervisor (`AtomicBool` flags + a supervisor that owns the reason) and OpenVMM
+/// Only flat, cheap state lives here (an atomic stop flag, optional fatal/guest-exit results, and
+/// the registered vCPU thread ids); the caller keeps any richer bookkeeping to itself. This
+/// mirrors cloud-hypervisor (`AtomicBool` flags + a supervisor that owns the reason) and OpenVMM
 /// (`Arc<Halt>` woken by any VP).
 struct VmControl {
     /// Set once any vCPU asks the VM to stop; polled by every vCPU loop.
     stop: AtomicBool,
     /// The first fatal error reported by any vCPU (a normal shutdown leaves this `None`).
     fatal: Mutex<Option<String>>,
+    /// The first process exit code reported through the guest shutdown control port.
+    guest_exit: Mutex<Option<u8>>,
     /// A best-effort error (currently a guest-profile write failure) reported by the boot vCPU
     /// after its run loop ended. Kept separate from `fatal` so it is reconciled last and can never
     /// mask a real vCPU (boot or AP) fatal.
@@ -206,6 +210,7 @@ impl VmControl {
         Self {
             stop: AtomicBool::new(false),
             fatal: Mutex::new(None),
+            guest_exit: Mutex::new(None),
             deferred_err: Mutex::new(None),
             tids: Mutex::new(Vec::new()),
             released: AtomicBool::new(false),
@@ -246,6 +251,20 @@ impl VmControl {
     /// Requests a clean stop of the whole VM (guest shutdown/reset, boot marker, snapshot).
     fn request_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Requests a clean stop and preserves the first guest-provided process exit code.
+    fn request_guest_exit(&self, exit_code: u8) {
+        let mut guest_exit = self.guest_exit.lock().expect("vm control poisoned");
+        if guest_exit.is_none() {
+            *guest_exit = Some(exit_code);
+        }
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns the guest-provided process exit code, if one was reported.
+    fn guest_exit_code(&self) -> Option<u8> {
+        *self.guest_exit.lock().expect("vm control poisoned")
     }
 
     /// Requests a stop and records a fatal error (kept only if it is the first one).
@@ -325,6 +344,22 @@ impl VmControl {
             }
         }
     }
+}
+
+/// Reconciles VM termination with vCPU and deferred errors taking priority over a guest status.
+fn finish_run(result: Result<()>, control: &VmControl, require_guest_exit: bool) -> Result<u8> {
+    result?;
+    if let Some(msg) = control.take_fatal() {
+        bail!("vcpu fatal: {msg}");
+    }
+    if let Some(msg) = control.take_deferred_err() {
+        bail!("{msg}");
+    }
+    let guest_exit = control.guest_exit_code();
+    if require_guest_exit {
+        return guest_exit.context("guest terminated without reporting an exec exit status");
+    }
+    Ok(0)
 }
 
 /// Owns every application-processor thread and guarantees that none can outlive the VM resources
@@ -462,7 +497,7 @@ pub fn selftest() -> Result<()> {
 /// Creates and runs a micro-VM until the guest halts, resets, or is snapshotted. Either
 /// cold-boots a kernel or restores from a snapshot directory, depending on [`Config`].
 ///
-pub fn run(cfg: Config) -> Result<()> {
+pub fn run(cfg: Config) -> Result<u8> {
     if let Some(dir) = cfg.restore.clone() {
         run_restore(cfg, &dir)
     } else {
@@ -489,7 +524,7 @@ fn append_tsc_early_khz(cmdline: &mut String, tsc_khz: u32) {
 }
 
 /// Cold-boots a kernel + initramfs via the PVH protocol.
-fn run_cold(cfg: Config) -> Result<()> {
+fn run_cold(cfg: Config) -> Result<u8> {
     let kernel_path: &PathBuf = cfg.kernel.as_ref().context("--kernel is required")?;
     let kernel: Vec<u8> =
         fs::read(kernel_path).with_context(|| format!("reading kernel image {kernel_path:?}"))?;
@@ -570,6 +605,10 @@ fn run_cold(cfg: Config) -> Result<()> {
     if let Some(ncfg) = &cfg.net {
         cmdline.push(' ');
         cmdline.push_str(&ncfg.cmdline_fragment());
+    }
+    if let Some(exec) = cfg.exec.as_deref() {
+        cmdline.push_str(" nvx_exec=");
+        cmdline.push_str(exec);
     }
 
     let start_info_gpa: u64 = pvh::configure(&mem, &cmdline, initrd_region)?;
@@ -698,18 +737,7 @@ fn run_cold(cfg: Config) -> Result<()> {
     // any guest memory or VM resources can be released.
     ap_threads.stop_and_join();
 
-    // Reconcile the run outcome in priority order: the boot processor's own error (via `result`)
-    // first, then a fatal reported by any AP, and finally a best-effort deferred error (e.g. a
-    // guest-profile write failure) — so a profile-write error can never mask a real vCPU fatal.
-    // A clean guest shutdown/reset leaves nothing recorded.
-    match (result, control.take_fatal()) {
-        (Err(e), _) => Err(e),
-        (Ok(()), Some(msg)) => Err(anyhow!("vcpu fatal: {msg}")),
-        (Ok(()), None) => match control.take_deferred_err() {
-            Some(msg) => Err(anyhow!("{msg}")),
-            None => Ok(()),
-        },
-    }
+    finish_run(result, &control, cfg.exec.is_some())
 }
 
 /// Drives an application-processor vCPU for functional SMP. The AP is created in KVM's default
@@ -785,8 +813,9 @@ fn run_ap(
                 Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
                 Ok(VcpuExit::IoOut(port, data)) => match bus.pio_write(port, data) {
                     PioAction::None => {}
-                    PioAction::Shutdown => {
-                        stop_vm(None);
+                    PioAction::Shutdown(exit_code) => {
+                        control.request_guest_exit(exit_code);
+                        control.kick_others(my_tid);
                         break;
                     }
                     // The snapshot can be triggered from any CPU. Announce it and kick the other
@@ -874,7 +903,7 @@ fn ap_snapshot(ap: &mut Vcpu, idx: u64, control: &VmControl) -> Result<()> {
 }
 
 /// Restores and resumes a VM from a snapshot directory.
-fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
+fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
     let snap: Snapshot = Snapshot::read(dir)?;
 
     if cfg.net.is_some() {
@@ -1004,17 +1033,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     // Stop the VM and force any application processor still in `KVM_RUN` to exit, then join.
     ap_threads.stop_and_join();
 
-    // Reconcile in the same priority order as the cold-start path: the boot processor's own error
-    // first, then any AP fatal, and finally a best-effort deferred error (e.g. a guest-profile
-    // write failure) so it can never mask a real vCPU fatal.
-    match (result, control.take_fatal()) {
-        (Err(e), _) => Err(e),
-        (Ok(()), Some(msg)) => Err(anyhow!("vcpu fatal: {msg}")),
-        (Ok(()), None) => match control.take_deferred_err() {
-            Some(msg) => Err(anyhow!("{msg}")),
-            None => Ok(()),
-        },
-    }
+    finish_run(result, &control, cfg.exec.is_some())
 }
 
 /// Rebuilds the virt-net NIC from serialized snapshot state, or returns `None` if the snapshot
@@ -1227,9 +1246,9 @@ fn execute(
             Ok(VcpuExit::IoIn(port, data)) => bus.pio_read(port, data),
             Ok(VcpuExit::IoOut(port, data)) => match bus.pio_write(port, data) {
                 PioAction::None => {}
-                PioAction::Shutdown => {
-                    info!("guest requested shutdown");
-                    control.request_stop();
+                PioAction::Shutdown(exit_code) => {
+                    info!("guest requested shutdown with exit code {exit_code}");
+                    control.request_guest_exit(exit_code);
                     control.kick_others(self_tid);
                     break;
                 }
@@ -1734,6 +1753,24 @@ impl Drop for SampleSignalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_control_preserves_the_first_guest_exit_code() {
+        let control = VmControl::new(2);
+        control.request_guest_exit(37);
+        control.request_guest_exit(99);
+        assert!(control.should_stop());
+        assert_eq!(control.guest_exit_code(), Some(37));
+        assert_eq!(finish_run(Ok(()), &control, true).unwrap(), 37);
+        assert_eq!(finish_run(Ok(()), &control, false).unwrap(), 0);
+    }
+
+    #[test]
+    fn exec_run_requires_a_guest_exit_code() {
+        let control = VmControl::new(1);
+        assert!(finish_run(Ok(()), &control, true).is_err());
+        assert_eq!(finish_run(Ok(()), &control, false).unwrap(), 0);
+    }
 
     #[test]
     fn tsc_frequency_is_added_to_kernel_command_line() {

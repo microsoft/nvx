@@ -7,12 +7,28 @@ mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+ifconfig lo 127.0.0.1 up
 
 fatal() {
     echo "$*" >&2
     /bin/busybox reboot -f
     exit 1
 }
+
+mount_virtfs() {
+    if [ -e /dev/mtdblock0 ]; then
+        vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
+        [ -n "$vdir" ] || vdir=/mnt/host
+        vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)
+        [ -n "$vfs" ] || vfs=squashfs
+        vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
+        [ -n "$vmode" ] || vmode=ro
+        mkdir -p "$vdir"
+        mount -t "$vfs" -o "$vmode" /dev/mtdblock0 "$vdir" 2>/dev/null ||
+            fatal "virtfs: failed to mount /dev/mtdblock0 at $vdir"
+    fi
+}
+mount_virtfs
 
 # virt-net: configure standalone --net or the fail-closed L2Bridge/HCN contract before Python.
 nrequired=$(sed -n 's/.*virtnet_required=\([^ ]*\).*/\1/p' /proc/cmdline)
@@ -158,6 +174,21 @@ if [ "$nrequired" = 1 ] || [ -n "$nip" ]; then
         fi
         virtnet_error "no network interface found after 30s"
     fi
+fi
+
+nvx_exec=$(sed -n 's/.*nvx_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$nvx_exec" ]; then
+    if [ ! -f "$nvx_exec" ]; then
+        echo "nvx: executable script not found: $nvx_exec" >&2
+        /sbin/nvx-exit 127
+    fi
+    /bin/sh "$nvx_exec"
+    nvx_status=$?
+    /bin/busybox sync
+    /sbin/nvx-exit "$nvx_status"
+    echo "nvx: failed to stop VM after workload exit" >&2
+    /bin/busybox reboot -f
+    exit "$nvx_status"
 fi
 
 PYAPP=hello.py

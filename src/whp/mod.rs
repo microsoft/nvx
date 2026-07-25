@@ -144,6 +144,8 @@ pub struct Config {
     pub mount_size: Option<u64>,
     /// Optional guest/host profiling configuration.
     pub profiling: Option<crate::profiler::ProfilingConfig>,
+    /// Guest path to a mounted shell script executed once by the Alpine init.
+    pub exec: Option<String>,
 }
 
 /// A running virt-net NIC: the shared device model, raw-frame backend, and snapshot-safe identity.
@@ -342,7 +344,7 @@ fn ensure_whp_available() -> Result<()> {
 /// Creates and runs a WHP micro-VM: either cold-boots a kernel or resumes from a snapshot
 /// directory, depending on [`Config`].
 ///
-pub fn run(cfg: Config) -> Result<()> {
+pub fn run(cfg: Config) -> Result<u8> {
     ensure_whp_available()?;
     match cfg.restore.clone() {
         Some(dir) => run_restore(cfg, &dir),
@@ -377,7 +379,7 @@ fn create_partition() -> Result<Partition> {
 }
 
 /// Cold-boots a kernel + initramfs via the PVH protocol.
-fn run_cold(cfg: Config) -> Result<()> {
+fn run_cold(cfg: Config) -> Result<u8> {
     let kernel_path: &PathBuf = cfg.kernel.as_ref().context("--kernel is required")?;
     let kernel: Vec<u8> =
         fs::read(kernel_path).with_context(|| format!("reading kernel image {kernel_path:?}"))?;
@@ -409,6 +411,10 @@ fn run_cold(cfg: Config) -> Result<()> {
         .any(|arg| arg.starts_with("tsc_early_khz="))
     {
         cmdline.push_str(&format!(" tsc_early_khz={}", tsc_hz / 1000));
+    }
+    if let Some(exec) = cfg.exec.as_deref() {
+        cmdline.push_str(" nvx_exec=");
+        cmdline.push_str(exec);
     }
 
     // Optionally export a host directory to the guest as a virt-fs. The FAT image is mapped into
@@ -525,7 +531,7 @@ fn run_cold(cfg: Config) -> Result<()> {
 }
 
 /// Restores and resumes a VM from a snapshot directory.
-fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
+fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
     let snap: Snapshot = Snapshot::read(dir)?;
     let tsc_hz: u64 = measure_tsc_hz();
 
@@ -690,7 +696,7 @@ fn execute(
     bus: &DeviceBus,
     tsc_hz: u64,
     nic: Option<Nic>,
-) -> Result<()> {
+) -> Result<u8> {
     let handle = partition.handle;
     let guard: ConsoleGuard = ConsoleGuard::new();
     let mut guest_profiler: Option<GuestProfiler> = match &cfg.profiling {
@@ -769,6 +775,8 @@ fn execute(
 
     let mut exit: WHV_RUN_VP_EXIT_CONTEXT = WHV_RUN_VP_EXIT_CONTEXT::default();
     let mut run_err: Option<::anyhow::Error> = None;
+    let mut guest_exit_code = 0;
+    let mut guest_shutdown_seen = false;
     let mut prefer_timer = true;
     if let Some(path) = cfg.restore_ready_pipe.as_deref() {
         let pipe = xdp::ControlPipe::connect(path)?;
@@ -814,8 +822,10 @@ fn execute(
                     }
                     match result.action {
                         PioAction::None => {}
-                        PioAction::Shutdown => {
-                            info!("guest requested shutdown");
+                        PioAction::Shutdown(exit_code) => {
+                            guest_exit_code = exit_code;
+                            guest_shutdown_seen = true;
+                            info!("guest requested shutdown with exit code {exit_code}");
                             break;
                         }
                         PioAction::Snapshot => {
@@ -957,6 +967,9 @@ fn execute(
     if let Some(err) = run_err {
         return Err(err);
     }
+    if cfg.exec.is_some() && !guest_shutdown_seen {
+        bail!("guest terminated without reporting an exec exit status");
+    }
 
     if !cfg.timing_markers.is_empty() {
         let console = console.lock().expect("console poisoned");
@@ -986,7 +999,11 @@ fn execute(
             );
         }
     }
-    Ok(())
+    Ok(if cfg.exec.is_some() {
+        guest_exit_code
+    } else {
+        0
+    })
 }
 
 /// Result of one guest PIO access.

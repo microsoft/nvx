@@ -89,6 +89,7 @@ built revision.
 | `--mount-rw` | off | Use a writable, in-memory filesystem image. |
 | `--mount-image <file>` | none | Use a persistent writable image; implies `--mount-rw`. |
 | `--mount-size <MiB>` | computed | Size a new writable image. |
+| `--exec <guest-path>` | none | KVM/WHP cold boot: run a mounted shell script and return its status. Requires `--mount`; conflicts with snapshot, restore, self-test, and `--exit-on-boot`. |
 | `--net <IP/PREFIX>` | none | Attach standalone KVM TAP or WHP user-mode NAT networking. |
 | `--net-config <json>` | none | WHP-only external AF_XDP L2Bridge manifest; conflicts with `--net`. |
 | `--net-tap <name>` | none | KVM-only preconfigured TAP; valid with `--net` or a network snapshot restore. |
@@ -105,6 +106,45 @@ built revision.
 See [Networking](networking.md), [Virt-fs](virtfs.md), and
 [Snapshot and Restore](snapshots.md) for the grouped feature options and platform differences. See
 [Profiling and Flamegraphs](profiling-flamegraph.md) for capture and post-processing workflows.
+
+## Run a mounted workload
+
+The direct KVM and WHP VMMs can run one shell script from a virt-fs export and return the script's
+8-bit status to the host process. On Linux/KVM:
+
+```console
+./target/release/microvm \
+  --kernel build/vmlinux \
+  --initrd build/initramfs.cpio.gz \
+  --mount ./workloads/example \
+  --exec /mnt/host/run.sh
+status=$?
+```
+
+On Windows/WHP:
+
+```powershell
+.\target\release\microvm.exe `
+  --kernel build\vmlinux `
+  --initrd build\initramfs.cpio.gz `
+  --mount C:\workloads\example `
+  --exec /mnt/host/run.sh
+$status = $LASTEXITCODE
+```
+
+The guest path must be absolute and contain no whitespace. PID 1 mounts virt-fs, configures any
+requested network, and invokes the file through `/bin/sh`; the host exits with the resulting status
+from 0 through 255. `--exec` is a direct VMM option and is not exposed by `scripts/nvx.py run`. It
+is limited to cold boots and cannot be combined with `--snapshot`, `--restore`, `--selftest`, or
+`--exit-on-boot`. It composes with KVM `--net`, WHP `--net`, and Windows `--net-config`; PID 1
+finishes network setup before invoking the script. The privileged HCN/AF_XDP smoke test uses this
+path to run its guest-to-host HTTP probe and propagate its result through the VMM exit status.
+
+Host-side failures are distinguished from a guest status by an `NVX-HOST-ERROR:` prefix on
+standard error. This prefix is emitted for command-line validation failures, runtime errors, and
+panics. Clap syntax and option-conflict errors return status 2; semantic validation and ordinary
+host runtime errors return status 1. Panic exit behavior follows the Rust runtime. Help and version
+output are successful requests and do not carry the prefix.
 
 ## Console and logging
 

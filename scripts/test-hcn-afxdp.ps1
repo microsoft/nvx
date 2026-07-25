@@ -108,6 +108,7 @@ if ($endpoint.guestAddress -ne $GuestAddress -or
 
 $python = (Get-Command python -ErrorAction Stop).Source
 $webRoot = Join-Path ([IO.Path]::GetTempPath()) ('nvx-hcn-afxdp-www-' + [Guid]::NewGuid().ToString('N'))
+$workRoot = Join-Path ([IO.Path]::GetTempPath()) ('nvx-hcn-afxdp-work-' + [Guid]::NewGuid().ToString('N'))
 
 $pipeName = 'nvx-hcn-afxdp-' + [Guid]::NewGuid().ToString('N')
 $pipePath = '\\.\pipe\' + $pipeName
@@ -163,7 +164,6 @@ $writer = $null
 $process = $null
 $stdoutTask = $null
 $stderrTask = $null
-$stdoutPrefix = New-Object Collections.Generic.List[string]
 $stdout = ''
 $stderr = ''
 $readyLine = ''
@@ -177,6 +177,30 @@ $serverStdout = ''
 $serverStderr = ''
 
 try {
+    New-Item -ItemType Directory -Path $workRoot | Out-Null
+    $guestProbe = @'
+marker=NVX-HCN-AFXDP
+/bin/busybox timeout 20 /bin/busybox wget -qO /tmp/hcn-afxdp-http.log http://__GATEWAY__:__PORT__/
+probe_status=$?
+read guest_tx_packets < /sys/class/net/eth0/statistics/tx_packets
+read guest_tx_errors < /sys/class/net/eth0/statistics/tx_errors
+read guest_carrier < /sys/class/net/eth0/carrier
+read guest_operstate < /sys/class/net/eth0/operstate
+read host_response < /tmp/hcn-afxdp-http.log
+echo "${marker}-GUEST-TX=${guest_tx_packets} ERRORS=${guest_tx_errors} CARRIER=${guest_carrier} OPERSTATE=${guest_operstate}"
+echo "${marker}-HTTP=${host_response}"
+if [ "${probe_status:-1}" -eq 0 ] && [ "${host_response}" = HELLO-HOST ]; then
+    echo "${marker}-SMOKE-OK"
+    exit 0
+fi
+echo "${marker}-SMOKE-FAIL"
+exit 42
+'@
+    $guestProbe = $guestProbe.Replace('__GATEWAY__', $Gateway)
+    $guestProbe = $guestProbe.Replace('__PORT__', [string]$WebPort)
+    $guestProbe = $guestProbe.Replace("`r`n", "`n") + "`n"
+    [IO.File]::WriteAllText((Join-Path $workRoot 'hcn-afxdp-smoke.sh'), $guestProbe, $utf8)
+
     $pipe = New-Object IO.Pipes.NamedPipeServerStream(
         $pipeName,
         [IO.Pipes.PipeDirection]::InOut,
@@ -192,8 +216,8 @@ try {
         '--mem', '512',
         '--cmdline', 'earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1',
         '--net-config', $manifestPath,
-        '--exit-on-boot',
-        '--boot-marker', 'NVX-HCN-AFXDP-STOP',
+        '--mount', $workRoot,
+        '--exec', '/mnt/host/hcn-afxdp-smoke.sh',
         '--log-level', 'info'
     )
     $startInfo = New-Object Diagnostics.ProcessStartInfo
@@ -203,7 +227,6 @@ try {
     }) -join ' ')
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 
@@ -213,6 +236,7 @@ try {
         throw 'failed to start microvm.exe'
     }
     $started = $true
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
@@ -288,48 +312,6 @@ try {
 
     $writer.WriteLine('{"type":"StartVm"}')
 
-    $bootReady = $false
-    while (-not $bootReady) {
-        $stdoutLineTask = $process.StandardOutput.ReadLineAsync()
-        $bootRemaining = $deadline - [DateTime]::UtcNow
-        if ($bootRemaining.TotalMilliseconds -le 0 -or -not $stdoutLineTask.Wait($bootRemaining)) {
-            throw 'timed out waiting for Alpine guest readiness'
-        }
-        $stdoutLine = $stdoutLineTask.Result
-        if ($null -eq $stdoutLine) {
-            throw 'microvm.exe exited before Alpine reported guest readiness'
-        }
-        $stdoutPrefix.Add($stdoutLine)
-        $bootReady = $stdoutLine.Contains('ALPINE-MICROVM-BOOT-OK:')
-    }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-
-    $guestProbe = @'
-marker=NVX-HCN-AFXDP
-/bin/busybox timeout 20 /bin/busybox wget -qO /tmp/hcn-afxdp-http.log http://__GATEWAY__:__PORT__/; probe_status=$?
-read guest_tx_packets < /sys/class/net/eth0/statistics/tx_packets; read guest_tx_errors < /sys/class/net/eth0/statistics/tx_errors; read guest_carrier < /sys/class/net/eth0/carrier; read guest_operstate < /sys/class/net/eth0/operstate; read host_response < /tmp/hcn-afxdp-http.log; echo "${marker}-GUEST-TX=${guest_tx_packets} ERRORS=${guest_tx_errors} CARRIER=${guest_carrier} OPERSTATE=${guest_operstate}"; echo "${marker}-HTTP=${host_response}"; if [ "${probe_status:-1}" -eq 0 ] && [ "${host_response}" = HELLO-HOST ]; then echo "${marker}-SMOKE-OK"; else echo "${marker}-SMOKE-FAIL"; fi; echo "${marker}-STOP"
-'@
-    $guestProbe = $guestProbe.Replace('__GATEWAY__', $Gateway).Replace('__PORT__', [string]$WebPort) + "`n"
-    $inputStream = $process.StandardInput.BaseStream
-    # Windows PowerShell 5.1 may prepend a UTF-8 BOM when StandardInput is first opened.
-    $inputStream.WriteByte(10)
-    $inputStream.Flush()
-    $inputBytes = $utf8.GetBytes($guestProbe)
-    $inputStream.Write($inputBytes, 0, $inputBytes.Length)
-    $inputStream.Flush()
-
-    if (-not $process.WaitForExit(30000)) {
-        $interruptBytes = $utf8.GetBytes([string][char]3)
-        $inputStream.Write($interruptBytes, 0, $interruptBytes.Length)
-        $inputStream.Flush()
-        [Threading.Tasks.Task]::Delay(500).Wait()
-        $guestFallback = "`necho `"`${marker}-SMOKE-FAIL`"; echo `"`${marker}-STOP`"`n"
-        $inputBytes = $utf8.GetBytes($guestFallback)
-        $inputStream.Write($inputBytes, 0, $inputBytes.Length)
-        $inputStream.Flush()
-    }
-    $inputStream.Close()
-
     $processRemaining = $deadline - [DateTime]::UtcNow
     $waitMilliseconds = [int][Math]::Min(
         [int]::MaxValue,
@@ -354,17 +336,9 @@ read guest_tx_packets < /sys/class/net/eth0/statistics/tx_packets; read guest_tx
         }
     }
     if ($null -ne $stdoutTask) {
-        try {
-            $stdout = ($stdoutPrefix -join [Environment]::NewLine)
-            if ($stdout.Length -gt 0) { $stdout += [Environment]::NewLine }
-            $stdout += $stdoutTask.Result
-        } catch { $stdout = '<stdout unavailable>' }
+        try { $stdout = $stdoutTask.Result } catch { $stdout = '<stdout unavailable>' }
     } elseif ($null -ne $process) {
-        try {
-            $stdout = ($stdoutPrefix -join [Environment]::NewLine)
-            if ($stdout.Length -gt 0) { $stdout += [Environment]::NewLine }
-            $stdout += $process.StandardOutput.ReadToEnd()
-        } catch { $stdout = '<stdout unavailable>' }
+        try { $stdout = $process.StandardOutput.ReadToEnd() } catch { $stdout = '<stdout unavailable>' }
     }
     if ($null -ne $stderrTask) {
         try { $stderr = $stderrTask.Result } catch { $stderr = '<stderr unavailable>' }
@@ -404,6 +378,7 @@ read guest_tx_packets < /sys/class/net/eth0/statistics/tx_packets; read guest_tx
     if ($null -ne $process) { $process.Dispose() }
     if ($null -ne $serverProcess) { $serverProcess.Dispose() }
     Remove-Item -LiteralPath $webRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
 }
 
