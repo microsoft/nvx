@@ -209,6 +209,8 @@ def run_vm(
     mount_image: Path | None = None,
     mount_size: int | None = None,
     net: str | None = None,
+    allow_hosts: Sequence[str] = (),
+    block_hosts: Sequence[str] = (),
 ) -> int:
     executable = backend.executable(profile)
     require_file(executable, f"microvm not found at {executable}; build it first")
@@ -229,6 +231,10 @@ def run_vm(
             args.extend(["--mount-size", str(mount_size)])
     if net:
         args.extend(["--net", net])
+    for destination in allow_hosts:
+        args.extend(["--allow-host", destination])
+    for destination in block_hosts:
+        args.extend(["--block-host", destination])
     return subprocess.call([str(value) for value in args])
 
 

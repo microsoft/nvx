@@ -18,6 +18,7 @@ from nvx_tools.backends.base import HostBackend
 from nvx_tools.backends.windows import WindowsBackend
 from nvx_tools.build import (
     DockerBuildConfig,
+    _install,
     build_docker_artifacts,
     docker_build_command,
 )
@@ -40,10 +41,23 @@ from nvx_tools.vm import (
     format_median,
     invoke_vm_metric,
     boot_test,
+    run_vm,
 )
 
 
 class BackendTests(unittest.TestCase):
+    def test_guest_script_install_normalizes_windows_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            destination = Path(directory) / "destination"
+            source.write_bytes(b"#!/bin/sh\r\necho ready\r\n")
+
+            _install(source, destination)
+
+            self.assertEqual(destination.read_bytes(), b"#!/bin/sh\necho ready\n")
+            if os.name != "nt":
+                self.assertTrue(destination.stat().st_mode & 0o111)
+
     def test_platform_defaults_are_explicit(self) -> None:
         linux = LinuxBackend()
         windows = WindowsBackend()
@@ -82,6 +96,40 @@ class BackendTests(unittest.TestCase):
     def test_network_snapshot_rejects_non_ipv4_network(self) -> None:
         with self.assertRaisesRegex(ScriptError, "invalid --net IPv4 CIDR"):
             network_gateway("fd00::2/64")
+
+    def test_run_parser_collects_mutually_exclusive_egress_rules(self) -> None:
+        args = build_parser().parse_args(
+            ["run", "--allow-host", "10.0.0.0/8", "--allow-host", "192.0.2.10"]
+        )
+        self.assertEqual(args.allow_host, ["10.0.0.0/8", "192.0.2.10"])
+        self.assertEqual(args.block_host, [])
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                ["run", "--allow-host", "10.0.0.0/8", "--block-host", "192.0.2.10"]
+            )
+
+    @patch("nvx_tools.vm.require_file")
+    @patch("nvx_tools.vm.subprocess.call", return_value=0)
+    def test_run_forwards_egress_rules(self, invoke: object, require: object) -> None:
+        result = run_vm(
+            VmConfig(Path("kernel"), Path("initrd")),
+            LinuxBackend(),
+            net="10.0.0.2/24",
+            allow_hosts=("10.0.0.0/8", "192.0.2.10"),
+        )
+
+        self.assertEqual(result, 0)
+        command = invoke.call_args.args[0]
+        self.assertEqual(command.count("--allow-host"), 2)
+        self.assertEqual(
+            [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--allow-host"
+            ],
+            ["10.0.0.0/8", "192.0.2.10"],
+        )
 
     def test_network_snapshot_times_one_gateway_probe_on_cold_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

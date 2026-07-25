@@ -142,6 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--mount-image", type=Path, default=os.environ.get("MOUNT_IMAGE"))
     run.add_argument("--mount-size", type=int)
     run.add_argument("--net", default=os.environ.get("NET"))
+    egress = run.add_mutually_exclusive_group()
+    egress.add_argument("--allow-host", action="append", default=[])
+    egress.add_argument("--block-host", action="append", default=[])
 
     measure = subparsers.add_parser("measure-coldstart", help="benchmark cold-start configurations")
     _add_vm_arguments(measure, python_initrd=False)
@@ -433,6 +436,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mount_image=args.mount_image,
                 mount_size=args.mount_size,
                 net=args.net,
+                allow_hosts=args.allow_host,
+                block_hosts=args.block_host,
             )
         if args.command == "measure-coldstart":
             kernel, initrd = _vm_paths(args, backend)

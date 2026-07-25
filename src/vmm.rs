@@ -130,6 +130,8 @@ pub struct Config {
     pub net: Option<net::NetConfig>,
     /// Optional pre-existing host TAP to attach to instead of creating one (`--net-tap`).
     pub net_tap: Option<String>,
+    /// Host-side IPv4/CIDR policy for guest network egress.
+    pub egress_filter: crate::egress::EgressFilter,
     /// Number of vCPUs to create (`--vcpus`). 1 keeps the single-processor path. With N > 1 the
     /// VMM writes an Intel MP table and brings up N-1 application processors so the guest runs
     /// functional SMP.
@@ -592,6 +594,7 @@ fn run_cold(cfg: Config) -> Result<()> {
                 tap.raw_fd(),
                 irq,
                 ncfg.mac,
+                cfg.egress_filter.clone(),
             )));
             let tap_fd = tap.raw_fd();
             let cfg_header = ncfg.save_header();
@@ -921,11 +924,16 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
     // re-register the irqfd, and reload the device's transport state so it resumes in lockstep
     // with the ring state already present in the restored guest RAM. `_net_tap` keeps the TAP
     // alive for the VM's lifetime.
-    let (net_dev, _net_tap): (Option<NetDevice>, Option<net::HostTap>) =
-        match restore_net(&vm_fd, &mem, snap.net_state(), cfg.net_tap.as_deref())? {
-            Some((dev, tap)) => (Some(dev), Some(tap)),
-            None => (None, None),
-        };
+    let (net_dev, _net_tap): (Option<NetDevice>, Option<net::HostTap>) = match restore_net(
+        &vm_fd,
+        &mem,
+        snap.net_state(),
+        cfg.net_tap.as_deref(),
+        &cfg.egress_filter,
+    )? {
+        Some((dev, tap)) => (Some(dev), Some(tap)),
+        None => (None, None),
+    };
 
     let (console, bus) = build_io(&cfg, Some(snap.device_state()));
     let bus: Arc<DeviceBus> = Arc::new(bus);
@@ -1017,6 +1025,7 @@ fn restore_net(
     mem: &GuestMemory,
     net_state: &[u8],
     net_tap: Option<&str>,
+    egress_filter: &crate::egress::EgressFilter,
 ) -> Result<Option<(NetDevice, net::HostTap)>> {
     if net_state.is_empty() {
         return Ok(None);
@@ -1026,7 +1035,7 @@ fn restore_net(
     let tx_evt = net::register_tx_ioeventfd(vm_fd)?;
     let tap = net::HostTap::for_config(&ncfg, net_tap)?;
     let tap_fd = tap.raw_fd();
-    let mut dev = VirtioNet::new(mem.ram(), tap_fd, irq, ncfg.mac);
+    let mut dev = VirtioNet::new(mem.ram(), tap_fd, irq, ncfg.mac, egress_filter.clone());
     dev.load(&net_state[consumed..])?;
     dev.resume();
     info!(

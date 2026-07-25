@@ -30,6 +30,7 @@ use ::windows::Win32::System::Threading::{
     CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
 
+use crate::egress::EgressFilter;
 use crate::l2bridge::{L2BridgeConfig, MAX_AFXDP_MTU, MAX_EXTERNAL_QUEUES};
 use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters, FrameSend};
 
@@ -1204,6 +1205,7 @@ struct Afxdp {
     rx_sender: SyncSender<Vec<u8>>,
     receiver: Mutex<Receiver<Vec<u8>>>,
     arp_proxy: Option<ArpProxy>,
+    egress_filter: EgressFilter,
     max_frame_size: usize,
     shared: Arc<SharedState>,
     controls: Vec<Arc<Event>>,
@@ -1217,6 +1219,7 @@ impl Afxdp {
         queues: Vec<Queue>,
         max_frame_size: usize,
         arp_proxy: Option<ArpProxy>,
+        egress_filter: EgressFilter,
     ) -> Result<Arc<Self>> {
         let (out, receiver) = sync_channel(RX_CHANNEL_DEPTH);
         let (tx_sender, tx_receiver) = sync_channel(TX_FRAME_COUNT);
@@ -1287,6 +1290,7 @@ impl Afxdp {
             rx_sender: out,
             receiver: Mutex::new(receiver),
             arp_proxy,
+            egress_filter,
             max_frame_size,
             shared,
             controls,
@@ -1327,6 +1331,7 @@ impl FrameBackend for Afxdp {
         if self.shared.state.load(Ordering::Acquire) != STATE_READY
             || frame.len() < 14
             || frame.len() > self.max_frame_size
+            || !self.egress_filter.allows_ethernet_frame(&frame)
         {
             self.shared
                 .counters
@@ -1865,7 +1870,11 @@ impl ArpProxy {
     }
 }
 
-pub fn start(config: &L2BridgeConfig, arp_proxy: Option<ArpProxy>) -> Result<BackendStart> {
+pub fn start(
+    config: &L2BridgeConfig,
+    arp_proxy: Option<ArpProxy>,
+    egress_filter: &EgressFilter,
+) -> Result<BackendStart> {
     let expected_luid = config.attachment.interface_luid;
     validate_interface_identity(config.attachment.interface_index, expected_luid)?;
     let (max_frame_size, chunk_size) = frame_layout(config.device.mtu)?;
@@ -1902,8 +1911,14 @@ pub fn start(config: &L2BridgeConfig, arp_proxy: Option<ArpProxy>) -> Result<Bac
     };
     let observed_luid =
         validate_interface_identity(config.attachment.interface_index, expected_luid)?;
-    let backend: Arc<dyn FrameBackend> =
-        Afxdp::new(api, guard, queues, max_frame_size, arp_proxy)?;
+    let backend: Arc<dyn FrameBackend> = Afxdp::new(
+        api,
+        guard,
+        queues,
+        max_frame_size,
+        arp_proxy,
+        egress_filter.clone(),
+    )?;
     Ok(BackendStart {
         backend,
         queues: ids,

@@ -84,6 +84,7 @@ use crate::boot::pvh;
 use crate::console::{Console, TimingMarker};
 use crate::devices::portb::PortConsole;
 use crate::devices::{DeviceBus, PioAction};
+use crate::egress::EgressFilter;
 use crate::l2bridge::{ExternalIdentity, L2BridgeConfig};
 use crate::profiler::{GuestProfiler, HostTraceSession};
 use crate::whp::emulator::{Emulator, MmioHandler};
@@ -129,6 +130,8 @@ pub struct Config {
     pub net: Option<NetConfig>,
     /// Optional external L2Bridge data-plane contract (`--net-config`).
     pub net_config: Option<L2BridgeConfig>,
+    /// Host-side IPv4/CIDR policy for guest network egress.
+    pub egress_filter: EgressFilter,
     /// Host directory to export to the guest as a virt-fs (`--mount`).
     pub mount: Option<PathBuf>,
     /// Guest mount point for the `--mount` directory.
@@ -155,8 +158,8 @@ struct Nic {
 
 impl Nic {
     /// Builds the standalone SLIRP NIC.
-    fn build_slirp(mem: &Arc<GuestMemory>, ncfg: &NetConfig) -> Self {
-        let slirp = slirp::start(ncfg);
+    fn build_slirp(mem: &Arc<GuestMemory>, ncfg: &NetConfig, egress_filter: &EgressFilter) -> Self {
+        let slirp = slirp::start(ncfg, egress_filter);
         let backend: Arc<dyn FrameBackend> = slirp;
         let dev: Arc<Mutex<VirtioNet>> = Arc::new(Mutex::new(VirtioNet::new(
             Arc::clone(mem),
@@ -171,7 +174,11 @@ impl Nic {
     }
 
     /// Builds the external NIC. `xdp::start` must report readiness before this returns.
-    fn build_l2bridge(mem: &Arc<GuestMemory>, config: &L2BridgeConfig) -> Result<Self> {
+    fn build_l2bridge(
+        mem: &Arc<GuestMemory>,
+        config: &L2BridgeConfig,
+        egress_filter: &EgressFilter,
+    ) -> Result<Self> {
         // The Agent owns and hosts this pipe; NVX is only a client. Connect before initializing
         // XDP so an initialization failure can be reported, then do not enter the vCPU loop until
         // the Agent explicitly acknowledges the ready data plane with StartVm.
@@ -188,7 +195,7 @@ impl Nic {
             })
             .transpose()?;
 
-        let started = match xdp::start(config, arp_proxy) {
+        let started = match xdp::start(config, arp_proxy, egress_filter) {
             Ok(started) => started,
             Err(error) => {
                 pipe.data_plane_error(&format!("{error:#}"));
@@ -468,7 +475,7 @@ fn run_cold(cfg: Config) -> Result<()> {
                 ncfg.prefix,
                 ncfg.host_ip
             );
-            Some(Nic::build_slirp(&mem, ncfg))
+            Some(Nic::build_slirp(&mem, ncfg, &cfg.egress_filter))
         }
         (None, Some(config)) => {
             if config.uses_hcn_vnic() {
@@ -486,7 +493,7 @@ fn run_cold(cfg: Config) -> Result<()> {
                     config.device.mtu
                 );
             }
-            Some(Nic::build_l2bridge(&mem, config)?)
+            Some(Nic::build_l2bridge(&mem, config, &cfg.egress_filter)?)
         }
         (None, None) => None,
         (Some(_), Some(_)) => bail!("--net and --net-config are mutually exclusive"),
@@ -541,7 +548,12 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<()> {
 
     // An external snapshot is restored only with a fresh external manifest. The data-plane
     // backend is initialized and ready before device state is restored and the vCPU can resume.
-    let nic: Option<Nic> = build_restored_nic(&mem, snap.net(), cfg.net_config.as_ref())?;
+    let nic: Option<Nic> = build_restored_nic(
+        &mem,
+        snap.net(),
+        cfg.net_config.as_ref(),
+        &cfg.egress_filter,
+    )?;
     if nic.is_none() && cfg.net_config.is_some() {
         bail!("--net-config was supplied but this snapshot has no NIC");
     }
@@ -561,6 +573,7 @@ fn build_restored_nic(
     mem: &Arc<GuestMemory>,
     net_state: &[u8],
     external: Option<&L2BridgeConfig>,
+    egress_filter: &EgressFilter,
 ) -> Result<Option<Nic>> {
     if net_state.is_empty() {
         return Ok(None);
@@ -576,13 +589,13 @@ fn build_restored_nic(
                 "external L2Bridge restore identity mismatch (MAC, MTU, or guest bootstrap changed)"
             );
         }
-        (Nic::build_l2bridge(mem, config)?, consumed)
+        (Nic::build_l2bridge(mem, config, egress_filter)?, consumed)
     } else {
         if external.is_some() {
             bail!("a standalone SLIRP snapshot cannot be restored with --net-config");
         }
         let (ncfg, consumed) = NetConfig::from_header(net_state)?;
-        (Nic::build_slirp(mem, &ncfg), consumed)
+        (Nic::build_slirp(mem, &ncfg, egress_filter), consumed)
     };
     {
         let mut dev = nic.dev.lock().expect("virt-net poisoned");

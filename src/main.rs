@@ -14,6 +14,7 @@
 mod boot;
 mod console;
 mod devices;
+mod egress;
 #[cfg(any(target_os = "windows", test))]
 mod l2bridge;
 mod layout;
@@ -157,6 +158,24 @@ struct Args {
     /// `sudo ip`.
     #[arg(long, value_name = "IP/PREFIX")]
     net: Option<String>,
+
+    /// Permit only this IPv4 address or CIDR through the guest network backend. Repeatable and
+    /// mutually exclusive with `--block-host`.
+    #[arg(
+        long,
+        value_name = "IPv4[/PREFIX]",
+        conflicts_with_all = ["block_host", "snapshot"]
+    )]
+    allow_host: Vec<String>,
+
+    /// Block this IPv4 address or CIDR in the guest network backend. Repeatable and mutually
+    /// exclusive with `--allow-host`.
+    #[arg(
+        long,
+        value_name = "IPv4[/PREFIX]",
+        conflicts_with_all = ["allow_host", "snapshot"]
+    )]
+    block_host: Vec<String>,
 
     /// Path to a versioned external L2Bridge network manifest. This is mutually exclusive with
     /// `--net`, which remains the standalone SLIRP configuration.
@@ -385,11 +404,18 @@ fn dispatch(
     if args.restore_ready_pipe.is_some() {
         bail!("--restore-ready-pipe is only available on the Windows/WHP backend");
     }
+    if (!args.allow_host.is_empty() || !args.block_host.is_empty())
+        && args.net.is_none()
+        && args.restore.is_none()
+    {
+        bail!("--allow-host and --block-host require --net or --restore");
+    }
     // Parse the optional virt-net endpoint (guest IP/prefix), deriving the host gateway.
     let net: Option<net::NetConfig> = match &args.net {
         Some(spec) => Some(net::NetConfig::parse(spec)?),
         None => None,
     };
+    let egress_filter = egress::EgressFilter::parse(&args.allow_host, &args.block_host)?;
 
     if args.net_tap.is_some() && args.net.is_none() && args.restore.is_none() {
         bail!("--net-tap requires --net (cold boot) or --restore (a networked snapshot)");
@@ -423,9 +449,40 @@ fn dispatch(
         mount_size: args.mount_size,
         net,
         net_tap: args.net_tap,
+        egress_filter,
         vcpus: args.vcpus,
         profiling,
     })
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn egress_policy_accepts_external_network_and_rejects_mixed_modes() {
+        let args = Args::try_parse_from([
+            "microvm",
+            "--allow-host",
+            "10.0.0.0/8",
+            "--net-config",
+            "network.json",
+        ])
+        .unwrap();
+        assert_eq!(args.allow_host, ["10.0.0.0/8"]);
+        assert_eq!(args.net_config, Some(PathBuf::from("network.json")));
+
+        assert!(
+            Args::try_parse_from([
+                "microvm",
+                "--allow-host",
+                "10.0.0.0/8",
+                "--block-host",
+                "192.0.2.10",
+            ])
+            .is_err()
+        );
+    }
 }
 
 /// Builds the backend configuration and runs the VM (Windows / WHP backend).
@@ -446,6 +503,13 @@ fn dispatch(
     if args.vcpus > 1 {
         bail!("--vcpus > 1 is only available on the Linux/KVM backend (WHP is single-vCPU)");
     }
+    if (!args.allow_host.is_empty() || !args.block_host.is_empty())
+        && args.net.is_none()
+        && args.net_config.is_none()
+        && args.restore.is_none()
+    {
+        bail!("--allow-host and --block-host require --net, --net-config, or --restore");
+    }
 
     let net: Option<whp::NetConfig> = match &args.net {
         Some(spec) => Some(whp::NetConfig::parse(spec)?),
@@ -455,6 +519,7 @@ fn dispatch(
         Some(path) => Some(l2bridge::L2BridgeConfig::from_path(path)?),
         None => None,
     };
+    let egress_filter = egress::EgressFilter::parse(&args.allow_host, &args.block_host)?;
 
     whp::run(whp::Config {
         kernel: args.kernel,
@@ -473,6 +538,7 @@ fn dispatch(
         restore_ready_pipe: args.restore_ready_pipe,
         net,
         net_config,
+        egress_filter,
         mount: args.mount,
         mount_target: args.mount_target,
         mount_rw: args.mount_rw,

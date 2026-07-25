@@ -30,6 +30,7 @@ use ::std::thread::{self, JoinHandle};
 use ::std::time::Duration;
 use ::std::time::Instant;
 
+use crate::egress::EgressFilter;
 use crate::whp::net::{BackendHealth, FrameBackend, FrameCounters, FrameSend, NetConfig};
 
 const FRAME_QUEUE_DEPTH: usize = 256;
@@ -105,7 +106,7 @@ impl Drop for Slirp {
 }
 
 /// Starts the NAT worker for `cfg`.
-pub fn start(cfg: &NetConfig) -> Arc<Slirp> {
+pub fn start(cfg: &NetConfig, egress_filter: &EgressFilter) -> Arc<Slirp> {
     let (to_nat, from_guest): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) =
         sync_channel(FRAME_QUEUE_DEPTH);
     let (to_guest_tx, to_guest): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) =
@@ -113,11 +114,17 @@ pub fn start(cfg: &NetConfig) -> Arc<Slirp> {
     let stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     let worker_cfg: NetConfig = cfg.clone();
+    let worker_filter = egress_filter.clone();
     let worker_stop: Arc<AtomicBool> = Arc::clone(&stop);
     let worker: JoinHandle<()> = thread::Builder::new()
         .name("whp-slirp".into())
         .spawn(move || {
-            let mut nat: Nat = Nat::new(worker_cfg, to_guest_tx, Arc::clone(&worker_stop));
+            let mut nat: Nat = Nat::new(
+                worker_cfg,
+                worker_filter,
+                to_guest_tx,
+                Arc::clone(&worker_stop),
+            );
             while !worker_stop.load(Ordering::Acquire) {
                 // Drain guest frames without blocking long, then service host sockets, so both
                 // directions stay responsive.
@@ -211,6 +218,7 @@ impl FrameBackend for Slirp {
 /// The NAT state machine, owned by the worker thread.
 struct Nat {
     cfg: NetConfig,
+    egress_filter: EgressFilter,
     /// Sink for frames destined to the guest.
     to_guest: SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
@@ -221,10 +229,16 @@ struct Nat {
 }
 
 impl Nat {
-    fn new(cfg: NetConfig, to_guest: SyncSender<Vec<u8>>, stop: Arc<AtomicBool>) -> Self {
+    fn new(
+        cfg: NetConfig,
+        egress_filter: EgressFilter,
+        to_guest: SyncSender<Vec<u8>>,
+        stop: Arc<AtomicBool>,
+    ) -> Self {
         let guest_mac: [u8; 6] = cfg.mac;
         Self {
             cfg,
+            egress_filter,
             to_guest,
             stop,
             guest_mac,
@@ -306,6 +320,10 @@ impl Nat {
         let Some(pkt) = proto::Ipv4Packet::parse(ip) else {
             return;
         };
+        if !self.egress_filter.allows(pkt.dst) {
+            self.reject_ipv4(ip);
+            return;
+        }
         match pkt.proto {
             IpProto::Icmp => self.on_icmp(&pkt),
             IpProto::Udp => {
@@ -323,6 +341,19 @@ impl Nat {
             }
             IpProto::Other(_) => {}
         }
+    }
+
+    /// Reports a policy denial as ICMP destination-unreachable / administratively prohibited.
+    fn reject_ipv4(&self, original: &[u8]) {
+        let quoted = &original[..original.len().min(28)];
+        let mut icmp = Vec::with_capacity(8 + quoted.len());
+        icmp.extend_from_slice(&[3, 13, 0, 0]); // destination unreachable, admin prohibited
+        icmp.extend_from_slice(&[0, 0, 0, 0]);
+        icmp.extend_from_slice(quoted);
+        let checksum = proto::checksum(&icmp);
+        icmp[2..4].copy_from_slice(&checksum.to_be_bytes());
+        let reply = proto::build_ipv4(self.cfg.host_ip, self.cfg.guest_ip, IpProto::Icmp, &icmp);
+        let _ = self.emit(self.frame_to_guest(&reply));
     }
 
     /// Answers ICMP echo requests addressed to the gateway (so `ping <gateway>` works).
@@ -381,7 +412,7 @@ mod tests {
         let cfg = NetConfig::parse("10.0.0.2/24").unwrap();
         let (frames, receiver) = sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
-        let nat = Nat::new(cfg, frames, Arc::clone(&stop));
+        let nat = Nat::new(cfg, EgressFilter::AllowAll, frames, Arc::clone(&stop));
         assert!(nat.emit(vec![1]));
 
         let (completed, completion) = channel();
@@ -394,5 +425,27 @@ mod tests {
         assert!(completion.recv_timeout(Duration::from_secs(1)).unwrap());
         assert_eq!(receiver.recv().unwrap(), vec![2]);
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn unlisted_dns_destination_returns_admin_prohibited() {
+        let cfg = NetConfig::parse("10.0.0.2/24").unwrap();
+        let filter = EgressFilter::parse(&["10.0.0.0/8".to_string()], &[]).unwrap();
+        let (frames, receiver) = sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut nat = Nat::new(cfg.clone(), filter, frames, stop);
+        let mut tcp = vec![0_u8; 20];
+        tcp[2..4].copy_from_slice(&53_u16.to_be_bytes());
+        let packet = proto::build_ipv4(
+            cfg.guest_ip,
+            "192.168.1.10".parse().unwrap(),
+            IpProto::Tcp,
+            &tcp,
+        );
+
+        nat.on_ipv4(&packet);
+
+        let frame = receiver.recv().unwrap();
+        assert_eq!(&frame[34..36], &[3, 13]);
     }
 }

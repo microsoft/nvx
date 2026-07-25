@@ -72,6 +72,7 @@ use ::log::{
 };
 use ::vmm_sys_util::eventfd::EventFd;
 
+use crate::egress::EgressFilter;
 use crate::memory::GuestRam;
 
 /// Guest-physical base of the virtio-mmio device window. It lives in the MMIO gap
@@ -524,6 +525,8 @@ pub struct VirtioNet {
     mem: GuestRam,
     /// Host TAP descriptor (owned by [`HostTap`]; valid for the VM's lifetime).
     tap: RawFd,
+    /// Host-side destination policy applied before writing guest frames to TAP.
+    egress_filter: EgressFilter,
     /// IRQ line, raised by signalling this eventfd (registered as an `irqfd`).
     irq: Arc<EventFd>,
     /// Guest MAC address (exposed through config space).
@@ -539,10 +542,17 @@ pub struct VirtioNet {
 
 impl VirtioNet {
     /// Creates the device backed by TAP `tap`, raising `irq`, presenting `mac` to the guest.
-    pub fn new(mem: GuestRam, tap: RawFd, irq: Arc<EventFd>, mac: [u8; 6]) -> Self {
+    pub fn new(
+        mem: GuestRam,
+        tap: RawFd,
+        irq: Arc<EventFd>,
+        mac: [u8; 6],
+        egress_filter: EgressFilter,
+    ) -> Self {
         Self {
             mem,
             tap,
+            egress_filter,
             irq,
             mac,
             device_features_sel: 0,
@@ -730,7 +740,10 @@ impl VirtioNet {
 
             // Strip the virtio_net_hdr and hand the raw Ethernet frame to the TAP.
             if frame.len() > NET_HDR_LEN {
-                tap_write(self.tap, &frame[NET_HDR_LEN..]);
+                let ethernet = &frame[NET_HDR_LEN..];
+                if self.egress_filter.allows_ethernet_frame(ethernet) {
+                    tap_write(self.tap, ethernet);
+                }
             }
             self.queues[TX_QUEUE].push_used(&mem, u32::from(head), 0);
             raised = true;

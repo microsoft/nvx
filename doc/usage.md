@@ -92,6 +92,8 @@ built revision.
 | `--net <IP/PREFIX>` | none | Attach standalone KVM TAP or WHP user-mode NAT networking. |
 | `--net-config <json>` | none | WHP-only external AF_XDP L2Bridge manifest; conflicts with `--net`. |
 | `--net-tap <name>` | none | KVM-only preconfigured TAP; valid with `--net` or a network snapshot restore. |
+| `--allow-host <IPv4[/PREFIX]>` | none | Allow only listed guest egress destinations; repeatable across all network backends. |
+| `--block-host <IPv4[/PREFIX]>` | none | Block listed guest egress destinations; repeatable across all network backends. |
 | `--guest-profile <file>` | none | Sample guest stacks and write folded output. |
 | `--profile-hz <Hz>` | `997` | Guest sampling frequency, from 1 through 8190 Hz. |
 | `--kernel-symbols <ELF[@BASE]>` | none | Resolve guest-kernel sample addresses. |

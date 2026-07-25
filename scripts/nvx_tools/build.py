@@ -91,7 +91,7 @@ def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
 
 
 def _install(source: Path, destination: Path) -> None:
-    shutil.copy2(source, destination)
+    destination.write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
     destination.chmod(0o755)
 
 

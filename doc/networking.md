@@ -13,6 +13,30 @@ backend:
 
 The guest uses a static IPv4 address. IPv6 is not part of the current guest network contract.
 
+## Egress policy
+
+All three host data planes support the same repeatable destination policy:
+
+```text
+--allow-host 10.20.0.0/16 --allow-host 192.0.2.10
+--block-host 169.254.169.254
+```
+
+`--allow-host` permits only the listed IPv4 addresses or CIDRs. `--block-host` permits all IPv4
+destinations except the listed addresses or CIDRs. The modes are mutually exclusive and require
+`--net`, `--net-config`, or a networked `--restore`. DNS has no implicit exception, so an
+allow-list must include every DNS resolver the guest needs.
+
+The policy is checked before SLIRP opens a host socket, before KVM writes a frame to TAP, and before
+AF_XDP queues a frame for transmission. TAP and AF_XDP allow ARP so the guest can resolve its
+gateway, and they inspect IPv4 inside stacked VLAN headers. In allow-list mode they reject IPv6
+and other non-ARP protocols because those destinations cannot be represented by an IPv4 CIDR. In
+block-list mode non-IPv4 protocols remain outside the IPv4 policy. Malformed IPv4 or VLAN frames
+fail closed whenever either policy mode is active.
+
+The policy is run-scoped and is not serialized into snapshots. The options therefore conflict
+with `--snapshot`; supply the desired policy again whenever restoring a networked snapshot.
+
 ## Standalone addressing
 
 `--net <IP/PREFIX>` identifies the guest. Prefixes from `/1` through `/30` are accepted. NVX
