@@ -47,9 +47,6 @@ Linux and Windows, compiles the Python and Alpine sources, and runs the Python u
 hosts. `cargo fmt --check` is a contributor-side check and should remain clean even though the
 workflow does not currently run it explicitly.
 
-PowerShell changes should parse under Windows PowerShell 5.1 or newer. The Windows CI job parses
-all HCN/AF_XDP scripts before running them.
-
 ## Backend validation
 
 After unit tests, use the narrowest relevant executable check:
@@ -62,7 +59,7 @@ After unit tests, use the narrowest relevant executable check:
 | Virt-fs | Read-only smoke test or `bench-virtfs --runs 1`, matching the changed mode |
 | Standalone networking | Guest gateway probe and `bench-net-snapshot --runs 1` |
 | Python guest | Rebuild the Python initramfs and run the relevant snapshot smoke test |
-| HCN/AF_XDP | `test-hcn-afxdp.ps1` on a provisioned Windows host |
+| HCN/AF_XDP | `scripts/nvx.py test-hcn-afxdp` on a provisioned Windows host |
 | Performance parser or metric | Python unit tests and `performance.py collect` on representative logs |
 
 Run both KVM and WHP when changing shared boot structures, PMIO, console behavior, kernel command

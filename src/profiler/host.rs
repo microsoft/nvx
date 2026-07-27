@@ -396,7 +396,7 @@ impl Drop for HostTraceSession {
 /// Bundled WPR recording profiles (embedded at build time), materialized next to the trace so the
 /// lean/scheduling profile is the default without depending on the working directory.
 #[cfg(target_os = "windows")]
-const NVX_WPRP: &str = include_str!("../../scripts/nvx-cpu.wprp");
+const NVX_WPRP: &str = include_str!("nvx-cpu.wprp");
 
 /// Bundled default WPR profile name. Captures CPU sampled-profile stacks plus scheduling events.
 #[cfg(target_os = "windows")]

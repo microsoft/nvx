@@ -217,13 +217,13 @@ jobs:
 
       - name: Guest exec smoke test
         run: |
-          sh scripts/test-kvm-exec.sh
+          python3 scripts/nvx.py test-exec
           if [ "$RUN_BENCH" = true ]; then
-            INITRD=build/initramfs-python.cpio.gz MEM=512 sh scripts/test-kvm-exec.sh
+            python3 scripts/nvx.py test-exec --initrd build/initramfs-python.cpio.gz --mem 512
           fi
 
       - name: Profiling smoke test
-        run: scripts/test-profiling.sh
+        run: python3 scripts/nvx.py test-profiling
 
       - name: Prepare performance logs
         if: env.RUN_BENCH == 'true'
@@ -344,33 +344,8 @@ jobs:
       - name: Validate Python tooling
         run: python -m compileall -q scripts alpine
 
-      - name: Validate PowerShell tooling
-        run: |
-          $files = @(
-            'scripts\benchmark-hcn-afxdp.ps1',
-            'scripts\benchmark-hcn-afxdp-snapshot.ps1',
-            'scripts\hcn-tools.psm1',
-            'scripts\setup-hcn-endpoint.ps1',
-            'scripts\cleanup-hcn-endpoint.ps1',
-            'scripts\test-hcn-afxdp.ps1',
-            'scripts\test-whp-exec.ps1'
-          )
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $file),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count) {
-              $errors | Format-List Message, Extent
-              throw "PowerShell syntax validation failed for $file"
-            }
-          }
-
       - name: Set up cross-OS cache tools
-        run: .\scripts\setup-cross-os-cache.ps1
+        run: python scripts\nvx.py setup-cross-os-cache
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -419,11 +394,11 @@ jobs:
       - name: Guest exec smoke test
         timeout-minutes: 5
         run: |
-          .\scripts\test-whp-exec.ps1
+          python scripts\nvx.py test-exec
           if ($env:RUN_BENCH -eq 'true') {
-            .\scripts\test-whp-exec.ps1 `
-              -Initrd build\initramfs-python.cpio.gz `
-              -MemoryMiB 512
+            python scripts\nvx.py test-exec `
+              --initrd build\initramfs-python.cpio.gz `
+              --mem 512
           }
 
       - name: Prepare performance logs
@@ -545,7 +520,7 @@ jobs:
           python-version: '3.12'
 
       - name: Set up cross-OS cache tools
-        run: .\scripts\setup-cross-os-cache.ps1
+        run: python scripts\nvx.py setup-cross-os-cache
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -611,11 +586,11 @@ jobs:
       - name: Set up external HCN host vNIC
         run: |
           $descriptor = Join-Path $env:RUNNER_TEMP 'nvx-hcn-afxdp-endpoint.json'
-          .\scripts\setup-hcn-endpoint.ps1 `
-            -OutputPath $descriptor `
-            -GuestAddress $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
-            -Gateway $env:NVX_HCN_AFXDP_GATEWAY `
-            -AttachToHost
+          python scripts\nvx.py setup-hcn-endpoint `
+            --output $descriptor `
+            --guest-address $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
+            --gateway $env:NVX_HCN_AFXDP_GATEWAY `
+            --attach-to-host
           $utf8 = New-Object Text.UTF8Encoding($false)
           [IO.File]::AppendAllText(
             $env:GITHUB_ENV,
@@ -626,24 +601,24 @@ jobs:
       - name: Smoke — external HCN vNIC + AF_XDP
         timeout-minutes: 10
         run: |
-          .\scripts\test-hcn-afxdp.ps1 `
-            -EndpointConfig $env:NVX_HCN_ENDPOINT_CONFIG `
-            -GuestAddress $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
-            -Gateway $env:NVX_HCN_AFXDP_GATEWAY `
-            -TimeoutSeconds 300 `
-            -LogPath build\performance\hcn-afxdp-smoke.log
+          python scripts\nvx.py test-hcn-afxdp `
+            --endpoint-config $env:NVX_HCN_ENDPOINT_CONFIG `
+            --guest-address $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
+            --gateway $env:NVX_HCN_AFXDP_GATEWAY `
+            --timeout-sec 300 `
+            --log-path build\performance\hcn-afxdp-smoke.log
 
       - name: Benchmark — external HCN vNIC + AF_XDP snapshot
         if: env.RUN_BENCH == 'true'
         timeout-minutes: 15
         run: |
-          .\scripts\benchmark-hcn-afxdp-snapshot.ps1 `
-            -Runs 5 `
-            -EndpointConfig $env:NVX_HCN_ENDPOINT_CONFIG `
-            -GuestAddress $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
-            -Gateway $env:NVX_HCN_AFXDP_GATEWAY `
-            -TimeoutSeconds 300 `
-            -SnapshotPath build\hcn-afxdp-netsnap *>&1 |
+          python scripts\nvx.py bench-hcn-afxdp-snapshot `
+            --runs 5 `
+            --endpoint-config $env:NVX_HCN_ENDPOINT_CONFIG `
+            --guest-address $env:NVX_HCN_AFXDP_GUEST_ADDRESS `
+            --gateway $env:NVX_HCN_AFXDP_GATEWAY `
+            --timeout-sec 300 `
+            --snapshot build\hcn-afxdp-netsnap *>&1 |
             Tee-Object -FilePath build\performance-hcn-afxdp\network.log
 
       - name: Publish Windows / HCN AF_XDP benchmark table
@@ -663,7 +638,7 @@ jobs:
         if: always()
         run: |
           $descriptor = Join-Path $env:RUNNER_TEMP 'nvx-hcn-afxdp-endpoint.json'
-          .\scripts\cleanup-hcn-endpoint.ps1 -DescriptorPath $descriptor
+          python scripts\nvx.py cleanup-hcn-endpoint --descriptor $descriptor
 
       - name: Save HCN AF_XDP smoke log
         if: always() && env.RUN_BENCH != 'true' && hashFiles('build/performance/hcn-afxdp-smoke.log') != ''

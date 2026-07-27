@@ -171,7 +171,7 @@ hard-killed prior run is cancelled and reclaimed by the next run.
 ### Host recording profiles (Windows)
 
 By default nvx uses the bundled **`NvxCpuScheduling`** profile. nvx materializes
-`scripts/nvx-cpu.wprp` next to the trace and selects the profile automatically, so the default
+the bundled `src/profiler/nvx-cpu.wprp` next to the trace and selects the profile automatically, so the default
 works regardless of the working directory.
 
 The bundled profiles are scoped to what the flamegraph and scheduling analysis need: compared with

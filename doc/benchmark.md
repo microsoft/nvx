@@ -37,7 +37,7 @@ Useful overrides include `KERNEL`, `INITRD`, `MEM`, `CORES`, `N`, `SNAP`, `NET`,
 | Virtual file system | `bench-virtfs` | `bench-virtfs` | Measures sequential guest write/read throughput for ephemeral and persistent storage, then verifies data across cold VM launches. |
 | Python snapshot | `snapshot-demo` | `snapshot-demo` | Compares a cold Python start, including warmed pandas/numpy work, with restoration of the already-warmed interpreter. |
 | Shell snapshot | `bench-snapshot-shell` | `bench-snapshot-shell` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
-| Network snapshot | `bench-net-snapshot` | `benchmark-hcn-afxdp-snapshot.ps1` | Compares a network-ready cold boot with snapshot restore. HCN + AF_XDP verifies gateway connectivity after every restore. |
+| Network snapshot | `bench-net-snapshot` | `bench-hcn-afxdp-snapshot` | Compares a network-ready cold boot with snapshot restore. HCN + AF_XDP verifies gateway connectivity after every restore. |
 
 ## Canonical metrics
 

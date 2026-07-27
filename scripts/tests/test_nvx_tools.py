@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -31,7 +35,24 @@ from nvx_tools.benchmarks import (
     parse_dd_rate,
 )
 from nvx_tools.common import CommandResult, REPO_ROOT, ScriptError, remove_tree
+from nvx_tools.ci import _require_sha256
 from nvx_tools.cli import build_parser, main as cli_main
+from nvx_tools.hcn_afxdp import (
+    AfxdpConfig,
+    AfxdpVmResult,
+    WindowsNamedPipeServer,
+    benchmark_hcn_afxdp_snapshot,
+    build_manifest,
+    test_hcn_afxdp,
+    validate_ready,
+)
+from nvx_tools.smoke import (
+    ExecTestConfig,
+    ProfilingTestConfig,
+    _folded_sample_count,
+    test_exec,
+    test_profiling,
+)
 from nvx_tools.vm import (
     BOOT_MARKER,
     BootTestConfig,
@@ -43,9 +64,352 @@ from nvx_tools.vm import (
     boot_test,
     run_vm,
 )
+from nvx_tools.windows_hcn import (
+    HcnEndpointConfig,
+    create_hcn_endpoint,
+    validate_hcn_topology,
+)
 
 
 class BackendTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows named pipes are required")
+    def test_windows_control_pipe_round_trip(self) -> None:
+        pipe_path = rf"\\.\pipe\nvx-python-test-{uuid.uuid4().hex}"
+        server = WindowsNamedPipeServer(pipe_path)
+        observed: list[dict[str, str]] = []
+
+        def client() -> None:
+            with open(pipe_path, "r+b", buffering=0) as stream:
+                stream.write(
+                    b'{"type":"DataPlaneReady","queues":[0],"interfaceLuid":11}\n'
+                )
+                observed.append(json.loads(stream.readline()))
+
+        thread = threading.Thread(target=client)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            server.connect(deadline)
+            ready = json.loads(server.read_line(deadline))
+            server.write_line({"type": "StartVm"}, deadline)
+            thread.join(5)
+        finally:
+            server.close()
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(ready["type"], "DataPlaneReady")
+        self.assertEqual(observed, [{"type": "StartVm"}])
+
+    @unittest.skipUnless(os.name == "nt", "Windows named pipes are required")
+    def test_windows_control_pipe_timeout_drains_cancellation(self) -> None:
+        pipe_path = rf"\\.\pipe\nvx-python-timeout-{uuid.uuid4().hex}"
+        server = WindowsNamedPipeServer(pipe_path)
+        try:
+            with self.assertRaises(TimeoutError):
+                server.connect(time.monotonic() + 0.02)
+        finally:
+            server.close()
+
+    def test_hcn_afxdp_manifest_preserves_network_contract(self) -> None:
+        config = AfxdpConfig(
+            Path("microvm.exe"),
+            Path("vmlinux"),
+            Path("initrd"),
+            Path("endpoint.json"),
+        )
+        manifest = build_manifest(
+            {
+                "interfaceIndex": 7,
+                "interfaceLuid": 11,
+                "gatewayMac": "00-15-5D-00-00-01",
+                "macAddress": "00-15-5D-52-C1-02",
+            },
+            config,
+            r"\\.\pipe\nvx-test",
+        )
+
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(
+            manifest["attachment"]["backend"], "hcn-afxdp-l2bridge"
+        )
+        self.assertEqual(
+            manifest["attachment"]["queueSelection"], {"mode": "auto"}
+        )
+        self.assertEqual(
+            manifest["guestBootstrap"]["ipv4"]["gateway"], "192.168.240.1"
+        )
+        self.assertEqual(manifest["runtime"]["controlPipe"], r"\\.\pipe\nvx-test")
+
+    def test_hcn_afxdp_ready_requires_queue_zero(self) -> None:
+        validate_ready(
+            {"type": "DataPlaneReady", "interfaceLuid": 11, "queues": [0, 1]}
+        )
+        with self.assertRaisesRegex(ScriptError, "invalid DataPlaneReady"):
+            validate_ready(
+                {"type": "DataPlaneReady", "interfaceLuid": 11, "queues": [1]}
+            )
+
+    def test_migrated_hcn_ranges_reject_invalid_values(self) -> None:
+        invalid = (
+            ["setup-hcn-endpoint", "--output", "endpoint.json", "--prefix-length", "0"],
+            ["test-hcn-afxdp", "--endpoint-config", "endpoint.json", "--mtu", "1"],
+            ["test-hcn-afxdp", "--endpoint-config", "endpoint.json", "--web-port", "0"],
+            ["bench-hcn-afxdp-snapshot", "--endpoint-config", "endpoint.json", "--runs", "0"],
+        )
+        for arguments in invalid:
+            with self.subTest(arguments=arguments), contextlib.redirect_stderr(
+                io.StringIO()
+            ), self.assertRaises(SystemExit):
+                build_parser().parse_args(arguments)
+
+    def test_exec_timeout_preserves_kvm_environment_name(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"NVX_KVM_EXEC_TIMEOUT_SECONDS": "77"},
+            clear=False,
+        ):
+            os.environ.pop("NVX_EXEC_TIMEOUT_SECONDS", None)
+            args = build_parser().parse_args(["test-exec"])
+
+        self.assertEqual(args.timeout_sec, 77)
+
+    @patch("nvx_tools.cli.select_backend", return_value=LinuxBackend())
+    @patch("nvx_tools.cli.test_exec")
+    def test_exec_preserves_microvm_environment_override(
+        self, execute: object, select: object
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MICROVM": "target/wsl/release/microvm",
+                "KERNEL": "build/vmlinux",
+                "INITRD": "build/initramfs.cpio.gz",
+            },
+        ):
+            result = cli_main(["test-exec"])
+
+        self.assertEqual(result, 0)
+        config = execute.call_args.args[0]
+        self.assertEqual(config.microvm, Path("target/wsl/release/microvm"))
+
+    def test_hcn_topology_requires_first_usable_gateway(self) -> None:
+        config = HcnEndpointConfig(gateway="192.168.240.7")
+
+        with self.assertRaisesRegex(ScriptError, "first usable address"):
+            validate_hcn_topology(config)
+
+    def test_hcn_endpoint_descriptor_preserves_external_contract(self) -> None:
+        class FakeHcnApi:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            def enumerate_networks(self) -> list[str]:
+                return []
+
+            def create_network(self, identifier: object, document: object) -> object:
+                return object()
+
+            def create_endpoint(
+                self, network: object, identifier: object, document: object
+            ) -> object:
+                return object()
+
+            def endpoint_properties(
+                self, handle: object, identifier: object
+            ) -> dict[str, str]:
+                return {"MacAddress": "00-15-5D-52-C1-02"}
+
+            def host_default_namespace(self) -> object:
+                return uuid.UUID("12345678-1234-1234-1234-123456789abc")
+
+            def modify_namespace(self, *args: object, **kwargs: object) -> None:
+                return None
+
+            def close_endpoint(self, handle: object) -> None:
+                return None
+
+            def close_network(self, handle: object) -> None:
+                return None
+
+            def delete_endpoint(self, identifier: object) -> None:
+                self.deleted.append("endpoint")
+
+            def delete_network(self, identifier: object) -> None:
+                self.deleted.append("network")
+
+        api = FakeHcnApi()
+        descriptor = create_hcn_endpoint(
+            HcnEndpointConfig(attach_to_host=True),
+            api=api,
+            interface_resolver=lambda *args: {
+                "interfaceIndex": 7,
+                "interfaceLuid": 11,
+                "interfaceAlias": "vEthernet (nvx-test)",
+                "gatewayMac": "00-15-5D-00-00-01",
+            },
+        )
+
+        self.assertEqual(descriptor["version"], 1)
+        self.assertEqual(descriptor["networkAddress"], "192.168.240.0")
+        self.assertTrue(descriptor["hostAttached"])
+        self.assertEqual(descriptor["interfaceIndex"], 7)
+        self.assertEqual(descriptor["interfaceLuid"], 11)
+        self.assertEqual(api.deleted, [])
+
+    def test_hcn_attach_failure_rolls_back_namespace(self) -> None:
+        class FailingAttachApi:
+            def __init__(self) -> None:
+                self.requests: list[str] = []
+
+            def enumerate_networks(self) -> list[str]:
+                return []
+
+            def create_network(self, identifier: object, document: object) -> object:
+                return object()
+
+            def create_endpoint(
+                self, network: object, identifier: object, document: object
+            ) -> object:
+                return object()
+
+            def endpoint_properties(
+                self, handle: object, identifier: object
+            ) -> dict[str, str]:
+                return {"MacAddress": "00-15-5D-52-C1-02"}
+
+            def host_default_namespace(self) -> uuid.UUID:
+                return uuid.UUID("12345678-1234-1234-1234-123456789abc")
+
+            def modify_namespace(
+                self,
+                namespace: object,
+                endpoint: object,
+                request: str,
+                **kwargs: object,
+            ) -> None:
+                self.requests.append(request)
+                if request == "Add":
+                    raise RuntimeError("namespace close failed after attachment")
+
+            def close_endpoint(self, handle: object) -> None:
+                return None
+
+            def close_network(self, handle: object) -> None:
+                return None
+
+            def delete_endpoint(self, identifier: object) -> None:
+                return None
+
+            def delete_network(self, identifier: object) -> None:
+                return None
+
+        api = FailingAttachApi()
+        with self.assertRaisesRegex(ScriptError, "namespace close failed"):
+            create_hcn_endpoint(
+                HcnEndpointConfig(attach_to_host=True),
+                api=api,
+            )
+
+        self.assertEqual(api.requests, ["Add", "Remove"])
+
+    def test_cache_archive_hash_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "archive.zip"
+            archive.write_bytes(b"archive")
+            expected = "0eb3e36bfb24dcd9bb1d1bece1531216b59539a8fde17ee80224af0653c92aa3"
+
+            _require_sha256(archive, expected)
+            with self.assertRaisesRegex(ScriptError, "SHA-256 mismatch"):
+                _require_sha256(archive, "0" * 64)
+
+    def test_folded_sample_parser_sums_positive_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folded = Path(temporary) / "smoke.folded"
+            folded.write_text("idle;foo 2\ninvalid x\nmain;bar 3\nzero 0\n")
+
+            self.assertEqual(_folded_sample_count(folded), 5)
+
+    @patch("nvx_tools.smoke.require_file")
+    @patch("nvx_tools.smoke._perf_record_is_usable", return_value=False)
+    def test_profiling_smoke_uses_shared_process_runner(
+        self, perf_usable: object, require: object
+    ) -> None:
+        commands: list[list[str | Path]] = []
+
+        def runner(args: list[str | Path], **kwargs: object) -> CommandResult:
+            commands.append(args)
+            folded = Path(args[args.index("--guest-profile") + 1])
+            folded.write_text("guest;stack 7\n", encoding="utf-8")
+            return CommandResult((), 0, BOOT_MARKER.encode(), b"")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            test_profiling(
+                ProfilingTestConfig(
+                    Path("microvm"), Path("kernel"), Path("initrd")
+                ),
+                runner=runner,
+            )
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--profile-hz", commands[0])
+        self.assertNotIn("--host-profile", commands[0])
+
+    @patch("nvx_tools.smoke.require_file")
+    @patch("nvx_tools.smoke._build_kvm_ap_helper")
+    def test_exec_uses_shared_cases_and_kvm_vcpus(
+        self, build_helper: object, require: object
+    ) -> None:
+        results = [
+            CommandResult((), 0, b"NVX-EXEC-SMOKE-0", b""),
+            CommandResult((), 37, b"NVX-EXEC-SMOKE-37", b""),
+            CommandResult((), 0, b"NVX-LEGACY-SHUTDOWN", b""),
+            CommandResult((), 127, b"executable script not found", b""),
+        ]
+        runner = unittest.mock.Mock(side_effect=results)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            test_exec(
+                ExecTestConfig(Path("microvm"), Path("kernel"), Path("initrd")),
+                LinuxBackend(),
+                runner=runner,
+            )
+
+        self.assertEqual(runner.call_count, 4)
+        for invocation in runner.call_args_list:
+            command = invocation.args[0]
+            self.assertEqual(command[command.index("--vcpus") + 1], "2")
+        build_helper.assert_called_once()
+
+    @patch("nvx_tools.smoke.require_file")
+    def test_exec_adds_whp_snapshot_and_host_error_cases(self, require: object) -> None:
+        results = [
+            CommandResult((), 0, b"NVX-EXEC-SMOKE-0", b""),
+            CommandResult((), 37, b"NVX-EXEC-SMOKE-37", b""),
+            CommandResult((), 0, b"NVX-LEGACY-SHUTDOWN", b""),
+            CommandResult((), 127, b"executable script not found", b""),
+            CommandResult((), 0, b"", b""),
+            CommandResult((), 41, b"NVX-WHP-SNAPSHOT-RESTORED", b""),
+            CommandResult((), 1, b"", b"NVX-HOST-ERROR:"),
+            CommandResult((), 1, b"", b"NVX-HOST-ERROR:"),
+        ]
+        runner = unittest.mock.Mock(side_effect=results)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            test_exec(
+                ExecTestConfig(Path("microvm.exe"), Path("kernel"), Path("initrd")),
+                WindowsBackend(),
+                runner=runner,
+            )
+
+        self.assertEqual(runner.call_count, 8)
+        self.assertNotIn("--vcpus", runner.call_args_list[0].args[0])
+        capture = runner.call_args_list[4].args[0]
+        mount = Path(capture[capture.index("--mount") + 1])
+        snapshot = Path(capture[capture.index("--snapshot") + 1])
+        self.assertEqual(mount.name, "mount")
+        self.assertEqual(snapshot.parent, mount.parent)
+        self.assertFalse(snapshot.is_relative_to(mount))
+
     def test_guest_script_install_normalizes_windows_line_endings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
@@ -394,58 +758,109 @@ class BenchmarkParserTests(unittest.TestCase):
 
 
 class RetainedWorkflowTests(unittest.TestCase):
-    def test_hcn_output_paths_follow_powershell_location(self) -> None:
-        output_paths = {
-            "test-hcn-afxdp.ps1": "LogPath",
-            "benchmark-hcn-afxdp.ps1": "LogDirectory",
-            "benchmark-hcn-afxdp-snapshot.ps1": "SnapshotPath",
-            "setup-hcn-endpoint.ps1": "OutputPath",
-        }
-        for script_name, variable in output_paths.items():
-            source = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-            self.assertIn(
-                f"${variable} = $ExecutionContext.SessionState.Path."
-                f"GetUnresolvedProviderPathFromPSPath(${variable})",
-                source,
+    def test_hcn_afxdp_smoke_runs_a_mounted_exec_workload(self) -> None:
+        observed: dict[str, object] = {}
+
+        class FakeHttpServer:
+            logs: list[str] = []
+
+            def __init__(self, port: int) -> None:
+                observed["port"] = port
+
+            def __enter__(self) -> "FakeHttpServer":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        def invoke(
+            config: AfxdpConfig,
+            endpoint: object,
+            arguments: list[str | Path],
+            **kwargs: object,
+        ) -> AfxdpVmResult:
+            observed["arguments"] = arguments
+            mount = Path(arguments[arguments.index("--mount") + 1])
+            observed["workload"] = (mount / "hcn-afxdp-smoke.sh").read_text()
+            return AfxdpVmResult(
+                None,
+                12.0,
+                "NVX-HCN-AFXDP-SMOKE-OK\n",
+                "",
+                {"type": "DataPlaneReady", "interfaceLuid": 11, "queues": [0]},
             )
 
-    def test_hcn_afxdp_smoke_runs_a_mounted_exec_workload(self) -> None:
-        source = (REPO_ROOT / "scripts" / "test-hcn-afxdp.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("'--mount', $workRoot", source)
-        self.assertIn("'--exec', '/mnt/host/hcn-afxdp-smoke.sh'", source)
-        self.assertIn("exit 42", source)
-        self.assertNotIn("RedirectStandardInput = $true", source)
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "nvx_tools.hcn_afxdp.HostHttpServer", FakeHttpServer
+        ), contextlib.redirect_stdout(io.StringIO()):
+            test_hcn_afxdp(
+                AfxdpConfig(
+                    Path("microvm.exe"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    Path("endpoint.json"),
+                ),
+                log_path=Path(temporary) / "smoke.log",
+                endpoint={"interfaceIndex": 7},
+                invoker=invoke,
+            )
 
-    def test_kvm_exec_smoke_covers_smp_exit_statuses(self) -> None:
-        source = (REPO_ROOT / "scripts" / "test-kvm-exec.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("--vcpus 2", source)
-        self.assertIn("for exit_code in 0 37", source)
-        self.assertIn("/mnt/host/kvm-pin-ap", source)
-        self.assertIn("/sbin/nvx-exit 37", source)
-        self.assertIn("legacy KVM shutdown payload ignored", source)
-        self.assertIn("run_exec 127", source)
+        arguments = observed["arguments"]
+        self.assertIn("--mount", arguments)
+        self.assertIn("/mnt/host/hcn-afxdp-smoke.sh", arguments)
+        self.assertIn("exit 42", observed["workload"])
+        self.assertEqual(observed["port"], 8099)
 
     def test_hcn_afxdp_snapshot_runs_whp_selftest_and_visible_guests(self) -> None:
-        afxdp = (REPO_ROOT / "scripts" / "benchmark-hcn-afxdp-snapshot.ps1").read_text(
-            encoding="utf-8"
+        invocations: list[tuple[list[str | Path], dict[str, object]]] = []
+
+        def invoke(
+            config: AfxdpConfig,
+            endpoint: object,
+            arguments: list[str | Path],
+            **kwargs: object,
+        ) -> AfxdpVmResult:
+            invocations.append((arguments, kwargs))
+            if "--snapshot" in arguments:
+                snapshot = Path(arguments[arguments.index("--snapshot") + 1])
+                snapshot.mkdir()
+                (snapshot / "state.bin").write_bytes(b"state")
+                (snapshot / "mem.bin").write_bytes(b"memory")
+            return AfxdpVmResult(
+                3.0 if kwargs.get("require_metric") else None,
+                5.0,
+                str(kwargs.get("required_marker", "")),
+                "",
+                {"type": "DataPlaneReady", "interfaceLuid": 11, "queues": [0]},
+            )
+
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(
+            io.StringIO()
+        ):
+            benchmark_hcn_afxdp_snapshot(
+                AfxdpConfig(
+                    Path("microvm.exe"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    Path("endpoint.json"),
+                ),
+                Path(temporary) / "snapshot",
+                runs=1,
+                endpoint={"interfaceIndex": 7},
+                invoker=invoke,
+            )
+
+        self.assertEqual(len(invocations), 3)
+        cold, capture, restore = invocations
+        self.assertNotIn("--quiet", cold[0])
+        self.assertEqual(
+            cold[0][cold[0].index("--boot-marker") + 1],
+            "VIRTNET-PROBE-OK: 192.168.240.1",
         )
-        self.assertIn("function Invoke-MicrovmSelfTest", afxdp)
-        self.assertIn("RedirectStandardError = $true", afxdp)
-        self.assertIn("if ($stderr) { Write-Output $stderr }", afxdp)
-        self.assertIn("Invoke-MicrovmSelfTest", afxdp)
-        snapshot_runs = afxdp.split(
-            'Write-Output "HCN AF_XDP networking + snapshot benchmark', 1
-        )[1]
-        self.assertNotIn("'--quiet'", snapshot_runs)
-        self.assertIn("'--boot-marker', $coldMarker", snapshot_runs)
-        self.assertIn("'--boot-marker', $restoreMarker", snapshot_runs)
-        self.assertIn('$coldMarker = "VIRTNET-PROBE-OK: $Gateway"', afxdp)
-        self.assertIn(
-            '$restoreMarker = "NETSNAP-RESTORE-PROBE-OK: $Gateway"', afxdp
+        self.assertIn("netsnap: pre-snapshot link OK", capture[1]["required_marker"])
+        self.assertEqual(
+            restore[0][restore[0].index("--boot-marker") + 1],
+            "NETSNAP-RESTORE-PROBE-OK: 192.168.240.1",
         )
 
         network_guest = (REPO_ROOT / "alpine" / "net-hello.py").read_text(
@@ -504,13 +919,13 @@ class CiWorkflowParityTests(unittest.TestCase):
 
         self.assertIn("scripts/nvx.py bench-net-snapshot |", linux)
         self.assertIn("scripts\\nvx.py bench-net-snapshot --runs 5", windows)
-        self.assertIn("scripts/test-kvm-exec.sh", linux)
+        self.assertIn("scripts/nvx.py test-exec", linux)
         self.assertIn('if [ "$RUN_BENCH" = true ]', linux)
-        self.assertIn("INITRD=build/initramfs-python.cpio.gz MEM=512", linux)
-        self.assertIn("scripts\\test-whp-exec.ps1", windows)
+        self.assertIn("--initrd build/initramfs-python.cpio.gz --mem 512", linux)
+        self.assertIn("scripts\\nvx.py test-exec", windows)
         self.assertIn("if ($env:RUN_BENCH -eq 'true')", windows)
-        self.assertIn("-Initrd build\\initramfs-python.cpio.gz", windows)
-        self.assertIn("-MemoryMiB 512", windows)
+        self.assertIn("--initrd build\\initramfs-python.cpio.gz", windows)
+        self.assertIn("--mem 512", windows)
 
         self.assertNotIn("skipping networking benchmark", linux)
         self.assertNotIn("skipping networked Python smoke test", linux)
@@ -524,17 +939,17 @@ class CiWorkflowParityTests(unittest.TestCase):
         exec_smoke = hcn_afxdp.split(
             "- name: Smoke — external HCN vNIC + AF_XDP\n", 1
         )[1].split("\n      - name:", 1)[0]
-        self.assertIn("test-hcn-afxdp.ps1", exec_smoke)
+        self.assertIn("scripts\\nvx.py test-hcn-afxdp", exec_smoke)
         self.assertNotIn("if:", exec_smoke)
         for command in (
             "measure-coldstart --runs 5",
             "bench-virtfs --runs 3",
             "snapshot-demo --runs 5",
             "bench-snapshot-shell --runs 5",
-            "benchmark-hcn-afxdp-snapshot.ps1",
+            "bench-hcn-afxdp-snapshot",
         ):
             self.assertIn(command, hcn_afxdp)
-        self.assertIn("-Runs 5", hcn_afxdp)
+        self.assertIn("--runs 5", hcn_afxdp)
         self.assertIn("--platform windows-hcn-afxdp", hcn_afxdp)
 
     def test_each_backend_job_publishes_its_benchmark_table(self) -> None:

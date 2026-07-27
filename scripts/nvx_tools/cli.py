@@ -30,6 +30,19 @@ from .benchmarks import (
     benchmark_virtfs,
 )
 from .common import ScriptError
+from .ci import setup_cross_os_cache
+from .hcn_afxdp import (
+    AfxdpConfig,
+    benchmark_hcn_afxdp_smoke,
+    benchmark_hcn_afxdp_snapshot,
+    test_hcn_afxdp,
+)
+from .smoke import ExecTestConfig, ProfilingTestConfig, test_exec, test_profiling
+from .windows_hcn import (
+    HcnEndpointConfig,
+    cleanup_hcn_endpoint,
+    setup_hcn_endpoint,
+)
 from .vm import (
     DEFAULT_CMDLINE,
     BootTestConfig,
@@ -57,6 +70,21 @@ def _path_default(environment: str, fallback: Path) -> Path:
 
 def _int_default(environment: str, fallback: int) -> str:
     return os.environ.get(environment, str(fallback))
+
+
+def _bounded_int(minimum: int, maximum: int) -> Any:
+    def parse(value: str) -> int:
+        try:
+            parsed = int(value)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(f"must be an integer, got {value!r}") from error
+        if not minimum <= parsed <= maximum:
+            raise argparse.ArgumentTypeError(
+                f"must be in the range {minimum}..{maximum}, got {parsed}"
+            )
+        return parsed
+
+    return parse
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -236,7 +264,129 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=_int_default("TIMEOUT_SEC", 90),
     )
+    execute = subparsers.add_parser(
+        "test-exec", help="validate cross-platform guest exec semantics"
+    )
+    execute.add_argument("--microvm", type=Path)
+    execute.add_argument("--kernel", "-Kernel", type=Path)
+    execute.add_argument("--initrd", "-Initrd", type=Path)
+    execute.add_argument(
+        "--mem",
+        "--memory-mib",
+        "-MemoryMiB",
+        type=_bounded_int(64, 65536),
+        default=_int_default("MEM", 128),
+    )
+    execute.add_argument(
+        "--timeout-sec",
+        "--timeout-seconds",
+        "-TimeoutSeconds",
+        type=_bounded_int(1, 300),
+        default=os.environ.get(
+            "NVX_EXEC_TIMEOUT_SECONDS",
+            os.environ.get("NVX_KVM_EXEC_TIMEOUT_SECONDS", "60"),
+        ),
+    )
+    profiling = subparsers.add_parser(
+        "test-profiling", help="validate guest and optional host profiling artifacts"
+    )
+    profiling.add_argument("--microvm", type=Path)
+    profiling.add_argument("--kernel", "-Kernel", type=Path)
+    profiling.add_argument("--initrd", "-Initrd", type=Path)
+    profiling.add_argument(
+        "--timeout-sec", type=int, default=_int_default("NVX_PROFILE_TIMEOUT_SECONDS", 120)
+    )
+
+    subparsers.add_parser(
+        "setup-cross-os-cache",
+        help="install GNU tar and zstd for GitHub Actions cross-OS caches",
+    )
+
+    hcn_setup = subparsers.add_parser(
+        "setup-hcn-endpoint", help="create an externally managed Windows HCN endpoint"
+    )
+    hcn_setup.add_argument("--output", "--output-path", type=Path, required=True)
+    hcn_setup.add_argument(
+        "--guest-address",
+        default=os.environ.get("NVX_HCN_AFXDP_GUEST_ADDRESS", "192.168.240.2"),
+    )
+    hcn_setup.add_argument("--prefix-length", type=_bounded_int(1, 30), default=24)
+    hcn_setup.add_argument(
+        "--gateway",
+        default=os.environ.get("NVX_HCN_AFXDP_GATEWAY", "192.168.240.1"),
+    )
+    hcn_setup.add_argument(
+        "--dns-servers", default=os.environ.get("NVX_HCN_DNS_SERVERS", "1.1.1.1")
+    )
+    hcn_setup.add_argument("--mac-address")
+    hcn_setup.add_argument("--attach-to-host", action="store_true")
+
+    hcn_cleanup = subparsers.add_parser(
+        "cleanup-hcn-endpoint", help="remove an externally managed Windows HCN endpoint"
+    )
+    hcn_cleanup.add_argument(
+        "--descriptor", "--descriptor-path", type=Path, required=True
+    )
+    hcn_cleanup.add_argument("--keep-descriptor", action="store_true")
+
+    hcn_smoke = subparsers.add_parser(
+        "test-hcn-afxdp", help="verify an externally managed HCN vNIC through AF_XDP"
+    )
+    _add_hcn_afxdp_arguments(hcn_smoke)
+    hcn_smoke.add_argument(
+        "--web-port",
+        type=_bounded_int(1, 65535),
+        default=_int_default("NVX_HCN_AFXDP_WEB_PORT", 8099),
+    )
+    hcn_smoke.add_argument(
+        "--log-path", type=Path, default=Path("build/performance/hcn-afxdp-smoke.log")
+    )
+
+    hcn_benchmark = subparsers.add_parser(
+        "bench-hcn-afxdp-smoke", help="benchmark repeated HCN AF_XDP HTTP verification"
+    )
+    _add_hcn_afxdp_arguments(hcn_benchmark)
+    hcn_benchmark.add_argument(
+        "--runs", type=_bounded_int(1, 100), default=_int_default("N", 5)
+    )
+    hcn_benchmark.add_argument(
+        "--web-port",
+        type=_bounded_int(1, 65535),
+        default=_int_default("NVX_HCN_AFXDP_WEB_PORT", 8099),
+    )
+    hcn_benchmark.add_argument(
+        "--log-directory", type=Path, default=Path("build/performance/hcn-afxdp-runs")
+    )
+
+    hcn_snapshot = subparsers.add_parser(
+        "bench-hcn-afxdp-snapshot", help="benchmark HCN AF_XDP snapshot restore"
+    )
+    _add_hcn_afxdp_arguments(hcn_snapshot)
+    hcn_snapshot.add_argument(
+        "--runs", type=_bounded_int(1, 100), default=_int_default("N", 5)
+    )
+    hcn_snapshot.add_argument(
+        "--snapshot", type=Path, default=Path("build/hcn-afxdp-netsnap")
+    )
     return parser
+
+
+def _add_hcn_afxdp_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--microvm", type=Path)
+    parser.add_argument("--kernel", type=Path)
+    parser.add_argument("--initrd", type=Path)
+    parser.add_argument("--endpoint-config", type=Path, required=True)
+    parser.add_argument(
+        "--guest-address",
+        default=os.environ.get("NVX_HCN_AFXDP_GUEST_ADDRESS", "192.168.240.2"),
+    )
+    parser.add_argument("--prefix-length", type=_bounded_int(1, 30), default=24)
+    parser.add_argument(
+        "--gateway",
+        default=os.environ.get("NVX_HCN_AFXDP_GATEWAY", "192.168.240.1"),
+    )
+    parser.add_argument("--mtu", type=_bounded_int(576, 4082), default=1500)
+    parser.add_argument("--timeout-sec", type=_bounded_int(30, 900), default=300)
 
 
 def _add_alpine_build_arguments(
@@ -364,6 +514,21 @@ def _snapshot_config(args: argparse.Namespace, backend: object) -> SnapshotConfi
         backend.artifact(args.snapshot_name),
     )
     return SnapshotConfig(kernel, initrd, snapshot, args.mem, args.runs)
+
+
+def _afxdp_config(args: argparse.Namespace, backend: object) -> AfxdpConfig:
+    return AfxdpConfig(
+        args.microvm or backend.executable(),
+        args.kernel or _path_default("KERNEL", backend.artifact("vmlinux")),
+        args.initrd
+        or _path_default("INITRD", backend.artifact("initramfs.cpio.gz")),
+        args.endpoint_config,
+        args.guest_address,
+        args.prefix_length,
+        args.gateway,
+        args.mtu,
+        args.timeout_sec,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -514,6 +679,97 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout=args.timeout_sec,
             )
             return print_boot_test(boot_test(config, backend))
+        if args.command == "test-exec":
+            exec_artifact = (
+                backend.repo_root / "build"
+                if backend.name == "linux-kvm"
+                else backend.artifact_dir
+            )
+            kernel = args.kernel or _path_default(
+                "KERNEL", exec_artifact / "vmlinux"
+            )
+            initrd = args.initrd or _path_default(
+                "INITRD", exec_artifact / "initramfs.cpio.gz"
+            )
+            test_exec(
+                ExecTestConfig(
+                    args.microvm or _path_default("MICROVM", backend.executable()),
+                    kernel,
+                    initrd,
+                    args.mem,
+                    args.timeout_sec,
+                ),
+                backend,
+            )
+            return 0
+        if args.command == "test-profiling":
+            test_profiling(
+                ProfilingTestConfig(
+                    args.microvm or backend.executable(),
+                    args.kernel
+                    or _path_default(
+                        "KERNEL", backend.artifact("vmlinux-profiling")
+                    ),
+                    args.initrd
+                    or _path_default(
+                        "INITRD", backend.artifact("initramfs.cpio.gz")
+                    ),
+                    args.timeout_sec,
+                )
+            )
+            return 0
+        if args.command == "setup-cross-os-cache":
+            setup_cross_os_cache()
+            return 0
+        if args.command == "setup-hcn-endpoint":
+            descriptor = setup_hcn_endpoint(
+                args.output,
+                HcnEndpointConfig(
+                    args.guest_address,
+                    args.prefix_length,
+                    args.gateway,
+                    tuple(
+                        value
+                        for value in args.dns_servers.replace(",", " ").split()
+                        if value
+                    ),
+                    args.mac_address,
+                    args.attach_to_host,
+                ),
+            )
+            print(f"Created externally managed HCN endpoint {descriptor['endpointId']}")
+            print(f"Descriptor: {args.output.expanduser().resolve()}")
+            if descriptor["hostAttached"]:
+                print(
+                    f"Host vNIC: ifIndex {descriptor['interfaceIndex']}, "
+                    f"LUID {descriptor['interfaceLuid']}"
+                )
+            return 0
+        if args.command == "cleanup-hcn-endpoint":
+            cleanup_hcn_endpoint(
+                args.descriptor, keep_descriptor=args.keep_descriptor
+            )
+            return 0
+        if args.command == "test-hcn-afxdp":
+            test_hcn_afxdp(
+                _afxdp_config(args, backend),
+                web_port=args.web_port,
+                log_path=args.log_path,
+            )
+            return 0
+        if args.command == "bench-hcn-afxdp-smoke":
+            benchmark_hcn_afxdp_smoke(
+                _afxdp_config(args, backend),
+                runs=args.runs,
+                web_port=args.web_port,
+                log_directory=args.log_directory,
+            )
+            return 0
+        if args.command == "bench-hcn-afxdp-snapshot":
+            benchmark_hcn_afxdp_snapshot(
+                _afxdp_config(args, backend), args.snapshot, runs=args.runs
+            )
+            return 0
     except (ScriptError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

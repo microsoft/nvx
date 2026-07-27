@@ -252,9 +252,9 @@ queue resources may be reprovisioned, but the guest-visible MAC, MTU, IPv4 boots
 DNS identity must match the snapshot. NVX rejects a standalone NAT snapshot with `--net-config`
 and refuses to restore an external snapshot without it.
 
-The repository's `setup-hcn-endpoint.ps1`, `cleanup-hcn-endpoint.ps1`,
-`test-hcn-afxdp.ps1`, and `benchmark-hcn-afxdp-snapshot.ps1` scripts implement the CI provisioning,
-cleanup, smoke-test, and benchmark flows.
+The `scripts/nvx.py setup-hcn-endpoint`, `cleanup-hcn-endpoint`, `test-hcn-afxdp`, and
+`bench-hcn-afxdp-snapshot` commands implement the CI provisioning, cleanup, smoke-test, and
+benchmark flows through shared Python orchestration.
 
 ### CI hardware lane
 
