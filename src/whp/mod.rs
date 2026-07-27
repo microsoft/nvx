@@ -1036,7 +1036,7 @@ fn execute(
             );
         }
     }
-    Ok(if cfg.exec.is_some() {
+    Ok(if cfg.exec.is_some() || cfg.output_after_marker.is_some() {
         guest_exit_code
     } else {
         0

@@ -93,12 +93,13 @@ function Invoke-Microvm {
 }
 
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) ('nvx-whp-exec-' + [Guid]::NewGuid().ToString('N'))
-$scriptPath = Join-Path $workRoot 'workload.sh'
+$mountRoot = Join-Path $workRoot 'mount'
+$scriptPath = Join-Path $mountRoot 'workload.sh'
 $snapshotPath = Join-Path $workRoot 'snapshot'
 $utf8 = New-Object Text.UTF8Encoding($false)
 
 try {
-    New-Item -ItemType Directory -Path $workRoot | Out-Null
+    New-Item -ItemType Directory -Path $mountRoot -Force | Out-Null
 
     foreach ($exitCode in @(0, 37)) {
         $marker = "NVX-EXEC-SMOKE-$exitCode"
@@ -107,7 +108,7 @@ try {
             '--kernel', $Kernel,
             '--initrd', $Initrd,
             '--mem', [string]$MemoryMiB,
-            '--mount', $workRoot,
+            '--mount', $mountRoot,
             '--exec', '/mnt/host/workload.sh',
             '--log-level', 'off'
         )
@@ -121,7 +122,7 @@ try {
         '--kernel', $Kernel,
         '--initrd', $Initrd,
         '--mem', [string]$MemoryMiB,
-        '--mount', $workRoot,
+        '--mount', $mountRoot,
         '--cmdline', 'earlycon=xe9 console=hvc0 reboot=t panic=-1 nvx_exec=/mnt/host/workload.sh',
         '--log-level', 'off'
     )
@@ -132,22 +133,40 @@ try {
         '--kernel', $Kernel,
         '--initrd', $Initrd,
         '--mem', [string]$MemoryMiB,
-        '--mount', $workRoot,
+        '--mount', $mountRoot,
         '--exec', '/mnt/host/missing.sh',
         '--log-level', 'off'
     )
     $result = Invoke-Microvm $missingArguments 127 'executable script not found' ''
     Write-Host "missing workload status $($result.ExitCode) propagated"
 
-    $conflictArguments = @(
-        '--mount', $workRoot,
+    $snapshotMarker = 'NVX-WHP-SNAPSHOT-ORIGINAL'
+    [IO.File]::WriteAllText($scriptPath, "echo $snapshotMarker`nexit 0`n", $utf8)
+    $snapshotArguments = @(
+        '--kernel', $Kernel,
+        '--initrd', $Initrd,
+        '--mem', [string]$MemoryMiB,
+        '--mount', $mountRoot,
         '--exec', '/mnt/host/workload.sh',
-        '--snapshot', $snapshotPath
+        '--snapshot', $snapshotPath,
+        '--snapshot-before-exec',
+        '--log-level', 'off'
     )
-    $result = Invoke-Microvm $conflictArguments 2 '' $HostErrorPrefix
-    Write-Host 'parser failure used the host-error prefix'
+    $result = Invoke-Microvm $snapshotArguments 0 '' ''
+    Write-Host 'pre-exec snapshot captured'
 
-    $semanticArguments = @('--mount', $workRoot, '--exec', 'relative.sh')
+    $restoredMarker = 'NVX-WHP-SNAPSHOT-RESTORED'
+    [IO.File]::WriteAllText($scriptPath, "echo $restoredMarker`nexit 41`n", $utf8)
+    $restoreArguments = @(
+        '--restore', $snapshotPath,
+        '--mount', $mountRoot,
+        '--output-after-marker', 'NVX-EXEC-START',
+        '--log-level', 'off'
+    )
+    $result = Invoke-Microvm $restoreArguments 41 $restoredMarker ''
+    Write-Host "restored workload status $($result.ExitCode) propagated"
+
+    $semanticArguments = @('--mount', $mountRoot, '--exec', 'relative.sh')
     $result = Invoke-Microvm $semanticArguments 1 '' $HostErrorPrefix
     Write-Host 'semantic validation used the host-error prefix'
 
