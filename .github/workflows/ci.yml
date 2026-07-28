@@ -8,8 +8,7 @@
 # Runner requirements (expected to be provisioned on the org's self-hosted runners):
 #   * Linux:   Python 3.10+, a stable Rust toolchain (edition 2024, >= 1.85), Docker (to build the Linux
 #              kernel + initramfs artifacts), and an accessible /dev/kvm for the KVM backend.
-#              e2fsprogs (mke2fs) is used by the virt-fs benchmark; passwordless `sudo ip` is
-#              required by the networking benchmarks.
+#              Passwordless `sudo ip` is required by the networking benchmarks.
 #   * Windows: Python 3.10+, a stable Rust toolchain for x86_64-pc-windows-msvc (edition 2024),
 #              and the Windows Hypervisor Platform feature enabled for the WHP backend.
 #   * HCN/XDP: The Windows runner additionally needs Hyper-V Administrator/HNS privileges and the
@@ -420,8 +419,8 @@ jobs:
             Tee-Object -FilePath build\performance\virtfs.log |
             Out-String
           Write-Host $output
-          if ($output -notmatch 'payload survived across runs\s+: 3/3') {
-            throw 'virt-fs persistence verification failed'
+          if ($output -notmatch 'bidirectional visibility verified\s+: 3/3') {
+            throw 'live virt-fs visibility verification failed'
           }
 
       - name: Benchmark — snapshot/restore (Python)

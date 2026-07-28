@@ -103,7 +103,7 @@ relative link after moving or renaming a page.
 
 ## Performance changes
 
-CI collects the 23 metrics in [Benchmark Reference](benchmark.md) on KVM and WHP. The optional
+CI collects the 21 shared metrics in [Benchmark Reference](benchmark.md) on KVM and WHP. The optional
 HCN/AF_XDP lane emits the same metric set with its external-network measurement.
 
 For pull requests, the current workflow compares each p50 with the latest 10 p50 values from the

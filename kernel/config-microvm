@@ -1000,13 +1000,7 @@ CONFIG_DMI_SCAN_MACHINE_NON_EFI_FALLBACK=y
 
 # CONFIG_FWCTL is not set
 # CONFIG_GNSS is not set
-# virt-fs: expose a host directory (see the VMM's --mount) to the guest. The image is placed in
-# a physical-memory window by the VMM and surfaced through phram (MTD) + mtdblock as a block
-# device that PID 1 mounts. olddefconfig fills in the remaining MTD defaults.
-CONFIG_MTD=y
-CONFIG_MTD_BLKDEVS=y
-CONFIG_MTD_BLOCK=y
-CONFIG_MTD_PHRAM=y
+# CONFIG_MTD is not set
 # CONFIG_OF is not set
 CONFIG_ARCH_MIGHT_HAVE_PC_PARPORT=y
 # CONFIG_PARPORT is not set
@@ -1663,14 +1657,7 @@ CONFIG_FS_IOMAP=y
 CONFIG_BUFFER_HEAD=y
 CONFIG_LEGACY_DIRECT_IO=y
 # CONFIG_EXT2_FS is not set
-CONFIG_EXT4_FS=y
-CONFIG_EXT4_USE_FOR_EXT2=y
-CONFIG_EXT4_FS_POSIX_ACL=y
-CONFIG_EXT4_FS_SECURITY=y
-# CONFIG_EXT4_DEBUG is not set
-CONFIG_JBD2=y
-# CONFIG_JBD2_DEBUG is not set
-CONFIG_FS_MBCACHE=y
+# CONFIG_EXT4_FS is not set
 # CONFIG_JFS_FS is not set
 # CONFIG_XFS_FS is not set
 # CONFIG_GFS2_FS is not set
@@ -1694,7 +1681,8 @@ CONFIG_QUOTA_TREE=y
 CONFIG_QFMT_V2=y
 CONFIG_QUOTACTL=y
 CONFIG_AUTOFS_FS=y
-# CONFIG_FUSE_FS is not set
+CONFIG_FUSE_FS=y
+CONFIG_VIRTIO_FS=y
 # CONFIG_OVERLAY_FS is not set
 
 #
@@ -1714,12 +1702,7 @@ CONFIG_ZISOFS=y
 #
 # DOS/FAT/EXFAT/NT Filesystems
 #
-CONFIG_FAT_FS=y
-CONFIG_MSDOS_FS=y
-CONFIG_VFAT_FS=y
-CONFIG_FAT_DEFAULT_CODEPAGE=437
-CONFIG_FAT_DEFAULT_IOCHARSET="iso8859-1"
-# CONFIG_FAT_DEFAULT_UTF8 is not set
+# CONFIG_FAT_FS is not set
 # CONFIG_EXFAT_FS is not set
 # CONFIG_NTFS3_FS is not set
 # CONFIG_NTFS_FS is not set
@@ -1764,9 +1747,7 @@ CONFIG_MISC_FILESYSTEMS=y
 # CONFIG_BFS_FS is not set
 # CONFIG_EFS_FS is not set
 # CONFIG_CRAMFS is not set
-# virt-fs: read-only filesystem the VMM builds from the --mount directory (gzip/zlib).
-CONFIG_SQUASHFS=y
-CONFIG_SQUASHFS_ZLIB=y
+# CONFIG_SQUASHFS is not set
 # CONFIG_VXFS_FS is not set
 # CONFIG_MINIX_FS is not set
 # CONFIG_OMFS_FS is not set

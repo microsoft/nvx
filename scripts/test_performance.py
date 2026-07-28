@@ -18,11 +18,9 @@ COLD_START_LOG = """
 """
 
 VIRTFS_LOG = """
-  rw ephemeral (in-memory)    write    500.0 MB/s  (min 490, max 510, n=3)
-                              read   1,200.0 MB/s  (min 1100, max 1300, n=3)
-  rw persistent (file-backed) write    400.0 MB/s  (min 390, max 410, n=3)
-                              read     900.0 MB/s  (min 850, max 950, n=3)
-  reuse image + verify (cold each)  :     200 ms  (min 190, max 210, n=3)
+    rw live host directory      write    500.0 MB/s  (min 490, max 510, n=3)
+                                                            read   1,200.0 MB/s  (min 1100, max 1300, n=3)
+    live exchange (cold each)         :     200 ms  (min 190, max 210, n=3)
 """
 
 SNAPSHOT_LOG = """
@@ -129,7 +127,7 @@ class PerformanceTests(unittest.TestCase):
             results = performance.read_results(result_path)
 
             self.assertEqual(result_path.name, "windows-hcn-afxdp.csv")
-            self.assertEqual(len(results), 24)
+            self.assertEqual(len(results), 22)
             self.assertEqual(
                 {result.metric for result in results},
                 performance.SHARED_METRICS | performance.HCN_AFXDP_ONLY_METRICS,
@@ -155,14 +153,14 @@ class PerformanceTests(unittest.TestCase):
                 )
             )
 
-    def test_windows_virtfs_reuse_uses_shared_metric_name(self):
+    def test_live_virtfs_roundtrip_uses_shared_metric_name(self):
         self.assertEqual(
-            performance._platform_metric_name("windows-whp", "virtfs_reuse"),
-            "virtfs_reuse",
+            performance._platform_metric_name("windows-whp", "virtfs_live_roundtrip"),
+            "virtfs_live_roundtrip",
         )
         self.assertEqual(
-            performance._platform_metric_name("linux-kvm", "virtfs_reuse"),
-            "virtfs_reuse",
+            performance._platform_metric_name("linux-kvm", "virtfs_live_roundtrip"),
+            "virtfs_live_roundtrip",
         )
 
     def test_collects_linux_metrics_from_utf8_and_utf16_logs(self):
@@ -191,10 +189,10 @@ class PerformanceTests(unittest.TestCase):
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 23)
+            self.assertEqual(len(results), 21)
             by_metric = {result.metric: result for result in results}
-            self.assertEqual(by_metric["virtfs_ephemeral_read"].p50, 1200.0)
-            self.assertEqual(by_metric["virtfs_ephemeral_read"].direction, "higher")
+            self.assertEqual(by_metric["virtfs_live_read"].p50, 1200.0)
+            self.assertEqual(by_metric["virtfs_live_read"].direction, "higher")
             self.assertEqual(by_metric["network_snapshot_restore"].p50, 40.0)
             self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].p50, 510.0)
             self.assertEqual(
@@ -205,8 +203,8 @@ class PerformanceTests(unittest.TestCase):
             )
             markdown = (root / "summary.md").read_text(encoding="utf-8")
             self.assertIn("## Linux / KVM benchmark results", markdown)
-            self.assertEqual(markdown.count("\n| `"), 23)
-            self.assertIn("| `virtfs_ephemeral_read` | 1200.00 MB/s | Higher is better |", markdown)
+            self.assertEqual(markdown.count("\n| `"), 21)
+            self.assertIn("| `virtfs_live_read` | 1200.00 MB/s | Higher is better |", markdown)
             self.assertIn("| `network_snapshot_restore` | 40.00 ms | Lower is better |", markdown)
 
     def test_shared_suite_rejects_missing_scenarios(self):
@@ -223,7 +221,7 @@ class PerformanceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 performance.PerformanceError,
-                r"exactly 23 metrics \(missing: network_snapshot_cold",
+                r"exactly 21 metrics \(missing: network_snapshot_cold",
             ):
                 performance.collect_results(
                     "linux-kvm",

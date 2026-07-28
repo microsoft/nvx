@@ -26,11 +26,9 @@ SHARED_METRICS = frozenset(
         "cold_start_shell_loud",
         "cold_start_shell_silent",
         "cold_start_fast",
-        "virtfs_ephemeral_write",
-        "virtfs_ephemeral_read",
-        "virtfs_persistent_write",
-        "virtfs_persistent_read",
-        "virtfs_reuse",
+        "virtfs_live_write",
+        "virtfs_live_read",
+        "virtfs_live_roundtrip",
         "python_snapshot_cold",
         "python_snapshot_restore",
         "shell_snapshot_cold_64_mib",
@@ -273,72 +271,32 @@ def _parse_hcn_afxdp_network_snapshot(text: str) -> dict[str, MetricValue]:
 
 
 def _parse_virtfs(text: str) -> dict[str, MetricValue]:
-    write_pattern = re.compile(
-        rf"^\s*rw\s+(?P<kind>ephemeral|persistent)\b.*?\bwrite\s+"
-        rf"(?:(?P<value>{NUMBER})\s+MB/s|(?P<na>n/a)\b)",
-        re.IGNORECASE,
+    return _parse_fixed(
+        text,
+        "virtfs.log",
+        [
+            (
+                "virtfs_live_write",
+                "MB/s",
+                "higher",
+                rf"^\s*rw live host directory\s+write\s+"
+                rf"(?P<value>{NUMBER})\s+MB/s\b",
+            ),
+            (
+                "virtfs_live_read",
+                "MB/s",
+                "higher",
+                rf"^\s*read\s+(?P<value>{NUMBER})\s+MB/s\b",
+            ),
+            (
+                "virtfs_live_roundtrip",
+                "ms",
+                "lower",
+                rf"^\s*live exchange \(cold each\)\s*:\s*"
+                rf"(?P<value>{NUMBER})\s*ms\b",
+            ),
+        ],
     )
-    read_pattern = re.compile(
-        rf"^\s*read\s+(?:(?P<value>{NUMBER})\s+MB/s|(?P<na>n/a)\b)",
-        re.IGNORECASE,
-    )
-    metrics: dict[str, MetricValue] = {}
-    seen: set[str] = set()
-    current_kind: str | None = None
-
-    for line in text.splitlines():
-        write_match = write_pattern.search(line)
-        if write_match is not None:
-            current_kind = write_match.group("kind").lower()
-            key = f"{current_kind}_write"
-            seen.add(key)
-            if write_match.group("value") is not None:
-                metrics[f"virtfs_{key}"] = (
-                    "MB/s",
-                    "higher",
-                    _number(write_match.group("value")),
-                )
-            continue
-
-        read_match = read_pattern.search(line)
-        if read_match is not None and current_kind is not None:
-            key = f"{current_kind}_read"
-            seen.add(key)
-            if read_match.group("value") is not None:
-                metrics[f"virtfs_{key}"] = (
-                    "MB/s",
-                    "higher",
-                    _number(read_match.group("value")),
-                )
-
-    expected = {
-        "ephemeral_write",
-        "ephemeral_read",
-        "persistent_write",
-        "persistent_read",
-    }
-    missing = sorted(expected - seen)
-    if missing:
-        raise PerformanceError(
-            f"missing virt-fs throughput result(s) in virtfs.log: {', '.join(missing)}"
-        )
-
-    metrics.update(
-        _parse_fixed(
-            text,
-            "virtfs.log",
-            [
-                (
-                    "virtfs_reuse",
-                    "ms",
-                    "lower",
-                    rf"^\s*reuse image \+ verify \(cold each\)\s*:\s*"
-                    rf"(?P<value>{NUMBER})\s*ms\b",
-                )
-            ],
-        )
-    )
-    return metrics
 
 
 LOG_PARSERS: dict[str, tuple[Parser, bool]] = {

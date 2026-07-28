@@ -1,7 +1,8 @@
 # Benchmark Reference
 
-NVX runs the same 23-metric benchmark suite on Linux/KVM, Windows/WHP, and
-Windows/HCN + AF_XDP. CI reports the median (p50) for each metric in the job
+NVX runs the same 21-metric benchmark suite on Linux/KVM, Windows/WHP, and
+Windows/HCN + AF_XDP. The privileged HCN lane records one additional network metric. CI reports
+the median (p50) for each metric in the job
 summary. Latency metrics are lower-is-better; throughput metrics are
 higher-is-better.
 
@@ -25,8 +26,8 @@ Use `python scripts\nvx.py ...` on Windows. The Python snapshot benchmark requir
 `initramfs-python.cpio.gz`. KVM network benchmarks require permission to configure a TAP; the WHP
 standalone network uses user-mode NAT.
 
-Useful overrides include `KERNEL`, `INITRD`, `MEM`, `CORES`, `N`, `SNAP`, `NET`, `PAYLOAD_MB`, and
-`IMG_MB`. Each subcommand also accepts explicit options; run
+Useful overrides include `KERNEL`, `INITRD`, `MEM`, `CORES`, `N`, `SNAP`, `NET`, and `PAYLOAD_MB`.
+Each subcommand also accepts explicit options; run
 `python scripts/nvx.py <command> --help` for the exact surface.
 
 ## Benchmark commands
@@ -34,7 +35,7 @@ Useful overrides include `KERNEL`, `INITRD`, `MEM`, `CORES`, `N`, `SNAP`, `NET`,
 | Benchmark | KVM and WHP | HCN + AF_XDP | Description |
 | --- | --- | --- | --- |
 | Cold start | `measure-coldstart` | `measure-coldstart` | Measures guest start to kernel/userspace or shell-ready markers under rendered, discarded, silent, and tuned configurations. |
-| Virtual file system | `bench-virtfs` | `bench-virtfs` | Measures sequential guest write/read throughput for ephemeral and persistent storage, then verifies data across cold VM launches. |
+| Virtual file system | `bench-virtfs` | `bench-virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
 | Python snapshot | `snapshot-demo` | `snapshot-demo` | Compares a cold Python start, including warmed pandas/numpy work, with restoration of the already-warmed interpreter. |
 | Shell snapshot | `bench-snapshot-shell` | `bench-snapshot-shell` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
 | Network snapshot | `bench-net-snapshot` | `bench-hcn-afxdp-snapshot` | Compares a network-ready cold boot with snapshot restore. HCN + AF_XDP verifies gateway connectivity after every restore. |
@@ -56,16 +57,14 @@ the first guest instruction to the selected console marker.
 
 ### Virtual file system
 
-Throughput scenarios normally use three samples and a 64 MiB payload. The reuse
-scenario measures complete process wall time in milliseconds.
+Throughput scenarios normally use three samples and a 64 MiB payload. The round-trip scenario
+measures complete process wall time while host and guest exchange files through one running VM.
 
 | Metric | Unit | Description |
 | --- | --- | --- |
-| `virtfs_ephemeral_write` | MB/s | Sequential `dd` write with `fsync` to a fresh ephemeral backing store. |
-| `virtfs_ephemeral_read` | MB/s | Sequential read from the ephemeral store after dropping guest page cache. |
-| `virtfs_persistent_write` | MB/s | Sequential `dd` write with `fsync` to a host-persistent backing store. |
-| `virtfs_persistent_read` | MB/s | Sequential read from the persistent store after dropping guest page cache. |
-| `virtfs_reuse` | ms | Cold VM launch, reopen the persistent store, and verify the previously written payload checksum. |
+| `virtfs_live_write` | MB/s | Sequential guest `dd` write with `fsync` directly into the host directory. |
+| `virtfs_live_read` | MB/s | Sequential guest read from the host file after dropping guest page cache. |
+| `virtfs_live_roundtrip` | ms | Guest creates a marker observed by the host, then observes a host rewrite before that VM exits. |
 
 ### Python snapshot
 
@@ -108,7 +107,7 @@ failed sample without adding an interval between successful packets.
 ## CI collection
 
 `scripts/performance.py collect --require-shared-suite` rejects a backend result
-unless it contains exactly the 23 metrics above. Each backend job publishes its
+unless it contains exactly the 21 shared metrics above. Each backend job publishes its
 p50 table to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM
 and WHP results with the latest base-branch history; privileged HCN/AF_XDP results
 are collected when the hardware job is enabled.

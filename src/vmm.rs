@@ -36,7 +36,7 @@ use crate::net::{self, VirtioNet};
 use crate::profiler::{GuestProfiler, HostTraceSession};
 use crate::snapshot::{self, Snapshot};
 use crate::vcpu::Vcpu;
-use crate::virtfs;
+use crate::virtiofs::{self, PassthroughFs, VirtioFs};
 
 /// Guest-physical address of the emulated task-state segment required by VT-x.
 const TSS_ADDRESS: usize = 0xfffb_d000;
@@ -120,12 +120,8 @@ pub struct Config {
     pub mount: Option<PathBuf>,
     /// Guest mount point for the `--mount` directory.
     pub mount_target: String,
-    /// Export the `--mount` directory read-write (ext4) instead of read-only (SquashFS).
+    /// Let the guest modify the live `--mount` host directory.
     pub mount_rw: bool,
-    /// Optional host file backing a read-write `--mount` (implies read-write; persists writes).
-    pub mount_image: Option<PathBuf>,
-    /// Optional size (MiB) of the writable ext4 image (headroom for guest writes).
-    pub mount_size: Option<u64>,
     /// Optional virt-net endpoint (`--net`): the guest IP/prefix and derived host gateway.
     pub net: Option<net::NetConfig>,
     /// Optional pre-existing host TAP to attach to instead of creating one (`--net-tap`).
@@ -158,6 +154,14 @@ struct NetDevice {
     /// a snapshot can re-emit it without consulting `--net`, which is absent on the restore path
     /// (so a snapshot taken from a restored VM still records its NIC).
     cfg_header: Vec<u8>,
+}
+
+/// A running live virtio-fs device and the KVM eventfd used to inject its IRQ.
+#[derive(Clone)]
+struct FsDevice {
+    dev: Arc<Mutex<VirtioFs>>,
+    irq: Arc<::vmm_sys_util::eventfd::EventFd>,
+    writable: bool,
 }
 
 /// VM-wide supervisor shared by every vCPU thread (the boot processor and all application
@@ -412,28 +416,84 @@ impl Drop for ApThreads {
     }
 }
 
-/// Services a guest MMIO read to the virt-net window from any vCPU. Reads outside the window float
-/// to all-ones (matching an unoccupied bus).
-fn net_mmio_read(net: Option<&Arc<Mutex<VirtioNet>>>, addr: u64, data: &mut [u8]) {
-    let in_window = (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr);
-    match (net, in_window) {
-        (Some(dev), true) => {
-            let off = addr - net::NET_MMIO_BASE;
-            dev.lock().expect("virt-net poisoned").mmio_read(off, data);
-        }
-        // Unclaimed MMIO reads float to 0xFF (matches cloud-hypervisor's sentinel).
-        _ => data.iter_mut().for_each(|b| *b = 0xff),
+/// Services a guest MMIO read to either virtio device from any vCPU.
+fn mmio_read(
+    net: Option<&Arc<Mutex<VirtioNet>>>,
+    filesystem: Option<&FsDevice>,
+    addr: u64,
+    data: &mut [u8],
+) {
+    if let Some(dev) = net
+        && (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr)
+    {
+        dev.lock()
+            .expect("virt-net poisoned")
+            .mmio_read(addr - net::NET_MMIO_BASE, data);
+    } else if let Some(filesystem) = filesystem
+        && (virtiofs::MMIO_BASE..virtiofs::MMIO_BASE + virtiofs::MMIO_SIZE).contains(&addr)
+    {
+        filesystem
+            .dev
+            .lock()
+            .expect("virtio-fs poisoned")
+            .mmio_read(addr - virtiofs::MMIO_BASE, data);
+    } else {
+        data.fill(0xff);
     }
 }
 
-/// Services a guest MMIO write to the virt-net window from any vCPU. Writes outside the window are
-/// dropped (matching an unoccupied bus).
-fn net_mmio_write(net: Option<&Arc<Mutex<VirtioNet>>>, addr: u64, data: &[u8]) {
-    let in_window = (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr);
-    if let (Some(dev), true) = (net, in_window) {
-        let off = addr - net::NET_MMIO_BASE;
-        dev.lock().expect("virt-net poisoned").mmio_write(off, data);
+/// Services a guest MMIO write to either virtio device from any vCPU.
+fn mmio_write(
+    net: Option<&Arc<Mutex<VirtioNet>>>,
+    filesystem: Option<&FsDevice>,
+    addr: u64,
+    data: &[u8],
+) {
+    if let Some(dev) = net
+        && (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&addr)
+    {
+        dev.lock()
+            .expect("virt-net poisoned")
+            .mmio_write(addr - net::NET_MMIO_BASE, data);
+    } else if let Some(filesystem) = filesystem
+        && (virtiofs::MMIO_BASE..virtiofs::MMIO_BASE + virtiofs::MMIO_SIZE).contains(&addr)
+    {
+        let mut dev = filesystem.dev.lock().expect("virtio-fs poisoned");
+        let was_asserted = dev.irq_asserted();
+        dev.mmio_write(addr - virtiofs::MMIO_BASE, data);
+        let raise = !was_asserted && dev.irq_asserted();
+        drop(dev);
+        if raise && let Err(error) = filesystem.irq.write(1) {
+            warn!("virtio-fs: failed to signal IRQ: {error}");
+        }
     }
+}
+
+fn build_virtiofs(
+    vm_fd: &::kvm_ioctls::VmFd,
+    mem: &GuestMemory,
+    directory: &Path,
+    writable: bool,
+) -> Result<FsDevice> {
+    let irq = ::vmm_sys_util::eventfd::EventFd::new(::libc::EFD_NONBLOCK)
+        .context("creating virtio-fs IRQ eventfd")?;
+    vm_fd
+        .register_irqfd(&irq, virtiofs::IRQ)
+        .context("registering virtio-fs irqfd")?;
+    let dma: Arc<dyn virtiofs::DmaMemory> = Arc::new(mem.ram());
+    let handler = Box::new(PassthroughFs::new(directory, writable)?);
+    let dev = VirtioFs::new(dma, handler, virtiofs::TAG)?;
+    info!(
+        "virtio-fs: exporting {directory:?} live at {:#x} ({}, tag {})",
+        virtiofs::MMIO_BASE,
+        if writable { "read-write" } else { "read-only" },
+        virtiofs::TAG
+    );
+    Ok(FsDevice {
+        dev: Arc::new(Mutex::new(dev)),
+        irq: Arc::new(irq),
+        writable,
+    })
 }
 
 /// Runs a tiny 32-bit self-test program through the same `setup_pvh` entry path to validate
@@ -565,10 +625,6 @@ fn run_cold(cfg: Config) -> Result<u8> {
         }
         None => None,
     };
-    // Optionally export a host directory to the guest as a virt-fs. The filesystem image is
-    // mapped into guest memory above reported RAM and pointed at via the kernel command line;
-    // `_virtfs` owns that mapping (and, for a persistent read-write export, flushes it) and must
-    // stay alive until the guest stops.
     let mut cmdline: String = cfg.cmdline.clone();
     // Linux discovers the TSC frequency before kvm-clock is initialized. Give it KVM's actual
     // virtual rate so it never has to rely on timing-sensitive PIT/delay-loop calibration.
@@ -582,19 +638,13 @@ fn run_cold(cfg: Config) -> Result<u8> {
     } else {
         warn!("KVM_GET_TSC_KHZ is unavailable; guest will use timer calibration");
     }
-    let _virtfs: Option<virtfs::VirtFs> = match &cfg.mount {
+    let filesystem: Option<FsDevice> = match &cfg.mount {
         Some(dir) => {
-            let opts = virtfs::Options {
-                dir,
-                target: &cfg.mount_target,
-                writable: cfg.mount_rw || cfg.mount_image.is_some(),
-                image: cfg.mount_image.as_deref(),
-                size: cfg.mount_size.map(|mib| mib << 20),
-            };
-            let (fs, fragment) = virtfs::load(&vm_fd, ram_size, opts)?;
+            let writable = cfg.mount_rw;
+            let fragment = VirtioFs::cmdline_fragment(&cfg.mount_target, writable, virtiofs::TAG);
             cmdline.push(' ');
             cmdline.push_str(&fragment);
-            Some(fs)
+            Some(build_virtiofs(&vm_fd, &mem, dir, writable)?)
         }
         None => None,
     };
@@ -678,6 +728,7 @@ fn run_cold(cfg: Config) -> Result<u8> {
     // The virt-net device, shared so any vCPU can service its MMIO window (the guest's drivers can
     // touch it from any CPU). The boot processor keeps `net_dev` (which also owns the RX thread).
     let net_shared: Option<Arc<Mutex<VirtioNet>>> = net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
+    let filesystem_shared = filesystem.clone();
 
     let mut ap_threads: ApThreads = ApThreads::new(Arc::clone(&control));
     for id in 1..cfg.vcpus as u64 {
@@ -687,6 +738,7 @@ fn run_cold(cfg: Config) -> Result<u8> {
         let ap_bus: Arc<DeviceBus> = Arc::clone(&bus);
         let ap_console: Arc<Mutex<Console>> = Arc::clone(&console);
         let ap_net: Option<Arc<Mutex<VirtioNet>>> = net_shared.clone();
+        let ap_filesystem = filesystem_shared.clone();
         let ap_control: Arc<VmControl> = Arc::clone(&control);
         let exit_on_boot: bool = cfg.exit_on_boot;
         let snapshot_enabled: bool = cfg.snapshot.is_some();
@@ -699,6 +751,7 @@ fn run_cold(cfg: Config) -> Result<u8> {
                     id,
                     ap_bus,
                     ap_net,
+                    ap_filesystem,
                     ap_console,
                     exit_on_boot,
                     snapshot_enabled,
@@ -730,6 +783,7 @@ fn run_cold(cfg: Config) -> Result<u8> {
         bus.as_ref(),
         false,
         net_dev,
+        filesystem,
         Arc::clone(&control),
     );
 
@@ -756,6 +810,7 @@ fn run_ap(
     idx: u64,
     bus: Arc<DeviceBus>,
     net: Option<Arc<Mutex<VirtioNet>>>,
+    filesystem: Option<FsDevice>,
     console: Arc<Mutex<Console>>,
     exit_on_boot: bool,
     snapshot_enabled: bool,
@@ -827,8 +882,12 @@ fn run_ap(
                         }
                     }
                 },
-                Ok(VcpuExit::MmioRead(addr, data)) => net_mmio_read(net.as_ref(), addr, data),
-                Ok(VcpuExit::MmioWrite(addr, data)) => net_mmio_write(net.as_ref(), addr, data),
+                Ok(VcpuExit::MmioRead(addr, data)) => {
+                    mmio_read(net.as_ref(), filesystem.as_ref(), addr, data)
+                }
+                Ok(VcpuExit::MmioWrite(addr, data)) => {
+                    mmio_write(net.as_ref(), filesystem.as_ref(), addr, data)
+                }
                 // Linux APs HLT in the idle loop; with the in-kernel LAPIC, KVM re-blocks until the
                 // next interrupt, so looping here does not busy-spin.
                 Ok(VcpuExit::Hlt) => {}
@@ -963,6 +1022,12 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
         Some((dev, tap)) => (Some(dev), Some(tap)),
         None => (None, None),
     };
+    let filesystem = restore_virtiofs(
+        &vm_fd,
+        &mem,
+        snap.virtiofs_state(),
+        cfg.mount.as_deref(),
+    )?;
 
     let (console, bus) = build_io(&cfg, Some(snap.device_state()));
     let bus: Arc<DeviceBus> = Arc::new(bus);
@@ -974,6 +1039,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
     install_signal_handlers();
     let control: Arc<VmControl> = Arc::new(VmControl::new(n_vcpus));
     let net_shared: Option<Arc<Mutex<VirtioNet>>> = net_dev.as_ref().map(|nd| Arc::clone(&nd.dev));
+    let filesystem_shared = filesystem.clone();
 
     // The boot processor is index 0; the rest run as application processors, parked at the start
     // gate until every vCPU is created and restored and the boot processor releases them together.
@@ -985,6 +1051,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
         let ap_bus: Arc<DeviceBus> = Arc::clone(&bus);
         let ap_console: Arc<Mutex<Console>> = Arc::clone(&console);
         let ap_net: Option<Arc<Mutex<VirtioNet>>> = net_shared.clone();
+        let ap_filesystem = filesystem_shared.clone();
         let ap_control: Arc<VmControl> = Arc::clone(&control);
         let exit_on_boot: bool = cfg.exit_on_boot;
         let snapshot_enabled: bool = cfg.snapshot.is_some();
@@ -997,6 +1064,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
                     id,
                     ap_bus,
                     ap_net,
+                    ap_filesystem,
                     ap_console,
                     exit_on_boot,
                     snapshot_enabled,
@@ -1027,6 +1095,7 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
         bus.as_ref(),
         true,
         net_dev,
+        filesystem,
         Arc::clone(&control),
     );
 
@@ -1075,6 +1144,40 @@ fn restore_net(
     )))
 }
 
+fn restore_virtiofs(
+    vm_fd: &::kvm_ioctls::VmFd,
+    mem: &GuestMemory,
+    state: &[u8],
+    directory: Option<&Path>,
+) -> Result<Option<FsDevice>> {
+    if state.is_empty() {
+        if directory.is_some() {
+            bail!("--mount was supplied, but the snapshot has no live virtio-fs device");
+        }
+        return Ok(None);
+    }
+    if state.len() < 2 || state[0] != 1 {
+        bail!("unsupported virtio-fs snapshot header");
+    }
+    let directory = directory.context(
+        "snapshot contains a live virtio-fs device; supply the per-run host directory with --mount",
+    )?;
+    let filesystem = build_virtiofs(vm_fd, mem, directory, state[1] != 0)?;
+    let mut dev = filesystem.dev.lock().expect("virtio-fs poisoned");
+    dev.load(&state[2..])?;
+    dev.resume();
+    let raise = dev.irq_asserted();
+    drop(dev);
+    if raise {
+        filesystem
+            .irq
+            .write(1)
+            .context("reasserting restored virtio-fs IRQ")?;
+    }
+    info!("virtio-fs: restored live device against {directory:?}");
+    Ok(Some(filesystem))
+}
+
 /// Builds the shared console sink and PMIO device bus. When `device_state` is provided, the
 /// pending console input and RTC register index are restored from it.
 fn build_io(cfg: &Config, device_state: Option<&[u8]>) -> (Arc<Mutex<Console>>, DeviceBus) {
@@ -1104,6 +1207,7 @@ fn execute(
     bus: &DeviceBus,
     resumed: bool,
     net: Option<NetDevice>,
+    filesystem: Option<FsDevice>,
     control: Arc<VmControl>,
 ) -> Result<()> {
     let tty_guard: TtyGuard = TtyGuard::new();
@@ -1219,6 +1323,7 @@ fn execute(
                 bus,
                 console,
                 net.as_ref(),
+                filesystem.as_ref(),
                 &control,
                 &net_stop,
                 &mut net_rx,
@@ -1265,13 +1370,12 @@ fn execute(
                     }
                 }
             },
-            // Guest MMIO: the virt-net window is serviced from any vCPU; other reads float to
-            // all-ones and writes are dropped, matching the unoccupied PMIO bus.
+            // Guest MMIO: route the virt-net and virtio-fs windows from any vCPU.
             Ok(VcpuExit::MmioRead(addr, data)) => {
-                net_mmio_read(net.as_ref().map(|nd| &nd.dev), addr, data)
+                mmio_read(net.as_ref().map(|nd| &nd.dev), filesystem.as_ref(), addr, data)
             }
             Ok(VcpuExit::MmioWrite(addr, data)) => {
-                net_mmio_write(net.as_ref().map(|nd| &nd.dev), addr, data)
+                mmio_write(net.as_ref().map(|nd| &nd.dev), filesystem.as_ref(), addr, data)
             }
             Ok(VcpuExit::Hlt) => {
                 info!("guest halted");
@@ -1423,6 +1527,7 @@ fn coordinate_snapshot(
     bus: &DeviceBus,
     console: &Arc<Mutex<Console>>,
     net: Option<&NetDevice>,
+    filesystem: Option<&FsDevice>,
     control: &VmControl,
     net_stop: &Arc<AtomicBool>,
     net_rx: &mut Option<JoinHandle<()>>,
@@ -1469,7 +1574,7 @@ fn coordinate_snapshot(
 
     // 5. Collect every processor's state in index order and write the snapshot.
     let states: Vec<snapshot::VcpuState> = control.take_saved()?;
-    write_snapshot(cfg, vm_fd, mem, bus, console, net, &states)?;
+    write_snapshot(cfg, vm_fd, mem, bus, console, net, filesystem, &states)?;
     if !cfg.timing_markers.is_empty() {
         eprintln!("snapshot-capture: {:.1} ms", capture_start.elapsed().as_secs_f64() * 1000.0);
     }
@@ -1501,6 +1606,7 @@ fn write_snapshot(
     bus: &DeviceBus,
     console: &Arc<Mutex<Console>>,
     net: Option<&NetDevice>,
+    filesystem: Option<&FsDevice>,
     states: &[snapshot::VcpuState],
 ) -> Result<()> {
     let dir = cfg
@@ -1521,7 +1627,24 @@ fn write_snapshot(
         }
         None => Vec::new(),
     };
-    snapshot::write(dir, states, vm_fd, mem, &device_state, &net_state)
+    let virtiofs_state: Vec<u8> = match filesystem {
+        Some(filesystem) => {
+            let dev = filesystem.dev.lock().expect("virtio-fs poisoned");
+            let mut state = vec![1, u8::from(filesystem.writable)];
+            state.extend(dev.save()?);
+            state
+        }
+        None => Vec::new(),
+    };
+    snapshot::write(
+        dir,
+        states,
+        vm_fd,
+        mem,
+        &device_state,
+        &net_state,
+        &virtiofs_state,
+    )
         .with_context(|| format!("writing snapshot to {dir:?}"))?;
     Ok(())
 }

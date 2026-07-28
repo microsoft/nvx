@@ -19,7 +19,7 @@ machine you are changing.
 | [Running NVX](doc/usage.md) | Workflow CLI, direct VMM options, console behavior, and platform limits. |
 | [Project Organization](doc/project-organization.md) | Boot flow, machine model, memory map, kernel configuration, and source ownership. |
 | [Networking](doc/networking.md) | KVM TAP, WHP user-mode NAT, external HCN/AF_XDP, and network restore. |
-| [Virt-fs](doc/virtfs.md) | Read-only, ephemeral, and persistent host directory exports. |
+| [Virt-fs](doc/virtfs.md) | Live read-only or read-write host directory exports through virtio-fs. |
 | [Snapshot and Restore](doc/snapshots.md) | Capture protocol, state formats, lazy RAM restore, and Python workflows. |
 | [Profiling and Flamegraphs](doc/profiling-flamegraph.md) | Guest sampling, host traces, symbol resolution, and flamegraph post-processing. |
 | [Benchmark Reference](doc/benchmark.md) | Canonical metrics, sample methodology, commands, and CI regression policy. |

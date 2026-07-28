@@ -48,7 +48,6 @@ mod rtc;
 mod slirp;
 mod snapshot;
 mod vcpu;
-mod virtfs;
 mod xdp;
 
 use ::core::ffi::c_void;
@@ -87,6 +86,7 @@ use crate::devices::{DeviceBus, PioAction};
 use crate::egress::EgressFilter;
 use crate::l2bridge::{ExternalIdentity, L2BridgeConfig};
 use crate::profiler::{GuestProfiler, HostTraceSession};
+use crate::virtiofs::{self, PassthroughFs, VirtioFs};
 use crate::whp::emulator::{Emulator, MmioHandler};
 use crate::whp::memory::GuestMemory;
 pub use crate::whp::net::NetConfig;
@@ -143,10 +143,6 @@ pub struct Config {
     pub mount_target: String,
     /// Export the `--mount` directory read-write instead of read-only.
     pub mount_rw: bool,
-    /// Optional host file backing a read-write `--mount` (implies read-write; persists writes).
-    pub mount_image: Option<PathBuf>,
-    /// Optional size (MiB) of the writable image (headroom for guest writes).
-    pub mount_size: Option<u64>,
     /// Optional guest/host profiling configuration.
     pub profiling: Option<crate::profiler::ProfilingConfig>,
     /// Guest path to a mounted shell script executed once by the Alpine init.
@@ -163,6 +159,68 @@ struct Nic {
     backend: Arc<dyn FrameBackend>,
     /// Snapshot header containing guest identity only, never host attachment state.
     snapshot_header: Vec<u8>,
+}
+
+/// A running live virtio-fs device.
+struct FsDevice {
+    dev: Arc<Mutex<VirtioFs>>,
+    writable: bool,
+}
+
+impl crate::virtiofs::DmaMemory for GuestMemory {
+    fn read(&self, gpa: u64, data: &mut [u8]) -> bool {
+        self.read_slice(gpa, data).is_ok()
+    }
+
+    fn write(&self, gpa: u64, data: &[u8]) -> bool {
+        self.write_slice(gpa, data).is_ok()
+    }
+}
+
+fn build_virtiofs(
+    mem: &Arc<GuestMemory>,
+    directory: &Path,
+    writable: bool,
+) -> Result<FsDevice> {
+    let dma: Arc<dyn virtiofs::DmaMemory> = mem.clone();
+    let handler = Box::new(PassthroughFs::new(directory, writable)?);
+    let dev = VirtioFs::new(dma, handler, virtiofs::TAG)?;
+    info!(
+        "virtio-fs: exporting {directory:?} live at {:#x} ({}, tag {})",
+        virtiofs::MMIO_BASE,
+        if writable { "read-write" } else { "read-only" },
+        virtiofs::TAG
+    );
+    Ok(FsDevice {
+        dev: Arc::new(Mutex::new(dev)),
+        writable,
+    })
+}
+
+fn restore_virtiofs(
+    mem: &Arc<GuestMemory>,
+    state: &[u8],
+    directory: Option<&Path>,
+) -> Result<Option<FsDevice>> {
+    if state.is_empty() {
+        if directory.is_some() {
+            bail!("--mount was supplied, but the snapshot has no live virtio-fs device");
+        }
+        return Ok(None);
+    }
+    if state.len() < 2 || state[0] != 1 {
+        bail!("unsupported virtio-fs snapshot header");
+    }
+    let directory = directory.context(
+        "snapshot contains a live virtio-fs device; supply the per-run host directory with --mount",
+    )?;
+    let filesystem = build_virtiofs(mem, directory, state[1] != 0)?;
+    let mut dev = filesystem.dev.lock().expect("virtio-fs poisoned");
+    dev.load(&state[2..])?;
+    dev.resume();
+    drop(dev);
+    info!("virtio-fs: restored live device against {directory:?}");
+    Ok(Some(filesystem))
 }
 
 impl Nic {
@@ -427,23 +485,14 @@ fn run_cold(cfg: Config) -> Result<u8> {
         cmdline.push_str(" nvx_snapshot_before_exec=1");
     }
 
-    // Optionally export a host directory to the guest as a virt-fs. The FAT image is mapped into
-    // guest memory above reported RAM and pointed at via the kernel command line; `_virtfs` owns
-    // that mapping (and, for a persistent read-write export, flushes it) and must stay alive until
-    // the guest stops.
-    let _virtfs: Option<virtfs::VirtFs> = match &cfg.mount {
+    // Optionally export a live host directory through virtio-fs.
+    let filesystem: Option<FsDevice> = match &cfg.mount {
         Some(dir) => {
-            let opts = virtfs::Options {
-                dir,
-                target: &cfg.mount_target,
-                writable: cfg.mount_rw || cfg.mount_image.is_some(),
-                image: cfg.mount_image.as_deref(),
-                size: cfg.mount_size.map(|mib| mib << 20),
-            };
-            let (fs, fragment) = virtfs::load(partition.handle, ram_size, opts)?;
+            let writable = cfg.mount_rw;
+            let fragment = VirtioFs::cmdline_fragment(&cfg.mount_target, writable, virtiofs::TAG);
             cmdline.push(' ');
             cmdline.push_str(&fragment);
-            Some(fs)
+            Some(build_virtiofs(&mem, dir, writable)?)
         }
         None => None,
     };
@@ -537,6 +586,7 @@ fn run_cold(cfg: Config) -> Result<u8> {
         &bus,
         tsc_hz,
         nic,
+        filesystem,
     )
 }
 
@@ -554,24 +604,8 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
     partition.create_vcpu()?;
     snap.apply(partition.handle)?;
 
-    // A run-once snapshot captures the initialized phram device but not its host mapping (which
-    // lives outside guest RAM). Reattach a fresh per-run image at the identical GPA before the
-    // vCPU resumes and the guest mounts it.
-    let _virtfs: Option<virtfs::VirtFs> = match &cfg.mount {
-        Some(mount) => {
-            let options = virtfs::Options {
-                dir: mount,
-                target: &cfg.mount_target,
-                writable: cfg.mount_rw || cfg.mount_image.is_some(),
-                image: cfg.mount_image.as_deref(),
-                size: cfg.mount_size.map(|mib| mib << 20),
-            };
-            let (filesystem, _) =
-                virtfs::load(partition.handle, snap.ram_size(), options)?;
-            Some(filesystem)
-        },
-        None => None,
-    };
+    // Reattach the requested live host directory and restore its guest-visible device state.
+    let filesystem = restore_virtiofs(&mem, snap.virtiofs(), cfg.mount.as_deref())?;
 
     // Rebuild the emulated devices from the saved state.
     let mut pic: Pic = Pic::new();
@@ -599,7 +633,17 @@ fn run_restore(cfg: Config, dir: &Path) -> Result<u8> {
         snap.ram_size() >> 20
     );
     execute(
-        &cfg, &partition, &mem, pic, pit, rtc, &console, &bus, tsc_hz, nic,
+        &cfg,
+        &partition,
+        &mem,
+        pic,
+        pit,
+        rtc,
+        &console,
+        &bus,
+        tsc_hz,
+        nic,
+        filesystem,
     )
 }
 
@@ -730,6 +774,7 @@ fn execute(
     bus: &DeviceBus,
     tsc_hz: u64,
     nic: Option<Nic>,
+    filesystem: Option<FsDevice>,
 ) -> Result<u8> {
     let handle = partition.handle;
     let guard: ConsoleGuard = ConsoleGuard::new();
@@ -839,7 +884,14 @@ fn execute(
         // Deliver a pending timer tick (raised by the timer thread) as the guest's IRQ0, and
         // re-check the NIC on the same cadence so a receive interrupt that could not be injected
         // earlier (e.g. the line was briefly masked) self-heals within one tick.
-        service_pending_irqs(&timer_pending, &nic, &mut pic, handle, &mut prefer_timer);
+        service_pending_irqs(
+            &timer_pending,
+            &nic,
+            &filesystem,
+            &mut pic,
+            handle,
+            &mut prefer_timer,
+        );
 
         let reason = exit.ExitReason;
         if reason == WHvRunVpExitReasonX64IoPortAccess {
@@ -849,6 +901,7 @@ fn execute(
                         service_pending_irqs(
                             &timer_pending,
                             &nic,
+                            &filesystem,
                             &mut pic,
                             handle,
                             &mut prefer_timer,
@@ -889,6 +942,7 @@ fn execute(
                                 console,
                                 bus,
                                 nic.as_ref(),
+                                filesystem.as_ref(),
                             ) {
                                 Ok(true) => break,
                                 Ok(false) => {}
@@ -918,7 +972,14 @@ fn execute(
         } else if reason == WHvRunVpExitReasonCanceled || reason == WHvRunVpExitReasonNone {
             // Woken by the timer, input thread, or the NIC receive pump: service a pending NIC
             // interrupt so a just-delivered frame is signalled to the guest with low latency.
-            service_pending_irqs(&timer_pending, &nic, &mut pic, handle, &mut prefer_timer);
+            service_pending_irqs(
+                &timer_pending,
+                &nic,
+                &filesystem,
+                &mut pic,
+                handle,
+                &mut prefer_timer,
+            );
             if sample_pending.swap(false, Ordering::AcqRel) {
                 if let Some(prof) = guest_profiler.as_mut() {
                     sample_guest_whp(prof, handle, mem);
@@ -932,13 +993,26 @@ fn execute(
         } else if reason == WHvRunVpExitReasonMemoryAccess {
             // Decode MMIO accesses through the instruction emulator. The NIC window is dispatched
             // when present; other reads float to zero and writes are dropped like an empty bus.
-            if let Err(e) = handle_mmio(&emulator, handle, &exit, nic.as_ref()) {
+            if let Err(e) = handle_mmio(
+                &emulator,
+                handle,
+                &exit,
+                nic.as_ref(),
+                filesystem.as_ref(),
+            ) {
                 run_err = Some(e);
                 break;
             }
-            if nic.is_some() {
-                // A transmit notification (QueueNotify) may have raised the NIC's interrupt.
-                service_pending_irqs(&timer_pending, &nic, &mut pic, handle, &mut prefer_timer);
+            if nic.is_some() || filesystem.is_some() {
+                // QueueNotify may have completed network or filesystem buffers.
+                service_pending_irqs(
+                    &timer_pending,
+                    &nic,
+                    &filesystem,
+                    &mut pic,
+                    handle,
+                    &mut prefer_timer,
+                );
             }
         } else {
             debug!("unhandled vcpu exit reason {}", reason.0);
@@ -1066,6 +1140,7 @@ fn take_snapshot(
     console: &Arc<Mutex<Console>>,
     bus: &DeviceBus,
     nic: Option<&Nic>,
+    filesystem: Option<&FsDevice>,
 ) -> Result<bool> {
     let dir = match &cfg.snapshot {
         Some(dir) => dir,
@@ -1093,12 +1168,22 @@ fn take_snapshot(
         }
         None => Vec::new(),
     };
+    let virtiofs_state: Vec<u8> = match filesystem {
+        Some(filesystem) => {
+            let dev = filesystem.dev.lock().expect("virtio-fs poisoned");
+            let mut state = vec![1, u8::from(filesystem.writable)];
+            state.extend(dev.save()?);
+            state
+        }
+        None => Vec::new(),
+    };
     let devices = snapshot::DeviceState {
         pic: &pic_bytes,
         pit: &pit_bytes,
         rtc: &rtc_bytes,
         console: &con_state,
         net: &net_state,
+        virtiofs: &virtiofs_state,
     };
     snapshot::write(dir, handle, mem, &devices)
         .with_context(|| format!("writing snapshot to {}", dir.display()))?;
@@ -1527,9 +1612,54 @@ fn service_nic_irq(nic: &Option<Nic>, pic: &mut Pic, handle: WHV_PARTITION_HANDL
     false
 }
 
+fn inject_virtiofs_irq(pic: &mut Pic, handle: WHV_PARTITION_HANDLE) -> bool {
+    let Some(vector) = pic.raise_irq(virtiofs::IRQ as u8) else {
+        return false;
+    };
+    let interrupt = WHV_INTERRUPT_CONTROL {
+        _bitfield: 0,
+        Destination: 0,
+        Vector: u32::from(vector),
+    };
+    let result = unsafe {
+        WHvRequestInterrupt(
+            handle,
+            &interrupt,
+            size_of::<WHV_INTERRUPT_CONTROL>() as u32,
+        )
+    };
+    if let Err(error) = result {
+        pic.cancel_irq(virtiofs::IRQ as u8);
+        error!(
+            "virtio-fs: WHvRequestInterrupt failed for IRQ{} vector {vector:#04x}: {error}",
+            virtiofs::IRQ
+        );
+        return false;
+    }
+    true
+}
+
+fn service_virtiofs_irq(
+    filesystem: &Option<FsDevice>,
+    pic: &mut Pic,
+    handle: WHV_PARTITION_HANDLE,
+) -> bool {
+    if let Some(filesystem) = filesystem
+        && filesystem
+            .dev
+            .lock()
+            .expect("virtio-fs poisoned")
+            .irq_asserted()
+    {
+        return inject_virtiofs_irq(pic, handle);
+    }
+    false
+}
+
 fn service_pending_irqs(
     timer_pending: &AtomicBool,
     nic: &Option<Nic>,
+    filesystem: &Option<FsDevice>,
     pic: &mut Pic,
     handle: WHV_PARTITION_HANDLE,
     prefer_timer: &mut bool,
@@ -1560,29 +1690,32 @@ fn service_pending_irqs(
     } else if nic_waiting && service_nic_irq(nic, pic, handle) {
         *prefer_timer = true;
     }
+    let _ = service_virtiofs_irq(filesystem, pic, handle);
 }
 
-/// Services a guest MMIO exit by emulating the faulting instruction against the NIC.
+/// Services a guest MMIO exit by emulating the faulting instruction against the virtio devices.
 fn handle_mmio(
     emu: &Emulator,
     handle: WHV_PARTITION_HANDLE,
     exit: &WHV_RUN_VP_EXIT_CONTEXT,
     nic: Option<&Nic>,
+    filesystem: Option<&FsDevice>,
 ) -> Result<()> {
     let vp: &WHV_VP_EXIT_CONTEXT = &exit.VpContext;
     // SAFETY: the exit reason selects the `MemoryAccess` arm of the union.
     let mmio: &WHV_MEMORY_ACCESS_CONTEXT = unsafe { &exit.Anonymous.MemoryAccess };
-    let mut handler: NetMmio<'_> = NetMmio { nic };
+    let mut handler = DeviceMmio { nic, filesystem };
     emu.emulate(handle, vp, mmio, &mut handler)
 }
 
 /// MMIO dispatcher used by the instruction emulator: routes accesses in the virtio-mmio window to
 /// the NIC; other reads float to zero and other writes are dropped (the unoccupied-bus behaviour).
-struct NetMmio<'a> {
+struct DeviceMmio<'a> {
     nic: Option<&'a Nic>,
+    filesystem: Option<&'a FsDevice>,
 }
 
-impl MmioHandler for NetMmio<'_> {
+impl MmioHandler for DeviceMmio<'_> {
     fn mmio(&mut self, gpa: u64, is_write: bool, data: &mut [u8]) {
         if let Some(nic) = self.nic
             && (net::NET_MMIO_BASE..net::NET_MMIO_BASE + net::NET_MMIO_SIZE).contains(&gpa)
@@ -1593,6 +1726,16 @@ impl MmioHandler for NetMmio<'_> {
                 dev.mmio_write(off, data);
             } else {
                 dev.mmio_read(off, data);
+            }
+        } else if let Some(filesystem) = self.filesystem
+            && (virtiofs::MMIO_BASE..virtiofs::MMIO_BASE + virtiofs::MMIO_SIZE).contains(&gpa)
+        {
+            let offset = gpa - virtiofs::MMIO_BASE;
+            let mut dev = filesystem.dev.lock().expect("virtio-fs poisoned");
+            if is_write {
+                dev.mmio_write(offset, data);
+            } else {
+                dev.mmio_read(offset, data);
             }
         } else if !is_write {
             data.iter_mut().for_each(|b| *b = 0);

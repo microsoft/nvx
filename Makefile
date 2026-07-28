@@ -61,7 +61,7 @@ boot-test: release
 measure: release
 	$(PYTHON) scripts/nvx.py measure-coldstart --kernel "$(KERNEL_IMG)" --initrd "$(INITRD_IMG)"
 
-# Benchmark the virt-fs: guest read/write throughput and the persistent --mount-image round-trip.
+# Benchmark live virtio-fs throughput and bidirectional host/guest visibility.
 bench-virtfs: release
 	$(PYTHON) scripts/nvx.py bench-virtfs --kernel "$(KERNEL_IMG)" --initrd "$(INITRD_IMG)"
 

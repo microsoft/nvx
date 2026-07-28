@@ -48,9 +48,6 @@ class HostBackend:
                     continue
         return allocated or stat.st_size
 
-    def prepare_virtfs_benchmark(self) -> None:
-        return None
-
     def cleanup_network(self) -> None:
         return None
 

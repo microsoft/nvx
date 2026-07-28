@@ -17,16 +17,15 @@ fatal() {
 
 nvx_snapshot_before_exec=$(sed -n 's/.*nvx_snapshot_before_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
 mount_virtfs() {
-    if [ -e /dev/mtdblock0 ]; then
+    vtag=$(sed -n 's/.*virtfs_tag=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$vtag" ]; then
         vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
         [ -n "$vdir" ] || vdir=/mnt/host
-        vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)
-        [ -n "$vfs" ] || vfs=squashfs
         vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
         [ -n "$vmode" ] || vmode=ro
         mkdir -p "$vdir"
-        mount -t "$vfs" -o "$vmode" /dev/mtdblock0 "$vdir" 2>/dev/null ||
-            fatal "virtfs: failed to mount /dev/mtdblock0 at $vdir"
+        mount -t virtiofs -o "$vmode" "$vtag" "$vdir" 2>/dev/null ||
+            fatal "virtfs: failed to mount tag $vtag at $vdir"
     fi
 }
 if [ "$nvx_snapshot_before_exec" != 1 ]; then

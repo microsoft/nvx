@@ -8,7 +8,7 @@ import re
 import shutil
 
 from .base import HostBackend
-from ..common import require_tool, run_capture
+from ..common import run_capture
 
 
 def _is_root() -> bool:
@@ -31,9 +31,6 @@ class LinuxBackend(HostBackend):
     @property
     def build_hint(self) -> str:
         return "run 'python3 scripts/nvx.py build-kernel' and 'build-initramfs'"
-
-    def prepare_virtfs_benchmark(self) -> None:
-        require_tool("mke2fs", "missing mke2fs (install e2fsprogs)")
 
     def cleanup_network(self) -> None:
         ip = shutil.which("ip")

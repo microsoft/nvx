@@ -31,7 +31,6 @@ from nvx_tools.benchmarks import (
     benchmark_network_snapshot,
     format_rate_median,
     network_gateway,
-    parse_data_checksum,
     parse_dd_rate,
 )
 from nvx_tools.common import CommandResult, REPO_ROOT, ScriptError, remove_tree
@@ -570,11 +569,9 @@ class BackendTests(unittest.TestCase):
 
         self.assertEqual(exit_info.exception.code, 0)
 
-    def test_virtfs_honors_image_size_environment(self) -> None:
-        with patch.dict(os.environ, {"IMG_MB": "777"}):
-            args = build_parser().parse_args(["bench-virtfs"])
-
-        self.assertEqual(args.image_mib, 777)
+    def test_run_rejects_removed_virtfs_image_options(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["run", "--mount-image", "host.img"])
 
     @patch("nvx_tools.backends.linux._is_root", return_value=True)
     @patch("nvx_tools.backends.linux.shutil.which", return_value="/usr/sbin/ip")
@@ -748,10 +745,6 @@ class BenchmarkParserTests(unittest.TestCase):
         self.assertEqual(parse_dd_rate(text, 1), 320.0)
         self.assertEqual(parse_dd_rate(text, 2), 3200.0)
 
-    def test_checksum_requires_data_bin_line(self) -> None:
-        self.assertEqual(parse_data_checksum("3975907619 67108864 /mnt/host/data.bin\n"), "3975907619")
-        self.assertIsNone(parse_data_checksum("3975907619 1 other.bin\n"))
-
     def test_rate_output_keeps_performance_parser_contract(self) -> None:
         formatted = format_rate_median([100.0, 300.0, 200.0])
         self.assertRegex(formatted, r"200\.0 MB/s")
@@ -923,6 +916,8 @@ class CiWorkflowParityTests(unittest.TestCase):
         self.assertIn('if [ "$RUN_BENCH" = true ]', linux)
         self.assertIn("--initrd build/initramfs-python.cpio.gz --mem 512", linux)
         self.assertIn("scripts\\nvx.py test-exec", windows)
+        self.assertIn("bidirectional visibility verified\\s+: 3/3", windows)
+        self.assertNotIn("payload survived across runs", windows)
         self.assertIn("if ($env:RUN_BENCH -eq 'true')", windows)
         self.assertIn("--initrd build\\initramfs-python.cpio.gz", windows)
         self.assertIn("--mem 512", windows)

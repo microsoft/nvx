@@ -15,20 +15,19 @@ fatal() {
 }
 nvx_snapshot_before_exec=$(sed -n 's/.*nvx_snapshot_before_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
 mount_virtfs() {
-    # KVM/WHP expose a phram image as /dev/mtdblock0. A snapshot-before-exec run deliberately
-    # defers this first mount until restore has attached the per-run image.
-    if [ -e /dev/mtdblock0 ]; then
+    # A snapshot-before-exec run deliberately defers this first mount until restore has attached
+    # the per-run live host directory.
+    vtag=$(sed -n 's/.*virtfs_tag=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$vtag" ]; then
         vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
         [ -n "$vdir" ] || vdir=/mnt/host
-        vfs=$(sed -n 's/.*virtfs_fs=\([^ ]*\).*/\1/p' /proc/cmdline)
-        [ -n "$vfs" ] || vfs=squashfs
         vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
         [ -n "$vmode" ] || vmode=ro
         mkdir -p "$vdir"
-        if mount -t "$vfs" -o "$vmode" /dev/mtdblock0 "$vdir" 2>/dev/null; then
-            echo "virtfs: mounted host directory at $vdir ($vfs,$vmode)"
+        if mount -t virtiofs -o "$vmode" "$vtag" "$vdir" 2>/dev/null; then
+            echo "virtfs: mounted live host directory at $vdir (virtiofs,$vmode)"
         else
-            echo "virtfs: failed to mount /dev/mtdblock0 at $vdir" >&2
+            fatal "virtfs: failed to mount tag $vtag at $vdir"
         fi
     fi
 }

@@ -167,8 +167,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--mount", type=Path, default=os.environ.get("MOUNT"))
     run.add_argument("--mount-target", default=os.environ.get("MOUNT_TARGET", "/mnt/host"))
     run.add_argument("--mount-rw", action="store_true", default=bool(os.environ.get("MOUNT_RW")))
-    run.add_argument("--mount-image", type=Path, default=os.environ.get("MOUNT_IMAGE"))
-    run.add_argument("--mount-size", type=int)
     run.add_argument("--net", default=os.environ.get("NET"))
     egress = run.add_mutually_exclusive_group()
     egress.add_argument("--allow-host", action="append", default=[])
@@ -218,13 +216,6 @@ def build_parser() -> argparse.ArgumentParser:
         "-PayloadMB",
         type=int,
         default=_int_default("PAYLOAD_MB", 64),
-    )
-    virtfs.add_argument(
-        "--image-mib",
-        "--img-mb",
-        "-ImgMB",
-        type=int,
-        default=os.environ.get("IMG_MB"),
     )
 
     network = subparsers.add_parser(
@@ -598,8 +589,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mount=args.mount,
                 mount_target=args.mount_target,
                 mount_rw=args.mount_rw,
-                mount_image=args.mount_image,
-                mount_size=args.mount_size,
                 net=args.net,
                 allow_hosts=args.allow_host,
                 block_hosts=args.block_host,
@@ -626,7 +615,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "bench-virtfs":
             kernel, initrd = _vm_paths(args, backend)
-            image_mib = args.image_mib or (args.payload_mib * 2 + 64)
             benchmark_virtfs(
                 VirtfsConfig(
                     kernel,
@@ -635,7 +623,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.runs,
                     args.vcpus,
                     args.payload_mib,
-                    image_mib,
                 ),
                 backend,
             )

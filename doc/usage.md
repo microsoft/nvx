@@ -86,9 +86,7 @@ built revision.
 | `--restore-ready-pipe <pipe>` | none | WHP-only named-pipe notification after restore is ready. |
 | `--mount <dir>` | none | Export a host directory through virt-fs. |
 | `--mount-target <path>` | `/mnt/host` | Guest path for the virt-fs mount. |
-| `--mount-rw` | off | Use a writable, in-memory filesystem image. |
-| `--mount-image <file>` | none | Use a persistent writable image; implies `--mount-rw`. |
-| `--mount-size <MiB>` | computed | Size a new writable image. |
+| `--mount-rw` | off | Let the guest modify the live host directory. |
 | `--exec <guest-path>` | none | KVM/WHP cold boot: run a mounted shell script and return its status. Requires `--mount`; conflicts with snapshot, restore, self-test, and `--exit-on-boot`. |
 | `--net <IP/PREFIX>` | none | Attach standalone KVM TAP or WHP user-mode NAT networking. |
 | `--net-config <json>` | none | WHP-only external AF_XDP L2Bridge manifest; conflicts with `--net`. |

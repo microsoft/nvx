@@ -150,6 +150,10 @@ impl<'a> Reader<'a> {
         let len: usize = self.u32()? as usize;
         self.take(len)
     }
+
+    fn is_empty(&self) -> bool {
+        self.pos == self.data.len()
+    }
 }
 
 /// Reads a POD value from `bytes` (which must be at least `size_of::<T>()` long).
@@ -394,6 +398,7 @@ pub fn write(
     mem: &GuestMemory,
     device_state: &[u8],
     net_state: &[u8],
+    virtiofs_state: &[u8],
 ) -> Result<()> {
     if states.is_empty() {
         bail!("snapshot requires at least one vCPU state");
@@ -431,6 +436,8 @@ pub fn write(
 
     // virt-net device state (empty unless a NIC was attached).
     put_blob(&mut buf, net_state);
+    // Live virtio-fs transport, inode, and handle state (empty unless a directory was exported).
+    put_blob(&mut buf, virtiofs_state);
 
     // Persist RAM and state.
     mem.snapshot_ram(&dir.join("mem.bin"))?;
@@ -451,6 +458,7 @@ pub struct Snapshot {
     pit: kvm_pit_state2,
     device_state: Vec<u8>,
     net_state: Vec<u8>,
+    virtiofs_state: Vec<u8>,
 }
 
 impl Snapshot {
@@ -484,6 +492,15 @@ impl Snapshot {
         let pit: kvm_pit_state2 = read_pod(r.blob()?)?;
         let device_state: Vec<u8> = r.blob()?.to_vec();
         let net_state: Vec<u8> = r.blob()?.to_vec();
+        // Added after virt-net; old snapshots end exactly after `net_state`.
+        let virtiofs_state: Vec<u8> = if r.is_empty() {
+            Vec::new()
+        } else {
+            r.blob()?.to_vec()
+        };
+        if !r.is_empty() {
+            bail!("snapshot has trailing bytes");
+        }
 
         Ok(Self {
             ram_size,
@@ -493,6 +510,7 @@ impl Snapshot {
             pit,
             device_state,
             net_state,
+            virtiofs_state,
         })
     }
 
@@ -514,6 +532,11 @@ impl Snapshot {
     /// Returns the serialized virt-net device state (empty if the VM had no NIC).
     pub fn net_state(&self) -> &[u8] {
         &self.net_state
+    }
+
+    /// Returns the serialized live virtio-fs state (empty if no directory was exported).
+    pub fn virtiofs_state(&self) -> &[u8] {
+        &self.virtiofs_state
     }
 
     /// Applies the VM-wide state (irqchip, PIT, clock) to `vm`. The irqchip and PIT must
@@ -623,6 +646,14 @@ mod tests {
         buf.extend_from_slice(&[0; 4]);
         let mut r = Reader::new(&buf);
         assert!(r.blob().is_err());
+    }
+
+    #[test]
+    fn optional_blob_distinguishes_eof_from_truncated_prefix() {
+        assert!(Reader::new(&[]).is_empty());
+        let mut truncated = Reader::new(&[1, 0, 0]);
+        assert!(!truncated.is_empty());
+        assert!(truncated.blob().is_err());
     }
 
     #[test]

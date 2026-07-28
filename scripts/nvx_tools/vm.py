@@ -206,8 +206,6 @@ def run_vm(
     mount: Path | None = None,
     mount_target: str = "/mnt/host",
     mount_rw: bool = False,
-    mount_image: Path | None = None,
-    mount_size: int | None = None,
     net: str | None = None,
     allow_hosts: Sequence[str] = (),
     block_hosts: Sequence[str] = (),
@@ -225,10 +223,6 @@ def run_vm(
         args.extend(["--mount", mount, "--mount-target", mount_target])
         if mount_rw:
             args.append("--mount-rw")
-        if mount_image is not None:
-            args.extend(["--mount-image", mount_image])
-        if mount_size is not None:
-            args.extend(["--mount-size", str(mount_size)])
     if net:
         args.extend(["--net", net])
     for destination in allow_hosts:

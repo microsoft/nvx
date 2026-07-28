@@ -46,8 +46,6 @@ Optional features need additional host tools:
 
 | Feature | Requirement |
 | --- | --- |
-| Read-only virt-fs | `mksquashfs` from `squashfs-tools` |
-| Read-write virt-fs | `mke2fs` and `debugfs` from `e2fsprogs` |
 | Managed TAP networking | `ip` from `iproute2`, plus root or passwordless `sudo ip` |
 | Container artifact build | Docker with the Linux engine |
 

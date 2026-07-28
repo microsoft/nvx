@@ -19,6 +19,7 @@ mod egress;
 mod l2bridge;
 mod layout;
 mod profiler;
+mod virtiofs;
 
 // Linux backend: KVM-based VMM.
 #[cfg(target_os = "linux")]
@@ -31,8 +32,6 @@ mod net;
 mod snapshot;
 #[cfg(target_os = "linux")]
 mod vcpu;
-#[cfg(target_os = "linux")]
-mod virtfs;
 #[cfg(target_os = "linux")]
 mod vmm;
 
@@ -128,9 +127,8 @@ struct Args {
     #[arg(long, value_name = "PIPE", requires = "restore")]
     restore_ready_pipe: Option<String>,
 
-    /// Export this host directory to the guest as a filesystem, mounted at `--mount-target`.
-    /// Read-only (SquashFS) by default; pass `--mount-rw` (or `--mount-image`) to mount it
-    /// read-write (ext4). Surfaced in the guest as an MTD/block device.
+    /// Export this host directory live to the guest through virtio-fs, mounted at
+    /// `--mount-target`.
     #[arg(long, value_name = "DIR")]
     mount: Option<PathBuf>,
 
@@ -138,22 +136,9 @@ struct Args {
     #[arg(long, value_name = "PATH", default_value = "/mnt/host")]
     mount_target: String,
 
-    /// Mount the `--mount` filesystem read-write (ext4) instead of read-only (SquashFS). Without
-    /// `--mount-image` the writable image is held in guest memory, so changes are discarded when
-    /// the VM stops.
+    /// Let the guest modify the live `--mount` host directory. The default is read-only.
     #[arg(long)]
     mount_rw: bool,
-
-    /// Back a read-write `--mount` with this host file (implies `--mount-rw`). The ext4 image is
-    /// created from `--mount` the first time and reused afterwards, and guest writes are flushed
-    /// back to it, so changes persist across runs.
-    #[arg(long, value_name = "FILE")]
-    mount_image: Option<PathBuf>,
-
-    /// Size (in MiB) of the writable ext4 image, giving the guest headroom to create files.
-    /// Applies to `--mount-rw`; ignored for a read-only mount or an existing `--mount-image`.
-    #[arg(long, value_name = "MiB")]
-    mount_size: Option<u64>,
 
     /// Execute this mounted guest shell script during a cold boot, then exit with its status.
     /// Incompatible with restore, self-test, and `--exit-on-boot`.
@@ -334,10 +319,8 @@ fn run(args: Args) -> Result<ExitCode> {
         .checked_mul(1024 * 1024)
         .context("--mem is too large")?;
 
-    if args.mount.is_none()
-        && (args.mount_rw || args.mount_image.is_some() || args.mount_size.is_some())
-    {
-        bail!("--mount-rw, --mount-image and --mount-size require --mount <dir>");
+    if args.mount.is_none() && args.mount_rw {
+        bail!("--mount-rw requires --mount <dir>");
     }
     if let Some(exec) = args.exec.as_deref() {
         validate_exec_path(exec)?;
@@ -533,8 +516,6 @@ fn dispatch(
         mount: args.mount,
         mount_target: args.mount_target,
         mount_rw: args.mount_rw,
-        mount_image: args.mount_image,
-        mount_size: args.mount_size,
         net,
         net_tap: args.net_tap,
         egress_filter,
@@ -577,8 +558,8 @@ mod cli_tests {
 /// Builds the backend configuration and runs the VM (Windows / WHP backend).
 ///
 /// The WHP backend implements the core PVH boot path (kernel + RAM initramfs + portb console),
-/// snapshot/restore, virt-net (`--net`) through a user-mode NAT, and virt-fs (`--mount`) via a
-/// pure-Rust FAT image. The TAP-attach option (`--net-tap`, which is Linux-specific) and
+/// snapshot/restore, virt-net (`--net`) through a user-mode NAT, and live virtio-fs (`--mount`).
+/// The TAP-attach option (`--net-tap`, which is Linux-specific) and
 /// multi-vCPU (`--vcpus`, KVM-only) configurations are rejected here rather than silently ignored.
 #[cfg(target_os = "windows")]
 fn dispatch(
@@ -632,8 +613,6 @@ fn dispatch(
         mount: args.mount,
         mount_target: args.mount_target,
         mount_rw: args.mount_rw,
-        mount_image: args.mount_image,
-        mount_size: args.mount_size,
         profiling,
         exec: args.exec,
         snapshot_before_exec: args.snapshot_before_exec,

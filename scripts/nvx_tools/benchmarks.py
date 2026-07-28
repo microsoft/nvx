@@ -6,7 +6,6 @@ import functools
 import http.server
 import ipaddress
 import re
-import shutil
 import socket
 import statistics
 import tempfile
@@ -23,7 +22,6 @@ from .common import (
     CommandResult,
     ScriptError,
     diagnostic_tail,
-    format_size,
     remove_tree,
     require_success,
     run_capture,
@@ -42,7 +40,6 @@ from .vm import (
 QUIET_CMDLINE = "earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1"
 VIRTFS_CMDLINE = "console=hvc0 quiet loglevel=0 reboot=t panic=-1"
 RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
-CHECKSUM_PATTERN = re.compile(r"(?m)^\s*([0-9]+)\s+[0-9]+\s+.*data\.bin\s*$")
 METRIC_PATTERN = re.compile(r"(?:cold-start|restore):\s*([0-9.]+)")
 
 
@@ -54,7 +51,6 @@ class VirtfsConfig:
     runs: int = 5
     vcpus: int = 1
     payload_mib: int = 64
-    image_mib: int = 192
 
 
 @dataclass(frozen=True)
@@ -136,11 +132,6 @@ def parse_dd_rate(text: str, occurrence: int) -> float | None:
     return float(raw_value) * multiplier
 
 
-def parse_data_checksum(text: str) -> str | None:
-    match = CHECKSUM_PATTERN.search(text)
-    return match.group(1) if match else None
-
-
 def format_rate_median(values: Sequence[float]) -> str:
     positive = [value for value in values if value > 0]
     if not positive:
@@ -153,9 +144,8 @@ def format_rate_median(values: Sequence[float]) -> str:
 
 def benchmark_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
     require_vm_inputs(VmConfig(config.kernel, config.initrd, config.mem), backend)
-    backend.prepare_virtfs_benchmark()
-    if config.runs < 1 or config.payload_mib < 1 or config.image_mib < 1:
-        raise ScriptError("runs, payload MiB, and image MiB must be positive")
+    if config.runs < 1 or config.payload_mib < 1:
+        raise ScriptError("runs and payload MiB must be positive")
 
     ready = "until /bin/busybox true 2>/dev/null; do :; done\n"
     io_script = (
@@ -166,15 +156,14 @@ def benchmark_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
         + "/bin/busybox dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1\n"
         + "/bin/busybox sync\n/bin/busybox reboot -f\n"
     )
-    create_script = (
+    exchange_script = (
         ready
-        + f"/bin/busybox dd if=/dev/zero of=/mnt/host/data.bin bs=1M count={config.payload_mib} 2>/dev/null\n"
-        + "/bin/busybox cksum /mnt/host/data.bin\n/bin/busybox sync\n"
-        + "/bin/busybox reboot -f\n"
-    )
-    verify_script = (
-        ready
-        + "/bin/busybox cksum /mnt/host/data.bin 2>/dev/null\n"
+        + "printf 'guest-to-host\\n' > /mnt/host/guest-visible\n"
+        + "tries=0\n"
+        + "while [ \"$(cat /mnt/host/host-visible 2>/dev/null)\" != host-to-guest ] && "
+        + "[ \"$tries\" -lt 1200 ]; do sleep 0.05; tries=$((tries + 1)); done\n"
+        + "[ \"$(cat /mnt/host/host-visible 2>/dev/null)\" = host-to-guest ] && "
+        + "echo VIRTFS-LIVE-ROUNDTRIP-OK\n"
         + "/bin/busybox reboot -f\n"
     )
 
@@ -183,85 +172,83 @@ def benchmark_virtfs(config: VirtfsConfig, backend: HostBackend) -> None:
         seed = work / "seed"
         seed.mkdir()
         (seed / "README").write_text("virt-fs benchmark seed", encoding="utf-8")
-        persistent_image = work / "persist.img"
-        round_image = work / "round.img"
 
         print(
             f"virt-fs benchmark: {config.payload_mib} MiB payload, {config.mem} MiB guest, "
-            f"{config.vcpus} vCPU, image {config.image_mib} MiB, median of {config.runs} runs"
+            f"{config.vcpus} vCPU, live host directory, median of {config.runs} runs"
         )
         print()
         print("== sequential throughput (guest dd, conv=fsync writes) ==")
         _run_io_benchmark(
-            "rw ephemeral (in-memory)",
-            ["--mount", seed, "--mount-rw", "--mount-size", str(config.image_mib)],
+            "rw live host directory",
+            ["--mount", seed, "--mount-rw"],
             config,
             backend,
             io_script,
         )
-        _run_io_benchmark(
-            "rw persistent (file-backed)",
-            [
-                "--mount",
-                seed,
-                "--mount-image",
-                persistent_image,
-                "--mount-size",
-                str(config.image_mib),
-            ],
-            config,
-            backend,
-            io_script,
-        )
-        persistent_image.unlink(missing_ok=True)
         print()
 
-        print("== persistence round-trip (rw --mount-image) ==")
-        mount_args: list[str | Path] = [
-            "--mount",
-            seed,
-            "--mount-image",
-            round_image,
-            "--mount-size",
-            str(config.image_mib),
-        ]
-        started = time.perf_counter()
-        create_result = _guest_run(config, backend, create_script, mount_args)
-        create_ms = (time.perf_counter() - started) * 1000
-        checksum = parse_data_checksum(create_result.text)
-        if checksum is None:
-            raise ScriptError(
-                "persistent image creation did not report a checksum\n"
-                + _failure_tail(create_result.text)
-            )
-        print(
-            f"  create image + write {config.payload_mib} MiB       : {create_ms:.0f} ms"
-        )
-        disk_size = backend.allocated_size(round_image)
-        print(
-            f"  host image on disk                : {round_image.name} "
-            f"({format_size(disk_size)})"
-        )
-
-        reuse: list[float] = []
+        print("== live host <-> guest visibility (same running VM) ==")
+        exchange_times: list[float] = []
         verified = 0
         for run_number in range(1, config.runs + 1):
-            started = time.perf_counter()
-            result = _guest_run(config, backend, verify_script, mount_args)
-            reuse.append((time.perf_counter() - started) * 1000)
-            actual = parse_data_checksum(result.text)
-            if actual != checksum:
-                raise ScriptError(
-                    f"persistent image verification {run_number}/{config.runs} checksum "
-                    f"mismatch ({actual} != {checksum})\n{_failure_tail(result.text)}"
-                )
+            exchange_times.append(
+                _run_live_exchange(config, backend, seed, exchange_script, run_number)
+            )
             verified += 1
-        print(f"  reuse image + verify (cold each)  : {format_median(reuse, width=7)}")
         print(
-            f"  payload survived across runs      : {verified}/{config.runs} runs "
-            f"(cksum {checksum})"
+            f"  live exchange (cold each)         : {format_median(exchange_times, width=7)}"
         )
-        _print_host_image_confirmation(round_image, backend)
+        print(
+            f"  bidirectional visibility verified : {verified}/{config.runs} runs"
+        )
+
+
+def _run_live_exchange(
+    config: VirtfsConfig,
+    backend: HostBackend,
+    directory: Path,
+    script: str,
+    run_number: int,
+) -> float:
+    guest_visible = directory / "guest-visible"
+    host_visible = directory / "host-visible"
+    guest_visible.unlink(missing_ok=True)
+    host_visible.write_bytes(b"waiting\n")
+    errors: list[str] = []
+
+    def exchange() -> None:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                if guest_visible.read_text(encoding="utf-8") == "guest-to-host\n":
+                    host_visible.write_bytes(b"host-to-guest\n")
+                    return
+            except (FileNotFoundError, PermissionError, UnicodeError):
+                pass
+            time.sleep(0.01)
+        errors.append("host did not observe the guest-created marker")
+
+    worker = threading.Thread(target=exchange, name="virtfs-live-exchange", daemon=True)
+    worker.start()
+    started = time.perf_counter()
+    result = _guest_run(
+        config,
+        backend,
+        script,
+        ["--mount", directory, "--mount-rw"],
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    worker.join(timeout=1)
+    if worker.is_alive():
+        errors.append("host exchange worker did not finish")
+    if errors or "VIRTFS-LIVE-ROUNDTRIP-OK" not in result.text:
+        detail = "; ".join(errors) or "guest did not observe the host update"
+        raise ScriptError(
+            f"live virt-fs exchange {run_number}/{config.runs} failed: {detail}\n"
+            + _failure_tail(result.text)
+        )
+    return elapsed_ms
 
 
 def _run_io_benchmark(
@@ -286,15 +273,6 @@ def _run_io_benchmark(
         read_rates.append(read_rate)
     print(f"  {label:<27} write {format_rate_median(write_rates)}")
     print(f"  {'':<27} read  {format_rate_median(read_rates)}")
-
-
-def _print_host_image_confirmation(path: Path, backend: HostBackend) -> None:
-    if backend.name != "linux-kvm" or shutil.which("debugfs") is None:
-        return
-    result = run_capture(["debugfs", "-R", "stat /data.bin", path])
-    match = re.search(r"\bSize:\s*([0-9]+)", result.text)
-    value = match.group(1) if match else "not found"
-    print(f"  host sees /data.bin in image      : {value} bytes (debugfs)")
 
 
 def _run_timed(

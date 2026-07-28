@@ -128,6 +128,10 @@ impl<'a> Reader<'a> {
         let len: usize = self.u32()? as usize;
         self.take(len)
     }
+
+    fn is_empty(&self) -> bool {
+        self.pos == self.data.len()
+    }
 }
 
 /// Returns the raw 16 bytes of a register value.
@@ -165,6 +169,8 @@ pub struct DeviceState<'a> {
     pub console: &'a [u8],
     /// Serialized virt-net state (endpoint header + device transport indices); empty if no NIC.
     pub net: &'a [u8],
+    /// Serialized live virtio-fs transport, inode, and handle state.
+    pub virtiofs: &'a [u8],
 }
 
 ///
@@ -245,6 +251,7 @@ pub fn write(
     put_blob(&mut buf, devices.rtc);
     put_blob(&mut buf, devices.console);
     put_blob(&mut buf, devices.net);
+    put_blob(&mut buf, devices.virtiofs);
 
     // Persist through temporary files. state.bin is renamed last and is the completion marker
     // consumed by the Agent, so a failed capture cannot expose a partially-written snapshot.
@@ -284,6 +291,7 @@ pub struct Snapshot {
     rtc: Vec<u8>,
     console: Vec<u8>,
     net: Vec<u8>,
+    virtiofs: Vec<u8>,
 }
 
 impl Snapshot {
@@ -313,8 +321,12 @@ impl Snapshot {
         let pit: Vec<u8> = r.blob()?.to_vec();
         let rtc: Vec<u8> = r.blob()?.to_vec();
         let console: Vec<u8> = r.blob()?.to_vec();
-        // The virt-net blob was added later; tolerate its absence in older snapshots.
-        let net: Vec<u8> = r.blob().map(<[u8]>::to_vec).unwrap_or_default();
+        // Each optional blob may be absent only when an older snapshot ends exactly here.
+        let net: Vec<u8> = if r.is_empty() { Vec::new() } else { r.blob()?.to_vec() };
+        let virtiofs: Vec<u8> = if r.is_empty() { Vec::new() } else { r.blob()?.to_vec() };
+        if !r.is_empty() {
+            bail!("snapshot has trailing bytes");
+        }
 
         Ok(Self {
             ram_size,
@@ -326,6 +338,7 @@ impl Snapshot {
             rtc,
             console,
             net,
+            virtiofs,
         })
     }
 
@@ -358,6 +371,11 @@ impl Snapshot {
     /// snapshot had no NIC.
     pub fn net(&self) -> &[u8] {
         &self.net
+    }
+
+    /// Serialized live virtio-fs state; empty when the snapshot has no shared directory.
+    pub fn virtiofs(&self) -> &[u8] {
+        &self.virtiofs
     }
 
     /// Applies the processor and local-APIC state to the vCPU. The partition must be set up, the
@@ -443,5 +461,13 @@ mod tests {
         buf.extend_from_slice(&[0; 4]);
         let mut r = Reader::new(&buf);
         assert!(r.blob().is_err());
+    }
+
+    #[test]
+    fn optional_blob_distinguishes_eof_from_truncated_prefix() {
+        assert!(Reader::new(&[]).is_empty());
+        let mut truncated = Reader::new(&[1, 0, 0]);
+        assert!(!truncated.is_empty());
+        assert!(truncated.blob().is_err());
     }
 }
