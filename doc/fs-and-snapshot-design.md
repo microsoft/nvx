@@ -71,6 +71,15 @@ Enabling them is mechanical. The real work is **measuring what they cost**: each
 
 The freezer used by the capture protocol needs no new configuration: `cgroup.freeze` is a cgroup v2 core interface file and `CONFIG_CGROUPS=y` is already set. Worth confirming it is unconditional in the guest kernel build.
 
+**Host storage.** The volume holding snapshot artifacts must support **block cloning**, which the per-tenant snapshot instantiation in §9.2 depends on:
+
+| Platform | Supported | Not supported |
+|---|---|---|
+| Windows (production) | **ReFS** — `FSCTL_DUPLICATE_EXTENTS_TO_FILE`, Server 2016+ | **NTFS** — has hard links and dedup, neither of which separates page cache |
+| Linux (development) | **XFS, btrfs** — `FICLONE` | **ext4** |
+
+The same primitive is already assumed for cloning scratch VHDs from the pool template (§5.1), so this is one requirement serving two purposes.
+
 ---
 
 ## 3. Image Preparation (Off the Critical Path)
@@ -392,7 +401,7 @@ Two properties follow from it being customer-authored:
 
 **Resume is not clone.** For a 1:1 resume, identity continuity is *correct*: the machine-id, hostname, and RNG stream should carry over, and forcibly refreshing them would be a bug. But `nvx` restores copy-on-write, so the same checkpoint *can* be replayed many times — and that is cloning, which needs the §8.2 treatment. The two are the same artifact with different semantics, so a restore must state which it is.
 
-**Cross-tenant workload start is future work.** A platform-authored warm runtime shared across tenants would be considerably more valuable than a per-customer one, but reintroduces cross-tenant page sharing (§9). A nearer-term middle ground: the platform authors the warm snapshot but **instantiates a private copy per tenant**, so each tenant's restores share pages only with each other. That costs host memory proportional to active tenants and keeps the latency win. See §14.
+**Cross-tenant workload start is solved by per-tenant instantiation.** A platform-authored warm runtime shared across *all* tenants would be more valuable than a per-customer one, but sharing one `mem.bin` across trust domains reintroduces the cross-VM page sharing §9.1 rules out. The resolution is to give each tenant its **own reflinked copy** of the snapshot: a new inode sharing the same disk extents, so tenants get distinct physical pages at near-zero storage cost (§9.2). The platform authors the warm snapshot once; each tenant restores from its own clone.
 
 ### 8.2 Cloning hazards (any 1:N restore)
 
@@ -621,7 +630,30 @@ Per tier:
 - **Workload start — tenant-scoped, so the question does not arise.** Shared pages are confined to one customer's sandboxes, which is the same posture as two of their containers sharing page cache on an ordinary host.
 - **Instance checkpoint — single instance.** No sharing beyond a resume of itself; if replayed N times, it is tenant-scoped by the same argument.
 
-The cross-tenant workload-start case (§8.1) is exactly the case this analysis rules out, which is why it is future work rather than a configuration option. The per-tenant-instantiation middle ground avoids the problem by giving each tenant a distinct backing file, and therefore distinct physical pages, at the cost of host memory.
+The cross-tenant workload-start case is resolved by giving each tenant its own copy of the snapshot rather than by accepting the sharing — see §9.2.
+
+### 9.2 Breaking page sharing without copying: reflink
+
+Where sharing must be broken, the mechanism is cheap. Page cache is keyed by `(address_space, offset)` and `address_space` belongs to the **inode**, so physical-page identity follows inode identity:
+
+| Reference | New inode? | Separate page cache? | Storage cost |
+|---|---|---|---|
+| Hard link | No | ❌ shared | 0 |
+| Symlink | No | ❌ shared | 0 |
+| **Reflink / block clone** | **Yes** | **✅ separate** | **~0 — extents shared** |
+| Full copy | Yes | ✅ separate | full |
+
+A reflink is a new inode that shares the original's **disk extents**. Two VMs restoring from reflinked copies of the same snapshot read identical bytes off identical blocks, but the pages land in different physical frames — so there is nothing to `clflush` in common. Hard links are the intuitive answer and the wrong one: the same inode means the same `address_space` and therefore exactly the sharing being avoided.
+
+Because `mem.bin` is mapped copy-on-write and never written back, the extents stay shared for the artifact's whole life.
+
+**The cost is RAM, and that is the point.** Storage is unaffected; memory is duplicated per clone, which *is* the isolation rather than a side effect of it. The scaling shape is favourable — cost is per **active tenant on the node**, not per sandbox, since a tenant's many sandboxes all restore from that tenant's single copy. It is not free, though: a warmed language-runtime snapshot is a few hundred megabytes, so a node hosting many distinct tenants pays real memory. That is a capacity-planning input, not a correctness question.
+
+**Do not apply this to the platform tier.** Its sharing is safe (§9.1) and fleet-wide sharing of one copy is the entire value; reflinking it would multiply memory for no benefit.
+
+**Not an alternative: pre-faulting.** Force-populating a `MAP_PRIVATE` mapping also privatizes every page, but pays the full copy *in RAM, on the restore path* — the exact latency the design protects. Reflink defers the copy to natural page faults and never pays it for pages nobody touches.
+
+Implementation is a control-plane concern only: `nvx` opens whichever path it is given, so nothing in the VMM changes. It does impose a **storage requirement** (§2.3).
 
 ---
 
@@ -734,5 +766,5 @@ The guest sees only a virtio-blk device and has no knowledge of where the bytes 
 9. **virtio-blk device state in `state.bin`** (§2.3) — negotiated features, queue addresses, ring indices, and in-flight I/O must serialize and restore; today `state.bin` carries only the legacy devices and virtio-net.
 10. **Snapshot artifact distribution and GC** (§3.2) — the workload-start and instance-checkpoint tiers add `mem.bin`, `state.bin`, and paired scratch images. Unlike layer blobs these are tenant-specific and cannot be fleet-cached, so they need their own placement, retention, and GC story, and they constrain where a sandbox can be scheduled.
 11. **Warm shim per runtime** (§8.1, §8.5) — the per-runtime design for where a Python, Node, or Java shim places its checkpoint, and what happens for a runtime the platform does not ship a shim for.
-12. **Cross-tenant workload-start snapshots** (§8.1, §9.1) — whether the per-tenant-instantiation compromise is sufficient, or whether genuine cross-tenant sharing is worth the side-channel work.
+12. **Per-tenant snapshot memory budget** (§9.2) — cross-tenant sharing of workload-start snapshots is resolved by reflinked per-tenant copies, so what remains is capacity planning: how much node memory the duplication consumes at realistic tenant counts, and whether that ever justifies revisiting true cross-tenant sharing.
 13. **Agent side-channel hardening** (§9.1) — establishing and reviewing the requirement that the agent has no secret-dependent control flow while handling the per-sandbox configuration section.
