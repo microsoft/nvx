@@ -18,8 +18,10 @@ The design has four pillars:
 |---|---|
 | **Image delivery** | An **initramfs carrying the agent**, plus **two or three read-only compressed-EROFS layer blobs** (distro, runtime, and an optional custom layer) and **one scratch blob**, each its own virtio-blk device. No partition tables, no layer discovery. Blobs are built ahead of time by a control-plane conversion service. |
 | **Filesystem assembly** | `overlayfs` in the guest: EROFS layers as `lowerdir`, a **virtio-blk scratch VHD** as `upperdir`. Assembled by the agent, not the host. |
-| **Control plane** | A **Rust init agent** running as PID 1. Boot-time configuration arrives in a VMM-populated memory region, split into an immutable profile and a per-sandbox part rewritten on every restore; runtime operations arrive over a framed **RPC multiplexed on the VMM-owned stdio channel**. |
+| **Control plane** | A **Rust init agent** running as PID 1. Boot-time configuration arrives in a VMM-populated memory region, sectioned by when each part becomes valid; runtime operations arrive over a framed **RPC multiplexed on the VMM-owned stdio channel**. |
 | **Startup** | Everything cold-plugged, zero hotplug, and no host round-trips between VM start and `exec` on the cold fast path. Three snapshot tiers (platform / workload start / instance checkpoint) for further latency reduction. |
+
+**The target is a ~10 ms restore.** That number is what makes several choices in this document look severe out of context — notably the insistence on invariant device geometry (§8.4), the refusal to put any host round trip on the start path (§6), and the rejection of per-restore work measured in tens of milliseconds. Against a 10 ms budget a 15 ms repair step is not a minor cost; it is the entire budget and then some. Cold start has a correspondingly tighter budget than a conventional container runtime because the VM boundary is per-container rather than per-pod.
 
 Deliberately **not** used today, for security reasons: `virtio-pmem` + DAX, which would let N VMs share one host page-cache copy of an image. See §9.
 
@@ -69,8 +71,12 @@ Enabling these is mechanical. The real work is **measuring what they cost**: eac
 **VMM.** Three additions to `nvx`:
 
 - **virtio-blk** — content reaches the guest through `phram` today (§4.3). This is a subsystem, not a device: a multi-device virtio-mmio bus, IRQ delivery, queue workers, read-only and short-read semantics, and serialization of negotiated features, queue addresses, ring indices, and in-flight I/O into `state.bin`, which today carries only the legacy devices and virtio-net.
-- **Capture as a resumable transaction** — capture today writes the snapshot and exits the VMM. The protocol in §8.5 requires the VMM to drain block queues, flush backing files, clone the quiesced scratch, publish a manifest, and then **resume the guest in place**, so that a checkpoint is an ordinary operation on a running sandbox and a failed capture does not destroy one.
-- **Host-triggered capture** — *degraded mode only.* All three snapshot tiers are captured by the agent writing port `0x605` (§8.5), so this is needed only when the agent is unresponsive, and can be deferred.
+- **Capture as a host transaction** — the capture path must drain block queues, flush backing files, clone the quiesced scratch, validate the restore contract against a host-owned manifest before vCPU entry, and publish artifacts atomically (§8.5). The guest is *not* resumed after capture (§8.1), so this needs no reversible run-state machine — the existing one-shot save-and-exit shape is correct, extended with queue draining, manifest handling, and a status result reported to the host.
+- **A restore gate** — device interrupts, network ingress, and host control input must be held until the agent signals that its post-restore work is complete (§8.5).
+
+The network identity `nvx` binds into a snapshot currently hashes routes, DNS servers, and search domains together with the L2/L3 identity, and rejects any change on restore. Since those carry tenant-specific values while the L2/L3 identity does not (§4.1), that binding must narrow to MAC, address, prefix, and MTU.
+
+Host-triggered capture — a VMM-level capture of a guest whose agent is unresponsive — is *degraded mode only* and can be deferred; every snapshot tier is captured by the agent (§8.5).
 
 **Host storage.** The volume holding snapshot artifacts and scratch templates must support **block cloning**, which per-tenant snapshot instantiation (§9.2) and the scratch pool (§5.1) both depend on:
 
@@ -189,10 +195,10 @@ Constraint 3 is the decisive one: it means the command line is only suitable for
 
 **1. Invariants — must match the snapshot they are restored against.** State the captured guest already depends on:
 
-- Network identity — address, prefix, MAC, MTU, routes, DNS. Once the agent has programmed the interface, the guest's in-memory network state encodes it, and `nvx` requires the restored `guestIdentity` to match the snapshot. §11 explains why holding this constant is not a limitation in practice.
+- Guest-visible network identity — MAC, address, prefix, MTU. These are **platform-owned generic values**, not tenant-derived: §11 explains why holding them constant across restores is what makes the design work, and the external endpoint carries the per-launch difference. Tenant-specific routing and resolver settings are deliberately *not* here (see §3 below).
 - Device topology and geometry — which MMIO address carries which role, the uniform layer capacity, and the layer count.
 
-The agent reads this section **before** the platform snapshot point and programs the network from it. Every restore supplies the section afresh, so the agent compares it against the values it recorded pre-snapshot — which live in guest RAM and therefore return with the snapshot — and fails with a typed error on mismatch.
+The agent reads this section **before** the platform snapshot point and programs the interface from it.
 
 **2. Image binding — supplied per restore.** Which blobs are attached for *this* sandbox:
 
@@ -204,9 +210,26 @@ This is deliberately not an invariant. A platform snapshot is captured before an
 
 - OCI runtime config — entrypoint, args, env, workdir, user, capabilities — with image defaults and per-sandbox overrides already merged by the control plane, which holds both.
 - Secure environment variables.
-- A restore mode of `clone` or `resume` (§8.2), and when cloning, a fresh entropy seed and wall-clock reading.
+- Tenant resolver and routing configuration — DNS servers, search domains, and any non-default routes. These may encode tenant-specific values, so they are applied by the agent after the platform snapshot point rather than baked into a fleet-shared artifact. Writing `/etc/resolv.conf` and installing routes is cheap and stays off the shared-capture path.
+- A **launch epoch**, and for a clone, a fresh entropy seed and wall-clock reading (§8.2).
 
-Sections 2 and 3 are read **after** the platform snapshot point, which is what keeps secrets out of a fleet-shared snapshot (§8.4). Resolving image defaults against overrides on the host rather than in the guest keeps the agent free of OCI-config merge semantics and removes any need for it to read configuration out of a mounted layer before it can act.
+Sections 2 and 3 are read **after** the platform snapshot point, which is what keeps secrets and image bindings out of a fleet-shared snapshot (§8.4).
+
+**What a restore may change depends on the tier.** The section boundaries describe when the *agent* consumes each value, so a snapshot can only redefine what had not yet been consumed when it was captured:
+
+| Tier | Captured before reading | Therefore redefinable on restore |
+|---|---|---|
+| Platform | §2 and §3 | Image binding, OCI config, secrets, resolver/routing |
+| Workload start | nothing — all sections consumed | Work items handed to the shim only (§8.5) |
+| Instance checkpoint | nothing — all sections consumed | Work items only |
+
+Supplying a fresh §2 or §3 to a workload-start or instance-checkpoint restore would be silently ineffective: those values were already resolved into mounted filesystems and running process state at capture. The manifest records which sections a given snapshot consumed, and a restore that supplies different values for a consumed section is rejected rather than ignored.
+
+**Validation belongs to the host, not the guest.** The manifest carries a canonical digest over the invariants section and the device contract, and `nvx` validates it **before vCPU entry** (§2.3). A guest-side comparison cannot be the primary check: it runs after devices are already live, and the values the agent remembers came from the same snapshot, so it binds nothing independently. The agent still re-reads and compares as defence in depth, and fails with a typed error on mismatch.
+
+Resolving image defaults against overrides on the host rather than in the guest keeps the agent free of OCI-config merge semantics and removes any need for it to read configuration out of a mounted layer before it can act.
+
+**The launch epoch distinguishes a cold boot from a restore.** The VMM writes a monotonically increasing value into the region on every launch. Because the region is never captured (below), the agent compares the epoch it reads against the one recorded in its own memory — which *is* captured — and a mismatch means it is running from a snapshot rather than continuing a cold boot. This is the trigger for the post-restore work in §8.2; the guest has no other way to detect its own restoration, since a capture leaves no observable trace in CPU or memory state.
 
 **Layer identity is a mix-up check, not an integrity control.** The agent compares each device's EROFS superblock UUID after mount. This is a cheap constant-time check that the expected blob was attached — not integrity verification, and it must not be mistaken for one. Full content hashing is done once by the node when a blob is admitted to the cache; re-hashing a multi-gigabyte blob inside the guest would read the entire artifact, defeating both the latency budget and demand paging. The host is trusted in this design (§2.2), so the threat defended against is operational error, not attack.
 
@@ -215,8 +238,6 @@ Sections 2 and 3 are read **after** the platform snapshot point, which is what k
 > **Requirement: the region must live outside `ram_size`.** `Memory` holds only the low/high RAM regions split at `MMIO_GAP_START`, and `snapshot_ram` walks exactly those, so a region registered as a separate memory slot above reported RAM is absent from `mem.bin`. That is what lets the VMM supply fresh contents on every restore (§8.3). Placing it inside guest RAM would reverse this: restore would overwrite the VMM's configuration with the captured copy.
 
 **Secrecy posture.** The region is guest-physical memory, readable by anything in the guest holding `CAP_SYS_RAWIO` or the backing device — but not by the container, which gets neither. The agent must not expose the region into the container's mount namespace or `/dev`. Zeroing it after use is worthwhile defence in depth, but does not make the secrets unrecoverable: they persist in the agent's own buffers and in the container's environment.
-
-**Updates.** The `StartContainer` RPC can also carry configuration, at the cost of a host→guest round trip. The region is used for initial configuration so the start path stays round-trip-free (§6); the RPC is the mechanism for changing configuration on an already-running or restored sandbox.
 
 **Updates.** The `StartContainer` RPC can also carry configuration, at the cost of a host→guest round trip. The region is used for initial configuration so the start path stays round-trip-free (§6); the RPC is the mechanism for changing configuration on an already-running or restored sandbox.
 
@@ -262,7 +283,13 @@ Mount options: `metacopy=on` (a `chmod`/`chown` on a lower-layer file copies onl
 
 **`metacopy=on` requires trusted lower layers, which the conversion pipeline must guarantee.** The kernel documentation is explicit: *"Do not use metacopy=on with untrusted upper/lower directories. Otherwise it is possible that an attacker can create a handcrafted file with appropriate REDIRECT and METACOPY xattrs, and gain access to file on lower pointed by REDIRECT."* Setting `trusted.*` xattrs normally requires `CAP_SYS_ADMIN` and so is out of reach of an image author — but the conversion service (§3) runs privileged and writes the layer blobs, so anything it faithfully copies out of a customer image becomes a `trusted.*` xattr on a lower layer.
 
-The pipeline therefore **strips all `trusted.overlay.*` and `user.overlay.*` attributes from customer content and synthesizes only the whiteout and opaque markers it intends**. Since it is already generating those markers from the image's own deletion semantics (§3.1), this is a restriction on what it copies rather than new work, and it makes the lower layers trusted by construction.
+The pipeline therefore applies a **deny-by-default metadata allow-list** when translating image content into layer blobs. Attributes are dropped unless explicitly permitted, which covers more than the overlay namespace:
+
+- `trusted.overlay.*` and `user.overlay.*` — never copied. Whiteouts and opaque-directory markers are **synthesized** by the pipeline from the image's own deletion semantics, so the only overlay metadata in a layer is metadata the platform wrote.
+- `security.capability` — a crafted image could otherwise grant file capabilities to arbitrary binaries. Permitted only where the platform's policy allows it, and normalized rather than passed through.
+- `security.selinux`, POSIX ACLs, and any other `security.*` attribute — carried only under an explicit policy decision, since each grants or relaxes access inside the guest.
+
+The allow-list applies to **every** layer, not only the customer's custom layer: distro and runtime blobs are pipeline-built too, and a lower layer is exactly where a crafted redirect would be most useful. Raw `char 0:0` whiteout inodes are not xattrs and are handled by the same synthesis path rather than by copying. With this in place the lower layers are trusted by construction, which is the precondition `metacopy=on` needs.
 
 ### 5.1 Scratch: virtio-blk from a pre-formatted VHD pool
 
@@ -295,26 +322,31 @@ The order below is load-bearing rather than incidental: the network is programme
  2. Host: (external networking) DataPlaneReady ──► StartVm handshake before vCPU entry
  3. VMM:  PVH-boot kernel + initramfs
  4. Agent (PID 1): mount /proc, /sys, devtmpfs, cgroup2; create agent + container cgroups
- 5. Agent: read config §1 (invariants) → device topology, network identity
- 6. Agent: configure network (static, no DHCP)
+ 5. Agent: read config §1 (invariants) → device topology, guest-visible network identity
+ 6. Agent: configure interface (static address, no DHCP)
     ─────────────────── ◆ platform snapshot point ◆ ───────────────────
- 7. Agent: read config §2 + §3 → layer UUIDs, OCI config, secrets, restore mode
- 8. Agent: resolve MMIO addresses → block devices; assert capacities
- 9. Agent: mount the read-only layer blobs (EROFS) → /l/distro, /l/runtime, [/l/custom];
+ 7. Agent: read config §2 + §3 → layer UUIDs, OCI config, secrets, resolver/routing, epoch
+ 8. Agent: apply resolver and routing configuration
+ 9. Agent: resolve MMIO addresses → block devices; assert capacities
+10. Agent: mount the read-only layer blobs (EROFS) → /l/distro, /l/runtime, [/l/custom];
            verify each layer's EROFS UUID
-10. Agent: mount scratch (ext4, rw) → /s
-11. Agent: mount overlayfs → /rootfs
-12. Agent: apply clock and entropy for this restore; zero the config region
-13. Agent: emit Ready over the control channel
-14. Agent: clone3(CLONE_INTO_CGROUP) a child into the container cgroup and
+11. Agent: mount scratch (ext4, rw) → /s
+12. Agent: mount overlayfs → /rootfs
+13. Agent: if restoring, apply clock and entropy for this launch (§8.2); zero the config region
+14. Agent: emit Ready over the control channel
+15. Agent: clone3(CLONE_INTO_CGROUP) a child into the container cgroup and
            new mount/PID/UTS namespaces
-15. Child: pivot_root into /rootfs, apply OCI config, exec entrypoint
-16. Agent (still PID 1): supervise — reap orphans, stream stdio, serve RPC
+16. Child: pivot_root into /rootfs, apply OCI config, exec entrypoint
+17. Agent (still PID 1): supervise — reap orphans, stream stdio, serve RPC
 ```
 
-Two steps deserve explanation.
+Steps 5–6 read and apply only platform-owned, image-independent values. Everything tenant-specific — image bindings, secrets, resolver and routing settings — is read at step 7, after the snapshot point, which is what allows a platform snapshot to be shared across tenants (§8.4).
 
-**Step 14 does not `exec` the entrypoint.** `exec` replaces the process image, which would destroy the agent and with it supervision, log streaming, and the control channel. The agent stays PID 1 in the initial namespace and clones a child; `pivot_root` happens inside the *child's* mount namespace, so the agent retains its own initramfs view, and the child's PID namespace makes the entrypoint PID 1 from its own perspective (§10.1).
+**A platform snapshot is captured against placeholder devices.** When building one, step 1 attaches deterministic placeholder blobs of the uniform capacity rather than any tenant's layers. This matters because the kernel's block probe reads the first sectors of each device before PID 1 runs, and those bytes enter the guest page cache and therefore the captured image. Attaching real blobs during capture would embed one tenant's image content in an artifact restored by every other. Restores attach the real blobs, whose probe-time cache is discarded before mount (§8.4).
+
+Two further steps deserve explanation.
+
+**Step 15 does not `exec` the entrypoint.** `exec` replaces the process image, which would destroy the agent and with it supervision, log streaming, and the control channel. The agent stays PID 1 in the initial namespace and clones a child; `pivot_root` happens inside the *child's* mount namespace, so the agent retains its own initramfs view, and the child's PID namespace makes the entrypoint PID 1 from its own perspective (§10.1).
 
 **The child is placed in its cgroup atomically.** `clone3` with `CLONE_INTO_CGROUP` creates the child directly in the container cgroup. Creating it first and moving it afterwards would leave a window in which the child could fork or exec outside the resource limits and outside the freeze that the capture protocol depends on (§8.5).
 
@@ -349,6 +381,10 @@ We therefore multiplex the control plane over this existing channel rather than 
 ```
 
 Framing carries a stream ID so container stdio and control RPC share one pipe without interleaving corruption. Boot-phase output remains human-readable plain text for diagnosability; the channel switches to framed mode once the agent is up.
+
+**The channel is versioned by launch epoch.** A capture can occur with a partially decoded frame in the agent's buffers and with host-issued requests still outstanding, and on restore the host side is a different process holding a different pipe. The channel therefore carries the launch epoch (§4.1): the agent discards any partial decoder state, drops requests belonging to a previous epoch rather than replying to identifiers whose requester no longer exists, and opens the restored channel with a `RestoreHello` that re-establishes the host's view before any other traffic. Requests that are not safely replayable are failed rather than retried, so a checkpoint taken mid-RPC cannot cause the operation to take effect twice.
+
+Because the capture path parks the agent's worker threads before requesting the snapshot (§8.5), frames are quiesced at a boundary rather than mid-write.
 
 ### 7.3 RPC surface
 
@@ -408,26 +444,37 @@ The tiers differ along three axes that matter more than where they sit in the bo
 | **Workload start** | Guest signal from the customer's own workload | Wherever the customer's code declares a useful starting point | **Single tenant** | Clone, 1:N |
 | **Instance checkpoint** | External signal from the customer | Arbitrary point in a live instance | **That one instance** | Resume, 1:1 |
 
+All three are captured by the agent, and in all three the capturing instance ends at the capture point (below).
+
 **Platform** is the only cross-tenant tier, and is safe to share precisely because of *what* it contains: the guest kernel and the agent, with no image content, no customer code, and no secrets (§8.4, §9).
 
-**Workload start** exists because customers often know where their workloads begin — a warmed interpreter with modules imported, a loaded model, an initialized connection pool — and restoring from that point avoids paying startup repeatedly. The typical motivation is skipping **interpreter startup**, which for a Python or Node workload can dominate cold start.
+It earns its place on absolute savings rather than proportional ones. Restoring past kernel boot and agent initialization removes a few hundred milliseconds from every cold start on the fleet, and it removes them from *every* sandbox regardless of image, runtime, or customer — it is the one tier that needs no customer participation and no per-runtime work. For the short-lived sandboxes this design targets, a few hundred milliseconds is frequently half or more of total wall time, so the tier is retained even where a warm-workload snapshot would save more in relative terms. The two are complementary: platform removes boot, workload start removes runtime initialization.
+
+**Workload start** exists because customers often know where their workloads begin — a warmed interpreter with modules imported, a loaded model, compiled bytecode in place — and restoring from that point avoids paying startup repeatedly. The typical motivation is skipping **interpreter startup**, which for a Python or Node workload dominates cold start: the difference between a cold start and a restore from a warmed interpreter is measured in seconds, not milliseconds.
 
 Two properties follow from it being customer-authored:
 
 - It is **tenant-scoped by construction**, not by policy. Customer code is running at capture, so the snapshot necessarily contains that customer's code and memory. There is nothing to decide.
 - It requires a **runtime-specific warm shim**. "Avoid interpreter startup" means the restored process must then run *this* sandbox's work, so the warm point is an interpreter that has finished initializing and then requests a checkpoint; the agent returns this sandbox's work item as the reply after restore (§8.5). Python, Node, and Java each need their own shim; this is not a generic mechanism.
 
-**Instance checkpoint** is ordinary pause/resume of one VM, driven by explicit customer signals relayed to the agent as an RPC. Like the other tiers it is captured by the agent (§8.5), so it needs no new VMM capability.
+**Instance checkpoint** is pause and resume of one VM, driven by explicit customer signals relayed to the agent as an RPC.
+
+**Capture terminates the capturing instance.** The VMM writes the artifacts and exits; it does not return the guest to execution. Every restore is therefore a fresh instance continuing from the captured point, and the captured instance never continues past it. This is what makes the tier semantics clean:
+
+- A **pause** is genuine: the instance stops, and the single restore that follows is its one continuation. Identity and RNG continuity are correct because no other continuation exists.
+- Had the capturing instance resumed, a later restore would be a *fork* rather than a resume — the original may already have emitted nonces, written to external systems, or advanced its RNG stream, so two instances would share a history that only one of them is entitled to. Terminating at capture removes that hazard by construction rather than by convention.
+
+The consequences are stated plainly: **checkpointing is a build-shaped operation, not something performed mid-request**, and a *failed* capture also ends the instance. Failure is therefore reported by the VMM to the host (§8.5); there is no guest left to report it. For the workload-start tier this fits naturally — a job runs to its declared starting point and produces an artifact — and for the instance-checkpoint tier stopping is the intended behaviour.
 
 **Cross-tenant workload start uses per-tenant instantiation.** A platform-authored warm runtime is more valuable than a per-customer one, but sharing a single `mem.bin` across trust domains creates the cross-VM page sharing §9.1 rules out. Each tenant therefore restores from its **own reflinked copy** of the snapshot: a distinct inode sharing the same disk extents, giving distinct physical pages at near-zero storage cost (§9.2). The platform authors the warm snapshot once and clones it per tenant.
 
 ### 8.2 Restore modes: clone and resume
 
-A restore is one of two things, and the config region says which (§4.1).
+A restore is one of two things, declared by the host in the snapshot manifest rather than by the guest.
 
-**Resume (1:1)** returns a single instance to where it left off. Identity continuity is *correct*: machine-id, hostname, and the RNG stream should carry over, and refreshing them would be a bug.
+**Resume (1:1)** returns a paused instance to where it left off, exactly once. Identity continuity is *correct*: machine-id, hostname, and the RNG stream carry over, and refreshing them would be a bug. This is sound only because the capturing instance was terminated (§8.1), so the restore is the sole continuation; the host enforces single use by claiming the artifact atomically, and a second attempt is rejected rather than silently producing a fork.
 
-**Clone (1:N)** produces many guests from identical captured state. The platform and workload-start tiers are always clones; an instance checkpoint becomes one the moment it is replayed rather than resumed once. Three pieces of state are then wrong and must be corrected before the workload runs:
+**Clone (1:N)** produces many guests from identical captured state. The platform and workload-start tiers are always clones. Three pieces of state are then wrong and must be corrected before the workload runs:
 
 **1. Randomness.** Identical entropy across clones means duplicate UUIDs and, in the worst case, repeated cryptographic material. Correcting it has two halves:
 
@@ -560,52 +607,63 @@ Scratch VHDs are standardized to a fixed size within each pool, so the writable 
 
 #### What the agent must provide
 
-- A **well-defined snapshot point** in its boot sequence, with nothing config-derived cached before it.
-- **Restore detection**, so it can distinguish a cold boot from a resume and run the `PostRestore` path (§8.2) — re-read the config region, apply fresh identity, reseed, and continue.
+- A **well-defined snapshot point** in its boot sequence, with nothing image-specific or secret consumed before it.
+- **Restore detection** via the launch epoch (§4.1), since a capture leaves no observable trace in CPU or memory state.
 - **Idempotent configuration application**, since the same code path runs on both cold boot and every restore.
 
 ### 8.5 Capture and restore protocol
 
-Capture and restore raise two ordering problems, and one arrangement solves both: **the agent is always the process that requests the capture, and the container is frozen before it does so.**
+Capture and restore raise two ordering problems:
 
 - **Filesystem consistency at capture.** Once scratch is mounted, `mem.bin` holds dirty ext4 pages that have not reached the scratch VHD, while the host-side scratch file is at a different moment. Capturing the pair without quiescing corrupts the filesystem on restore.
-- **Execution ordering at restore.** Resuming a vCPU makes *every* task that was runnable at capture runnable again. Nothing intrinsically schedules the agent before the container, so the container could observe a stale clock or captured entropy before `PostRestore` has corrected them.
+- **Execution ordering at restore.** Resuming a guest makes *every* task that was runnable at capture runnable again, and re-arms device interrupts and host-facing I/O. Nothing intrinsically schedules the agent's restore work before any of it.
 
-The barrier that solves the second is **the captured cgroup freeze**, not the placement of the resume point. `nvx` resumes at the instruction after the `0x605` write, so having the agent issue it guarantees the *agent's own thread* continues in the right place — but on a multi-vCPU guest other vCPUs resume concurrently, so that alone orders nothing. What orders everything is that the container's tasks were frozen when the snapshot was taken and are therefore still frozen when it is restored. They cannot run until the agent thaws them, whichever vCPU they would run on.
+The first is solved by the agent freezing and quiescing before it requests the capture. The second needs **three barriers, not one** — a point worth being precise about, because the captured cgroup freeze alone is often assumed to be sufficient and is not:
+
+| Barrier | Covers | Established |
+|---|---|---|
+| VMM restore gate | Device interrupts, network ingress, host control input | By the VMM, held until the agent signals completion |
+| Agent thread rendezvous | The agent's own non-capture threads (RPC server, log pump) | By the agent, at the capture call site |
+| Captured cgroup freeze | All container tasks | At capture, restored frozen |
+
+The cgroup freeze orders only tasks inside the container cgroup — at the platform tier there are none, so it orders nothing there. The resume point does not help either: `nvx` resumes at the instruction after the `0x605` write, which positions the agent's own capture thread correctly but says nothing about other vCPUs, kernel workers, or the VMM's own device threads, several of which start before vCPU entry.
 
 ```
               trigger  (agent itself / container request / host RPC)
                  │
-   agent  ───────┼─ freeze container cgroup; wait for cgroup.events: frozen 1
+   agent  ───────┼─ rendezvous: park own worker threads
+                 ├─ freeze container cgroup; wait for cgroup.events: frozen 1
                  ├─ sync(); FIFREEZE scratch
                  └─ write 0x605                       ◆ CAPTURE ◆
                  │
-   VMM    ───────┼─ stop and drain block device queues; flush backing files
-                 ├─ write mem.bin + state.bin; clone the quiesced scratch
-                 ├─ publish the manifest last
-                 └─ resume the guest in place
-                 │
-   agent  ───────┼─ FITHAW; thaw container cgroup; reply to the requester
-                 └─ (capturing instance continues running)
+   VMM    ───────┼─ stop vCPUs; drain block device queues; flush backing files
+                 ├─ write mem.bin + state.bin into a fresh generation directory
+                 ├─ clone the quiesced scratch
+                 ├─ fsync artifacts, then publish the manifest atomically
+                 ├─ report the result to the host
+                 └─ exit  (the capturing instance ends here — §8.1)
 
         ─────────────────────── on restore ───────────────────────
-   agent  ───────┼─ read config §1; assert invariants match
-                 ├─ read config §2 + §3
-                 ├─ PostRestore: set clock, reseed CRNG, refresh identity
-                 ├─ queue the reply for the requester
-                 ├─ FITHAW; thaw container cgroup
-                 └─ continue
+   VMM    ───────┼─ validate the manifest digest against the launch contract
+                 ├─ map mem.bin CoW; attach devices; hold the restore gate
+                 └─ enter vCPU
+   agent  ───────┼─ read config §1; compare invariants (defence in depth)
+                 ├─ read config §2 + §3; detect restore via launch epoch
+                 ├─ set clock, reseed CRNG, refresh identity  (if clone — §8.2)
+                 ├─ release the VMM restore gate
+                 ├─ FITHAW; queue the reply; thaw container cgroup
+                 └─ continue at boot step 7
 ```
 
-**Capture is a VMM transaction, and the guest survives it.** The VMM stops and drains the block device queues and flushes backing files before serializing state, so `mem.bin`, `state.bin`, and the cloned scratch describe one consistent instant. It publishes the manifest last, so a partially written artifact set is never selectable for restore. It then **resumes the guest in place** rather than exiting, which is what allows a checkpoint to be an ordinary operation on a running sandbox and gives capture failure a path other than losing the instance: the VMM reports the failure, the agent thaws, and the workload continues.
+**Capture is a host transaction.** The VMM drains block queues and flushes backing files before serializing, so `mem.bin`, `state.bin`, and the cloned scratch describe one instant. Artifacts are written into a **fresh generation directory** with checksums and lengths, durably flushed, and then published by atomically installing a single manifest pointer — so a partially written set is never selectable, and a crash mid-capture leaves the previous generation intact. Blob and scratch refcounts are committed in the same transaction as the manifest.
 
-Cloning the scratch is the VMM's job precisely because it happens after the queues are drained. Doing it guest-side before the `0x605` write would clone a file the VMM may still have writes queued against.
+Cloning the scratch is the VMM's job because it happens after the queues are drained; doing it guest-side before the `0x605` write would clone a file the VMM may still have writes queued against.
 
 **Freeze semantics.** `cgroup.freeze` is a cgroup v2 **core** interface file — not a controller, so it needs nothing in `cgroup.subtree_control` — and exists only on non-root cgroups, which the container's sibling cgroup (§7.4) is. Writing `1` freezes the cgroup and all descendants. Three properties matter:
 
 - **It is invisible to the process.** Unlike `SIGSTOP`, no signal is delivered and the task cannot detect it. The workload needs no awareness or handling.
 - **It is asynchronous but notified.** The kernel documents that "freezing of the cgroup may take some time"; completion sets `frozen 1` in `cgroup.events` and issues a notification, so the agent waits with `epoll` rather than polling.
-- **It can stall.** A task in uninterruptible sleep keeps the cgroup in `FREEZING` until its I/O completes, and such a task does not die promptly on `SIGKILL` either. The agent therefore needs a **freeze timeout** with a defined failure path — thaw, fail the capture, report a typed error — and teardown of a sandbox stuck this way falls back to host-side VMM termination.
+- **It can stall.** A task in uninterruptible sleep keeps the cgroup in `FREEZING` until its I/O completes, and such a task does not die promptly on `SIGKILL` either. The agent therefore needs a **freeze timeout** with a defined failure path — thaw, abandon the capture, report a typed error — and teardown of a sandbox stuck this way falls back to host-side VMM termination.
 
 The container cgroup must be **owned by the agent and not delegated**, since a workload able to write its own `cgroup.freeze` or migrate out of the cgroup could escape the barrier. Where a workload legitimately needs a delegated subtree (§10.1), it is delegated a *child* of the agent-owned cgroup, so the freeze applies hierarchically from above.
 
@@ -627,9 +685,11 @@ Most workloads never touch this. For the workload-start tier the platform's warm
 
 For customers who want to choose the point themselves, the agent exposes a **`SOCK_SEQPACKET` UNIX socket bind-mounted into the container** at `/dev/aci/checkpoint` — the agent already owns the container's `/dev` tmpfs, so this costs no copy-up and does not perturb the image. One datagram requests a checkpoint; one datagram comes back.
 
-The socket is a request channel, not the barrier. The requesting thread blocks awaiting its reply, but that alone would leave the process's other threads running, so correctness rests on the cgroup freeze; the reply is queued while the container is still frozen and delivered as it thaws. Sequenced packets avoid partial-message framing, and per-message `SCM_CREDENTIALS` identify the actual sender rather than whichever process happened to open the socket — the descriptor may have been inherited across `fork` or passed over another socket.
+The socket is a request channel, not a barrier. The requesting thread blocks awaiting its reply, but that alone would leave the process's other threads running, so ordering rests on the three barriers above. Sequenced packets avoid partial-message framing, and per-message `SCM_CREDENTIALS` identify the actual sender rather than whichever process happened to open the socket — the descriptor may have been inherited across `fork` or passed over another socket.
 
 The reply carries this sandbox's work item. After restore the agent has already read the refreshed configuration, so it returns the entrypoint arguments or work item for *this* sandbox. The warm shim's handoff is therefore not a separate protocol — it is this call's return value.
+
+**The shim must reseed before its peers run.** Thawing the cgroup makes every container thread runnable at once, so nothing guarantees the requesting thread processes its reply — and resets its runtime's RNG state (§8.2) — before a background thread consumes cloned randomness or acts on stale state. A workload-start snapshot must therefore be captured **single-threaded**, or the shim must hold its peer threads behind its own barrier until it has completed its restore hooks. This is a requirement on the shim, and on any customer using the interface directly, because the agent cannot reach inside a process to enforce it.
 
 Two policy controls:
 
@@ -670,13 +730,15 @@ Rejecting DAX on side-channel grounds obliges us to be consistent: `nvx` restore
 
 A clarification worth stating, because it is easy to get wrong: **flushing the guest page cache before capture does not remove this channel.** Flush+Reload targets CPU cache lines backing shared *physical pages*; the guest page cache is a Linux construct. Anonymous memory, kernel text, and agent text are all shared after a COW restore and all LLC-cacheable regardless of what the guest page cache holds. Dropping caches shrinks the shared surface; it does not eliminate it.
 
-Per tier:
+**Sharing alone is not sufficient, though — the attacker also needs an address.** `clflush` operates on a virtual address, so a shared physical page is only exploitable if the attacker can map it. That precondition is what separates the tiers:
 
-- **Platform — cross-tenant, and defensible.** The shared pages are the guest kernel and the agent. There is no image content and no tenant data (§8.4, property 1), so there is no secret to extract from the *contents*. The residual channel is observing the agent's control flow while it processes another tenant's configuration, which yields a stated requirement: **the agent must have no secret-dependent control flow or data-dependent memory access** when handling the sandbox configuration section. That is tractable — it is a `memcpy` into a struct, not a cryptographic routine — but it must be an explicit coding rule, and a reviewed one.
-- **Workload start — tenant-scoped, so the question does not arise.** Shared pages are confined to one customer's sandboxes, which is the same posture as two of their containers sharing page cache on an ordinary host.
-- **Instance checkpoint — single instance.** No sharing beyond a resume of itself; if replayed N times, it is tenant-scoped by the same argument.
+- **Platform — cross-tenant, and the channel is unlikely to arise.** The shared pages are guest kernel and agent memory. The container can map neither: it has no access to agent address space, no `/dev/mem`, and its own pages are faulted fresh and privatized by the kernel's zeroing write before it ever sees them. With no alias, there is nothing for the container to flush and time. The design still requires that **the agent have no secret-dependent control flow or data-dependent memory access** when handling the sandbox configuration section — cheap to satisfy, since that path is a `memcpy` into a struct — but this is defence in depth against an addressability gap rather than the load-bearing control it might appear to be.
+- **Workload start — the alias exists, and is why tenant scoping matters.** Here the container's *own* text and data are in `mem.bin`, and a restored container maps exactly those pages. Two clones of the same snapshot therefore do share attacker-addressable memory. Confined to one tenant this is the same posture as two of that customer's containers sharing page cache on an ordinary host; across tenants it would be the DAX scenario, which is why §9.2 applies.
+- **Instance checkpoint — single instance.** A resume shares nothing beyond itself.
 
-The cross-tenant workload-start case is resolved by giving each tenant its own copy of the snapshot rather than by accepting the sharing — see §9.2.
+Because the precondition rests on the container's inability to map agent and kernel memory, that property should be treated as a security invariant of the agent's namespace and device setup (§7.1) rather than an incidental consequence of it.
+
+The cross-tenant workload-start case is resolved by giving each tenant its own copy of the snapshot — see §9.2.
 
 ### 9.2 Breaking page sharing without copying: reflink
 
@@ -690,6 +752,8 @@ Where sharing must be broken, the mechanism is cheap. Page cache is keyed by `(a
 | Full copy | Yes | ✅ separate | full |
 
 A reflink is a new inode that shares the original's **disk extents**. Two VMs restoring from reflinked copies of the same snapshot read identical bytes off identical blocks, but the pages land in different physical frames — so there is nothing to `clflush` in common. Hard links are the intuitive answer and the wrong one: the same inode means the same `address_space` and therefore exactly the sharing being avoided.
+
+The inode/`address_space` reasoning above is Linux's. On Windows the analogous property is that two files are distinct stream objects with distinct section objects, which should likewise yield distinct pages — but ReFS block cloning guarantees allocate-on-write *on disk*, not distinct cache page frames, and `nvx` maps guest RAM with `PAGE_WRITECOPY`/`FILE_MAP_COPY` rather than a Linux mapping. **Physical-frame separation between ReFS clones is therefore an assumption to be validated on the production build, not a property to rely on unverified** (§14), and it holds only with page combining disabled (§2.3).
 
 Because `mem.bin` is mapped copy-on-write and never written back, the extents stay shared for the artifact's whole life.
 
@@ -821,6 +885,8 @@ The guest sees only a virtio-blk device and has no knowledge of where the bytes 
 10. **Snapshot artifact distribution and GC** (§3.2) — the workload-start and instance-checkpoint tiers add `mem.bin`, `state.bin`, and paired scratch images. Unlike layer blobs these are tenant-specific and cannot be fleet-cached, so they need their own placement, retention, and GC story, and they constrain where a sandbox can be scheduled.
 11. **Warm shim per runtime** (§8.1, §8.5) — where a Python, Node, or Java shim places its checkpoint, how it resets its runtime's RNG state on restore (§8.2), and what happens for a runtime the platform does not ship a shim for.
 12. **Per-tenant snapshot memory budget** (§9.2) — how much node memory per-tenant duplication consumes at realistic tenant counts, measured separately for clean resident pages, dirty pages, and commit charge, and how first-restore latency compares with steady state.
-13. **Agent side-channel hardening** (§9.1) — establishing and reviewing the requirement that the agent has no secret-dependent control flow while handling sandbox configuration.
-14. **Snapshot portability class** (§8.4) — defining the CPU feature, XSAVE, and TSC classes a snapshot may be restored across, and expressing them as placement constraints in scheduling.
-15. **Layer xattr sanitization** (§5) — the exact allow-list the conversion pipeline applies when translating image content, and test coverage for images carrying crafted `trusted.overlay.*` attributes.
+13. **Agent side-channel hardening** (§9.1) — establishing the agent's no-secret-dependent-control-flow rule, and confirming as a tested invariant that the container can map neither agent nor kernel memory.
+14. **ReFS physical-frame separation** (§9.2) — validating on the production Windows build that two ReFS block clones yield distinct page frames under `PAGE_WRITECOPY`, with page combining disabled. The per-tenant isolation argument depends on it.
+15. **Snapshot portability class** (§8.4) — defining the CPU feature, XSAVE, and TSC classes a snapshot may be restored across, and expressing them as placement constraints in scheduling.
+16. **Layer metadata allow-list** (§5) — the exact permitted set and the policy for `security.capability`, SELinux labels, and ACLs, with test coverage for images carrying crafted attributes.
+17. **Capture failure handling** (§8.1, §8.5) — since capture ends the instance, the host-side reporting path and the retry or abandonment policy for a failed platform or workload-start build.
