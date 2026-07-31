@@ -21,8 +21,6 @@ The design has four pillars:
 | **Control plane** | A **Rust init agent** running as PID 1. Boot-time configuration arrives in a VMM-populated memory region, sectioned by when each part becomes valid; runtime operations arrive over a framed **RPC multiplexed on the VMM-owned stdio channel**. |
 | **Startup** | Everything cold-plugged, zero hotplug, and no host round-trips between VM start and `exec` on the cold fast path. Three snapshot tiers (platform / workload start / instance checkpoint) for further latency reduction. |
 
-**The target is a ~10 ms restore.** That number is what makes several choices in this document look severe out of context — notably the insistence on invariant device geometry (§8.4), the refusal to put any host round trip on the start path (§6), and the rejection of per-restore work measured in tens of milliseconds. Against a 10 ms budget a 15 ms repair step is not a minor cost; it is the entire budget and then some. Cold start has a correspondingly tighter budget than a conventional container runtime because the VM boundary is per-container rather than per-pod.
-
 Deliberately **not** used today, for security reasons: `virtio-pmem` + DAX, which would let N VMs share one host page-cache copy of an image. See §9.
 
 ---
@@ -50,7 +48,12 @@ None of that applies here. Because the container is known at VM-create time and 
 - **Confidential computing.** Out of scope. The host is trusted to pull, convert, and store image content in plaintext. (A confidential variant would invalidate the entire host-side conversion pipeline and require guest-side image pull; that is a different design.)
 - **Volumes** (Azure Files, `emptyDir`, secrets, gitRepo). Recognized as required *eventually*, but **optional and to be designed** — see §10.
 
-### 2.3 Guest platform prerequisites
+### 2.3 Latency targets
+
+- **Restore is targeted at ~10 ms**, measured from VMM launch to the workload being runnable.
+- **Cold start** is dominated by the layer mount and `exec` path (§6); the design keeps host round trips off it entirely.
+
+### 2.4 Guest platform prerequisites
 
 This design depends on guest kernel features and VMM capabilities that **do not exist today**. They are hard prerequisites, not incremental improvements: nothing described below boots until they are in place.
 
@@ -225,7 +228,9 @@ Sections 2 and 3 are read **after** the platform snapshot point, which is what k
 
 Supplying a fresh §2 or §3 to a workload-start or instance-checkpoint restore would be silently ineffective: those values were already resolved into mounted filesystems and running process state at capture. The manifest records which sections a given snapshot consumed, and a restore that supplies different values for a consumed section is rejected rather than ignored.
 
-**Validation belongs to the host, not the guest.** The manifest carries a canonical digest over the invariants section and the device contract, and `nvx` validates it **before vCPU entry** (§2.3). A guest-side comparison cannot be the primary check: it runs after devices are already live, and the values the agent remembers came from the same snapshot, so it binds nothing independently. The agent still re-reads and compares as defence in depth, and fails with a typed error on mismatch.
+**The host validates the launch contract before vCPU entry.** The manifest carries a canonical digest over the invariants section and the device contract. On every launch `nvx` recomputes that digest from the configuration it is about to write and the devices it is about to attach, compares it against the manifest, and refuses to enter the vCPU on mismatch (§2.4).
+
+The host is where this check belongs because it is the party holding an independent statement of what the sandbox is supposed to be: the placement decision, the blob set, and the device layout all originate there. A snapshot cannot vouch for itself, and a check that runs after vCPU entry runs after devices are already live. The agent re-reads the invariants section on boot and fails with a typed error if it disagrees, which catches VMM-side construction bugs that the digest would not.
 
 Resolving image defaults against overrides on the host rather than in the guest keeps the agent free of OCI-config merge semantics and removes any need for it to read configuration out of a mounted layer before it can act.
 
@@ -424,7 +429,7 @@ This is the one place we deliberately keep cgroups. Both the agent and the conta
 - `cpu.weight` keeps the agent schedulable under container CPU saturation.
 - The container cgroup is also the attachment point for a **`BPF_PROG_TYPE_CGROUP_DEVICE`** filter restricting which device nodes the container may create (see §9, §10.1).
 
-Requires `CONFIG_MEMCG` and `CONFIG_BPF_SYSCALL`, both currently disabled (§2.3).
+Requires `CONFIG_MEMCG` and `CONFIG_BPF_SYSCALL`, both currently disabled (§2.4).
 
 Trade-off to note: the platform reserve is memory the customer pays for the VM but cannot use. It should be small and measured.
 
@@ -618,15 +623,25 @@ Capture and restore raise two ordering problems:
 - **Filesystem consistency at capture.** Once scratch is mounted, `mem.bin` holds dirty ext4 pages that have not reached the scratch VHD, while the host-side scratch file is at a different moment. Capturing the pair without quiescing corrupts the filesystem on restore.
 - **Execution ordering at restore.** Resuming a guest makes *every* task that was runnable at capture runnable again, and re-arms device interrupts and host-facing I/O. Nothing intrinsically schedules the agent's restore work before any of it.
 
-The first is solved by the agent freezing and quiescing before it requests the capture. The second needs **three barriers, not one** — a point worth being precise about, because the captured cgroup freeze alone is often assumed to be sufficient and is not:
+The first problem is solved at capture time: the agent freezes the container and quiesces the filesystem before requesting the capture, so the artifacts describe a settled instant.
 
-| Barrier | Covers | Established |
+The second is a restore-time problem, and it is broader than the container. Three populations of execution become live again when a snapshot resumes, and each of them can run before the agent has fixed the clock, reseeded the CRNG, and refreshed identity (§8.2):
+
+- **Container tasks**, every one of which was runnable at capture.
+- **The agent's own worker threads** — RPC server, log pump — which are captured mid-flight along with everything else.
+- **Device and host-facing activity**: interrupts, network ingress, and host control input. Some of this the VMM starts before vCPU entry, so it is not ordered by anything the guest does.
+
+Each population is held by the mechanism that owns it, and each hold is established *at capture* so it is already in force the instant execution resumes:
+
+| Population | Held by | Released by |
 |---|---|---|
-| VMM restore gate | Device interrupts, network ingress, host control input | By the VMM, held until the agent signals completion |
-| Agent thread rendezvous | The agent's own non-capture threads (RPC server, log pump) | By the agent, at the capture call site |
-| Captured cgroup freeze | All container tasks | At capture, restored frozen |
+| Container tasks | `cgroup.freeze`, captured in the frozen state | Agent, last |
+| Agent worker threads | Parked at the capture call site, so the agent restores single-threaded | Agent, as it finishes its own work |
+| Devices, network, host input | VMM restore gate | Agent, by signalling completion |
 
-The cgroup freeze orders only tasks inside the container cgroup — at the platform tier there are none, so it orders nothing there. The resume point does not help either: `nvx` resumes at the instruction after the `0x605` write, which positions the agent's own capture thread correctly but says nothing about other vCPUs, kernel workers, or the VMM's own device threads, several of which start before vCPU entry.
+They are not substitutes for one another, because they sit at different layers. The cgroup freeze lives in the guest kernel and reaches only tasks in the container cgroup — not the agent's threads, which are in a sibling cgroup (§7.4), and not the VMM's device threads, which are outside the guest entirely. The restore gate lives in the VMM and can hold what enters the guest, but cannot order anything already scheduled inside it. And the resume point orders only one thread: `nvx` resumes at the instruction following the `0x605` write, which puts the agent's capture thread exactly where it needs to be and says nothing about any other vCPU or kernel worker.
+
+The release order in the diagram below follows from this. The agent does its repair work while everything is still held, releases the restore gate so devices and host I/O are live, and thaws the container last — so the workload is the only thing that never observes a partially repaired sandbox. At the platform tier the first row does not apply: no container exists yet (§8.1), and the other two holds are what make that tier's restore safe.
 
 ```
               trigger  (agent itself / container request / host RPC)
@@ -647,7 +662,7 @@ The cgroup freeze orders only tasks inside the container cgroup — at the platf
    VMM    ───────┼─ validate the manifest digest against the launch contract
                  ├─ map mem.bin CoW; attach devices; hold the restore gate
                  └─ enter vCPU
-   agent  ───────┼─ read config §1; compare invariants (defence in depth)
+   agent  ───────┼─ read config §1; compare invariants
                  ├─ read config §2 + §3; detect restore via launch epoch
                  ├─ set clock, reseed CRNG, refresh identity  (if clone — §8.2)
                  ├─ release the VMM restore gate
@@ -677,7 +692,7 @@ All of the above is **capture-time** cost. The restore path is unaffected.
 | Workload start | Container requests it (below) | Cgroup freeze |
 | Instance checkpoint | Host RPC to the agent | Cgroup freeze |
 
-Because the agent performs every capture, one mechanism covers all three tiers, and the VMM needs no way to capture a guest that is not cooperating — except as a degraded-mode fallback for an unresponsive agent (§2.3).
+Because the agent performs every capture, one mechanism covers all three tiers, and the VMM needs no way to capture a guest that is not cooperating — except as a degraded-mode fallback for an unresponsive agent (§2.4).
 
 #### The container-facing interface
 
@@ -753,7 +768,7 @@ Where sharing must be broken, the mechanism is cheap. Page cache is keyed by `(a
 
 A reflink is a new inode that shares the original's **disk extents**. Two VMs restoring from reflinked copies of the same snapshot read identical bytes off identical blocks, but the pages land in different physical frames — so there is nothing to `clflush` in common. Hard links are the intuitive answer and the wrong one: the same inode means the same `address_space` and therefore exactly the sharing being avoided.
 
-The inode/`address_space` reasoning above is Linux's. On Windows the analogous property is that two files are distinct stream objects with distinct section objects, which should likewise yield distinct pages — but ReFS block cloning guarantees allocate-on-write *on disk*, not distinct cache page frames, and `nvx` maps guest RAM with `PAGE_WRITECOPY`/`FILE_MAP_COPY` rather than a Linux mapping. **Physical-frame separation between ReFS clones is therefore an assumption to be validated on the production build, not a property to rely on unverified** (§14), and it holds only with page combining disabled (§2.3).
+The inode/`address_space` reasoning above is Linux's. On Windows the analogous property is that two files are distinct stream objects with distinct section objects, which should likewise yield distinct pages — but ReFS block cloning guarantees allocate-on-write *on disk*, not distinct cache page frames, and `nvx` maps guest RAM with `PAGE_WRITECOPY`/`FILE_MAP_COPY` rather than a Linux mapping. **Physical-frame separation between ReFS clones is therefore an assumption to be validated on the production build, not a property to rely on unverified** (§14), and it holds only with page combining disabled (§2.4).
 
 Because `mem.bin` is mapped copy-on-write and never written back, the extents stay shared for the artifact's whole life.
 
@@ -771,7 +786,7 @@ A warmed language-runtime snapshot is a few hundred megabytes, so a node hosting
 
 **Not an alternative: pre-faulting.** Force-populating a `MAP_PRIVATE` mapping also privatizes every page, but pays the full copy *in RAM, on the restore path* — the exact latency the design protects. Reflink defers the copy to natural page faults and never pays it for pages nobody touches.
 
-Implementation is a control-plane concern: `nvx` opens whichever path it is given, so nothing in the VMM changes. It does impose a **storage requirement**, and on Windows a **page-combining-disabled requirement**, since page combining would re-share the physically identical pages this separation creates (§2.3).
+Implementation is a control-plane concern: `nvx` opens whichever path it is given, so nothing in the VMM changes. It does impose a **storage requirement**, and on Windows a **page-combining-disabled requirement**, since page combining would re-share the physically identical pages this separation creates (§2.4).
 
 ---
 
@@ -878,10 +893,10 @@ The guest sees only a virtio-blk device and has no knowledge of where the bytes 
 3. **phram/virtio-blk threshold** (§4.3) — the image size at which to switch.
 4. **Snapshot artifact lifecycle** (§8.3, §8.5) — how paired scratch images are stored, refcounted, and garbage-collected alongside their snapshots, and the freeze timeout and failure policy when `cgroup.events` never reports `frozen 1`.
 5. **Uniform layer capacity** (§8.4) — the value to report, chosen to cover expected layers with margin so the unbind/rebind slow path stays an outlier.
-6. **Guest kernel and agent versioning** (§3.2, §2.3) — node rollout cadence, host↔agent RPC skew tolerance during a staged rollout, and how snapshots captured with an older kernel, agent, or VMM build are invalidated or rebuilt.
+6. **Guest kernel and agent versioning** (§3.2, §2.4) — node rollout cadence, host↔agent RPC skew tolerance during a staged rollout, and how snapshots captured with an older kernel, agent, or VMM build are invalidated or rebuilt.
 7. **Metrics and billing accounting** — `GetMetrics` semantics and their mapping to vCPU-second / GB-second billing.
 8. **Control and log transport** (§7.2) — the `portb` console is one VM exit per transmitted byte with polled receive and no IRQ, which is adequate for boot diagnostics but poor for streaming container logs. Kernel `printk` can also interleave into framed output. Decide between a purpose-built transport (virtio-serial, vsock, or a shared-memory ring) and an explicit accepted throughput limit, and specify how the transport is quiesced across snapshot so partial frames are not captured.
-9. **virtio-blk device state in `state.bin`** (§2.3) — negotiated features, queue addresses, ring indices, and in-flight I/O must serialize and restore, alongside the queue drain and flush the capture transaction depends on (§8.5).
+9. **virtio-blk device state in `state.bin`** (§2.4) — negotiated features, queue addresses, ring indices, and in-flight I/O must serialize and restore, alongside the queue drain and flush the capture transaction depends on (§8.5).
 10. **Snapshot artifact distribution and GC** (§3.2) — the workload-start and instance-checkpoint tiers add `mem.bin`, `state.bin`, and paired scratch images. Unlike layer blobs these are tenant-specific and cannot be fleet-cached, so they need their own placement, retention, and GC story, and they constrain where a sandbox can be scheduled.
 11. **Warm shim per runtime** (§8.1, §8.5) — where a Python, Node, or Java shim places its checkpoint, how it resets its runtime's RNG state on restore (§8.2), and what happens for a runtime the platform does not ship a shim for.
 12. **Per-tenant snapshot memory budget** (§9.2) — how much node memory per-tenant duplication consumes at realistic tenant counts, measured separately for clean resident pages, dirty pages, and commit charge, and how first-restore latency compares with steady state.
