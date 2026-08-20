@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import datetime as dt
+import errno
 import json
 import os
 from pathlib import Path
@@ -324,6 +325,70 @@ def contains_output_line(output: bytes | bytearray, marker: bytes) -> bool:
     return any(line.removesuffix(b"\r") == marker for line in output.split(b"\n"))
 
 
+class InteractiveProcess:
+    def __init__(self, command: Sequence[str], environment: dict[str, str]) -> None:
+        self.terminal_fd: int | None = None
+        if sys.platform.startswith("linux"):
+            terminal_fd, child_fd = os.openpty()
+            try:
+                self.process = subprocess.Popen(
+                    command,
+                    stdin=child_fd,
+                    stdout=child_fd,
+                    stderr=child_fd,
+                    env=environment,
+                )
+            except Exception:
+                os.close(terminal_fd)
+                raise
+            finally:
+                os.close(child_fd)
+            self.terminal_fd = terminal_fd
+        else:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=environment,
+            )
+
+    def read_output(self, chunks: queue.Queue[bytes | None]) -> None:
+        try:
+            if self.terminal_fd is not None:
+                while True:
+                    try:
+                        chunk = os.read(self.terminal_fd, 4096)
+                    except OSError as error:
+                        if error.errno in (errno.EBADF, errno.EIO):
+                            break
+                        raise
+                    if not chunk:
+                        break
+                    chunks.put(chunk)
+            else:
+                assert self.process.stdout is not None
+                while chunk := self.process.stdout.read1(4096):
+                    chunks.put(chunk)
+        finally:
+            chunks.put(None)
+
+    def write_input(self, data: bytes) -> None:
+        if self.terminal_fd is not None:
+            remaining = memoryview(data)
+            while remaining:
+                remaining = remaining[os.write(self.terminal_fd, remaining) :]
+        else:
+            assert self.process.stdin is not None
+            self.process.stdin.write(data)
+            self.process.stdin.flush()
+
+    def close(self) -> None:
+        if self.terminal_fd is not None:
+            os.close(self.terminal_fd)
+            self.terminal_fd = None
+
+
 def measure_once(
     command: Sequence[str],
     *,
@@ -334,25 +399,13 @@ def measure_once(
     teardown_mode: str = "guest-exit",
 ) -> tuple[float, int, float | None]:
     started = time.perf_counter_ns()
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=environment,
-    )
+    interaction = InteractiveProcess(command, environment)
+    process = interaction.process
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
     chunks: queue.Queue[bytes | None] = queue.Queue()
-
-    def read_output() -> None:
-        assert process.stdout is not None
-        while chunk := process.stdout.read1(4096):
-            chunks.put(chunk)
-        chunks.put(None)
-
-    threading.Thread(target=read_output, daemon=True).start()
+    threading.Thread(target=interaction.read_output, args=(chunks,), daemon=True).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
     try:
@@ -377,9 +430,7 @@ def measure_once(
                 if teardown_mode != "guest-exit":
                     process.terminate()
                 else:
-                    assert process.stdin is not None
-                    process.stdin.write(b"nvx-exit 0\n")
-                    process.stdin.flush()
+                    interaction.write_input(b"nvx-exit 0\n")
                 try:
                     returncode = wait_for_process_exit(
                         process,
@@ -402,6 +453,8 @@ def measure_once(
         if tail:
             raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
         raise
+    finally:
+        interaction.close()
 
 
 def benchmark(
@@ -493,25 +546,13 @@ def capture_snapshot(
 ) -> tuple[float, float, float]:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off,openvmm_entry::vm_controller=info"
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=environment,
-    )
+    interaction = InteractiveProcess(command, environment)
+    process = interaction.process
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
     chunks: queue.Queue[bytes | None] = queue.Queue()
-
-    def read_output() -> None:
-        assert process.stdout is not None
-        while chunk := process.stdout.read1(4096):
-            chunks.put(chunk)
-        chunks.put(None)
-
-    threading.Thread(target=read_output, daemon=True).start()
+    threading.Thread(target=interaction.read_output, args=(chunks,), daemon=True).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
     snapshot_requested = False
@@ -547,11 +588,9 @@ def capture_snapshot(
             output.extend(chunk)
             if not snapshot_requested and BOOT_MARKER in output:
                 snapshot_started_ns = time.perf_counter_ns()
-                assert process.stdin is not None
-                process.stdin.write(
+                interaction.write_input(
                     b"nvx-snapshot; echo " + RESTORE_MARKER + b"\n"
                 )
-                process.stdin.flush()
                 snapshot_requested = True
                 deadline = time.monotonic() + timeout
             if snapshot_requested and contains_output_line(output, RESTORE_MARKER):
@@ -585,6 +624,8 @@ def capture_snapshot(
         if tail:
             raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
         raise
+    finally:
+        interaction.close()
 
 
 def summarize_snapshot_samples(
