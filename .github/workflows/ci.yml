@@ -113,8 +113,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             openvmm/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            cargo-${{ runner.os }}-
 
       - name: Download guest artifacts
         uses: actions/download-artifact@v4
@@ -214,6 +216,9 @@ jobs:
           python -m compileall -q scripts benchmarks
           python -m unittest scripts/test_performance.py scripts/test_flamegraph.py -v
 
+      - name: Set up cache tools
+        run: python scripts\nvx.py setup-cross-os-cache
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -221,8 +226,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             openvmm/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            cargo-${{ runner.os }}-
 
       - name: Download guest artifacts
         uses: actions/download-artifact@v4

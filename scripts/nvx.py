@@ -33,6 +33,7 @@ from nvx_tools.build import (
     build_python_initramfs_native,
 )
 from nvx_tools.common import ScriptError
+from nvx_tools.ci import setup_cross_os_cache
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -185,6 +186,10 @@ def command_build_openvmm(args: argparse.Namespace) -> None:
         ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
         cwd=OPENVMM_DIR,
     )
+
+
+def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
+    setup_cross_os_cache()
 
 
 def command_build(args: argparse.Namespace) -> None:
@@ -679,6 +684,12 @@ def parse_args() -> argparse.Namespace:
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")
     openvmm.add_argument("--skip-restore", action="store_true")
     openvmm.set_defaults(handler=command_build_openvmm)
+
+    cache = subparsers.add_parser(
+        "setup-cross-os-cache",
+        help="install GNU tar and zstd for GitHub Actions cross-OS caches",
+    )
+    cache.set_defaults(handler=command_setup_cross_os_cache)
 
     build = subparsers.add_parser("build", help="build guest artifacts and OpenVMM")
     _add_guest_options(build)
