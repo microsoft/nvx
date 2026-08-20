@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import os
 import re
@@ -334,6 +335,10 @@ PLATFORM_NAMES = {
     "linux-kvm": "Linux / KVM",
     "windows-whp": "Windows / WHP",
 }
+OPENVMM_BACKENDS = {
+    "linux-kvm": "kvm",
+    "windows-whp": "whp",
+}
 
 
 def _platform_metric_name(platform: str, metric: str) -> str:
@@ -426,6 +431,135 @@ def append_results_summary(
     lines.extend(["", f"Commit: `{results[0].commit}`", ""])
     with path.open("a", encoding="utf-8", newline="\n") as output:
         output.write("\n" + "\n".join(lines))
+
+
+def _json_object(value: object, location: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise PerformanceError(f"expected an object at {location}")
+    return value
+
+
+def _openvmm_value(
+    document: dict[str, object],
+    section: str,
+    backend: str,
+    field: str,
+    source: Path,
+) -> float:
+    section_value = _json_object(document.get(section), f"{source}:{section}")
+    backend_value = _json_object(
+        section_value.get(backend), f"{source}:{section}.{backend}"
+    )
+    value = backend_value.get(field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PerformanceError(
+            f"expected a number at {source}:{section}.{backend}.{field}"
+        )
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise PerformanceError(
+            f"value at {source}:{section}.{backend}.{field} "
+            "must be positive and finite"
+        )
+    return value
+
+
+def append_openvmm_diagnostics(
+    path: Path,
+    platform: str,
+    document: dict[str, object],
+    backend: str,
+    source: Path,
+) -> None:
+    cold_start = _openvmm_value(document, "backends", backend, "p50_ms", source)
+    snapshot_restore = _openvmm_value(
+        document, "snapshot_restore", backend, "p50_ms", source
+    )
+    cold_rss = _openvmm_value(
+        document, "backends", backend, "peak_rss_p50_bytes", source
+    )
+    restore_rss = _openvmm_value(
+        document,
+        "snapshot_restore",
+        backend,
+        "peak_rss_p50_bytes",
+        source,
+    )
+    title = PLATFORM_NAMES.get(platform, platform)
+    speedup = cold_start / snapshot_restore
+    savings = (1 - snapshot_restore / cold_start) * 100
+    lines = [
+        f"## {title} benchmark diagnostics",
+        "",
+        "Peak RSS is informational and excluded from regression gating.",
+        "",
+        "| Measurement | Value |",
+        "| --- | ---: |",
+        f"| Cold-start peak RSS p50 | {cold_rss / 1024 / 1024:.2f} MiB |",
+        f"| Snapshot-restore peak RSS p50 | {restore_rss / 1024 / 1024:.2f} MiB |",
+        f"| Snapshot-restore speedup | {speedup:.2f}x |",
+        f"| Snapshot-restore latency savings | {savings:.2f}% |",
+        "",
+    ]
+    with path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write("\n" + "\n".join(lines))
+
+
+def collect_openvmm_results(
+    platform: str,
+    commit: str,
+    input_path: Path,
+    output_dir: Path,
+    summary_path: Path | None = None,
+) -> Path:
+    backend = OPENVMM_BACKENDS.get(platform)
+    if backend is None:
+        raise PerformanceError(f"unsupported OpenVMM benchmark platform: {platform!r}")
+    if not commit:
+        raise PerformanceError("commit must not be empty")
+    try:
+        document = _json_object(
+            json.loads(input_path.read_text(encoding="utf-8")), str(input_path)
+        )
+    except FileNotFoundError as error:
+        raise PerformanceError(f"benchmark result not found: {input_path}") from error
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PerformanceError(f"invalid benchmark JSON {input_path}: {error}") from error
+
+    controls = _json_object(document.get("controls"), f"{input_path}:controls")
+    if controls.get("suite") != "e2e":
+        raise PerformanceError(
+            f"{input_path} is not an e2e benchmark result: {controls.get('suite')!r}"
+        )
+    metrics = (
+        ("openvmm_cold_start", "backends", "p50_ms"),
+        ("openvmm_snapshot_restore", "snapshot_restore", "p50_ms"),
+        ("openvmm_cold_start_teardown", "backends", "teardown_p50_ms"),
+        (
+            "openvmm_snapshot_restore_teardown",
+            "snapshot_restore",
+            "teardown_p50_ms",
+        ),
+    )
+    results = [
+        Result(
+            commit,
+            metric,
+            "ms",
+            "lower",
+            _openvmm_value(document, section, backend, field, input_path),
+        )
+        for metric, section, field in metrics
+    ]
+    output_path = output_dir / f"{platform}.csv"
+    write_results(output_path, results)
+    if summary_path is not None:
+        append_results_summary(summary_path, platform, results)
+        append_openvmm_diagnostics(
+            summary_path, platform, document, backend, input_path
+        )
+    print(f"Collected {len(results)} OpenVMM p50 metric(s) for {platform}: {output_path}")
+    return output_path
 
 
 def collect_results(
@@ -725,6 +859,15 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--require-shared-suite", action="store_true")
     collect.add_argument("--summary", type=Path)
 
+    collect_openvmm = commands.add_parser(
+        "collect-openvmm", help="convert an OpenVMM benchmark JSON result to p50 CSV"
+    )
+    collect_openvmm.add_argument("--platform", required=True)
+    collect_openvmm.add_argument("--commit", required=True)
+    collect_openvmm.add_argument("--input", type=Path, required=True)
+    collect_openvmm.add_argument("--output-dir", type=Path, required=True)
+    collect_openvmm.add_argument("--summary", type=Path)
+
     gate = commands.add_parser("gate", help="check current p50 values for regressions")
     gate.add_argument("--baseline-dir", type=Path, required=True)
     gate.add_argument("--target-dir", type=Path, required=True)
@@ -769,6 +912,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 require_shell_snapshot=args.require_shell_snapshot,
                 require_shared_suite=args.require_shared_suite,
                 summary_path=args.summary,
+            )
+            return 0
+        if args.command == "collect-openvmm":
+            collect_openvmm_results(
+                args.platform,
+                args.commit,
+                args.input,
+                args.output_dir,
+                args.summary,
             )
             return 0
         if args.command == "gate":

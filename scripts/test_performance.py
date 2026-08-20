@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import sys
 import tempfile
 import unittest
@@ -69,6 +70,81 @@ SHELL_SNAPSHOT_LOG = """
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_collects_openvmm_json_and_appends_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "linux-kvm.json"
+            summary = root / "summary.md"
+            source.write_text(
+                json.dumps(
+                    {
+                        "controls": {"suite": "e2e"},
+                        "backends": {
+                            "kvm": {
+                                "p50_ms": 200.5,
+                                "peak_rss_p50_bytes": 64 * 1024 * 1024,
+                                "teardown_p50_ms": 25.25,
+                            }
+                        },
+                        "snapshot_restore": {
+                            "kvm": {
+                                "p50_ms": 20.25,
+                                "peak_rss_p50_bytes": 32 * 1024 * 1024,
+                                "teardown_p50_ms": 5.5,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result_path = performance.collect_openvmm_results(
+                "linux-kvm", "abc123", source, root / "results", summary
+            )
+
+            results = performance.read_results(result_path)
+            self.assertEqual(
+                [result.metric for result in results],
+                [
+                    "openvmm_cold_start",
+                    "openvmm_snapshot_restore",
+                    "openvmm_cold_start_teardown",
+                    "openvmm_snapshot_restore_teardown",
+                ],
+            )
+            self.assertEqual(results[0].p50, 200.5)
+            self.assertTrue(all(result.direction == "lower" for result in results))
+            markdown = summary.read_text(encoding="utf-8")
+            self.assertIn("## Linux / KVM benchmark results", markdown)
+            self.assertIn("| `openvmm_snapshot_restore` | 20.25 ms |", markdown)
+            self.assertIn("## Linux / KVM benchmark diagnostics", markdown)
+            self.assertIn("| Cold-start peak RSS p50 | 64.00 MiB |", markdown)
+            self.assertIn("| Snapshot-restore speedup | 9.90x |", markdown)
+
+    def test_openvmm_json_requires_the_platform_backend(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "windows-whp.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "controls": {"suite": "e2e"},
+                        "backends": {},
+                        "snapshot_restore": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"backends\.whp",
+            ):
+                performance.collect_openvmm_results(
+                    "windows-whp",
+                    "abc123",
+                    source,
+                    Path(temporary) / "results",
+                )
+
     def test_collect_appends_ci_benchmark_table(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
