@@ -1,0 +1,74 @@
+name: Run benchmark
+description: Run and publish an OpenVMM acceptance benchmark
+
+inputs:
+  backend:
+    description: OpenVMM backend to benchmark
+    required: true
+  platform:
+    description: Platform name used for results and artifacts
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download guest artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: guest-artifacts-${{ github.run_attempt }}
+        path: build
+
+    - name: Run Linux acceptance test
+      if: runner.os != 'Windows'
+      shell: bash
+      run: >-
+        python3 scripts/nvx.py benchmark --
+        --suite e2e
+        --backend "${{ inputs.backend }}"
+        --warmups 1
+        --runs 3
+        --skip-build
+        --output "build/benchmarks/${{ inputs.platform }}.json"
+
+    - name: Run Windows acceptance test
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: >-
+        python scripts\nvx.py benchmark --
+        --suite e2e
+        --backend "${{ inputs.backend }}"
+        --warmups 1
+        --runs 3
+        --skip-build
+        --output "build/benchmarks/${{ inputs.platform }}.json"
+
+    - name: Publish Linux benchmark results
+      if: runner.os != 'Windows'
+      shell: bash
+      run: >-
+        python3 scripts/performance.py collect-openvmm
+        --platform "${{ inputs.platform }}"
+        --commit "${GITHUB_SHA}"
+        --input "build/benchmarks/${{ inputs.platform }}.json"
+        --output-dir build/benchmarks
+        --summary "${GITHUB_STEP_SUMMARY}"
+
+    - name: Publish Windows benchmark results
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: >-
+        python scripts\performance.py collect-openvmm
+        --platform "${{ inputs.platform }}"
+        --commit $env:GITHUB_SHA
+        --input "build/benchmarks/${{ inputs.platform }}.json"
+        --output-dir build/benchmarks
+        --summary $env:GITHUB_STEP_SUMMARY
+
+    - name: Upload benchmark results
+      if: always() && hashFiles(format('build/benchmarks/{0}.json', inputs.platform)) != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-${{ inputs.platform }}-${{ github.run_attempt }}
+        path: build/benchmarks
+        if-no-files-found: error
+        overwrite: true

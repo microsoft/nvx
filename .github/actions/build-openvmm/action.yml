@@ -1,0 +1,88 @@
+name: Build OpenVMM
+description: Checkout and cache or build the pinned OpenVMM binary
+
+inputs:
+  ssh-key:
+    description: SSH deploy key used to checkout OpenVMM
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout OpenVMM
+      id: openvmm
+      uses: ./.github/actions/checkout-openvmm
+      with:
+        ssh-key: ${{ inputs.ssh-key }}
+
+    - name: Set up Windows cache tools
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: python scripts\nvx.py setup-cross-os-cache
+
+    - name: Resolve Linux Rust toolchain identity
+      if: runner.os != 'Windows'
+      id: rust-linux
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustc_sha="$(rustc -Vv | sed -n 's/^commit-hash: //p')"
+        test -n "${rustc_sha}"
+        echo "sha=${rustc_sha}" >> "${GITHUB_OUTPUT}"
+
+    - name: Resolve Windows Rust toolchain identity
+      if: runner.os == 'Windows'
+      id: rust-windows
+      shell: powershell
+      run: |
+        $rustcSha = (rustc -Vv | Select-String '^commit-hash:').Line.Split(':', 2)[1].Trim()
+        if ([string]::IsNullOrWhiteSpace($rustcSha)) {
+          throw 'rustc did not report a commit hash'
+        }
+        "sha=$rustcSha" |
+          Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Cache OpenVMM binary
+      id: cache-openvmm
+      uses: actions/cache@v5
+      with:
+        path: |
+          openvmm/target/release/openvmm
+          openvmm/target/release/openvmm.exe
+        key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust-linux.outputs.sha || steps.rust-windows.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
+
+    - name: Cache cargo
+      if: steps.cache-openvmm.outputs.cache-hit != 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          openvmm/target
+        key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+        restore-keys: |
+          cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+          cargo-${{ runner.os }}-
+
+    - name: Install Linux build dependencies
+      if: runner.os != 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          git libarchive-tools
+
+    - name: Build OpenVMM on Linux
+      if: runner.os != 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 scripts/nvx.py build-openvmm
+
+    - name: Build OpenVMM on Windows
+      if: runner.os == 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'
+      shell: powershell
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python scripts\nvx.py build-openvmm

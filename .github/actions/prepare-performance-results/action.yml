@@ -1,0 +1,32 @@
+name: Prepare performance results
+description: Download platform benchmarks and collect their p50 results
+
+runs:
+  using: composite
+  steps:
+    - name: Download Linux / KVM benchmark results
+      uses: actions/download-artifact@v4
+      with:
+        name: benchmark-linux-kvm-${{ github.run_attempt }}
+        path: performance-input/linux-kvm
+
+    - name: Download Windows / WHP benchmark results
+      uses: actions/download-artifact@v4
+      with:
+        name: benchmark-windows-whp-${{ github.run_attempt }}
+        path: performance-input/windows-whp
+
+    - name: Collect p50 results
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 scripts/performance.py collect-openvmm \
+          --platform linux-kvm \
+          --commit "${GITHUB_SHA}" \
+          --input performance-input/linux-kvm/linux-kvm.json \
+          --output-dir performance-results
+        python3 scripts/performance.py collect-openvmm \
+          --platform windows-whp \
+          --commit "${GITHUB_SHA}" \
+          --input performance-input/windows-whp/windows-whp.json \
+          --output-dir performance-results

@@ -28,17 +28,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve OpenVMM revision
-        id: openvmm
-        run: echo "sha=$(git rev-parse :openvmm)" >> "$GITHUB_OUTPUT"
-
       - name: Checkout OpenVMM
-        uses: actions/checkout@v5
+        uses: ./.github/actions/checkout-openvmm
         with:
-          repository: nanvix/openvmm
-          ref: ${{ steps.openvmm.outputs.sha }}
-          path: openvmm
-          persist-credentials: false
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
       - name: Validate runner
@@ -84,19 +76,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve OpenVMM revision
-        id: openvmm
-        run: echo "sha=$(git rev-parse :openvmm)" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout OpenVMM
-        uses: actions/checkout@v5
-        with:
-          repository: nanvix/openvmm
-          ref: ${{ steps.openvmm.outputs.sha }}
-          path: openvmm
-          persist-credentials: false
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
       - name: Validate runner
         run: |
           set -euo pipefail
@@ -106,81 +85,16 @@ jobs:
           test -r /dev/kvm
           test -w /dev/kvm
 
-      - name: Resolve Rust toolchain identity
-        id: rust
-        run: |
-          set -euo pipefail
-          rustc_sha="$(rustc -Vv | sed -n 's/^commit-hash: //p')"
-          test -n "${rustc_sha}"
-          echo "sha=${rustc_sha}" >> "${GITHUB_OUTPUT}"
-
-      - name: Cache OpenVMM binary
-        id: cache-openvmm
-        uses: actions/cache@v5
-        with:
-          path: openvmm/target/release/openvmm
-          key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
-
-      - name: Cache cargo
-        if: steps.cache-openvmm.outputs.cache-hit != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            openvmm/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            cargo-${{ runner.os }}-
-
-      - name: Download guest artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: guest-artifacts-${{ github.run_attempt }}
-          path: build
-
-      - name: Install OpenVMM build dependencies
-        if: steps.cache-openvmm.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            git libarchive-tools
-
       - name: Build OpenVMM
-        if: steps.cache-openvmm.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/nvx.py build-openvmm
-
-      - name: KVM acceptance test
-        run: >-
-          python3 scripts/nvx.py benchmark --
-          --suite e2e
-          --backend kvm
-          --warmups 1
-          --runs 3
-          --skip-build
-          --output build/benchmarks/linux-kvm.json
-
-      - name: Publish Linux / KVM benchmark results
-        run: >-
-          python3 scripts/performance.py collect-openvmm
-          --platform linux-kvm
-          --commit "${GITHUB_SHA}"
-          --input build/benchmarks/linux-kvm.json
-          --output-dir build/benchmarks
-          --summary "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload Linux / KVM benchmark results
-        if: always() && hashFiles('build/benchmarks/linux-kvm.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/build-openvmm
         with:
-          name: benchmark-linux-kvm-${{ github.run_attempt }}
-          path: build/benchmarks
-          if-no-files-found: error
-          overwrite: true
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Run Linux / KVM benchmark
+        uses: ./.github/actions/run-benchmark
+        with:
+          backend: kvm
+          platform: linux-kvm
 
   windows:
     name: Windows / WHP
@@ -196,33 +110,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve OpenVMM revision
-        id: openvmm
-        run: |
-          "sha=$(git rev-parse :openvmm)" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Resolve checkout identity
-        id: checkout-identity
-        run: |
-          $domain, $username = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\', 2
-          "domain=$domain" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "username=$username" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Checkout OpenVMM
-        uses: actions/checkout@v5
-        env:
-          USERDOMAIN: ${{ steps.checkout-identity.outputs.domain }}
-          USERNAME: ${{ steps.checkout-identity.outputs.username }}
-        with:
-          repository: nanvix/openvmm
-          ref: ${{ steps.openvmm.outputs.sha }}
-          path: openvmm
-          persist-credentials: false
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
       - name: Validate runner
         run: |
           python --version
@@ -234,78 +121,16 @@ jobs:
           python -m compileall -q scripts benchmarks
           python -m unittest scripts/test_performance.py scripts/test_flamegraph.py -v
 
-      - name: Set up cache tools
-        run: python scripts\nvx.py setup-cross-os-cache
-
-      - name: Resolve Rust toolchain identity
-        id: rust
-        run: |
-          $rustcSha = (rustc -Vv | Select-String '^commit-hash:').Line.Split(':', 2)[1].Trim()
-          if ([string]::IsNullOrWhiteSpace($rustcSha)) {
-            throw 'rustc did not report a commit hash'
-          }
-          "sha=$rustcSha" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Cache OpenVMM binary
-        id: cache-openvmm
-        uses: actions/cache@v5
-        with:
-          path: openvmm/target/release/openvmm.exe
-          key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
-
-      - name: Cache cargo
-        if: steps.cache-openvmm.outputs.cache-hit != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            openvmm/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            cargo-${{ runner.os }}-
-
-      - name: Download guest artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: guest-artifacts-${{ github.run_attempt }}
-          path: build
-
       - name: Build OpenVMM
-        if: steps.cache-openvmm.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python scripts\nvx.py build-openvmm
-
-      - name: WHP acceptance test
-        run: >-
-          python scripts\nvx.py benchmark --
-          --suite e2e
-          --backend whp
-          --warmups 1
-          --runs 3
-          --skip-build
-          --output build\benchmarks\windows-whp.json
-
-      - name: Publish Windows / WHP benchmark results
-        run: >-
-          python scripts\performance.py collect-openvmm
-          --platform windows-whp
-          --commit $env:GITHUB_SHA
-          --input build\benchmarks\windows-whp.json
-          --output-dir build\benchmarks
-          --summary $env:GITHUB_STEP_SUMMARY
-
-      - name: Upload Windows / WHP benchmark results
-        if: always() && hashFiles('build/benchmarks/windows-whp.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/build-openvmm
         with:
-          name: benchmark-windows-whp-${{ github.run_attempt }}
-          path: build/benchmarks
-          if-no-files-found: error
-          overwrite: true
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Run Windows / WHP benchmark
+        uses: ./.github/actions/run-benchmark
+        with:
+          backend: whp
+          platform: windows-whp
 
   performance-gate:
     name: Performance regression gate
@@ -325,31 +150,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Download Linux / KVM benchmark results
-        uses: actions/download-artifact@v4
-        with:
-          name: benchmark-linux-kvm-${{ github.run_attempt }}
-          path: performance-input/linux-kvm
-
-      - name: Download Windows / WHP benchmark results
-        uses: actions/download-artifact@v4
-        with:
-          name: benchmark-windows-whp-${{ github.run_attempt }}
-          path: performance-input/windows-whp
-
-      - name: Collect p50 results
-        run: |
-          set -euo pipefail
-          python3 scripts/performance.py collect-openvmm \
-            --platform linux-kvm \
-            --commit "${GITHUB_SHA}" \
-            --input performance-input/linux-kvm/linux-kvm.json \
-            --output-dir performance-results
-          python3 scripts/performance.py collect-openvmm \
-            --platform windows-whp \
-            --commit "${GITHUB_SHA}" \
-            --input performance-input/windows-whp/windows-whp.json \
-            --output-dir performance-results
+      - name: Prepare performance results
+        uses: ./.github/actions/prepare-performance-results
 
       - name: Load base branch performance history
         env:
@@ -407,31 +209,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Download Linux / KVM benchmark results
-        uses: actions/download-artifact@v4
-        with:
-          name: benchmark-linux-kvm-${{ github.run_attempt }}
-          path: performance-input/linux-kvm
-
-      - name: Download Windows / WHP benchmark results
-        uses: actions/download-artifact@v4
-        with:
-          name: benchmark-windows-whp-${{ github.run_attempt }}
-          path: performance-input/windows-whp
-
-      - name: Collect p50 results
-        run: |
-          set -euo pipefail
-          python3 scripts/performance.py collect-openvmm \
-            --platform linux-kvm \
-            --commit "${GITHUB_SHA}" \
-            --input performance-input/linux-kvm/linux-kvm.json \
-            --output-dir performance-results
-          python3 scripts/performance.py collect-openvmm \
-            --platform windows-whp \
-            --commit "${GITHUB_SHA}" \
-            --input performance-input/windows-whp/windows-whp.json \
-            --output-dir performance-results
+      - name: Prepare performance results
+        uses: ./.github/actions/prepare-performance-results
 
       - name: Persist results on main
         run: |
