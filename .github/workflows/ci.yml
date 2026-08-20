@@ -125,6 +125,8 @@ jobs:
             git libarchive-tools
 
       - name: Build OpenVMM
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/nvx.py build-openvmm
 
       - name: KVM acceptance test
@@ -215,6 +217,8 @@ jobs:
           path: build
 
       - name: Build OpenVMM
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py build-openvmm
 
       - name: WHP acceptance test
