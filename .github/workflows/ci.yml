@@ -36,6 +36,14 @@ jobs:
           persist-credentials: false
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc binutils bison build-essential ca-certificates cpio curl flex gzip \
+            libelf-dev libssl-dev python3 rsync tar xz-utils
+
       - name: Validate runner
         run: |
           set -euo pipefail
