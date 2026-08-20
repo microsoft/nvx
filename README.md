@@ -72,6 +72,14 @@ sudo usermod -aG kvm "$USER"
 Log out and back in after changing groups, then check access with
 `test -r /dev/kvm && test -w /dev/kvm`.
 
+## Continuous integration
+
+The GitHub Actions workflow builds guest artifacts on Linux, then builds and
+exercises OpenVMM on self-hosted runners labeled `linux, kvm` and
+`windows, whp`. Configure an Actions secret named `OPENVMM_TOKEN` with
+read-only access to both `nanvix/nvx` and the private `nanvix/openvmm`
+submodule. The runners require the platform prerequisites listed above.
+
 ## Build
 
 The portable workflow downloads the pinned Linux archive, verifies its

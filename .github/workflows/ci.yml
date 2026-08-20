@@ -1,0 +1,190 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    name: Build guest artifacts
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+          token: ${{ secrets.OPENVMM_TOKEN }}
+
+      - name: Validate runner
+        run: |
+          set -euo pipefail
+          python3 --version
+          test -r /dev/kvm
+          test -w /dev/kvm
+
+      - name: Validate Python tooling
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q scripts benchmarks
+          python3 -m unittest scripts/test_performance.py scripts/test_flamegraph.py -v
+
+      - name: Verify source pins
+        run: python3 scripts/nvx.py verify
+
+      - name: Cache Linux guest build
+        uses: actions/cache@v5
+        with:
+          path: |
+            .cache/linux
+            build/linux
+          key: linux-guest-${{ hashFiles('SOURCE-MANIFEST.json', 'kernel/**', 'scripts/nvx.py', 'scripts/nvx_tools/build.py') }}
+
+      - name: Build guest artifacts
+        run: python3 scripts/nvx.py build-guest --native
+
+      - name: Upload guest artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-artifacts-${{ github.run_attempt }}
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          if-no-files-found: error
+          overwrite: true
+
+  linux:
+    name: Linux / KVM
+    needs: artifacts
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+          token: ${{ secrets.OPENVMM_TOKEN }}
+
+      - name: Validate runner
+        run: |
+          set -euo pipefail
+          python3 --version
+          rustc --version
+          cargo --version
+          test -r /dev/kvm
+          test -w /dev/kvm
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            openvmm/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Download guest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-artifacts-${{ github.run_attempt }}
+          path: build
+
+      - name: Build OpenVMM
+        run: python3 scripts/nvx.py build-openvmm
+
+      - name: KVM acceptance test
+        run: >-
+          python3 scripts/nvx.py benchmark --
+          --suite e2e
+          --backend kvm
+          --warmups 1
+          --runs 3
+          --skip-build
+          --output build/benchmarks/linux-kvm.json
+
+      - name: Upload KVM results
+        if: always() && hashFiles('build/benchmarks/linux-kvm.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-linux-kvm-${{ github.run_attempt }}
+          path: build/benchmarks/linux-kvm.json
+          if-no-files-found: error
+          overwrite: true
+
+  windows:
+    name: Windows / WHP
+    needs: artifacts
+    runs-on: [self-hosted, windows, whp]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+          token: ${{ secrets.OPENVMM_TOKEN }}
+
+      - name: Validate runner
+        run: |
+          python --version
+          rustc --version
+          cargo --version
+
+      - name: Validate Python tooling
+        run: |
+          python -m compileall -q scripts benchmarks
+          python -m unittest scripts/test_performance.py scripts/test_flamegraph.py -v
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            openvmm/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Download guest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-artifacts-${{ github.run_attempt }}
+          path: build
+
+      - name: Build OpenVMM
+        run: python scripts\nvx.py build-openvmm
+
+      - name: WHP acceptance test
+        run: >-
+          python scripts\nvx.py benchmark --
+          --suite e2e
+          --backend whp
+          --warmups 1
+          --runs 3
+          --skip-build
+          --output build\benchmarks\windows-whp.json
+
+      - name: Upload WHP results
+        if: always() && hashFiles('build/benchmarks/windows-whp.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-windows-whp-${{ github.run_attempt }}
+          path: build/benchmarks/windows-whp.json
+          if-no-files-found: error
+          overwrite: true
