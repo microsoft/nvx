@@ -117,6 +117,13 @@ jobs:
           name: guest-artifacts-${{ github.run_attempt }}
           path: build
 
+      - name: Install OpenVMM build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git libarchive-tools
+
       - name: Build OpenVMM
         run: python3 scripts/nvx.py build-openvmm
 
@@ -159,8 +166,20 @@ jobs:
           "sha=$(git rev-parse :openvmm)" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+      - name: Resolve checkout identity
+        id: checkout-identity
+        run: |
+          $domain, $username = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\', 2
+          "domain=$domain" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "username=$username" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Checkout OpenVMM
         uses: actions/checkout@v5
+        env:
+          USERDOMAIN: ${{ steps.checkout-identity.outputs.domain }}
+          USERNAME: ${{ steps.checkout-identity.outputs.username }}
         with:
           repository: nanvix/openvmm
           ref: ${{ steps.openvmm.outputs.sha }}
