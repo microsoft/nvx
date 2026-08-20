@@ -106,7 +106,23 @@ jobs:
           test -r /dev/kvm
           test -w /dev/kvm
 
+      - name: Resolve Rust toolchain identity
+        id: rust
+        run: |
+          set -euo pipefail
+          rustc_sha="$(rustc -Vv | sed -n 's/^commit-hash: //p')"
+          test -n "${rustc_sha}"
+          echo "sha=${rustc_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache OpenVMM binary
+        id: cache-openvmm
+        uses: actions/cache@v5
+        with:
+          path: openvmm/target/release/openvmm
+          key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
+
       - name: Cache cargo
+        if: steps.cache-openvmm.outputs.cache-hit != 'true'
         uses: actions/cache@v5
         with:
           path: |
@@ -125,6 +141,7 @@ jobs:
           path: build
 
       - name: Install OpenVMM build dependencies
+        if: steps.cache-openvmm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -132,6 +149,7 @@ jobs:
             git libarchive-tools
 
       - name: Build OpenVMM
+        if: steps.cache-openvmm.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/nvx.py build-openvmm
@@ -219,7 +237,25 @@ jobs:
       - name: Set up cache tools
         run: python scripts\nvx.py setup-cross-os-cache
 
+      - name: Resolve Rust toolchain identity
+        id: rust
+        run: |
+          $rustcSha = (rustc -Vv | Select-String '^commit-hash:').Line.Split(':', 2)[1].Trim()
+          if ([string]::IsNullOrWhiteSpace($rustcSha)) {
+            throw 'rustc did not report a commit hash'
+          }
+          "sha=$rustcSha" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Cache OpenVMM binary
+        id: cache-openvmm
+        uses: actions/cache@v5
+        with:
+          path: openvmm/target/release/openvmm.exe
+          key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
+
       - name: Cache cargo
+        if: steps.cache-openvmm.outputs.cache-hit != 'true'
         uses: actions/cache@v5
         with:
           path: |
@@ -238,6 +274,7 @@ jobs:
           path: build
 
       - name: Build OpenVMM
+        if: steps.cache-openvmm.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py build-openvmm
