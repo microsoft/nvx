@@ -76,9 +76,9 @@ Log out and back in after changing groups, then check access with
 
 The GitHub Actions workflow builds guest artifacts on Linux, then builds and
 exercises OpenVMM on self-hosted runners labeled `linux, kvm` and
-`windows, whp`. Configure an Actions secret named `OPENVMM_TOKEN` with
-read-only access to both `nanvix/nvx` and the private `nanvix/openvmm`
-submodule. The runners require the platform prerequisites listed above.
+`windows, whp`. It uses the read-only OpenVMM deploy key stored in the
+`OPENVMM_DEPLOY_KEY` Actions secret to fetch the private submodule at its
+pinned commit. The runners require the platform prerequisites listed above.
 
 ## Build
 
