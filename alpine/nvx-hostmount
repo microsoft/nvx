@@ -1,0 +1,16 @@
+#!/bin/sh
+
+vtag=$(sed -n 's/.*virtfs_tag=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$vtag" ] || exit 0
+
+vdir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$vdir" ] || vdir=/mnt/host
+vmode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$vmode" ] || vmode=ro
+
+mkdir -p "$vdir"
+if ! mount -t virtiofs -o "$vmode" "$vtag" "$vdir" 2>/dev/null; then
+    echo "virtfs: failed to mount tag $vtag at $vdir" >&2
+    exit 1
+fi
+echo "virtfs: mounted live host directory at $vdir (virtiofs,$vmode)"

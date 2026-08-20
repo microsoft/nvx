@@ -1,0 +1,11 @@
+.git
+.github
+.cache
+.venv
+benchmarks
+build
+dist
+openvmm
+third_party
+**/__pycache__
+**/*.pyc

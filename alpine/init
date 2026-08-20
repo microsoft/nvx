@@ -1,0 +1,258 @@
+#!/bin/sh
+# PID 1 for the RAM initramfs. Mounts the pseudo-filesystems, prints a recognizable
+# boot-completion banner (used as the cold-start marker), and drops to an interactive shell.
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev 2>/dev/null || mdev -s
+mount -t tmpfs none /tmp
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+ifconfig lo 127.0.0.1 up
+
+fatal() {
+    echo "$*" >&2
+    /bin/busybox reboot -f
+    exit 1
+}
+nvx_snapshot_before_exec=$(sed -n 's/.*nvx_snapshot_before_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
+nvx_exec=$(sed -n 's/.*nvx_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
+mount_virtfs() {
+    /sbin/nvx-hostmount || fatal "virtfs: failed to mount live host directory"
+}
+# Run-once workloads mount from their prepared dispatcher so cold and restore
+# cross the same pre-dispatch boundary.
+if [ -z "$nvx_exec" ]; then
+    mount_virtfs
+fi
+# virt-net: if --net attached a NIC, configure the only non-loopback interface.
+nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$nip" ]; then
+    nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ngw=$(sed -n 's/.*virtnet_gw=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ndns=$(sed -n 's/.*virtnet_dns=\([^ ]*\).*/\1/p' /proc/cmdline)
+    virtnet_error() {
+        echo "virtnet: $*" >&2
+    }
+
+    ndev=
+    tries=0
+    while [ "$tries" -lt 600 ] && [ -z "$ndev" ]; do
+        for npath in /sys/class/net/*; do
+            [ -e "$npath" ] || continue
+            candidate=${npath##*/}
+            [ "$candidate" = lo ] && continue
+            ndev=$candidate
+            break
+        done
+        [ -n "$ndev" ] || sleep 0.05
+        tries=$((tries + 1))
+    done
+    if [ -z "$ndev" ]; then
+        virtnet_error "no network interface found after 30s"
+    else
+        [ -n "$nmask" ] || nmask=255.255.255.0
+        if ! ifconfig "$ndev" "$nip" netmask "$nmask" up; then
+            virtnet_error "failed to configure $ndev as $nip/$nmask"
+        fi
+        if [ -n "$ngw" ]; then
+            route del default dev "$ndev" 2>/dev/null
+            route add -host "$ngw" dev "$ndev" 2>/dev/null
+            if ! route add default gw "$ngw" dev "$ndev"; then
+                virtnet_error "failed to install standalone default route via $ngw"
+            fi
+        fi
+
+        if [ -n "$ndns" ]; then
+            if ! : > /etc/resolv.conf; then
+                virtnet_error "failed to replace /etc/resolv.conf"
+            fi
+            oldifs=$IFS
+            IFS=,
+            for server in $ndns; do
+                if [ -n "$server" ]; then
+                    if ! printf 'nameserver %s\n' "$server" >> /etc/resolv.conf; then
+                        virtnet_error "failed to write DNS server $server"
+                    fi
+                fi
+            done
+            IFS=$oldifs
+        fi
+
+        nprobe=$(sed -n 's/.*virtnet_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
+        if [ -n "$nprobe" ]; then
+            if ping -c 1 -W 1 "$nprobe" >/tmp/virtnet-probe.log 2>&1; then
+                echo "VIRTNET-PROBE-OK: $nprobe"
+            else
+                cat /tmp/virtnet-probe.log >&2
+                echo "VIRTNET-PROBE-FAIL: $nprobe" >&2
+            fi
+        fi
+        echo "VIRTNET-OK: configured $ndev as $nip/$nmask"
+    fi
+fi
+# run-once: execute a mounted shell script and report its status through the VMM control port.
+if [ -n "$nvx_exec" ]; then
+    if [ "$nvx_snapshot_before_exec" = 1 ]; then
+        /bin/sh /snapshot-dispatcher.sh --pause "$nvx_exec" &
+        nvx_dispatcher_pid=$!
+        nvx_dispatcher_state=
+        nvx_dispatcher_tries=0
+        while [ "$nvx_dispatcher_tries" -lt 500 ]; do
+            if read -r _ _ nvx_dispatcher_state _ < "/proc/$nvx_dispatcher_pid/stat"; then
+                [ "$nvx_dispatcher_state" = T ] && break
+            else
+                fatal "nvx: dispatcher exited before the snapshot rendezvous"
+            fi
+            nvx_dispatcher_tries=$((nvx_dispatcher_tries + 1))
+            sleep 0.01
+        done
+        [ "$nvx_dispatcher_state" = T ] ||
+            fatal "nvx: dispatcher did not reach the snapshot rendezvous"
+        /sbin/nvx-snapshot
+        kill -CONT "$nvx_dispatcher_pid" ||
+            fatal "nvx: failed to resume dispatcher after restore"
+        wait "$nvx_dispatcher_pid"
+        nvx_status=$?
+    else
+        /bin/sh /snapshot-dispatcher.sh "$nvx_exec"
+        nvx_status=$?
+    fi
+    /bin/busybox sync
+    /sbin/nvx-exit "$nvx_status"
+    echo "nvx: failed to stop VM after workload exit" >&2
+    /bin/busybox reboot -f
+    exit "$nvx_status"
+fi
+# netsnap: optional snapshot self-test/benchmark for --net (see `scripts/nvx.py bench-net-snapshot`).
+# When the kernel command line contains "netsnap", check the link, then ask the VMM to take a
+# snapshot through /sbin/nvx-snapshot. On the snapshot run the VMM captures here
+# and exits; on a later restore, execution resumes at the next line -- so the guest re-checks the
+# link (now over the freshly rebuilt backend) and prints a marker the benchmark greps for.
+#
+# The check is a single sysfs read of the NIC's carrier, deliberately lighter than fork/exec-ing
+# `ping`: the benchmark only needs to confirm the link resumed, and the ~60 ms of ping process
+# startup would otherwise dominate the restore-to-marker time (round-trips over the link are
+# sub-millisecond). The `link_up` function is defined before the snapshot point, so it is part of
+# the captured shell state and is still available when execution resumes on restore.
+case " $(cat /proc/cmdline) " in
+    *" netsnap "*)
+        linkdev="${ndev:-eth0}"
+        link_up() { read -r c 2>/dev/null < "/sys/class/net/$linkdev/carrier" && [ "$c" = 1 ]; }
+        link_up && echo "netsnap: pre-snapshot link OK" || echo "netsnap: pre-snapshot link FAIL"
+        ntcp=$(sed -n 's/.*netsnap_tcp=\([^ ]*\).*/\1/p' /proc/cmdline)
+        if [ -n "$ntcp" ]; then
+            nthost=${ntcp%:*}
+            ntport=${ntcp##*:}
+            rm -f /tmp/netsnap-tcp.in /tmp/netsnap-tcp.out
+            : > /tmp/netsnap-tcp.in
+            follow_tcp_input() {
+                next_line=1
+                while :; do
+                    line=$(sed -n "${next_line}p" /tmp/netsnap-tcp.in)
+                    if [ -n "$line" ]; then
+                        printf '%s\n' "$line"
+                        next_line=$((next_line + 1))
+                    else
+                        sleep 0.05
+                    fi
+                done
+            }
+            follow_tcp_input |
+                nc "$nthost" "$ntport" >/tmp/netsnap-tcp.out 2>&1 &
+            ncpid=$!
+            wait_for_tcp_ack() {
+                marker=$1
+                attempts=0
+                while [ "$attempts" -lt 5 ]; do
+                    grep -q "^ACK:$marker$" /tmp/netsnap-tcp.out && return 0
+                    kill -0 "$ncpid" 2>/dev/null || return 1
+                    attempts=$((attempts + 1))
+                    sleep 1
+                done
+                return 1
+            }
+            echo PRE >> /tmp/netsnap-tcp.in
+            if wait_for_tcp_ack PRE; then
+                echo "netsnap: pre-snapshot TCP OK ($ntcp)"
+            else
+                echo "netsnap: pre-snapshot TCP FAIL ($ntcp)" >&2
+            fi
+        fi
+        ntxflood=$(sed -n 's/.*netsnap_tx_flood=\([^ ]*\).*/\1/p' /proc/cmdline)
+        if [ -n "$ntxflood" ]; then
+            ping -i 0.01 "$ntxflood" >/tmp/netsnap-tx-flood.log 2>&1 &
+            ntxpid=$!
+            sleep 1
+            if kill -0 "$ntxpid" 2>/dev/null; then
+                echo "netsnap: active TX flood running ($ntxflood)"
+            else
+                cat /tmp/netsnap-tx-flood.log >&2
+                echo "netsnap: active TX flood failed ($ntxflood)" >&2
+                ntxpid=
+            fi
+        fi
+        /sbin/nvx-snapshot
+        # ---- on restore, execution resumes here ----
+        if link_up; then
+            if [ -n "$nprobe" ]; then
+                if ping -c 1 -W 1 "$nprobe" >/tmp/netsnap-restore-probe.log 2>&1; then
+                    echo "NETSNAP-RESTORE-PROBE-OK: $nprobe"
+                    echo "NETSNAP-RESTORE-OK"
+                else
+                    cat /tmp/netsnap-restore-probe.log >&2
+                    echo "NETSNAP-RESTORE-PROBE-FAIL: $nprobe" >&2
+                    echo "NETSNAP-RESTORE-FAIL"
+                fi
+            else
+                echo "NETSNAP-RESTORE-OK"
+            fi
+        else
+            echo "NETSNAP-RESTORE-FAIL"
+        fi
+        if [ -n "$ntxpid" ]; then
+            kill "$ntxpid" 2>/dev/null
+            wait "$ntxpid" 2>/dev/null
+            echo "NETSNAP-ACTIVE-TX-RESTORE-OK: $ntxflood"
+        fi
+        if [ -n "$ntcp" ]; then
+            echo POST >> /tmp/netsnap-tcp.in
+            if wait_for_tcp_ack POST; then
+                echo "NETSNAP-TCP-RESTORE-OK: $ntcp"
+            else
+                cat /tmp/netsnap-tcp.out >&2
+                echo "NETSNAP-TCP-RESTORE-FAIL: $ntcp" >&2
+            fi
+            wait "$ncpid" 2>/dev/null
+        fi
+        ;;
+esac
+# shellsnap: optional cold-vs-snapshot benchmark for the plain shell (see
+# `scripts/nvx.py bench-snapshot-shell`). When the kernel command line contains "shellsnap", ask the VMM
+# to take a snapshot through /sbin/nvx-snapshot just before the boot banner below.
+# On the snapshot run the VMM captures here and exits; on a later restore, execution resumes at the
+# next line and falls through to the banner -- the same marker the benchmark times on a cold boot.
+# On a plain cold boot (no --snapshot) the VMM ignores the write, so this stays a no-op.
+case " $(cat /proc/cmdline) " in
+    *" shellsnap "*)
+        /sbin/nvx-snapshot
+        # ---- on restore, execution resumes here ----
+        ;;
+esac
+echo
+echo "=========================================="
+echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
+echo " uname: $(uname -a)"
+echo "=========================================="
+echo
+# snap: optional snapshot benchmark for a plain (non-networked) shell (see the shell-snapshot
+# benchmark). When the kernel command line contains "snap", ask the VMM to take a snapshot at
+# this fully-booted, shell-ready point through /sbin/nvx-snapshot. On the
+# snapshot run the VMM captures here and exits; on a later restore, execution resumes at the next
+# line and the guest prints a marker the benchmark greps for before dropping to the shell.
+case " $(cat /proc/cmdline) " in
+    *" snap "*)
+        /sbin/nvx-snapshot
+        # ---- on restore, execution resumes here ----
+        echo "SNAP-RESTORE-OK"
+        ;;
+esac
+exec /bin/sh

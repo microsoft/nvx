@@ -1,0 +1,7 @@
+* text=auto
+
+*.md text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf

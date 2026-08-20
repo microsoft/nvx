@@ -1,0 +1,164 @@
+#!/bin/sh
+# PID 1 for the NVX Python initramfs, shared by the full and the minimal agent images.
+#
+# `nvx_mode=<agent|hostfs|app>` selects where the workload comes from:
+#   agent  - the snapshot-resident agent reads it from the host over the workload channel
+#   hostfs - it is read from the host directory exported with `--mount`
+#   app    - it is baked into the image
+# `pyapp=<file>` names the workload for the hostfs and app modes, and `nvx_snapshot=1` routes it
+# through the trampoline. `nvx_python_warmup=1` optionally warms pandas/NumPy before snapshotting.
+# A host filesystem is attached only once the snapshot resumes, so one snapshot serves any workload.
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev 2>/dev/null || mdev -s
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+umask 022
+ifconfig lo 127.0.0.1 up
+
+fatal() {
+    echo "$*" >&2
+    /bin/busybox reboot -f
+    exit 1
+}
+
+nvx_mode=$(sed -n 's/.*nvx_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
+nvx_snapshot=$(sed -n 's/.*nvx_snapshot=\([^ ]*\).*/\1/p' /proc/cmdline)
+nvx_python_warmup=$(sed -n 's/.*nvx_python_warmup=\([^ ]*\).*/\1/p' /proc/cmdline)
+pyapp=$(sed -n 's/.*pyapp=\([^ ]*\).*/\1/p' /proc/cmdline)
+nvx_exec=$(sed -n 's/.*nvx_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
+nvx_snapshot_before_exec=$(sed -n 's/.*nvx_snapshot_before_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
+virtfs_tag=$(sed -n 's/.*virtfs_tag=\([^ ]*\).*/\1/p' /proc/cmdline)
+virtfs_dir=$(sed -n 's/.*virtfs_dir=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$virtfs_dir" ] || virtfs_dir=/mnt/host
+virtfs_mode=$(sed -n 's/.*virtfs_mode=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$virtfs_mode" ] || virtfs_mode=ro
+
+case "$nvx_mode" in
+    agent)
+        [ "$nvx_snapshot" != 1 ] ||
+            fatal "nvx: agent mode snapshots itself; drop nvx_snapshot=1"
+        [ -z "$nvx_exec" ] || fatal "nvx: agent mode does not support nvx_exec"
+        ;;
+    hostfs)
+        [ -n "$virtfs_tag" ] ||
+            fatal "nvx: hostfs mode requires a host filesystem; boot the VM with --mount"
+        [ -n "$pyapp" ] || fatal "nvx: hostfs mode requires pyapp=<file>"
+        ;;
+    app)
+        [ -n "$pyapp" ] || fatal "nvx: app mode requires pyapp=<file>"
+        ;;
+    *)
+        [ -n "$nvx_exec" ] ||
+            fatal "nvx: unsupported or missing nvx_mode: ${nvx_mode:-<empty>}"
+        ;;
+esac
+
+mount_virtfs() {
+    if [ -n "$virtfs_tag" ]; then
+        mkdir -p "$virtfs_dir"
+        if ! mount -t virtiofs -o "$virtfs_mode" "$virtfs_tag" "$virtfs_dir" 2>/dev/null; then
+            if [ -n "$nvx_exec" ]; then
+                /sbin/nvx-exit 126
+            fi
+            fatal "virtfs: failed to mount tag $virtfs_tag at $virtfs_dir"
+        fi
+    fi
+}
+
+# Both snapshot routes defer the mount so each restore can be handed a different host directory.
+if [ "$nvx_snapshot_before_exec" != 1 ] && [ "$nvx_snapshot" != 1 ]; then
+    mount_virtfs
+fi
+
+# virt-net: configure the standalone --net interface before Python.
+nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$nip" ]; then
+    nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ngw=$(sed -n 's/.*virtnet_gw=\([^ ]*\).*/\1/p' /proc/cmdline)
+    ndns=$(sed -n 's/.*virtnet_dns=\([^ ]*\).*/\1/p' /proc/cmdline)
+    virtnet_error() {
+        echo "virtnet: $*" >&2
+    }
+
+    ndev=
+    tries=0
+    while [ "$tries" -lt 600 ] && [ -z "$ndev" ]; do
+        for npath in /sys/class/net/*; do
+            [ -e "$npath" ] || continue
+            candidate=${npath##*/}
+            [ "$candidate" = lo ] && continue
+            ndev=$candidate
+            break
+        done
+        [ -n "$ndev" ] || sleep 0.05
+        tries=$((tries + 1))
+    done
+    if [ -n "$ndev" ]; then
+        [ -n "$nmask" ] || nmask=255.255.255.0
+        if ! ifconfig "$ndev" "$nip" netmask "$nmask" up; then
+            virtnet_error "failed to configure $ndev as $nip/$nmask"
+        fi
+        if [ -n "$ngw" ]; then
+            route del default dev "$ndev" 2>/dev/null
+            route add -host "$ngw" dev "$ndev" 2>/dev/null
+            if ! route add default gw "$ngw" dev "$ndev"; then
+                virtnet_error "failed to install standalone default route via $ngw"
+            fi
+        fi
+
+        if [ -n "$ndns" ]; then
+            if ! : > /etc/resolv.conf; then
+                virtnet_error "failed to replace /etc/resolv.conf"
+            fi
+            oldifs=$IFS
+            IFS=,
+            for server in $ndns; do
+                if [ -n "$server" ] && ! printf 'nameserver %s\n' "$server" >> /etc/resolv.conf; then
+                    virtnet_error "failed to write DNS server $server"
+                fi
+            done
+            IFS=$oldifs
+        fi
+        echo "VIRTNET-OK: configured $ndev as $nip/$nmask"
+    else
+        virtnet_error "no network interface found after 30s"
+    fi
+fi
+
+if [ "$nvx_snapshot_before_exec" = 1 ]; then
+    /sbin/nvx-snapshot
+    mount_virtfs
+fi
+
+if [ -n "$nvx_exec" ]; then
+    printf 'NVX-EXEC-START'
+    if [ ! -f "$nvx_exec" ]; then
+        echo "nvx: executable script not found: $nvx_exec" >&2
+        /sbin/nvx-exit 127
+    fi
+    /bin/sh "$nvx_exec"
+    nvx_status=$?
+    /bin/busybox sync
+    /sbin/nvx-exit "$nvx_status"
+    echo "nvx: failed to stop VM after workload exit" >&2
+    /bin/busybox reboot -f
+    exit "$nvx_status"
+fi
+
+case "$nvx_mode" in
+    agent)
+        # The agent opens the workload channel, snapshots itself, then runs the host's script.
+        exec python3 /mxc-agent.py
+        ;;
+    hostfs) pyapp_path="$virtfs_dir/$pyapp" ;;
+    app) pyapp_path="/$pyapp" ;;
+esac
+
+# Do not prepend the app's directory to sys.path; names such as pandas.py must not shadow packages.
+if [ "$nvx_snapshot" = 1 ]; then
+    set --
+    [ -z "$virtfs_tag" ] || set -- --mount "$virtfs_tag" "$virtfs_dir" "$virtfs_mode"
+    [ "$nvx_python_warmup" != 1 ] || set -- "$@" --warmup
+    exec python3 -P /snapshot-trampoline.py "$@" "$pyapp_path"
+fi
+exec python3 -P "$pyapp_path"
