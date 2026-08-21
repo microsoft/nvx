@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 import gzip
 import hashlib
 import json
@@ -15,6 +16,14 @@ import subprocess
 import sys
 import tarfile
 
+from nvx_tools.collect_alpine_sources import (
+    collect_alpine_sources,
+    configure_parser as configure_alpine_sources_parser,
+)
+from nvx_tools.create_linux_source_archive import (
+    configure_parser as configure_linux_source_archive_parser,
+)
+from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.build import (
     AlpineBuildConfig,
     DEFAULT_ALPINE_BRANCH,
@@ -237,7 +246,7 @@ def _validate_alpine_sources(package_manifests: list[Path]) -> None:
         (package["package"], package["version"], package["commit"]): package
         for package in source_manifest["packages"]
     }
-    missing = []
+    missing: list[str] = []
     for manifest_path in package_manifests:
         package_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         for package in package_manifest["packages"]:
@@ -379,21 +388,18 @@ def _guest_release_inputs() -> tuple[list[str], list[Path]]:
     )
     for name in required_guest_names:
         _require_file(_artifact(name), f"required guest artifact {name}")
-    guest_names = list(required_guest_names)
+    guest_names: list[str] = list(required_guest_names)
     package_manifests = [_artifact("initramfs.cpio.gz.packages.json")]
     return guest_names, package_manifests
 
 
-def command_collect_sources(_: argparse.Namespace) -> None:
-    _, package_manifests = _guest_release_inputs()
-    collector = [
-        sys.executable,
-        REPO_ROOT / "scripts" / "collect_alpine_sources.py",
-        *package_manifests,
-        "--output",
+def command_collect_sources(_args: argparse.Namespace) -> None:
+    _guest_names, package_manifests = _guest_release_inputs()
+    collect_alpine_sources(
+        package_manifests,
         SOURCE_DIR / "alpine",
-    ]
-    _run(collector)
+        REPO_ROOT / ".cache" / "aports",
+    )
     build_docker_linux_source(
         DockerBuildConfig(destination=SOURCE_DIR / "linux")
     )
@@ -562,7 +568,7 @@ def _add_guest_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -615,11 +621,29 @@ def parse_args() -> argparse.Namespace:
     )
     configure_benchmark_parser(benchmark, REPO_ROOT)
 
+    performance = subparsers.add_parser(
+        "performance",
+        help="collect, persist, and gate CI performance results",
+    )
+    configure_performance_parser(performance)
+
     sources = subparsers.add_parser(
         "collect-sources",
         help="materialize verified Linux and Alpine release-source artifacts",
     )
     sources.set_defaults(handler=command_collect_sources)
+
+    alpine_sources = subparsers.add_parser(
+        "collect-alpine-sources",
+        help="collect exact Alpine recipes and upstream sources",
+    )
+    configure_alpine_sources_parser(alpine_sources)
+
+    linux_source_archive = subparsers.add_parser(
+        "create-linux-source-archive",
+        help="create the Linux corresponding-source archive from pinned inputs",
+    )
+    configure_linux_source_archive_parser(linux_source_archive)
 
     package = subparsers.add_parser("package", help="stage a binary distribution")
     package.add_argument("--version")
@@ -636,13 +660,13 @@ def parse_args() -> argparse.Namespace:
 
     verify = subparsers.add_parser("verify", help="verify source and submodule inputs")
     verify.set_defaults(handler=command_verify)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
     try:
-        args.handler(args)
+        result = args.handler(args)
     except KeyboardInterrupt:
         print("Interrupted", file=sys.stderr)
         return 130
@@ -655,7 +679,7 @@ def main() -> int:
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    return 0
+    return result if result is not None else 0
 
 
 if __name__ == "__main__":

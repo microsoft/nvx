@@ -254,7 +254,7 @@ jobs:
 
       - name: Gate on performance regressions
         run: >-
-          python3 scripts/performance.py gate
+          python3 scripts/nvx.py performance gate
           --baseline-dir performance-baseline
           --target-dir performance-results
           --window "${PERFORMANCE_BASELINE_WINDOW}"
@@ -298,7 +298,7 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git checkout -B performance-persist origin/main
-            python3 scripts/performance.py persist \
+            python3 scripts/nvx.py performance persist \
               --source-dir performance-results \
               --history-dir benchmarks/baselines/performance
             git add benchmarks/baselines/performance

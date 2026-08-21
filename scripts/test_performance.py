@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import performance  # noqa: E402
+import nvx  # noqa: E402
+from nvx_tools import performance  # noqa: E402
 
 
 COLD_START_LOG = """
@@ -594,8 +595,9 @@ class PerformanceTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                performance.main(
+                nvx.main(
                     [
+                        "performance",
                         "persist",
                         "--source-dir",
                         str(source),

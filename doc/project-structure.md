@@ -33,11 +33,11 @@ nvx/
 |-- openvmm/                     Private OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
-|   |   `-- benchmark.py         OpenVMM benchmark coordinator
+|   |   |-- benchmark.py         OpenVMM benchmark coordinator
+|   |   |-- performance.py       Performance commands
+|   |   |-- collect_alpine_sources.py Alpine source collection
+|   |   `-- create_linux_source_archive.py Linux source packaging
 |   |-- nvx.py                   Supported command-line entry point
-|   |-- performance.py           Performance result processing
-|   |-- collect_alpine_sources.py
-|   |-- create_linux_source_archive.py
 |   `-- test_*.py                Python tooling tests
 |-- .dockerignore                Docker build-context exclusions
 |-- .gitattributes               Git path attributes

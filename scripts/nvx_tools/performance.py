@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Collect, persist, and gate CI performance results."""
 
 from __future__ import annotations
@@ -847,9 +846,8 @@ def _non_negative_float(value: str) -> float:
     return parsed
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+def configure_parser(parser: argparse.ArgumentParser) -> None:
+    commands = parser.add_subparsers(dest="performance_command", required=True)
 
     collect = commands.add_parser("collect", help="parse benchmark logs into p50 CSV")
     collect.add_argument("--platform", required=True)
@@ -898,13 +896,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="metric to omit from persistence (repeatable)",
     )
-    return parser
+    parser.set_defaults(handler=command_performance)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+def command_performance(args: argparse.Namespace) -> int:
     try:
-        if args.command == "collect":
+        if args.performance_command == "collect":
             collect_results(
                 args.platform,
                 args.commit,
@@ -916,7 +913,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 summary_path=args.summary,
             )
             return 0
-        if args.command == "collect-openvmm":
+        if args.performance_command == "collect-openvmm":
             collect_openvmm_results(
                 args.platform,
                 args.commit,
@@ -925,7 +922,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.summary,
             )
             return 0
-        if args.command == "gate":
+        if args.performance_command == "gate":
             return gate_results(
                 args.baseline_dir,
                 args.target_dir,
@@ -939,7 +936,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (PerformanceError, OSError, csv.Error) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())

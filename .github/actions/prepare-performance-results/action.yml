@@ -26,17 +26,17 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python3 scripts/performance.py collect-openvmm \
+        python3 scripts/nvx.py performance collect-openvmm \
           --platform linux-kvm \
           --commit "${GITHUB_SHA}" \
           --input performance-input/linux-kvm/linux-kvm.json \
           --output-dir performance-results
-        python3 scripts/performance.py collect-openvmm \
+        python3 scripts/nvx.py performance collect-openvmm \
           --platform linux-mshv \
           --commit "${GITHUB_SHA}" \
           --input performance-input/linux-mshv/linux-mshv.json \
           --output-dir performance-results
-        python3 scripts/performance.py collect-openvmm \
+        python3 scripts/nvx.py performance collect-openvmm \
           --platform windows-whp \
           --commit "${GITHUB_SHA}" \
           --input performance-input/windows-whp/windows-whp.json \

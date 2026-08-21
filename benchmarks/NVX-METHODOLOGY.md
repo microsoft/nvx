@@ -164,7 +164,7 @@ failed sample without adding an interval between successful packets.
 
 ## CI collection
 
-`scripts/performance.py collect --require-shared-suite` rejects a backend result
+`python scripts/nvx.py performance collect --require-shared-suite` rejects a backend result
 unless it contains exactly the 27 shared metrics above. Each backend job publishes its
 p50 table to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM
 and WHP results with the latest base-branch history.

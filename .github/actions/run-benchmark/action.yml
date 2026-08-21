@@ -52,7 +52,7 @@ runs:
       if: runner.os != 'Windows'
       shell: bash
       run: >-
-        python3 scripts/performance.py collect-openvmm
+        python3 scripts/nvx.py performance collect-openvmm
         --platform "${{ inputs.platform }}"
         --commit "${GITHUB_SHA}"
         --input "build/benchmarks/${{ inputs.platform }}.json"
@@ -63,7 +63,7 @@ runs:
       if: runner.os == 'Windows'
       shell: powershell
       run: >-
-        python scripts\performance.py collect-openvmm
+        python scripts\nvx.py performance collect-openvmm
         --platform "${{ inputs.platform }}"
         --commit $env:GITHUB_SHA
         --input "build/benchmarks/${{ inputs.platform }}.json"

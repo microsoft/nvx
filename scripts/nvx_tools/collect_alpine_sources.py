@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Collect exact aports recipes and upstream sources for initramfs APKs."""
 
 from __future__ import annotations
@@ -10,11 +9,10 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import sys
 import tarfile
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 APORTS_URL = "https://gitlab.alpinelinux.org/alpine/aports.git"
 REPOSITORIES = ("main", "community", "testing")
 
@@ -233,8 +231,7 @@ def _write_checksums(output: Path) -> None:
     (output / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("manifests", nargs="+", type=Path)
     parser.add_argument(
         "--output",
@@ -251,47 +248,49 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="collect exact aports recipes without running abuild fetch",
     )
-    return parser.parse_args()
+    parser.set_defaults(handler=command_collect_alpine_sources)
 
 
-def main() -> int:
-    args = parse_args()
+def collect_alpine_sources(
+    manifests: list[Path],
+    output: Path,
+    cache: Path,
+    *,
+    skip_upstream: bool = False,
+) -> None:
+    branch, architecture, packages = _load_packages(manifests)
+    metadata = [
+        _package_metadata(package, branch, architecture) for package in packages
+    ]
+    _prepare_aports(cache, branch)
+    output = output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    for item in metadata:
+        item["recipe"] = _extract_recipe(cache, output, item)
+    manifest = {
+        "format": 1,
+        "alpine_branch": branch,
+        "architecture": architecture,
+        "packages": metadata,
+    }
+    (output / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if not skip_upstream:
+        alpine_version = branch.removeprefix("v")
+        _fetch_upstream_sources(output, alpine_version)
+    _write_checksums(output)
+    print(f">> collected Alpine sources in {output}")
+
+
+def command_collect_alpine_sources(args: argparse.Namespace) -> None:
     try:
-        branch, architecture, packages = _load_packages(args.manifests)
-        metadata = [
-            _package_metadata(package, branch, architecture) for package in packages
-        ]
-        _prepare_aports(args.cache, branch)
-        output = args.output.resolve()
-        output.mkdir(parents=True, exist_ok=True)
-        for item in metadata:
-            item["recipe"] = _extract_recipe(args.cache, output, item)
-        manifest = {
-            "format": 1,
-            "alpine_branch": branch,
-            "architecture": architecture,
-            "packages": metadata,
-        }
-        (output / "manifest.json").write_text(
-            json.dumps(manifest, indent=2) + "\n",
-            encoding="utf-8",
+        collect_alpine_sources(
+            args.manifests,
+            args.output,
+            args.cache,
+            skip_upstream=args.skip_upstream,
         )
-        if not args.skip_upstream:
-            alpine_version = branch.removeprefix("v")
-            _fetch_upstream_sources(output, alpine_version)
-        _write_checksums(output)
-        print(f">> collected Alpine sources in {output}")
-    except (
-        SourceError,
-        OSError,
-        KeyError,
-        ValueError,
-        subprocess.CalledProcessError,
-    ) as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    except KeyError as error:
+        raise SourceError(f"missing package manifest field: {error}") from error

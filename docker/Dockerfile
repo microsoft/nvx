@@ -36,7 +36,7 @@ RUN python3 scripts/nvx.py build-initramfs
 
 FROM kernel AS linux-source-archive
 RUN mkdir -p /out \
-    && python3 scripts/create_linux_source_archive.py \
+    && python3 scripts/nvx.py create-linux-source-archive \
         --config /repo/build/linux/.config \
         --output /out/nvx-linux-source-6.18.38.tar.gz
 
