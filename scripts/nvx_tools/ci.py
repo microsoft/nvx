@@ -48,7 +48,7 @@ def setup_cross_os_cache() -> None:
     require_file(gnu_tar, f"Git for Windows GNU tar is missing at {gnu_tar}")
 
     archive = runner_temp / ZSTD_ARCHIVE
-    download(ZSTD_URL, archive)
+    download(ZSTD_URL, archive, expected_sha256=ZSTD_SHA256)
     _require_sha256(archive, ZSTD_SHA256)
 
     destination = runner_temp / f"zstd-v{ZSTD_VERSION}-win64"

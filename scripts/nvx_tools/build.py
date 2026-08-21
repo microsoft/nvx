@@ -99,6 +99,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _download_verified(url: str, destination: Path, expected_sha256: str) -> None:
+    if destination.is_file():
+        actual_sha256 = _sha256(destination)
+        if actual_sha256 == expected_sha256:
+            return
+        print(
+            f">> discarding {destination.name}: SHA-256 is {actual_sha256}, "
+            f"expected {expected_sha256}"
+        )
+        destination.unlink()
+    print(f">> downloading {destination.name}")
+    download(url, destination, expected_sha256=expected_sha256)
+
+
 def _cache_root() -> Path:
     configured = os.environ.get("NVX_CACHE_DIR")
     return (
@@ -147,9 +161,7 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
 
     downloads.mkdir(parents=True, exist_ok=True)
     source_parent.mkdir(parents=True, exist_ok=True)
-    if not tarball.is_file():
-        print(f">> downloading {tarball.name}")
-        download(DEFAULT_KERNEL_URL, tarball)
+    _download_verified(DEFAULT_KERNEL_URL, tarball, DEFAULT_KERNEL_SHA256)
     actual_sha256 = _sha256(tarball)
     if actual_sha256 != DEFAULT_KERNEL_SHA256:
         raise ScriptError(
@@ -186,13 +198,12 @@ def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
         )
     config.work.mkdir(parents=True, exist_ok=True)
     tarball = _alpine_tarball(config)
-    if not tarball.is_file():
-        print(f">> downloading {tarball.name}")
-        download(
-            "https://dl-cdn.alpinelinux.org/alpine/"
-            f"{config.branch}/releases/x86_64/{tarball.name}",
-            tarball,
-        )
+    _download_verified(
+        "https://dl-cdn.alpinelinux.org/alpine/"
+        f"{config.branch}/releases/x86_64/{tarball.name}",
+        tarball,
+        DEFAULT_ALPINE_MINIROOTFS_SHA256,
+    )
     actual_sha256 = _sha256(tarball)
     if actual_sha256 != DEFAULT_ALPINE_MINIROOTFS_SHA256:
         raise ScriptError(

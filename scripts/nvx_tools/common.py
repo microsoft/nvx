@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -95,16 +96,42 @@ def run_checked(
         ) from error
 
 
-def download(url: str, destination: Path, attempts: int = 3) -> None:
+def download(
+    url: str,
+    destination: Path,
+    attempts: int = 3,
+    *,
+    expected_sha256: str | None = None,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.part")
     for attempt in range(1, attempts + 1):
         try:
+            digest = hashlib.sha256()
             with (
                 urllib.request.urlopen(url) as response,
                 temporary.open("wb") as output,
             ):
-                shutil.copyfileobj(response, output)
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            if (
+                expected_sha256 is not None
+                and actual_sha256 != expected_sha256
+            ):
+                temporary.unlink(missing_ok=True)
+                error = (
+                    f"{destination.name} SHA-256 is {actual_sha256}, "
+                    f"expected {expected_sha256}"
+                )
+                if attempt == attempts:
+                    raise ScriptError(error)
+                print(
+                    f">> download failed ({attempt}/{attempts}); "
+                    f"retrying: {error}"
+                )
+                continue
             temporary.replace(destination)
             return
         except (OSError, urllib.error.URLError) as error:
