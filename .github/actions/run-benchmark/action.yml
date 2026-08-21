@@ -19,7 +19,7 @@ runs:
     - name: Download guest artifacts
       uses: actions/download-artifact@v4
       with:
-        name: guest-artifacts-${{ github.run_attempt }}
+        name: guest-artifacts-${{ github.run_id }}
         path: build
 
     - name: Run Linux acceptance test
@@ -74,7 +74,7 @@ runs:
       if: always() && hashFiles(format('build/benchmarks/{0}.json', inputs.platform)) != ''
       uses: actions/upload-artifact@v4
       with:
-        name: benchmark-${{ inputs.platform }}-${{ github.run_attempt }}
+        name: benchmark-${{ inputs.platform }}-${{ github.run_id }}
         path: build/benchmarks
         if-no-files-found: error
         overwrite: true

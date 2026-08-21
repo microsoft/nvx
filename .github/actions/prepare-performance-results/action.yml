@@ -7,19 +7,19 @@ runs:
     - name: Download Linux / KVM benchmark results
       uses: actions/download-artifact@v4
       with:
-        name: benchmark-linux-kvm-${{ github.run_attempt }}
+        name: benchmark-linux-kvm-${{ github.run_id }}
         path: performance-input/linux-kvm
 
     - name: Download Linux / MSHV benchmark results
       uses: actions/download-artifact@v4
       with:
-        name: benchmark-linux-mshv-${{ github.run_attempt }}
+        name: benchmark-linux-mshv-${{ github.run_id }}
         path: performance-input/linux-mshv
 
     - name: Download Windows / WHP benchmark results
       uses: actions/download-artifact@v4
       with:
-        name: benchmark-windows-whp-${{ github.run_attempt }}
+        name: benchmark-windows-whp-${{ github.run_id }}
         path: performance-input/windows-whp
 
     - name: Collect p50 results
