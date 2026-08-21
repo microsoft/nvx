@@ -1,1 +1,1 @@
-"""Cross-platform build, test, and benchmark tooling for nvx."""
+"""Build and CI helpers for NVX."""

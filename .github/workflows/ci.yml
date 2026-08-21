@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m compileall -q scripts benchmarks
-          python3 -m unittest scripts/test_performance.py scripts/test_flamegraph.py -v
+          python3 -m unittest scripts/test_performance.py -v
 
       - name: Verify source pins
         run: python3 scripts/nvx.py verify
@@ -119,7 +119,7 @@ jobs:
       - name: Validate Python tooling
         run: |
           python -m compileall -q scripts benchmarks
-          python -m unittest scripts/test_performance.py scripts/test_flamegraph.py -v
+          python -m unittest scripts/test_performance.py -v
 
       - name: Build OpenVMM
         uses: ./.github/actions/build-openvmm

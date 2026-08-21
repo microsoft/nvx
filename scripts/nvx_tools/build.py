@@ -7,10 +7,10 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .backends.base import HostBackend
 from .common import (
     REPO_ROOT,
     ScriptError,
@@ -70,7 +70,6 @@ class KernelBuildConfig:
     version: str = DEFAULT_KERNEL_VERSION
     work: Path = Path.home() / "build" / "kernel"
     output: Path = Path.home() / "build" / "vmlinux"
-    profiling: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,13 +78,12 @@ class DockerBuildConfig:
     kernel_version: str = DEFAULT_KERNEL_VERSION
     alpine_version: str = DEFAULT_ALPINE_VERSION
     alpine_branch: str = DEFAULT_ALPINE_BRANCH
-    profiling: bool = False
 
 
-def _require_linux(backend: HostBackend, workflow: str) -> None:
-    if backend.name != "linux-kvm":
+def _require_linux(workflow: str) -> None:
+    if sys.platform != "linux":
         raise ScriptError(
-            f"{workflow} requires a Linux host; use build-linux-artifacts with Docker"
+            f"{workflow} requires Linux; use build-guest without --native for Docker"
         )
 
 
@@ -345,8 +343,8 @@ def _write_apk_manifest(
     )
 
 
-def build_initramfs(config: AlpineBuildConfig, backend: HostBackend) -> None:
-    _require_linux(backend, "build-initramfs")
+def build_initramfs(config: AlpineBuildConfig) -> None:
+    _require_linux("build-initramfs")
     root = _prepare_alpine_root(config)
     print(">> installing busybox-extras into the rootfs")
     _apk_add(root, "busybox-extras")
@@ -366,15 +364,14 @@ def build_initramfs(config: AlpineBuildConfig, backend: HostBackend) -> None:
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
 
 
-def build_kernel(config: KernelBuildConfig, backend: HostBackend) -> None:
-    _require_linux(backend, "build-kernel")
+def build_kernel(config: KernelBuildConfig) -> None:
+    _require_linux("build-kernel")
     for tool in ("make", "readelf"):
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config.version)
     build_fingerprint = json.dumps(
         {
             "source": source_fingerprint,
-            "profiling": config.profiling,
         },
         sort_keys=True,
     )
@@ -388,21 +385,6 @@ def build_kernel(config: KernelBuildConfig, backend: HostBackend) -> None:
     build_stamp.write_text(build_fingerprint, encoding="utf-8")
     kernel_config = config.work / ".config"
     shutil.copy2(REPO_ROOT / "kernel" / "config-microvm", kernel_config)
-    if config.profiling:
-        print(
-            ">> applying profiling kernel config overlay (frame pointers, ORC disabled)"
-        )
-        run_checked(
-            [
-                source / "scripts" / "kconfig" / "merge_config.sh",
-                "-O",
-                config.work,
-                "-m",
-                kernel_config,
-                REPO_ROOT / "kernel" / "config-microvm-profiling",
-            ],
-            cwd=config.work,
-        )
     make = ["make", "-C", source, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
     _assert_virtio_console_kernel_config(kernel_config)
@@ -484,22 +466,13 @@ def build_docker_artifacts(
         "docker",
         "docker was not found on PATH; install Docker with the Linux engine first",
     )
-    target = (
-        "artifacts-profiling"
-        if config.profiling
-        else "artifacts"
-    )
     destination = _docker_destination(config.destination)
-    kind = " profiling" if config.profiling else ""
     print(
-        f">> building Linux{kind} artifacts into '{destination}' "
+        f">> building Linux artifacts into '{destination}' "
         f"(kernel {config.kernel_version}, Alpine {config.alpine_version})"
     )
-    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
-    expected = (
-        "vmlinux-profiling" if config.profiling else "vmlinux",
-        "initramfs.cpio.gz",
-    )
+    run_checked(docker_build_command(config, "artifacts"), cwd=REPO_ROOT)
+    expected = ("vmlinux", "initramfs.cpio.gz")
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:
         raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")

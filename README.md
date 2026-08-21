@@ -100,15 +100,6 @@ On a Linux host, build the guest directly:
 python3 scripts/nvx.py build-guest --native
 ```
 
-Optional profiling variant:
-
-```bash
-python3 scripts/nvx.py build-guest --profiling
-```
-
-`--profiling` adds `build/vmlinux-profiling` while retaining the standard
-`build/vmlinux` used by `run`.
-
 The standard build produces:
 
 ```text

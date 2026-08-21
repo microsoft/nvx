@@ -15,7 +15,6 @@ import subprocess
 import sys
 import tarfile
 
-from nvx_tools.backends import LinuxBackend
 from nvx_tools.build import (
     AlpineBuildConfig,
     DEFAULT_ALPINE_BRANCH,
@@ -105,16 +104,12 @@ def command_init(_: argparse.Namespace) -> None:
     _run(["git", "submodule", "update", "--init", "--recursive"])
 
 
-def _native_kernel(profiling: bool) -> None:
-    name = "vmlinux-profiling" if profiling else "vmlinux"
-    work = BUILD_DIR / ("linux-profiling" if profiling else "linux")
+def _native_kernel() -> None:
     build_kernel(
         KernelBuildConfig(
-            work=work,
-            output=_artifact(name),
-            profiling=profiling,
-        ),
-        LinuxBackend(),
+            work=BUILD_DIR / "linux",
+            output=_artifact("vmlinux"),
+        )
     )
 
 
@@ -123,27 +118,22 @@ def _native_initramfs() -> None:
         AlpineBuildConfig(
             work=BUILD_DIR / "initramfs-work",
             output=_artifact("initramfs.cpio.gz"),
-        ),
-        LinuxBackend(),
+        )
     )
 
 
 def command_build_guest(args: argparse.Namespace) -> None:
     if args.native:
-        _native_kernel(False)
-        if args.profiling:
-            _native_kernel(True)
+        _native_kernel()
         _native_initramfs()
         return
 
     config = DockerBuildConfig(destination=BUILD_DIR)
     build_docker_artifacts(config)
-    if args.profiling:
-        build_docker_artifacts(DockerBuildConfig(destination=BUILD_DIR, profiling=True))
 
 
-def command_build_kernel(args: argparse.Namespace) -> None:
-    _native_kernel(args.profiling)
+def command_build_kernel(_: argparse.Namespace) -> None:
+    _native_kernel()
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
@@ -404,12 +394,6 @@ def _guest_release_inputs() -> tuple[list[str], list[Path]]:
         _require_file(_artifact(name), f"required guest artifact {name}")
     guest_names = list(required_guest_names)
     package_manifests = [_artifact("initramfs.cpio.gz.packages.json")]
-    profiling_names = ("vmlinux-profiling", "vmlinux-profiling.config")
-    profiling_exists = tuple(_artifact(name).is_file() for name in profiling_names)
-    if any(profiling_exists) and not all(profiling_exists):
-        raise ScriptError("profiling kernel and generated config must be packaged together")
-    if all(profiling_exists):
-        guest_names.extend(profiling_names)
     return guest_names, package_manifests
 
 
@@ -589,11 +573,6 @@ def _add_guest_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="build directly on Linux instead of using Docker",
     )
-    parser.add_argument(
-        "--profiling",
-        action="store_true",
-        help="build vmlinux-profiling with frame pointers",
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -611,7 +590,6 @@ def parse_args() -> argparse.Namespace:
         "build-kernel",
         help="fetch, patch, and build the pinned kernel natively on Linux",
     )
-    kernel.add_argument("--profiling", action="store_true")
     kernel.set_defaults(handler=command_build_kernel)
 
     initramfs = subparsers.add_parser(

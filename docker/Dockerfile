@@ -31,9 +31,6 @@ COPY LICENSE-NVX README.md SOURCE-MANIFEST.json THIRD_PARTY_NOTICES.md /repo/
 FROM base AS kernel
 RUN python3 scripts/nvx.py build-kernel
 
-FROM base AS kernel-profiling
-RUN python3 scripts/nvx.py build-kernel --profiling
-
 FROM base AS initramfs
 RUN python3 scripts/nvx.py build-initramfs
 
@@ -46,12 +43,6 @@ RUN mkdir -p /out \
 FROM scratch AS artifacts
 COPY --from=kernel /repo/build/vmlinux /vmlinux
 COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
-COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
-COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
-
-FROM scratch AS artifacts-profiling
-COPY --from=kernel-profiling /repo/build/vmlinux-profiling /vmlinux-profiling
-COPY --from=kernel-profiling /repo/build/vmlinux-profiling.config /vmlinux-profiling.config
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
 COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
 
