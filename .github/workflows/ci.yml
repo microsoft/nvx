@@ -100,35 +100,65 @@ jobs:
       - name: Verify source pins
         run: python3 scripts/nvx.py verify
 
-      - name: Cache Linux guest artifacts
-        id: cache-linux-guest
+      - name: Resolve guest artifact versions
+        id: guest-versions
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print(f"kernel-version={manifest['linux']['version']}", file=output)
+              print(f"alpine-version={manifest['alpine']['version']}", file=output)
+          PY
+
+      - name: Cache Linux kernel
+        id: cache-linux-kernel
         uses: actions/cache@v5
         with:
           path: |
             build/vmlinux
             build/vmlinux.config
+          key: linux-kernel-v1-${{ steps.guest-versions.outputs.kernel-version }}-${{ hashFiles('kernel/config-microvm') }}
+
+      - name: Cache Alpine disk image
+        id: cache-alpine-image
+        uses: actions/cache@v5
+        with:
+          path: |
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
-          key: linux-guest-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('docker/**', 'SOURCE-MANIFEST.json', 'kernel/**', 'alpine/**', 'scripts/nvx.py', 'scripts/nvx_tools/**') }}
+          key: alpine-image-v1-${{ steps.guest-versions.outputs.alpine-version }}-${{ hashFiles('alpine/**') }}
 
-      - name: Build guest artifacts (Docker)
-        if: steps.cache-linux-guest.outputs.cache-hit != 'true'
-        run: python3 scripts/nvx.py build-guest
+      - name: Build Linux kernel (Docker)
+        if: steps.cache-linux-kernel.outputs.cache-hit != 'true'
+        run: >-
+          docker build
+          --file docker/Dockerfile
+          --target kernel-artifacts
+          --output type=local,dest=build
+          .
 
-      - name: Resolve portable OpenVMM build identity
-        id: portable-openvmm-build
-        run: |
-          set -euo pipefail
-          rustc_sha="$(rustc -Vv | sed -n 's/^commit-hash: //p')"
-          test -n "${rustc_sha}"
-          echo "rustc-sha=${rustc_sha}" >> "${GITHUB_OUTPUT}"
+      - name: Build Alpine disk image (Docker)
+        if: steps.cache-alpine-image.outputs.cache-hit != 'true'
+        run: >-
+          docker build
+          --file docker/Dockerfile
+          --target initramfs-artifacts
+          --output type=local,dest=build
+          .
 
       - name: Cache portable OpenVMM
         id: cache-portable-openvmm
         uses: actions/cache@v5
         with:
           path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
-          key: portable-openvmm-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.portable-openvmm-build.outputs.rustc-sha }}
+          key: openvmm-linux-mshv-v1-x86_64-${{ steps.openvmm.outputs.sha }}
 
       - name: Build portable OpenVMM for MSHV
         if: steps.cache-portable-openvmm.outputs.cache-hit != 'true'

@@ -20,28 +20,6 @@ runs:
       shell: powershell
       run: python scripts\nvx.py setup-cross-os-cache
 
-    - name: Resolve Linux Rust toolchain identity
-      if: runner.os != 'Windows'
-      id: rust-linux
-      shell: bash
-      run: |
-        set -euo pipefail
-        rustc_sha="$(rustc -Vv | sed -n 's/^commit-hash: //p')"
-        test -n "${rustc_sha}"
-        echo "sha=${rustc_sha}" >> "${GITHUB_OUTPUT}"
-
-    - name: Resolve Windows Rust toolchain identity
-      if: runner.os == 'Windows'
-      id: rust-windows
-      shell: powershell
-      run: |
-        $rustcSha = (rustc -Vv | Select-String '^commit-hash:').Line.Split(':', 2)[1].Trim()
-        if ([string]::IsNullOrWhiteSpace($rustcSha)) {
-          throw 'rustc did not report a commit hash'
-        }
-        "sha=$rustcSha" |
-          Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
     - name: Cache OpenVMM binary
       id: cache-openvmm
       uses: actions/cache@v5
@@ -49,7 +27,7 @@ runs:
         path: |
           openvmm/target/release/openvmm
           openvmm/target/release/openvmm.exe
-        key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust-linux.outputs.sha || steps.rust-windows.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
+        key: openvmm-binary-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Cache cargo
       if: steps.cache-openvmm.outputs.cache-hit != 'true'

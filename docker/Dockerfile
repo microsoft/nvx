@@ -34,6 +34,14 @@ RUN python3 scripts/nvx.py build-kernel
 FROM base AS initramfs
 RUN python3 scripts/nvx.py build-initramfs
 
+FROM scratch AS kernel-artifacts
+COPY --from=kernel /repo/build/vmlinux /vmlinux
+COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
+
+FROM scratch AS initramfs-artifacts
+COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
+COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
+
 FROM kernel AS linux-source-archive
 RUN mkdir -p /out \
     && python3 scripts/nvx.py create-linux-source-archive \
