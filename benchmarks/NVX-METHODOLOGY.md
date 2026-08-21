@@ -25,22 +25,13 @@ Build the release VMM and required guest artifacts first. See [Building NVX](bui
 ```console
 # Linux
 python3 scripts/nvx.py measure-coldstart --runs 5
-python3 scripts/nvx.py capture-console-snapshots --initrd build/initramfs-python-agent.cpio.gz --snapshot build/mxc-agent-snapshot --portb-snapshot build/mxc-agent-snapshot-hvc
-python3 scripts/nvx.py bench-console-output --snapshot build/mxc-agent-snapshot --portb-snapshot build/mxc-agent-snapshot-hvc --runs 5
 python3 scripts/nvx.py bench-virtfs --runs 3
-python3 scripts/nvx.py snapshot-demo-pandas --runs 5
-python3 scripts/nvx.py snapshot-demo-hello --runs 5
 python3 scripts/nvx.py bench-snapshot-shell --runs 5 --memories "64 128 256 512"
 python3 scripts/nvx.py bench-net-snapshot --runs 5
-
-# Windows/WHP, using an existing controlled agent snapshot:
-python scripts\nvx.py --backend whp bench-snapshot-prefetch --snapshot build\mxc-agent-snapshot --marker NVX-EXEC-START --training-runs 5 --runs 10
 ```
 
-Use `python scripts\nvx.py ...` on Windows. Console capture requires the `agent` Python initramfs;
-the Python application snapshot benchmarks require the `full` image (`initramfs-python.cpio.gz`).
-KVM network benchmarks require permission to configure a TAP; the WHP standalone network uses
-user-mode NAT.
+Use `python scripts\nvx.py ...` on Windows. KVM network benchmarks require permission to
+configure a TAP; the WHP standalone network uses user-mode NAT.
 
 Useful overrides include `KERNEL`, `INITRD`, `MEM`, `CORES`, `N`, `SNAP`, `NET`, and `PAYLOAD_MB`.
 Each subcommand also accepts explicit options; run
@@ -51,10 +42,7 @@ Each subcommand also accepts explicit options; run
 | Benchmark | Command | Description |
 | --- | --- | --- |
 | Cold start | `measure-coldstart` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
-| Console output | `bench-console-output` | Validates and measures restored raw virtio-console and legacy PMIO at 1/4/16/64 KiB. |
 | Virtual file system | `bench-virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
-| Pandas snapshot | `snapshot-demo-pandas` | Restores a generic, untrained Python trampoline, then imports pandas/NumPy and runs the workload. |
-| Pure Python hello | `snapshot-demo-hello` | Restores the same generic, untrained trampoline, then prints `hello world`. |
 | Shell snapshot | `bench-snapshot-shell` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
 | Network snapshot | `bench-net-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 
@@ -74,11 +62,7 @@ selected.
 | --- | --- | --- |
 | Cold start | baseline | `QUIET` |
 | Cold start | tuning variant | `QUIET` plus one of `clocksource=<backend>`, `tsc=reliable`, `no_timer_check`, `random.trust_cpu=on`, `rcupdate.rcu_expedited=1`, `nokaslr`, `mitigations=off`, or `cryptomgr.notests` |
-| Console output | snapshot capture | `QUIET nvx_mode=agent` |
-| Console output | measured runs | restore (from snapshot) |
 | Virtual file system | guest runs | `console=hvc0 quiet loglevel=0 reboot=t panic=-1` (no `earlycon=xe9`) |
-| Pandas / hello snapshot | cold and capture | `QUIET nvx_mode=hostfs nvx_snapshot=1 pyapp=app.py` |
-| Pandas / hello snapshot | restore | restore (from snapshot) |
 | Shell snapshot | cold | `QUIET` |
 | Shell snapshot | capture | `QUIET shellsnap` |
 | Shell snapshot | restore | restore (from snapshot) |

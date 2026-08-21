@@ -13,16 +13,12 @@ from .build import (
     DEFAULT_ALPINE_BRANCH,
     DEFAULT_ALPINE_VERSION,
     DEFAULT_KERNEL_VERSION,
-    DEFAULT_PYTHON_PROFILE,
-    PYTHON_INITRAMFS_PROFILES,
     AlpineBuildConfig,
     DockerBuildConfig,
     KernelBuildConfig,
     build_docker_artifacts,
     build_initramfs,
     build_kernel,
-    build_python_initramfs_native,
-    python_initramfs_profile,
 )
 from .benchmarks import (
     ConsoleOutputConfig,
@@ -142,36 +138,6 @@ def build_parser() -> argparse.ArgumentParser:
         "build-initramfs", help="build the base Alpine initramfs on a Linux host"
     )
     _add_alpine_build_arguments(initramfs, python_image=False)
-
-    python_initramfs = subparsers.add_parser(
-        "build-python-initramfs", help="build the Python initramfs"
-    )
-    _add_alpine_build_arguments(
-        python_initramfs, python_image=True, optional_output=True
-    )
-    python_initramfs.add_argument(
-        "--profile",
-        choices=tuple(PYTHON_INITRAMFS_PROFILES),
-        default=os.environ.get("PYTHON_PROFILE", DEFAULT_PYTHON_PROFILE),
-        help="Python image profile (default: full)",
-    )
-    python_initramfs.add_argument(
-        "--native",
-        action="store_true",
-        help="force the native Linux builder instead of Docker",
-    )
-    python_initramfs.add_argument(
-        "--docker",
-        action="store_true",
-        help="force the portable Docker builder",
-    )
-    python_initramfs.add_argument(
-        "--dest",
-        "-Dest",
-        type=Path,
-        default=_path_default("DEST", Path("build")),
-        help="Docker export directory (Windows default: build)",
-    )
 
     artifacts = subparsers.add_parser(
         "build-linux-artifacts", help="build kernel and initramfs through Docker"
@@ -631,31 +597,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backend,
             )
             return 0
-        if args.command == "build-python-initramfs":
-            if args.native and args.docker:
-                raise ScriptError("--native and --docker are mutually exclusive")
-            profile = python_initramfs_profile(args.profile)
-            work = args.work or Path.home() / "build" / profile.work_name
-            output = args.output or Path.home() / "build" / profile.artifact_name
-            if (backend.name == "linux-kvm" and not args.docker) or args.native:
-                build_python_initramfs_native(
-                    AlpineBuildConfig(args.aver, args.abranch, work, output),
-                    backend,
-                    args.profile,
-                )
-            else:
-                build_docker_artifacts(
-                    DockerBuildConfig(
-                        args.dest,
-                        DEFAULT_KERNEL_VERSION,
-                        args.aver,
-                        args.abranch,
-                    ),
-                    python_only=True,
-                    output=args.output,
-                    python_profile_name=args.profile,
-                )
-            return 0
         if args.command == "build-linux-artifacts":
             build_docker_artifacts(
                 DockerBuildConfig(
@@ -665,7 +606,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.abranch,
                     args.profiling,
                 ),
-                python_only=False,
             )
             return 0
         if args.command in {"run", "boot"}:

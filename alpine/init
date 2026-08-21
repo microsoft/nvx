@@ -13,16 +13,10 @@ fatal() {
     /bin/busybox reboot -f
     exit 1
 }
-nvx_snapshot_before_exec=$(sed -n 's/.*nvx_snapshot_before_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
-nvx_exec=$(sed -n 's/.*nvx_exec=\([^ ]*\).*/\1/p' /proc/cmdline)
 mount_virtfs() {
     /sbin/nvx-hostmount || fatal "virtfs: failed to mount live host directory"
 }
-# Run-once workloads mount from their prepared dispatcher so cold and restore
-# cross the same pre-dispatch boundary.
-if [ -z "$nvx_exec" ]; then
-    mount_virtfs
-fi
+mount_virtfs
 # virt-net: if --net attached a NIC, configure the only non-loopback interface.
 nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$nip" ]; then
@@ -88,39 +82,6 @@ if [ -n "$nip" ]; then
         fi
         echo "VIRTNET-OK: configured $ndev as $nip/$nmask"
     fi
-fi
-# run-once: execute a mounted shell script and report its status through the VMM control port.
-if [ -n "$nvx_exec" ]; then
-    if [ "$nvx_snapshot_before_exec" = 1 ]; then
-        /bin/sh /snapshot-dispatcher.sh --pause "$nvx_exec" &
-        nvx_dispatcher_pid=$!
-        nvx_dispatcher_state=
-        nvx_dispatcher_tries=0
-        while [ "$nvx_dispatcher_tries" -lt 500 ]; do
-            if read -r _ _ nvx_dispatcher_state _ < "/proc/$nvx_dispatcher_pid/stat"; then
-                [ "$nvx_dispatcher_state" = T ] && break
-            else
-                fatal "nvx: dispatcher exited before the snapshot rendezvous"
-            fi
-            nvx_dispatcher_tries=$((nvx_dispatcher_tries + 1))
-            sleep 0.01
-        done
-        [ "$nvx_dispatcher_state" = T ] ||
-            fatal "nvx: dispatcher did not reach the snapshot rendezvous"
-        /sbin/nvx-snapshot
-        kill -CONT "$nvx_dispatcher_pid" ||
-            fatal "nvx: failed to resume dispatcher after restore"
-        wait "$nvx_dispatcher_pid"
-        nvx_status=$?
-    else
-        /bin/sh /snapshot-dispatcher.sh "$nvx_exec"
-        nvx_status=$?
-    fi
-    /bin/busybox sync
-    /sbin/nvx-exit "$nvx_status"
-    echo "nvx: failed to stop VM after workload exit" >&2
-    /bin/busybox reboot -f
-    exit "$nvx_status"
 fi
 # netsnap: optional snapshot self-test/benchmark for --net (see `scripts/nvx.py bench-net-snapshot`).
 # When the kernel command line contains "netsnap", check the link, then ask the VMM to take a

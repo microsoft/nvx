@@ -30,7 +30,6 @@ from nvx_tools.build import (
     build_docker_linux_source,
     build_initramfs,
     build_kernel,
-    build_python_initramfs_native,
 )
 from nvx_tools.common import ScriptError
 from nvx_tools.ci import setup_cross_os_cache
@@ -119,55 +118,28 @@ def _native_kernel(profiling: bool) -> None:
     )
 
 
-def _native_initramfs(profile: str) -> None:
-    if profile == "base":
-        config = AlpineBuildConfig(
+def _native_initramfs() -> None:
+    build_initramfs(
+        AlpineBuildConfig(
             work=BUILD_DIR / "initramfs-work",
             output=_artifact("initramfs.cpio.gz"),
-        )
-        build_initramfs(config, LinuxBackend())
-        return
-    name = (
-        "initramfs-python.cpio.gz"
-        if profile == "full"
-        else "initramfs-python-agent.cpio.gz"
-    )
-    build_python_initramfs_native(
-        AlpineBuildConfig(
-            work=BUILD_DIR / f"initramfs-{profile}-work",
-            output=_artifact(name),
         ),
         LinuxBackend(),
-        profile,
     )
 
 
 def command_build_guest(args: argparse.Namespace) -> None:
-    profiles = ("full", "agent") if args.python == "all" else (args.python,)
     if args.native:
         _native_kernel(False)
         if args.profiling:
             _native_kernel(True)
-        _native_initramfs("base")
-        for profile in profiles:
-            if profile != "none":
-                _native_initramfs(profile)
+        _native_initramfs()
         return
 
     config = DockerBuildConfig(destination=BUILD_DIR)
-    build_docker_artifacts(config, python_only=False)
+    build_docker_artifacts(config)
     if args.profiling:
-        build_docker_artifacts(
-            DockerBuildConfig(destination=BUILD_DIR, profiling=True),
-            python_only=False,
-        )
-    for profile in profiles:
-        if profile != "none":
-            build_docker_artifacts(
-                config,
-                python_only=True,
-                python_profile_name=profile,
-            )
+        build_docker_artifacts(DockerBuildConfig(destination=BUILD_DIR, profiling=True))
 
 
 def command_build_kernel(args: argparse.Namespace) -> None:
@@ -175,7 +147,7 @@ def command_build_kernel(args: argparse.Namespace) -> None:
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
-    _native_initramfs(args.profile)
+    _native_initramfs()
 
 
 def command_build_openvmm(args: argparse.Namespace) -> None:
@@ -197,14 +169,6 @@ def command_build(args: argparse.Namespace) -> None:
     command_build_openvmm(args)
 
 
-def _initrd_name(profile: str) -> str:
-    return {
-        "base": "initramfs.cpio.gz",
-        "python": "initramfs-python.cpio.gz",
-        "python-agent": "initramfs-python-agent.cpio.gz",
-    }[profile]
-
-
 def _hypervisor(selected: str) -> str:
     if selected != "auto":
         return selected
@@ -219,8 +183,8 @@ def command_run(args: argparse.Namespace) -> None:
     executable = _require_file(_openvmm_binary(), "OpenVMM release binary")
     kernel = _require_file(_artifact("vmlinux"), "PVH kernel")
     initrd = _require_file(
-        _artifact(_initrd_name(args.initrd)),
-        f"{args.initrd} initramfs",
+        _artifact("initramfs.cpio.gz"),
+        "initramfs",
     )
     command = [
         str(executable),
@@ -440,20 +404,6 @@ def _guest_release_inputs() -> tuple[list[str], list[Path]]:
         _require_file(_artifact(name), f"required guest artifact {name}")
     guest_names = list(required_guest_names)
     package_manifests = [_artifact("initramfs.cpio.gz.packages.json")]
-    for artifact_name in (
-        "initramfs-python.cpio.gz",
-        "initramfs-python-agent.cpio.gz",
-    ):
-        manifest_name = f"{artifact_name}.packages.json"
-        artifact_exists = _artifact(artifact_name).is_file()
-        manifest_exists = _artifact(manifest_name).is_file()
-        if artifact_exists != manifest_exists:
-            raise ScriptError(
-                f"{artifact_name} and {manifest_name} must be packaged together"
-            )
-        if artifact_exists:
-            guest_names.extend((artifact_name, manifest_name))
-            package_manifests.append(_artifact(manifest_name))
     profiling_names = ("vmlinux-profiling", "vmlinux-profiling.config")
     profiling_exists = tuple(_artifact(name).is_file() for name in profiling_names)
     if any(profiling_exists) and not all(profiling_exists):
@@ -644,12 +594,6 @@ def _add_guest_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="build vmlinux-profiling with frame pointers",
     )
-    parser.add_argument(
-        "--python",
-        choices=("none", "full", "agent", "all"),
-        default="none",
-        help="also build a Python initramfs profile",
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -674,11 +618,6 @@ def parse_args() -> argparse.Namespace:
         "build-initramfs",
         help="build an Alpine initramfs natively on Linux",
     )
-    initramfs.add_argument(
-        "--profile",
-        choices=("base", "full", "agent"),
-        default="base",
-    )
     initramfs.set_defaults(handler=command_build_initramfs)
 
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")
@@ -699,11 +638,6 @@ def parse_args() -> argparse.Namespace:
     run = subparsers.add_parser("run", help="run an OpenVMM microVM")
     run.add_argument("--hypervisor", choices=("auto", "whp", "kvm"), default="auto")
     run.add_argument("--memory-mib", type=int, default=128)
-    run.add_argument(
-        "--initrd",
-        choices=("base", "python", "python-agent"),
-        default="base",
-    )
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
     run.add_argument("--net", metavar="IPV4/PREFIX")
     run.add_argument("--cmdline", default="")

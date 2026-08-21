@@ -35,8 +35,6 @@ DEFAULT_ALPINE_BRANCH = "v3.24"
 DEFAULT_ALPINE_MINIROOTFS_SHA256 = (
     "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081"
 )
-DEFAULT_PYTHON_PROFILE = "full"
-
 REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_HVC_DRIVER=y",
     "CONFIG_VIRTIO=y",
@@ -57,60 +55,6 @@ def _assert_virtio_console_kernel_config(path: Path) -> None:
         raise ScriptError(
             "kernel configuration cannot provide /dev/hvc1: " + ", ".join(missing)
         )
-
-
-@dataclass(frozen=True)
-class PythonInitramfsProfile:
-    """Packages, guest inputs, and output contract for a Python initramfs."""
-
-    packages: tuple[str, ...]
-    sources: tuple[tuple[str, str], ...]
-    artifact_name: str
-    work_name: str
-    docker_target: str
-    forbidden_packages: tuple[str, ...] = ()
-    prune_runtime: bool = False
-
-
-PYTHON_INITRAMFS_PROFILES = {
-    "full": PythonInitramfsProfile(
-        packages=("python3", "py3-numpy", "py3-pandas"),
-        sources=(
-            ("init.python", "init"),
-            ("snapshot-trampoline.py", "snapshot-trampoline.py"),
-            ("mxc-agent.py", "mxc-agent.py"),
-            ("nvx-snapshot", "sbin/nvx-snapshot"),
-            ("nvx-exit", "sbin/nvx-exit"),
-        ),
-        artifact_name="initramfs-python.cpio.gz",
-        work_name="initramfs-python",
-        docker_target="python-artifacts",
-        prune_runtime=True,
-    ),
-    "agent": PythonInitramfsProfile(
-        packages=("python3",),
-        sources=(
-            ("init.python", "init"),
-            ("mxc-agent.py", "mxc-agent.py"),
-            ("nvx-snapshot", "sbin/nvx-snapshot"),
-            ("nvx-exit", "sbin/nvx-exit"),
-        ),
-        artifact_name="initramfs-python-agent.cpio.gz",
-        work_name="initramfs-python-agent",
-        docker_target="python-agent-artifacts",
-        forbidden_packages=(
-            "py3-numpy",
-            "py3-pandas",
-            "openblas",
-            "blas",
-            "lapack",
-            "libgfortran",
-            "libquadmath",
-            "gfortran",
-        ),
-        prune_runtime=True,
-    ),
-}
 
 
 @dataclass(frozen=True)
@@ -136,17 +80,6 @@ class DockerBuildConfig:
     alpine_version: str = DEFAULT_ALPINE_VERSION
     alpine_branch: str = DEFAULT_ALPINE_BRANCH
     profiling: bool = False
-
-
-def python_initramfs_profile(name: str) -> PythonInitramfsProfile:
-    """Returns a named Python image profile or raises a CLI-friendly error."""
-    try:
-        return PYTHON_INITRAMFS_PROFILES[name]
-    except KeyError as error:
-        choices = ", ".join(PYTHON_INITRAMFS_PROFILES)
-        raise ScriptError(
-            f"unknown Python initramfs profile {name!r}; choose {choices}"
-        ) from error
 
 
 def _require_linux(backend: HostBackend, workflow: str) -> None:
@@ -300,110 +233,6 @@ def _apk_add(root: Path, *packages: str) -> None:
     )
 
 
-def _apk_installed_packages(root: Path) -> tuple[str, ...]:
-    loader = root / "lib" / "ld-musl-x86_64.so.1"
-    environment = os.environ.copy()
-    environment["LD_LIBRARY_PATH"] = f"{root / 'lib'}:{root / 'usr' / 'lib'}"
-    result = run_capture(
-        [
-            loader,
-            root / "sbin" / "apk",
-            "--root",
-            root,
-            "info",
-        ],
-        env=environment,
-    )
-    require_success(result, "listing installed APK packages")
-    return tuple(sorted(result.stdout.decode("utf-8").splitlines()))
-
-
-def _prune_python_runtime(root: Path) -> None:
-    for relative in (
-        "usr/include",
-        "usr/lib/pkgconfig",
-        "usr/share/aclocal",
-        "usr/share/doc",
-        "usr/share/info",
-        "usr/share/man",
-    ):
-        shutil.rmtree(root / relative, ignore_errors=True)
-
-    python_roots = tuple((root / "usr" / "lib").glob("python3.*"))
-    for python_root in python_roots:
-        for relative in ("idlelib", "test", "turtledemo"):
-            shutil.rmtree(python_root / relative, ignore_errors=True)
-        for config_dir in python_root.glob("config-*"):
-            shutil.rmtree(config_dir, ignore_errors=True)
-        extension_dir = python_root / "lib-dynload"
-        for pattern in (
-            "_*test*.so",
-            "_xxtestfuzz*.so",
-            "xxlimited*.so",
-            "xxsubtype*.so",
-        ):
-            for extension in extension_dir.glob(pattern):
-                extension.unlink(missing_ok=True)
-        site_packages = python_root / "site-packages"
-        if site_packages.is_dir():
-            for tests in (
-                *site_packages.glob("*/test"),
-                *site_packages.glob("*/tests"),
-            ):
-                shutil.rmtree(tests, ignore_errors=True)
-
-    for pattern in ("*.a", "*.la"):
-        for path in root.rglob(pattern):
-            path.unlink(missing_ok=True)
-
-
-def _validate_agent_runtime(root: Path, profile: PythonInitramfsProfile) -> None:
-    installed = _apk_installed_packages(root)
-    forbidden = tuple(
-        package
-        for package in installed
-        if any(
-            package == prefix or package.startswith(f"{prefix}-")
-            for prefix in profile.forbidden_packages
-        )
-    )
-    if forbidden:
-        raise ScriptError(
-            "agent initramfs contains forbidden APK packages: " + ", ".join(forbidden)
-        )
-
-    forbidden_paths = []
-    for path in root.rglob("*"):
-        relative = path.relative_to(root).as_posix()
-        components = tuple(component.lower() for component in path.parts)
-        if (
-            any(component.startswith(("numpy", "pandas")) for component in components)
-            or path.suffix in {".a", ".la"}
-            or relative.startswith("usr/include/")
-            or (
-                path.is_dir()
-                and path.name in {"idlelib", "test", "tests", "turtledemo"}
-            )
-            or (
-                path.is_dir()
-                and path.parent.name.startswith("python3.")
-                and path.name.startswith("config-")
-            )
-            or (
-                path.parent.name == "lib-dynload"
-                and path.name.startswith(
-                    ("_ctypes_test", "_test", "_xxtestfuzz", "xxlimited", "xxsubtype")
-                )
-            )
-        ):
-            forbidden_paths.append(relative)
-    if forbidden_paths:
-        preview = ", ".join(forbidden_paths[:8])
-        raise ScriptError(
-            f"agent initramfs contains forbidden runtime content: {preview}"
-        )
-
-
 def _normalize_initramfs_metadata(root: Path) -> None:
     (root / "var" / "log" / "apk.log").unlink(missing_ok=True)
     for path in (*root.rglob("*"), root):
@@ -531,32 +360,6 @@ def build_initramfs(config: AlpineBuildConfig, backend: HostBackend) -> None:
         root / "sbin" / "nvx-hostmount",
     )
     _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
-    _install(
-        REPO_ROOT / "alpine" / "snapshot-dispatcher.sh",
-        root / "snapshot-dispatcher.sh",
-    )
-    config.output.parent.mkdir(parents=True, exist_ok=True)
-    _write_apk_manifest(root, config.output, config)
-    _pack_initramfs(root, config.output)
-    print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
-
-
-def build_python_initramfs_native(
-    config: AlpineBuildConfig,
-    backend: HostBackend,
-    profile_name: str = DEFAULT_PYTHON_PROFILE,
-) -> None:
-    _require_linux(backend, "native build-python-initramfs")
-    profile = python_initramfs_profile(profile_name)
-    root = _prepare_alpine_root(config)
-    print(f">> installing {', '.join(profile.packages)} into the {profile_name} rootfs")
-    _apk_add(root, *profile.packages)
-    for source_name, destination_name in profile.sources:
-        _install(REPO_ROOT / "alpine" / source_name, root / destination_name)
-    if profile.prune_runtime:
-        _prune_python_runtime(root)
-    if profile.forbidden_packages:
-        _validate_agent_runtime(root, profile)
     config.output.parent.mkdir(parents=True, exist_ok=True)
     _write_apk_manifest(root, config.output, config)
     _pack_initramfs(root, config.output)
@@ -676,60 +479,31 @@ def build_docker_linux_source(config: DockerBuildConfig) -> Path:
 
 def build_docker_artifacts(
     config: DockerBuildConfig,
-    python_only: bool,
-    output: Path | None = None,
-    python_profile_name: str = DEFAULT_PYTHON_PROFILE,
 ) -> None:
     require_tool(
         "docker",
         "docker was not found on PATH; install Docker with the Linux engine first",
     )
-    python_profile = python_initramfs_profile(python_profile_name)
     target = (
-        python_profile.docker_target
-        if python_only
-        else "artifacts-profiling"
+        "artifacts-profiling"
         if config.profiling
         else "artifacts"
     )
     destination = _docker_destination(config.destination)
-    if python_only:
-        print(
-            f">> building the {python_profile_name} Python initramfs into "
-            f"'{destination}' (Alpine {config.alpine_version})"
-        )
-    else:
-        kind = " profiling" if config.profiling else ""
-        print(
-            f">> building Linux{kind} artifacts into '{destination}' "
-            f"(kernel {config.kernel_version}, Alpine {config.alpine_version})"
-        )
+    kind = " profiling" if config.profiling else ""
+    print(
+        f">> building Linux{kind} artifacts into '{destination}' "
+        f"(kernel {config.kernel_version}, Alpine {config.alpine_version})"
+    )
     run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
     expected = (
-        (python_profile.artifact_name,)
-        if python_only
-        else (
-            "vmlinux-profiling" if config.profiling else "vmlinux",
-            "initramfs.cpio.gz",
-        )
+        "vmlinux-profiling" if config.profiling else "vmlinux",
+        "initramfs.cpio.gz",
     )
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:
         raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
-    requested_output: Path | None = None
-    if output is not None:
-        if not python_only:
-            raise ScriptError(
-                "an explicit output file is only supported for Python artifacts"
-            )
-        requested_output = output.expanduser().resolve()
-        requested_output.parent.mkdir(parents=True, exist_ok=True)
-        source = destination / expected[0]
-        if source.resolve() != requested_output:
-            shutil.copy2(source, requested_output)
     print(">> done:")
     for name in expected:
         path = destination / name
         print(f"  {path} ({format_size(path.stat().st_size)})")
-    if requested_output is not None and requested_output != (destination / expected[0]):
-        print(f"  {requested_output} ({format_size(requested_output.stat().st_size)})")

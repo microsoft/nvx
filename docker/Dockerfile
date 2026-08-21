@@ -35,13 +35,7 @@ FROM base AS kernel-profiling
 RUN python3 scripts/nvx.py build-kernel --profiling
 
 FROM base AS initramfs
-RUN python3 scripts/nvx.py build-initramfs --profile base
-
-FROM base AS python-initramfs
-RUN python3 scripts/nvx.py build-initramfs --profile full
-
-FROM base AS python-agent-initramfs
-RUN python3 scripts/nvx.py build-initramfs --profile agent
+RUN python3 scripts/nvx.py build-initramfs
 
 FROM kernel AS linux-source-archive
 RUN mkdir -p /out \
@@ -60,14 +54,6 @@ COPY --from=kernel-profiling /repo/build/vmlinux-profiling /vmlinux-profiling
 COPY --from=kernel-profiling /repo/build/vmlinux-profiling.config /vmlinux-profiling.config
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
 COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
-
-FROM scratch AS python-artifacts
-COPY --from=python-initramfs /repo/build/initramfs-python.cpio.gz /initramfs-python.cpio.gz
-COPY --from=python-initramfs /repo/build/initramfs-python.cpio.gz.packages.json /initramfs-python.cpio.gz.packages.json
-
-FROM scratch AS python-agent-artifacts
-COPY --from=python-agent-initramfs /repo/build/initramfs-python-agent.cpio.gz /initramfs-python-agent.cpio.gz
-COPY --from=python-agent-initramfs /repo/build/initramfs-python-agent.cpio.gz.packages.json /initramfs-python-agent.cpio.gz.packages.json
 
 FROM scratch AS linux-source-artifacts
 COPY --from=linux-source-archive /out/nvx-linux-source-6.18.38.tar.gz /nvx-linux-source-6.18.38.tar.gz

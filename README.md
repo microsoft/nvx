@@ -100,10 +100,9 @@ On a Linux host, build the guest directly:
 python3 scripts/nvx.py build-guest --native
 ```
 
-Optional guest variants:
+Optional profiling variant:
 
 ```bash
-python3 scripts/nvx.py build-guest --python all
 python3 scripts/nvx.py build-guest --profiling
 ```
 
