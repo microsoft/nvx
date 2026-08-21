@@ -30,6 +30,7 @@ from nvx_tools.build import (
     build_initramfs,
     build_kernel,
 )
+from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.common import ScriptError
 from nvx_tools.ci import setup_cross_os_cache
 
@@ -201,20 +202,6 @@ def command_run(args: argparse.Namespace) -> None:
     print(f">> {_format_command(command)}")
     if not args.dry_run:
         raise SystemExit(subprocess.run(command).returncode)
-
-
-def command_benchmark(args: argparse.Namespace) -> None:
-    arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
-    command = [
-        sys.executable,
-        REPO_ROOT / "benchmarks" / "openvmm.py",
-        "--openvmm-dir",
-        OPENVMM_DIR,
-        "--nvx-dir",
-        REPO_ROOT,
-        *arguments,
-    ]
-    _run(command)
 
 
 def _copy_release_file(source: Path, destination: Path) -> None:
@@ -626,8 +613,7 @@ def parse_args() -> argparse.Namespace:
         "benchmark",
         help="run the OpenVMM-native benchmark coordinator",
     )
-    benchmark.add_argument("arguments", nargs=argparse.REMAINDER)
-    benchmark.set_defaults(handler=command_benchmark)
+    configure_benchmark_parser(benchmark, REPO_ROOT)
 
     sources = subparsers.add_parser(
         "collect-sources",
@@ -657,7 +643,16 @@ def main() -> int:
     args = parse_args()
     try:
         args.handler(args)
-    except (ScriptError, FileNotFoundError, subprocess.CalledProcessError) as error:
+    except KeyboardInterrupt:
+        print("Interrupted", file=sys.stderr)
+        return 130
+    except (
+        ScriptError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

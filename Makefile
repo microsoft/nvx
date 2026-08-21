@@ -20,7 +20,7 @@ run:
 	$(PYTHON) scripts/nvx.py run
 
 benchmark:
-	$(PYTHON) scripts/nvx.py benchmark -- --suite boot
+	$(PYTHON) scripts/nvx.py benchmark --suite boot
 
 sources:
 	$(PYTHON) scripts/nvx.py collect-sources

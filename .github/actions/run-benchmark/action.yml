@@ -26,7 +26,7 @@ runs:
       if: runner.os != 'Windows'
       shell: bash
       run: >-
-        python3 scripts/nvx.py benchmark --
+        python3 scripts/nvx.py benchmark
         --suite e2e
         --backend "${{ inputs.backend }}"
         --warmups 1
@@ -39,7 +39,7 @@ runs:
       if: runner.os == 'Windows'
       shell: powershell
       run: >-
-        python scripts\nvx.py benchmark --
+        python scripts\nvx.py benchmark
         --suite e2e
         --backend "${{ inputs.backend }}"
         --warmups 1

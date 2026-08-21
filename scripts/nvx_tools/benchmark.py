@@ -38,11 +38,13 @@ KVM_RESULT_PREFIX = "OPENVMM_KVM_RESULT="
 KVM_RESTORE_RESULT_PREFIX = "OPENVMM_KVM_RESTORE_RESULT="
 KVM_SNAPSHOT_RESULT_PREFIX = "OPENVMM_KVM_SNAPSHOT_RESULT="
 PHASE2_RESULT_PREFIX = "OPENVMM_PHASE2_RESULT="
+NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
 
 
-def parse_args() -> argparse.Namespace:
-    script_dir = Path(__file__).resolve().parent
-    repository_dir = script_dir.parent
+def configure_parser(
+    parser: argparse.ArgumentParser,
+    repository_dir: Path,
+) -> None:
     cpu_count = os.cpu_count() or 1
     cpu_start = max(0, cpu_count - min(cpu_count, 4))
     default_cpus = (
@@ -50,11 +52,9 @@ def parse_args() -> argparse.Namespace:
         if cpu_start == cpu_count - 1
         else f"{cpu_start}-{cpu_count - 1}"
     )
-    parser = argparse.ArgumentParser(
-        description=(
-            "Build and benchmark OpenVMM microVM boot or the host-side phase 2 "
-            "snapshot foundations. No NVX VMM binary is built or run."
-        )
+    parser.description = (
+        "Build and benchmark OpenVMM microVM boot or the host-side phase 2 "
+        "snapshot foundations. No NVX VMM binary is built or run."
     )
     parser.add_argument(
         "--suite",
@@ -147,7 +147,7 @@ def parse_args() -> argparse.Namespace:
         help="keep temporary staged KVM benchmark binaries",
     )
 
-    # The Windows coordinator reinvokes this file inside WSL for KVM so the
+    # The Windows coordinator reinvokes the NVX CLI inside WSL for KVM so the
     # timed process does not include one wsl.exe launch per sample.
     parser.add_argument("--_kvm-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -155,7 +155,7 @@ def parse_args() -> argparse.Namespace:
         default="/tmp/openvmm-microvm-benchmark",
         help=argparse.SUPPRESS,
     )
-    return parser.parse_args()
+    parser.set_defaults(handler=run)
 
 
 def positive_int(value: str) -> int:
@@ -1418,12 +1418,13 @@ def benchmark_kvm(
 ) -> dict[str, object]:
     stage_dir = "/tmp/openvmm-microvm-benchmark"
     stage_kvm(executable, kernel, initrd, stage_dir)
-    script_wsl = windows_to_wsl(Path(__file__))
+    script_wsl = windows_to_wsl(NVX_SCRIPT)
     command = [
         "wsl.exe",
         "--exec",
         "python3",
         script_wsl,
+        "benchmark",
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
@@ -1470,12 +1471,13 @@ def benchmark_snapshot_restore_kvm(
 ) -> dict[str, object]:
     stage_dir = "/tmp/openvmm-microvm-benchmark"
     stage_kvm(executable, kernel, initrd, stage_dir)
-    script_wsl = windows_to_wsl(Path(__file__))
+    script_wsl = windows_to_wsl(NVX_SCRIPT)
     command = [
         "wsl.exe",
         "--exec",
         "python3",
         script_wsl,
+        "benchmark",
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
@@ -1524,12 +1526,13 @@ def benchmark_snapshot_kvm(
 ) -> dict[str, object]:
     stage_dir = "/tmp/openvmm-microvm-benchmark"
     stage_kvm(executable, kernel, initrd, stage_dir)
-    script_wsl = windows_to_wsl(Path(__file__))
+    script_wsl = windows_to_wsl(NVX_SCRIPT)
     command = [
         "wsl.exe",
         "--exec",
         "python3",
         script_wsl,
+        "benchmark",
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
@@ -1566,8 +1569,7 @@ def benchmark_snapshot_kvm(
             cleanup_kvm(stage_dir)
 
 
-def main() -> int:
-    args = parse_args()
+def run(args: argparse.Namespace) -> int:
     if args._kvm_worker:
         return run_kvm_worker(args)
     if os.name != "nt":
@@ -1777,14 +1779,3 @@ def main() -> int:
         output.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote {output}")
     return 0
-
-
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        print("Interrupted", file=sys.stderr)
-        raise SystemExit(130) from None
-    except Exception as error:
-        print(f"error: {error}", file=sys.stderr)
-        raise SystemExit(1) from None

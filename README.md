@@ -168,15 +168,14 @@ The supported coordinator measures OpenVMM process launch through the
 restore:
 
 ```bash
-python3 scripts/nvx.py benchmark -- --suite boot --backend whp
-python3 scripts/nvx.py benchmark -- --suite e2e --backend kvm
+python3 scripts/nvx.py benchmark --suite boot --backend whp
+python3 scripts/nvx.py benchmark --suite e2e --backend kvm
 ```
 
 Historical Linux/KVM and Windows/WHP CSVs are in `benchmarks/baselines`.
 `benchmarks/NVX-METHODOLOGY.md` documents the inherited workload definitions.
-The files in `scripts/nvx_tools` preserve the original NVX workload and parser
-implementations; `benchmarks/openvmm.py` is the runner that uses OpenVMM's CLI
-and marker-driven lifecycle.
+The OpenVMM benchmark coordinator is implemented in
+`scripts/nvx_tools/benchmark.py` and exposed through the supported NVX CLI.
 
 ## Package and source delivery
 

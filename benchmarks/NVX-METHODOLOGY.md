@@ -2,8 +2,8 @@
 
 > **Archived NVX reference:** command examples below describe the original NVX
 > VMM CLI and are retained to define workload semantics. They are not commands
-> for this repository's supported launcher. Use `scripts/nvx.py benchmark` and
-> `benchmarks/openvmm.py --help` to run the OpenVMM-native implementation.
+> for this repository's supported launcher. Use
+> `scripts/nvx.py benchmark --help` to run the OpenVMM-native implementation.
 
 NVX runs the same 27-metric benchmark suite on Linux/KVM, Linux/MSHV, and Windows/WHP. CI reports
 the median (p50) for each metric in the job summary. Latency metrics are lower-is-better;

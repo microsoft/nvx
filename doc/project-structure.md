@@ -18,8 +18,7 @@ nvx/
 |   `-- nvx-snapshot             Snapshot preparation helper
 |-- benchmarks/                  Benchmark definitions and reference data
 |   |-- baselines/               Platform baseline CSV files
-|   |-- NVX-METHODOLOGY.md       Workload and measurement methodology
-|   `-- openvmm.py               OpenVMM benchmark runner
+|   `-- NVX-METHODOLOGY.md       Workload and measurement methodology
 |-- build/                       Generated build products (ignored)
 |-- dist/                        Generated release packages (ignored)
 |-- docker/
@@ -34,6 +33,7 @@ nvx/
 |-- openvmm/                     Private OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
+|   |   `-- benchmark.py         OpenVMM benchmark coordinator
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- performance.py           Performance result processing
 |   |-- collect_alpine_sources.py
@@ -71,10 +71,11 @@ virtio-fs mounting, and snapshot preparation from inside the guest.
 
 ### `benchmarks/`
 
-Benchmark orchestration, documentation, and expected results. `openvmm.py`
-drives OpenVMM workloads, while `baselines/` stores Linux/KVM and Windows/WHP
-CSV reference data. Its `performance/` subdirectory holds the rolling
-performance-gate baselines maintained by CI.
+Benchmark documentation and expected results. `baselines/` stores Linux/KVM
+and Windows/WHP CSV reference data. Its `performance/` subdirectory holds the
+rolling performance-gate baselines maintained by CI. The supported CLI in
+`scripts/nvx.py` exposes the coordinator implemented by
+`scripts/nvx_tools/benchmark.py`.
 
 ### `docker/`
 
