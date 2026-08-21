@@ -587,9 +587,7 @@ class PerformanceTests(unittest.TestCase):
             source = root / "source"
             history = root / "history"
             platforms = ("linux-kvm", "linux-mshv", "windows-whp")
-            results = [
-                performance.Result("commit", "latency", "ms", "lower", 10.0)
-            ]
+            results = [performance.Result("commit", "latency", "ms", "lower", 10.0)]
             for platform in platforms:
                 performance.write_results(source / f"{platform}.csv", results)
 
