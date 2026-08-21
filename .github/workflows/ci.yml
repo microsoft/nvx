@@ -62,6 +62,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout OpenVMM
+        id: openvmm
         uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
@@ -86,10 +87,38 @@ jobs:
       - name: Verify source pins
         run: python3 scripts/nvx.py verify
 
+      - name: Cache Linux guest artifacts
+        id: cache-linux-guest
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: linux-guest-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('docker/**', 'SOURCE-MANIFEST.json', 'kernel/**', 'alpine/**', 'scripts/nvx.py', 'scripts/nvx_tools/**') }}
+
       - name: Build guest artifacts (Docker)
+        if: steps.cache-linux-guest.outputs.cache-hit != 'true'
         run: python3 scripts/nvx.py build-guest
 
+      - name: Resolve portable OpenVMM build identity
+        id: portable-openvmm-build
+        run: |
+          set -euo pipefail
+          rustc_sha="$(rustc -Vv | sed -n 's/^commit-hash: //p')"
+          test -n "${rustc_sha}"
+          echo "rustc-sha=${rustc_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache portable OpenVMM
+        id: cache-portable-openvmm
+        uses: actions/cache@v5
+        with:
+          path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
+          key: portable-openvmm-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.portable-openvmm-build.outputs.rustc-sha }}
+
       - name: Build portable OpenVMM for MSHV
+        if: steps.cache-portable-openvmm.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
