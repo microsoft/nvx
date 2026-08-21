@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -20,6 +19,7 @@ from .common import (
     require_success,
     run_capture,
     run_checked,
+    sha256_file,
 )
 
 
@@ -91,17 +91,9 @@ def _alpine_tarball(config: AlpineBuildConfig) -> Path:
     return config.work / f"alpine-minirootfs-{config.version}-x86_64.tar.gz"
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _download_verified(url: str, destination: Path, expected_sha256: str) -> None:
     if destination.is_file():
-        actual_sha256 = _sha256(destination)
+        actual_sha256 = sha256_file(destination)
         if actual_sha256 == expected_sha256:
             return
         print(
@@ -134,7 +126,7 @@ def _kernel_source_fingerprint() -> str:
         {
             "archive_sha256": DEFAULT_KERNEL_SHA256,
             "patches": [
-                {"name": patch.name, "sha256": _sha256(patch)}
+                {"name": patch.name, "sha256": sha256_file(patch)}
                 for patch in _kernel_patch_files()
             ],
         },
@@ -162,12 +154,6 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
     downloads.mkdir(parents=True, exist_ok=True)
     source_parent.mkdir(parents=True, exist_ok=True)
     _download_verified(DEFAULT_KERNEL_URL, tarball, DEFAULT_KERNEL_SHA256)
-    actual_sha256 = _sha256(tarball)
-    if actual_sha256 != DEFAULT_KERNEL_SHA256:
-        raise ScriptError(
-            f"{tarball.name} SHA-256 is {actual_sha256}, "
-            f"expected {DEFAULT_KERNEL_SHA256}"
-        )
 
     cached_fingerprint = (
         stamp.read_text(encoding="utf-8") if stamp.is_file() else None
@@ -204,12 +190,6 @@ def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
         tarball,
         DEFAULT_ALPINE_MINIROOTFS_SHA256,
     )
-    actual_sha256 = _sha256(tarball)
-    if actual_sha256 != DEFAULT_ALPINE_MINIROOTFS_SHA256:
-        raise ScriptError(
-            f"{tarball.name} SHA-256 is {actual_sha256}, "
-            f"expected {DEFAULT_ALPINE_MINIROOTFS_SHA256}"
-        )
     root = config.work / "root"
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)

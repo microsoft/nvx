@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,8 +10,8 @@ import re
 import subprocess
 import tarfile
 
+from .common import REPO_ROOT, write_sha256_sums
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 APORTS_URL = "https://gitlab.alpinelinux.org/alpine/aports.git"
 REPOSITORIES = ("main", "community", "testing")
 
@@ -218,19 +217,6 @@ done
     )
 
 
-def _write_checksums(output: Path) -> None:
-    lines = []
-    for path in sorted(output.rglob("*")):
-        if not path.is_file() or path.name == "SHA256SUMS":
-            continue
-        digest = hashlib.sha256()
-        with path.open("rb") as source:
-            while chunk := source.read(1024 * 1024):
-                digest.update(chunk)
-        lines.append(f"{digest.hexdigest()}  {path.relative_to(output).as_posix()}")
-    (output / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="ascii")
-
-
 def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("manifests", nargs="+", type=Path)
     parser.add_argument(
@@ -267,7 +253,7 @@ def collect_alpine_sources(
     output.mkdir(parents=True, exist_ok=True)
     for item in metadata:
         item["recipe"] = _extract_recipe(cache, output, item)
-    manifest = {
+    manifest: dict[str, object] = {
         "format": 1,
         "alpine_branch": branch,
         "architecture": architecture,
@@ -280,7 +266,7 @@ def collect_alpine_sources(
     if not skip_upstream:
         alpine_version = branch.removeprefix("v")
         _fetch_upstream_sources(output, alpine_version)
-    _write_checksums(output)
+    write_sha256_sums(output)
     print(f">> collected Alpine sources in {output}")
 
 

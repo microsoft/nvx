@@ -14,10 +14,22 @@ from typing import Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BUILD_DIR = REPO_ROOT / "build"
+SOURCE_DIR = BUILD_DIR / "sources"
+OPENVMM_DIR = REPO_ROOT / "openvmm"
 
 
 class ScriptError(RuntimeError):
     """Raised for an actionable command-line workflow failure."""
+
+
+def artifact_path(name: str) -> Path:
+    return BUILD_DIR / name
+
+
+def openvmm_binary_path() -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return OPENVMM_DIR / "target" / "release" / f"openvmm{suffix}"
 
 
 @dataclass(frozen=True)
@@ -62,9 +74,10 @@ def run_capture(
     return CommandResult(command, result.returncode, result.stdout, result.stderr)
 
 
-def require_file(path: Path, message: str) -> None:
+def require_file(path: Path, description: str) -> Path:
     if not path.is_file():
-        raise ScriptError(message)
+        raise ScriptError(f"{description} not found: {path}")
+    return path
 
 
 def require_tool(name: str, message: str | None = None) -> str:
@@ -72,6 +85,48 @@ def require_tool(name: str, message: str | None = None) -> str:
     if executable is None:
         raise ScriptError(message or f"{name} was not found on PATH")
     return executable
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_sha256_sums(directory: Path) -> None:
+    files = sorted(
+        path
+        for path in directory.rglob("*")
+        if path.is_file() and path.name != "SHA256SUMS"
+    )
+    lines = [
+        f"{sha256_file(path)}  {path.relative_to(directory).as_posix()}"
+        for path in files
+    ]
+    (directory / "SHA256SUMS").write_text(
+        "\n".join(lines) + "\n",
+        encoding="ascii",
+    )
+
+
+def verify_sha256_sums(directory: Path) -> None:
+    checksum_file = require_file(directory / "SHA256SUMS", "source checksums")
+    root = directory.resolve()
+    for line in checksum_file.read_text(encoding="ascii").splitlines():
+        expected, separator, relative = line.partition("  ")
+        if not separator:
+            raise ScriptError(f"malformed checksum line in {checksum_file}: {line}")
+        path = (directory / relative).resolve()
+        if root not in path.parents or not path.is_file():
+            raise ScriptError(f"invalid checksum path in {checksum_file}: {relative}")
+        actual = sha256_file(path)
+        if actual != expected:
+            raise ScriptError(
+                f"source checksum mismatch for {relative}: {actual}, "
+                f"expected {expected}"
+            )
 
 
 def run_checked(

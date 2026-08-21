@@ -3,26 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import gzip
-from pathlib import Path, PurePosixPath
-import tarfile
+from pathlib import Path
 
+from nvx_tools.archive import create_reproducible_tar_gz
 from nvx_tools.build import DEFAULT_KERNEL_VERSION, prepare_kernel_source
-
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _filter(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    path = PurePosixPath(member.name)
-    if "__pycache__" in path.parts or path.suffix in (".pyc", ".pyo"):
-        return None
-    member.uid = 0
-    member.gid = 0
-    member.uname = ""
-    member.gname = ""
-    member.mtime = 0
-    return member
+from nvx_tools.common import REPO_ROOT
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> None:
@@ -50,9 +35,5 @@ def command_create_linux_source_archive(args: argparse.Namespace) -> None:
         (REPO_ROOT / "THIRD_PARTY_NOTICES.md", f"{root}/THIRD_PARTY_NOTICES.md"),
         (REPO_ROOT / "LICENSE-NVX", f"{root}/LICENSE-NVX"),
     )
-    with output.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w") as archive:
-                for path, arcname in inputs:
-                    archive.add(path, arcname=arcname, filter=_filter)
+    create_reproducible_tar_gz(output, inputs)
     print(f">> created {output}")
