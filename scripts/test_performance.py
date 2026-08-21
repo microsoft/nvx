@@ -581,6 +581,25 @@ class PerformanceTests(unittest.TestCase):
                 len(performance.read_results(history / "linux-kvm.csv")), 4
             )
 
+    def test_persist_writes_all_platform_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            history = root / "history"
+            platforms = ("linux-kvm", "linux-mshv", "windows-whp")
+            results = [
+                performance.Result("commit", "latency", "ms", "lower", 10.0)
+            ]
+            for platform in platforms:
+                performance.write_results(source / f"{platform}.csv", results)
+
+            performance.persist_results(source, history)
+
+            for platform in platforms:
+                self.assertEqual(
+                    performance.read_results(history / f"{platform}.csv"), results
+                )
+
     def test_persist_excludes_selected_metrics(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

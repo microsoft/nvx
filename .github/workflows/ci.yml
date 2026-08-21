@@ -307,7 +307,7 @@ jobs:
 
       - name: Load base branch performance history
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_REF: dev
         run: |
           set -euo pipefail
           mkdir -p performance-baseline
@@ -345,7 +345,7 @@ jobs:
       ${{
         always() &&
         github.event_name == 'push' &&
-        github.ref == 'refs/heads/main' &&
+        github.ref == 'refs/heads/dev' &&
         !cancelled() &&
         needs.linux.result == 'success' &&
         needs.mshv.result == 'success' &&
@@ -356,7 +356,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout main
+      - name: Checkout dev
         uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
@@ -365,15 +365,15 @@ jobs:
       - name: Prepare performance results
         uses: ./.github/actions/prepare-performance-results
 
-      - name: Persist results on main
+      - name: Persist results on dev
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           for attempt in 1 2 3; do
-            git fetch origin main
-            git checkout -B performance-persist origin/main
+            git fetch origin dev
+            git checkout -B performance-persist origin/dev
             python3 scripts/nvx.py performance persist \
               --source-dir performance-results \
               --history-dir benchmarks/baselines/performance
@@ -386,7 +386,7 @@ jobs:
 
             git commit --no-verify \
               -m "data: update performance baselines (${GITHUB_SHA}) [skip ci]"
-            if git push origin HEAD:main; then
+            if git push origin HEAD:dev; then
               exit 0
             fi
             if [ "${attempt}" -eq 3 ]; then
