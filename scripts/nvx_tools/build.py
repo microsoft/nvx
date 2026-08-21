@@ -77,12 +77,7 @@ PYTHON_INITRAMFS_PROFILES = {
         packages=("python3", "py3-numpy", "py3-pandas"),
         sources=(
             ("init.python", "init"),
-            ("hello.py", "hello.py"),
-            ("pandas.py", "pandas.py"),
             ("snapshot-trampoline.py", "snapshot-trampoline.py"),
-            ("repl.py", "repl.py"),
-            ("net-hello.py", "net-hello.py"),
-            ("net-pandas.py", "net-pandas.py"),
             ("mxc-agent.py", "mxc-agent.py"),
             ("nvx-snapshot", "sbin/nvx-snapshot"),
             ("nvx-exit", "sbin/nvx-exit"),
