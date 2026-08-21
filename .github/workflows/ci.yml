@@ -105,12 +105,11 @@ jobs:
           export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC=1
           export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_LIB_PATH="$sysroot/lib"
           export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_STATIC=1
-          cargo build \
-            --manifest-path openvmm/Cargo.toml \
+          (cd openvmm && cargo build \
             --release \
             --target x86_64-unknown-linux-musl \
             -p openvmm \
-            --bin openvmm
+            --bin openvmm)
 
       - name: Upload portable OpenVMM
         uses: actions/upload-artifact@v4
