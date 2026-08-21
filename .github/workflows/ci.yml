@@ -89,7 +89,36 @@ jobs:
         uses: ./.github/actions/build-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-          cache-key-suffix: kvm
+
+      - name: Build portable OpenVMM for MSHV
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ ! -f openvmm/.packages/extracted/x86_64-sysroot/lib/libsymcrypt.a ]; then
+            (cd openvmm && cargo xflowey restore-packages --no-compat-igvm)
+          fi
+          rustup target add x86_64-unknown-linux-musl
+          sysroot="$(cd openvmm && pwd)/.packages/extracted/x86_64-sysroot"
+          export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR="$sysroot"
+          export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR=1
+          export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC=1
+          export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_LIB_PATH="$sysroot/lib"
+          export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_STATIC=1
+          cargo build \
+            --manifest-path openvmm/Cargo.toml \
+            --release \
+            --target x86_64-unknown-linux-musl \
+            -p openvmm \
+            --bin openvmm
+
+      - name: Upload portable OpenVMM
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvmm-linux-mshv-${{ github.run_attempt }}
+          path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
+          if-no-files-found: error
+          overwrite: true
 
       - name: Run Linux / KVM benchmark
         uses: ./.github/actions/run-benchmark
@@ -99,7 +128,7 @@ jobs:
 
   mshv:
     name: Linux / MSHV
-    needs: artifacts
+    needs: [artifacts, linux]
     runs-on: [self-hosted, linux, mshv]
     timeout-minutes: 60
     steps:
@@ -118,11 +147,19 @@ jobs:
           test -w /dev/mshv
           sudo -n true
 
-      - name: Build OpenVMM
-        uses: ./.github/actions/build-openvmm
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-          cache-key-suffix: mshv
+
+      - name: Download portable OpenVMM
+        uses: actions/download-artifact@v4
+        with:
+          name: openvmm-linux-mshv-${{ github.run_attempt }}
+          path: openvmm/target/release
+
+      - name: Prepare portable OpenVMM
+        run: chmod +x openvmm/target/release/openvmm
 
       - name: Run Linux / MSHV benchmark
         uses: ./.github/actions/run-benchmark
@@ -160,7 +197,6 @@ jobs:
         uses: ./.github/actions/build-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-          cache-key-suffix: whp
 
       - name: Run Windows / WHP benchmark
         uses: ./.github/actions/run-benchmark
