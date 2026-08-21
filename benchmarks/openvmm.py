@@ -3,7 +3,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Build and benchmark the OpenVMM microVM entrypoint on WHP and KVM."""
+"""Build and benchmark the OpenVMM microVM entrypoint on WHP, KVM, and MSHV."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=("whp", "kvm", "both"),
+        choices=("whp", "kvm", "mshv", "both"),
         default="both" if os.name == "nt" else "kvm",
         help="backend to benchmark (default: both on Windows, kvm on Linux)",
     )
@@ -1241,7 +1241,7 @@ def result_document(
             ),
             "teardown_scope": (
                 "host process termination request through OpenVMM process exit; "
-                "TerminateProcess on WHP and SIGTERM on KVM"
+                "TerminateProcess on WHP and SIGTERM on Linux"
                 if args.teardown_mode != "guest-exit"
                 else "host dispatch of nvx-exit 0 at guest readiness through "
                 "successful OpenVMM process exit"
@@ -1265,8 +1265,10 @@ def result_document(
 
 
 def run_native_linux(args: argparse.Namespace) -> int:
-    if args.backend != "kvm":
-        raise ValueError("native Linux benchmark runs support --backend kvm")
+    if args.backend not in ("kvm", "mshv"):
+        raise ValueError("native Linux benchmark runs support --backend kvm or mshv")
+
+    backend = args.backend
 
     openvmm_dir = args.openvmm_dir.resolve()
     require_file(openvmm_dir / "Cargo.toml", "OpenVMM Cargo.toml")
@@ -1344,7 +1346,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
             "--machine",
             "microvm",
             "--hypervisor",
-            "kvm",
+            backend,
             "--memory",
             f"{args.memory_mib}M",
             "--kernel",
@@ -1352,7 +1354,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
             "--initrd",
             str(initrd),
             "--cmdline",
-            f"clocksource=kvm-clock {BASE_TUNING}",
+            f"{'clocksource=kvm-clock ' if backend == 'kvm' else ''}{BASE_TUNING}",
         ]
         if args.net is not None:
             boot_command.extend(("--net", args.net))
@@ -1364,43 +1366,43 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
                 teardown_mode=args.teardown_mode,
             )
-            results["backends"]["kvm"] = result
-            print_summary("kvm", result)
+            results["backends"][backend] = result
+            print_summary(backend, result)
         if run_snapshot:
             result = benchmark_snapshot_capture(args, boot_command)
-            results["snapshot_capture"]["kvm"] = result
-            print_snapshot_summary("kvm", result)
+            results["snapshot_capture"][backend] = result
+            print_snapshot_summary(backend, result)
         if run_restore:
             result = benchmark_snapshot_restore(
                 args,
                 executable,
-                "kvm",
+                backend,
                 boot_command,
                 command_prefix=prefix,
             )
-            results["snapshot_restore"]["kvm"] = result
-            print_summary("snapshot-restore/kvm", result)
+            results["snapshot_restore"][backend] = result
+            print_summary(f"snapshot-restore/{backend}", result)
     if run_phase2:
         assert phase2_executable is not None
         result = run_phase2_benchmark(
             [*prefix, str(phase2_executable), *phase2_arguments(args)]
         )
-        results["phase2"]["kvm"] = result
-        print_phase2_summary("kvm", result)
+        results["phase2"][backend] = result
+        print_phase2_summary(backend, result)
     if run_boot and run_phase2:
         comparison = compare_cold_start_to_restore_prepare(
-            results["backends"]["kvm"],
-            results["phase2"]["kvm"],
+            results["backends"][backend],
+            results["phase2"][backend],
         )
-        results["comparison"]["kvm"] = comparison
-        print_cold_restore_comparison("kvm", comparison)
+        results["comparison"][backend] = comparison
+        print_cold_restore_comparison(backend, comparison)
     if run_boot and run_restore:
         comparison = compare_cold_start_to_snapshot_restore(
-            results["backends"]["kvm"],
-            results["snapshot_restore"]["kvm"],
+            results["backends"][backend],
+            results["snapshot_restore"][backend],
         )
-        results["e2e_comparison"]["kvm"] = comparison
-        print_e2e_comparison("kvm", comparison)
+        results["e2e_comparison"][backend] = comparison
+        print_e2e_comparison(backend, comparison)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")

@@ -96,6 +96,39 @@ jobs:
           backend: kvm
           platform: linux-kvm
 
+  mshv:
+    name: Linux / MSHV
+    needs: artifacts
+    runs-on: [self-hosted, linux, mshv]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        run: |
+          set -euo pipefail
+          python3 --version
+          rustc --version
+          cargo --version
+          test -r /dev/mshv
+          test -w /dev/mshv
+          sudo -n true
+
+      - name: Build OpenVMM
+        uses: ./.github/actions/build-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Run Linux / MSHV benchmark
+        uses: ./.github/actions/run-benchmark
+        with:
+          backend: mshv
+          platform: linux-mshv
+          teardown-mode: host-terminate
+
   windows:
     name: Windows / WHP
     needs: artifacts
@@ -134,12 +167,13 @@ jobs:
 
   performance-gate:
     name: Performance regression gate
-    needs: [linux, windows]
+    needs: [linux, mshv, windows]
     if: >-
       ${{
         github.event_name == 'pull_request' &&
         !cancelled() &&
         needs.linux.result == 'success' &&
+        needs.mshv.result == 'success' &&
         needs.windows.result == 'success'
       }}
     runs-on: [self-hosted, linux, kvm]
@@ -188,7 +222,7 @@ jobs:
 
   performance-persist:
     name: Persist performance baseline
-    needs: [linux, windows]
+    needs: [linux, mshv, windows]
     if: >-
       ${{
         always() &&
@@ -196,6 +230,7 @@ jobs:
         github.ref == 'refs/heads/main' &&
         !cancelled() &&
         needs.linux.result == 'success' &&
+        needs.mshv.result == 'success' &&
         needs.windows.result == 'success'
       }}
     runs-on: [self-hosted, linux, kvm]

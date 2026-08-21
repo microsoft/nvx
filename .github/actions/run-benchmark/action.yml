@@ -8,6 +8,10 @@ inputs:
   platform:
     description: Platform name used for results and artifacts
     required: true
+  teardown-mode:
+    description: How to stop OpenVMM after each guest readiness marker
+    required: false
+    default: guest-exit
 
 runs:
   using: composite
@@ -28,6 +32,7 @@ runs:
         --warmups 1
         --runs 3
         --skip-build
+        --teardown-mode "${{ inputs.teardown-mode }}"
         --output "build/benchmarks/${{ inputs.platform }}.json"
 
     - name: Run Windows acceptance test
@@ -40,6 +45,7 @@ runs:
         --warmups 1
         --runs 3
         --skip-build
+        --teardown-mode "${{ inputs.teardown-mode }}"
         --output "build/benchmarks/${{ inputs.platform }}.json"
 
     - name: Publish Linux benchmark results

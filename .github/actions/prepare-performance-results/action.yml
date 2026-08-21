@@ -10,6 +10,12 @@ runs:
         name: benchmark-linux-kvm-${{ github.run_attempt }}
         path: performance-input/linux-kvm
 
+    - name: Download Linux / MSHV benchmark results
+      uses: actions/download-artifact@v4
+      with:
+        name: benchmark-linux-mshv-${{ github.run_attempt }}
+        path: performance-input/linux-mshv
+
     - name: Download Windows / WHP benchmark results
       uses: actions/download-artifact@v4
       with:
@@ -24,6 +30,11 @@ runs:
           --platform linux-kvm \
           --commit "${GITHUB_SHA}" \
           --input performance-input/linux-kvm/linux-kvm.json \
+          --output-dir performance-results
+        python3 scripts/performance.py collect-openvmm \
+          --platform linux-mshv \
+          --commit "${GITHUB_SHA}" \
+          --input performance-input/linux-mshv/linux-mshv.json \
           --output-dir performance-results
         python3 scripts/performance.py collect-openvmm \
           --platform windows-whp \

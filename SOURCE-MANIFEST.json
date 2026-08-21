@@ -34,7 +34,7 @@
   "openvmm": {
     "repository": "https://github.com/nanvix/openvmm.git",
     "branch": "microvm/mshv",
-    "commit": "646298643908776188c45df655e7dedf85d40d88",
+    "commit": "8176c56389bb72f730ba9a83704c92a1a8a8226e",
     "source_delivery": "private-git-submodule"
   }
 }

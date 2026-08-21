@@ -333,10 +333,12 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
 
 PLATFORM_NAMES = {
     "linux-kvm": "Linux / KVM",
+    "linux-mshv": "Linux / MSHV",
     "windows-whp": "Windows / WHP",
 }
 OPENVMM_BACKENDS = {
     "linux-kvm": "kvm",
+    "linux-mshv": "mshv",
     "windows-whp": "whp",
 }
 

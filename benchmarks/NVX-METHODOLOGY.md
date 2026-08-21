@@ -5,9 +5,9 @@
 > for this repository's supported launcher. Use `scripts/nvx.py benchmark` and
 > `benchmarks/openvmm.py --help` to run the OpenVMM-native implementation.
 
-NVX runs the same 27-metric benchmark suite on Linux/KVM and Windows/WHP. CI reports the median
-(p50) for each metric in the job summary. Latency metrics are lower-is-better; throughput metrics
-are higher-is-better.
+NVX runs the same 27-metric benchmark suite on Linux/KVM, Linux/MSHV, and Windows/WHP. CI reports
+the median (p50) for each metric in the job summary. Latency metrics are lower-is-better;
+throughput metrics are higher-is-better.
 
 The console output, virtual file system, network snapshot, and networked Python commands also
 report the p50 peak resident set size (RSS) of the measured `nvx` process. Linux obtains the peak
@@ -30,7 +30,7 @@ python3 scripts/nvx.py bench-snapshot-shell --runs 5 --memories "64 128 256 512"
 python3 scripts/nvx.py bench-net-snapshot --runs 5
 ```
 
-Use `python scripts\nvx.py ...` on Windows. KVM network benchmarks require permission to
+Use `python scripts\nvx.py ...` on Windows. KVM and MSHV network benchmarks require permission to
 configure a TAP; the WHP standalone network uses user-mode NAT.
 
 Useful overrides include `KERNEL`, `INITRD`, `MEM`, `CORES`, `N`, `SNAP`, `NET`, and `PAYLOAD_MB`.

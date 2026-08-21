@@ -69,9 +69,19 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        sudo apt-get update
-        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          git libarchive-tools
+        if command -v git >/dev/null && command -v bsdtar >/dev/null; then
+          exit 0
+        fi
+        if command -v apt-get >/dev/null; then
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git libarchive-tools
+        elif command -v dnf >/dev/null; then
+          sudo dnf install -y git bsdtar
+        else
+          echo "::error::Unsupported Linux package manager"
+          exit 1
+        fi
 
     - name: Build OpenVMM on Linux
       if: runner.os != 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'

@@ -70,6 +70,41 @@ SHELL_SNAPSHOT_LOG = """
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_collects_openvmm_mshv_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "linux-mshv.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "controls": {"suite": "e2e"},
+                        "backends": {
+                            "mshv": {"p50_ms": 150.0, "teardown_p50_ms": 20.0}
+                        },
+                        "snapshot_restore": {
+                            "mshv": {"p50_ms": 15.0, "teardown_p50_ms": 4.0}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result_path = performance.collect_openvmm_results(
+                "linux-mshv", "abc123", source, root / "results"
+            )
+
+            results = performance.read_results(result_path)
+            self.assertEqual(
+                [result.metric for result in results],
+                [
+                    "openvmm_cold_start",
+                    "openvmm_snapshot_restore",
+                    "openvmm_cold_start_teardown",
+                    "openvmm_snapshot_restore_teardown",
+                ],
+            )
+            self.assertEqual(results[0].p50, 150.0)
+
     def test_collects_openvmm_json_and_appends_diagnostics(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
