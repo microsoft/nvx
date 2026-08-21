@@ -5,6 +5,10 @@ inputs:
   ssh-key:
     description: SSH deploy key used to checkout OpenVMM
     required: true
+  cache-key-suffix:
+    description: Platform-specific cache namespace
+    required: false
+    default: default
 
 runs:
   using: composite
@@ -49,7 +53,7 @@ runs:
         path: |
           openvmm/target/release/openvmm
           openvmm/target/release/openvmm.exe
-        key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust-linux.outputs.sha || steps.rust-windows.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
+        key: openvmm-binary-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-suffix }}-${{ steps.openvmm.outputs.sha }}-${{ steps.rust-linux.outputs.sha || steps.rust-windows.outputs.sha }}-${{ hashFiles('scripts/nvx.py') }}
 
     - name: Cache cargo
       if: steps.cache-openvmm.outputs.cache-hit != 'true'
@@ -59,29 +63,36 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           openvmm/target
-        key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+        key: cargo-${{ runner.os }}-${{ inputs.cache-key-suffix }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
         restore-keys: |
-          cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-          cargo-${{ runner.os }}-
+          cargo-${{ runner.os }}-${{ inputs.cache-key-suffix }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+          cargo-${{ runner.os }}-${{ inputs.cache-key-suffix }}-
 
     - name: Install Linux build dependencies
       if: runner.os != 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set -euo pipefail
-        if command -v git >/dev/null && command -v bsdtar >/dev/null; then
+        dependencies_ready() {
+          command -v git >/dev/null &&
+            command -v bsdtar >/dev/null &&
+            command -v pkg-config >/dev/null &&
+            pkg-config --exists openssl
+        }
+        if dependencies_ready; then
           exit 0
         fi
         if command -v apt-get >/dev/null; then
           sudo apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            git libarchive-tools
+            git libarchive-tools libssl-dev pkg-config
         elif command -v dnf >/dev/null; then
-          sudo dnf install -y git bsdtar
+          sudo dnf install -y git libarchive openssl-devel pkgconf-pkg-config
         else
           echo "::error::Unsupported Linux package manager"
           exit 1
         fi
+        dependencies_ready
 
     - name: Build OpenVMM on Linux
       if: runner.os != 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'

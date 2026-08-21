@@ -89,6 +89,7 @@ jobs:
         uses: ./.github/actions/build-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+          cache-key-suffix: kvm
 
       - name: Run Linux / KVM benchmark
         uses: ./.github/actions/run-benchmark
@@ -121,6 +122,7 @@ jobs:
         uses: ./.github/actions/build-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+          cache-key-suffix: mshv
 
       - name: Run Linux / MSHV benchmark
         uses: ./.github/actions/run-benchmark
@@ -158,6 +160,7 @@ jobs:
         uses: ./.github/actions/build-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+          cache-key-suffix: whp
 
       - name: Run Windows / WHP benchmark
         uses: ./.github/actions/run-benchmark
