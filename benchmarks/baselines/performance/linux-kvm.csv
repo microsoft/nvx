@@ -1,1 +1,5 @@
 commit,metric,unit,direction,p50
+fe06bafe801ec0ce9c87371f051e87f4a20f07a9,openvmm_cold_start,ms,lower,197.395248
+fe06bafe801ec0ce9c87371f051e87f4a20f07a9,openvmm_snapshot_restore,ms,lower,15.529966
+fe06bafe801ec0ce9c87371f051e87f4a20f07a9,openvmm_cold_start_teardown,ms,lower,26.64049
+fe06bafe801ec0ce9c87371f051e87f4a20f07a9,openvmm_snapshot_restore_teardown,ms,lower,4.897809
