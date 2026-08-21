@@ -52,7 +52,16 @@ jobs:
             docker run --rm --volume ${{ github.workspace }}:/workspace:ro
             --workdir /workspace
             mvdan/shfmt@sha256:307d265ffd25ce832899ae17c93ed5062fc3375c514bba8f52cbf52792735c4d
-        run: make check
+        run: |
+          set -euo pipefail
+          python -m ruff check scripts benchmarks
+          ${SHELLCHECK} --shell=sh \
+            alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
+          python -m pyright --pythonplatform Linux
+          python -m pyright --pythonplatform Windows
+          python -m ruff format --check scripts benchmarks
+          ${SHFMT} -d -ln posix -i 4 -ci \
+            alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
 
   artifacts:
     name: Build shared artifacts
@@ -80,11 +89,12 @@ jobs:
           test -r /dev/kvm
           test -w /dev/kvm
 
-      - name: Validate Python tooling
+      - name: Validate NVX CLI
         run: |
           set -euo pipefail
           python3 -m compileall -q scripts benchmarks
           python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
+          python3 scripts/nvx.py --help
           python3 scripts/nvx.py benchmark --help
 
       - name: Verify source pins
@@ -255,10 +265,11 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Validate Python tooling
+      - name: Validate NVX CLI
         run: |
           python -m compileall -q scripts benchmarks
           python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
+          python scripts\nvx.py --help
           python scripts\nvx.py benchmark --help
 
       - name: Build OpenVMM

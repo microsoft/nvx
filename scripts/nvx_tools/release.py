@@ -46,7 +46,6 @@ PROJECT_SOURCE_PATHS = (
     ".gitignore",
     "LICENSE",
     "LICENSE-NVX",
-    "Makefile",
     "README.md",
     "SOURCE-MANIFEST.json",
     "THIRD_PARTY_NOTICES.md",

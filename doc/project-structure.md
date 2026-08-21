@@ -45,7 +45,6 @@ nvx/
 |-- .gitmodules                  OpenVMM submodule definition
 |-- LICENSE                      Repository license
 |-- LICENSE-NVX                  NVX-specific license terms
-|-- Makefile                     Convenience targets for common workflows
 |-- pyproject.toml               Pyright and Ruff configuration
 |-- README.md                    Setup and usage documentation
 |-- requirements-dev.txt         Pinned Python development tools
@@ -104,8 +103,8 @@ made in that repository and then recorded here by updating the submodule pin.
 
 ### `scripts/`
 
-Host-side Python tooling. `nvx.py` is the public entry point used directly or
-through the `Makefile`; command implementations live in `nvx_tools/`.
+Host-side Python tooling. `nvx.py` is the public entry point; command
+implementations live in `nvx_tools/`.
 Source-collection scripts assemble corresponding-source archives for Linux and
 Alpine. Performance scripts analyze benchmark outputs, with adjacent
 `test_*.py` files covering those utilities.
@@ -115,7 +114,6 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | Path | Responsibility |
 | --- | --- |
 | `README.md` | Installation, build, run, benchmark, and packaging instructions |
-| `Makefile` | Short aliases for build, lint, and formatting commands |
 | `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
 | `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
 | `SOURCE-MANIFEST.json` | Exact Linux, Alpine, NVX, and OpenVMM source identities and output locations |

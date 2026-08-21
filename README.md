@@ -20,7 +20,7 @@ update the submodule. Cloning this repository does not grant access to it.
 | `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
 | `benchmarks` | OpenVMM-native coordinator, methodology, and baselines |
 | `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
-| `scripts/nvx.py` | Supported build, run, benchmark, and packaging CLI |
+| `scripts/nvx.py` | Canonical build, run, benchmark, and packaging CLI |
 | `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
 | `build/sources` | Generated Linux and Alpine release sources; ignored by Git |
 
@@ -86,20 +86,25 @@ to match the versions enforced in CI.
 Run all lint and formatting checks before submitting a change:
 
 ```bash
-make check
+python3 -m ruff check scripts benchmarks
+shellcheck --shell=sh \
+  alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
+python3 -m pyright --pythonplatform Linux
+python3 -m pyright --pythonplatform Windows
+python3 -m ruff format --check scripts benchmarks
+shfmt -d -ln posix -i 4 -ci \
+  alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
 ```
 
-Pyright runs in strict mode for both Linux and Windows platform APIs. Run it
-independently with `make typecheck`.
+Pyright runs in strict mode for both Linux and Windows platform APIs.
 
 Apply the configured Python and POSIX shell formatters with:
 
 ```bash
-make format
+python3 -m ruff format scripts benchmarks
+shfmt -w -ln posix -i 4 -ci \
+  alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
 ```
-
-The `typecheck`, `lint-python`, `lint-shell`, `format-check-python`, and
-`format-check-shell` targets are available for narrower checks.
 
 ## Continuous integration
 
@@ -113,6 +118,9 @@ pull requests gate regressions against recent history, and successful pushes to
 runners require the platform prerequisites listed above.
 
 ## Build
+
+Drive supported workflows directly through `scripts/nvx.py`; no Make wrapper
+is required.
 
 The portable workflow downloads the pinned Linux archive, verifies its
 SHA-256, applies every patch in `kernel/patches`, and builds Linux plus the
