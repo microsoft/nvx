@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tarfile
+from pathlib import Path
 
 from .common import REPO_ROOT, write_sha256_sums
 
@@ -106,7 +106,9 @@ def _prepare_aports(cache: Path, branch: str) -> None:
             ]
         )
     else:
-        _run(["git", "-C", cache, "fetch", "--filter=blob:none", "origin", stable_branch])
+        _run(
+            ["git", "-C", cache, "fetch", "--filter=blob:none", "origin", stable_branch]
+        )
 
 
 def _safe_extract(data: bytes, destination: Path) -> None:
@@ -125,7 +127,11 @@ def _safe_extract(data: bytes, destination: Path) -> None:
 def _extract_recipe(cache: Path, output: Path, metadata: dict[str, str]) -> str:
     repositories = (
         metadata["repository"],
-        *(repository for repository in REPOSITORIES if repository != metadata["repository"]),
+        *(
+            repository
+            for repository in REPOSITORIES
+            if repository != metadata["repository"]
+        ),
     )
     for repository in repositories:
         recipe = f"{repository}/{metadata['origin']}"

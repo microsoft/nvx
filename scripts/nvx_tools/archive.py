@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 import gzip
-from pathlib import Path, PurePosixPath
 import tarfile
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 
 from .common import ScriptError
-
 
 ArchiveInput = tuple[Path, str]
 

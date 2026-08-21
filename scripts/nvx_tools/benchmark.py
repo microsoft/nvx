@@ -11,9 +11,9 @@ import argparse
 import ctypes
 import datetime as dt
 import errno
+import io
 import json
 import os
-from pathlib import Path
 import queue
 import select
 import shlex
@@ -23,8 +23,9 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Sequence
-
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import TypedDict, cast
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
@@ -41,6 +42,80 @@ PHASE2_RESULT_PREFIX = "OPENVMM_PHASE2_RESULT="
 NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
 
 
+class BenchmarkResult(TypedDict):
+    samples_ms: list[float]
+    p50_ms: float
+    min_ms: float
+    max_ms: float
+    peak_rss_samples_bytes: list[int]
+    peak_rss_p50_bytes: int
+    peak_rss_min_bytes: int
+    peak_rss_max_bytes: int
+    teardown_samples_ms: list[float | None]
+    teardown_completed_samples_ms: list[float]
+    teardown_timeout_count: int
+    teardown_timeout_seconds: float
+    teardown_p50_ms: float | None
+    teardown_min_ms: float | None
+    teardown_max_ms: float | None
+
+
+class SnapshotCaptureResult(TypedDict):
+    samples_ms: list[float]
+    p50_ms: float
+    min_ms: float
+    max_ms: float
+    request_to_publication_samples_ms: list[float]
+    request_to_publication_p50_ms: float
+    request_to_publication_min_ms: float
+    request_to_publication_max_ms: float
+    post_publication_exit_samples_ms: list[float]
+    post_publication_exit_p50_ms: float
+    post_publication_exit_min_ms: float
+    post_publication_exit_max_ms: float
+
+
+class Phase2Metric(TypedDict):
+    p50_ms: float
+
+
+class Phase2Result(TypedDict):
+    artifact_unchanged: bool
+    memory_mib: int
+    metrics: dict[str, Phase2Metric]
+
+
+class ColdRestoreComparison(TypedDict):
+    scope: str
+    includes: list[str]
+    excludes: list[str]
+    cold_start_p50_ms: float
+    restore_prepare_p50_ms: float
+    repeat_restore_prepare_p50_ms: float
+    new_process_restore_prepare_p50_ms: float
+    cold_start_over_new_process_restore_prepare: float
+    new_process_restore_prepare_savings_percent: float
+
+
+class E2EComparison(TypedDict):
+    scope: str
+    cold_start_p50_ms: float
+    snapshot_restore_p50_ms: float
+    cold_start_over_snapshot_restore: float
+    snapshot_restore_savings_percent: float
+
+
+class ResultDocument(TypedDict):
+    timestamp_utc: str
+    controls: dict[str, object]
+    backends: dict[str, BenchmarkResult]
+    snapshot_capture: dict[str, SnapshotCaptureResult]
+    snapshot_restore: dict[str, BenchmarkResult]
+    phase2: dict[str, Phase2Result]
+    comparison: dict[str, ColdRestoreComparison]
+    e2e_comparison: dict[str, E2EComparison]
+
+
 def configure_parser(
     parser: argparse.ArgumentParser,
     repository_dir: Path,
@@ -48,9 +123,7 @@ def configure_parser(
     cpu_count = os.cpu_count() or 1
     cpu_start = max(0, cpu_count - min(cpu_count, 4))
     default_cpus = (
-        str(cpu_start)
-        if cpu_start == cpu_count - 1
-        else f"{cpu_start}-{cpu_count - 1}"
+        str(cpu_start) if cpu_start == cpu_count - 1 else f"{cpu_start}-{cpu_count - 1}"
     )
     parser.description = (
         "Build and benchmark OpenVMM microVM boot or the host-side phase 2 "
@@ -245,6 +318,8 @@ class ProcessMemoryCounters(ctypes.Structure):
 
 
 def windows_peak_rss_bytes(pid: int) -> int:
+    if os.name != "nt":
+        raise RuntimeError("Windows process memory counters are unavailable")
     process_query_limited_information = 0x1000
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     psapi = ctypes.WinDLL("psapi", use_last_error=True)
@@ -309,8 +384,12 @@ def terminate(process: subprocess.Popen[bytes]) -> None:
 
 
 def wait_for_process_exit(process: subprocess.Popen[bytes], timeout: float) -> int:
-    if sys.platform.startswith("linux") and hasattr(os, "pidfd_open"):
-        pidfd = os.pidfd_open(process.pid)
+    pidfd_open = cast(
+        Callable[[int], int] | None,
+        getattr(os, "pidfd_open", None),
+    )
+    if sys.platform.startswith("linux") and pidfd_open is not None:
+        pidfd = pidfd_open(process.pid)
         try:
             readable, _, _ = select.select([pidfd], [], [], timeout)
             if not readable:
@@ -329,7 +408,13 @@ class InteractiveProcess:
     def __init__(self, command: Sequence[str], environment: dict[str, str]) -> None:
         self.terminal_fd: int | None = None
         if sys.platform.startswith("linux"):
-            terminal_fd, child_fd = os.openpty()
+            openpty = cast(
+                Callable[[], tuple[int, int]] | None,
+                getattr(os, "openpty", None),
+            )
+            if openpty is None:
+                raise RuntimeError("pseudo-terminal support is unavailable")
+            terminal_fd, child_fd = openpty()
             try:
                 self.process = subprocess.Popen(
                     command,
@@ -368,7 +453,8 @@ class InteractiveProcess:
                     chunks.put(chunk)
             else:
                 assert self.process.stdout is not None
-                while chunk := self.process.stdout.read1(4096):
+                stream = cast(io.BufferedReader, self.process.stdout)
+                while chunk := stream.read1(4096):
                     chunks.put(chunk)
         finally:
             chunks.put(None)
@@ -405,7 +491,9 @@ def measure_once(
         set_windows_affinity(process.pid, windows_cpus)
 
     chunks: queue.Queue[bytes | None] = queue.Queue()
-    threading.Thread(target=interaction.read_output, args=(chunks,), daemon=True).start()
+    threading.Thread(
+        target=interaction.read_output, args=(chunks,), daemon=True
+    ).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
     try:
@@ -417,7 +505,9 @@ def measure_once(
                 chunk = chunks.get(timeout=min(remaining, 0.25))
             except queue.Empty:
                 if process.poll() is not None:
-                    raise RuntimeError(f"OpenVMM exited with status {process.returncode}")
+                    raise RuntimeError(
+                        f"OpenVMM exited with status {process.returncode}"
+                    ) from None
                 continue
             if chunk is None:
                 raise RuntimeError(f"OpenVMM exited with status {process.poll()}")
@@ -466,7 +556,7 @@ def benchmark(
     marker: bytes = BOOT_MARKER,
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
-) -> dict[str, object]:
+) -> BenchmarkResult:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     for index in range(warmups):
@@ -489,9 +579,9 @@ def benchmark(
             flush=True,
         )
 
-    samples = []
-    peak_rss_samples = []
-    teardown_samples = []
+    samples: list[float] = []
+    peak_rss_samples: list[int] = []
+    teardown_samples: list[float | None] = []
     for index in range(runs):
         value, peak_bytes, teardown_ms = measure_once(
             command,
@@ -552,7 +642,9 @@ def capture_snapshot(
         set_windows_affinity(process.pid, windows_cpus)
 
     chunks: queue.Queue[bytes | None] = queue.Queue()
-    threading.Thread(target=interaction.read_output, args=(chunks,), daemon=True).start()
+    threading.Thread(
+        target=interaction.read_output, args=(chunks,), daemon=True
+    ).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
     snapshot_requested = False
@@ -580,7 +672,9 @@ def capture_snapshot(
             except queue.Empty:
                 observe_snapshot_publication()
                 if process.poll() is not None and snapshot_published_ns is None:
-                    raise RuntimeError(f"OpenVMM exited with status {process.returncode}")
+                    raise RuntimeError(
+                        f"OpenVMM exited with status {process.returncode}"
+                    ) from None
                 continue
             if chunk is None:
                 observe_snapshot_publication()
@@ -588,9 +682,7 @@ def capture_snapshot(
             output.extend(chunk)
             if not snapshot_requested and BOOT_MARKER in output:
                 snapshot_started_ns = time.perf_counter_ns()
-                interaction.write_input(
-                    b"nvx-snapshot; echo " + RESTORE_MARKER + b"\n"
-                )
+                interaction.write_input(b"nvx-snapshot; echo " + RESTORE_MARKER + b"\n")
                 snapshot_requested = True
                 deadline = time.monotonic() + timeout
             if snapshot_requested and contains_output_line(output, RESTORE_MARKER):
@@ -632,7 +724,7 @@ def summarize_snapshot_samples(
     samples: list[float],
     request_to_publication_samples: list[float],
     post_publication_exit_samples: list[float],
-) -> dict[str, object]:
+) -> SnapshotCaptureResult:
     return {
         "samples_ms": samples,
         "p50_ms": statistics.median(samples),
@@ -658,12 +750,14 @@ def benchmark_snapshot_capture(
     boot_command: Sequence[str],
     *,
     windows_cpus: set[int] | None = None,
-) -> dict[str, object]:
-    samples = []
-    request_to_publication_samples = []
-    post_publication_exit_samples = []
+) -> SnapshotCaptureResult:
+    samples: list[float] = []
+    request_to_publication_samples: list[float] = []
+    post_publication_exit_samples: list[float] = []
     for index in range(args.warmups + args.runs):
-        with tempfile.TemporaryDirectory(prefix="openvmm-snapshot-capture-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="openvmm-snapshot-capture-"
+        ) as temp_dir:
             snapshot_path = Path(temp_dir) / "snapshot"
             value, request_to_publication, post_publication_exit = capture_snapshot(
                 [*boot_command, "--snapshot-destination", str(snapshot_path)],
@@ -690,7 +784,7 @@ def benchmark_snapshot_capture(
     )
 
 
-def print_snapshot_summary(backend: str, result: dict[str, object]) -> None:
+def print_snapshot_summary(backend: str, result: SnapshotCaptureResult) -> None:
     print(
         f"snapshot/{backend}: p50={result['p50_ms']:.3f} ms "
         f"min={result['min_ms']:.3f} ms max={result['max_ms']:.3f} ms "
@@ -730,7 +824,7 @@ def benchmark_snapshot_restore(
     *,
     command_prefix: Sequence[str] = (),
     windows_cpus: set[int] | None = None,
-) -> dict[str, object]:
+) -> BenchmarkResult:
     with tempfile.TemporaryDirectory(prefix="openvmm-e2e-restore-") as temp_dir:
         snapshot_path = Path(temp_dir) / "snapshot"
         capture_snapshot(
@@ -758,7 +852,7 @@ def benchmark_snapshot_restore(
         )
 
 
-def print_summary(backend: str, result: dict[str, object]) -> None:
+def print_summary(backend: str, result: BenchmarkResult) -> None:
     teardown_p50 = result["teardown_p50_ms"]
     teardown_max = result["teardown_max_ms"]
     teardown = (
@@ -776,11 +870,9 @@ def print_summary(backend: str, result: dict[str, object]) -> None:
     )
 
 
-def print_phase2_summary(backend: str, result: dict[str, object]) -> None:
+def print_phase2_summary(backend: str, result: Phase2Result) -> None:
     memory_mib = int(result["memory_mib"])
     metrics = result["metrics"]
-    if not isinstance(metrics, dict):
-        raise TypeError("phase 2 result metrics must be an object")
     print(f"phase2/{backend} ({memory_mib} MiB RAM):", flush=True)
     for name in (
         "restore_prepare",
@@ -788,13 +880,9 @@ def print_phase2_summary(backend: str, result: dict[str, object]) -> None:
         "new_process_restore_prepare",
     ):
         metric = metrics[name]
-        if not isinstance(metric, dict):
-            raise TypeError(f"phase 2 metric {name} must be an object")
         print(f"  {name}: p50={float(metric['p50_ms']):.3f} ms", flush=True)
     for name in ("snapshot_publish", "snapshot_verify", "repeat_verify"):
         metric = metrics[name]
-        if not isinstance(metric, dict):
-            raise TypeError(f"phase 2 metric {name} must be an object")
         p50_ms = float(metric["p50_ms"])
         throughput = memory_mib / (p50_ms / 1000.0)
         print(
@@ -803,19 +891,15 @@ def print_phase2_summary(backend: str, result: dict[str, object]) -> None:
         )
     for name in ("cow_map", "repeat_cow_map", "cow_dirty_all"):
         metric = metrics[name]
-        if not isinstance(metric, dict):
-            raise TypeError(f"phase 2 metric {name} must be an object")
         p50_ms = float(metric["p50_ms"])
         print(f"  {name}: p50={p50_ms:.3f} ms", flush=True)
 
 
 def compare_cold_start_to_restore_prepare(
-    cold_start: dict[str, object],
-    phase2: dict[str, object],
-) -> dict[str, object]:
+    cold_start: BenchmarkResult,
+    phase2: Phase2Result,
+) -> ColdRestoreComparison:
     metrics = phase2["metrics"]
-    if not isinstance(metrics, dict):
-        raise TypeError("phase 2 result metrics must be an object")
     cold_start_ms = float(cold_start["p50_ms"])
     restore_prepare_ms = float(metrics["restore_prepare"]["p50_ms"])
     repeat_restore_prepare_ms = float(metrics["repeat_restore_prepare"]["p50_ms"])
@@ -850,9 +934,9 @@ def compare_cold_start_to_restore_prepare(
 
 
 def compare_cold_start_to_snapshot_restore(
-    cold_start: dict[str, object],
-    snapshot_restore: dict[str, object],
-) -> dict[str, object]:
+    cold_start: BenchmarkResult,
+    snapshot_restore: BenchmarkResult,
+) -> E2EComparison:
     cold_start_ms = float(cold_start["p50_ms"])
     snapshot_restore_ms = float(snapshot_restore["p50_ms"])
     return {
@@ -868,7 +952,7 @@ def compare_cold_start_to_snapshot_restore(
 
 def print_cold_restore_comparison(
     backend: str,
-    comparison: dict[str, object],
+    comparison: ColdRestoreComparison,
 ) -> None:
     print(
         f"comparison/{backend} (new-process host-only lower bound): "
@@ -879,7 +963,7 @@ def print_cold_restore_comparison(
     )
 
 
-def print_e2e_comparison(backend: str, comparison: dict[str, object]) -> None:
+def print_e2e_comparison(backend: str, comparison: E2EComparison) -> None:
     print(
         f"comparison/{backend} (new process to guest marker): "
         f"cold-start={comparison['cold_start_p50_ms']:.3f} ms "
@@ -963,11 +1047,7 @@ def build_phase2_whp_host(openvmm_dir: Path) -> Path:
         cwd=openvmm_dir,
     )
     return require_file(
-        openvmm_dir
-        / "target"
-        / "release"
-        / "examples"
-        / "phase2_snapshot_bench.exe",
+        openvmm_dir / "target" / "release" / "examples" / "phase2_snapshot_bench.exe",
         "native phase 2 benchmark executable",
     )
 
@@ -1058,7 +1138,7 @@ def run_phase2_benchmark(
     command: Sequence[str],
     *,
     windows_cpus: set[int] | None = None,
-) -> dict[str, object]:
+) -> Phase2Result:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     process = subprocess.Popen(
@@ -1072,7 +1152,7 @@ def run_phase2_benchmark(
         set_windows_affinity(process.pid, windows_cpus)
 
     assert process.stdout is not None
-    output = []
+    output: list[str] = []
     for line in process.stdout:
         output.append(line)
         print(line, end="", flush=True)
@@ -1085,9 +1165,14 @@ def run_phase2_benchmark(
         )
     for line in output:
         if line.startswith(PHASE2_RESULT_PREFIX):
-            result = json.loads(line.removeprefix(PHASE2_RESULT_PREFIX))
+            result = cast(
+                Phase2Result,
+                json.loads(line.removeprefix(PHASE2_RESULT_PREFIX)),
+            )
             if not result.get("artifact_unchanged"):
-                raise RuntimeError("phase 2 benchmark did not preserve the snapshot artifact")
+                raise RuntimeError(
+                    "phase 2 benchmark did not preserve the snapshot artifact"
+                )
             return result
     raise RuntimeError("phase 2 benchmark did not emit a result")
 
@@ -1106,7 +1191,7 @@ def phase2_arguments(args: argparse.Namespace) -> list[str]:
 def benchmark_phase2_kvm(
     args: argparse.Namespace,
     executable: Path,
-) -> dict[str, object]:
+) -> Phase2Result:
     stage_dir = "/tmp/openvmm-phase2-benchmark"
     executable_wsl = windows_to_wsl(executable)
     quoted_stage = shlex.quote(stage_dir)
@@ -1201,9 +1286,9 @@ def result_document(
     args: argparse.Namespace,
     kernel: Path | None,
     initrd: Path | None,
-) -> dict[str, object]:
+) -> ResultDocument:
     return {
-        "timestamp_utc": dt.datetime.now(dt.UTC).isoformat(),
+        "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "controls": {
             "suite": args.suite,
             "warmups": args.warmups,
@@ -1415,7 +1500,7 @@ def benchmark_kvm(
     executable: Path,
     kernel: Path,
     initrd: Path,
-) -> dict[str, object]:
+) -> BenchmarkResult:
     stage_dir = "/tmp/openvmm-microvm-benchmark"
     stage_kvm(executable, kernel, initrd, stage_dir)
     script_wsl = windows_to_wsl(NVX_SCRIPT)
@@ -1450,7 +1535,10 @@ def benchmark_kvm(
         print(completed.stdout, end="")
         for line in completed.stdout.splitlines():
             if line.startswith(KVM_RESULT_PREFIX):
-                return json.loads(line.removeprefix(KVM_RESULT_PREFIX))
+                return cast(
+                    BenchmarkResult,
+                    json.loads(line.removeprefix(KVM_RESULT_PREFIX)),
+                )
         raise RuntimeError("KVM worker did not emit a result")
     except subprocess.CalledProcessError as error:
         if error.stdout:
@@ -1468,7 +1556,7 @@ def benchmark_snapshot_restore_kvm(
     executable: Path,
     kernel: Path,
     initrd: Path,
-) -> dict[str, object]:
+) -> BenchmarkResult:
     stage_dir = "/tmp/openvmm-microvm-benchmark"
     stage_kvm(executable, kernel, initrd, stage_dir)
     script_wsl = windows_to_wsl(NVX_SCRIPT)
@@ -1505,7 +1593,10 @@ def benchmark_snapshot_restore_kvm(
         print(completed.stdout, end="")
         for line in completed.stdout.splitlines():
             if line.startswith(KVM_RESTORE_RESULT_PREFIX):
-                return json.loads(line.removeprefix(KVM_RESTORE_RESULT_PREFIX))
+                return cast(
+                    BenchmarkResult,
+                    json.loads(line.removeprefix(KVM_RESTORE_RESULT_PREFIX)),
+                )
         raise RuntimeError("KVM restore worker did not emit a result")
     except subprocess.CalledProcessError as error:
         if error.stdout:
@@ -1523,7 +1614,7 @@ def benchmark_snapshot_kvm(
     executable: Path,
     kernel: Path,
     initrd: Path,
-) -> dict[str, object]:
+) -> SnapshotCaptureResult:
     stage_dir = "/tmp/openvmm-microvm-benchmark"
     stage_kvm(executable, kernel, initrd, stage_dir)
     script_wsl = windows_to_wsl(NVX_SCRIPT)
@@ -1556,7 +1647,10 @@ def benchmark_snapshot_kvm(
         print(completed.stdout, end="")
         for line in completed.stdout.splitlines():
             if line.startswith(KVM_SNAPSHOT_RESULT_PREFIX):
-                return json.loads(line.removeprefix(KVM_SNAPSHOT_RESULT_PREFIX))
+                return cast(
+                    SnapshotCaptureResult,
+                    json.loads(line.removeprefix(KVM_SNAPSHOT_RESULT_PREFIX)),
+                )
         raise RuntimeError("KVM snapshot worker did not emit a result")
     except subprocess.CalledProcessError as error:
         if error.stdout:

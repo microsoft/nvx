@@ -72,6 +72,35 @@ sudo usermod -aG kvm "$USER"
 Log out and back in after changing groups, then check access with
 `test -r /dev/kvm && test -w /dev/kvm`.
 
+## Development
+
+Install the pinned Python development tools:
+
+```bash
+python3 -m pip install --requirement requirements-dev.txt
+```
+
+Install ShellCheck 0.11.0 and shfmt 3.12.0 using the platform package manager
+to match the versions enforced in CI.
+
+Run all lint and formatting checks before submitting a change:
+
+```bash
+make check
+```
+
+Pyright runs in strict mode for both Linux and Windows platform APIs. Run it
+independently with `make typecheck`.
+
+Apply the configured Python and POSIX shell formatters with:
+
+```bash
+make format
+```
+
+The `typecheck`, `lint-python`, `lint-shell`, `format-check-python`, and
+`format-check-shell` targets are available for narrower checks.
+
 ## Continuous integration
 
 The GitHub Actions workflow builds guest artifacts on Linux, then builds and

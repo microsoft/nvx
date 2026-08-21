@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: reportPrivateUsage=false
 
 import json
 import sys
@@ -9,7 +10,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
 from nvx_tools import performance  # noqa: E402
-
 
 COLD_START_LOG = """
     base                     :    101.0 ms  (min 100, max 102, n=5)
@@ -368,7 +368,7 @@ class PerformanceTests(unittest.TestCase):
                 performance.Result("old", "latency", "ms", "lower", 1000.0),
                 performance.Result("old", "throughput", "MB/s", "higher", 1.0),
             ]
-            recent = []
+            recent: list[performance.Result] = []
             for index in range(10):
                 recent.extend(
                     [

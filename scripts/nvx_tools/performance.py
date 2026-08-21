@@ -12,10 +12,10 @@ import statistics
 import sys
 import tempfile
 from collections import defaultdict, deque
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
-
+from typing import cast
 
 CSV_FIELDS = ["commit", "metric", "unit", "direction", "p50"]
 DIRECTIONS = {"lower", "higher"}
@@ -58,19 +58,6 @@ SHELL_SNAPSHOT_SECTION = re.compile(
     r"(?P<body>.*?)(?=^==\s*[0-9]+\s+MiB\s*==\s*$|\Z)",
     re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
-
-
-def _snapshot_section(text: str, memory_mib: int, source: str) -> str:
-    sections = [
-        match.group("body")
-        for match in SHELL_SNAPSHOT_SECTION.finditer(text)
-        if int(match.group("memory")) == memory_mib
-    ]
-    if not sections:
-        raise PerformanceError(f"missing {memory_mib} MiB section in {source}")
-    if len(sections) > 1:
-        raise PerformanceError(f"duplicate {memory_mib} MiB section in {source}")
-    return sections[0]
 
 
 class PerformanceError(RuntimeError):
@@ -376,7 +363,7 @@ def read_results(path: Path) -> list[Result]:
                 raise PerformanceError(
                     f"unsupported CSV header in {path}: {reader.fieldnames}"
                 )
-            results = []
+            results: list[Result] = []
             for line_number, row in enumerate(reader, start=2):
                 try:
                     p50 = float(row["p50"])
@@ -416,7 +403,7 @@ def append_results_summary(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     title = PLATFORM_NAMES.get(platform, platform)
-    lines = [
+    lines: list[str] = [
         f"## {title} benchmark results",
         "",
         "| Metric | p50 | Preferred direction |",
@@ -437,7 +424,7 @@ def append_results_summary(
 def _json_object(value: object, location: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise PerformanceError(f"expected an object at {location}")
-    return value
+    return cast(dict[str, object], value)
 
 
 def _openvmm_value(
@@ -459,8 +446,7 @@ def _openvmm_value(
     value = float(value)
     if not math.isfinite(value) or value <= 0:
         raise PerformanceError(
-            f"value at {source}:{section}.{backend}.{field} "
-            "must be positive and finite"
+            f"value at {source}:{section}.{backend}.{field} must be positive and finite"
         )
     return value
 
@@ -525,7 +511,9 @@ def collect_openvmm_results(
     except FileNotFoundError as error:
         raise PerformanceError(f"benchmark result not found: {input_path}") from error
     except (UnicodeError, json.JSONDecodeError) as error:
-        raise PerformanceError(f"invalid benchmark JSON {input_path}: {error}") from error
+        raise PerformanceError(
+            f"invalid benchmark JSON {input_path}: {error}"
+        ) from error
 
     controls = _json_object(document.get("controls"), f"{input_path}:controls")
     if controls.get("suite") != "e2e":
@@ -559,7 +547,9 @@ def collect_openvmm_results(
         append_openvmm_diagnostics(
             summary_path, platform, document, backend, input_path
         )
-    print(f"Collected {len(results)} OpenVMM p50 metric(s) for {platform}: {output_path}")
+    print(
+        f"Collected {len(results)} OpenVMM p50 metric(s) for {platform}: {output_path}"
+    )
     return output_path
 
 
@@ -602,7 +592,7 @@ def collect_results(
     if require_shared_suite and collected.keys() != expected_metrics:
         missing = sorted(expected_metrics - collected.keys())
         extra = sorted(collected.keys() - expected_metrics)
-        details = []
+        details: list[str] = []
         if missing:
             details.append("missing: " + ", ".join(missing))
         if extra:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: reportPrivateUsage=false
 
 import hashlib
 import io
@@ -101,6 +102,9 @@ class ReleaseTests(unittest.TestCase):
             destination = root / "staged"
             stderr = io.StringIO()
 
+            def artifact_path(name: str) -> Path:
+                return build_dir / name
+
             with (
                 patch.object(release, "REPO_ROOT", root),
                 patch.object(release, "SOURCE_DIR", source_dir),
@@ -108,7 +112,7 @@ class ReleaseTests(unittest.TestCase):
                 patch.object(
                     release,
                     "artifact_path",
-                    side_effect=lambda name: build_dir / name,
+                    side_effect=artifact_path,
                 ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
                 patch("sys.stderr", stderr),

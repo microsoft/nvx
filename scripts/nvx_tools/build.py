@@ -9,6 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from .common import (
     REPO_ROOT,
@@ -16,17 +17,13 @@ from .common import (
     download,
     format_size,
     require_tool,
-    require_success,
     run_capture,
     run_checked,
     sha256_file,
 )
 
-
 DEFAULT_KERNEL_VERSION = "6.18.38"
-DEFAULT_KERNEL_URL = (
-    "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz"
-)
+DEFAULT_KERNEL_URL = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz"
 DEFAULT_KERNEL_SHA256 = (
     "ac26e508abd56e9f8b89872b6e10c49fc823bcc70d8068a5d8504c1a7c4ff045"
 )
@@ -42,6 +39,18 @@ REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_VIRTIO_MMIO=y",
     "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
 )
+
+
+class ApkPackage(TypedDict):
+    name: str
+    version: str | None
+    architecture: str | None
+    license: str | None
+    origin: str | None
+    url: str | None
+    description: str | None
+    aports_commit: str | None
+    build_time: str | None
 
 
 def _assert_virtio_console_kernel_config(path: Path) -> None:
@@ -138,8 +147,7 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
     """Download, verify, extract, and patch the pinned Linux source."""
     if version != DEFAULT_KERNEL_VERSION:
         raise ScriptError(
-            "this source tree pins Linux "
-            f"{DEFAULT_KERNEL_VERSION}; requested {version}"
+            f"this source tree pins Linux {DEFAULT_KERNEL_VERSION}; requested {version}"
         )
     for tool in ("patch", "tar"):
         require_tool(tool)
@@ -155,9 +163,7 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
     source_parent.mkdir(parents=True, exist_ok=True)
     _download_verified(DEFAULT_KERNEL_URL, tarball, DEFAULT_KERNEL_SHA256)
 
-    cached_fingerprint = (
-        stamp.read_text(encoding="utf-8") if stamp.is_file() else None
-    )
+    cached_fingerprint = stamp.read_text(encoding="utf-8") if stamp.is_file() else None
     if source.is_dir() and cached_fingerprint != fingerprint:
         shutil.rmtree(source)
     if not source.is_dir():
@@ -295,9 +301,9 @@ def _write_apk_manifest(
     config: AlpineBuildConfig,
 ) -> None:
     installed = root / "lib" / "apk" / "db" / "installed"
-    packages = []
+    packages: list[ApkPackage] = []
     for record in installed.read_text(encoding="utf-8").split("\n\n"):
-        fields = {}
+        fields: dict[str, str] = {}
         for line in record.splitlines():
             if len(line) >= 2 and line[1] == ":":
                 fields[line[0]] = line[2:]

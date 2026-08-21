@@ -15,7 +15,6 @@ from .common import (
     run_checked,
 )
 
-
 ZSTD_VERSION = "1.5.7"
 ZSTD_ARCHIVE = f"zstd-v{ZSTD_VERSION}-win64.zip"
 ZSTD_URL = (

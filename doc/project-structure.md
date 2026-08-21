@@ -46,7 +46,9 @@ nvx/
 |-- LICENSE                      Repository license
 |-- LICENSE-NVX                  NVX-specific license terms
 |-- Makefile                     Convenience targets for common workflows
+|-- pyproject.toml               Pyright and Ruff configuration
 |-- README.md                    Setup and usage documentation
+|-- requirements-dev.txt         Pinned Python development tools
 |-- SOURCE-MANIFEST.json         Pinned source versions, hashes, and outputs
 |-- THIRD_PARTY_NOTICES.md       Third-party attribution and notices
 `-- VERSION                      NVX release version
@@ -113,7 +115,9 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | Path | Responsibility |
 | --- | --- |
 | `README.md` | Installation, build, run, benchmark, and packaging instructions |
-| `Makefile` | Short aliases for the supported `scripts/nvx.py` commands |
+| `Makefile` | Short aliases for build, lint, and formatting commands |
+| `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
+| `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
 | `SOURCE-MANIFEST.json` | Exact Linux, Alpine, NVX, and OpenVMM source identities and output locations |
 | `VERSION` | Distribution version consumed by packaging tools |
 | `.gitmodules` | OpenVMM repository URL, path, and tracking branch |
@@ -131,6 +135,7 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | `build/` | Kernels, initramfs images, package manifests, benchmark output, and collected sources |
 | `dist/` | Staged binary and source release archives |
 | `openvmm/target/` | Rust build output produced inside the OpenVMM submodule |
+| `.ruff_cache/` | Ruff's local lint cache |
 | `__pycache__/` | Python bytecode caches that may appear below Python source directories |
 
 Generated paths can be removed and recreated by the build and packaging

@@ -4,20 +4,14 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
+from collections.abc import Sequence
+from pathlib import Path
 
-from nvx_tools.collect_alpine_sources import (
-    configure_parser as configure_alpine_sources_parser,
-)
-from nvx_tools.create_linux_source_archive import (
-    configure_parser as configure_linux_source_archive_parser,
-)
-from nvx_tools.performance import configure_parser as configure_performance_parser
+from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
     AlpineBuildConfig,
     DockerBuildConfig,
@@ -26,7 +20,10 @@ from nvx_tools.build import (
     build_initramfs,
     build_kernel,
 )
-from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
+from nvx_tools.ci import setup_cross_os_cache
+from nvx_tools.collect_alpine_sources import (
+    configure_parser as configure_alpine_sources_parser,
+)
 from nvx_tools.common import (
     BUILD_DIR,
     OPENVMM_DIR,
@@ -36,7 +33,10 @@ from nvx_tools.common import (
     openvmm_binary_path,
     require_file,
 )
-from nvx_tools.ci import setup_cross_os_cache
+from nvx_tools.create_linux_source_archive import (
+    configure_parser as configure_linux_source_archive_parser,
+)
+from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.release import (
     collect_release_sources,
     package_release,

@@ -8,10 +8,9 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_DIR = REPO_ROOT / "build"
@@ -171,10 +170,7 @@ def download(
                     output.write(chunk)
                     digest.update(chunk)
             actual_sha256 = digest.hexdigest()
-            if (
-                expected_sha256 is not None
-                and actual_sha256 != expected_sha256
-            ):
+            if expected_sha256 is not None and actual_sha256 != expected_sha256:
                 temporary.unlink(missing_ok=True)
                 error = (
                     f"{destination.name} SHA-256 is {actual_sha256}, "
@@ -182,10 +178,7 @@ def download(
                 )
                 if attempt == attempts:
                     raise ScriptError(error)
-                print(
-                    f">> download failed ({attempt}/{attempts}); "
-                    f"retrying: {error}"
-                )
+                print(f">> download failed ({attempt}/{attempts}); retrying: {error}")
                 continue
             temporary.replace(destination)
             return

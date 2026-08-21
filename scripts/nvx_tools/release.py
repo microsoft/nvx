@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tarfile
+from pathlib import Path
 
 from .archive import create_reproducible_tar_gz
 from .build import (
@@ -15,8 +15,8 @@ from .build import (
     DEFAULT_ALPINE_MINIROOTFS_SHA256,
     DEFAULT_ALPINE_VERSION,
     DEFAULT_KERNEL_SHA256,
-    DEFAULT_KERNEL_VERSION,
     DEFAULT_KERNEL_URL,
+    DEFAULT_KERNEL_VERSION,
     DockerBuildConfig,
     build_docker_linux_source,
 )
@@ -32,7 +32,6 @@ from .common import (
     verify_sha256_sums,
     write_sha256_sums,
 )
-
 
 PROJECT_SOURCE_PATHS = (
     "alpine",
@@ -52,6 +51,8 @@ PROJECT_SOURCE_PATHS = (
     "SOURCE-MANIFEST.json",
     "THIRD_PARTY_NOTICES.md",
     "VERSION",
+    "pyproject.toml",
+    "requirements-dev.txt",
 )
 
 
@@ -160,9 +161,7 @@ def _validate_linux_source_archive(path: Path) -> None:
         members = archive.getmembers()
         names = [member.name for member in members]
         if not any(
-            name.endswith(
-                f"linux-{DEFAULT_KERNEL_VERSION}/drivers/tty/hvc/hvc_xe9.c"
-            )
+            name.endswith(f"linux-{DEFAULT_KERNEL_VERSION}/drivers/tty/hvc/hvc_xe9.c")
             for name in names
         ):
             raise ScriptError(f"{path} does not contain the patched xe9 HVC driver")
@@ -186,7 +185,7 @@ def _guest_release_inputs() -> tuple[list[str], list[Path]]:
     )
     for name in required_guest_names:
         require_file(artifact_path(name), f"required guest artifact {name}")
-    guest_names = list(required_guest_names)
+    guest_names: list[str] = list(required_guest_names)
     package_manifests = [artifact_path("initramfs.cpio.gz.packages.json")]
     return guest_names, package_manifests
 
@@ -211,9 +210,7 @@ def package_release(
 ) -> None:
     guest_names, package_manifests = _guest_release_inputs()
     linux_source_archive = (
-        SOURCE_DIR
-        / "linux"
-        / f"nvx-linux-source-{DEFAULT_KERNEL_VERSION}.tar.gz"
+        SOURCE_DIR / "linux" / f"nvx-linux-source-{DEFAULT_KERNEL_VERSION}.tar.gz"
     )
     if include_source:
         _validate_alpine_sources(package_manifests)
@@ -226,9 +223,9 @@ def package_release(
             file=sys.stderr,
         )
 
-    release_version = version or (REPO_ROOT / "VERSION").read_text(
-        encoding="ascii"
-    ).strip()
+    release_version = (
+        version or (REPO_ROOT / "VERSION").read_text(encoding="ascii").strip()
+    )
     release_destination = (
         destination or REPO_ROOT / "dist" / release_version
     ).resolve()

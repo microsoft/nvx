@@ -56,14 +56,14 @@ if [ -n "$nip" ]; then
         fi
 
         if [ -n "$ndns" ]; then
-            if ! : > /etc/resolv.conf; then
+            if ! : >/etc/resolv.conf; then
                 virtnet_error "failed to replace /etc/resolv.conf"
             fi
             oldifs=$IFS
             IFS=,
             for server in $ndns; do
                 if [ -n "$server" ]; then
-                    if ! printf 'nameserver %s\n' "$server" >> /etc/resolv.conf; then
+                    if ! printf 'nameserver %s\n' "$server" >>/etc/resolv.conf; then
                         virtnet_error "failed to write DNS server $server"
                     fi
                 fi
@@ -97,14 +97,14 @@ fi
 case " $(cat /proc/cmdline) " in
     *" netsnap "*)
         linkdev="${ndev:-eth0}"
-        link_up() { read -r c 2>/dev/null < "/sys/class/net/$linkdev/carrier" && [ "$c" = 1 ]; }
+        link_up() { read -r c 2>/dev/null <"/sys/class/net/$linkdev/carrier" && [ "$c" = 1 ]; }
         link_up && echo "netsnap: pre-snapshot link OK" || echo "netsnap: pre-snapshot link FAIL"
         ntcp=$(sed -n 's/.*netsnap_tcp=\([^ ]*\).*/\1/p' /proc/cmdline)
         if [ -n "$ntcp" ]; then
             nthost=${ntcp%:*}
             ntport=${ntcp##*:}
             rm -f /tmp/netsnap-tcp.in /tmp/netsnap-tcp.out
-            : > /tmp/netsnap-tcp.in
+            : >/tmp/netsnap-tcp.in
             follow_tcp_input() {
                 next_line=1
                 while :; do
@@ -131,7 +131,7 @@ case " $(cat /proc/cmdline) " in
                 done
                 return 1
             }
-            echo PRE >> /tmp/netsnap-tcp.in
+            echo PRE >>/tmp/netsnap-tcp.in
             if wait_for_tcp_ack PRE; then
                 echo "netsnap: pre-snapshot TCP OK ($ntcp)"
             else
@@ -175,7 +175,7 @@ case " $(cat /proc/cmdline) " in
             echo "NETSNAP-ACTIVE-TX-RESTORE-OK: $ntxflood"
         fi
         if [ -n "$ntcp" ]; then
-            echo POST >> /tmp/netsnap-tcp.in
+            echo POST >>/tmp/netsnap-tcp.in
             if wait_for_tcp_ack POST; then
                 echo "NETSNAP-TCP-RESTORE-OK: $ntcp"
             else
