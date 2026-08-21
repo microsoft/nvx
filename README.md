@@ -17,7 +17,7 @@ update the submodule. Cloning this repository does not grant access to it.
 | --- | --- |
 | `kernel` | Reproducible configs and complete Linux patch series |
 | `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
-| `openvmm` | Private OpenVMM submodule pinned to `microvm/profile` |
+| `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
 | `benchmarks` | OpenVMM-native coordinator, methodology, and baselines |
 | `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
 | `scripts/nvx.py` | Supported build, run, benchmark, and packaging CLI |
