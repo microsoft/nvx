@@ -11,7 +11,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `kernel` | Reproducible configs and complete Linux patch series |
 | `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
 | `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
-| `benchmarks` | OpenVMM-native coordinator, methodology, and baselines |
+| `benchmarks` | Historical benchmark baseline CSV files |
 | `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
 | `scripts/nvx.py` | Canonical build, run, benchmark, and packaging CLI |
 | `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
@@ -29,15 +29,14 @@ nvx/
 |   |-- nvx-exit                 Clean guest shutdown helper
 |   |-- nvx-hostmount            virtio-fs host mount helper
 |   `-- nvx-snapshot             Snapshot preparation helper
-|-- benchmarks/                  Benchmark definitions and reference data
-|   |-- baselines/               Platform baseline CSV files
-|   `-- NVX-METHODOLOGY.md       Workload and measurement methodology
+|-- benchmarks/                  Historical benchmark reference data
+|   `-- baselines/               Platform baseline CSV files
 |-- build/                       Generated build products (ignored)
 |-- dist/                        Generated release packages (ignored)
 |-- docker/
 |   `-- Dockerfile               Reproducible guest build environment
 |-- doc/                         User and contributor documentation
-|   |-- benchmarks.md            Benchmark commands and methodology pointers
+|   |-- benchmarks.md            Benchmark commands and measurement methodology
 |   |-- build.md                 Guest and OpenVMM build workflows
 |   |-- ci.md                    Continuous integration overview
 |   |-- distribution.md          Packaging and source delivery
