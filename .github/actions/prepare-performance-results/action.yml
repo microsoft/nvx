@@ -26,18 +26,27 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python3 scripts/nvx.py performance collect-openvmm \
+        python3 scripts/nvx.py performance collect \
           --platform linux-kvm \
           --commit "${GITHUB_SHA}" \
-          --input performance-input/linux-kvm/linux-kvm.json \
-          --output-dir performance-results
-        python3 scripts/nvx.py performance collect-openvmm \
+          --input-dir performance-input/linux-kvm \
+          --output-dir performance-results \
+          --require-network \
+          --require-shell-snapshot \
+          --require-shared-suite
+        python3 scripts/nvx.py performance collect \
           --platform linux-mshv \
           --commit "${GITHUB_SHA}" \
-          --input performance-input/linux-mshv/linux-mshv.json \
-          --output-dir performance-results
-        python3 scripts/nvx.py performance collect-openvmm \
+          --input-dir performance-input/linux-mshv \
+          --output-dir performance-results \
+          --require-network \
+          --require-shell-snapshot \
+          --require-shared-suite
+        python3 scripts/nvx.py performance collect \
           --platform windows-whp \
           --commit "${GITHUB_SHA}" \
-          --input performance-input/windows-whp/windows-whp.json \
-          --output-dir performance-results
+          --input-dir performance-input/windows-whp \
+          --output-dir performance-results \
+          --require-network \
+          --require-shell-snapshot \
+          --require-shared-suite

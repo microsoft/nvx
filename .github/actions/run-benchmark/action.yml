@@ -33,7 +33,21 @@ runs:
         --runs 3
         --skip-build
         --teardown-mode "${{ inputs.teardown-mode }}"
-        --output "build/benchmarks/${{ inputs.platform }}.json"
+        --output "build/benchmarks/${{ inputs.platform }}/acceptance.json"
+
+    - name: Run Linux performance suite
+      if: runner.os != 'Windows'
+      shell: bash
+      run: >-
+        python3 scripts/nvx.py benchmark
+        --suite performance
+        --backend "${{ inputs.backend }}"
+        --warmups 1
+        --runs 5
+        --virtfs-runs 3
+        --skip-build
+        --teardown-mode "${{ inputs.teardown-mode }}"
+        --output-dir "build/benchmarks/${{ inputs.platform }}"
 
     - name: Run Windows acceptance test
       if: runner.os == 'Windows'
@@ -46,35 +60,55 @@ runs:
         --runs 3
         --skip-build
         --teardown-mode "${{ inputs.teardown-mode }}"
-        --output "build/benchmarks/${{ inputs.platform }}.json"
+        --output "build/benchmarks/${{ inputs.platform }}/acceptance.json"
 
-    - name: Publish Linux benchmark results
-      if: runner.os != 'Windows'
-      shell: bash
-      run: >-
-        python3 scripts/nvx.py performance collect-openvmm
-        --platform "${{ inputs.platform }}"
-        --commit "${GITHUB_SHA}"
-        --input "build/benchmarks/${{ inputs.platform }}.json"
-        --output-dir build/benchmarks
-        --summary "${GITHUB_STEP_SUMMARY}"
-
-    - name: Publish Windows benchmark results
+    - name: Run Windows performance suite
       if: runner.os == 'Windows'
       shell: powershell
       run: >-
-        python scripts\nvx.py performance collect-openvmm
+        python scripts\nvx.py benchmark
+        --suite performance
+        --backend "${{ inputs.backend }}"
+        --warmups 1
+        --runs 5
+        --virtfs-runs 3
+        --skip-build
+        --teardown-mode "${{ inputs.teardown-mode }}"
+        --output-dir "build/benchmarks/${{ inputs.platform }}"
+
+    - name: Publish Linux performance results
+      if: runner.os != 'Windows'
+      shell: bash
+      run: >-
+        python3 scripts/nvx.py performance collect
+        --platform "${{ inputs.platform }}"
+        --commit "${GITHUB_SHA}"
+        --input-dir "build/benchmarks/${{ inputs.platform }}"
+        --output-dir "build/benchmarks/${{ inputs.platform }}"
+        --require-network
+        --require-shell-snapshot
+        --require-shared-suite
+        --summary "${GITHUB_STEP_SUMMARY}"
+
+    - name: Publish Windows performance results
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: >-
+        python scripts\nvx.py performance collect
         --platform "${{ inputs.platform }}"
         --commit $env:GITHUB_SHA
-        --input "build/benchmarks/${{ inputs.platform }}.json"
-        --output-dir build/benchmarks
+        --input-dir "build/benchmarks/${{ inputs.platform }}"
+        --output-dir "build/benchmarks/${{ inputs.platform }}"
+        --require-network
+        --require-shell-snapshot
+        --require-shared-suite
         --summary $env:GITHUB_STEP_SUMMARY
 
     - name: Upload benchmark results
-      if: always() && hashFiles(format('build/benchmarks/{0}.json', inputs.platform)) != ''
+      if: always() && hashFiles(format('build/benchmarks/{0}/{0}.csv', inputs.platform)) != ''
       uses: actions/upload-artifact@v4
       with:
         name: benchmark-${{ inputs.platform }}-${{ github.run_id }}
-        path: build/benchmarks
+        path: build/benchmarks/${{ inputs.platform }}
         if-no-files-found: error
         overwrite: true

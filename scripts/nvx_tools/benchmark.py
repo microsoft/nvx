@@ -8,15 +8,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import datetime as dt
 import errno
 import io
+import ipaddress
 import json
 import os
 import queue
+import re
 import select
 import shlex
+import shutil
 import statistics
 import subprocess
 import sys
@@ -25,7 +29,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import TextIO, TypedDict, cast
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
@@ -40,6 +44,20 @@ KVM_RESTORE_RESULT_PREFIX = "OPENVMM_KVM_RESTORE_RESULT="
 KVM_SNAPSHOT_RESULT_PREFIX = "OPENVMM_KVM_SNAPSHOT_RESULT="
 PHASE2_RESULT_PREFIX = "OPENVMM_PHASE2_RESULT="
 NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
+WORKLOAD_SUITES = frozenset(
+    {"cold-start", "virtfs", "shell-snapshot", "network-snapshot", "performance"}
+)
+DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
+VIRTFS_COMPLETION_MARKER = b"NVX-VIRTFS-WORKLOAD-COMPLETE"
+VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"
+SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
+PERFORMANCE_LOG_FILENAMES = (
+    "cold-start.log",
+    "virtfs.log",
+    "shell-snapshot.log",
+    "network.log",
+)
+LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 
 
 class BenchmarkResult(TypedDict):
@@ -47,6 +65,10 @@ class BenchmarkResult(TypedDict):
     p50_ms: float
     min_ms: float
     max_ms: float
+    wall_samples_ms: list[float]
+    wall_p50_ms: float
+    wall_min_ms: float
+    wall_max_ms: float
     peak_rss_samples_bytes: list[int]
     peak_rss_p50_bytes: int
     peak_rss_min_bytes: int
@@ -116,6 +138,12 @@ class ResultDocument(TypedDict):
     e2e_comparison: dict[str, E2EComparison]
 
 
+class GuestCommandResult(TypedDict):
+    text: str
+    wall_ms: float
+    peak_rss_bytes: int
+
+
 def configure_parser(
     parser: argparse.ArgumentParser,
     repository_dir: Path,
@@ -131,11 +159,20 @@ def configure_parser(
     )
     parser.add_argument(
         "--suite",
-        choices=("boot", "snapshot", "restore", "e2e", "phase2", "all"),
+        choices=(
+            "boot",
+            "snapshot",
+            "restore",
+            "e2e",
+            "phase2",
+            "all",
+            *sorted(WORKLOAD_SUITES),
+        ),
         default="boot",
         help=(
             "benchmark suite to run: e2e measures cold boot and full "
-            "snapshot restore; phase2 measures host foundations (default: boot)"
+            "snapshot restore; performance runs the canonical non-Python "
+            "workloads (default: boot)"
         ),
     )
     parser.add_argument(
@@ -159,6 +196,38 @@ def configure_parser(
     parser.add_argument("--warmups", type=positive_int, default=3)
     parser.add_argument("--runs", type=positive_int, default=11)
     parser.add_argument("--memory-mib", type=positive_int, default=128)
+    parser.add_argument(
+        "--virtfs-runs",
+        type=positive_int,
+        default=3,
+        help="samples for virtfs within the performance suite (default: 3)",
+    )
+    parser.add_argument(
+        "--virtfs-memory-mib",
+        type=positive_int,
+        default=512,
+        help="guest memory for the virtfs workload (default: 512)",
+    )
+    parser.add_argument(
+        "--payload-mib",
+        type=positive_int,
+        default=64,
+        help="virtfs sequential I/O payload size (default: 64)",
+    )
+    parser.add_argument(
+        "--shell-memories",
+        type=positive_int,
+        nargs="+",
+        default=[64, 128, 256, 512],
+        metavar="MIB",
+        help="shell snapshot memory sizes (default: 64 128 256 512)",
+    )
+    parser.add_argument(
+        "--network-memory-mib",
+        type=positive_int,
+        default=256,
+        help="guest memory for the network snapshot workload (default: 256)",
+    )
     parser.add_argument(
         "--net",
         metavar="IPV4/PREFIX",
@@ -213,6 +282,11 @@ def configure_parser(
         "--output",
         type=Path,
         help="optional JSON result path",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="write canonical workload logs to this directory",
     )
     parser.add_argument(
         "--keep-kvm-stage",
@@ -475,6 +549,32 @@ class InteractiveProcess:
             self.terminal_fd = None
 
 
+def cleanup_managed_tap(pid: int) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    name = f"ovm{pid}"
+    query = subprocess.run(
+        ["ip", "link", "show", "dev", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if query.returncode != 0:
+        return
+    geteuid = cast(Callable[[], int] | None, getattr(os, "geteuid", None))
+    command = ["ip"] if geteuid is not None and geteuid() == 0 else ["sudo", "-n", "ip"]
+    completed = subprocess.run(
+        [*command, "tuntap", "del", "dev", name, "mode", "tap"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"failed to remove managed TAP {name}: {completed.stderr.strip()}"
+        )
+
+
 def measure_once(
     command: Sequence[str],
     *,
@@ -483,7 +583,8 @@ def measure_once(
     marker: bytes = BOOT_MARKER,
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
-) -> tuple[float, int, float | None]:
+    cleanup_managed_network: bool = False,
+) -> tuple[float, int, float | None, float]:
     started = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
@@ -528,13 +629,16 @@ def measure_once(
                     )
                 except subprocess.TimeoutExpired:
                     terminate(process)
-                    return elapsed_ms, peak_bytes, None
-                teardown_ms = (time.perf_counter_ns() - teardown_started) / 1_000_000
+                    wall_ms = (time.perf_counter_ns() - started) / 1_000_000
+                    return elapsed_ms, peak_bytes, None, wall_ms
+                process_exited = time.perf_counter_ns()
+                teardown_ms = (process_exited - teardown_started) / 1_000_000
+                wall_ms = (process_exited - started) / 1_000_000
                 if teardown_mode == "guest-exit" and returncode != 0:
                     raise RuntimeError(
                         f"OpenVMM exited with status {returncode} during teardown"
                     )
-                return elapsed_ms, peak_bytes, teardown_ms
+                return elapsed_ms, peak_bytes, teardown_ms, wall_ms
             if len(output) > 1024 * 1024:
                 del output[: len(output) - 1024 * 1024]
     except Exception as error:
@@ -545,6 +649,8 @@ def measure_once(
         raise
     finally:
         interaction.close()
+        if cleanup_managed_network:
+            cleanup_managed_tap(process.pid)
 
 
 def benchmark(
@@ -556,17 +662,19 @@ def benchmark(
     marker: bytes = BOOT_MARKER,
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
+    cleanup_managed_network: bool = False,
 ) -> BenchmarkResult:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     for index in range(warmups):
-        value, peak_bytes, teardown_ms = measure_once(
+        value, peak_bytes, teardown_ms, _wall_ms = measure_once(
             command,
             environment=environment,
             timeout=timeout,
             marker=marker,
             windows_cpus=windows_cpus,
             teardown_mode=teardown_mode,
+            cleanup_managed_network=cleanup_managed_network,
         )
         teardown = (
             f"{teardown_ms:.3f} ms"
@@ -580,18 +688,21 @@ def benchmark(
         )
 
     samples: list[float] = []
+    wall_samples: list[float] = []
     peak_rss_samples: list[int] = []
     teardown_samples: list[float | None] = []
     for index in range(runs):
-        value, peak_bytes, teardown_ms = measure_once(
+        value, peak_bytes, teardown_ms, wall_ms = measure_once(
             command,
             environment=environment,
             timeout=timeout,
             marker=marker,
             windows_cpus=windows_cpus,
             teardown_mode=teardown_mode,
+            cleanup_managed_network=cleanup_managed_network,
         )
         samples.append(value)
+        wall_samples.append(wall_ms)
         peak_rss_samples.append(peak_bytes)
         teardown_samples.append(teardown_ms)
         teardown = (
@@ -611,6 +722,10 @@ def benchmark(
         "p50_ms": statistics.median(samples),
         "min_ms": min(samples),
         "max_ms": max(samples),
+        "wall_samples_ms": wall_samples,
+        "wall_p50_ms": statistics.median(wall_samples),
+        "wall_min_ms": min(wall_samples),
+        "wall_max_ms": max(wall_samples),
         "peak_rss_samples_bytes": peak_rss_samples,
         "peak_rss_p50_bytes": int(statistics.median(peak_rss_samples)),
         "peak_rss_min_bytes": min(peak_rss_samples),
@@ -625,6 +740,801 @@ def benchmark(
         "teardown_min_ms": min(completed_teardowns, default=None),
         "teardown_max_ms": max(completed_teardowns, default=None),
     }
+
+
+def format_sample_summary(samples: Sequence[float], *, unit: str = "ms") -> str:
+    if not samples:
+        raise ValueError("cannot summarize an empty sample set")
+    return (
+        f"{statistics.median(samples):.1f} {unit}  "
+        f"(min {min(samples):.1f}, max {max(samples):.1f}, n={len(samples)})"
+    )
+
+
+def clocksource_parameter(backend: str) -> str:
+    return "clocksource=kvm-clock" if backend == "kvm" else "clocksource=tsc"
+
+
+def network_gateway(spec: str) -> str:
+    try:
+        interface = ipaddress.IPv4Interface(spec)
+    except ValueError as error:
+        raise ValueError(f"invalid network IPv4 CIDR {spec!r}: {error}") from error
+    if not 1 <= interface.network.prefixlen <= 30:
+        raise ValueError(f"network prefix must be in 1..30, got {spec!r}")
+    return str(interface.network.network_address + 1)
+
+
+def parse_dd_rate(text: str, occurrence: int) -> float | None:
+    lines = [line for line in text.splitlines() if "copied" in line]
+    if len(lines) < occurrence:
+        return None
+    matches = DD_RATE_PATTERN.findall(lines[occurrence - 1])
+    if not matches:
+        return None
+    raw_value, prefix = matches[-1]
+    multiplier = {"": 1e-6, "K": 1e-3, "M": 1.0, "G": 1e3}[prefix]
+    return float(raw_value) * multiplier
+
+
+def workload_boot_command(
+    executable: Path,
+    backend: str,
+    kernel: Path,
+    initrd: Path,
+    memory_mib: int,
+    cmdline: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    network: str | None = None,
+    mount: str | None = None,
+) -> list[str]:
+    command = [
+        *command_prefix,
+        str(executable),
+        "--single-process",
+        "--machine",
+        "microvm",
+        "--hypervisor",
+        backend,
+        "--memory",
+        f"{memory_mib}M",
+        "--kernel",
+        str(kernel),
+        "--initrd",
+        str(initrd),
+        "--cmdline",
+        cmdline,
+    ]
+    if network is not None:
+        command.extend(("--net", network))
+    if mount is not None:
+        command.extend(("--mount", mount))
+    return command
+
+
+def _try_peak_rss(process: subprocess.Popen[bytes], current: int) -> int:
+    if process.poll() is not None:
+        return current
+    try:
+        return max(current, peak_rss_bytes(process.pid))
+    except (OSError, RuntimeError):
+        return current
+
+
+def run_guest_script(
+    command: Sequence[str],
+    script: str,
+    completion_marker: bytes,
+    *,
+    timeout: float,
+    windows_cpus: set[int] | None = None,
+    teardown_mode: str = "guest-exit",
+) -> GuestCommandResult:
+    environment = os.environ.copy()
+    environment["OPENVMM_LOG"] = "off"
+    started_ns = time.perf_counter_ns()
+    interaction = InteractiveProcess(command, environment)
+    process = interaction.process
+    if windows_cpus is not None:
+        set_windows_affinity(process.pid, windows_cpus)
+
+    chunks: queue.Queue[bytes | None] = queue.Queue()
+    threading.Thread(
+        target=interaction.read_output, args=(chunks,), daemon=True
+    ).start()
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    input_sent = False
+    completed = False
+    peak_bytes = 0
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"guest workload did not finish within {timeout:g}s")
+            try:
+                chunk = chunks.get(timeout=min(remaining, 0.1))
+            except queue.Empty:
+                peak_bytes = _try_peak_rss(process, peak_bytes)
+                if process.poll() is not None:
+                    continue
+                continue
+            if chunk is None:
+                break
+            output.extend(chunk)
+            peak_bytes = _try_peak_rss(process, peak_bytes)
+            if not input_sent and BOOT_MARKER in output:
+                interaction.write_input(script.encode("utf-8"))
+                input_sent = True
+            if input_sent and contains_output_line(output, completion_marker):
+                completed = True
+                if teardown_mode != "guest-exit" and process.poll() is None:
+                    process.terminate()
+                    deadline = min(
+                        deadline,
+                        time.monotonic() + TEARDOWN_TIMEOUT_SECONDS,
+                    )
+
+        returncode = process.wait()
+        if teardown_mode == "guest-exit" and returncode != 0:
+            raise RuntimeError(f"OpenVMM exited with status {returncode}")
+        if not input_sent:
+            raise RuntimeError("guest exited before its boot marker")
+        if not completed:
+            raise RuntimeError(
+                f"guest exited without completion marker {completion_marker.decode()!r}"
+            )
+        return {
+            "text": output.decode("utf-8", "replace"),
+            "wall_ms": (time.perf_counter_ns() - started_ns) / 1_000_000,
+            "peak_rss_bytes": peak_bytes,
+        }
+    except Exception as error:
+        terminate(process)
+        tail = output[-4096:].decode("utf-8", "replace")
+        if tail:
+            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
+        raise
+    finally:
+        interaction.close()
+
+
+def capture_automatic_snapshot(
+    command: Sequence[str],
+    snapshot_path: Path,
+    *,
+    timeout: float,
+    required_markers: Sequence[bytes] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    if snapshot_path.exists():
+        shutil.rmtree(snapshot_path)
+    environment = os.environ.copy()
+    environment["OPENVMM_LOG"] = "off"
+    interaction = InteractiveProcess(command, environment)
+    process = interaction.process
+    if windows_cpus is not None:
+        set_windows_affinity(process.pid, windows_cpus)
+
+    chunks: queue.Queue[bytes | None] = queue.Queue()
+    threading.Thread(
+        target=interaction.read_output, args=(chunks,), daemon=True
+    ).start()
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"snapshot was not captured within {timeout:g}s")
+            try:
+                chunk = chunks.get(timeout=min(remaining, 0.1))
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            output.extend(chunk)
+
+        returncode = process.wait()
+        if returncode != 0:
+            raise RuntimeError(f"snapshot source exited with status {returncode}")
+        for marker in required_markers:
+            if marker not in output:
+                raise RuntimeError(
+                    f"snapshot source did not emit required marker {marker.decode()!r}"
+                )
+        for filename in SNAPSHOT_FILENAMES:
+            if not (snapshot_path / filename).is_file():
+                raise RuntimeError(
+                    f"snapshot did not publish {snapshot_path / filename}"
+                )
+    except Exception as error:
+        terminate(process)
+        tail = output[-4096:].decode("utf-8", "replace")
+        if tail:
+            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
+        raise
+    finally:
+        interaction.close()
+
+
+def format_rss_summary(samples: Sequence[int]) -> str:
+    if not samples:
+        return "n/a"
+    values = [bytes_to_mib(value) for value in samples]
+    return (
+        f"{statistics.median(values):.1f} MiB  "
+        f"(min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
+    )
+
+
+def benchmark_cold_start_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    clocksource = clocksource_parameter(backend)
+    scenarios = (
+        ("base", None),
+        (clocksource, clocksource),
+        ("tsc=reliable", "tsc=reliable"),
+        ("no_timer_check", "no_timer_check"),
+        ("random.trust_cpu=on", "random.trust_cpu=on"),
+        ("rcupdate.rcu_expedited=1", "rcupdate.rcu_expedited=1"),
+        ("nokaslr", "nokaslr"),
+        ("mitigations=off", "mitigations=off"),
+        ("cryptomgr.notests", "cryptomgr.notests"),
+    )
+    print(
+        "cold-start (OpenVMM process launch -> shell marker), "
+        f"median of {args.runs} runs, {args.memory_mib} MiB, 1 vCPU"
+    )
+    print()
+    print("isolated kernel command-line scenarios:")
+    for label, parameter in scenarios:
+        cmdline = "quiet loglevel=0"
+        if parameter is not None:
+            cmdline = f"{cmdline} {parameter}"
+        result = benchmark(
+            workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                args.memory_mib,
+                cmdline,
+                command_prefix=command_prefix,
+            ),
+            warmups=args.warmups,
+            runs=args.runs,
+            timeout=args.timeout,
+            windows_cpus=windows_cpus,
+            teardown_mode=args.teardown_mode,
+        )
+        print(f"  {label:<25}: {format_sample_summary(result['samples_ms'])}")
+
+
+def _format_rate_summary(samples: Sequence[float]) -> str:
+    if not samples:
+        raise ValueError("cannot summarize an empty throughput sample set")
+    return (
+        f"{statistics.median(samples):8.1f} MB/s  "
+        f"(min {min(samples):.1f}, max {max(samples):.1f}, n={len(samples)})"
+    )
+
+
+def _guest_exit_script(teardown_mode: str) -> str:
+    return "nvx-exit 0\n" if teardown_mode == "guest-exit" else ""
+
+
+def _virtfs_script(payload_mib: int, teardown_mode: str) -> str:
+    return (
+        f"dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count={payload_mib} "
+        "conv=fsync 2>&1\n"
+        "sync\n"
+        "echo 3 > /proc/sys/vm/drop_caches 2>/dev/null\n"
+        "dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1\n"
+        "sync\n"
+        f"echo {VIRTFS_COMPLETION_MARKER.decode()}\n"
+        + _guest_exit_script(teardown_mode)
+    )
+
+
+def _virtfs_roundtrip_script(teardown_mode: str) -> str:
+    return (
+        "printf 'guest-to-host\\n' > /mnt/host/guest-visible\n"
+        "tries=0\n"
+        'while [ "$(cat /mnt/host/host-visible 2>/dev/null)" != host-to-guest ] '
+        '&& [ "$tries" -lt 1200 ]; do sleep 0.05; tries=$((tries + 1)); done\n'
+        'if [ "$(cat /mnt/host/host-visible 2>/dev/null)" = host-to-guest ]; then\n'
+        f"  echo {VIRTFS_ROUNDTRIP_MARKER.decode()}\n"
+        "fi\n" + _guest_exit_script(teardown_mode)
+    )
+
+
+def _run_virtfs_roundtrip(
+    command: Sequence[str],
+    directory: Path,
+    run_number: int,
+    runs: int,
+    *,
+    timeout: float,
+    windows_cpus: set[int] | None,
+    teardown_mode: str,
+) -> GuestCommandResult:
+    guest_visible = directory / "guest-visible"
+    host_visible = directory / "host-visible"
+    guest_visible.unlink(missing_ok=True)
+    host_visible.write_text("waiting\n", encoding="ascii")
+    errors: list[str] = []
+
+    def exchange() -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if guest_visible.read_text(encoding="ascii") == "guest-to-host\n":
+                    host_visible.write_text("host-to-guest\n", encoding="ascii")
+                    return
+            except (FileNotFoundError, PermissionError, UnicodeError):
+                pass
+            time.sleep(0.01)
+        errors.append("host did not observe the guest-created marker")
+
+    worker = threading.Thread(
+        target=exchange,
+        name="virtfs-live-exchange",
+        daemon=True,
+    )
+    worker.start()
+    result = run_guest_script(
+        command,
+        _virtfs_roundtrip_script(teardown_mode),
+        VIRTFS_ROUNDTRIP_MARKER,
+        timeout=timeout,
+        windows_cpus=windows_cpus,
+        teardown_mode=teardown_mode,
+    )
+    worker.join(timeout=1)
+    if worker.is_alive():
+        errors.append("host exchange worker did not finish")
+    if errors:
+        raise RuntimeError(
+            f"live virtfs exchange {run_number}/{runs} failed: {'; '.join(errors)}"
+        )
+    return result
+
+
+def benchmark_virtfs_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    runs: int,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="openvmm-virtfs-") as temporary:
+        directory = Path(temporary)
+        if "," in str(directory):
+            raise ValueError("virtfs benchmark directory must not contain a comma")
+        mount = f"/mnt/host,{directory},rw"
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            args.virtfs_memory_mib,
+            "quiet loglevel=0",
+            command_prefix=command_prefix,
+            mount=mount,
+        )
+        print(
+            f"virtfs benchmark: {args.payload_mib} MiB payload, "
+            f"{args.virtfs_memory_mib} MiB guest, 1 vCPU, median of {runs} runs"
+        )
+        print()
+        print("== sequential throughput (guest dd, conv=fsync writes) ==")
+        write_rates: list[float] = []
+        read_rates: list[float] = []
+        io_rss: list[int] = []
+        for run_number in range(1, runs + 1):
+            result = run_guest_script(
+                command,
+                _virtfs_script(args.payload_mib, args.teardown_mode),
+                VIRTFS_COMPLETION_MARKER,
+                timeout=max(args.timeout, 300.0),
+                windows_cpus=windows_cpus,
+                teardown_mode=args.teardown_mode,
+            )
+            write_rate = parse_dd_rate(result["text"], 1)
+            read_rate = parse_dd_rate(result["text"], 2)
+            if write_rate is None or read_rate is None:
+                raise RuntimeError(
+                    f"virtfs run {run_number}/{runs} did not report both dd rates"
+                )
+            write_rates.append(write_rate)
+            read_rates.append(read_rate)
+            io_rss.append(result["peak_rss_bytes"])
+        print(
+            f"  {'rw live host directory':<27} write {_format_rate_summary(write_rates)}"
+        )
+        print(f"  {'':<27} read  {_format_rate_summary(read_rates)}")
+        print(f"  OpenVMM peak RSS                  : {format_rss_summary(io_rss)}")
+        print()
+
+        print("== live host <-> guest visibility (same running VM) ==")
+        roundtrip_samples: list[float] = []
+        roundtrip_rss: list[int] = []
+        for run_number in range(1, runs + 1):
+            result = _run_virtfs_roundtrip(
+                command,
+                directory,
+                run_number,
+                runs,
+                timeout=max(args.timeout, 120.0),
+                windows_cpus=windows_cpus,
+                teardown_mode=args.teardown_mode,
+            )
+            roundtrip_samples.append(result["wall_ms"])
+            roundtrip_rss.append(result["peak_rss_bytes"])
+        print(
+            "  live exchange (cold each)         : "
+            + format_sample_summary(roundtrip_samples)
+        )
+        print(
+            f"  OpenVMM peak RSS                  : {format_rss_summary(roundtrip_rss)}"
+        )
+
+
+def _print_shell_snapshot_summary(
+    memory_mib: int,
+    cold: Sequence[float],
+    restored: Sequence[float],
+) -> None:
+    split_ms = 900.0
+    fast = [value for value in cold if value < split_ms]
+    slow = [value for value in cold if value >= split_ms]
+
+    def line(name: str, values: Sequence[float]) -> str:
+        return (
+            f"  {name:<20}: median {statistics.median(values):7.1f} ms   "
+            f"(min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
+        )
+
+    print(f"== {memory_mib} MiB ==")
+    print(line("cold boot", cold))
+    if fast and slow:
+        print(
+            f"       fast path {statistics.median(fast):7.1f} ms (n={len(fast)})  |  "
+            f"slow path {statistics.median(slow):7.1f} ms (n={len(slow)}, "
+            f"+~{statistics.median(slow) - statistics.median(fast):.0f} ms "
+            "TSC PIT-calib)"
+        )
+    print(line("snapshot restore", restored))
+    restore_p50 = statistics.median(restored)
+    if restore_p50 > 0:
+        base = statistics.median(fast) if fast else statistics.median(cold)
+        print(
+            f"  {'speedup':<20}: {base / restore_p50:.0f}x (fast-path cold) .. "
+            f"{statistics.median(cold) / restore_p50:.0f}x (median cold) "
+            "faster via snapshot"
+        )
+    print()
+
+
+def benchmark_shell_snapshot_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    print(
+        "boot-to-shell: cold OpenVMM launch vs snapshot restore, "
+        f"median of {args.runs} runs, 1 vCPU"
+    )
+    print(f'marker : "{BOOT_MARKER.decode()}"')
+    print(f"kernel : {kernel}")
+    print(f"initrd : {initrd}")
+    print()
+    with tempfile.TemporaryDirectory(prefix="openvmm-shell-snapshot-") as temporary:
+        root = Path(temporary)
+        for memory_mib in args.shell_memories:
+            cold_command = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                command_prefix=command_prefix,
+            )
+            cold = benchmark(
+                cold_command,
+                warmups=args.warmups,
+                runs=args.runs,
+                timeout=args.timeout,
+                windows_cpus=windows_cpus,
+                teardown_mode=args.teardown_mode,
+            )
+
+            snapshot_path = root / f"shell-{memory_mib}-mib"
+            capture_command = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0 shellsnap",
+                command_prefix=command_prefix,
+            )
+            capture_automatic_snapshot(
+                [
+                    *capture_command,
+                    "--snapshot-destination",
+                    str(snapshot_path),
+                ],
+                snapshot_path,
+                timeout=max(args.timeout, 30.0),
+                windows_cpus=windows_cpus,
+            )
+            restored = benchmark(
+                [
+                    *command_prefix,
+                    *snapshot_restore_command(
+                        executable,
+                        backend,
+                        snapshot_path,
+                        args.unsafe_skip_snapshot_memory_verification,
+                    ),
+                ],
+                warmups=args.warmups,
+                runs=args.runs,
+                timeout=args.timeout,
+                marker=BOOT_MARKER,
+                windows_cpus=windows_cpus,
+                teardown_mode=args.teardown_mode,
+            )
+            _print_shell_snapshot_summary(
+                memory_mib,
+                cold["samples_ms"],
+                restored["samples_ms"],
+            )
+
+
+def benchmark_network_snapshot_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    network = args.net or "10.0.0.2/24"
+    gateway = network_gateway(network)
+    cold_marker = f"VIRTNET-PROBE-OK: {gateway}".encode()
+    restore_marker = f"NETSNAP-RESTORE-PROBE-OK: {gateway}".encode()
+    print(
+        "networking + snapshot benchmark, "
+        f"median of {args.runs}, {args.network_memory_mib} MiB, 1 vCPU, "
+        f"--net {network}"
+    )
+    print()
+    print("== cold boot -> verified gateway connectivity ==")
+    probe_cmdline = f"quiet loglevel=0 virtnet_probe={gateway}"
+    cleanup_managed_network = (
+        args.teardown_mode != "guest-exit" and sys.platform.startswith("linux")
+    )
+    cold_command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        args.network_memory_mib,
+        probe_cmdline,
+        command_prefix=command_prefix,
+        network=network,
+    )
+    cold = benchmark(
+        cold_command,
+        warmups=args.warmups,
+        runs=args.runs,
+        timeout=max(args.timeout, 40.0),
+        marker=cold_marker,
+        windows_cpus=windows_cpus,
+        teardown_mode=args.teardown_mode,
+        cleanup_managed_network=cleanup_managed_network,
+    )
+    print(
+        "  cold  (guest start -> marker):   "
+        + format_sample_summary(cold["samples_ms"])
+    )
+    print(
+        "  cold OpenVMM peak RSS          : "
+        + format_rss_summary(cold["peak_rss_samples_bytes"])
+    )
+
+    print("== capture a warmed, network-configured snapshot (one-off) ==")
+    with tempfile.TemporaryDirectory(prefix="openvmm-network-snapshot-") as temporary:
+        snapshot_path = Path(temporary) / "snapshot"
+        capture_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            args.network_memory_mib,
+            f"{probe_cmdline} netsnap",
+            command_prefix=command_prefix,
+            network=network,
+        )
+        capture_automatic_snapshot(
+            [
+                *capture_command,
+                "--snapshot-destination",
+                str(snapshot_path),
+            ],
+            snapshot_path,
+            timeout=max(args.timeout, 40.0),
+            required_markers=(cold_marker, b"netsnap: pre-snapshot link OK"),
+            windows_cpus=windows_cpus,
+        )
+
+        print("== restore -> verified gateway connectivity ==")
+        restored = benchmark(
+            [
+                *command_prefix,
+                *snapshot_restore_command(
+                    executable,
+                    backend,
+                    snapshot_path,
+                    args.unsafe_skip_snapshot_memory_verification,
+                ),
+            ],
+            warmups=args.warmups,
+            runs=args.runs,
+            timeout=max(args.timeout, 30.0),
+            marker=restore_marker,
+            windows_cpus=windows_cpus,
+            teardown_mode=args.teardown_mode,
+            cleanup_managed_network=cleanup_managed_network,
+        )
+        if restored["teardown_timeout_count"] != 0:
+            raise RuntimeError(
+                "network restore did not complete every measured teardown"
+            )
+        wall_samples = restored["wall_samples_ms"]
+        print(
+            "  restore (guest resume -> marker):  "
+            + format_sample_summary(restored["samples_ms"])
+        )
+        print(
+            "  restore OpenVMM peak RSS         : "
+            + format_rss_summary(restored["peak_rss_samples_bytes"])
+        )
+        print("== end-to-end wall-clock (process start -> exit) ==")
+        print(
+            "  restore wall-clock             : " + format_sample_summary(wall_samples)
+        )
+
+
+class TeeWriter:
+    def __init__(self, *streams: TextIO) -> None:
+        self.streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
+def run_workload_benchmarks(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> int:
+    if args.output is not None:
+        raise ValueError("workload suites use --output-dir instead of --output")
+    requested = (
+        ("cold-start", "virtfs", "shell-snapshot", "network-snapshot")
+        if args.suite == "performance"
+        else (args.suite,)
+    )
+    output_dir = args.output_dir
+    if output_dir is None and args.suite == "performance":
+        platform = f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
+        output_dir = args.nvx_dir.resolve() / "build" / "benchmarks" / platform
+    if output_dir is not None:
+        output_dir = output_dir.resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if args.suite == "performance":
+            for filename in (*PERFORMANCE_LOG_FILENAMES, *LEGACY_PYTHON_LOG_FILENAMES):
+                (output_dir / filename).unlink(missing_ok=True)
+
+    callbacks: dict[str, tuple[str, Callable[[], None]]] = {
+        "cold-start": (
+            "cold-start.log",
+            lambda: benchmark_cold_start_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+        "virtfs": (
+            "virtfs.log",
+            lambda: benchmark_virtfs_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                runs=args.virtfs_runs if args.suite == "performance" else args.runs,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+        "shell-snapshot": (
+            "shell-snapshot.log",
+            lambda: benchmark_shell_snapshot_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+        "network-snapshot": (
+            "network.log",
+            lambda: benchmark_network_snapshot_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+    }
+    for suite in requested:
+        filename, callback = callbacks[suite]
+        print(f"Benchmarking {suite} on OpenVMM/{backend}", flush=True)
+        if output_dir is None:
+            callback()
+            continue
+        path = output_dir / filename
+        with path.open("w", encoding="utf-8", newline="\n") as log:
+            with contextlib.redirect_stdout(cast(TextIO, TeeWriter(sys.stdout, log))):
+                callback()
+        print(f"Wrote {path}", flush=True)
+    return 0
 
 
 def capture_snapshot(
@@ -1361,7 +2271,8 @@ def run_native_linux(args: argparse.Namespace) -> int:
     run_snapshot = args.suite in ("snapshot", "all")
     run_restore = args.suite in ("restore", "e2e", "all")
     run_phase2 = args.suite in ("phase2", "all")
-    run_guest = run_boot or run_snapshot or run_restore
+    run_workloads = args.suite in WORKLOAD_SUITES
+    run_guest = run_boot or run_snapshot or run_restore or run_workloads
     kernel = None
     initrd = None
     executable = None
@@ -1421,6 +2332,16 @@ def run_native_linux(args: argparse.Namespace) -> int:
             f"CPU set {args.cpus!r} exceeds the {available_cpus} available logical CPUs"
         )
     prefix = ["taskset", "-c", args.cpus]
+    if run_workloads:
+        assert executable is not None and kernel is not None and initrd is not None
+        return run_workload_benchmarks(
+            args,
+            executable,
+            kernel,
+            initrd,
+            backend,
+            command_prefix=prefix,
+        )
     results = result_document(args, kernel, initrd)
     if run_guest:
         assert executable is not None and kernel is not None and initrd is not None
@@ -1677,7 +2598,13 @@ def run(args: argparse.Namespace) -> int:
     run_snapshot = args.suite in ("snapshot", "all")
     run_restore = args.suite in ("restore", "e2e", "all")
     run_phase2 = args.suite in ("phase2", "all")
-    run_guest = run_boot or run_snapshot or run_restore
+    run_workloads = args.suite in WORKLOAD_SUITES
+    if run_workloads and args.backend != "whp":
+        raise ValueError(
+            "Windows workload suites require --backend whp; run KVM/MSHV "
+            "workloads on native Linux"
+        )
+    run_guest = run_boot or run_snapshot or run_restore or run_workloads
     kernel = None
     initrd = None
     if run_guest:
@@ -1736,6 +2663,17 @@ def run(args: argparse.Namespace) -> int:
             phase2_binaries["whp"] = build_phase2_whp_host(openvmm_dir)
         if run_phase2 and "kvm" in selected:
             phase2_binaries["kvm"] = build_phase2_kvm_host(openvmm_dir)
+
+    if run_workloads:
+        assert kernel is not None and initrd is not None
+        return run_workload_benchmarks(
+            args,
+            boot_binaries["whp"],
+            kernel,
+            initrd,
+            "whp",
+            windows_cpus=cpus,
+        )
 
     results = result_document(args, kernel, initrd)
 

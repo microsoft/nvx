@@ -4,6 +4,7 @@
 import hashlib
 import io
 import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -13,10 +14,32 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import archive, build, common, release  # noqa: E402
+from nvx_tools import archive, benchmark, build, common, release  # noqa: E402
 
 
 class CliTests(unittest.TestCase):
+    def test_benchmark_exposes_non_python_performance_suite(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "performance",
+                "--shell-memories",
+                "64",
+                "256",
+                "--output-dir",
+                "results",
+            ]
+        )
+
+        self.assertEqual(args.suite, "performance")
+        self.assertEqual(args.shell_memories, [64, 256])
+        self.assertEqual(args.virtfs_runs, 3)
+        self.assertEqual(args.payload_mib, 64)
+        self.assertEqual(args.network_memory_mib, 256)
+        self.assertEqual(args.output_dir, Path("results"))
+        self.assertIs(args.handler, benchmark.run)
+
     def test_release_commands_keep_their_cli_contract(self):
         collect = nvx.parse_args(["collect-sources"])
         self.assertEqual(collect.command, "collect-sources")
@@ -44,6 +67,139 @@ class CliTests(unittest.TestCase):
         verify = nvx.parse_args(["verify"])
         self.assertEqual(verify.command, "verify")
         self.assertIs(verify.handler, nvx.command_verify)
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_builds_isolated_workload_command(self):
+        command = benchmark.workload_boot_command(
+            Path("openvmm"),
+            "kvm",
+            Path("vmlinux"),
+            Path("initramfs.cpio.gz"),
+            128,
+            "quiet loglevel=0 nokaslr",
+            command_prefix=("taskset", "-c", "2-3"),
+            network="10.0.0.2/24",
+            mount="/mnt/host,C:/work,rw",
+        )
+
+        self.assertEqual(command[:4], ["taskset", "-c", "2-3", "openvmm"])
+        self.assertIn("quiet loglevel=0 nokaslr", command)
+        self.assertEqual(
+            command[-4:], ["--net", "10.0.0.2/24", "--mount", "/mnt/host,C:/work,rw"]
+        )
+
+    def test_parses_dd_rates_and_network_gateway(self):
+        output = """
+67108864 bytes copied, 0.25 s, 268.4 MB/s
+67108864 bytes copied, 0.04 s, 1.6 GB/s
+"""
+
+        self.assertEqual(benchmark.parse_dd_rate(output, 1), 268.4)
+        self.assertEqual(benchmark.parse_dd_rate(output, 2), 1600.0)
+        self.assertEqual(benchmark.network_gateway("10.0.0.2/24"), "10.0.0.1")
+        self.assertEqual(
+            benchmark.clocksource_parameter("kvm"), "clocksource=kvm-clock"
+        )
+        self.assertEqual(benchmark.clocksource_parameter("mshv"), "clocksource=tsc")
+
+    def test_benchmark_preserves_exact_process_wall_samples(self):
+        samples = [
+            (10.0, 1024, 2.0, 13.5),
+            (12.0, 2048, 3.0, 16.5),
+        ]
+        with patch.object(benchmark, "measure_once", side_effect=samples):
+            result = benchmark.benchmark(["openvmm"], warmups=0, runs=2, timeout=1)
+
+        self.assertEqual(result["samples_ms"], [10.0, 12.0])
+        self.assertEqual(result["wall_samples_ms"], [13.5, 16.5])
+        self.assertEqual(result["wall_p50_ms"], 15.0)
+        self.assertEqual(
+            benchmark.SNAPSHOT_FILENAMES,
+            ("manifest.bin", "state.bin", "memory.bin"),
+        )
+
+    def test_virtfs_honors_host_termination_mode(self):
+        guest_exit = benchmark._virtfs_script(1, "guest-exit")
+        host_terminate = benchmark._virtfs_script(1, "host-terminate")
+        roundtrip = benchmark._virtfs_roundtrip_script("host-terminate")
+
+        self.assertIn("nvx-exit 0", guest_exit)
+        self.assertNotIn("nvx-exit 0", host_terminate)
+        self.assertNotIn("nvx-exit 0", roundtrip)
+
+    def test_managed_tap_cleanup_uses_openvmm_pid(self):
+        query: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+            ["ip"], 0, "", ""
+        )
+        removed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+            ["sudo", "-n", "ip"], 0, "", ""
+        )
+        with (
+            patch.object(benchmark.sys, "platform", "linux"),
+            patch.object(benchmark.os, "geteuid", return_value=1000, create=True),
+            patch.object(
+                benchmark.subprocess, "run", side_effect=(query, removed)
+            ) as run,
+        ):
+            benchmark.cleanup_managed_tap(1234)
+
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "sudo",
+                "-n",
+                "ip",
+                "tuntap",
+                "del",
+                "dev",
+                "ovm1234",
+                "mode",
+                "tap",
+            ],
+        )
+
+    def test_performance_suite_writes_four_canonical_logs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "snapshot.log").write_text("stale", encoding="ascii")
+            (output / "snapshot-hello.log").write_text("stale", encoding="ascii")
+            args = nvx.parse_args(
+                [
+                    "benchmark",
+                    "--suite",
+                    "performance",
+                    "--backend",
+                    "whp",
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            with (
+                patch.object(benchmark, "benchmark_cold_start_workload") as cold,
+                patch.object(benchmark, "benchmark_virtfs_workload") as virtfs,
+                patch.object(benchmark, "benchmark_shell_snapshot_workload") as shell,
+                patch.object(
+                    benchmark, "benchmark_network_snapshot_workload"
+                ) as network,
+            ):
+                result = benchmark.run_workload_benchmarks(
+                    args,
+                    Path("openvmm.exe"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    "whp",
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {"cold-start.log", "virtfs.log", "shell-snapshot.log", "network.log"},
+            )
+            cold.assert_called_once()
+            self.assertEqual(virtfs.call_args.kwargs["runs"], 3)
+            shell.assert_called_once()
+            network.assert_called_once()
 
     def test_package_command_forwards_parsed_options(self):
         args = nvx.parse_args(

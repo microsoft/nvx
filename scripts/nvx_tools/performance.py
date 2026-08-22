@@ -33,10 +33,6 @@ SHARED_METRICS = frozenset(
         "virtfs_live_write",
         "virtfs_live_read",
         "virtfs_live_roundtrip",
-        "python_pandas_cold",
-        "python_pandas_restore",
-        "python_hello_cold",
-        "python_hello_restore",
         "shell_snapshot_cold_64_mib",
         "shell_snapshot_restore_64_mib",
         "shell_snapshot_cold_128_mib",
@@ -311,8 +307,8 @@ def _parse_virtfs(text: str) -> dict[str, MetricValue]:
 LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "cold-start.log": (_parse_cold_start, True),
     "virtfs.log": (_parse_virtfs, True),
-    "snapshot.log": (_parse_snapshot, True),
-    "snapshot-hello.log": (_parse_hello_snapshot, True),
+    "snapshot.log": (_parse_snapshot, False),
+    "snapshot-hello.log": (_parse_hello_snapshot, False),
     "shell-snapshot.log": (_parse_shell_snapshot, False),
     "network.log": (_parse_network, False),
 }

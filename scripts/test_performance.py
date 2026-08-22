@@ -190,10 +190,6 @@ class PerformanceTests(unittest.TestCase):
             summary.write_text("Existing summary", encoding="utf-8")
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
-            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
-            (logs / "snapshot-hello.log").write_text(
-                HELLO_SNAPSHOT_LOG, encoding="utf-8"
-            )
             (logs / "shell-snapshot.log").write_text(
                 SHELL_SNAPSHOT_LOG, encoding="utf-8"
             )
@@ -238,10 +234,6 @@ class PerformanceTests(unittest.TestCase):
             logs.mkdir()
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
-            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
-            (logs / "snapshot-hello.log").write_text(
-                HELLO_SNAPSHOT_LOG, encoding="utf-8"
-            )
             (logs / "network.log").write_text(NETWORK_LOG, encoding="utf-16")
             (logs / "shell-snapshot.log").write_text(
                 SHELL_SNAPSHOT_LOG, encoding="utf-8"
@@ -259,7 +251,7 @@ class PerformanceTests(unittest.TestCase):
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 27)
+            self.assertEqual(len(results), 23)
             by_metric = {result.metric: result for result in results}
             self.assertEqual(by_metric["cold_start_base"].p50, 101.0)
             self.assertEqual(by_metric["cold_start_cryptomgr_notests"].p50, 109.0)
@@ -269,11 +261,9 @@ class PerformanceTests(unittest.TestCase):
             self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].p50, 510.0)
             self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].direction, "lower")
             self.assertEqual(by_metric["shell_snapshot_restore_512_mib"].p50, 7.0)
-            self.assertEqual(by_metric["python_hello_cold"].p50, 1100.0)
-            self.assertEqual(by_metric["python_hello_restore"].p50, 125.0)
             markdown = (root / "summary.md").read_text(encoding="utf-8")
             self.assertIn("## Linux / KVM benchmark results", markdown)
-            self.assertEqual(markdown.count("\n| `"), 27)
+            self.assertEqual(markdown.count("\n| `"), 23)
             self.assertIn(
                 "| `virtfs_live_read` | 1200.00 MB/s | Higher is better |", markdown
             )
@@ -288,17 +278,13 @@ class PerformanceTests(unittest.TestCase):
             logs.mkdir()
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
-            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
-            (logs / "snapshot-hello.log").write_text(
-                HELLO_SNAPSHOT_LOG, encoding="utf-8"
-            )
             (logs / "shell-snapshot.log").write_text(
                 SHELL_SNAPSHOT_LOG, encoding="utf-8"
             )
 
             with self.assertRaisesRegex(
                 performance.PerformanceError,
-                r"exactly 27 metrics \(missing: network_snapshot_cold",
+                r"exactly 23 metrics \(missing: network_snapshot_cold",
             ):
                 performance.collect_results(
                     "linux-kvm",
@@ -324,10 +310,6 @@ class PerformanceTests(unittest.TestCase):
             logs.mkdir()
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
-            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
-            (logs / "snapshot-hello.log").write_text(
-                HELLO_SNAPSHOT_LOG, encoding="utf-8"
-            )
 
             with self.assertRaisesRegex(
                 performance.PerformanceError,
@@ -341,22 +323,19 @@ class PerformanceTests(unittest.TestCase):
                     require_shell_snapshot=True,
                 )
 
-    def test_collect_requires_hello_snapshot_log(self):
+    def test_collect_does_not_require_python_snapshot_logs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             logs = root / "logs"
             logs.mkdir()
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
-            (logs / "snapshot.log").write_text(SNAPSHOT_LOG, encoding="utf-8")
 
-            with self.assertRaisesRegex(
-                performance.PerformanceError,
-                r"required benchmark log not found: .*snapshot-hello\.log",
-            ):
-                performance.collect_results(
-                    "linux-kvm", "abc123", logs, root / "results"
-                )
+            result_path = performance.collect_results(
+                "linux-kvm", "abc123", logs, root / "results"
+            )
+
+            self.assertEqual(len(performance.read_results(result_path)), 12)
 
     def test_gate_uses_latest_ten_p50_values_and_both_directions(self):
         with tempfile.TemporaryDirectory() as temporary:
