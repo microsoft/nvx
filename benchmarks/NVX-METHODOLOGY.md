@@ -1,8 +1,9 @@
 # Benchmark Reference
 
-NVX runs the same 23-metric OpenVMM benchmark suite on Linux/KVM, Linux/MSHV, and Windows/WHP.
-CI reports the median (p50) for each metric in the job summary. Latency metrics are
-lower-is-better; throughput metrics are higher-is-better.
+NVX runs a 23-metric OpenVMM benchmark suite on Linux/KVM and Windows/WHP. Linux/MSHV runs the
+20 supported non-network metrics because OpenVMM's microVM virtio-net phase currently supports
+KVM and WHP only. CI reports the median (p50) for each metric in the job summary. Latency metrics
+are lower-is-better; throughput metrics are higher-is-better.
 
 The suite uses the base Alpine guest. Python application snapshots, the Python-agent console
 workload, and its snapshot-prefetch experiment are intentionally excluded because the supported
@@ -10,8 +11,7 @@ guest build does not include a Python initramfs.
 
 Raw benchmark logs also report peak resident set size (RSS) for the measured OpenVMM process.
 Linux reads the process high-water mark; Windows reads the cumulative peak working set. RSS
-includes resident guest-memory mappings and is diagnostic rather than one of the 23
-regression-gated metrics.
+includes resident guest-memory mappings and is diagnostic rather than regression-gated.
 
 Use this page for metric names and methodology. Current historical p50 values live in
 `benchmarks/baselines/performance/`; timings copied into old discussions or commit messages are
@@ -25,17 +25,20 @@ Build the release VMM and guest artifacts first. See [Build](../doc/build.md).
 # Linux/KVM: run all 23 metrics and write collector-compatible logs
 python3 scripts/nvx.py benchmark --suite performance --backend kvm --runs 5 --virtfs-runs 3 --skip-build --output-dir build/benchmarks/linux-kvm
 
+# Linux/MSHV: run the 20 supported non-network metrics
+python3 scripts/nvx.py benchmark --suite performance --backend mshv --runs 5 --virtfs-runs 3 --skip-build --output-dir build/benchmarks/linux-mshv
+
 # Windows/WHP
 python scripts\nvx.py benchmark --suite performance --backend whp --runs 5 --virtfs-runs 3 --skip-build --output-dir build\benchmarks\windows-whp
 ```
 
-Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
-instead of `performance`. Use `--shell-memories 64 128 256 512`, `--payload-mib 64`, and
-`--net 10.0.0.2/24` to override their defaults. Run `python scripts/nvx.py benchmark --help` for
-the complete option surface.
+Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or, on KVM/WHP,
+`network-snapshot` instead of `performance`. Use `--shell-memories 64 128 256 512`,
+`--payload-mib 64`, and `--net 10.0.0.2/24` to override their defaults. Run
+`python scripts/nvx.py benchmark --help` for the complete option surface.
 
-KVM and MSHV network benchmarks require root or non-interactive `sudo ip` access so OpenVMM can
-create a managed TAP. WHP uses its in-process user-mode NAT backend.
+The KVM network benchmark requires root or non-interactive `sudo ip` access so OpenVMM can create
+a managed TAP. WHP uses its in-process user-mode NAT backend.
 
 Collect a completed suite with:
 
@@ -47,11 +50,11 @@ python3 scripts/nvx.py performance collect --platform linux-kvm --commit HEAD --
 
 | Benchmark | Command | Description |
 | --- | --- | --- |
-| All non-Python workloads | `benchmark --suite performance` | Runs all 23 canonical metrics and writes four collector-compatible logs. |
+| All supported non-Python workloads | `benchmark --suite performance` | Runs 23 metrics on KVM/WHP or 20 on MSHV and writes collector-compatible logs. |
 | Cold start | `benchmark --suite cold-start` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
 | Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
-| Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
+| Network snapshot | `benchmark --suite network-snapshot` | On KVM/WHP, compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 
 ## Kernel command lines
 
@@ -126,11 +129,11 @@ milliseconds to the shell-ready `ALPINE-MICROVM-BOOT-OK` marker.
 
 ### Network snapshot
 
-These scenarios normally use five samples. A run is accepted only after the
-network verification marker is observed. Cold boot and restore both time to one
-successful ICMP echo to the configured gateway. Up to five one-second attempts
-allow initial neighbor and link readiness without adding an interval after a
-successful packet.
+These KVM/WHP scenarios normally use five samples. A run is accepted only after the network
+verification marker is observed. Cold boot and restore both time to one successful ICMP echo to
+the configured gateway; the one-second timeout bounds a failed probe without adding an interval
+between successful packets. MSHV does not emit these metrics because its OpenVMM microVM network
+backend is not supported.
 
 | Metric | Description |
 | --- | --- |
@@ -141,9 +144,9 @@ successful packet.
 ## CI collection
 
 `python scripts/nvx.py performance collect --require-shared-suite` rejects a backend result
-unless it contains exactly the 23 shared metrics above. Each backend job publishes its p50 table
-to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with
-the latest base-branch history.
+unless it contains exactly the supported shared metrics: 23 for KVM/WHP or 20 for MSHV. Each
+backend job publishes its p50 table to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks
+compare KVM, MSHV, and WHP results with the latest base-branch history.
 
 The current workflow uses the latest 10 p50 samples on the pull request's base branch. A metric
 regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be

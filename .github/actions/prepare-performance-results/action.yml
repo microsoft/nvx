@@ -39,7 +39,6 @@ runs:
           --commit "${GITHUB_SHA}" \
           --input-dir performance-input/linux-mshv \
           --output-dir performance-results \
-          --require-network \
           --require-shell-snapshot \
           --require-shared-suite
         python3 scripts/nvx.py performance collect \

@@ -46,6 +46,14 @@ SHARED_METRICS = frozenset(
         "network_snapshot_restore_wall",
     }
 )
+NETWORK_METRICS = frozenset(
+    {
+        "network_snapshot_cold",
+        "network_snapshot_restore",
+        "network_snapshot_restore_wall",
+    }
+)
+MSHV_SHARED_METRICS = SHARED_METRICS - NETWORK_METRICS
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
@@ -329,6 +337,10 @@ def _platform_metric_name(platform: str, metric: str) -> str:
     return metric
 
 
+def _shared_metrics(platform: str) -> frozenset[str]:
+    return MSHV_SHARED_METRICS if platform == "linux-mshv" else SHARED_METRICS
+
+
 def write_results(path: Path, results: Iterable[Result]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = list(results)
@@ -584,7 +596,7 @@ def collect_results(
 
     if not collected:
         raise PerformanceError(f"no performance metrics found in {input_dir}")
-    expected_metrics = SHARED_METRICS
+    expected_metrics = _shared_metrics(platform)
     if require_shared_suite and collected.keys() != expected_metrics:
         missing = sorted(expected_metrics - collected.keys())
         extra = sorted(collected.keys() - expected_metrics)

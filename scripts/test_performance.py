@@ -271,6 +271,32 @@ class PerformanceTests(unittest.TestCase):
                 "| `network_snapshot_restore` | 40.00 ms | Lower is better |", markdown
             )
 
+    def test_collects_mshv_shared_suite_without_network(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / "shell-snapshot.log").write_text(
+                SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+
+            result_path = performance.collect_results(
+                "linux-mshv",
+                "abc123",
+                logs,
+                root / "results",
+                require_shell_snapshot=True,
+                require_shared_suite=True,
+            )
+            results = performance.read_results(result_path)
+
+            self.assertEqual(len(results), 20)
+            self.assertTrue(
+                all(not result.metric.startswith("network_") for result in results)
+            )
+
     def test_shared_suite_rejects_missing_scenarios(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

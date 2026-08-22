@@ -1,7 +1,8 @@
 # Benchmark
 
 The supported coordinator provides acceptance and diagnostic suites plus the
-23-metric non-Python performance suite used by CI:
+non-Python performance suite used by CI. KVM/WHP run 23 metrics; MSHV runs the
+20 supported non-network metrics:
 
 ```bash
 python3 scripts/nvx.py benchmark --suite boot --backend whp
@@ -14,10 +15,10 @@ python3 scripts/nvx.py benchmark \
 	--output-dir build/benchmarks/linux-kvm
 ```
 
-Select `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot` to run
-one performance workload. Historical Linux/KVM, Linux/MSHV, and Windows/WHP
-CSVs are in `benchmarks/baselines`; rolling CI history is under its
-`performance/` subdirectory.
+Select `cold-start`, `virtfs`, `shell-snapshot`, or, on KVM/WHP,
+`network-snapshot` to run one performance workload. Historical Linux/KVM,
+Linux/MSHV, and Windows/WHP CSVs are in `benchmarks/baselines`; rolling CI
+history is under its `performance/` subdirectory.
 
 [`NVX-METHODOLOGY.md`](../benchmarks/NVX-METHODOLOGY.md) defines the supported
 metrics and measurement semantics. Python snapshots and Python-agent-dependent

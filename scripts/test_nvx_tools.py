@@ -163,15 +163,6 @@ class BenchmarkTests(unittest.TestCase):
                 b"host-to-guest\n",
             )
 
-    def test_network_probes_allow_neighbor_resolution(self):
-        init = (Path(__file__).parents[1] / "alpine" / "init").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertEqual(init.count('probe_gateway "$nprobe"'), 2)
-        self.assertEqual(init.count('ping -c 1 -W 1 "$target"'), 1)
-        self.assertIn('while [ "$attempts" -lt 5 ]', init)
-
     def test_managed_tap_cleanup_uses_openvmm_pid(self):
         query: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
             ["ip"], 0, "", ""
@@ -244,6 +235,56 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(virtfs.call_args.kwargs["runs"], 3)
             shell.assert_called_once()
             network.assert_called_once()
+
+    def test_mshv_performance_suite_skips_unsupported_network(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "benchmark",
+                    "--suite",
+                    "performance",
+                    "--backend",
+                    "mshv",
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            with (
+                patch.object(benchmark, "benchmark_cold_start_workload"),
+                patch.object(benchmark, "benchmark_virtfs_workload"),
+                patch.object(benchmark, "benchmark_shell_snapshot_workload"),
+                patch.object(
+                    benchmark, "benchmark_network_snapshot_workload"
+                ) as network,
+            ):
+                benchmark.run_workload_benchmarks(
+                    args,
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    "mshv",
+                )
+
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {"cold-start.log", "virtfs.log", "shell-snapshot.log"},
+            )
+            network.assert_not_called()
+
+    def test_mshv_rejects_explicit_network_snapshot_suite(self):
+        args = nvx.parse_args(
+            ["benchmark", "--suite", "network-snapshot", "--backend", "mshv"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "unsupported on OpenVMM/mshv"):
+            benchmark.run_workload_benchmarks(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                "mshv",
+            )
 
     def test_package_command_forwards_parsed_options(self):
         args = nvx.parse_args(

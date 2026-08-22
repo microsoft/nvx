@@ -85,7 +85,6 @@ runs:
         --commit "${GITHUB_SHA}"
         --input-dir "build/benchmarks/${{ inputs.platform }}"
         --output-dir "build/benchmarks/${{ inputs.platform }}"
-        --require-network
         --require-shell-snapshot
         --require-shared-suite
         --summary "${GITHUB_STEP_SUMMARY}"

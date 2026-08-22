@@ -47,6 +47,7 @@ NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
 WORKLOAD_SUITES = frozenset(
     {"cold-start", "virtfs", "shell-snapshot", "network-snapshot", "performance"}
 )
+NETWORK_SNAPSHOT_BACKENDS = frozenset({"kvm", "whp"})
 DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 VIRTFS_COMPLETION_MARKER = b"NVX-VIRTFS-WORKLOAD-COMPLETE"
 VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"
@@ -1459,11 +1460,14 @@ def run_workload_benchmarks(
 ) -> int:
     if args.output is not None:
         raise ValueError("workload suites use --output-dir instead of --output")
-    requested = (
-        ("cold-start", "virtfs", "shell-snapshot", "network-snapshot")
-        if args.suite == "performance"
-        else (args.suite,)
-    )
+    if args.suite == "network-snapshot" and backend not in NETWORK_SNAPSHOT_BACKENDS:
+        raise ValueError(f"network-snapshot is unsupported on OpenVMM/{backend}")
+    if args.suite == "performance":
+        requested = ["cold-start", "virtfs", "shell-snapshot"]
+        if backend in NETWORK_SNAPSHOT_BACKENDS:
+            requested.append("network-snapshot")
+    else:
+        requested = [args.suite]
     output_dir = args.output_dir
     if output_dir is None and args.suite == "performance":
         platform = f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"

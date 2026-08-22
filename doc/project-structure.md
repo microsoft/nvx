@@ -93,9 +93,9 @@ virtio-fs mounting, and snapshot preparation from inside the guest.
 
 Benchmark documentation and expected results. `baselines/` stores Linux/KVM,
 Linux/MSHV, and Windows/WHP CSV reference data. Its `performance/` subdirectory
-holds the rolling 23-metric performance-gate baselines maintained by CI. The
-supported CLI in `scripts/nvx.py` exposes the coordinator implemented by
-`scripts/nvx_tools/benchmark.py`.
+holds the rolling platform-specific performance-gate baselines maintained by
+CI. The supported CLI in `scripts/nvx.py` exposes the coordinator implemented
+by `scripts/nvx_tools/benchmark.py`.
 
 ### `docker/`
 
