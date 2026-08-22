@@ -4,6 +4,19 @@ This document describes the NVX repository layout. Paths marked as generated
 are build products or caches and are not part of the tracked source tree. The
 `openvmm/` directory is a Git submodule maintained in a separate repository.
 
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `kernel` | Reproducible configs and complete Linux patch series |
+| `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
+| `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
+| `benchmarks` | OpenVMM-native coordinator, methodology, and baselines |
+| `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
+| `scripts/nvx.py` | Canonical build, run, benchmark, and packaging CLI |
+| `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
+| `build/sources` | Generated Linux and Alpine release sources; ignored by Git |
+
 ## Directory tree
 
 ```text
@@ -23,8 +36,14 @@ nvx/
 |-- dist/                        Generated release packages (ignored)
 |-- docker/
 |   `-- Dockerfile               Reproducible guest build environment
-|-- doc/
-|   `-- project-structure.md     This guide
+|-- doc/                         User and contributor documentation
+|   |-- benchmarks.md            Benchmark commands and methodology pointers
+|   |-- build.md                 Guest and OpenVMM build workflows
+|   |-- ci.md                    Continuous integration overview
+|   |-- distribution.md          Packaging and source delivery
+|   |-- project-structure.md     This guide
+|   |-- run.md                   Guest launch and host mapping
+|   `-- setup.md                 Initialization and development prerequisites
 |-- kernel/                      Linux configuration and NVX patch set
 |   |-- patches/                 Ordered patches applied to Linux
 |   |-- BUILDING.md              Kernel build notes
@@ -46,7 +65,7 @@ nvx/
 |-- LICENSE                      Repository license
 |-- LICENSE-NVX                  NVX-specific license terms
 |-- pyproject.toml               Pyright and Ruff configuration
-|-- README.md                    Setup and usage documentation
+|-- README.md                    Project overview and documentation index
 |-- requirements-dev.txt         Pinned Python development tools
 |-- SOURCE-MANIFEST.json         Pinned source versions, hashes, and outputs
 |-- THIRD_PARTY_NOTICES.md       Third-party attribution and notices
@@ -113,7 +132,7 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 
 | Path | Responsibility |
 | --- | --- |
-| `README.md` | Installation, build, run, benchmark, and packaging instructions |
+| `README.md` | Project overview and documentation index |
 | `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
 | `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
 | `SOURCE-MANIFEST.json` | Exact Linux, Alpine, NVX, and OpenVMM source identities and output locations |
@@ -137,5 +156,5 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | `__pycache__/` | Python bytecode caches that may appear below Python source directories |
 
 Generated paths can be removed and recreated by the build and packaging
-commands documented in `README.md`. They should not be treated as source or
-edited by hand.
+commands documented in the other guides in this directory. They should not be
+treated as source or edited by hand.
