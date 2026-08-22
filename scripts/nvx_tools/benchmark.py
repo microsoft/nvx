@@ -50,6 +50,9 @@ WORKLOAD_SUITES = frozenset(
 DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 VIRTFS_COMPLETION_MARKER = b"NVX-VIRTFS-WORKLOAD-COMPLETE"
 VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"
+VIRTFS_GUEST_TO_HOST = b"guest-to-host\n"
+VIRTFS_HOST_WAITING = b"waiting\n"
+VIRTFS_HOST_TO_GUEST = b"host-to-guest\n"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 PERFORMANCE_LOG_FILENAMES = (
     "cold-start.log",
@@ -1071,17 +1074,17 @@ def _run_virtfs_roundtrip(
     guest_visible = directory / "guest-visible"
     host_visible = directory / "host-visible"
     guest_visible.unlink(missing_ok=True)
-    host_visible.write_text("waiting\n", encoding="ascii")
+    host_visible.write_bytes(VIRTFS_HOST_WAITING)
     errors: list[str] = []
 
     def exchange() -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                if guest_visible.read_text(encoding="ascii") == "guest-to-host\n":
-                    host_visible.write_text("host-to-guest\n", encoding="ascii")
+                if guest_visible.read_bytes() == VIRTFS_GUEST_TO_HOST:
+                    host_visible.write_bytes(VIRTFS_HOST_TO_GUEST)
                     return
-            except (FileNotFoundError, PermissionError, UnicodeError):
+            except (FileNotFoundError, PermissionError):
                 pass
             time.sleep(0.01)
         errors.append("host did not observe the guest-created marker")

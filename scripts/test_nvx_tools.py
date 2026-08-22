@@ -128,6 +128,20 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotIn("nvx-exit 0", host_terminate)
         self.assertNotIn("nvx-exit 0", roundtrip)
 
+    def test_virtfs_exchange_uses_lf_only_bytes(self):
+        self.assertEqual(benchmark.VIRTFS_GUEST_TO_HOST, b"guest-to-host\n")
+        self.assertEqual(benchmark.VIRTFS_HOST_WAITING, b"waiting\n")
+        self.assertEqual(benchmark.VIRTFS_HOST_TO_GUEST, b"host-to-guest\n")
+        self.assertNotIn(b"\r", benchmark.VIRTFS_HOST_TO_GUEST)
+
+    def test_network_probes_allow_neighbor_resolution(self):
+        init = (Path(__file__).parents[1] / "alpine" / "init").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(init.count('ping -c 1 -W 5 "$nprobe"'), 2)
+        self.assertNotIn('ping -c 1 -W 1 "$nprobe"', init)
+
     def test_managed_tap_cleanup_uses_openvmm_pid(self):
         query: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
             ["ip"], 0, "", ""
