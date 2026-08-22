@@ -10,7 +10,7 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -233,6 +233,27 @@ jobs:
           backend: kvm
           platform: linux-kvm
 
+      - name: Package Linux / KVM release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          package="nvx-${version}-linux-kvm"
+          python3 scripts/nvx.py package \
+            --version "${version}" \
+            --destination "dist/${package}" \
+            --binary-only
+          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+
+      - name: Upload Linux / KVM release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-kvm-${{ github.run_id }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   mshv:
     name: Linux / MSHV
     needs: artifacts
@@ -275,6 +296,27 @@ jobs:
           platform: linux-mshv
           teardown-mode: host-terminate
 
+      - name: Package Linux / MSHV release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          package="nvx-${version}-linux-mshv"
+          python3 scripts/nvx.py package \
+            --version "${version}" \
+            --destination "dist/${package}" \
+            --binary-only
+          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+
+      - name: Upload Linux / MSHV release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-mshv-${{ github.run_id }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   windows:
     name: Windows / WHP
     needs: artifacts
@@ -312,6 +354,86 @@ jobs:
         with:
           backend: whp
           platform: windows-whp
+
+      - name: Package Windows / WHP release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        run: |
+          $Version = (Get-Content VERSION -Raw).Trim()
+          $Package = "nvx-$Version-windows-whp"
+          python scripts\nvx.py package `
+            --version $Version `
+            --destination "dist\$Package" `
+            --binary-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive `
+            -Path "dist\$Package" `
+            -DestinationPath "dist\$Package.zip"
+
+      - name: Upload Windows / WHP release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-whp-${{ github.run_id }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish development release
+    needs: [quality, linux, mshv, windows]
+    if: >-
+      ${{
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        !cancelled() &&
+        needs.quality.result == 'success' &&
+        needs.linux.result == 'success' &&
+        needs.mshv.result == 'success' &&
+        needs.windows.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*-${{ github.run_id }}
+          path: release
+          merge-multiple: true
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          short_sha="${GITHUB_SHA:0:12}"
+          tag="v${version}-dev.${short_sha}"
+          packages=(
+            "release/nvx-${version}-linux-kvm.tar.gz"
+            "release/nvx-${version}-linux-mshv.tar.gz"
+            "release/nvx-${version}-windows-whp.zip"
+          )
+          for package in "${packages[@]}"; do
+            test -f "${package}"
+          done
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${packages[@]}" --clobber
+          else
+            gh release create "${tag}" "${packages[@]}" \
+              --target "${GITHUB_SHA}" \
+              --title "NVX ${version} dev ${short_sha}" \
+              --notes "Automated development release for ${GITHUB_SHA}." \
+              --prerelease
+          fi
 
   performance-gate:
     name: Performance regression gate
