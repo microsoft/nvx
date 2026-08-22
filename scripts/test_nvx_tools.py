@@ -129,18 +129,48 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotIn("nvx-exit 0", roundtrip)
 
     def test_virtfs_exchange_uses_lf_only_bytes(self):
-        self.assertEqual(benchmark.VIRTFS_GUEST_TO_HOST, b"guest-to-host\n")
-        self.assertEqual(benchmark.VIRTFS_HOST_WAITING, b"waiting\n")
-        self.assertEqual(benchmark.VIRTFS_HOST_TO_GUEST, b"host-to-guest\n")
-        self.assertNotIn(b"\r", benchmark.VIRTFS_HOST_TO_GUEST)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def emulate_guest(
+                *_args: object, **_kwargs: object
+            ) -> benchmark.GuestCommandResult:
+                (root / "guest-visible").write_bytes(benchmark.VIRTFS_GUEST_TO_HOST)
+                deadline = benchmark.time.monotonic() + 1
+                while benchmark.time.monotonic() < deadline:
+                    if (
+                        root / "host-visible"
+                    ).read_bytes() == benchmark.VIRTFS_HOST_TO_GUEST:
+                        break
+                    benchmark.time.sleep(0.001)
+                else:
+                    self.fail("guest did not observe the byte-exact host update")
+                return {"text": "", "wall_ms": 1.0, "peak_rss_bytes": 1}
+
+            with patch.object(benchmark, "run_guest_script", side_effect=emulate_guest):
+                benchmark._run_virtfs_roundtrip(
+                    ["openvmm"],
+                    root,
+                    1,
+                    1,
+                    timeout=1,
+                    windows_cpus=None,
+                    teardown_mode="guest-exit",
+                )
+
+            self.assertEqual(
+                (root / "host-visible").read_bytes(),
+                b"host-to-guest\n",
+            )
 
     def test_network_probes_allow_neighbor_resolution(self):
         init = (Path(__file__).parents[1] / "alpine" / "init").read_text(
             encoding="utf-8"
         )
 
-        self.assertEqual(init.count('ping -c 1 -W 5 "$nprobe"'), 2)
-        self.assertNotIn('ping -c 1 -W 1 "$nprobe"', init)
+        self.assertEqual(init.count('probe_gateway "$nprobe"'), 2)
+        self.assertEqual(init.count('ping -c 1 -W 1 "$target"'), 1)
+        self.assertIn('while [ "$attempts" -lt 5 ]', init)
 
     def test_managed_tap_cleanup_uses_openvmm_pid(self):
         query: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(

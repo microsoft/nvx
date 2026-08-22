@@ -128,8 +128,9 @@ milliseconds to the shell-ready `ALPINE-MICROVM-BOOT-OK` marker.
 
 These scenarios normally use five samples. A run is accepted only after the
 network verification marker is observed. Cold boot and restore both time to one
-successful ICMP echo to the configured gateway; the five-second timeout bounds a
-failed sample without adding an interval between successful packets.
+successful ICMP echo to the configured gateway. Up to five one-second attempts
+allow initial neighbor and link readiness without adding an interval after a
+successful packet.
 
 | Metric | Description |
 | --- | --- |
