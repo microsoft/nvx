@@ -1,19 +1,18 @@
-# NVX OpenVMM distribution
+# NVX: An Ultra-Light Micro-VM Sandbox
 
-This repository builds and packages a small Alpine Linux guest for OpenVMM's
-`microvm` machine. It keeps the exact Linux and Alpine source pins, complete
-kernel patch series, guest-owned sources, build tooling, and benchmark
-workloads in Git. Large upstream source trees are verified and materialized
-under ignored build/cache directories only when building or preparing a
-release. OpenVMM is the only private component and is pinned as the `openvmm`
-Git submodule.
+NVX is an ultra-light micro-VM sandbox for running untrusted workloads with hardware-enforced
+isolation. It is built on top of OpenVMM and runs Linux as a guest.
 
-Access to `https://github.com/nanvix/openvmm` is required to initialize or
-update the submodule. Cloning this repository does not grant access to it.
+NVX was jointly developed by the MSR Systems Research Group and Azure Research - Systems, building
+on research results from the [Nanvix](https://github.com/nanvix) system.
+
+This repository includes version pins for Linux and OpenVMM, along with the patches, guest source
+files, build tools, and benchmarks needed to use NVX.
 
 ## Documentation
 
 - [Setup](doc/setup.md)
+- [Contributing](doc/contribute.md)
 - [Continuous integration](doc/ci.md)
 - [Build](doc/build.md)
 - [Run](doc/run.md)
