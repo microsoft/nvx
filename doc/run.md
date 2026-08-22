@@ -1,5 +1,17 @@
 # Run
 
+Download and install the latest release matching the host before the first run:
+
+```bash
+python3 scripts/nvx.py download
+python3 scripts/nvx.py run
+```
+
+This installs the packaged kernel and initramfs under `build/` and OpenVMM
+under `openvmm/target/release/`, so no local build is required. Set `GH_TOKEN`
+to a token with contents read access when downloading from a private repository.
+On Linux, pass `--hypervisor mshv` to both commands to use the MSHV package.
+
 The CLI chooses WHP on Windows and KVM on Linux:
 
 ```bash

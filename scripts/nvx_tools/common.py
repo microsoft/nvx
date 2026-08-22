@@ -156,14 +156,20 @@ def download(
     attempts: int = 3,
     *,
     expected_sha256: str | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.part")
     for attempt in range(1, attempts + 1):
         try:
             digest = hashlib.sha256()
+            request = (
+                urllib.request.Request(url, headers=dict(headers))
+                if headers is not None
+                else url
+            )
             with (
-                urllib.request.urlopen(url) as response,
+                urllib.request.urlopen(request) as response,
                 temporary.open("wb") as output,
             ):
                 while chunk := response.read(1024 * 1024):

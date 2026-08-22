@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
-from pathlib import Path
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import cast
 
 from .archive import create_reproducible_tar_gz
 from .build import (
@@ -27,6 +37,7 @@ from .common import (
     SOURCE_DIR,
     ScriptError,
     artifact_path,
+    download,
     openvmm_binary_path,
     require_file,
     verify_sha256_sums,
@@ -53,6 +64,196 @@ PROJECT_SOURCE_PATHS = (
     "pyproject.toml",
     "requirements-dev.txt",
 )
+
+GUEST_RELEASE_NAMES = (
+    "vmlinux",
+    "vmlinux.config",
+    "initramfs.cpio.gz",
+    "initramfs.cpio.gz.packages.json",
+)
+GITHUB_API_VERSION = "2022-11-28"
+
+
+@dataclass(frozen=True)
+class _ReleaseAsset:
+    tag: str
+    name: str
+    url: str
+    size: int
+
+
+def _github_headers(token: str | None, accept: str) -> dict[str, str]:
+    headers = {
+        "Accept": accept,
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "User-Agent": "nvx-release-downloader",
+    }
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _latest_release_asset(
+    repository: str,
+    platform: str,
+    token: str | None,
+) -> _ReleaseAsset:
+    repository_parts = repository.split("/")
+    if len(repository_parts) != 2 or not all(repository_parts):
+        raise ScriptError("GitHub repository must be OWNER/REPOSITORY")
+    encoded_repository = "/".join(
+        urllib.parse.quote(part, safe="") for part in repository_parts
+    )
+    url = f"https://api.github.com/repos/{encoded_repository}/releases?per_page=100"
+    request = urllib.request.Request(
+        url,
+        headers=_github_headers(token, "application/vnd.github+json"),
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            releases: object = json.load(response)
+    except urllib.error.HTTPError as error:
+        hint = ""
+        if token is None and error.code in (401, 403, 404):
+            hint = "; set GH_TOKEN to access private releases"
+        raise ScriptError(
+            f"GitHub release query failed with HTTP {error.code}{hint}"
+        ) from error
+    except (OSError, urllib.error.URLError) as error:
+        raise ScriptError(f"GitHub release query failed: {error}") from error
+    if not isinstance(releases, list):
+        raise ScriptError("GitHub release query returned an invalid response")
+
+    extension = ".zip" if platform.startswith("windows-") else ".tar.gz"
+    asset_pattern = re.compile(rf"^nvx-.+-{re.escape(platform)}{re.escape(extension)}$")
+    for release_value in cast(list[object], releases):
+        if not isinstance(release_value, dict):
+            continue
+        release = cast(dict[str, object], release_value)
+        if release.get("draft") is True:
+            continue
+        tag = release.get("tag_name")
+        assets = release.get("assets")
+        if not isinstance(tag, str) or not isinstance(assets, list):
+            continue
+        for asset_value in cast(list[object], assets):
+            if not isinstance(asset_value, dict):
+                continue
+            asset = cast(dict[str, object], asset_value)
+            name = asset.get("name")
+            asset_url = asset.get("url")
+            size = asset.get("size")
+            if (
+                isinstance(name, str)
+                and asset_pattern.fullmatch(name) is not None
+                and isinstance(asset_url, str)
+                and isinstance(size, int)
+            ):
+                return _ReleaseAsset(tag, name, asset_url, size)
+    raise ScriptError(f"no GitHub release contains an NVX package for {platform}")
+
+
+def _validate_archive_member(name: str) -> None:
+    path = PurePosixPath(name)
+    if (
+        not name
+        or "\\" in name
+        or path.is_absolute()
+        or ".." in path.parts
+        or (path.parts and path.parts[0].endswith(":"))
+    ):
+        raise ScriptError(f"unsafe path in release archive: {name}")
+
+
+def _extract_release_archive(archive_path: Path, destination: Path) -> None:
+    try:
+        if archive_path.name.endswith(".tar.gz"):
+            with tarfile.open(archive_path, "r:gz") as archive:
+                members = archive.getmembers()
+                for member in members:
+                    _validate_archive_member(member.name)
+                    if not (member.isfile() or member.isdir()):
+                        raise ScriptError(
+                            f"unsupported entry in release archive: {member.name}"
+                        )
+                archive.extractall(destination)
+            return
+        if archive_path.suffix == ".zip":
+            with zipfile.ZipFile(archive_path) as archive:
+                for member in archive.infolist():
+                    _validate_archive_member(member.filename)
+                    file_type = (member.external_attr >> 16) & 0o170000
+                    if file_type not in (0, stat.S_IFDIR, stat.S_IFREG):
+                        raise ScriptError(
+                            f"unsupported entry in release archive: {member.filename}"
+                        )
+                archive.extractall(destination)
+            return
+    except (tarfile.TarError, zipfile.BadZipFile) as error:
+        raise ScriptError(
+            f"invalid release archive {archive_path.name}: {error}"
+        ) from error
+    raise ScriptError(f"unsupported release archive: {archive_path.name}")
+
+
+def _replace_runtime_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"{destination.name}.part")
+    temporary.unlink(missing_ok=True)
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _install_release_archive(archive_path: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-release-") as temporary:
+        extraction_root = Path(temporary)
+        _extract_release_archive(archive_path, extraction_root)
+        checksum_files = list(extraction_root.glob("*/SHA256SUMS"))
+        if len(checksum_files) != 1:
+            raise ScriptError(
+                "release archive must contain one package root with SHA256SUMS"
+            )
+        package_root = checksum_files[0].parent
+        verify_sha256_sums(package_root)
+
+        binary_destination = openvmm_binary_path()
+        binary_source = require_file(
+            package_root / "bin" / binary_destination.name,
+            "packaged OpenVMM binary",
+        )
+        guest_sources = {
+            name: require_file(
+                package_root / "guest" / name,
+                f"packaged guest artifact {name}",
+            )
+            for name in GUEST_RELEASE_NAMES
+        }
+        _replace_runtime_file(binary_source, binary_destination)
+        for name, source in guest_sources.items():
+            _replace_runtime_file(source, artifact_path(name))
+
+
+def download_latest_release(repository: str, platform: str) -> None:
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    asset = _latest_release_asset(repository, platform, token)
+    print(f">> downloading {asset.name} from {asset.tag}")
+    with tempfile.TemporaryDirectory(prefix="nvx-download-") as temporary:
+        archive_path = Path(temporary) / asset.name
+        download(
+            asset.url,
+            archive_path,
+            headers=_github_headers(token, "application/octet-stream"),
+        )
+        actual_size = archive_path.stat().st_size
+        if actual_size != asset.size:
+            raise ScriptError(
+                f"downloaded {asset.name} is {actual_size} bytes, expected {asset.size}"
+            )
+        _install_release_archive(archive_path)
+    print(f">> installed {asset.tag} for {platform}")
 
 
 def _copy_release_file(source: Path, destination: Path) -> None:
@@ -176,15 +377,9 @@ def _validate_linux_source_archive(path: Path) -> None:
 
 
 def _guest_release_inputs() -> tuple[list[str], list[Path]]:
-    required_guest_names = (
-        "vmlinux",
-        "vmlinux.config",
-        "initramfs.cpio.gz",
-        "initramfs.cpio.gz.packages.json",
-    )
-    for name in required_guest_names:
+    for name in GUEST_RELEASE_NAMES:
         require_file(artifact_path(name), f"required guest artifact {name}")
-    guest_names: list[str] = list(required_guest_names)
+    guest_names: list[str] = list(GUEST_RELEASE_NAMES)
     package_manifests = [artifact_path("initramfs.cpio.gz.packages.json")]
     return guest_names, package_manifests
 

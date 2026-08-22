@@ -3,12 +3,14 @@
 
 import hashlib
 import io
+import json
 import os
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +43,14 @@ class CliTests(unittest.TestCase):
         self.assertIs(args.handler, benchmark.run)
 
     def test_release_commands_keep_their_cli_contract(self):
+        download = nvx.parse_args(
+            ["download", "--repository", "example/nvx", "--hypervisor", "auto"]
+        )
+        self.assertEqual(download.command, "download")
+        self.assertEqual(download.repository, "example/nvx")
+        self.assertEqual(download.hypervisor, "auto")
+        self.assertIs(download.handler, nvx.command_download)
+
         collect = nvx.parse_args(["collect-sources"])
         self.assertEqual(collect.command, "collect-sources")
         self.assertIs(collect.handler, nvx.command_collect_sources)
@@ -309,8 +319,65 @@ class BenchmarkTests(unittest.TestCase):
             force=True,
         )
 
+    def test_download_command_selects_host_release(self):
+        args = nvx.parse_args(["download", "--repository", "example/nvx"])
+        expected_platform = "windows-whp" if os.name == "nt" else "linux-kvm"
+
+        with patch.object(nvx, "download_latest_release") as download_release:
+            args.handler(args)
+
+        download_release.assert_called_once_with("example/nvx", expected_platform)
+
 
 class ReleaseTests(unittest.TestCase):
+    def test_selects_latest_matching_prerelease_asset(self):
+        releases = [
+            {
+                "draft": True,
+                "tag_name": "v1.2.4-draft",
+                "assets": [
+                    {
+                        "name": "nvx-1.2.4-linux-kvm.tar.gz",
+                        "url": "https://api.example.invalid/draft",
+                        "size": 100,
+                    }
+                ],
+            },
+            {
+                "draft": False,
+                "prerelease": True,
+                "tag_name": "v1.2.3-dev.abc123",
+                "assets": [
+                    {
+                        "name": "nvx-1.2.3-windows-whp.zip",
+                        "url": "https://api.example.invalid/windows",
+                        "size": 200,
+                    },
+                    {
+                        "name": "nvx-1.2.3-linux-kvm.tar.gz",
+                        "url": "https://api.example.invalid/linux",
+                        "size": 300,
+                    },
+                ],
+            },
+        ]
+        response = io.BytesIO(json.dumps(releases).encode("utf-8"))
+
+        with patch(
+            "nvx_tools.release.urllib.request.urlopen",
+            return_value=response,
+        ):
+            asset = release._latest_release_asset(
+                "example/nvx",
+                "linux-kvm",
+                "token",
+            )
+
+        self.assertEqual(asset.tag, "v1.2.3-dev.abc123")
+        self.assertEqual(asset.name, "nvx-1.2.3-linux-kvm.tar.gz")
+        self.assertEqual(asset.url, "https://api.example.invalid/linux")
+        self.assertEqual(asset.size, 300)
+
     def test_binary_package_stages_files_and_checksums(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -370,6 +437,59 @@ class ReleaseTests(unittest.TestCase):
                 self.assertTrue((destination / "guest" / name).is_file())
             common.verify_sha256_sums(destination)
             self.assertIn("binary-only package", stderr.getvalue())
+
+    def test_release_archive_installs_runtime_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_root = root / "package" / "nvx-1.2.3-test"
+            binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+            binary = package_root / "bin" / binary_name
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"openvmm")
+            for name in release.GUEST_RELEASE_NAMES:
+                guest = package_root / "guest" / name
+                guest.parent.mkdir(parents=True, exist_ok=True)
+                guest.write_bytes(name.encode("ascii"))
+            common.write_sha256_sums(package_root)
+
+            if os.name == "nt":
+                archive_path = root / "nvx-1.2.3-windows-whp.zip"
+                with zipfile.ZipFile(archive_path, "w") as package:
+                    for path in package_root.rglob("*"):
+                        package.write(path, path.relative_to(package_root.parent))
+            else:
+                archive_path = root / "nvx-1.2.3-linux-kvm.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as package:
+                    package.add(package_root, arcname=package_root.name)
+
+            build_dir = root / "runtime" / "build"
+            binary_destination = (
+                root / "runtime" / "openvmm" / "target" / "release" / binary_name
+            )
+
+            def artifact_path(name: str) -> Path:
+                return build_dir / name
+
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=artifact_path,
+                ),
+                patch.object(
+                    release,
+                    "openvmm_binary_path",
+                    return_value=binary_destination,
+                ),
+            ):
+                release._install_release_archive(archive_path)
+
+            self.assertEqual(binary_destination.read_bytes(), b"openvmm")
+            for name in release.GUEST_RELEASE_NAMES:
+                self.assertEqual(
+                    (build_dir / name).read_bytes(),
+                    name.encode("ascii"),
+                )
 
 
 class SharedFileTests(unittest.TestCase):

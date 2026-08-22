@@ -39,9 +39,13 @@ from nvx_tools.create_linux_source_archive import (
 from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.release import (
     collect_release_sources,
+    download_latest_release,
     package_release,
     verify_source_tree,
 )
+
+DEFAULT_RELEASE_REPOSITORY = "nanvix/nvx"
+HYPERVISORS = ("auto", "whp", "kvm", "mshv")
 
 
 def _run(args: list[str | os.PathLike[str]], *, cwd: Path = REPO_ROOT) -> None:
@@ -113,6 +117,25 @@ def _hypervisor(selected: str) -> str:
     if selected != "auto":
         return selected
     return "whp" if os.name == "nt" else "kvm"
+
+
+def _release_platform(hypervisor: str) -> str:
+    selected = _hypervisor(hypervisor)
+    if sys.platform == "win32":
+        host = "windows"
+        supported = ("whp",)
+    elif sys.platform.startswith("linux"):
+        host = "linux"
+        supported = ("kvm", "mshv")
+    else:
+        raise ScriptError(f"release downloads are unsupported on {sys.platform}")
+    if selected not in supported:
+        raise ScriptError(f"{selected} is not supported on {host}")
+    return f"{host}-{selected}"
+
+
+def command_download(args: argparse.Namespace) -> None:
+    download_latest_release(args.repository, _release_platform(args.hypervisor))
 
 
 def _format_command(command: list[str]) -> str:
@@ -216,8 +239,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     build.add_argument("--skip-restore", action="store_true")
     build.set_defaults(handler=command_build)
 
+    download = subparsers.add_parser(
+        "download",
+        help="download and install the latest matching GitHub release",
+    )
+    download.add_argument(
+        "--repository",
+        default=DEFAULT_RELEASE_REPOSITORY,
+        metavar="OWNER/REPOSITORY",
+    )
+    download.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
+    download.set_defaults(handler=command_download)
+
     run = subparsers.add_parser("run", help="run an OpenVMM microVM")
-    run.add_argument("--hypervisor", choices=("auto", "whp", "kvm"), default="auto")
+    run.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     run.add_argument("--memory-mib", type=int, default=128)
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
     run.add_argument("--net", metavar="IPV4/PREFIX")
