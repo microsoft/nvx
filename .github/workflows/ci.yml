@@ -54,12 +54,12 @@ jobs:
             mvdan/shfmt@sha256:307d265ffd25ce832899ae17c93ed5062fc3375c514bba8f52cbf52792735c4d
         run: |
           set -euo pipefail
-          python -m ruff check scripts benchmarks
+          python -m ruff check scripts
           ${SHELLCHECK} --shell=sh \
             alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
           python -m pyright --pythonplatform Linux
           python -m pyright --pythonplatform Windows
-          python -m ruff format --check scripts benchmarks
+          python -m ruff format --check scripts
           ${SHFMT} -d -ln posix -i 4 -ci \
             alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
 
@@ -95,7 +95,7 @@ jobs:
       - name: Validate NVX CLI
         run: |
           set -euo pipefail
-          python3 -m compileall -q scripts benchmarks
+          python3 -m compileall -q scripts
           python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
           python3 scripts/nvx.py --help
           python3 scripts/nvx.py benchmark --help
@@ -449,7 +449,7 @@ jobs:
 
       - name: Validate NVX CLI
         run: |
-          python -m compileall -q scripts benchmarks
+          python -m compileall -q scripts
           python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
           python scripts\nvx.py --help
           python scripts\nvx.py benchmark --help
@@ -617,19 +617,19 @@ jobs:
           BASE_REF: dev
         run: |
           set -euo pipefail
-          mkdir -p performance-baseline
+          mkdir -p data/baseline
           git fetch --no-tags --depth=1 origin "${BASE_REF}"
-          for result in performance-results/*.csv; do
+          for result in data/results/*.csv; do
             filename="$(basename "${result}")"
-            candidate="benchmarks/baselines/performance/${filename}"
-            history="FETCH_HEAD:benchmarks/baselines/performance/${filename}"
+            candidate="data/${filename}"
+            history="FETCH_HEAD:data/${filename}"
             if [ -f "${candidate}" ] &&
               [ "$(wc -l < "${candidate}")" -eq 1 ] &&
               [ "$(head -n 1 "${candidate}")" = "commit,metric,unit,direction,p50" ]; then
-              cp "${candidate}" "performance-baseline/${filename}"
+              cp "${candidate}" "data/baseline/${filename}"
               echo "::notice::${filename} history is explicitly reset in this pull request; warming up the baseline"
             elif git cat-file -e "${history}" 2>/dev/null; then
-              git show "${history}" > "performance-baseline/${filename}"
+              git show "${history}" > "data/baseline/${filename}"
             else
               echo "::notice::No ${filename} performance history on ${BASE_REF}; warming up the baseline"
             fi
@@ -638,8 +638,8 @@ jobs:
       - name: Gate on performance regressions
         run: >-
           python3 scripts/nvx.py performance gate
-          --baseline-dir performance-baseline
-          --target-dir performance-results
+          --baseline-dir data/baseline
+          --target-dir data/results
           --window "${PERFORMANCE_BASELINE_WINDOW}"
           --threshold "${PERFORMANCE_REGRESSION_THRESHOLD}"
           --absolute-tolerance-ms "${PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS}"
@@ -682,9 +682,9 @@ jobs:
             git fetch origin dev
             git checkout -B performance-persist origin/dev
             python3 scripts/nvx.py performance persist \
-              --source-dir performance-results \
-              --history-dir benchmarks/baselines/performance
-            git add benchmarks/baselines/performance
+              --source-dir data/results \
+              --history-dir data
+            git add data/*.csv
 
             if git diff --cached --quiet; then
               echo "No new performance results to persist"

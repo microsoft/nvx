@@ -11,7 +11,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `kernel` | Reproducible configs and complete Linux patch series |
 | `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
 | `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
-| `benchmarks` | Historical benchmark baseline CSV files |
+| `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
 | `scripts/nvx.py` | Canonical build, run, benchmark, and packaging CLI |
 | `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
@@ -29,8 +29,10 @@ nvx/
 |   |-- nvx-exit                 Clean guest shutdown helper
 |   |-- nvx-hostmount            virtio-fs host mount helper
 |   `-- nvx-snapshot             Snapshot preparation helper
-|-- benchmarks/                  Historical benchmark reference data
-|   `-- baselines/               Platform baseline CSV files
+|-- data/                        Benchmark data
+|   |-- linux-kvm.csv            Rolling Linux/KVM history
+|   |-- linux-mshv.csv           Rolling Linux/MSHV history
+|   `-- windows-whp.csv          Rolling Windows/WHP history
 |-- build/                       Generated build products (ignored)
 |-- dist/                        Generated release packages (ignored)
 |-- docker/
@@ -87,13 +89,11 @@ Guest-owned scripts copied into the Alpine initramfs. `init` controls early
 boot and launches the guest shell. The `nvx-*` helpers handle shutdown,
 virtio-fs mounting, and snapshot preparation from inside the guest.
 
-### `benchmarks/`
+### `data/`
 
-Benchmark documentation and expected results. `baselines/` stores Linux/KVM,
-Linux/MSHV, and Windows/WHP CSV reference data. Its `performance/` subdirectory
-holds the rolling platform-specific performance-gate baselines maintained by
-CI. The supported CLI in `scripts/nvx.py` exposes the coordinator implemented
-by `scripts/nvx_tools/benchmark.py`.
+Benchmark data owned by local runs and CI. The platform CSVs at its root are
+rolling performance-gate histories maintained by CI. Ignored subdirectories
+hold run logs, downloaded artifacts, collected results, and gate inputs.
 
 ### `docker/`
 
@@ -147,7 +147,10 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | Path | Contents |
 | --- | --- |
 | `.cache/` | Downloaded, verified, and patched upstream source trees |
-| `build/` | Kernels, initramfs images, package manifests, benchmark output, and collected sources |
+| `build/` | Kernels, initramfs images, package manifests, and collected sources |
+| `data/baseline/` | Base-branch histories staged by the performance gate |
+| `data/results/` | Collected p50 results for the current commit |
+| `data/runs/` | Raw benchmark logs and per-platform artifacts |
 | `dist/` | Staged binary and source release archives |
 | `openvmm/target/` | Rust build output produced inside the OpenVMM submodule |
 | `.ruff_cache/` | Ruff's local lint cache |

@@ -1,5 +1,8 @@
 /build/
 /dist/
+/data/baseline/
+/data/results/
+/data/runs/
 /.cache/
 /.venv/
 /.ruff_cache/

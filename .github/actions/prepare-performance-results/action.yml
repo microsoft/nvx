@@ -20,7 +20,7 @@ runs:
       env:
         PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
-        path: build/benchmarks/linux-kvm
+        path: data/runs/linux-kvm
         key: benchmark-linux-kvm-${{ github.run_id }}
         enableCrossOsArchive: true
         fail-on-cache-miss: true
@@ -30,7 +30,7 @@ runs:
       env:
         PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
-        path: build/benchmarks/linux-mshv
+        path: data/runs/linux-mshv
         key: benchmark-linux-mshv-${{ github.run_id }}
         enableCrossOsArchive: true
         fail-on-cache-miss: true
@@ -38,7 +38,7 @@ runs:
     - name: Restore Windows / WHP benchmark results
       uses: actions/cache/restore@v5
       with:
-        path: build/benchmarks/windows-whp
+        path: data/runs/windows-whp
         key: benchmark-windows-whp-${{ github.run_id }}
         enableCrossOsArchive: true
         fail-on-cache-miss: true
@@ -50,23 +50,23 @@ runs:
         python3 scripts/nvx.py performance collect \
           --platform linux-kvm \
           --commit "${GITHUB_SHA}" \
-          --input-dir build/benchmarks/linux-kvm \
-          --output-dir performance-results \
+          --input-dir data/runs/linux-kvm \
+          --output-dir data/results \
           --require-network \
           --require-shell-snapshot \
           --require-shared-suite
         python3 scripts/nvx.py performance collect \
           --platform linux-mshv \
           --commit "${GITHUB_SHA}" \
-          --input-dir build/benchmarks/linux-mshv \
-          --output-dir performance-results \
+          --input-dir data/runs/linux-mshv \
+          --output-dir data/results \
           --require-shell-snapshot \
           --require-shared-suite
         python3 scripts/nvx.py performance collect \
           --platform windows-whp \
           --commit "${GITHUB_SHA}" \
-          --input-dir build/benchmarks/windows-whp \
-          --output-dir performance-results \
+          --input-dir data/runs/windows-whp \
+          --output-dir data/results \
           --require-network \
           --require-shell-snapshot \
           --require-shared-suite

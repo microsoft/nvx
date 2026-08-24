@@ -15,7 +15,7 @@ Linux reads the process high-water mark; Windows reads the cumulative peak worki
 includes resident guest-memory mappings and is diagnostic rather than regression-gated.
 
 Use this page for metric names and methodology. Current historical p50 values live in
-`benchmarks/baselines/performance/`; timings copied into old discussions or commit messages are
+`data/`; timings copied into old discussions or commit messages are
 not baselines. The OpenVMM benchmark coordinator is implemented in
 `scripts/nvx_tools/benchmark.py` and exposed through the supported NVX CLI.
 
@@ -34,13 +34,13 @@ Run the complete performance suite with:
 
 ```console
 # Linux/KVM: run all 23 metrics and write collector-compatible logs
-python3 scripts/nvx.py benchmark --suite performance --backend kvm --runs 5 --virtfs-runs 3 --skip-build --output-dir build/benchmarks/linux-kvm
+python3 scripts/nvx.py benchmark --suite performance --backend kvm --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm
 
 # Linux/MSHV: run the 20 supported non-network metrics
-python3 scripts/nvx.py benchmark --suite performance --backend mshv --runs 5 --virtfs-runs 3 --skip-build --output-dir build/benchmarks/linux-mshv
+python3 scripts/nvx.py benchmark --suite performance --backend mshv --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv
 
 # Windows/WHP
-python scripts\nvx.py benchmark --suite performance --backend whp --runs 5 --virtfs-runs 3 --skip-build --output-dir build\benchmarks\windows-whp
+python scripts\nvx.py benchmark --suite performance --backend whp --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp
 ```
 
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or, on KVM/WHP,
@@ -54,7 +54,7 @@ a managed TAP. WHP uses its in-process user-mode NAT backend.
 Collect a completed suite with:
 
 ```console
-python3 scripts/nvx.py performance collect --platform linux-kvm --commit HEAD --input-dir build/benchmarks/linux-kvm --output-dir build/benchmarks --require-network --require-shell-snapshot --require-shared-suite
+python3 scripts/nvx.py performance collect --platform linux-kvm --commit HEAD --input-dir data/runs/linux-kvm --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite
 ```
 
 ## Benchmark commands
@@ -162,8 +162,7 @@ compare KVM, MSHV, and WHP results with the latest base-branch history.
 The current workflow uses the latest 10 p50 samples on the pull request's base branch. A metric
 regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be
 more than 10 ms slower; higher-is-better metrics use the percentage comparison alone. A missing
-history is a warmup, not a failure. Successful `dev` builds append collected results to
-`benchmarks/baselines/performance/`.
+history is a warmup, not a failure. Successful `dev` builds append collected results to `data/`.
 
 ## Cold-start methodology
 

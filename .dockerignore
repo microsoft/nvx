@@ -2,8 +2,8 @@
 .github
 .cache
 .venv
-benchmarks
 build
+data
 dist
 openvmm
 third_party

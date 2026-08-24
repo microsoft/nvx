@@ -106,7 +106,7 @@ runs:
         --runs 3
         --skip-build
         --teardown-mode "${{ inputs.teardown-mode }}"
-        --output "build/benchmarks/${{ inputs.platform }}/acceptance.json"
+        --output "data/runs/${{ inputs.platform }}/acceptance.json"
 
     - name: Run Linux performance suite
       if: runner.os != 'Windows'
@@ -120,7 +120,7 @@ runs:
         --virtfs-runs 3
         --skip-build
         --teardown-mode "${{ inputs.teardown-mode }}"
-        --output-dir "build/benchmarks/${{ inputs.platform }}"
+        --output-dir "data/runs/${{ inputs.platform }}"
 
     - name: Run Windows acceptance test
       if: runner.os == 'Windows'
@@ -133,7 +133,7 @@ runs:
         --runs 3
         --skip-build
         --teardown-mode "${{ inputs.teardown-mode }}"
-        --output "build/benchmarks/${{ inputs.platform }}/acceptance.json"
+        --output "data/runs/${{ inputs.platform }}/acceptance.json"
 
     - name: Run Windows performance suite
       if: runner.os == 'Windows'
@@ -147,7 +147,7 @@ runs:
         --virtfs-runs 3
         --skip-build
         --teardown-mode "${{ inputs.teardown-mode }}"
-        --output-dir "build/benchmarks/${{ inputs.platform }}"
+        --output-dir "data/runs/${{ inputs.platform }}"
 
     - name: Publish Linux performance results
       if: runner.os != 'Windows'
@@ -156,8 +156,8 @@ runs:
         python3 scripts/nvx.py performance collect
         --platform "${{ inputs.platform }}"
         --commit "${GITHUB_SHA}"
-        --input-dir "build/benchmarks/${{ inputs.platform }}"
-        --output-dir "build/benchmarks/${{ inputs.platform }}"
+        --input-dir "data/runs/${{ inputs.platform }}"
+        --output-dir "data/runs/${{ inputs.platform }}"
         --require-shell-snapshot
         --require-shared-suite
         --summary "${GITHUB_STEP_SUMMARY}"
@@ -169,19 +169,19 @@ runs:
         python scripts\nvx.py performance collect
         --platform "${{ inputs.platform }}"
         --commit $env:GITHUB_SHA
-        --input-dir "build/benchmarks/${{ inputs.platform }}"
-        --output-dir "build/benchmarks/${{ inputs.platform }}"
+        --input-dir "data/runs/${{ inputs.platform }}"
+        --output-dir "data/runs/${{ inputs.platform }}"
         --require-network
         --require-shell-snapshot
         --require-shared-suite
         --summary $env:GITHUB_STEP_SUMMARY
 
     - name: Save benchmark results
-      if: always() && hashFiles(format('build/benchmarks/{0}/{0}.csv', inputs.platform)) != ''
+      if: always() && hashFiles(format('data/runs/{0}/{0}.csv', inputs.platform)) != ''
       uses: actions/cache/save@v5
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path || steps.cache-tools-windows.outputs.path }}
       with:
-        path: build/benchmarks/${{ inputs.platform }}
+        path: data/runs/${{ inputs.platform }}
         key: benchmark-${{ inputs.platform }}-${{ github.run_id }}
         enableCrossOsArchive: true

@@ -1471,7 +1471,7 @@ def run_workload_benchmarks(
     output_dir = args.output_dir
     if output_dir is None and args.suite == "performance":
         platform = f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
-        output_dir = args.nvx_dir.resolve() / "build" / "benchmarks" / platform
+        output_dir = args.nvx_dir.resolve() / "data" / "runs" / platform
     if output_dir is not None:
         output_dir = output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)

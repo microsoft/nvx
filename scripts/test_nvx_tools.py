@@ -296,6 +296,40 @@ class BenchmarkTests(unittest.TestCase):
                 "mshv",
             )
 
+    def test_performance_suite_defaults_to_data_runs_platform(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "benchmark",
+                    "--suite",
+                    "performance",
+                    "--backend",
+                    "whp",
+                    "--nvx-dir",
+                    str(repository),
+                ]
+            )
+            with (
+                patch.object(benchmark, "benchmark_cold_start_workload"),
+                patch.object(benchmark, "benchmark_virtfs_workload"),
+                patch.object(benchmark, "benchmark_shell_snapshot_workload"),
+                patch.object(benchmark, "benchmark_network_snapshot_workload"),
+            ):
+                benchmark.run_workload_benchmarks(
+                    args,
+                    Path("openvmm.exe"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    "whp",
+                )
+
+            output = repository / "data" / "runs" / "windows-whp"
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {"cold-start.log", "virtfs.log", "shell-snapshot.log", "network.log"},
+            )
+
     def test_package_command_forwards_parsed_options(self):
         args = nvx.parse_args(
             [

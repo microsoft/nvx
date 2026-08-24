@@ -46,7 +46,9 @@ from .common import (
 
 PROJECT_SOURCE_PATHS = (
     "alpine",
-    "benchmarks",
+    "data/linux-kvm.csv",
+    "data/linux-mshv.csv",
+    "data/windows-whp.csv",
     "docker",
     "kernel",
     "licenses",

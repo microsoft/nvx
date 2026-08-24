@@ -8,6 +8,5 @@ pinned commit. KVM and WHP publish 23 non-Python metrics; MSHV publishes its 20
 supported non-network metrics. Shared guest binaries, benchmark results, and
 development release packages move between jobs through runner-compatible
 Actions caches. Pull requests gate regressions against recent history, and
-successful pushes to `dev` append their p50 values under
-`benchmarks/baselines/performance`. The runners require the [platform
+successful pushes to `dev` append their p50 values under `data/`. The runners require the [platform
 prerequisites](setup.md#prerequisites).

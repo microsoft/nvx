@@ -1,5 +1,5 @@
 [tool.pyright]
-include = ["scripts", "benchmarks"]
+include = ["scripts"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 
