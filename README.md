@@ -64,6 +64,7 @@ python scripts\nvx.py run
 
 ### Development
 
+- [Design](doc/design.md) - Current microVM architecture and ABI.
 - [Project structure](doc/project-structure.md) - Overview of the NVX repository layout.
 - [Continuous integration](doc/ci.md) - Instructions for running and maintaining NVX CI.
 - [Package and source delivery](doc/distribution.md) - Instructions for packaging and distributing
