@@ -8,6 +8,7 @@ are build products or caches and are not part of the tracked source tree. The
 
 | Path | Purpose |
 | --- | --- |
+| `.github/prompts` | Copilot prompts for common development workflows |
 | `kernel` | Reproducible configs and complete Linux patch series |
 | `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
 | `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
@@ -21,8 +22,9 @@ are build products or caches and are not part of the tracked source tree. The
 
 ```text
 nvx/
-|-- .github/                     GitHub Actions and repository automation
+|-- .github/                     GitHub automation and Copilot prompts
 |   |-- actions/                 Reusable local CI actions
+|   |-- prompts/                 Copilot development workflow prompts
 |   `-- workflows/ci.yml         Main build, test, and benchmark workflow
 |-- alpine/                      Files installed in the Alpine guest
 |   |-- init                     Guest PID 1 and boot sequence
@@ -79,9 +81,11 @@ contains downloaded and prepared upstream source trees, including Linux.
 
 ### `.github/`
 
-Repository automation lives here. `workflows/ci.yml` defines the main CI
-pipeline. The `actions/` directory contains local actions for checking out and
-building OpenVMM, running benchmarks, and preparing performance results.
+Repository automation and Copilot customizations live here. `workflows/ci.yml`
+defines the main CI pipeline. The `actions/` directory contains local actions
+for checking out and building OpenVMM, running benchmarks, and preparing
+performance results. The `prompts/` directory defines Copilot prompts for
+common development workflows.
 
 ### `alpine/`
 
