@@ -335,14 +335,13 @@ jobs:
             --binary-only
           tar -czf "dist/${package}.tar.gz" -C dist "${package}"
 
-      - name: Upload Linux / KVM release
+      - name: Save Linux / KVM release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/upload-artifact@v4
+        uses: actions/cache/save@v5
         with:
-          name: release-linux-kvm-${{ github.run_id }}
           path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+          key: release-linux-kvm-${{ github.run_id }}
+          enableCrossOsArchive: true
 
   mshv:
     name: Linux / MSHV
@@ -407,14 +406,26 @@ jobs:
             --binary-only
           tar -czf "dist/${package}.tar.gz" -C dist "${package}"
 
-      - name: Upload Linux / MSHV release
+      - name: Prepare Linux / MSHV release cache tools
+        id: release-cache-tools
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/upload-artifact@v4
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Save Linux / MSHV release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.release-cache-tools.outputs.path }}
         with:
-          name: release-linux-mshv-${{ github.run_id }}
           path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+          key: release-linux-mshv-${{ github.run_id }}
+          enableCrossOsArchive: true
 
   windows:
     name: Windows / WHP
@@ -470,14 +481,13 @@ jobs:
             -Path "dist\$Package" `
             -DestinationPath "dist\$Package.zip"
 
-      - name: Upload Windows / WHP release
+      - name: Save Windows / WHP release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/upload-artifact@v4
+        uses: actions/cache/save@v5
         with:
-          name: release-windows-whp-${{ github.run_id }}
           path: dist/*.zip
-          if-no-files-found: error
-          retention-days: 1
+          key: release-windows-whp-${{ github.run_id }}
+          enableCrossOsArchive: true
 
   release:
     name: Publish development release
@@ -495,6 +505,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: write
       contents: write
     steps:
       - name: Checkout
@@ -502,12 +513,41 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download release packages
-        uses: actions/download-artifact@v4
+      - name: Prepare release cache tools
+        id: release-cache-tools
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore Linux / KVM release
+        uses: actions/cache/restore@v5
         with:
-          pattern: release-*-${{ github.run_id }}
-          path: release
-          merge-multiple: true
+          path: dist/*.tar.gz
+          key: release-linux-kvm-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Linux / MSHV release
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.release-cache-tools.outputs.path }}
+        with:
+          path: dist/*.tar.gz
+          key: release-linux-mshv-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Windows / WHP release
+        uses: actions/cache/restore@v5
+        with:
+          path: dist/*.zip
+          key: release-windows-whp-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Publish GitHub prerelease
         env:
@@ -519,9 +559,9 @@ jobs:
           short_sha="${GITHUB_SHA:0:12}"
           tag="v${version}-dev.${short_sha}"
           packages=(
-            "release/nvx-${version}-linux-kvm.tar.gz"
-            "release/nvx-${version}-linux-mshv.tar.gz"
-            "release/nvx-${version}-windows-whp.zip"
+            "dist/nvx-${version}-linux-kvm.tar.gz"
+            "dist/nvx-${version}-linux-mshv.tar.gz"
+            "dist/nvx-${version}-windows-whp.zip"
           )
           for package in "${packages[@]}"; do
             test -f "${package}"
@@ -535,6 +575,20 @@ jobs:
               --notes "Automated development release for ${GITHUB_SHA}." \
               --prerelease
           fi
+
+      - name: Delete release package caches
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for platform in linux-kvm linux-mshv windows-whp; do
+            key="release-${platform}-${GITHUB_RUN_ID}"
+            if ! gh cache delete "${key}" --ref "${GITHUB_REF}"; then
+              echo "::warning::Failed to delete cache ${key}"
+            fi
+          done
 
   performance-gate:
     name: Performance regression gate
