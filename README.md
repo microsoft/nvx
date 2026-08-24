@@ -3,8 +3,12 @@
 NVX is an ultra-light micro-VM sandbox for running untrusted workloads with hardware-enforced
 isolation. It is built on top of OpenVMM and runs Linux as a guest.
 
-NVX was jointly developed by the MSR Systems Research Group and Azure Research - Systems, building
-on research results from the [Nanvix](https://github.com/nanvix) system.
+NVX was jointly developed by the [MSR Systems Research Group][msr-systems] and
+[Azure Research - Systems][azure-systems], building on research results from the
+[Nanvix](https://github.com/nanvix) system.
+
+[msr-systems]: https://www.microsoft.com/en-us/research/group/systems-research-group-redmond/
+[azure-systems]: https://www.microsoft.com/en-us/research/group/azure-research-systems/
 
 This repository includes version pins for Linux and OpenVMM, along with the patches, guest source
 files, build tools, and benchmarks needed to use NVX.
