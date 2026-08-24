@@ -67,6 +67,9 @@ jobs:
     name: Build shared artifacts
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 60
+    outputs:
+      kernel-cache-key: ${{ steps.guest-cache-keys.outputs.kernel }}
+      alpine-cache-key: ${{ steps.guest-cache-keys.outputs.alpine }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -117,26 +120,76 @@ jobs:
               print(f"alpine-version={manifest['alpine']['version']}", file=output)
           PY
 
-      - name: Cache Linux kernel
-        id: cache-linux-kernel
-        uses: actions/cache@v5
+      - name: Resolve guest cache keys
+        id: guest-cache-keys
+        env:
+          KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
+          ALPINE_VERSION: ${{ steps.guest-versions.outputs.alpine-version }}
+          KERNEL_INPUT_HASH: ${{ hashFiles('kernel/config-microvm') }}
+          ALPINE_INPUT_HASH: ${{ hashFiles('alpine/**') }}
+        run: |
+          set -euo pipefail
+          {
+            echo "kernel=linux-kernel-v1-${KERNEL_VERSION}-${KERNEL_INPUT_HASH}"
+            echo "alpine=alpine-image-v1-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare gzip cache tools
+        id: gzip-cache-tools
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore Linux kernel (zstd)
+        id: cache-linux-kernel-zstd
+        uses: actions/cache/restore@v5
         with:
           path: |
             build/vmlinux
             build/vmlinux.config
-          key: linux-kernel-v1-${{ steps.guest-versions.outputs.kernel-version }}-${{ hashFiles('kernel/config-microvm') }}
+          key: ${{ steps.guest-cache-keys.outputs.kernel }}
+          enableCrossOsArchive: true
 
-      - name: Cache Alpine disk image
-        id: cache-alpine-image
-        uses: actions/cache@v5
+      - name: Restore Linux kernel (gzip)
+        id: cache-linux-kernel-gzip
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+          key: ${{ steps.guest-cache-keys.outputs.kernel }}
+          enableCrossOsArchive: true
+
+      - name: Restore Alpine disk image (zstd)
+        id: cache-alpine-image-zstd
+        uses: actions/cache/restore@v5
         with:
           path: |
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
-          key: alpine-image-v1-${{ steps.guest-versions.outputs.alpine-version }}-${{ hashFiles('alpine/**') }}
+          key: ${{ steps.guest-cache-keys.outputs.alpine }}
+          enableCrossOsArchive: true
+
+      - name: Restore Alpine disk image (gzip)
+        id: cache-alpine-image-gzip
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
+        with:
+          path: |
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: ${{ steps.guest-cache-keys.outputs.alpine }}
+          enableCrossOsArchive: true
 
       - name: Build Linux kernel (Docker)
-        if: steps.cache-linux-kernel.outputs.cache-hit != 'true'
+        if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true' && steps.cache-linux-kernel-gzip.outputs.cache-hit != 'true'
         run: >-
           docker build
           --file docker/Dockerfile
@@ -144,8 +197,30 @@ jobs:
           --output type=local,dest=build
           .
 
+      - name: Save Linux kernel (zstd)
+        if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+          key: ${{ steps.guest-cache-keys.outputs.kernel }}
+          enableCrossOsArchive: true
+
+      - name: Save Linux kernel (gzip)
+        if: steps.cache-linux-kernel-gzip.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+          key: ${{ steps.guest-cache-keys.outputs.kernel }}
+          enableCrossOsArchive: true
+
       - name: Build Alpine disk image (Docker)
-        if: steps.cache-alpine-image.outputs.cache-hit != 'true'
+        if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true' && steps.cache-alpine-image-gzip.outputs.cache-hit != 'true'
         run: >-
           docker build
           --file docker/Dockerfile
@@ -153,9 +228,33 @@ jobs:
           --output type=local,dest=build
           .
 
-      - name: Cache portable OpenVMM
+      - name: Save Alpine disk image (zstd)
+        if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: ${{ steps.guest-cache-keys.outputs.alpine }}
+          enableCrossOsArchive: true
+
+      - name: Save Alpine disk image (gzip)
+        if: steps.cache-alpine-image-gzip.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
+        with:
+          path: |
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: ${{ steps.guest-cache-keys.outputs.alpine }}
+          enableCrossOsArchive: true
+
+      - name: Restore portable OpenVMM
         id: cache-portable-openvmm
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
         with:
           path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
           key: openvmm-linux-mshv-v1-x86_64-${{ steps.openvmm.outputs.sha }}
@@ -182,25 +281,14 @@ jobs:
             -p openvmm \
             --bin openvmm)
 
-      - name: Upload guest artifacts
-        uses: actions/upload-artifact@v4
+      - name: Save portable OpenVMM
+        if: steps.cache-portable-openvmm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
         with:
-          name: guest-artifacts-${{ github.run_id }}
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          if-no-files-found: error
-          overwrite: true
-
-      - name: Upload portable OpenVMM
-        uses: actions/upload-artifact@v4
-        with:
-          name: openvmm-linux-mshv-${{ github.run_id }}
           path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
-          if-no-files-found: error
-          overwrite: true
+          key: openvmm-linux-mshv-v1-x86_64-${{ steps.openvmm.outputs.sha }}
 
   linux:
     name: Linux / KVM
@@ -232,6 +320,8 @@ jobs:
         with:
           backend: kvm
           platform: linux-kvm
+          kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
+          alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
       - name: Package Linux / KVM release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -276,18 +366,25 @@ jobs:
           sudo -n true
 
       - name: Checkout OpenVMM
+        id: openvmm
         uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Download portable OpenVMM
-        uses: actions/download-artifact@v4
+      - name: Restore portable OpenVMM
+        uses: actions/cache/restore@v5
         with:
-          name: openvmm-linux-mshv-${{ github.run_id }}
-          path: openvmm/target/release
+          path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
+          key: openvmm-linux-mshv-v1-x86_64-${{ steps.openvmm.outputs.sha }}
+          fail-on-cache-miss: true
 
       - name: Prepare portable OpenVMM
-        run: chmod +x openvmm/target/release/openvmm
+        run: |
+          set -euo pipefail
+          mkdir -p openvmm/target/release
+          cp openvmm/target/x86_64-unknown-linux-musl/release/openvmm \
+            openvmm/target/release/openvmm
+          chmod +x openvmm/target/release/openvmm
 
       - name: Run Linux / MSHV benchmark
         uses: ./.github/actions/run-benchmark
@@ -295,6 +392,8 @@ jobs:
           backend: mshv
           platform: linux-mshv
           teardown-mode: host-terminate
+          kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
+          alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
       - name: Package Linux / MSHV release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -354,6 +453,8 @@ jobs:
         with:
           backend: whp
           platform: windows-whp
+          kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
+          alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
       - name: Package Windows / WHP release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'

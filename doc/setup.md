@@ -35,13 +35,18 @@ containers. Enable **Windows Hypervisor Platform** and reboot:
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
 ```
 
-For Debian/Ubuntu with KVM:
+For Debian/Ubuntu hosts:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
   bc binutils bison build-essential ca-certificates cpio curl flex gzip \
   libelf-dev libssl-dev python3 rsync tar xz-utils
+```
+
+On KVM hosts, add the runner user to the `kvm` group:
+
+```bash
 sudo usermod -aG kvm "$USER"
 ```
 

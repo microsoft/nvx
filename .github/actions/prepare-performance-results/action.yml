@@ -1,26 +1,47 @@
 name: Prepare performance results
-description: Download platform benchmarks and collect their p50 results
+description: Restore platform benchmarks and collect their p50 results
 
 runs:
   using: composite
   steps:
-    - name: Download Linux / KVM benchmark results
-      uses: actions/download-artifact@v4
-      with:
-        name: benchmark-linux-kvm-${{ github.run_id }}
-        path: performance-input/linux-kvm
+    - name: Prepare benchmark cache tools
+      id: benchmark-cache-tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+        mkdir -p "${cache_tools}"
+        ln -sf "$(command -v tar)" "${cache_tools}/tar"
+        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
 
-    - name: Download Linux / MSHV benchmark results
-      uses: actions/download-artifact@v4
+    - name: Restore Linux / KVM benchmark results
+      uses: actions/cache/restore@v5
+      env:
+        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
-        name: benchmark-linux-mshv-${{ github.run_id }}
-        path: performance-input/linux-mshv
+        path: build/benchmarks/linux-kvm
+        key: benchmark-linux-kvm-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
 
-    - name: Download Windows / WHP benchmark results
-      uses: actions/download-artifact@v4
+    - name: Restore Linux / MSHV benchmark results
+      uses: actions/cache/restore@v5
+      env:
+        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
-        name: benchmark-windows-whp-${{ github.run_id }}
-        path: performance-input/windows-whp
+        path: build/benchmarks/linux-mshv
+        key: benchmark-linux-mshv-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
+
+    - name: Restore Windows / WHP benchmark results
+      uses: actions/cache/restore@v5
+      with:
+        path: build/benchmarks/windows-whp
+        key: benchmark-windows-whp-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
 
     - name: Collect p50 results
       shell: bash
@@ -29,7 +50,7 @@ runs:
         python3 scripts/nvx.py performance collect \
           --platform linux-kvm \
           --commit "${GITHUB_SHA}" \
-          --input-dir performance-input/linux-kvm \
+          --input-dir build/benchmarks/linux-kvm \
           --output-dir performance-results \
           --require-network \
           --require-shell-snapshot \
@@ -37,14 +58,14 @@ runs:
         python3 scripts/nvx.py performance collect \
           --platform linux-mshv \
           --commit "${GITHUB_SHA}" \
-          --input-dir performance-input/linux-mshv \
+          --input-dir build/benchmarks/linux-mshv \
           --output-dir performance-results \
           --require-shell-snapshot \
           --require-shared-suite
         python3 scripts/nvx.py performance collect \
           --platform windows-whp \
           --commit "${GITHUB_SHA}" \
-          --input-dir performance-input/windows-whp \
+          --input-dir build/benchmarks/windows-whp \
           --output-dir performance-results \
           --require-network \
           --require-shell-snapshot \
