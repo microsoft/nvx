@@ -78,6 +78,51 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
 Building NVX locally also requires Rust stable, Visual Studio 2022 C++ build tools, the Windows
 SDK, and Docker Desktop using Linux containers.
 
+## Remote agent hosts
+
+The NVX agent skills can run and diagnose NVX on preconfigured SSH hosts. Remote development is
+opt-in: copy the tracked host inventory template to the ignored `.nvx-hosts.json` file at the
+repository root.
+
+On Linux:
+
+```bash
+cp scripts/nvx-hosts.example.json .nvx-hosts.json
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item scripts\nvx-hosts.example.json .nvx-hosts.json
+```
+
+Edit each profile in `.nvx-hosts.json`:
+
+- The profile name is the name supplied to the `nvx-host-connect` skill.
+- `ssh_target` is one destination or alias configured in the developer's SSH configuration.
+- `backend` is exactly one of `kvm`, `mshv`, or `whp`.
+- `remote_repo` is the absolute path to the NVX checkout on that host. It may be omitted so the
+  agent asks for it when connecting.
+- `notes` is optional developer-local context.
+
+Keep authentication in the SSH agent and SSH configuration. Do not put passwords, tokens,
+private keys, passphrases, or SSH options in `.nvx-hosts.json`. The file is ignored by Git.
+
+List and validate the configured profiles on Linux with:
+
+```bash
+python3 .github/skills/nvx-host-connect/scripts/hosts.py
+```
+
+On Windows PowerShell, use:
+
+```powershell
+python .github\skills\nvx-host-connect\scripts\hosts.py
+```
+
+If the inventory is absent or contains no hosts, the resolver disables remote access and reports
+that only local NVX development is enabled.
+
 ## Development
 
 Install the pinned Python development tools:

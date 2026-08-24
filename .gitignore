@@ -6,6 +6,7 @@
 /.cache/
 /.venv/
 /.ruff_cache/
+/.nvx-hosts.json
 __pycache__/
 *.py[cod]
 *.log
