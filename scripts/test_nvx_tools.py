@@ -438,7 +438,7 @@ class ReleaseTests(unittest.TestCase):
                 *(build_dir / name for name in guest_names),
                 *(root / name for name in release_files),
                 openvmm_dir / "LICENSE",
-                root / "licenses" / "COPYING-LINUX",
+                root / "kernel" / "COPYING-LINUX",
             ):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(path.name.encode("ascii"))

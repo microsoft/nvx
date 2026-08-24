@@ -49,8 +49,8 @@ nvx/
 |   `-- setup.md                 Initialization and development prerequisites
 |-- kernel/                      Linux configuration and NVX patch set
 |   |-- patches/                 Ordered patches applied to Linux
+|   |-- COPYING-LINUX            Linux copyright and license notice
 |   `-- config-microvm           MicroVM kernel configuration
-|-- licenses/                    Vendored third-party license texts
 |-- openvmm/                     Private OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
@@ -108,13 +108,9 @@ in a reproducible Linux environment.
 
 Inputs owned by NVX for producing the guest kernel. `config-microvm` defines the
 kernel build. Files in `patches/` are applied in name order to the pinned Linux
-source. See the [build guide](build.md#building-the-packaged-linux-source) for
+source. `COPYING-LINUX` records the upstream Linux copyright and license
+notice. See the [build guide](build.md#building-the-packaged-linux-source) for
 kernel-specific details.
-
-### `licenses/`
-
-Copies of licenses that must accompany distributed third-party components.
-The Linux license text is stored as `COPYING-LINUX`.
 
 ### `openvmm/`
 

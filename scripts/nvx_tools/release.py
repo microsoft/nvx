@@ -455,7 +455,7 @@ def package_release(
         release_destination / "licenses" / "LICENSE-OPENVMM",
     )
     _copy_release_file(
-        REPO_ROOT / "licenses" / "COPYING-LINUX",
+        REPO_ROOT / "kernel" / "COPYING-LINUX",
         release_destination / "licenses" / "COPYING-LINUX",
     )
     if include_source:
@@ -492,7 +492,7 @@ def verify_source_tree() -> None:
         / "kernel"
         / "patches"
         / "0002-microvm-hvc-xe9.patch": "xe9 HVC patch",
-        REPO_ROOT / "licenses" / "COPYING-LINUX": "Linux copyright notice",
+        REPO_ROOT / "kernel" / "COPYING-LINUX": "Linux copyright notice",
         OPENVMM_DIR / "Cargo.toml": "initialized OpenVMM submodule",
     }
     for path, description in required.items():
