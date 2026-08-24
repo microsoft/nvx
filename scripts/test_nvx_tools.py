@@ -299,13 +299,15 @@ class BenchmarkTests(unittest.TestCase):
     def test_performance_suite_defaults_to_data_runs_platform(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
+            backend = "whp" if os.name == "nt" else "kvm"
+            platform = "windows-whp" if os.name == "nt" else "linux-kvm"
             args = nvx.parse_args(
                 [
                     "benchmark",
                     "--suite",
                     "performance",
                     "--backend",
-                    "whp",
+                    backend,
                     "--nvx-dir",
                     str(repository),
                 ]
@@ -321,10 +323,10 @@ class BenchmarkTests(unittest.TestCase):
                     Path("openvmm.exe"),
                     Path("vmlinux"),
                     Path("initramfs.cpio.gz"),
-                    "whp",
+                    backend,
                 )
 
-            output = repository / "data" / "runs" / "windows-whp"
+            output = repository / "data" / "runs" / platform
             self.assertEqual(
                 {path.name for path in output.iterdir()},
                 {"cold-start.log", "virtfs.log", "shell-snapshot.log", "network.log"},
