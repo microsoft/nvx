@@ -60,6 +60,7 @@ python scripts\nvx.py run
 - [Build](doc/build.md) - Instructions for building NVX.
 - [Run](doc/run.md) - Instructions for running NVX.
 - [Benchmark](doc/benchmarks.md) - Instructions for benchmarking NVX.
+- [Command-line reference](doc/usage.md) - Complete `scripts/nvx.py` command and option reference.
 
 ### Development
 
