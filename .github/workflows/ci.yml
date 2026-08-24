@@ -31,45 +31,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-
-      - name: Install development tools
-        run: python -m pip install --requirement requirements-dev.txt
-
       - name: Check code quality
-        env:
-          SHELLCHECK: >-
-            docker run --rm --volume ${{ github.workspace }}:/workspace:ro
-            --workdir /workspace
-            koalaman/shellcheck-alpine@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002
-            shellcheck
-          SHFMT: >-
-            docker run --rm --volume ${{ github.workspace }}:/workspace:ro
-            --workdir /workspace
-            mvdan/shfmt@sha256:307d265ffd25ce832899ae17c93ed5062fc3375c514bba8f52cbf52792735c4d
-        run: |
-          set -euo pipefail
-          python -m ruff check scripts
-          ${SHELLCHECK} --shell=sh \
-            alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
-          python -m pyright --pythonplatform Linux
-          python -m pyright --pythonplatform Windows
-          python -m ruff format --check scripts
-          ${SHFMT} -d -ln posix -i 4 -ci \
-            alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
+        uses: ./.github/actions/check-quality
 
   artifacts:
     name: Build shared artifacts
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 60
     outputs:
-      kernel-cache-key: ${{ steps.guest-cache-keys.outputs.kernel }}
-      alpine-cache-key: ${{ steps.guest-cache-keys.outputs.alpine }}
+      kernel-cache-key: ${{ steps.guest-artifacts.outputs.kernel-cache-key }}
+      alpine-cache-key: ${{ steps.guest-artifacts.outputs.alpine-cache-key }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -83,212 +54,22 @@ jobs:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
       - name: Validate runner
-        run: |
-          set -euo pipefail
-          python3 --version
-          rustc --version
-          cargo --version
-          docker version
-          test -r /dev/kvm
-          test -w /dev/kvm
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: kvm
+          require-docker: "true"
 
       - name: Validate NVX CLI
-        run: |
-          set -euo pipefail
-          python3 -m compileall -q scripts
-          python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
-          python3 scripts/nvx.py --help
-          python3 scripts/nvx.py benchmark --help
+        uses: ./.github/actions/validate-nvx
 
-      - name: Verify source pins
-        run: python3 scripts/nvx.py verify
+      - name: Build guest artifacts
+        id: guest-artifacts
+        uses: ./.github/actions/build-guest-artifacts
 
-      - name: Resolve guest artifact versions
-        id: guest-versions
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          manifest = json.loads(
-              Path("SOURCE-MANIFEST.json").read_text(encoding="utf-8")
-          )
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              print(f"kernel-version={manifest['linux']['version']}", file=output)
-              print(f"alpine-version={manifest['alpine']['version']}", file=output)
-          PY
-
-      - name: Resolve guest cache keys
-        id: guest-cache-keys
-        env:
-          KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
-          ALPINE_VERSION: ${{ steps.guest-versions.outputs.alpine-version }}
-          KERNEL_INPUT_HASH: ${{ hashFiles('kernel/config-microvm') }}
-          ALPINE_INPUT_HASH: ${{ hashFiles('alpine/**') }}
-        run: |
-          set -euo pipefail
-          {
-            echo "kernel=linux-kernel-v1-${KERNEL_VERSION}-${KERNEL_INPUT_HASH}"
-            echo "alpine=alpine-image-v1-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Prepare gzip cache tools
-        id: gzip-cache-tools
-        run: |
-          set -euo pipefail
-          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-          mkdir -p "${cache_tools}"
-          ln -sf "$(command -v tar)" "${cache_tools}/tar"
-          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-      - name: Restore Linux kernel (zstd)
-        id: cache-linux-kernel-zstd
-        uses: actions/cache/restore@v5
+      - name: Build portable OpenVMM
+        uses: ./.github/actions/build-portable-openvmm
         with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ steps.guest-cache-keys.outputs.kernel }}
-          enableCrossOsArchive: true
-
-      - name: Restore Linux kernel (gzip)
-        id: cache-linux-kernel-gzip
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-        with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ steps.guest-cache-keys.outputs.kernel }}
-          enableCrossOsArchive: true
-
-      - name: Restore Alpine disk image (zstd)
-        id: cache-alpine-image-zstd
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ steps.guest-cache-keys.outputs.alpine }}
-          enableCrossOsArchive: true
-
-      - name: Restore Alpine disk image (gzip)
-        id: cache-alpine-image-gzip
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ steps.guest-cache-keys.outputs.alpine }}
-          enableCrossOsArchive: true
-
-      - name: Build Linux kernel (Docker)
-        if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true' && steps.cache-linux-kernel-gzip.outputs.cache-hit != 'true'
-        run: >-
-          docker build
-          --file docker/Dockerfile
-          --target kernel-artifacts
-          --output type=local,dest=build
-          .
-
-      - name: Save Linux kernel (zstd)
-        if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ steps.guest-cache-keys.outputs.kernel }}
-          enableCrossOsArchive: true
-
-      - name: Save Linux kernel (gzip)
-        if: steps.cache-linux-kernel-gzip.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        env:
-          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-        with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ steps.guest-cache-keys.outputs.kernel }}
-          enableCrossOsArchive: true
-
-      - name: Build Alpine disk image (Docker)
-        if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true' && steps.cache-alpine-image-gzip.outputs.cache-hit != 'true'
-        run: >-
-          docker build
-          --file docker/Dockerfile
-          --target initramfs-artifacts
-          --output type=local,dest=build
-          .
-
-      - name: Save Alpine disk image (zstd)
-        if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ steps.guest-cache-keys.outputs.alpine }}
-          enableCrossOsArchive: true
-
-      - name: Save Alpine disk image (gzip)
-        if: steps.cache-alpine-image-gzip.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        env:
-          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ steps.guest-cache-keys.outputs.alpine }}
-          enableCrossOsArchive: true
-
-      - name: Restore portable OpenVMM
-        id: cache-portable-openvmm
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-        with:
-          path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
-          key: openvmm-linux-mshv-v1-x86_64-${{ steps.openvmm.outputs.sha }}
-
-      - name: Build portable OpenVMM for MSHV
-        if: steps.cache-portable-openvmm.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if [ ! -f openvmm/.packages/extracted/x86_64-sysroot/lib/libsymcrypt.a ]; then
-            (cd openvmm && cargo xflowey restore-packages --no-compat-igvm)
-          fi
-          rustup target add x86_64-unknown-linux-musl
-          sysroot="$(cd openvmm && pwd)/.packages/extracted/x86_64-sysroot"
-          export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR="$sysroot"
-          export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR=1
-          export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC=1
-          export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_LIB_PATH="$sysroot/lib"
-          export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_STATIC=1
-          (cd openvmm && cargo build \
-            --release \
-            --target x86_64-unknown-linux-musl \
-            -p openvmm \
-            --bin openvmm)
-
-      - name: Save portable OpenVMM
-        if: steps.cache-portable-openvmm.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        env:
-          PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-        with:
-          path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
-          key: openvmm-linux-mshv-v1-x86_64-${{ steps.openvmm.outputs.sha }}
+          openvmm-sha: ${{ steps.openvmm.outputs.sha }}
 
   linux:
     name: Linux / KVM
@@ -302,13 +83,9 @@ jobs:
           persist-credentials: false
 
       - name: Validate runner
-        run: |
-          set -euo pipefail
-          python3 --version
-          rustc --version
-          cargo --version
-          test -r /dev/kvm
-          test -w /dev/kvm
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: kvm
 
       - name: Build OpenVMM
         uses: ./.github/actions/build-openvmm
@@ -325,23 +102,9 @@ jobs:
 
       - name: Package Linux / KVM release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        run: |
-          set -euo pipefail
-          version="$(cat VERSION)"
-          package="nvx-${version}-linux-kvm"
-          python3 scripts/nvx.py package \
-            --version "${version}" \
-            --destination "dist/${package}" \
-            --binary-only
-          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
-
-      - name: Save Linux / KVM release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/package-release
         with:
-          path: dist/*.tar.gz
-          key: release-linux-kvm-${{ github.run_id }}
-          enableCrossOsArchive: true
+          platform: linux-kvm
 
   mshv:
     name: Linux / MSHV
@@ -355,14 +118,9 @@ jobs:
           persist-credentials: false
 
       - name: Validate runner
-        run: |
-          set -euo pipefail
-          python3 --version
-          rustc --version
-          cargo --version
-          test -r /dev/mshv
-          test -w /dev/mshv
-          sudo -n true
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: mshv
 
       - name: Checkout OpenVMM
         id: openvmm
@@ -370,20 +128,10 @@ jobs:
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Restore portable OpenVMM
-        uses: actions/cache/restore@v5
-        with:
-          path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
-          key: openvmm-linux-mshv-v1-x86_64-${{ steps.openvmm.outputs.sha }}
-          fail-on-cache-miss: true
-
       - name: Prepare portable OpenVMM
-        run: |
-          set -euo pipefail
-          mkdir -p openvmm/target/release
-          cp openvmm/target/x86_64-unknown-linux-musl/release/openvmm \
-            openvmm/target/release/openvmm
-          chmod +x openvmm/target/release/openvmm
+        uses: ./.github/actions/prepare-portable-openvmm
+        with:
+          openvmm-sha: ${{ steps.openvmm.outputs.sha }}
 
       - name: Run Linux / MSHV benchmark
         uses: ./.github/actions/run-benchmark
@@ -396,45 +144,16 @@ jobs:
 
       - name: Package Linux / MSHV release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        run: |
-          set -euo pipefail
-          version="$(cat VERSION)"
-          package="nvx-${version}-linux-mshv"
-          python3 scripts/nvx.py package \
-            --version "${version}" \
-            --destination "dist/${package}" \
-            --binary-only
-          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
-
-      - name: Prepare Linux / MSHV release cache tools
-        id: release-cache-tools
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        run: |
-          set -euo pipefail
-          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-          mkdir -p "${cache_tools}"
-          ln -sf "$(command -v tar)" "${cache_tools}/tar"
-          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-      - name: Save Linux / MSHV release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/cache/save@v5
-        env:
-          PATH: ${{ steps.release-cache-tools.outputs.path }}
+        uses: ./.github/actions/package-release
         with:
-          path: dist/*.tar.gz
-          key: release-linux-mshv-${{ github.run_id }}
-          enableCrossOsArchive: true
+          platform: linux-mshv
+          cache-compression: gzip
 
   windows:
     name: Windows / WHP
     needs: artifacts
     runs-on: [self-hosted, windows, whp]
     timeout-minutes: 60
-    defaults:
-      run:
-        shell: powershell
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -442,17 +161,12 @@ jobs:
           persist-credentials: false
 
       - name: Validate runner
-        run: |
-          python --version
-          rustc --version
-          cargo --version
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: whp
 
       - name: Validate NVX CLI
-        run: |
-          python -m compileall -q scripts
-          python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
-          python scripts\nvx.py --help
-          python scripts\nvx.py benchmark --help
+        uses: ./.github/actions/validate-nvx
 
       - name: Build OpenVMM
         uses: ./.github/actions/build-openvmm
@@ -469,25 +183,9 @@ jobs:
 
       - name: Package Windows / WHP release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        run: |
-          $Version = (Get-Content VERSION -Raw).Trim()
-          $Package = "nvx-$Version-windows-whp"
-          python scripts\nvx.py package `
-            --version $Version `
-            --destination "dist\$Package" `
-            --binary-only
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Compress-Archive `
-            -Path "dist\$Package" `
-            -DestinationPath "dist\$Package.zip"
-
-      - name: Save Windows / WHP release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/package-release
         with:
-          path: dist/*.zip
-          key: release-windows-whp-${{ github.run_id }}
-          enableCrossOsArchive: true
+          platform: windows-whp
 
   release:
     name: Publish development release
@@ -513,82 +211,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prepare release cache tools
-        id: release-cache-tools
-        run: |
-          set -euo pipefail
-          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-          mkdir -p "${cache_tools}"
-          ln -sf "$(command -v tar)" "${cache_tools}/tar"
-          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-      - name: Restore Linux / KVM release
-        uses: actions/cache/restore@v5
-        with:
-          path: dist/*.tar.gz
-          key: release-linux-kvm-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Linux / MSHV release
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.release-cache-tools.outputs.path }}
-        with:
-          path: dist/*.tar.gz
-          key: release-linux-mshv-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Windows / WHP release
-        uses: actions/cache/restore@v5
-        with:
-          path: dist/*.zip
-          key: release-windows-whp-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Publish GitHub prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          version="$(cat VERSION)"
-          short_sha="${GITHUB_SHA:0:12}"
-          tag="v${version}-dev.${short_sha}"
-          packages=(
-            "dist/nvx-${version}-linux-kvm.tar.gz"
-            "dist/nvx-${version}-linux-mshv.tar.gz"
-            "dist/nvx-${version}-windows-whp.zip"
-          )
-          for package in "${packages[@]}"; do
-            test -f "${package}"
-          done
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" "${packages[@]}" --clobber
-          else
-            gh release create "${tag}" "${packages[@]}" \
-              --target "${GITHUB_SHA}" \
-              --title "NVX ${version} dev ${short_sha}" \
-              --notes "Automated development release for ${GITHUB_SHA}." \
-              --prerelease
-          fi
-
-      - name: Delete release package caches
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          for platform in linux-kvm linux-mshv windows-whp; do
-            key="release-${platform}-${GITHUB_RUN_ID}"
-            if ! gh cache delete "${key}" --ref "${GITHUB_REF}"; then
-              echo "::warning::Failed to delete cache ${key}"
-            fi
-          done
+      - name: Publish development release
+        uses: ./.github/actions/publish-development-release
 
   performance-gate:
     name: Performance regression gate
@@ -609,41 +233,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Prepare performance results
-        uses: ./.github/actions/prepare-performance-results
-
-      - name: Load base branch performance history
-        env:
-          BASE_REF: dev
-        run: |
-          set -euo pipefail
-          mkdir -p data/baseline
-          git fetch --no-tags --depth=1 origin "${BASE_REF}"
-          for result in data/results/*.csv; do
-            filename="$(basename "${result}")"
-            candidate="data/${filename}"
-            history="FETCH_HEAD:data/${filename}"
-            if [ -f "${candidate}" ] &&
-              [ "$(wc -l < "${candidate}")" -eq 1 ] &&
-              [ "$(head -n 1 "${candidate}")" = "commit,metric,unit,direction,p50" ]; then
-              cp "${candidate}" "data/baseline/${filename}"
-              echo "::notice::${filename} history is explicitly reset in this pull request; warming up the baseline"
-            elif git cat-file -e "${history}" 2>/dev/null; then
-              git show "${history}" > "data/baseline/${filename}"
-            else
-              echo "::notice::No ${filename} performance history on ${BASE_REF}; warming up the baseline"
-            fi
-          done
-
       - name: Gate on performance regressions
-        run: >-
-          python3 scripts/nvx.py performance gate
-          --baseline-dir data/baseline
-          --target-dir data/results
-          --window "${PERFORMANCE_BASELINE_WINDOW}"
-          --threshold "${PERFORMANCE_REGRESSION_THRESHOLD}"
-          --absolute-tolerance-ms "${PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS}"
-          --summary "${GITHUB_STEP_SUMMARY}"
+        uses: ./.github/actions/gate-performance
+        with:
+          base-ref: dev
+          baseline-window: ${{ env.PERFORMANCE_BASELINE_WINDOW }}
+          regression-threshold: ${{ env.PERFORMANCE_REGRESSION_THRESHOLD }}
+          absolute-tolerance-ms: ${{ env.PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS }}
 
   performance-persist:
     name: Persist performance baseline
@@ -669,35 +265,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Prepare performance results
-        uses: ./.github/actions/prepare-performance-results
-
       - name: Persist results on dev
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          for attempt in 1 2 3; do
-            git fetch origin dev
-            git checkout -B performance-persist origin/dev
-            python3 scripts/nvx.py performance persist \
-              --source-dir data/results \
-              --history-dir data
-            git add data/*.csv
-
-            if git diff --cached --quiet; then
-              echo "No new performance results to persist"
-              exit 0
-            fi
-
-            git commit --no-verify \
-              -m "data: update performance baselines (${GITHUB_SHA}) [skip ci]"
-            if git push origin HEAD:dev; then
-              exit 0
-            fi
-            if [ "${attempt}" -eq 3 ]; then
-              echo "::error::Failed to persist performance results after ${attempt} attempts"
-              exit 1
-            fi
-          done
+        uses: ./.github/actions/persist-performance-results
+        with:
+          branch: dev

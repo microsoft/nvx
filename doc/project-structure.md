@@ -82,10 +82,11 @@ contains downloaded and prepared upstream source trees, including Linux.
 ### `.github/`
 
 Repository automation and Copilot customizations live here. `workflows/ci.yml`
-defines the main CI pipeline. The `actions/` directory contains local actions
-for checking out and building OpenVMM, running benchmarks, and preparing
-performance results. The `prompts/` directory defines Copilot prompts for
-common development workflows.
+defines the main CI pipeline and its job-level orchestration. The `actions/`
+directory contains the reusable implementations for validation, artifact
+builds, benchmarks, packaging, releases, and performance history management.
+The `prompts/` directory defines Copilot prompts for common development
+workflows.
 
 ### `alpine/`
 

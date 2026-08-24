@@ -1,0 +1,26 @@
+name: Prepare portable OpenVMM
+description: Restore and stage the portable OpenVMM binary for MSHV
+
+inputs:
+  openvmm-sha:
+    description: Resolved OpenVMM commit used in the cache key
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Restore portable OpenVMM
+      uses: actions/cache/restore@v5
+      with:
+        path: openvmm/target/x86_64-unknown-linux-musl/release/openvmm
+        key: openvmm-linux-mshv-v1-x86_64-${{ inputs.openvmm-sha }}
+        fail-on-cache-miss: true
+
+    - name: Stage portable OpenVMM
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p openvmm/target/release
+        cp openvmm/target/x86_64-unknown-linux-musl/release/openvmm \
+          openvmm/target/release/openvmm
+        chmod +x openvmm/target/release/openvmm

@@ -1,0 +1,53 @@
+name: Validate runner
+description: Verify the toolchain and virtualization backend required by an NVX job
+
+inputs:
+  backend:
+    description: Virtualization backend expected on the runner
+    required: true
+  require-docker:
+    description: Whether the job requires a working Docker daemon
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Linux toolchain
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 --version
+        rustc --version
+        cargo --version
+
+    - name: Validate Windows toolchain
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        python --version
+        rustc --version
+        cargo --version
+
+    - name: Validate Docker
+      if: inputs.require-docker == 'true'
+      shell: bash
+      run: docker version
+
+    - name: Validate KVM
+      if: inputs.backend == 'kvm'
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -r /dev/kvm
+        test -w /dev/kvm
+
+    - name: Validate MSHV
+      if: inputs.backend == 'mshv'
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -r /dev/mshv
+        test -w /dev/mshv
+        sudo -n true

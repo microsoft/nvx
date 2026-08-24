@@ -1,0 +1,62 @@
+name: Gate performance
+description: Compare benchmark results with base-branch performance history
+
+inputs:
+  base-ref:
+    description: Branch containing the performance baseline history
+    required: false
+    default: dev
+  baseline-window:
+    description: Number of recent baseline samples to compare
+    required: true
+  regression-threshold:
+    description: Relative regression threshold
+    required: true
+  absolute-tolerance-ms:
+    description: Absolute regression tolerance in milliseconds
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare performance results
+      uses: ./.github/actions/prepare-performance-results
+
+    - name: Load base branch performance history
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base-ref }}
+      run: |
+        set -euo pipefail
+        mkdir -p data/baseline
+        git fetch --no-tags --depth=1 origin "${BASE_REF}"
+        for result in data/results/*.csv; do
+          filename="$(basename "${result}")"
+          candidate="data/${filename}"
+          history="FETCH_HEAD:data/${filename}"
+          if [ -f "${candidate}" ] &&
+            [ "$(wc -l < "${candidate}")" -eq 1 ] &&
+            [ "$(head -n 1 "${candidate}")" = "commit,metric,unit,direction,p50" ]; then
+            cp "${candidate}" "data/baseline/${filename}"
+            echo "::notice::${filename} history is explicitly reset in this pull request; warming up the baseline"
+          elif git cat-file -e "${history}" 2>/dev/null; then
+            git show "${history}" > "data/baseline/${filename}"
+          else
+            echo "::notice::No ${filename} performance history on ${BASE_REF}; warming up the baseline"
+          fi
+        done
+
+    - name: Gate on performance regressions
+      shell: bash
+      env:
+        PERFORMANCE_BASELINE_WINDOW: ${{ inputs.baseline-window }}
+        PERFORMANCE_REGRESSION_THRESHOLD: ${{ inputs.regression-threshold }}
+        PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: ${{ inputs.absolute-tolerance-ms }}
+      run: >-
+        python3 scripts/nvx.py performance gate
+        --baseline-dir data/baseline
+        --target-dir data/results
+        --window "${PERFORMANCE_BASELINE_WINDOW}"
+        --threshold "${PERFORMANCE_REGRESSION_THRESHOLD}"
+        --absolute-tolerance-ms "${PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS}"
+        --summary "${GITHUB_STEP_SUMMARY}"
