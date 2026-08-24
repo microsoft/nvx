@@ -33,3 +33,22 @@ The native kernel build caches the verified and patched source under
 generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
 absent. Changing an archive hash or patch invalidates both source and object
 caches.
+
+## Building the packaged Linux source
+
+The Linux corresponding-source archive contains the patched
+`linux-6.18.38/` tree and the exact `vmlinux.config` used for the distributed
+kernel.
+
+On a Linux host with the kernel build dependencies installed, run from the
+archive root:
+
+```bash
+mkdir build
+cp vmlinux.config build/.config
+make -C linux-6.18.38 O="$PWD/build" olddefconfig
+make -C linux-6.18.38 O="$PWD/build" -j"$(nproc)" vmlinux
+```
+
+The normal repository workflow performs the same build through
+`scripts/nvx.py build-kernel` or the Docker artifact target.

@@ -49,7 +49,6 @@ nvx/
 |   `-- setup.md                 Initialization and development prerequisites
 |-- kernel/                      Linux configuration and NVX patch set
 |   |-- patches/                 Ordered patches applied to Linux
-|   |-- BUILDING.md              Kernel build notes
 |   `-- config-microvm           MicroVM kernel configuration
 |-- licenses/                    Vendored third-party license texts
 |-- openvmm/                     Private OpenVMM Git submodule
@@ -109,7 +108,8 @@ in a reproducible Linux environment.
 
 Inputs owned by NVX for producing the guest kernel. `config-microvm` defines the
 kernel build. Files in `patches/` are applied in name order to the pinned Linux
-source. See `BUILDING.md` for kernel-specific details.
+source. See the [build guide](build.md#building-the-packaged-linux-source) for
+kernel-specific details.
 
 ### `licenses/`
 
