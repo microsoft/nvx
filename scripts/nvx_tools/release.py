@@ -56,7 +56,6 @@ PROJECT_SOURCE_PATHS = (
     ".gitmodules",
     ".gitignore",
     "LICENSE",
-    "LICENSE-NVX",
     "README.md",
     "SOURCE-MANIFEST.json",
     "THIRD_PARTY_NOTICES.md",
@@ -444,7 +443,6 @@ def package_release(
         _copy_release_file(artifact_path(name), release_destination / "guest" / name)
     for name in (
         "LICENSE",
-        "LICENSE-NVX",
         "README.md",
         "SOURCE-MANIFEST.json",
         "THIRD_PARTY_NOTICES.md",

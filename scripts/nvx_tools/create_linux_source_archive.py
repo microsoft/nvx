@@ -33,7 +33,7 @@ def command_create_linux_source_archive(args: argparse.Namespace) -> None:
         (REPO_ROOT / "README.md", f"{root}/README.md"),
         (REPO_ROOT / "SOURCE-MANIFEST.json", f"{root}/SOURCE-MANIFEST.json"),
         (REPO_ROOT / "THIRD_PARTY_NOTICES.md", f"{root}/THIRD_PARTY_NOTICES.md"),
-        (REPO_ROOT / "LICENSE-NVX", f"{root}/LICENSE-NVX"),
+        (REPO_ROOT / "LICENSE", f"{root}/LICENSE"),
     )
     create_reproducible_tar_gz(output, inputs)
     print(f">> created {output}")

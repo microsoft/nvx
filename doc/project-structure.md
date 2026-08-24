@@ -62,7 +62,6 @@ nvx/
 |-- .gitignore                   Generated-file exclusions
 |-- .gitmodules                  OpenVMM submodule definition
 |-- LICENSE                      Repository license
-|-- LICENSE-NVX                  NVX-specific license terms
 |-- pyproject.toml               Pyright and Ruff configuration
 |-- README.md                    Project overview and documentation index
 |-- requirements-dev.txt         Pinned Python development tools
@@ -140,7 +139,7 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | `.gitignore` | Excludes build products, caches, virtual environments, logs, and platform metadata |
 | `.dockerignore` | Limits files sent to the Docker build context |
 | `.gitattributes` | Repository-specific Git attributes |
-| `LICENSE` and `LICENSE-NVX` | Licensing terms for repository content |
+| `LICENSE` | Licensing terms for repository content |
 | `THIRD_PARTY_NOTICES.md` | Attribution and redistribution notices for dependencies |
 
 ## Generated directories

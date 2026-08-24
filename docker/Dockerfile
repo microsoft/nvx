@@ -26,7 +26,7 @@ COPY alpine/ /repo/alpine/
 COPY docker/ /repo/docker/
 COPY kernel/ /repo/kernel/
 COPY scripts/ /repo/scripts/
-COPY LICENSE-NVX README.md SOURCE-MANIFEST.json THIRD_PARTY_NOTICES.md /repo/
+COPY LICENSE README.md SOURCE-MANIFEST.json THIRD_PARTY_NOTICES.md /repo/
 
 FROM base AS kernel
 RUN python3 scripts/nvx.py build-kernel

@@ -8,7 +8,7 @@ the distribution tooling.
 | --- | --- | --- |
 | Linux 6.18.38 | Generated under `.cache/linux` | GPL-2.0-only; the upstream archive and patch series are pinned in `SOURCE-MANIFEST.json` and `kernel/patches`. Each build exports its exact config, and `collect-sources` emits the complete patched tree. |
 | OpenVMM | `openvmm` | MIT; see `openvmm/LICENSE`. Source is a private Git submodule and is available only to authorized users. |
-| NVX guest/build sources | `alpine`, `kernel`, `scripts/nvx_tools` | MIT; see `LICENSE-NVX`. |
+| NVX guest/build sources | `alpine`, `kernel`, `scripts/nvx_tools` | MIT; see `LICENSE`. |
 | Alpine Linux packages | generated initramfs images | Per-package licenses. Every build emits `*.packages.json`; retain that manifest and collect the corresponding aports recipes and upstream sources before distributing an image. |
 
 The source manifest records pinned versions, commits, and the upstream Linux

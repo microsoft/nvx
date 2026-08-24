@@ -393,7 +393,6 @@ class ReleaseTests(unittest.TestCase):
             )
             release_files = (
                 "LICENSE",
-                "LICENSE-NVX",
                 "README.md",
                 "SOURCE-MANIFEST.json",
                 "THIRD_PARTY_NOTICES.md",
