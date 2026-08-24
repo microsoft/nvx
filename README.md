@@ -54,11 +54,17 @@ python scripts\nvx.py run
 
 ## Documentation
 
-- [Setup](doc/setup.md)
-- [Contributing](doc/contribute.md)
-- [Continuous integration](doc/ci.md)
-- [Build](doc/build.md)
-- [Run](doc/run.md)
-- [Benchmark](doc/benchmarks.md)
-- [Package and source delivery](doc/distribution.md)
-- [Project structure](doc/project-structure.md)
+### Usage
+
+- [Setup](doc/setup.md) - Instructions for setting up your environment.
+- [Build](doc/build.md) - Instructions for building NVX.
+- [Run](doc/run.md) - Instructions for running NVX.
+- [Benchmark](doc/benchmarks.md) - Instructions for benchmarking NVX.
+
+### Development
+
+- [Project structure](doc/project-structure.md) - Overview of the NVX repository layout.
+- [Continuous integration](doc/ci.md) - Instructions for running and maintaining NVX CI.
+- [Package and source delivery](doc/distribution.md) - Instructions for packaging and distributing
+	NVX.
+- [Contributing](doc/contribute.md) - Guidelines for contributing to NVX.
