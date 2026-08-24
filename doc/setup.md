@@ -27,13 +27,7 @@ python3 scripts/nvx.py init
 
 ## Prerequisites
 
-For Windows/WHP, install Rust stable, Visual Studio 2022 C++ build tools, the
-Windows SDK, Python 3.10 or newer, Git, and Docker Desktop using Linux
-containers. Enable **Windows Hypervisor Platform** and reboot:
-
-```powershell
-Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
-```
+Python 3.10 or newer and Git are required on every platform.
 
 For Debian/Ubuntu hosts:
 
@@ -44,7 +38,10 @@ sudo apt-get install -y \
   libelf-dev libssl-dev python3 rsync tar xz-utils
 ```
 
-On KVM hosts, add the runner user to the `kvm` group:
+### Linux / KVM
+
+Enable Intel VT-x or AMD-V in the host firmware. Linux normally loads the matching KVM kernel
+module automatically; `/dev/kvm` should exist after boot. Add the current user to the `kvm` group:
 
 ```bash
 sudo usermod -aG kvm "$USER"
@@ -52,6 +49,34 @@ sudo usermod -aG kvm "$USER"
 
 Log out and back in after changing groups, then check access with
 `test -r /dev/kvm && test -w /dev/kvm`.
+
+### Linux / MSHV
+
+MSHV requires Linux running as a Microsoft Hypervisor root partition with an MSHV-enabled kernel.
+The kernel must expose `/dev/mshv`; if its MSHV root driver is a module, load it with:
+
+```bash
+sudo modprobe mshv_root
+```
+
+Grant the current session read/write access and verify the device:
+
+```bash
+sudo chmod a+rw /dev/mshv
+test -r /dev/mshv && test -w /dev/mshv
+```
+
+### Windows / WHP
+
+Enable hardware virtualization in the host firmware. Then enable **Windows Hypervisor Platform**
+from an elevated PowerShell session and reboot:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
+```
+
+Building NVX locally also requires Rust stable, Visual Studio 2022 C++ build tools, the Windows
+SDK, and Docker Desktop using Linux containers.
 
 ## Development
 
