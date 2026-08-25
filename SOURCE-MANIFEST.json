@@ -33,8 +33,8 @@
   },
   "openvmm": {
     "repository": "https://github.com/nanvix/openvmm.git",
-    "branch": "microvm/profile",
-    "commit": "5fbd1c280f23bd5be6e8740b97d5c77a077f385d",
+    "branch": "microvm/profile-v2",
+    "commit": "57965bf552bf3d87664afe7b55ea1676b6f55f40",
     "source_delivery": "private-git-submodule"
   }
 }
