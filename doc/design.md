@@ -74,11 +74,12 @@ ABI version 1 requires:
 - no VTL2, isolation, nested virtualization, or Hyper-V enlightenments; and
 - the exact chipset and device inventory described below.
 
-It rejects UEFI, PCAT, IGVM, ACPI, SMBIOS, device tree, PCI/PCIe, VPCI, VMBus,
-ISA DMA, IDE, floppy, VMGS, graphics, VGA firmware, debugger resources, and
-devices outside the profile. This is an allowlist: the implementation builds a
-microVM directly instead of constructing a standard PC and removing unwanted
-devices.
+It rejects UEFI, PCAT, IGVM, caller-supplied ACPI, SMBIOS, device tree,
+PCI/PCIe, VPCI, VMBus, ISA DMA, IDE, floppy, VMGS, graphics, VGA firmware,
+debugger resources, and devices outside the profile. The profile itself emits
+the fixed MP and minimal ACPI metadata described below. This is an allowlist:
+the implementation builds a microVM directly instead of constructing a
+standard PC and removing unwanted devices.
 
 Restore is stricter than cold boot. Guest-visible configuration is read from
 the snapshot's machine contract. Restore-time input may choose a compatible
@@ -101,22 +102,33 @@ untrusted. It:
 4. finds exactly one Xen `XEN_ELFNOTE_PHYS32_ENTRY` note and verifies that its
    32-bit physical entry lies in a loaded segment;
 5. places an optional initramfs, page-aligned, at the top of low RAM;
-6. builds Xen version-1 `hvm_start_info` and a RAM-only memory map; and
+6. builds Xen version-1 `hvm_start_info`, a RAM-only memory map, and the fixed
+   MP and ACPI platform metadata; and
 7. enters the kernel in flat 32-bit protected mode with paging disabled and
    `RBX` pointing to the start-info structure.
 
-The loader does not synthesize a Linux zero page, page tables, firmware tables,
-ACPI, SMBIOS, or a device tree.
+The loader does not synthesize a Linux zero page, page tables, SMBIOS, a device
+tree, or a firmware execution environment. The worker does build a minimal
+RSDP, MADT, and DSDT for the direct-boot guest. The loader places them below the
+command line and publishes the RSDP through `hvm_start_info.rsdp_paddr`. It also
+writes Intel MP 1.4 tables for the single processor, ISA bus, IOAPIC, and legacy
+IRQ routing. The profile's virtio IRQs are described as active-high,
+level-triggered lines; fixed virtio device discovery remains command-line
+based rather than firmware-enumerated.
 
 The fixed boot reservations are:
 
 | Guest physical address | Contents |
 | ---: | --- |
+| `0x0000..0x000f` | Intel MP 1.4 floating pointer |
+| `0x0400..0x04c7` | Single-processor MP configuration table |
 | `0x500..0x51f` | Four-entry bootstrap GDT |
 | `0x520` | Empty IDT |
 | `0x6000` | Xen `hvm_start_info` |
 | `0x6040` | Optional initramfs module entry |
 | `0x7000` | Xen PVH RAM map |
+| `0x8000..0x8fff` | ACPI RSDP page |
+| `0x9000..0x1ffff` | Bounded ACPI table region |
 | `0x20000` | NUL-terminated kernel command line |
 | `0x100000` and above | Kernel load segments and ordinary RAM |
 
@@ -190,9 +202,11 @@ string and its SHA-256 digest become part of the snapshot machine contract.
 
 The RTC is anchored to UTC and exposes binary, 24-hour fields with status B
 `0x06`. PIC, IOAPIC, PIT, RTC, LAPIC, and VM time use common OpenVMM device and
-state-unit machinery on every backend. Serial UARTs, debugcon, Hyper-V power
-management, gameport, PCI, firmware helpers, and standard-PC missing-port shims
-are absent.
+state-unit machinery on every backend. IOAPIC saved state includes the
+asserted level of every input line and reevaluates routing after restore, so a
+level interrupt is neither lost nor treated as an edge while reconstructing
+the backend. Serial UARTs, debugcon, Hyper-V power management, gameport, PCI,
+firmware helpers, and standard-PC missing-port shims are absent.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
@@ -556,7 +570,11 @@ VM time, RTC, PIT/LAPIC deadlines, and the KVM paravirtual clock by nonnegative
 host downtime, then reanchors them before vCPUs start. A destination that
 cannot reproduce the saved CPU or clock contract is rejected rather than
 silently changing guest behavior. The current restore path rejects negative
-downtime and elapsed host downtime greater than 30 days.
+downtime and elapsed host downtime greater than 30 days. If an advanced
+TSC-deadline timer would already be in the past, restore rearms it one
+millisecond beyond the restored TSC; some hypervisors do not inject an
+interrupt merely because a past deadline was restored. Exact deadline
+read-back is consequently excluded from state comparison.
 
 Replaying a snapshot also replays the guest's in-memory random-number-generator
 state. With restore entropy enabled, OpenVMM creates a fresh one-time packet and
@@ -616,7 +634,8 @@ virtio-fs attachment revalidation. Platform CI and the benchmark histories in
 ABI version 1 intentionally does not provide:
 
 - SMP, multiple NUMA nodes, non-x86 guests, or nested virtualization;
-- firmware boot, ACPI, SMBIOS, PCI, VPCI, VMBus, hotplug, or arbitrary devices;
+- firmware boot, caller-defined ACPI, SMBIOS, PCI, VPCI, VMBus, hotplug, or
+  arbitrary devices;
 - cross-hypervisor snapshot restore;
 - capture-and-continue or live migration;
 - snapshots with virtio-blk attached;
@@ -636,7 +655,7 @@ runtime modes. The current tree integrates their main deliverables as follows:
 
 | Proposal | Current implementation |
 | --- | --- |
-| Phase 1: base machine | PVH boot, fixed layout, chipset/PMIO devices, and optional cold-boot virtio-blk are implemented. Linux/MSHV is supported in addition to the originally named KVM and WHP backends. |
+| Phase 1: base machine | PVH boot, fixed layout, MP/ACPI boot metadata, chipset/PMIO devices, and optional cold-boot virtio-blk are implemented. Linux/MSHV is supported in addition to the originally named KVM and WHP backends. |
 | Phase 2: snapshot | Guest-requested capture with staged, checksummed artifacts and verified new-process restore is implemented for the no-block profile. Restore is same-backend and RAM uses private COW mappings. |
 | Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
 | Phase 4: network | Static identity, fixed transport, TAP/user-mode endpoints, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
@@ -655,6 +674,7 @@ and the limits above remain authoritative.
 | CLI and host attachment construction | [`openvmm_entry/src`](../openvmm/openvmm/openvmm_entry/src) |
 | Worker composition and fixed virtio placement | [`openvmm_core/src/worker`](../openvmm/openvmm/openvmm_core/src/worker) |
 | Xen PVH loading | [`vm/loader/src/pvh.rs`](../openvmm/vm/loader/src/pvh.rs) |
+| Minimal PVH ACPI construction | [`vmm_core/src/acpi_builder.rs`](../openvmm/vmm_core/src/acpi_builder.rs) |
 | Base-chipset allowlist and memory-layout defaults | [`vmm_core/vm_manifest_builder`](../openvmm/vmm_core/vm_manifest_builder) |
 | portb, shutdown, and snapshot PMIO | [`vm/devices/chipset/src/microvm.rs`](../openvmm/vm/devices/chipset/src/microvm.rs) |
 | RTC normalization | [`vm/devices/chipset/src/cmos_rtc.rs`](../openvmm/vm/devices/chipset/src/cmos_rtc.rs) |
