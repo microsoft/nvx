@@ -240,23 +240,6 @@ def configure_parser(
             "address (example: 10.0.0.2/24)"
         ),
     )
-    memory_verification = parser.add_mutually_exclusive_group()
-    memory_verification.add_argument(
-        "--unsafe-skip-snapshot-memory-verification",
-        dest="unsafe_skip_snapshot_memory_verification",
-        action="store_true",
-        help=(
-            "skip restore-time SHA-256 verification of memory.bin; use only "
-            "with trusted benchmark artifacts (default)"
-        ),
-    )
-    memory_verification.add_argument(
-        "--verify-snapshot-memory-sha256",
-        dest="unsafe_skip_snapshot_memory_verification",
-        action="store_false",
-        help="enable restore-time SHA-256 verification of memory.bin",
-    )
-    parser.set_defaults(unsafe_skip_snapshot_memory_verification=True)
     parser.add_argument(
         "--cpus",
         default=default_cpus,
@@ -1300,7 +1283,6 @@ def benchmark_shell_snapshot_workload(
                         executable,
                         backend,
                         snapshot_path,
-                        args.unsafe_skip_snapshot_memory_verification,
                     ),
                 ],
                 warmups=args.warmups,
@@ -1404,7 +1386,6 @@ def benchmark_network_snapshot_workload(
                     executable,
                     backend,
                     snapshot_path,
-                    args.unsafe_skip_snapshot_memory_verification,
                 ),
             ],
             warmups=args.warmups,
@@ -1715,9 +1696,8 @@ def snapshot_restore_command(
     executable: Path,
     hypervisor: str,
     snapshot_path: Path,
-    unsafe_skip_memory_verification: bool,
 ) -> list[str]:
-    command = [
+    return [
         str(executable),
         "--single-process",
         "--machine",
@@ -1728,9 +1708,6 @@ def snapshot_restore_command(
         str(snapshot_path),
         "--restore-entropy",
     ]
-    if unsafe_skip_memory_verification:
-        command.append("--unsafe-skip-snapshot-memory-verification")
-    return command
 
 
 def benchmark_snapshot_restore(
@@ -1757,7 +1734,6 @@ def benchmark_snapshot_restore(
                     executable,
                     hypervisor,
                     snapshot_path,
-                    args.unsafe_skip_snapshot_memory_verification,
                 ),
             ],
             warmups=args.warmups,
@@ -1828,7 +1804,7 @@ def compare_cold_start_to_restore_prepare(
         "includes": [
             "new process launch",
             "bounded manifest and state read",
-            "artifact length and SHA-256 verification",
+            "artifact structure and exact-length validation",
             "writable private COW mapping",
             "artifact probes",
         ],
@@ -2212,9 +2188,7 @@ def result_document(
             "runs": args.runs,
             "memory_mib": args.memory_mib,
             "network": args.net,
-            "restore_memory_sha256": (
-                not args.unsafe_skip_snapshot_memory_verification
-            ),
+            "snapshot_artifact_validation": "structural-and-semantic",
             "cold_start_scope": (
                 "OpenVMM process launch through guest readiness marker; "
                 "teardown excluded and recorded separately"
@@ -2514,8 +2488,6 @@ def benchmark_snapshot_restore_kvm(
     ]
     if args.net is not None:
         command.extend(("--net", args.net))
-    if args.unsafe_skip_snapshot_memory_verification:
-        command.append("--unsafe-skip-snapshot-memory-verification")
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True)
         print(completed.stdout, end="")

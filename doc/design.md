@@ -378,7 +378,7 @@ is coordinated as a bounded transaction:
 4. quiesce the remaining device workers and VM time in dependency order;
 5. save the exact state-unit inventory, processor state, device-private state,
    and memory;
-6. write, hash, and flush all artifacts in a unique sibling staging directory;
+6. write and flush all artifacts in a unique sibling staging directory;
 7. publish the directory with one no-replace rename; and
 8. terminate the source worker and process after publication.
 
@@ -410,7 +410,7 @@ sequenceDiagram
       Controller->>Worker: QuiesceForSnapshot
       Worker->>Units: Stop and save in dependency order
       Units-->>Controller: State, inventory, CPU, and clock contract
-      Controller->>Storage: Write, hash, and flush staging directory
+      Controller->>Storage: Write and flush staging directory
       Controller->>Storage: Publish with no-replace rename
       Controller->>Worker: Terminate committed source
    end
@@ -481,9 +481,9 @@ flowchart LR
 
    subgraph Staging["Unique private sibling staging directory"]
       direction TB
-      StateFile["state.bin<br/>write, hash, flush"]
-      MemoryFile["memory.bin<br/>sparse copy, hash, flush"]
-      ManifestFile["manifest.bin<br/>record lengths and digests<br/>write last, then flush"]
+      StateFile["state.bin<br/>write and flush"]
+      MemoryFile["memory.bin<br/>exact-length copy and flush"]
+      ManifestFile["manifest.bin<br/>record lengths<br/>write last, then flush"]
    end
 
    SyncStaging["Flush staging directory"]
@@ -499,11 +499,10 @@ flowchart LR
 ```
 
 [`openvmm_helpers::snapshot`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs)
-implements bounded decoding, sparse memory copying, artifact length checks,
-SHA-256 digests, restrictive creation, flushing, unique staging paths, and
-same-parent no-replace publication. The manifest is written last within the
-staging directory. A pre-existing final destination is never deleted or
-replaced.
+implements bounded decoding, exact-length memory copying, artifact length
+checks, restrictive creation, flushing, unique staging paths, and same-parent
+no-replace publication. The manifest is written last within the staging
+directory. A pre-existing final destination is never deleted or replaced.
 
 The manifest is authoritative for:
 
@@ -516,11 +515,17 @@ The manifest is authoritative for:
   transport, feature masks, and queue limits;
 - CPU, XSAVE, MSR, TSC-frequency, and clock compatibility data;
 - required host attachments and their policies; and
-- lengths and SHA-256 digests of `state.bin` and `memory.bin`.
+- exact lengths of `state.bin` and `memory.bin`.
 
 Snapshot paths and repeated fields are bounded. Restore rejects truncated,
-oversized, corrupt, path-escaping, symlinked, incompatible, missing, extra, or
-reordered state before guest execution.
+oversized, malformed, wrong-type, path-escaping, symlinked, incompatible,
+missing, extra, or reordered state before guest execution. Version 3 does not
+store or validate embedded checksums for `state.bin` or `memory.bin`; a
+same-length payload change is therefore outside the validation contract.
+Version 2 manifests remain readable, but their legacy checksum fields are
+accepted without re-hashing either payload. Snapshot directories rely on host
+access control, while authenticated export or transport belongs outside the
+default local artifact format.
 
 ### Authoritative restore
 
@@ -529,8 +534,8 @@ Restore proceeds in the opposite direction from capture:
 1. read the bounded manifest and derive the authoritative machine
    configuration;
 2. resolve console, network, filesystem, and policy attachments by stable ID;
-3. verify state and memory lengths and digests;
-4. create writable private copy-on-write mappings of verified `memory.bin`;
+3. validate state and memory file types and exact lengths;
+4. create writable private copy-on-write mappings of the opened `memory.bin`;
 5. construct the partition and exact device inventory from the manifest;
 6. compare the destination CPU, XSAVE/MSR, TSC, topology, device, and queue
    contract with the saved contract;
@@ -547,7 +552,7 @@ comparison and all saved-state validation still complete before a vCPU runs.
 flowchart LR
    Manifest["Bounded manifest"]
    Config["Authoritative machine config<br/>and host attachments"]
-   Verify["Verify state and memory<br/>lengths and SHA-256"]
+   Verify["Validate state and memory<br/>types and exact lengths"]
    Cow["Private COW mapping<br/>of memory.bin"]
    Machine["Construct partition<br/>and exact devices"]
    Validate["Validate destination CPU<br/>and saved device state"]
@@ -557,11 +562,12 @@ flowchart LR
    Manifest --> Config --> Verify --> Cow --> Machine --> Validate --> Restore --> Run
 ```
 
-The memory artifact remains immutable across restores. Multiple restored VMs
-may dirty all guest RAM without changing its digest. Initial compatibility is
-same-backend: KVM snapshots restore on compatible KVM hosts, MSHV on compatible
-MSHV hosts, and WHP on compatible WHP hosts. Cross-backend conversion and
-standalone NVX snapshot import are not supported.
+The memory artifact is mapped private and copy-on-write across restores.
+Multiple restored VMs may dirty all guest RAM without changing the snapshot
+file. Initial compatibility is same-backend: KVM snapshots restore on
+compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on compatible WHP
+hosts. Cross-backend conversion and standalone NVX snapshot import are not
+supported.
 
 ### Time and entropy
 
@@ -656,7 +662,7 @@ runtime modes. The current tree integrates their main deliverables as follows:
 | Proposal | Current implementation |
 | --- | --- |
 | Phase 1: base machine | PVH boot, fixed layout, MP/ACPI boot metadata, chipset/PMIO devices, and optional cold-boot virtio-blk are implemented. Linux/MSHV is supported in addition to the originally named KVM and WHP backends. |
-| Phase 2: snapshot | Guest-requested capture with staged, checksummed artifacts and verified new-process restore is implemented for the no-block profile. Restore is same-backend and RAM uses private COW mappings. |
+| Phase 2: snapshot | Guest-requested capture with staged checksum-free v3 artifacts and structurally validated new-process restore is implemented for the no-block profile. Legacy v2 manifests remain readable without payload checksum validation. Restore is same-backend and RAM uses private COW mappings. |
 | Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
 | Phase 4: network | Static identity, fixed transport, TAP/user-mode endpoints, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
 | Phase 5: filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |
@@ -679,7 +685,7 @@ and the limits above remain authoritative.
 | portb, shutdown, and snapshot PMIO | [`vm/devices/chipset/src/microvm.rs`](../openvmm/vm/devices/chipset/src/microvm.rs) |
 | RTC normalization | [`vm/devices/chipset/src/cmos_rtc.rs`](../openvmm/vm/devices/chipset/src/cmos_rtc.rs) |
 | Virtio device-private saved state | [`vm/devices/virtio`](../openvmm/vm/devices/virtio) |
-| Snapshot format, machine contract, publication, verification | [`openvmm_helpers/src/snapshot.rs`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs) |
+| Snapshot format, machine contract, publication, validation | [`openvmm_helpers/src/snapshot.rs`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs) |
 | Capture orchestration | [`openvmm_entry/src/vm_controller.rs`](../openvmm/openvmm/openvmm_entry/src/vm_controller.rs) |
 | End-to-end profile tests | [`vmm_tests/tests/tests/x86_64/microvm.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/x86_64/microvm.rs) |
 

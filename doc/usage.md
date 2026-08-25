@@ -218,8 +218,6 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--shell-memories MIB [MIB ...]` | `64 128 256 512` | Set the guest memory sizes for shell snapshot measurements. |
 | `--network-memory-mib MIB` | `256` | Set guest memory for the network snapshot workload. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
-| `--unsafe-skip-snapshot-memory-verification` | on | Skip restore-time SHA-256 verification of trusted benchmark snapshots. |
-| `--verify-snapshot-memory-sha256` | off | Enable restore-time SHA-256 verification of `memory.bin`. |
 | `--cpus CPUSET` | last up to four logical CPUs | Set process affinity in `taskset` syntax. |
 | `--timeout SECONDS` | `10` | Set the time allowed for each boot marker. |
 | `--teardown-mode {guest-exit,host-terminate,host-sigterm}` | `guest-exit` | Select how to stop a measured VM; `host-sigterm` is a deprecated alias. |
