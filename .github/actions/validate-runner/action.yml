@@ -21,6 +21,7 @@ runs:
         python3 --version
         rustc --version
         cargo --version
+        cargo nextest --version
 
     - name: Validate Windows toolchain
       if: runner.os == 'Windows'
@@ -29,6 +30,7 @@ runs:
         python --version
         rustc --version
         cargo --version
+        cargo nextest --version
 
     - name: Validate Docker
       if: inputs.require-docker == 'true'

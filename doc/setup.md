@@ -66,6 +66,16 @@ sudo chmod a+rw /dev/mshv
 test -r /dev/mshv && test -w /dev/mshv
 ```
 
+Azure Linux self-hosted runners also need the native toolchain used to build
+the pinned cargo-nextest release:
+
+```bash
+sudo tdnf install -y \
+  gcc glibc-devel kernel-headers binutils make \
+  pkgconf pkgconf-pkg-config openssl-devel libarchive
+cargo install --locked cargo-nextest --version 0.9.133
+```
+
 ### Windows / WHP
 
 Enable hardware virtualization in the host firmware. Then enable **Windows Hypervisor Platform**
