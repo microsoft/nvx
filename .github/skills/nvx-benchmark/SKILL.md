@@ -84,13 +84,15 @@ python3 scripts/nvx.py benchmark --suite performance --backend mshv \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$output_dir"
 python3 scripts/nvx.py performance collect --platform linux-mshv \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
-    --require-shell-snapshot --require-shared-suite \
+    --require-network --require-shell-snapshot --require-shared-suite \
     --summary "$output_dir/summary.md"
 printf 'NVX_RESULTS=%s\n' "$output_dir"
 ```
 
-MSHV produces the 20 supported non-network metrics. Do not request or require
-network snapshot metrics.
+The MSHV network workload requires root or preconfigured non-interactive `sudo ip`
+access so OpenVMM can create a managed TAP. The host input policy must also permit
+ICMP echo requests to the TAP gateway. Do not modify `sudoers` or firewall policy;
+report a missing prerequisite and ask before changing host configuration.
 
 ### Windows/WHP
 
