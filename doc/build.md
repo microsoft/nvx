@@ -12,6 +12,10 @@ python3 scripts/nvx.py build-guest
 python3 scripts/nvx.py build-openvmm
 ```
 
+The OpenVMM restore step excludes the compatibility IGVM artifact, which NVX
+does not build or package, so builds do not depend on unrelated upstream
+workflow artifacts.
+
 On a Linux host, build the guest directly:
 
 ```bash

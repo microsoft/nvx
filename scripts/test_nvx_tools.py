@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # pyright: reportPrivateUsage=false
 
+import argparse
 import hashlib
 import io
 import json
@@ -12,7 +13,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
@@ -114,6 +115,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.memory_max, 268435456)
         self.assertEqual(args.pids_max, 64)
         self.assertIs(args.handler, nvx.command_sandbox)
+
+    def test_openvmm_build_skips_compatibility_igvm(self):
+        with (
+            patch.object(nvx, "require_file"),
+            patch.object(nvx, "_run") as run,
+        ):
+            nvx.command_build_openvmm(argparse.Namespace(skip_restore=False))
+
+        self.assertEqual(
+            run.call_args_list[0],
+            call(
+                [
+                    "cargo",
+                    "xflowey",
+                    "restore-packages",
+                    "--no-compat-igvm",
+                ],
+                cwd=common.OPENVMM_DIR,
+            ),
+        )
 
 
 class CiTests(unittest.TestCase):

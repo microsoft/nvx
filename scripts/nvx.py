@@ -102,7 +102,10 @@ def command_build_initramfs(_: argparse.Namespace) -> None:
 def command_build_openvmm(args: argparse.Namespace) -> None:
     require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
     if not args.skip_restore:
-        _run(["cargo", "xflowey", "restore-packages"], cwd=OPENVMM_DIR)
+        _run(
+            ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
+            cwd=OPENVMM_DIR,
+        )
     _run(
         ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
         cwd=OPENVMM_DIR,
