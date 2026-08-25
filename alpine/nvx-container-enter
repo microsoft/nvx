@@ -7,18 +7,19 @@ shift 2
 tools=$rootfs/.nvx-agent
 
 mount --make-rprivate /
-mount --bind "$rootfs" "$rootfs"
 rm -rf "$tools"
 mkdir -p \
     "$tools" \
     "$rootfs/dev/pts" \
     "$rootfs/dev/shm" \
-    "$rootfs/.oldroot" \
     "$rootfs/proc" \
     "$rootfs/sys"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$tools"
-cp /bin/busybox.static "$tools/busybox"
-chmod 0555 "$tools/busybox"
+cp /lib/ld-musl-x86_64.so.1 "$tools/ld-musl-x86_64.so.1"
+cp /bin/setpriv "$tools/setpriv"
+cp -L /usr/lib/libcap-ng.so.0 "$tools/libcap-ng.so.0"
+cp -L /usr/lib/libeconf.so.0 "$tools/libeconf.so.0"
+chmod 0555 "$tools"/*
 mount -o remount,ro,nosuid,nodev "$tools"
 mount -t proc -o nosuid,nodev,noexec proc "$rootfs/proc"
 mount -t sysfs -o ro,nosuid,nodev,noexec sysfs "$rootfs/sys"
@@ -40,10 +41,9 @@ ln -s /proc/self/fd/1 "$rootfs/dev/stdout"
 ln -s /proc/self/fd/2 "$rootfs/dev/stderr"
 
 hostname "$hostname_value"
-cd "$rootfs"
-pivot_root . .oldroot
-/.oldroot/bin/busybox umount -l /.oldroot
-exec /.nvx-agent/busybox setpriv \
+exec chroot "$rootfs" /.nvx-agent/ld-musl-x86_64.so.1 \
+    --library-path /.nvx-agent \
+    /.nvx-agent/setpriv \
     --reuid 0 \
     --regid 0 \
     --clear-groups \

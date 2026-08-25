@@ -1,6 +1,5 @@
 #!/bin/sh
 set -eu
-set -f
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 cmdline=$(cat /proc/cmdline)
@@ -19,32 +18,37 @@ cmdline_value() {
     key=$1
     # Kernel command-line tokens are deliberately split on spaces.
     # shellcheck disable=SC2086
+    set -f
     for token in $cmdline; do
         case "$token" in
             "$key"=*)
+                set +f
                 printf '%s\n' "${token#*=}"
                 return 0
                 ;;
         esac
     done
+    set +f
     return 1
 }
 
 resolve_block_device() {
-    address=${1#0x}
-    address=$(printf '%s' "$address" | tr 'A-F' 'a-f')
+    address=$(printf '%d' "$1") || return 1
     attempts=0
     while [ "$attempts" -lt 600 ]; do
-        for block in /sys/class/block/*; do
-            [ -e "$block" ] || continue
-            target=$(readlink -f "$block/device") || continue
-            case "$target" in
-                *"/$address.virtio_mmio/"* | *"/$address.virtio_mmio")
+        while IFS=' ' read -r range separator platform _; do
+            [ "$separator" = : ] || continue
+            case "$platform" in virtio-mmio.*) ;; *) continue ;; esac
+            start=${range%%-*}
+            start=$(printf '%d' "0x$start") || continue
+            if [ "$start" -eq "$address" ]; then
+                for block in "/sys/devices/virtio-mmio-cmdline/$platform"/virtio*/block/*; do
+                    [ -e "$block" ] || continue
                     printf '/dev/%s\n' "${block##*/}"
                     return 0
-                    ;;
-            esac
-        done
+                done
+            fi
+        done </proc/iomem
         attempts=$((attempts + 1))
         sleep 0.05
     done
@@ -133,6 +137,7 @@ custom=false
 layer_count=0
 # Kernel command-line tokens are deliberately split on spaces.
 # shellcheck disable=SC2086
+set -f
 for token in $cmdline; do
     case "$token" in
         nvx_layer=*)
@@ -162,10 +167,13 @@ for token in $cmdline; do
             esac
             layer_count=$((layer_count + 1))
             [ "$layer_count" -le 3 ] || fatal "at most three layers are supported"
+            set +f
             mount_layer "$role" "$address" "$expected_uuid" "$layer_capacity"
+            set -f
             ;;
     esac
 done
+set +f
 [ "$layer_count" -gt 0 ] || fatal "at least one EROFS layer is required"
 
 lowerdirs=
@@ -206,11 +214,13 @@ hostname_value=$(cmdline_value nvx_hostname || true)
 set -- "$entrypoint"
 # Kernel command-line tokens are deliberately split on spaces.
 # shellcheck disable=SC2086
+set -f
 for token in $cmdline; do
     case "$token" in
         nvx_arg=*) set -- "$@" "${token#*=}" ;;
     esac
 done
+set +f
 
 barrier=$runtime/container-start
 mkfifo "$barrier"
@@ -227,6 +237,21 @@ rm -f "$barrier"
 echo "NVX-SANDBOX-READY: pid=$container_pid layers=$layer_count"
 status=0
 wait "$container_pid" || status=$?
+if ! umount "$rootfs"; then
+    echo "NVX-SANDBOX-ERROR: failed to unmount the container overlay" >&2
+    status=1
+fi
+for role in custom runtime distro; do
+    directory=$layers/$role
+    if mountpoint -q "$directory" && ! umount "$directory"; then
+        echo "NVX-SANDBOX-ERROR: failed to unmount the $role layer" >&2
+        status=1
+    fi
+done
+if ! umount "$scratch"; then
+    echo "NVX-SANDBOX-ERROR: failed to unmount scratch" >&2
+    status=1
+fi
 echo "NVX-SANDBOX-EXIT: status=$status"
 /sbin/nvx-exit "$status"
 while :; do

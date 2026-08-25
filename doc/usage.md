@@ -31,6 +31,7 @@ python3 scripts/nvx.py performance gate --help
 | `build` | Build the guest artifacts and OpenVMM. |
 | `download` | Download and install the latest matching GitHub release. |
 | `run` | Run an OpenVMM microVM. |
+| `sandbox` | Run one workload from EROFS layers over private ext4 scratch. |
 | `benchmark` | Run the OpenVMM-native benchmark coordinator. |
 | `performance` | Collect, gate, and persist CI performance results. |
 | `collect-sources` | Materialize verified Linux and Alpine release sources. |
@@ -157,6 +158,42 @@ python3 scripts/nvx.py run
 The command requires the OpenVMM release binary, `build/vmlinux`, and
 `build/initramfs.cpio.gz`. See [Run](run.md) for host setup, guest shutdown,
 networking, and virtio-fs examples.
+
+### `sandbox`
+
+```text
+python3 scripts/nvx.py sandbox
+    --layer ROLE,PATH,EROFS_UUID [--layer ...]
+    --scratch PATH
+    [--entrypoint PATH]
+    [--arg VALUE]...
+    [--hostname NAME]
+    [--memory-max BYTES]
+    [--pids-max COUNT]
+    [--memory-mib MIB]
+    [--hypervisor {auto,whp,kvm,mshv}]
+    [--net IPV4/PREFIX]
+    [--cmdline TEXT]
+    [--dry-run]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--layer ROLE,PATH,EROFS_UUID` | required | Attach a `distro`, `runtime`, or `custom` EROFS layer. Repeat once per distinct role. |
+| `--scratch PATH` | required | Attach a preformatted ext4 scratch image as the writable overlay. |
+| `--entrypoint PATH` | `/bin/sh` | Select an absolute workload entrypoint without whitespace. |
+| `--arg VALUE` | none | Append one whitespace-free entrypoint argument. Repeat to pass multiple arguments. |
+| `--hostname NAME` | `nvx-sandbox` | Set the workload UTS hostname. |
+| `--memory-max BYTES` | none | Set the workload cgroup memory limit. |
+| `--pids-max COUNT` | none | Set the workload cgroup process limit. |
+| `--memory-mib MIB` | `256` | Set guest memory in MiB. |
+| `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
+| `--net IPV4/PREFIX` | none | Enable the existing static virtio-net profile. |
+| `--cmdline TEXT` | empty | Append non-sandbox kernel parameters; `nvx_*` tokens are reserved. |
+| `--dry-run` | off | Print the generated OpenVMM ABI-v2 command without running it. |
+
+See [Run](run.md) for artifact preparation, the security boundary, and current
+snapshot/configuration limitations.
 
 ## Benchmarking
 

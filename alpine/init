@@ -18,6 +18,28 @@ fatal() {
     /bin/busybox reboot -f
     exit 1
 }
+nvx_exec=
+nvx_exec_seen=false
+# Kernel command-line tokens are deliberately split on spaces.
+# shellcheck disable=SC2086
+set -f
+for token in $cmdline; do
+    case "$token" in
+        nvx_exec=*)
+            [ "$nvx_exec_seen" = false ] || fatal "nvx_exec may be specified only once"
+            nvx_exec_seen=true
+            nvx_exec=${token#*=}
+            [ -n "$nvx_exec" ] || fatal "nvx_exec must not be empty"
+            ;;
+    esac
+done
+set +f
+if [ -n "$nvx_exec" ]; then
+    case "$nvx_exec" in
+        /*) exec "$nvx_exec" ;;
+        *) fatal "nvx_exec must be an absolute initramfs path" ;;
+    esac
+fi
 mount_virtfs() {
     /sbin/nvx-hostmount || fatal "virtfs: failed to mount live host directory"
 }

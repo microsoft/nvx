@@ -372,7 +372,6 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         root,
         "blkid",
         "busybox-extras",
-        "busybox-static",
         "util-linux",
         "util-linux-misc",
     )

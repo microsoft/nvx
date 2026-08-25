@@ -47,6 +47,7 @@ from nvx_tools.release import (
     package_release,
     verify_source_tree,
 )
+from nvx_tools.sandbox import SandboxLaunch, SandboxLayer
 
 DEFAULT_RELEASE_REPOSITORY = "nanvix/nvx"
 HYPERVISORS = ("auto", "whp", "kvm", "mshv")
@@ -184,6 +185,44 @@ def command_run(args: argparse.Namespace) -> None:
         raise SystemExit(subprocess.run(command).returncode)
 
 
+def command_sandbox(args: argparse.Namespace) -> None:
+    launch = SandboxLaunch(
+        layers=tuple(args.layer),
+        scratch=args.scratch,
+        entrypoint=args.entrypoint,
+        args=tuple(args.sandbox_arg),
+        hostname=args.hostname,
+        memory_max=args.memory_max,
+        pids_max=args.pids_max,
+    ).validated()
+    executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
+    kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+    initrd = require_file(
+        artifact_path("initramfs.cpio.gz"),
+        "initramfs",
+    )
+    command = [
+        str(executable),
+        *launch.openvmm_arguments(),
+        "--single-process",
+        "--hypervisor",
+        _hypervisor(args.hypervisor),
+        "--memory",
+        f"{args.memory_mib}M",
+        "--kernel",
+        str(kernel),
+        "--initrd",
+        str(initrd),
+        "--cmdline",
+        launch.kernel_command_line(args.cmdline),
+    ]
+    if args.net is not None:
+        command.extend(["--net", args.net])
+    print(f">> {_format_command(command)}")
+    if not args.dry_run:
+        raise SystemExit(subprocess.run(command).returncode)
+
+
 def command_collect_sources(_: argparse.Namespace) -> None:
     collect_release_sources()
 
@@ -278,6 +317,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--cmdline", default="")
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(handler=command_run)
+
+    sandbox = subparsers.add_parser(
+        "sandbox",
+        help="run one workload over EROFS layers and private ext4 scratch",
+    )
+
+    def sandbox_layer(value: str) -> SandboxLayer:
+        try:
+            return SandboxLayer.parse(value)
+        except ScriptError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+
+    sandbox.add_argument(
+        "--layer",
+        action="append",
+        required=True,
+        type=sandbox_layer,
+        metavar="ROLE,PATH,EROFS_UUID",
+    )
+    sandbox.add_argument("--scratch", required=True, type=Path)
+    sandbox.add_argument("--entrypoint", default="/bin/sh")
+    sandbox.add_argument("--arg", action="append", default=[], dest="sandbox_arg")
+    sandbox.add_argument("--hostname", default="nvx-sandbox")
+    sandbox.add_argument("--memory-max", type=int)
+    sandbox.add_argument("--pids-max", type=int)
+    sandbox.add_argument("--memory-mib", type=int, default=256)
+    sandbox.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
+    sandbox.add_argument("--net", metavar="IPV4/PREFIX")
+    sandbox.add_argument("--cmdline", default="")
+    sandbox.add_argument("--dry-run", action="store_true")
+    sandbox.set_defaults(handler=command_sandbox)
 
     benchmark = subparsers.add_parser(
         "benchmark",

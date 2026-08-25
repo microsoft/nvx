@@ -54,3 +54,34 @@ Use `ro` for read-only access. The guest target must be an absolute Linux path.
 Host paths containing commas are unsupported. To expose multiple directories,
 place them under one exported host root. Snapshot restore requires the same
 target, mode, and underlying host directory.
+
+## Experimental single-workload sandbox
+
+The `sandbox` command launches microVM ABI v2 with one to three compressed
+EROFS lower layers and one preformatted ext4 scratch image:
+
+```bash
+python3 scripts/nvx.py sandbox \
+  --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
+  --layer runtime,/var/lib/nvx/runtime.erofs,22222222-2222-2222-2222-222222222222 \
+  --scratch /var/lib/nvx/scratch.ext4 \
+  --entrypoint /bin/workload \
+  --arg=--serve
+```
+
+The layer UUID is the EROFS superblock UUID, not a content digest. The command
+validates the files before launch, orders roles independently of option order,
+attaches layers read-only, and reserves the writable slot for scratch.
+Conversion and scratch formatting stay off the start path; prepare those
+artifacts on Linux with `mkfs.erofs` and `mkfs.ext4`.
+
+This is the cold-filesystem bootstrap described in
+[the sandbox design](fs-and-snapshot-design.md), not the final production
+agent. It accepts no environment variables or secrets, does not support block
+snapshots, and deliberately omits the configuration region and runtime RPC.
+Arguments are individual kernel-command-line tokens and therefore cannot
+contain whitespace. The workload enters private mount/PID/UTS namespaces with
+a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
+The outer agent retains the initramfs root; the capability-stripped child
+enters only the assembled root with `chroot`, because Linux cannot
+`pivot_root` away from an initramfs `rootfs`.

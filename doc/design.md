@@ -269,6 +269,22 @@ Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and
 feature policy before resolving devices.
 
+ABI v2 retains those reservations and extends the block range for the sandbox
+filesystem. `--microvm-sandbox-block ROLE:DISK` assigns each attachment by
+role rather than option order:
+
+| Role | MMIO range | IRQ | Access |
+| --- | ---: | ---: | --- |
+| `distro` | `0xd0003000..0xd0003fff` | 4 | Read-only |
+| `runtime` | `0xd0004000..0xd0004fff` | 12 | Read-only |
+| `custom` | `0xd0005000..0xd0005fff` | 9 | Read-only |
+| `scratch` | `0xd0006000..0xd0006fff` | 11 | Writable |
+
+Roles must be unique and supplied in fixed order; omitted lower-layer roles
+leave their slots empty, and any nonempty topology ends with scratch. All four
+IRQs are level-triggered. IRQ 12 avoids the RTC's exclusive IRQ 8. ABI v1 and
+its command-line/device contract are unchanged.
+
 #### Block
 
 The optional block device is routed directly to virtio-mmio rather than VPCI.

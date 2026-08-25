@@ -90,6 +90,31 @@ class CliTests(unittest.TestCase):
         self.assertEqual(openvmm_tests.backend, "mshv")
         self.assertIs(openvmm_tests.handler, nvx.command_test_openvmm)
 
+    def test_sandbox_command_parses_typed_launch_contract(self):
+        args = nvx.parse_args(
+            [
+                "sandbox",
+                "--layer",
+                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+                "--scratch",
+                "scratch.ext4",
+                "--entrypoint",
+                "/bin/workload",
+                "--arg=--serve",
+                "--memory-max",
+                "268435456",
+                "--pids-max",
+                "64",
+            ]
+        )
+
+        self.assertEqual(args.layer[0].role, "distro")
+        self.assertEqual(args.scratch, Path("scratch.ext4"))
+        self.assertEqual(args.sandbox_arg, ["--serve"])
+        self.assertEqual(args.memory_max, 268435456)
+        self.assertEqual(args.pids_max, 64)
+        self.assertIs(args.handler, nvx.command_sandbox)
+
 
 class CiTests(unittest.TestCase):
     def test_openvmm_tests_bind_guest_artifacts(self):
@@ -186,8 +211,21 @@ class SandboxTests(unittest.TestCase):
                 "nvx_layer=custom,0xd0005000,22222222-2222-2222-2222-222222222222 "
                 "nvx_scratch=0xd0006000,ext4 "
                 "nvx_entrypoint=/bin/workload nvx_hostname=example "
-                "nvx_arg=--serve nvx_memory_max=268435456 nvx_pids_max=64"
+                "nvx_arg=--serve nvx_memory_max=268435456 nvx_pids_max=65"
             ),
+        )
+        self.assertEqual(
+            launch.openvmm_arguments(),
+            [
+                "--machine",
+                "microvm-v2",
+                "--microvm-sandbox-block",
+                "distro:file:distro.erofs,ro",
+                "--microvm-sandbox-block",
+                "custom:file:custom.erofs,ro",
+                "--microvm-sandbox-block",
+                "scratch:file:scratch.ext4",
+            ],
         )
 
     def test_launch_contract_rejects_duplicates_and_reserved_tokens(self):
@@ -206,6 +244,10 @@ class SandboxTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(common.ScriptError, "owned"):
             launch.kernel_command_line("nvx_sandbox=0")
+        with self.assertRaisesRegex(common.ScriptError, "owned"):
+            launch.kernel_command_line(r"foo=bar\ nvx_memory_max=max")
+        with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
+            launch.kernel_command_line("x" * sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE)
 
     def test_layer_parser_rejects_invalid_role_and_uuid(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):
@@ -214,6 +256,25 @@ class SandboxTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(common.ScriptError, "UUID is invalid"):
             sandbox.SandboxLayer.parse("distro,layer.erofs,not-a-uuid")
+
+    def test_launch_contract_rejects_disk_option_delimiters(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer_path = root / "layer;create=1G"
+            scratch = root / "scratch.ext4"
+            layer_path.touch()
+            scratch.touch()
+            layer = sandbox.SandboxLayer(
+                role="distro",
+                path=layer_path,
+                uuid="11111111-1111-1111-1111-111111111111",
+            )
+
+            with self.assertRaisesRegex(common.ScriptError, "semicolons"):
+                sandbox.SandboxLaunch(
+                    layers=(layer,),
+                    scratch=scratch,
+                ).validated()
 
 
 class BenchmarkTests(unittest.TestCase):

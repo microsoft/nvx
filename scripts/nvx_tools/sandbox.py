@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -18,6 +17,11 @@ BLOCK_MMIO_BASES = {
     "custom": 0xD000_5000,
     "scratch": 0xD000_6000,
 }
+KERNEL_COMMAND_LINE_MAX_SIZE = 2048
+OPENVMM_COMMAND_LINE_RESERVE = 1024
+SANDBOX_COMMAND_LINE_MAX_SIZE = (
+    KERNEL_COMMAND_LINE_MAX_SIZE - OPENVMM_COMMAND_LINE_RESERVE
+)
 _HOSTNAME = re.compile(r"(?=^.{1,63}$)(?!-)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -99,12 +103,27 @@ class SandboxLaunch:
         by_role = {layer.role: layer for layer in self.layers}
         return tuple(by_role[role] for role in LAYER_ROLES if role in by_role)
 
+    def openvmm_arguments(self) -> list[str]:
+        arguments = ["--machine", "microvm-v2"]
+        for layer in self.ordered_layers():
+            arguments.extend(
+                (
+                    "--microvm-sandbox-block",
+                    f"{layer.role}:file:{os.fspath(layer.path)},ro",
+                )
+            )
+        arguments.extend(
+            (
+                "--microvm-sandbox-block",
+                f"scratch:file:{os.fspath(self.scratch)}",
+            )
+        )
+        return arguments
+
     def kernel_command_line(self, user_command_line: str = "") -> str:
-        try:
-            user_tokens = shlex.split(user_command_line)
-        except ValueError as error:
-            raise ScriptError(f"invalid kernel command line: {error}") from error
-        for token in user_tokens:
+        if "\0" in user_command_line:
+            raise ScriptError("kernel command line contains an embedded NUL")
+        for token in user_command_line.split():
             if token.startswith("nvx_"):
                 raise ScriptError(
                     f"{token.split('=', 1)[0]} is owned by the sandbox profile"
@@ -126,14 +145,18 @@ class SandboxLaunch:
         if self.memory_max is not None:
             tokens.append(f"nvx_memory_max={self.memory_max}")
         if self.pids_max is not None:
-            tokens.append(f"nvx_pids_max={self.pids_max}")
+            tokens.append(f"nvx_pids_max={self.pids_max + 1}")
         command_line = " ".join(token for token in tokens if token)
-        if len(command_line.encode("utf-8")) + 1 > 64 * 1024:
-            raise ScriptError("sandbox kernel command line exceeds 64 KiB")
+        if len(command_line.encode("utf-8")) + 1 > SANDBOX_COMMAND_LINE_MAX_SIZE:
+            raise ScriptError(
+                "sandbox kernel command line exceeds its 1024-byte x86 budget"
+            )
         return command_line
 
 
 def _reject_disk_path(path: Path) -> None:
     value = os.fspath(path)
-    if "," in value:
-        raise ScriptError(f"disk paths containing commas are unsupported: {value}")
+    if any(character in value for character in ",;"):
+        raise ScriptError(
+            f"disk paths containing commas or semicolons are unsupported: {value}"
+        )
