@@ -47,7 +47,7 @@ NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
 WORKLOAD_SUITES = frozenset(
     {"cold-start", "virtfs", "shell-snapshot", "network-snapshot", "performance"}
 )
-NETWORK_SNAPSHOT_BACKENDS = frozenset({"kvm", "whp"})
+NETWORK_SNAPSHOT_BACKENDS = frozenset({"kvm", "mshv", "whp"})
 DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 VIRTFS_COMPLETION_MARKER = b"NVX-VIRTFS-WORKLOAD-COMPLETE"
 VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"

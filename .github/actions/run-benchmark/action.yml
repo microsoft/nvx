@@ -158,6 +158,7 @@ runs:
         --commit "${GITHUB_SHA}"
         --input-dir "data/runs/${{ inputs.platform }}"
         --output-dir "data/runs/${{ inputs.platform }}"
+        --require-network
         --require-shell-snapshot
         --require-shared-suite
         --summary "${GITHUB_STEP_SUMMARY}"

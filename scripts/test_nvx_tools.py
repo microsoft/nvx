@@ -246,7 +246,7 @@ class BenchmarkTests(unittest.TestCase):
             shell.assert_called_once()
             network.assert_called_once()
 
-    def test_mshv_performance_suite_skips_unsupported_network(self):
+    def test_mshv_performance_suite_includes_network(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             args = nvx.parse_args(
@@ -278,16 +278,16 @@ class BenchmarkTests(unittest.TestCase):
 
             self.assertEqual(
                 {path.name for path in output.iterdir()},
-                {"cold-start.log", "virtfs.log", "shell-snapshot.log"},
+                {"cold-start.log", "virtfs.log", "shell-snapshot.log", "network.log"},
             )
-            network.assert_not_called()
+            network.assert_called_once()
 
-    def test_mshv_rejects_explicit_network_snapshot_suite(self):
+    def test_mshv_runs_explicit_network_snapshot_suite(self):
         args = nvx.parse_args(
             ["benchmark", "--suite", "network-snapshot", "--backend", "mshv"]
         )
 
-        with self.assertRaisesRegex(ValueError, "unsupported on OpenVMM/mshv"):
+        with patch.object(benchmark, "benchmark_network_snapshot_workload") as network:
             benchmark.run_workload_benchmarks(
                 args,
                 Path("openvmm"),
@@ -295,6 +295,8 @@ class BenchmarkTests(unittest.TestCase):
                 Path("initramfs.cpio.gz"),
                 "mshv",
             )
+
+        network.assert_called_once()
 
     def test_performance_suite_defaults_to_data_runs_platform(self):
         with tempfile.TemporaryDirectory() as temporary:
