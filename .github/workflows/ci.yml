@@ -34,6 +34,62 @@ jobs:
       - name: Check code quality
         uses: ./.github/actions/check-quality
 
+  openvmm-changes:
+    name: Detect OpenVMM test inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-tests: ${{ steps.changes.outputs.run-tests }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect relevant changes
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          run_tests() {
+            echo "run-tests=true" >> "${GITHUB_OUTPUT}"
+            echo "### OpenVMM tests: run" >> "${GITHUB_STEP_SUMMARY}"
+            echo "$1" >> "${GITHUB_STEP_SUMMARY}"
+          }
+
+          if [[ -z "${BASE_SHA}" || "${BASE_SHA}" =~ ^0+$ ]]; then
+            run_tests "The comparison base is unavailable, so the safe fallback is to run the matrix."
+            exit 0
+          fi
+
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null ||
+             ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            run_tests "A comparison commit is unavailable, so the safe fallback is to run the matrix."
+            exit 0
+          fi
+
+          changed_files="${RUNNER_TEMP}/openvmm-changed-files"
+          if ! git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" > "${changed_files}"; then
+            run_tests "The changed files could not be determined, so the safe fallback is to run the matrix."
+            exit 0
+          fi
+
+          relevant_paths='^(openvmm$|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|checkout-openvmm|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          if grep -Eq "${relevant_paths}" "${changed_files}"; then
+            run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
+          else
+            echo "run-tests=false" >> "${GITHUB_OUTPUT}"
+            {
+              echo "### OpenVMM tests: skip"
+              echo "No OpenVMM test inputs changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
   artifacts:
     name: Build shared artifacts
     runs-on: [self-hosted, linux, kvm]
@@ -73,7 +129,17 @@ jobs:
 
   openvmm-tests:
     name: OpenVMM tests / ${{ matrix.name }}
-    needs: artifacts
+    needs: [artifacts, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        needs.artifacts.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 90
     strategy:
@@ -241,6 +307,16 @@ jobs:
   linux:
     name: Linux / KVM
     needs: [artifacts, openvmm-tests]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        needs.artifacts.result == 'success' &&
+        (
+          needs.openvmm-tests.result == 'success' ||
+          needs.openvmm-tests.result == 'skipped'
+        )
+      }}
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 60
     steps:
@@ -276,6 +352,16 @@ jobs:
   mshv:
     name: Linux / MSHV
     needs: [artifacts, openvmm-tests]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        needs.artifacts.result == 'success' &&
+        (
+          needs.openvmm-tests.result == 'success' ||
+          needs.openvmm-tests.result == 'skipped'
+        )
+      }}
     runs-on: [self-hosted, linux, mshv]
     timeout-minutes: 60
     steps:
@@ -353,6 +439,16 @@ jobs:
   windows:
     name: Windows / WHP
     needs: [artifacts, openvmm-tests]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        needs.artifacts.result == 'success' &&
+        (
+          needs.openvmm-tests.result == 'success' ||
+          needs.openvmm-tests.result == 'skipped'
+        )
+      }}
     runs-on: [self-hosted, windows, whp]
     timeout-minutes: 60
     steps:

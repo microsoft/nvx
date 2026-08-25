@@ -8,5 +8,8 @@ pinned commit. KVM, MSHV, and WHP each publish 23 non-Python metrics. Shared
 guest binaries, benchmark results, and development release packages move
 between jobs through runner-compatible Actions caches. Pull requests gate
 regressions against recent history, and successful pushes to `dev` append
-their p50 values under `data/`. The runners require the
+their p50 values under `data/`. The OpenVMM test matrix is skipped when the
+push or pull request changes none of its workflow, harness, submodule, kernel,
+or Alpine guest inputs; downstream benchmarks still run after that intentional
+skip but remain blocked by test failures. The runners require the
 [platform prerequisites](setup.md#prerequisites).
