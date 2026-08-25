@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -104,10 +105,12 @@ class CiTests(unittest.TestCase):
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "setup_cargo_nextest") as setup_cargo_nextest,
                 patch.object(ci, "run_checked") as run_checked,
             ):
                 ci.run_openvmm_tests(backend)
 
+            setup_cargo_nextest.assert_called_once()
             self.assertEqual(run_checked.call_count, 2)
             restore, tests = run_checked.call_args_list
             self.assertEqual(
@@ -121,6 +124,57 @@ class CiTests(unittest.TestCase):
             env = tests.kwargs["env"]
             self.assertEqual(env["OPENVMM_MICROVM_PVH_KERNEL"], str(kernel.resolve()))
             self.assertEqual(env["OPENVMM_MICROVM_PVH_INITRD"], str(initrd.resolve()))
+
+    def test_cargo_nextest_setup_installs_verified_prebuilt_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target, target_sha256 = ci._nextest_target()
+            binary_name = "cargo-nextest.exe" if os.name == "nt" else "cargo-nextest"
+            source_archive = root / "source.tar.gz"
+            source_binary = root / binary_name
+            source_binary.write_bytes(b"cargo-nextest")
+            with tarfile.open(source_archive, "w:gz") as package:
+                package.add(source_binary, arcname=f"package/{binary_name}")
+
+            def copy_archive(
+                url: str,
+                destination: Path,
+                attempts: int = 3,
+                *,
+                expected_sha256: str | None = None,
+                headers: dict[str, str] | None = None,
+            ) -> None:
+                self.assertEqual(
+                    url,
+                    (
+                        f"{ci.NEXTEST_RELEASE_URL}/cargo-nextest-"
+                        f"{ci.NEXTEST_VERSION}-{target}.tar.gz"
+                    ),
+                )
+                self.assertEqual(expected_sha256, target_sha256)
+                self.assertEqual(attempts, 3)
+                self.assertIsNone(headers)
+                shutil.copyfile(source_archive, destination)
+
+            env = {"RUNNER_TEMP": os.fspath(root / "runner-temp"), "PATH": "original"}
+            with (
+                patch.object(ci, "download", side_effect=copy_archive),
+                patch.object(ci, "run_checked") as run_checked,
+            ):
+                ci.setup_cargo_nextest(env)
+
+            destination = (
+                root
+                / "runner-temp"
+                / f"cargo-nextest-{ci.NEXTEST_VERSION}-{target}"
+                / binary_name
+            )
+            self.assertEqual(destination.read_bytes(), b"cargo-nextest")
+            self.assertEqual(
+                env["PATH"].split(os.pathsep),
+                [os.fspath(destination.parent), "original"],
+            )
+            run_checked.assert_called_once_with([destination, "--version"], env=env)
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):

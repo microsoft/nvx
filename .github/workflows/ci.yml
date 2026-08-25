@@ -202,9 +202,6 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      - name: Install cargo-nextest
-        run: cargo install --locked cargo-nextest --version 0.9.133
-
       - name: Run OpenVMM tests on KVM
         if: matrix.backend == 'kvm'
         shell: bash

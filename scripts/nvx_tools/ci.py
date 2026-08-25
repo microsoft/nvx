@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -23,8 +25,88 @@ ZSTD_URL = (
     f"https://github.com/facebook/zstd/releases/download/v{ZSTD_VERSION}/{ZSTD_ARCHIVE}"
 )
 ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
+NEXTEST_VERSION = "0.9.133"
+NEXTEST_RELEASE_URL = (
+    "https://github.com/nextest-rs/nextest/releases/download/"
+    f"cargo-nextest-{NEXTEST_VERSION}"
+)
+NEXTEST_TARGETS = {
+    ("linux", "aarch64"): (
+        "aarch64-unknown-linux-gnu",
+        "8e4d241c78f9cbf5ca8597b13004f0441c18af484ea105b8f83b44a716c82d3d",
+    ),
+    ("linux", "x86_64"): (
+        "x86_64-unknown-linux-gnu",
+        "a9f992321e8759818400d93abb9477b4b11422d18d216e8d208505bd73454103",
+    ),
+    ("windows", "aarch64"): (
+        "aarch64-pc-windows-msvc",
+        "7a9b714bd5879db124e8d8a4e4e5959295345678456af61741a516d17f6e4a69",
+    ),
+    ("windows", "x86_64"): (
+        "x86_64-pc-windows-msvc",
+        "7a2ecd620bb377255b1de642b6587b73efb4dc6d35beaf13cabf52bdb7ca2ba9",
+    ),
+}
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
 OPENVMM_MICROVM_TEST_FILTER = "test(x86_64::microvm)"
+
+
+def _nextest_target() -> tuple[str, str]:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    architecture = {
+        "amd64": "x86_64",
+        "arm64": "aarch64",
+    }.get(machine, machine)
+    try:
+        return NEXTEST_TARGETS[(system, architecture)]
+    except KeyError as error:
+        raise ScriptError(
+            f"cargo-nextest is unsupported on {system}/{architecture}"
+        ) from error
+
+
+def setup_cargo_nextest(env: dict[str, str]) -> None:
+    target, expected_sha256 = _nextest_target()
+    archive_name = f"cargo-nextest-{NEXTEST_VERSION}-{target}.tar.gz"
+    tools_root = Path(env.get("RUNNER_TEMP", BUILD_DIR / "tools"))
+    destination = tools_root / f"cargo-nextest-{NEXTEST_VERSION}-{target}"
+    binary = destination / ("cargo-nextest.exe" if os.name == "nt" else "cargo-nextest")
+    archive = destination / archive_name
+    temporary_binary = binary.with_suffix(f"{binary.suffix}.part")
+
+    destination.mkdir(parents=True, exist_ok=True)
+    download(
+        f"{NEXTEST_RELEASE_URL}/{archive_name}",
+        archive,
+        expected_sha256=expected_sha256,
+    )
+    try:
+        with tarfile.open(archive, "r:gz") as package:
+            members = [
+                member
+                for member in package.getmembers()
+                if member.isfile() and Path(member.name).name == binary.name
+            ]
+            if len(members) != 1:
+                raise ScriptError(
+                    f"{archive_name} does not contain exactly one {binary.name}"
+                )
+            source = package.extractfile(members[0])
+            if source is None:
+                raise ScriptError(f"could not read {binary.name} from {archive_name}")
+            with source, temporary_binary.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    except tarfile.TarError as error:
+        raise ScriptError(f"could not extract {archive_name}: {error}") from error
+    finally:
+        archive.unlink(missing_ok=True)
+
+    temporary_binary.chmod(0o755)
+    temporary_binary.replace(binary)
+    env["PATH"] = os.pathsep.join((os.fspath(destination), env.get("PATH", "")))
+    run_checked([binary, "--version"], env=env)
 
 
 def run_openvmm_tests(backend: str) -> None:
@@ -58,6 +140,7 @@ def run_openvmm_tests(backend: str) -> None:
     env["OPENVMM_MICROVM_PVH_KERNEL"] = os.fspath(kernel)
     env["OPENVMM_MICROVM_PVH_INITRD"] = os.fspath(initrd)
     cargo = require_tool("cargo")
+    setup_cargo_nextest(env)
 
     run_checked(
         [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
