@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+barrier=$1
+rootfs=$2
+hostname_value=$3
+shift 3
+
+IFS= read -r start <"$barrier"
+[ "$start" = start ] || exit 125
+
+exec unshare --mount --pid --uts --fork --kill-child \
+    /sbin/nvx-container-enter "$rootfs" "$hostname_value" "$@"

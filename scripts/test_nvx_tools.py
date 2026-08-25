@@ -16,7 +16,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import archive, benchmark, build, ci, common, release  # noqa: E402
+from nvx_tools import (  # noqa: E402
+    archive,
+    benchmark,
+    build,
+    ci,
+    common,
+    release,
+    sandbox,
+)
 
 
 class CliTests(unittest.TestCase):
@@ -125,6 +133,87 @@ class CiTests(unittest.TestCase):
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
             ci.run_openvmm_tests("unknown")
+
+
+class BuildTests(unittest.TestCase):
+    def test_sandbox_kernel_config_requires_every_feature(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            config.write_text(
+                "\n".join(build.REQUIRED_SANDBOX_KERNEL_CONFIG) + "\n",
+                encoding="utf-8",
+            )
+            build._assert_sandbox_kernel_config(config)
+
+            config.write_text(
+                "\n".join(build.REQUIRED_SANDBOX_KERNEL_CONFIG[:-1]) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                build.REQUIRED_SANDBOX_KERNEL_CONFIG[-1],
+            ):
+                build._assert_sandbox_kernel_config(config)
+
+
+class SandboxTests(unittest.TestCase):
+    def test_launch_contract_orders_roles_and_builds_agent_command_line(self):
+        custom = sandbox.SandboxLayer.parse(
+            "custom,custom.erofs,22222222-2222-2222-2222-222222222222"
+        )
+        distro = sandbox.SandboxLayer.parse(
+            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
+        )
+        launch = sandbox.SandboxLaunch(
+            layers=(custom, distro),
+            scratch=Path("scratch.ext4"),
+            entrypoint="/bin/workload",
+            args=("--serve",),
+            hostname="example",
+            memory_max=268435456,
+            pids_max=64,
+        )
+
+        self.assertEqual(
+            [layer.role for layer in launch.ordered_layers()],
+            ["distro", "custom"],
+        )
+        self.assertEqual(
+            launch.kernel_command_line("quiet"),
+            (
+                "quiet nvx_sandbox=1 "
+                "nvx_layer=distro,0xd0003000,11111111-1111-1111-1111-111111111111 "
+                "nvx_layer=custom,0xd0005000,22222222-2222-2222-2222-222222222222 "
+                "nvx_scratch=0xd0006000,ext4 "
+                "nvx_entrypoint=/bin/workload nvx_hostname=example "
+                "nvx_arg=--serve nvx_memory_max=268435456 nvx_pids_max=64"
+            ),
+        )
+
+    def test_launch_contract_rejects_duplicates_and_reserved_tokens(self):
+        distro = sandbox.SandboxLayer.parse(
+            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
+        )
+        with self.assertRaisesRegex(common.ScriptError, "duplicate.*distro"):
+            sandbox.SandboxLaunch(
+                layers=(distro, distro),
+                scratch=Path("scratch.ext4"),
+            )
+
+        launch = sandbox.SandboxLaunch(
+            layers=(distro,),
+            scratch=Path("scratch.ext4"),
+        )
+        with self.assertRaisesRegex(common.ScriptError, "owned"):
+            launch.kernel_command_line("nvx_sandbox=0")
+
+    def test_layer_parser_rejects_invalid_role_and_uuid(self):
+        with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):
+            sandbox.SandboxLayer.parse(
+                "unknown,layer.erofs,11111111-1111-1111-1111-111111111111"
+            )
+        with self.assertRaisesRegex(common.ScriptError, "UUID is invalid"):
+            sandbox.SandboxLayer.parse("distro,layer.erofs,not-a-uuid")
 
 
 class BenchmarkTests(unittest.TestCase):

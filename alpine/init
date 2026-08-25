@@ -7,6 +7,11 @@ mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 mount -t tmpfs none /tmp
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 ifconfig lo 127.0.0.1 up
+cmdline=" $(cat /proc/cmdline) "
+case "$cmdline" in
+    *" nvx_sandbox=1 "*) sandbox_mode=true ;;
+    *) sandbox_mode=false ;;
+esac
 
 fatal() {
     echo "$*" >&2
@@ -16,7 +21,9 @@ fatal() {
 mount_virtfs() {
     /sbin/nvx-hostmount || fatal "virtfs: failed to mount live host directory"
 }
-mount_virtfs
+if [ "$sandbox_mode" = false ]; then
+    mount_virtfs
+fi
 # virt-net: if --net attached a NIC, configure the only non-loopback interface.
 nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$nip" ]; then
@@ -82,6 +89,9 @@ if [ -n "$nip" ]; then
         fi
         echo "VIRTNET-OK: configured $ndev as $nip/$nmask"
     fi
+fi
+if [ "$sandbox_mode" = true ]; then
+    exec /sbin/nvx-init-agent
 fi
 # netsnap: optional snapshot self-test/benchmark for --net (see `scripts/nvx.py bench-net-snapshot`).
 # When the kernel command line contains "netsnap", check the link, then ask the VMM to take a

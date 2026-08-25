@@ -31,9 +31,13 @@ runs:
         set -euo pipefail
         python -m ruff check scripts
         ${SHELLCHECK} --shell=sh \
-          alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
+          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
+          alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
+          alpine/nvx-snapshot
         python -m pyright --pythonplatform Linux
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts
         ${SHFMT} -d -ln posix -i 4 -ci \
-          alpine/init alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-snapshot
+          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
+          alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
+          alpine/nvx-snapshot

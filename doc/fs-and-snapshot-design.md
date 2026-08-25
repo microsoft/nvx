@@ -6,6 +6,15 @@
 **Scope:** ACI Sandboxes (not classic multi-container ACI container groups). Non-confidential only.
 **Related:** `nvx` (VMM), `ACI.Sandbox.GuestAgent` (existing C# guest agent, being superseded), `ACI.SandboxRuntime` (host-side runtime)
 
+> **Implementation note.** The port accompanying this proposal lands the cold
+> filesystem foundation first: required guest-kernel features, a versioned
+> fixed virtio-blk topology, and an initramfs bootstrap that resolves device
+> roles, assembles EROFS layers over ext4 scratch, enters isolated namespaces,
+> drops workload capabilities, and supervises the child. The VMM-populated
+> configuration region, final Rust agent, restore gate, and paired-scratch
+> snapshot transaction remain later stages; the bootstrap therefore accepts
+> only non-secret launch tokens and is not the production agent contract.
+
 ---
 
 ## 1. Summary

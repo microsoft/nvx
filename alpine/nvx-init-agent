@@ -1,0 +1,234 @@
+#!/bin/sh
+set -eu
+set -f
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+cmdline=$(cat /proc/cmdline)
+runtime=/run/nvx
+layers=$runtime/layers
+scratch=$runtime/scratch
+rootfs=$runtime/rootfs
+
+fatal() {
+    echo "NVX-SANDBOX-ERROR: $*" >&2
+    /bin/busybox reboot -f
+    exit 1
+}
+
+cmdline_value() {
+    key=$1
+    # Kernel command-line tokens are deliberately split on spaces.
+    # shellcheck disable=SC2086
+    for token in $cmdline; do
+        case "$token" in
+            "$key"=*)
+                printf '%s\n' "${token#*=}"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+resolve_block_device() {
+    address=${1#0x}
+    address=$(printf '%s' "$address" | tr 'A-F' 'a-f')
+    attempts=0
+    while [ "$attempts" -lt 600 ]; do
+        for block in /sys/class/block/*; do
+            [ -e "$block" ] || continue
+            target=$(readlink -f "$block/device") || continue
+            case "$target" in
+                *"/$address.virtio_mmio/"* | *"/$address.virtio_mmio")
+                    printf '/dev/%s\n' "${block##*/}"
+                    return 0
+                    ;;
+            esac
+        done
+        attempts=$((attempts + 1))
+        sleep 0.05
+    done
+    return 1
+}
+
+configure_cgroups() {
+    mkdir -p /sys/fs/cgroup
+    if ! grep -q ' /sys/fs/cgroup cgroup2 ' /proc/mounts; then
+        mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup ||
+            fatal "failed to mount cgroup2"
+    fi
+
+    controllers=
+    available=" $(cat /sys/fs/cgroup/cgroup.controllers) "
+    case "$available" in *" memory "*) controllers="$controllers +memory" ;; esac
+    case "$available" in *" pids "*) controllers="$controllers +pids" ;; esac
+    if [ -n "$controllers" ]; then
+        echo "$controllers" >/sys/fs/cgroup/cgroup.subtree_control ||
+            fatal "failed to enable cgroup controllers"
+    fi
+
+    mkdir -p /sys/fs/cgroup/agent /sys/fs/cgroup/container
+    echo "$$" >/sys/fs/cgroup/agent/cgroup.procs ||
+        fatal "failed to place the agent in its cgroup"
+
+    case "$available" in
+        *" memory "*)
+            agent_memory_low=$(cmdline_value nvx_agent_memory_low || true)
+            [ -n "$agent_memory_low" ] || agent_memory_low=16777216
+            echo "$agent_memory_low" >/sys/fs/cgroup/agent/memory.low ||
+                fatal "invalid agent memory reservation"
+            ;;
+    esac
+    memory_max=$(cmdline_value nvx_memory_max || true)
+    if [ -n "$memory_max" ]; then
+        echo "$memory_max" >/sys/fs/cgroup/container/memory.max ||
+            fatal "invalid container memory limit"
+    fi
+    pids_max=$(cmdline_value nvx_pids_max || true)
+    if [ -n "$pids_max" ]; then
+        echo "$pids_max" >/sys/fs/cgroup/container/pids.max ||
+            fatal "invalid container process limit"
+    fi
+}
+
+mount_layer() {
+    role=$1
+    address=$2
+    expected_uuid=$3
+    expected_sectors=$4
+    device=$(resolve_block_device "$address") ||
+        fatal "$role layer at $address did not appear"
+    name=${device##*/}
+
+    if [ -n "$expected_sectors" ]; then
+        actual_sectors=$(cat "/sys/class/block/$name/size")
+        [ "$actual_sectors" = "$expected_sectors" ] ||
+            fatal "$role layer has $actual_sectors sectors, expected $expected_sectors"
+    fi
+
+    blockdev --flushbufs "$device" ||
+        fatal "failed to drop cached blocks for $role layer"
+    directory=$layers/$role
+    mkdir -p "$directory"
+    mount -t erofs -o ro "$device" "$directory" ||
+        fatal "failed to mount $role layer from $device"
+
+    if [ "$expected_uuid" != "-" ]; then
+        actual_uuid=$(blkid -s UUID -o value "$device" || true)
+        [ "$actual_uuid" = "$expected_uuid" ] ||
+            fatal "$role layer UUID is $actual_uuid, expected $expected_uuid"
+    fi
+}
+
+mkdir -p "$layers" "$scratch" "$rootfs"
+mount -t tmpfs -o mode=755,nosuid,nodev tmpfs /run ||
+    fatal "failed to mount runtime tmpfs"
+mkdir -p "$layers" "$scratch" "$rootfs"
+configure_cgroups
+
+layer_capacity=$(cmdline_value nvx_layer_capacity_sectors || true)
+distro=false
+runtime_layer=false
+custom=false
+layer_count=0
+# Kernel command-line tokens are deliberately split on spaces.
+# shellcheck disable=SC2086
+for token in $cmdline; do
+    case "$token" in
+        nvx_layer=*)
+            specification=${token#*=}
+            role=${specification%%,*}
+            remainder=${specification#*,}
+            [ "$remainder" != "$specification" ] ||
+                fatal "layer specification lacks an MMIO address"
+            address=${remainder%%,*}
+            expected_uuid=${remainder#*,}
+            [ "$expected_uuid" != "$remainder" ] ||
+                fatal "$role layer specification lacks an EROFS UUID"
+            case "$role" in
+                distro)
+                    [ "$distro" = false ] || fatal "duplicate distro layer"
+                    distro=true
+                    ;;
+                runtime)
+                    [ "$runtime_layer" = false ] || fatal "duplicate runtime layer"
+                    runtime_layer=true
+                    ;;
+                custom)
+                    [ "$custom" = false ] || fatal "duplicate custom layer"
+                    custom=true
+                    ;;
+                *) fatal "unknown layer role: $role" ;;
+            esac
+            layer_count=$((layer_count + 1))
+            [ "$layer_count" -le 3 ] || fatal "at most three layers are supported"
+            mount_layer "$role" "$address" "$expected_uuid" "$layer_capacity"
+            ;;
+    esac
+done
+[ "$layer_count" -gt 0 ] || fatal "at least one EROFS layer is required"
+
+lowerdirs=
+if [ "$distro" = true ]; then
+    lowerdirs=$layers/distro
+fi
+if [ "$runtime_layer" = true ]; then
+    lowerdirs=$layers/runtime${lowerdirs:+:$lowerdirs}
+fi
+if [ "$custom" = true ]; then
+    lowerdirs=$layers/custom${lowerdirs:+:$lowerdirs}
+fi
+
+scratch_spec=$(cmdline_value nvx_scratch || true)
+[ -n "$scratch_spec" ] || fatal "a scratch device is required"
+scratch_address=${scratch_spec%%,*}
+scratch_fstype=${scratch_spec#*,}
+if [ "$scratch_fstype" = "$scratch_spec" ]; then
+    scratch_fstype=ext4
+fi
+[ "$scratch_fstype" = ext4 ] || fatal "unsupported scratch filesystem: $scratch_fstype"
+scratch_device=$(resolve_block_device "$scratch_address") ||
+    fatal "scratch device at $scratch_address did not appear"
+mount -t ext4 -o rw,nosuid,nodev "$scratch_device" "$scratch" ||
+    fatal "failed to mount scratch from $scratch_device"
+mkdir -p "$scratch/upper" "$scratch/work"
+
+mount -t overlay overlay \
+    -o "lowerdir=$lowerdirs,upperdir=$scratch/upper,workdir=$scratch/work,metacopy=on,xino=on" \
+    "$rootfs" || fatal "failed to assemble the container overlay"
+
+entrypoint=$(cmdline_value nvx_entrypoint || true)
+[ -n "$entrypoint" ] || entrypoint=/bin/sh
+case "$entrypoint" in /*) ;; *) fatal "entrypoint must be an absolute path" ;; esac
+hostname_value=$(cmdline_value nvx_hostname || true)
+[ -n "$hostname_value" ] || hostname_value=nvx-sandbox
+
+set -- "$entrypoint"
+# Kernel command-line tokens are deliberately split on spaces.
+# shellcheck disable=SC2086
+for token in $cmdline; do
+    case "$token" in
+        nvx_arg=*) set -- "$@" "${token#*=}" ;;
+    esac
+done
+
+barrier=$runtime/container-start
+mkfifo "$barrier"
+/sbin/nvx-container-launch "$barrier" "$rootfs" "$hostname_value" "$@" &
+container_pid=$!
+if ! echo "$container_pid" >/sys/fs/cgroup/container/cgroup.procs; then
+    kill "$container_pid" 2>/dev/null || true
+    wait "$container_pid" 2>/dev/null || true
+    fatal "failed to place the workload in its cgroup"
+fi
+printf 'start\n' >"$barrier"
+rm -f "$barrier"
+
+echo "NVX-SANDBOX-READY: pid=$container_pid layers=$layer_count"
+status=0
+wait "$container_pid" || status=$?
+echo "NVX-SANDBOX-EXIT: status=$status"
+/sbin/nvx-exit "$status"
+while :; do
+    sleep 3600
+done

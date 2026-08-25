@@ -28,8 +28,11 @@ nvx/
 |   `-- workflows/ci.yml         Main build, test, and benchmark workflow
 |-- alpine/                      Files installed in the Alpine guest
 |   |-- init                     Guest PID 1 and boot sequence
+|   |-- nvx-container-enter      Container mount namespace and root setup
+|   |-- nvx-container-launch     Cgroup placement barrier and namespace launch
 |   |-- nvx-exit                 Clean guest shutdown helper
 |   |-- nvx-hostmount            virtio-fs host mount helper
+|   |-- nvx-init-agent           EROFS/overlay sandbox bootstrap and supervisor
 |   `-- nvx-snapshot             Snapshot preparation helper
 |-- data/                        Benchmark data
 |   |-- linux-kvm.csv            Rolling Linux/KVM history
@@ -91,8 +94,12 @@ workflows.
 ### `alpine/`
 
 Guest-owned scripts copied into the Alpine initramfs. `init` controls early
-boot and launches the guest shell. The `nvx-*` helpers handle shutdown,
-virtio-fs mounting, and snapshot preparation from inside the guest.
+boot and launches either the normal guest shell or `nvx-init-agent` for the
+sandbox profile. The sandbox helpers resolve fixed virtio-blk roles through
+sysfs, assemble EROFS lower layers over ext4 scratch, place the workload in its
+cgroup before release, construct its mount/PID/UTS namespaces, and retain the
+agent as the outer PID 1. The remaining helpers handle shutdown, virtio-fs
+mounting, and snapshot preparation.
 
 ### `data/`
 

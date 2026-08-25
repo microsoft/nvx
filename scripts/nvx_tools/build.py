@@ -39,6 +39,17 @@ REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_VIRTIO_MMIO=y",
     "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
 )
+REQUIRED_SANDBOX_KERNEL_CONFIG = (
+    "CONFIG_BPF_SYSCALL=y",
+    "CONFIG_CGROUP_BPF=y",
+    "CONFIG_EROFS_FS=y",
+    "CONFIG_EROFS_FS_ZIP=y",
+    "CONFIG_EROFS_FS_ZIP_ZSTD=y",
+    "CONFIG_EXT4_FS=y",
+    "CONFIG_MEMCG=y",
+    "CONFIG_OVERLAY_FS=y",
+    "CONFIG_VIRTIO_BLK=y",
+)
 
 
 class ApkPackage(TypedDict):
@@ -63,6 +74,19 @@ def _assert_virtio_console_kernel_config(path: Path) -> None:
     if missing:
         raise ScriptError(
             "kernel configuration cannot provide /dev/hvc1: " + ", ".join(missing)
+        )
+
+
+def _assert_sandbox_kernel_config(path: Path) -> None:
+    configured = set(path.read_text(encoding="utf-8").splitlines())
+    missing = [
+        setting
+        for setting in REQUIRED_SANDBOX_KERNEL_CONFIG
+        if setting not in configured
+    ]
+    if missing:
+        raise ScriptError(
+            "kernel configuration cannot run sandbox filesystems: " + ", ".join(missing)
         )
 
 
@@ -343,8 +367,15 @@ def _write_apk_manifest(
 def build_initramfs(config: AlpineBuildConfig) -> None:
     _require_linux("build-initramfs")
     root = _prepare_alpine_root(config)
-    print(">> installing busybox-extras into the rootfs")
-    _apk_add(root, "busybox-extras")
+    print(">> installing sandbox utilities into the rootfs")
+    _apk_add(
+        root,
+        "blkid",
+        "busybox-extras",
+        "busybox-static",
+        "util-linux",
+        "util-linux-misc",
+    )
     resolver = root / "etc" / "resolv.conf"
     resolver.unlink(missing_ok=True)
     resolver.touch()
@@ -353,6 +384,18 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
     _install(
         REPO_ROOT / "alpine" / "nvx-hostmount",
         root / "sbin" / "nvx-hostmount",
+    )
+    _install(
+        REPO_ROOT / "alpine" / "nvx-container-enter",
+        root / "sbin" / "nvx-container-enter",
+    )
+    _install(
+        REPO_ROOT / "alpine" / "nvx-container-launch",
+        root / "sbin" / "nvx-container-launch",
+    )
+    _install(
+        REPO_ROOT / "alpine" / "nvx-init-agent",
+        root / "sbin" / "nvx-init-agent",
     )
     _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
     config.output.parent.mkdir(parents=True, exist_ok=True)
@@ -385,6 +428,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     make = ["make", "-C", source, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
     _assert_virtio_console_kernel_config(kernel_config)
+    _assert_sandbox_kernel_config(kernel_config)
     jobs = os.cpu_count() or 1
     print(f">> building vmlinux with {jobs} jobs")
     run_checked([*make, f"-j{jobs}", "vmlinux"])
