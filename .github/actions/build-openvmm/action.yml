@@ -1,9 +1,18 @@
 name: Build OpenVMM
-description: Checkout and cache or build the pinned OpenVMM binary
+description: Checkout and cache or build OpenVMM for one backend
 
 inputs:
   ssh-key:
     description: SSH deploy key used to checkout OpenVMM
+    required: true
+  backend:
+    description: NVX backend that will use the OpenVMM binary
+    required: true
+  target:
+    description: Rust target used to isolate the build caches
+    required: true
+  build-mode:
+    description: OpenVMM build mode (native or musl)
     required: true
 
 runs:
@@ -15,35 +24,83 @@ runs:
       with:
         ssh-key: ${{ inputs.ssh-key }}
 
+    - name: Verify source pins on Linux
+      if: runner.os != 'Windows'
+      shell: bash
+      run: python3 scripts/nvx.py verify
+
+    - name: Verify source pins on Windows
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: python scripts\nvx.py verify
+
     - name: Set up Windows cache tools
       if: runner.os == 'Windows'
       shell: powershell
       run: python scripts\nvx.py setup-cross-os-cache
 
+    - name: Prepare MSHV cache tools
+      id: cache-tools-mshv
+      if: inputs.backend == 'mshv'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+        mkdir -p "${cache_tools}"
+        ln -sf "$(command -v tar)" "${cache_tools}/tar"
+        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
     - name: Cache OpenVMM binary
-      id: cache-openvmm
+      id: cache-openvmm-native
+      if: inputs.backend != 'mshv'
       uses: actions/cache@v5
       with:
         path: |
           openvmm/target/release/openvmm
           openvmm/target/release/openvmm.exe
-        key: openvmm-binary-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v3-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
-    - name: Cache cargo
-      if: steps.cache-openvmm.outputs.cache-hit != 'true'
+    - name: Cache OpenVMM binary for MSHV
+      id: cache-openvmm-mshv
+      if: inputs.backend == 'mshv'
+      uses: actions/cache@v5
+      env:
+        PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+      with:
+        path: openvmm/target/release/openvmm
+        key: openvmm-binary-v3-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+
+    - name: Cache Cargo
+      if: inputs.backend != 'mshv' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
       uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
           openvmm/target
-        key: cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+        key: cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
         restore-keys: |
-          cargo-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-          cargo-${{ runner.os }}-
+          cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+          cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-
 
-    - name: Install Linux build dependencies
-      if: runner.os != 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'
+    - name: Cache Cargo for MSHV
+      if: inputs.backend == 'mshv' && steps.cache-openvmm-mshv.outputs.cache-hit != 'true'
+      uses: actions/cache@v5
+      env:
+        PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          openvmm/target
+        key: cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+        restore-keys: |
+          cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+          cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-
+
+    - name: Install KVM build dependencies
+      if: inputs.backend == 'kvm' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -51,15 +108,47 @@ runs:
         sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
           git libarchive-tools
 
-    - name: Build OpenVMM on Linux
-      if: runner.os != 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'
+    - name: Install MSHV build dependencies
+      if: inputs.backend == 'mshv' && steps.cache-openvmm-mshv.outputs.cache-hit != 'true'
+      shell: bash
+      run: sudo -n tdnf install -y binutils kernel-headers libarchive openssl-devel
+
+    - name: Build native OpenVMM on Linux
+      if: runner.os != 'Windows' && inputs.build-mode == 'native' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
       run: python3 scripts/nvx.py build-openvmm
 
+    - name: Build musl OpenVMM on MSHV
+      if: inputs.build-mode == 'musl' && steps.cache-openvmm-mshv.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if [ ! -f openvmm/.packages/extracted/x86_64-sysroot/lib/libsymcrypt.a ]; then
+          (cd openvmm && cargo xflowey restore-packages --no-compat-igvm)
+        fi
+        rustup target add "${{ inputs.target }}"
+        sysroot="$(cd openvmm && pwd)/.packages/extracted/x86_64-sysroot"
+        export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR="${sysroot}"
+        export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR=1
+        export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC=1
+        export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_LIB_PATH="${sysroot}/lib"
+        export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_STATIC=1
+        (cd openvmm && cargo build \
+          --release \
+          --target "${{ inputs.target }}" \
+          -p openvmm \
+          --bin openvmm)
+        mkdir -p openvmm/target/release
+        cp "openvmm/target/${{ inputs.target }}/release/openvmm" \
+          openvmm/target/release/openvmm
+        chmod +x openvmm/target/release/openvmm
+
     - name: Build OpenVMM on Windows
-      if: runner.os == 'Windows' && steps.cache-openvmm.outputs.cache-hit != 'true'
+      if: runner.os == 'Windows' && inputs.build-mode == 'native' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
       shell: powershell
       env:
         GH_TOKEN: ${{ github.token }}

@@ -103,12 +103,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout OpenVMM
-        id: openvmm
-        uses: ./.github/actions/checkout-openvmm
-        with:
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
       - name: Validate runner
         uses: ./.github/actions/validate-runner
         with:
@@ -121,11 +115,6 @@ jobs:
       - name: Build guest artifacts
         id: guest-artifacts
         uses: ./.github/actions/build-guest-artifacts
-
-      - name: Build portable OpenVMM
-        uses: ./.github/actions/build-portable-openvmm
-        with:
-          openvmm-sha: ${{ steps.openvmm.outputs.sha }}
 
   openvmm-tests:
     name: OpenVMM tests / ${{ matrix.name }}
@@ -304,8 +293,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
 
-  linux:
-    name: Linux / KVM
+  platform:
+    name: Platform / ${{ matrix.name }}
     needs: [artifacts, openvmm-tests]
     if: >-
       ${{
@@ -317,8 +306,36 @@ jobs:
           needs.openvmm-tests.result == 'skipped'
         )
       }}
-    runs-on: [self-hosted, linux, kvm]
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / KVM
+            runner: '["self-hosted", "linux", "kvm"]'
+            backend: kvm
+            release-platform: linux-kvm
+            build-target: x86_64-unknown-linux-gnu
+            build-mode: native
+            teardown-mode: guest-exit
+            cache-compression: zstd
+          - name: Linux / MSHV
+            runner: '["self-hosted", "linux", "mshv"]'
+            backend: mshv
+            release-platform: linux-mshv
+            build-target: x86_64-unknown-linux-musl
+            build-mode: musl
+            teardown-mode: host-terminate
+            cache-compression: gzip
+          - name: Windows / WHP
+            runner: '["self-hosted", "windows", "whp"]'
+            backend: whp
+            release-platform: windows-whp
+            build-target: x86_64-pc-windows-msvc
+            build-mode: native
+            teardown-mode: guest-exit
+            cache-compression: zstd
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -328,65 +345,21 @@ jobs:
       - name: Validate runner
         uses: ./.github/actions/validate-runner
         with:
-          backend: kvm
+          backend: ${{ matrix.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
 
       - name: Build OpenVMM
         uses: ./.github/actions/build-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
-      - name: Run Linux / KVM benchmark
-        uses: ./.github/actions/run-benchmark
-        with:
-          backend: kvm
-          platform: linux-kvm
-          kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
-          alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
-
-      - name: Package Linux / KVM release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: ./.github/actions/package-release
-        with:
-          platform: linux-kvm
-
-  mshv:
-    name: Linux / MSHV
-    needs: [artifacts, openvmm-tests]
-    if: >-
-      ${{
-        always() &&
-        !cancelled() &&
-        needs.artifacts.result == 'success' &&
-        (
-          needs.openvmm-tests.result == 'success' ||
-          needs.openvmm-tests.result == 'skipped'
-        )
-      }}
-    runs-on: [self-hosted, linux, mshv]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Validate runner
-        uses: ./.github/actions/validate-runner
-        with:
-          backend: mshv
-
-      - name: Checkout OpenVMM
-        id: openvmm
-        uses: ./.github/actions/checkout-openvmm
-        with:
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
-      - name: Prepare portable OpenVMM
-        uses: ./.github/actions/prepare-portable-openvmm
-        with:
-          openvmm-sha: ${{ steps.openvmm.outputs.sha }}
+          backend: ${{ matrix.backend }}
+          target: ${{ matrix.build-target }}
+          build-mode: ${{ matrix.build-mode }}
 
       - name: Allow MSHV guest gateway probes
+        if: matrix.backend == 'mshv'
         shell: bash
         run: |
           set -euo pipefail
@@ -403,17 +376,17 @@ jobs:
           done
           sudo -n iptables -I INPUT 1 "${firewall_rule[@]}"
 
-      - name: Run Linux / MSHV benchmark
+      - name: Run benchmark
         uses: ./.github/actions/run-benchmark
         with:
-          backend: mshv
-          platform: linux-mshv
-          teardown-mode: host-terminate
+          backend: ${{ matrix.backend }}
+          platform: ${{ matrix.release-platform }}
+          teardown-mode: ${{ matrix.teardown-mode }}
           kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
           alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
       - name: Remove MSHV guest gateway probe rule
-        if: always()
+        if: always() && matrix.backend == 'mshv'
         shell: bash
         run: |
           set -euo pipefail
@@ -429,73 +402,23 @@ jobs:
             sudo -n iptables -D INPUT "${firewall_rule[@]}"
           done
 
-      - name: Package Linux / MSHV release
+      - name: Package release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: ./.github/actions/package-release
         with:
-          platform: linux-mshv
-          cache-compression: gzip
-
-  windows:
-    name: Windows / WHP
-    needs: [artifacts, openvmm-tests]
-    if: >-
-      ${{
-        always() &&
-        !cancelled() &&
-        needs.artifacts.result == 'success' &&
-        (
-          needs.openvmm-tests.result == 'success' ||
-          needs.openvmm-tests.result == 'skipped'
-        )
-      }}
-    runs-on: [self-hosted, windows, whp]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Validate runner
-        uses: ./.github/actions/validate-runner
-        with:
-          backend: whp
-
-      - name: Validate NVX CLI
-        uses: ./.github/actions/validate-nvx
-
-      - name: Build OpenVMM
-        uses: ./.github/actions/build-openvmm
-        with:
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
-      - name: Run Windows / WHP benchmark
-        uses: ./.github/actions/run-benchmark
-        with:
-          backend: whp
-          platform: windows-whp
-          kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
-          alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
-
-      - name: Package Windows / WHP release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: ./.github/actions/package-release
-        with:
-          platform: windows-whp
+          platform: ${{ matrix.release-platform }}
+          cache-compression: ${{ matrix.cache-compression }}
 
   release:
     name: Publish development release
-    needs: [quality, linux, mshv, windows]
+    needs: [quality, platform]
     if: >-
       ${{
         github.event_name == 'push' &&
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
         needs.quality.result == 'success' &&
-        needs.linux.result == 'success' &&
-        needs.mshv.result == 'success' &&
-        needs.windows.result == 'success'
+        needs.platform.result == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -513,14 +436,12 @@ jobs:
 
   performance-gate:
     name: Performance regression gate
-    needs: [linux, mshv, windows]
+    needs: [platform]
     if: >-
       ${{
         github.event_name == 'pull_request' &&
         !cancelled() &&
-        needs.linux.result == 'success' &&
-        needs.mshv.result == 'success' &&
-        needs.windows.result == 'success'
+        needs.platform.result == 'success'
       }}
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 10
@@ -540,16 +461,14 @@ jobs:
 
   performance-persist:
     name: Persist performance baseline
-    needs: [linux, mshv, windows]
+    needs: [platform]
     if: >-
       ${{
         always() &&
         github.event_name == 'push' &&
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
-        needs.linux.result == 'success' &&
-        needs.mshv.result == 'success' &&
-        needs.windows.result == 'success'
+        needs.platform.result == 'success'
       }}
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 10

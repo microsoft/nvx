@@ -12,10 +12,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Verify source pins
-      shell: bash
-      run: python3 scripts/nvx.py verify
-
     - name: Resolve guest artifact versions
       id: guest-versions
       shell: bash
