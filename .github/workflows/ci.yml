@@ -71,9 +71,175 @@ jobs:
         with:
           openvmm-sha: ${{ steps.openvmm.outputs.sha }}
 
+  openvmm-tests:
+    name: OpenVMM tests / ${{ matrix.name }}
+    needs: artifacts
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / KVM
+            backend: kvm
+            runner: '["self-hosted", "linux", "kvm"]'
+          - name: Linux / MSHV
+            backend: mshv
+            runner: '["self-hosted", "linux", "mshv"]'
+          - name: Windows / WHP
+            backend: whp
+            runner: '["self-hosted", "windows", "whp"]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        id: openvmm
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Prepare Windows cache tools
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py setup-cross-os-cache
+
+      - name: Prepare MSHV cache tools
+        id: cache-tools-mshv
+        if: matrix.backend == 'mshv'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache OpenVMM test build
+        if: matrix.backend != 'mshv'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            openvmm/target
+          key: openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Cache OpenVMM test build for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            openvmm/target
+          key: openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Restore Linux kernel
+        if: matrix.backend != 'mshv'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Linux kernel for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Alpine disk image
+        if: matrix.backend != 'mshv'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Alpine disk image for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Run OpenVMM tests on KVM
+        if: matrix.backend == 'kvm'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
+      - name: Run OpenVMM tests on MSHV
+        if: matrix.backend == 'mshv'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          firewall_rule=(-i 'ovm+' -p tcp -j ACCEPT)
+          firewall_rule_added=false
+          cleanup() {
+            if [[ "${firewall_rule_added}" == true ]]; then
+              sudo -n iptables -D INPUT "${firewall_rule[@]}"
+            fi
+          }
+          trap cleanup EXIT
+          if ! sudo -n iptables -C INPUT "${firewall_rule[@]}" 2>/dev/null; then
+            sudo -n iptables -I INPUT 1 "${firewall_rule[@]}"
+            firewall_rule_added=true
+          fi
+          python3 scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
+      - name: Run OpenVMM tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
   linux:
     name: Linux / KVM
-    needs: artifacts
+    needs: [artifacts, openvmm-tests]
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 60
     steps:
@@ -108,7 +274,7 @@ jobs:
 
   mshv:
     name: Linux / MSHV
-    needs: artifacts
+    needs: [artifacts, openvmm-tests]
     runs-on: [self-hosted, linux, mshv]
     timeout-minutes: 60
     steps:
@@ -133,6 +299,23 @@ jobs:
         with:
           openvmm-sha: ${{ steps.openvmm.outputs.sha }}
 
+      - name: Allow MSHV guest gateway probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          firewall_rule=(
+            -i 'ovm+'
+            -p icmp
+            --icmp-type echo-request
+            -m comment
+            --comment nvx-ci-mshv-benchmark
+            -j ACCEPT
+          )
+          while sudo -n iptables -C INPUT "${firewall_rule[@]}" 2>/dev/null; do
+            sudo -n iptables -D INPUT "${firewall_rule[@]}"
+          done
+          sudo -n iptables -I INPUT 1 "${firewall_rule[@]}"
+
       - name: Run Linux / MSHV benchmark
         uses: ./.github/actions/run-benchmark
         with:
@@ -141,6 +324,23 @@ jobs:
           teardown-mode: host-terminate
           kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
           alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
+
+      - name: Remove MSHV guest gateway probe rule
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          firewall_rule=(
+            -i 'ovm+'
+            -p icmp
+            --icmp-type echo-request
+            -m comment
+            --comment nvx-ci-mshv-benchmark
+            -j ACCEPT
+          )
+          while sudo -n iptables -C INPUT "${firewall_rule[@]}" 2>/dev/null; do
+            sudo -n iptables -D INPUT "${firewall_rule[@]}"
+          done
 
       - name: Package Linux / MSHV release
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -151,7 +351,7 @@ jobs:
 
   windows:
     name: Windows / WHP
-    needs: artifacts
+    needs: [artifacts, openvmm-tests]
     runs-on: [self-hosted, windows, whp]
     timeout-minutes: 60
     steps:

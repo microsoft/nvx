@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import archive, benchmark, build, common, release  # noqa: E402
+from nvx_tools import archive, benchmark, build, ci, common, release  # noqa: E402
 
 
 class CliTests(unittest.TestCase):
@@ -77,6 +77,54 @@ class CliTests(unittest.TestCase):
         verify = nvx.parse_args(["verify"])
         self.assertEqual(verify.command, "verify")
         self.assertIs(verify.handler, nvx.command_verify)
+
+        openvmm_tests = nvx.parse_args(["test-openvmm", "--backend", "mshv"])
+        self.assertEqual(openvmm_tests.backend, "mshv")
+        self.assertIs(openvmm_tests.handler, nvx.command_test_openvmm)
+
+
+class CiTests(unittest.TestCase):
+    def test_openvmm_tests_bind_guest_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            openvmm = root / "openvmm"
+            artifacts = root / "build"
+            openvmm.mkdir()
+            artifacts.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            kernel = artifacts / "vmlinux"
+            initrd = artifacts / "initramfs.cpio.gz"
+            kernel.touch()
+            initrd.touch()
+            backend = "whp" if os.name == "nt" else "kvm"
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci, "BUILD_DIR", artifacts),
+                patch.object(ci.os, "access", return_value=True),
+                patch.object(ci.Path, "exists", return_value=False),
+                patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "run_checked") as run_checked,
+            ):
+                ci.run_openvmm_tests(backend)
+
+            self.assertEqual(run_checked.call_count, 2)
+            restore, tests = run_checked.call_args_list
+            self.assertEqual(
+                restore.args[0],
+                ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
+            )
+            command = tests.args[0]
+            self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
+            self.assertEqual(command[-2:], ["--filter", ci.OPENVMM_MICROVM_TEST_FILTER])
+            self.assertEqual(tests.kwargs["cwd"], openvmm)
+            env = tests.kwargs["env"]
+            self.assertEqual(env["OPENVMM_MICROVM_PVH_KERNEL"], str(kernel.resolve()))
+            self.assertEqual(env["OPENVMM_MICROVM_PVH_INITRD"], str(initrd.resolve()))
+
+    def test_openvmm_tests_reject_unknown_backend(self):
+        with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
+            ci.run_openvmm_tests("unknown")
 
 
 class BenchmarkTests(unittest.TestCase):

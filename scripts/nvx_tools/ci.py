@@ -8,6 +8,8 @@ import zipfile
 from pathlib import Path
 
 from .common import (
+    BUILD_DIR,
+    OPENVMM_DIR,
     ScriptError,
     download,
     require_file,
@@ -21,6 +23,61 @@ ZSTD_URL = (
     f"https://github.com/facebook/zstd/releases/download/v{ZSTD_VERSION}/{ZSTD_ARCHIVE}"
 )
 ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
+OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
+OPENVMM_MICROVM_TEST_FILTER = "test(x86_64::microvm)"
+
+
+def run_openvmm_tests(backend: str) -> None:
+    if backend not in OPENVMM_TEST_BACKENDS:
+        choices = ", ".join(OPENVMM_TEST_BACKENDS)
+        raise ScriptError(
+            f"unsupported OpenVMM test backend {backend!r}; choose {choices}"
+        )
+
+    if backend == "whp":
+        if os.name != "nt":
+            raise ScriptError("WHP OpenVMM tests require Windows")
+    else:
+        if os.name == "nt":
+            raise ScriptError(f"{backend.upper()} OpenVMM tests require Linux")
+        device = Path("/dev") / backend
+        if not os.access(device, os.R_OK | os.W_OK):
+            raise ScriptError(f"OpenVMM tests require read/write access to {device}")
+        if backend == "kvm" and Path("/dev/mshv").exists():
+            raise ScriptError(
+                "/dev/mshv is present, so OpenVMM would select MSHV instead of KVM"
+            )
+
+    require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
+    kernel = require_file(BUILD_DIR / "vmlinux", "microVM PVH kernel").resolve()
+    initrd = require_file(
+        BUILD_DIR / "initramfs.cpio.gz",
+        "microVM Alpine initramfs",
+    ).resolve()
+    env = os.environ.copy()
+    env["OPENVMM_MICROVM_PVH_KERNEL"] = os.fspath(kernel)
+    env["OPENVMM_MICROVM_PVH_INITRD"] = os.fspath(initrd)
+    cargo = require_tool("cargo")
+
+    run_checked(
+        [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
+        cwd=OPENVMM_DIR,
+        env=env,
+    )
+    run_checked(
+        [
+            cargo,
+            "xflowey",
+            "vmm-tests-run",
+            "--release",
+            "--ci-profile",
+            "--skip-vhd-prompt",
+            "--filter",
+            OPENVMM_MICROVM_TEST_FILTER,
+        ],
+        cwd=OPENVMM_DIR,
+        env=env,
+    )
 
 
 def setup_cross_os_cache() -> None:

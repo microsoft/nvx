@@ -20,7 +20,11 @@ from nvx_tools.build import (
     build_initramfs,
     build_kernel,
 )
-from nvx_tools.ci import setup_cross_os_cache
+from nvx_tools.ci import (
+    OPENVMM_TEST_BACKENDS,
+    run_openvmm_tests,
+    setup_cross_os_cache,
+)
 from nvx_tools.collect_alpine_sources import (
     configure_parser as configure_alpine_sources_parser,
 )
@@ -106,6 +110,10 @@ def command_build_openvmm(args: argparse.Namespace) -> None:
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
     setup_cross_os_cache()
+
+
+def command_test_openvmm(args: argparse.Namespace) -> None:
+    run_openvmm_tests(args.backend)
 
 
 def command_build(args: argparse.Namespace) -> None:
@@ -233,6 +241,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="install GNU tar and zstd for GitHub Actions cross-OS caches",
     )
     cache.set_defaults(handler=command_setup_cross_os_cache)
+
+    openvmm_tests = subparsers.add_parser(
+        "test-openvmm",
+        help="run OpenVMM microVM integration tests",
+    )
+    openvmm_tests.add_argument(
+        "--backend",
+        choices=OPENVMM_TEST_BACKENDS,
+        required=True,
+    )
+    openvmm_tests.set_defaults(handler=command_test_openvmm)
 
     build = subparsers.add_parser("build", help="build guest artifacts and OpenVMM")
     _add_guest_options(build)
