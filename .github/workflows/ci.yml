@@ -216,6 +216,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          sudo -n tdnf install -y binutils libarchive
           firewall_rule=(-i 'ovm+' -p tcp -j ACCEPT)
           firewall_rule_added=false
           cleanup() {
