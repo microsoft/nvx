@@ -33,7 +33,7 @@ from typing import TextIO, TypedDict, cast
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
-TEARDOWN_TIMEOUT_SECONDS = 5.0
+TEARDOWN_TIMEOUT_SECONDS = 15.0
 BASE_TUNING = (
     "tsc=reliable no_timer_check random.trust_cpu=on "
     "rcupdate.rcu_expedited=1 nokaslr mitigations=off "

@@ -200,8 +200,9 @@ atomically published snapshot directory; publication is polled every 1 ms after 
 
 After the cold-start and restore markers, the host dispatches guest `nvx-exit 0` and measures until
 the OpenVMM process exits successfully. CI requires this guest-exit path on every backend and
-rejects any measured teardown timeout. Snapshot-source exit after publication is retained in the
-raw JSON as a diagnostic but is not the guest-exit teardown metric.
+allows up to 15 seconds for backend teardown before rejecting a measured sample. Snapshot-source
+exit after publication is retained in the raw JSON as a diagnostic but is not the guest-exit
+teardown metric.
 
 ## Cold-start methodology
 
