@@ -11,6 +11,7 @@ runs:
         set -euo pipefail
         python3 -m compileall -q scripts
         python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
+        python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
         python3 scripts/nvx.py --help
         python3 scripts/nvx.py benchmark --help
 
@@ -20,5 +21,6 @@ runs:
       run: |
         python -m compileall -q scripts
         python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py -v
+        python .github\skills\nvx-host-connect\scripts\test_hosts.py -v
         python scripts\nvx.py --help
         python scripts\nvx.py benchmark --help

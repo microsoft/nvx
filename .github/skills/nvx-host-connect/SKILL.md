@@ -36,7 +36,9 @@ Treat the resolver output as authoritative:
   `nvx-run`, `nvx-debug`, or `nvx-benchmark` locally.
 - If profiles are available and none was requested, ask the user to select one.
 - Resolve the selected profile by passing its name to the same command. Connect only
-  to the returned `ssh_target` and use its `backend` and `platform`.
+  to the returned `ssh_target` and treat its `backend`, `platform`, and `host_type`
+  as authoritative connection context. Do not infer whether the server is bare metal
+  or a virtual machine from platform probes.
 - If `remote_repo` is `null`, ask for the absolute checkout path. Ask only for
   fields missing from the selected profile.
 - Do not connect to an ad hoc SSH target or a profile absent from the inventory.
@@ -204,7 +206,7 @@ python scripts\nvx.py run --hypervisor whp --dry-run
 Keep the SSH session open and report:
 
 - SSH host alias and remote repository path.
-- Detected OS, selected backend, and platform ID.
+- Detected OS, selected backend, platform ID, and resolved host type.
 - Commit and whether the checkout is dirty.
 - Artifact source and completed preparation command.
 - Dry-run result and any existing OpenVMM process.

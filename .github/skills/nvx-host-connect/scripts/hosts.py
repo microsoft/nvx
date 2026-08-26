@@ -12,14 +12,15 @@ from pathlib import Path
 from typing import cast
 
 INVENTORY_FILENAME = ".nvx-hosts.json"
-INVENTORY_VERSION = 1
+INVENTORY_VERSION = 2
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BACKEND_PLATFORMS = {
     "kvm": "linux-kvm",
     "mshv": "linux-mshv",
     "whp": "windows-whp",
 }
-PROFILE_KEYS = frozenset({"ssh_target", "backend", "remote_repo", "notes"})
+HOST_TYPES = frozenset({"bare-metal", "virtual-machine"})
+PROFILE_KEYS = frozenset({"ssh_target", "backend", "host_type", "remote_repo", "notes"})
 
 
 class InventoryError(ValueError):
@@ -31,6 +32,7 @@ class HostProfile:
     name: str
     ssh_target: str
     backend: str
+    host_type: str
     remote_repo: str | None
     notes: str | None
 
@@ -40,6 +42,7 @@ class HostProfile:
             "ssh_target": self.ssh_target,
             "backend": self.backend,
             "platform": BACKEND_PLATFORMS[self.backend],
+            "host_type": self.host_type,
             "remote_repo": self.remote_repo,
             "notes": self.notes,
         }
@@ -91,11 +94,16 @@ def _parse_profile(name: str, value: object) -> HostProfile:
     if backend not in BACKEND_PLATFORMS:
         choices = ", ".join(BACKEND_PLATFORMS)
         raise InventoryError(f"{context}.backend must be one of: {choices}")
+    host_type = _required_string(profile, "host_type", context)
+    if host_type not in HOST_TYPES:
+        choices = ", ".join(sorted(HOST_TYPES))
+        raise InventoryError(f"{context}.host_type must be one of: {choices}")
 
     return HostProfile(
         name=name,
         ssh_target=ssh_target,
         backend=backend,
+        host_type=host_type,
         remote_repo=_optional_string(profile, "remote_repo", context),
         notes=_optional_string(profile, "notes", context),
     )
@@ -117,6 +125,12 @@ def load_inventory(path: Path) -> list[HostProfile] | None:
         )
     version = inventory.get("version")
     if version != INVENTORY_VERSION or isinstance(version, bool):
+        if version == 1 and not isinstance(version, bool):
+            raise InventoryError(
+                "inventory.version 1 is no longer supported; add host_type "
+                "('bare-metal' or 'virtual-machine') to every host and set "
+                f"inventory.version to {INVENTORY_VERSION}"
+            )
         raise InventoryError(f"inventory.version must be {INVENTORY_VERSION}")
 
     hosts = _mapping(inventory.get("hosts"), "inventory.hosts")

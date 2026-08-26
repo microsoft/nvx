@@ -1,20 +1,23 @@
 {
-  "version": 1,
+  "version": 2,
   "hosts": {
     "kvm-lab": {
       "ssh_target": "nvx-kvm-lab",
       "backend": "kvm",
+      "host_type": "bare-metal",
       "remote_repo": "/home/developer/src/nvx",
       "notes": "Optional developer-local notes"
     },
     "mshv-lab": {
       "ssh_target": "nvx-mshv-lab",
       "backend": "mshv",
+      "host_type": "virtual-machine",
       "remote_repo": "/home/developer/src/nvx"
     },
     "whp-lab": {
       "ssh_target": "nvx-whp-lab",
       "backend": "whp",
+      "host_type": "bare-metal",
       "remote_repo": "C:\\Users\\developer\\src\\nvx"
     }
   }
