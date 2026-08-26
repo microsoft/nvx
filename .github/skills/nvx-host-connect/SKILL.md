@@ -18,11 +18,6 @@ described in the [setup guide](../../../doc/setup.md), and keep
 connection and authentication details in SSH configuration. Never place passwords,
 tokens, private keys, passphrases, or SSH options in the inventory.
 
-The inventory schema is intentionally unversioned. Its top-level object contains
-only `hosts`, and every profile requires `host_type` set to `baremetal` or
-`virtual-machine`. Do not add a version selector or attempt a compatibility
-fallback.
-
 Before asking for an SSH target, list the configured profiles from the local
 workspace:
 
