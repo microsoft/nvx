@@ -142,6 +142,7 @@ python3 scripts/nvx.py run
     [--memory-mib MIB]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
     [--net IPV4/PREFIX]
+    [--network-profile {portable}]
     [--cmdline TEXT]
     [--dry-run]
 ```
@@ -152,6 +153,7 @@ python3 scripts/nvx.py run
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target, optionally read-only or read-write. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. |
+| `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--cmdline TEXT` | empty | Append a kernel command-line string. |
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 
@@ -173,6 +175,7 @@ python3 scripts/nvx.py sandbox
     [--memory-mib MIB]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--net IPV4/PREFIX]
+    [--network-profile {portable}]
     [--cmdline TEXT]
     [--dry-run]
 ```
@@ -188,7 +191,8 @@ python3 scripts/nvx.py sandbox
 | `--pids-max COUNT` | none | Set the workload cgroup process limit. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
-| `--net IPV4/PREFIX` | none | Enable the existing static virtio-net profile. |
+| `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
+| `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--cmdline TEXT` | empty | Append non-sandbox kernel parameters; `nvx_*` tokens are reserved. |
 | `--dry-run` | off | Print the generated OpenVMM ABI-v2 command without running it. |
 
@@ -218,6 +222,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--shell-memories MIB [MIB ...]` | `64 128 256 512` | Set the guest memory sizes for shell snapshot measurements. |
 | `--network-memory-mib MIB` | `256` | Set guest memory for the network snapshot workload. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
+| `--network-profile {portable}` | none | Required with `--net`; selects the portable KVM/MSHV/WHP contract. |
 | `--cpus CPUSET` | last up to four logical CPUs | Set process affinity in `taskset` syntax. |
 | `--timeout SECONDS` | `10` | Set the time allowed for each boot marker. |
 | `--teardown-mode {guest-exit,host-terminate,host-sigterm}` | `guest-exit` | Select how to stop a measured VM; `host-sigterm` is a deprecated alias. |

@@ -320,28 +320,33 @@ caller supplies the required attachment according to the recorded policy.
 #### Network
 
 The optional NIC has one RX/TX queue pair and an exact ABI-v1 feature mask:
-the MAC-address feature and virtio version 1. `--net IPv4/prefix` accepts
-prefixes `/1` through `/30`, derives the first usable address as the gateway,
-and derives deterministic guest and gateway MAC addresses from the final three
-IPv4 octets.
+the MAC-address feature and virtio version 1.
+`--net IPv4/prefix --network-profile portable` accepts prefixes `/1` through
+`/30`, derives the first usable address as the gateway, and derives
+deterministic guest and gateway MAC addresses from the final three IPv4
+octets. The profile is mandatory and selects the same in-process Consomme data
+plane on KVM, MSHV, and WHP.
 
-Linux uses a managed TAP or a supplied TAP attachment. Windows uses the
-in-process user-mode network backend. Both apply one canonical egress policy
-before externally visible transmission:
+The portable profile provides gateway DNS over UDP and TCP, ICMP echo,
+outbound TCP and UDP, deterministic rejection of fragmented IPv4 packets, and
+bounded flow, DNS, buffer, and packet-queue state. It applies one canonical
+egress policy before externally visible transmission:
 
 - allow only listed IPv4 hosts or CIDRs;
 - allow IPv4 except listed hosts or CIDRs; or
 - allow only exact IPv4 TCP endpoints.
 
 The modes are mutually exclusive and fail closed for traffic outside the
-selected policy. The snapshot records the network identity, backend kind, and
-policy digest. Restore reconstructs the endpoint and requires the policy again;
-native TAP descriptors, sockets, and connection objects are never serialized.
+selected policy. The snapshot records the profile, network identity, and
+policy digest. Restore reconstructs a fresh endpoint and requires the profile
+and policy again; native sockets, DNS requests, and flow objects are never
+serialized.
 Capture quiesces the endpoint, drains completion ownership, and requires the
 saved queues to contain no unrepresented RX or TX packets. It then saves the
 queue lifecycle, negotiated features, link state, and endpoint generation.
-Arbitrary in-flight packet payloads are not serialized, and existing proxied
-TCP/UDP flows are not promised to survive process replacement.
+Arbitrary in-flight packet payloads are not serialized. Pre-capture queued
+packets are not replayed, old TCP/UDP/ICMP/DNS state is invalidated, and new
+traffic must establish fresh post-restore flows.
 
 #### Filesystem
 

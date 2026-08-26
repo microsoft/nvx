@@ -51,6 +51,7 @@ from nvx_tools.sandbox import SandboxLaunch, SandboxLayer
 
 DEFAULT_RELEASE_REPOSITORY = "nanvix/nvx"
 HYPERVISORS = ("auto", "whp", "kvm", "mshv")
+NETWORK_PROFILES = ("portable",)
 
 
 def _run(args: list[str | os.PathLike[str]], *, cwd: Path = REPO_ROOT) -> None:
@@ -155,6 +156,8 @@ def _format_command(command: list[str]) -> str:
 
 
 def command_run(args: argparse.Namespace) -> None:
+    if (args.net is None) != (args.network_profile is None):
+        raise ScriptError("--net and --network-profile must be specified together")
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
     initrd = require_file(
@@ -180,7 +183,7 @@ def command_run(args: argparse.Namespace) -> None:
             raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
         command.extend(["--mount", args.mount])
     if args.net is not None:
-        command.extend(["--net", args.net])
+        command.extend(["--net", args.net, "--network-profile", args.network_profile])
     if args.cmdline:
         command.extend(["--cmdline", args.cmdline])
     print(f">> {_format_command(command)}")
@@ -189,6 +192,8 @@ def command_run(args: argparse.Namespace) -> None:
 
 
 def command_sandbox(args: argparse.Namespace) -> None:
+    if (args.net is None) != (args.network_profile is None):
+        raise ScriptError("--net and --network-profile must be specified together")
     launch = SandboxLaunch(
         layers=tuple(args.layer),
         scratch=args.scratch,
@@ -220,7 +225,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
         launch.kernel_command_line(args.cmdline),
     ]
     if args.net is not None:
-        command.extend(["--net", args.net])
+        command.extend(["--net", args.net, "--network-profile", args.network_profile])
     print(f">> {_format_command(command)}")
     if not args.dry_run:
         raise SystemExit(subprocess.run(command).returncode)
@@ -317,6 +322,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--memory-mib", type=int, default=128)
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
     run.add_argument("--net", metavar="IPV4/PREFIX")
+    run.add_argument("--network-profile", choices=NETWORK_PROFILES)
     run.add_argument("--cmdline", default="")
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(handler=command_run)
@@ -348,6 +354,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sandbox.add_argument("--memory-mib", type=int, default=256)
     sandbox.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     sandbox.add_argument("--net", metavar="IPV4/PREFIX")
+    sandbox.add_argument("--network-profile", choices=NETWORK_PROFILES)
     sandbox.add_argument("--cmdline", default="")
     sandbox.add_argument("--dry-run", action="store_true")
     sandbox.set_defaults(handler=command_sandbox)

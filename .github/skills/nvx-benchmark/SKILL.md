@@ -69,10 +69,8 @@ python3 scripts/nvx.py performance collect --platform linux-kvm \
 printf 'NVX_RESULTS=%s\n' "$output_dir"
 ```
 
-The KVM network workload requires root or preconfigured non-interactive `sudo ip`
-access so OpenVMM can create a managed TAP. Do not modify `sudoers`. If that
-prerequisite is missing, report it and ask whether to run only a non-network
-workload.
+The network workload uses the in-process portable profile and does not require
+TAP creation or host firewall changes.
 
 ### Linux/MSHV
 
@@ -89,10 +87,8 @@ python3 scripts/nvx.py performance collect --platform linux-mshv \
 printf 'NVX_RESULTS=%s\n' "$output_dir"
 ```
 
-The MSHV network workload requires root or preconfigured non-interactive `sudo ip`
-access so OpenVMM can create a managed TAP. The host input policy must also permit
-ICMP echo requests to the TAP gateway. Do not modify `sudoers` or firewall policy;
-report a missing prerequisite and ask before changing host configuration.
+The network workload uses the in-process portable profile and does not require
+TAP creation or host firewall changes.
 
 ### Windows/WHP
 

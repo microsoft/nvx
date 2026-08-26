@@ -44,13 +44,12 @@ python scripts\nvx.py benchmark --suite performance --backend whp --runs 5 --vir
 
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
 instead of `performance`. Use `--shell-memories 64 128 256 512`,
-`--payload-mib 64`, and `--net 10.0.0.2/24` to override their defaults. Run
+`--payload-mib 64`, and
+`--net 10.0.0.2/24 --network-profile portable` to override their defaults. Run
 `python scripts/nvx.py benchmark --help` for the complete option surface.
 
-The KVM and MSHV network benchmarks require root or non-interactive `sudo ip` access so OpenVMM
-can create a managed TAP. The host input policy must permit ICMP echo requests to the managed TAP
-gateway; a default-drop firewall needs an explicit rule outside NVX. WHP uses its in-process
-user-mode NAT backend.
+The network benchmarks select the same in-process portable data plane on KVM,
+MSHV, and WHP. They do not create TAP devices or require host firewall rules.
 
 Collect a completed suite with:
 

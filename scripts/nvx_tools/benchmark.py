@@ -241,6 +241,11 @@ def configure_parser(
         ),
     )
     parser.add_argument(
+        "--network-profile",
+        choices=("portable",),
+        help="required portable network capability profile when --net is specified",
+    )
+    parser.add_argument(
         "--cpus",
         default=default_cpus,
         help=f"logical CPUs used for affinity, in taskset syntax (default: {default_cpus})",
@@ -309,6 +314,14 @@ def positive_float(value: str) -> float:
 def run_checked(command: Sequence[str], *, cwd: Path | None = None) -> None:
     print("+", subprocess.list2cmdline(list(command)), flush=True)
     subprocess.run(command, cwd=cwd, check=True)
+
+
+def append_network_arguments(
+    command: list[str],
+    network: str,
+    profile: str = "portable",
+) -> None:
+    command.extend(("--net", network, "--network-profile", profile))
 
 
 def require_file(path: Path, description: str) -> Path:
@@ -794,7 +807,7 @@ def workload_boot_command(
         cmdline,
     ]
     if network is not None:
-        command.extend(("--net", network))
+        append_network_arguments(command, network)
     if mount is not None:
         command.extend(("--mount", mount))
     return command
@@ -1316,14 +1329,11 @@ def benchmark_network_snapshot_workload(
     print(
         "networking + snapshot benchmark, "
         f"median of {args.runs}, {args.network_memory_mib} MiB, 1 vCPU, "
-        f"--net {network}"
+        f"--net {network} --network-profile portable"
     )
     print()
     print("== cold boot -> verified gateway connectivity ==")
     probe_cmdline = f"quiet loglevel=0 virtnet_probe={gateway}"
-    cleanup_managed_network = (
-        args.teardown_mode != "guest-exit" and sys.platform.startswith("linux")
-    )
     cold_command = workload_boot_command(
         executable,
         backend,
@@ -1342,7 +1352,6 @@ def benchmark_network_snapshot_workload(
         marker=cold_marker,
         windows_cpus=windows_cpus,
         teardown_mode=args.teardown_mode,
-        cleanup_managed_network=cleanup_managed_network,
     )
     print(
         "  cold  (guest start -> marker):   "
@@ -1386,6 +1395,7 @@ def benchmark_network_snapshot_workload(
                     executable,
                     backend,
                     snapshot_path,
+                    network_profile="portable",
                 ),
             ],
             warmups=args.warmups,
@@ -1394,7 +1404,6 @@ def benchmark_network_snapshot_workload(
             marker=restore_marker,
             windows_cpus=windows_cpus,
             teardown_mode=args.teardown_mode,
-            cleanup_managed_network=cleanup_managed_network,
         )
         if restored["teardown_timeout_count"] != 0:
             raise RuntimeError(
@@ -1696,8 +1705,10 @@ def snapshot_restore_command(
     executable: Path,
     hypervisor: str,
     snapshot_path: Path,
+    *,
+    network_profile: str | None = None,
 ) -> list[str]:
-    return [
+    command = [
         str(executable),
         "--single-process",
         "--machine",
@@ -1708,6 +1719,9 @@ def snapshot_restore_command(
         str(snapshot_path),
         "--restore-entropy",
     ]
+    if network_profile is not None:
+        command.extend(("--network-profile", network_profile))
+    return command
 
 
 def benchmark_snapshot_restore(
@@ -1734,6 +1748,7 @@ def benchmark_snapshot_restore(
                     executable,
                     hypervisor,
                     snapshot_path,
+                    network_profile=args.network_profile,
                 ),
             ],
             warmups=args.warmups,
@@ -1996,7 +2011,7 @@ def whp_command(
         BASE_TUNING,
     ]
     if network is not None:
-        command.extend(("--net", network))
+        append_network_arguments(command, network)
     return command
 
 
@@ -2135,7 +2150,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         f"clocksource=kvm-clock {BASE_TUNING}",
     ]
     if args.net is not None:
-        boot_command.extend(("--net", args.net))
+        append_network_arguments(boot_command, args.net, args.network_profile)
     if args.suite == "snapshot":
         print("Benchmarking OpenVMM/KVM snapshot capture", flush=True)
         result = benchmark_snapshot_capture(args, boot_command)
@@ -2344,7 +2359,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
             f"{'clocksource=kvm-clock ' if backend == 'kvm' else ''}{BASE_TUNING}",
         ]
         if args.net is not None:
-            boot_command.extend(("--net", args.net))
+            append_network_arguments(boot_command, args.net, args.network_profile)
         if run_boot:
             result = benchmark(
                 boot_command,
@@ -2431,7 +2446,7 @@ def benchmark_kvm(
         args.teardown_mode,
     ]
     if args.net is not None:
-        command.extend(("--net", args.net))
+        command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True)
         print(completed.stdout, end="")
@@ -2487,7 +2502,7 @@ def benchmark_snapshot_restore_kvm(
         args.teardown_mode,
     ]
     if args.net is not None:
-        command.extend(("--net", args.net))
+        command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True)
         print(completed.stdout, end="")
@@ -2541,7 +2556,7 @@ def benchmark_snapshot_kvm(
         str(args.timeout),
     ]
     if args.net is not None:
-        command.extend(("--net", args.net))
+        command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True)
         print(completed.stdout, end="")
@@ -2564,6 +2579,8 @@ def benchmark_snapshot_kvm(
 
 
 def run(args: argparse.Namespace) -> int:
+    if (args.net is None) != (args.network_profile is None):
+        raise ValueError("--net and --network-profile must be specified together")
     if args._kvm_worker:
         return run_kvm_worker(args)
     if os.name != "nt":

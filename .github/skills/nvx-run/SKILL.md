@@ -53,7 +53,8 @@ Supported examples:
 
 ```bash
 python3 scripts/nvx.py run --hypervisor kvm \
-    --memory-mib 256 --net 10.0.0.2/24 --cmdline "quiet loglevel=0"
+    --memory-mib 256 --net 10.0.0.2/24 --network-profile portable \
+    --cmdline "quiet loglevel=0"
 python3 scripts/nvx.py run --hypervisor mshv \
     --mount "/mnt/host,/absolute/host/share,rw"
 ```

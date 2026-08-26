@@ -31,8 +31,13 @@ Pass extra guest options without changing the generated device ABI:
 python3 scripts/nvx.py run \
   --memory-mib 256 \
   --net 10.0.0.2/24 \
+  --network-profile portable \
   --cmdline "quiet loglevel=0"
 ```
+
+Networking requires the explicit `portable` capability profile. It uses the
+same in-process data plane on KVM, MSHV, and WHP; omitting either `--net` or
+`--network-profile portable` is rejected before OpenVMM starts.
 
 ## virtio-fs host mapping
 

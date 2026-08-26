@@ -116,6 +116,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.pids_max, 64)
         self.assertIs(args.handler, nvx.command_sandbox)
 
+    def test_network_requires_explicit_portable_profile(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+            ]
+        )
+        self.assertEqual(args.network_profile, "portable")
+
+        missing_profile = nvx.parse_args(["run", "--net", "10.0.0.2/24"])
+        with self.assertRaisesRegex(common.ScriptError, "--net and --network-profile"):
+            nvx.command_run(missing_profile)
+
+        missing_network = nvx.parse_args(["run", "--network-profile", "portable"])
+        with self.assertRaisesRegex(common.ScriptError, "--net and --network-profile"):
+            nvx.command_run(missing_network)
+
     def test_openvmm_build_skips_compatibility_igvm(self):
         with (
             patch.object(nvx, "require_file"),
@@ -315,7 +335,49 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(command[:4], ["taskset", "-c", "2-3", "openvmm"])
         self.assertIn("quiet loglevel=0 nokaslr", command)
         self.assertEqual(
-            command[-4:], ["--net", "10.0.0.2/24", "--mount", "/mnt/host,C:/work,rw"]
+            command[-6:],
+            [
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+                "--mount",
+                "/mnt/host,C:/work,rw",
+            ],
+        )
+
+    def test_benchmark_network_requires_explicit_profile(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+            ]
+        )
+        self.assertEqual(args.network_profile, "portable")
+
+        args.network_profile = None
+        with self.assertRaisesRegex(ValueError, "--net and --network-profile"):
+            benchmark.run(args)
+
+    def test_network_snapshot_restore_selects_portable_profile(self):
+        command = benchmark.snapshot_restore_command(
+            Path("openvmm"),
+            "mshv",
+            Path("snapshot"),
+            True,
+            network_profile="portable",
+        )
+
+        self.assertEqual(
+            command[-3:],
+            [
+                "--network-profile",
+                "portable",
+                "--unsafe-skip-snapshot-memory-verification",
+            ],
         )
 
     def test_parses_dd_rates_and_network_gateway(self):
