@@ -19,7 +19,7 @@ BACKEND_PLATFORMS = {
     "mshv": "linux-mshv",
     "whp": "windows-whp",
 }
-HOST_TYPES = frozenset({"bare-metal", "virtual-machine"})
+HOST_TYPES = frozenset({"baremetal", "virtual-machine"})
 PROFILE_KEYS = frozenset({"ssh_target", "backend", "host_type", "remote_repo", "notes"})
 
 
@@ -128,7 +128,7 @@ def load_inventory(path: Path) -> list[HostProfile] | None:
         if version == 1 and not isinstance(version, bool):
             raise InventoryError(
                 "inventory.version 1 is no longer supported; add host_type "
-                "('bare-metal' or 'virtual-machine') to every host and set "
+                "('baremetal' or 'virtual-machine') to every host and set "
                 f"inventory.version to {INVENTORY_VERSION}"
             )
         raise InventoryError(f"inventory.version must be {INVENTORY_VERSION}")

@@ -112,7 +112,7 @@ Edit each profile in `.nvx-hosts.json`:
 - The profile name is the name supplied to the `nvx-host-connect` skill.
 - `ssh_target` is one destination or alias configured in the developer's SSH configuration.
 - `backend` is exactly one of `kvm`, `mshv`, or `whp`.
-- `host_type` identifies the server itself and is exactly one of `bare-metal` or
+- `host_type` identifies the server itself and is exactly one of `baremetal` or
   `virtual-machine`.
 - `remote_repo` is the absolute path to the NVX checkout on that host. It may be omitted so the
   agent asks for it when connecting.

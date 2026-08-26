@@ -92,7 +92,7 @@ jobs:
 
   artifacts:
     name: Build shared artifacts
-    runs-on: [self-hosted, linux, kvm]
+    runs-on: [self-hosted, linux, kvm, baremetal]
     timeout-minutes: 60
     outputs:
       kernel-cache-key: ${{ steps.guest-artifacts.outputs.kernel-cache-key }}
@@ -137,13 +137,13 @@ jobs:
         include:
           - name: Linux / KVM
             backend: kvm
-            runner: '["self-hosted", "linux", "kvm"]'
+            runner: '["self-hosted", "linux", "kvm", "baremetal"]'
           - name: Linux / MSHV
             backend: mshv
-            runner: '["self-hosted", "linux", "mshv"]'
+            runner: '["self-hosted", "linux", "mshv", "baremetal"]'
           - name: Windows / WHP
             backend: whp
-            runner: '["self-hosted", "windows", "whp"]'
+            runner: '["self-hosted", "windows", "whp", "baremetal"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -313,7 +313,7 @@ jobs:
       matrix:
         include:
           - name: Linux / KVM
-            runner: '["self-hosted", "linux", "kvm"]'
+            runner: '["self-hosted", "linux", "kvm", "baremetal"]'
             backend: kvm
             release-platform: linux-kvm
             build-target: x86_64-unknown-linux-gnu
@@ -321,7 +321,7 @@ jobs:
             teardown-mode: guest-exit
             cache-compression: zstd
           - name: Linux / MSHV
-            runner: '["self-hosted", "linux", "mshv"]'
+            runner: '["self-hosted", "linux", "mshv", "baremetal"]'
             backend: mshv
             release-platform: linux-mshv
             build-target: x86_64-unknown-linux-musl
@@ -329,7 +329,7 @@ jobs:
             teardown-mode: host-terminate
             cache-compression: gzip
           - name: Windows / WHP
-            runner: '["self-hosted", "windows", "whp"]'
+            runner: '["self-hosted", "windows", "whp", "baremetal"]'
             backend: whp
             release-platform: windows-whp
             build-target: x86_64-pc-windows-msvc
@@ -443,7 +443,7 @@ jobs:
         !cancelled() &&
         needs.platform.result == 'success'
       }}
-    runs-on: [self-hosted, linux, kvm]
+    runs-on: [self-hosted, linux, kvm, baremetal]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -470,7 +470,7 @@ jobs:
         !cancelled() &&
         needs.platform.result == 'success'
       }}
-    runs-on: [self-hosted, linux, kvm]
+    runs-on: [self-hosted, linux, kvm, baremetal]
     timeout-minutes: 10
     permissions:
       contents: write

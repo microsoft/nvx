@@ -19,7 +19,7 @@ class HostInventoryTests(unittest.TestCase):
         path.write_text(json.dumps(inventory), encoding="utf-8")
         return path
 
-    def profile(self, host_type: str | None = "bare-metal") -> dict[str, str]:
+    def profile(self, host_type: str | None = "baremetal") -> dict[str, str]:
         profile = {
             "ssh_target": "nvx-lab",
             "backend": "kvm",
@@ -35,7 +35,7 @@ class HostInventoryTests(unittest.TestCase):
                 {
                     "version": 2,
                     "hosts": {
-                        "bare": self.profile("bare-metal"),
+                        "bare": self.profile("baremetal"),
                         "virtual": self.profile("virtual-machine"),
                     },
                 },
@@ -55,7 +55,7 @@ class HostInventoryTests(unittest.TestCase):
                 if key == "hosts":
                     self.assertEqual(
                         [profile["host_type"] for profile in payload[key]],
-                        ["bare-metal", "virtual-machine"],
+                        ["baremetal", "virtual-machine"],
                     )
                 else:
                     self.assertEqual(payload[key]["host_type"], "virtual-machine")
@@ -82,7 +82,7 @@ class HostInventoryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 hosts.InventoryError,
-                r"host_type must be one of: bare-metal, virtual-machine",
+                r"host_type must be one of: baremetal, virtual-machine",
             ):
                 hosts.load_inventory(path)
 
