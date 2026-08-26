@@ -33,8 +33,8 @@
   },
   "openvmm": {
     "repository": "https://github.com/nanvix/openvmm.git",
-    "branch": "copilot/issue-157-checksum-free-snapshots",
-    "commit": "873f9d13deebcedf5e5a19509a8c06f1eafb88a2",
+    "branch": "fix/deterministic-snapshot-clock-test",
+    "commit": "4af50db51cadce60a4d46ae72e64153852e8930f",
     "source_delivery": "private-git-submodule"
   }
 }
