@@ -46,6 +46,22 @@ SHARED_METRICS = frozenset(
         "network_snapshot_restore_wall",
     }
 )
+LIFECYCLE_METRICS = frozenset(
+    {
+        "openvmm_cold_start",
+        "openvmm_snapshot_generation",
+        "openvmm_snapshot_restore",
+        "openvmm_cold_start_guest_exit_teardown",
+        "openvmm_snapshot_restore_guest_exit_teardown",
+        "openvmm_cold_start_peak_rss",
+        "openvmm_snapshot_generation_peak_rss",
+        "openvmm_snapshot_restore_peak_rss",
+    }
+)
+BYTES_PER_MIB = 1024 * 1024
+LIFECYCLE_MEMORY_MIB = 128
+LIFECYCLE_BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
+LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
@@ -67,6 +83,13 @@ class Result:
     unit: str
     direction: str
     p50: float
+
+
+@dataclass(frozen=True)
+class LifecycleData:
+    document: dict[str, object]
+    backend: str
+    metrics: dict[str, MetricValue]
 
 
 MetricValue = tuple[str, str, float]
@@ -423,6 +446,16 @@ def _json_object(value: object, location: str) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _openvmm_backend_object(
+    document: dict[str, object],
+    section: str,
+    backend: str,
+    source: Path,
+) -> dict[str, object]:
+    section_value = _json_object(document.get(section), f"{source}:{section}")
+    return _json_object(section_value.get(backend), f"{source}:{section}.{backend}")
+
+
 def _openvmm_value(
     document: dict[str, object],
     section: str,
@@ -430,10 +463,7 @@ def _openvmm_value(
     field: str,
     source: Path,
 ) -> float:
-    section_value = _json_object(document.get(section), f"{source}:{section}")
-    backend_value = _json_object(
-        section_value.get(backend), f"{source}:{section}.{backend}"
-    )
+    backend_value = _openvmm_backend_object(document, section, backend, source)
     value = backend_value.get(field)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise PerformanceError(
@@ -447,59 +477,86 @@ def _openvmm_value(
     return value
 
 
-def append_openvmm_diagnostics(
-    path: Path,
-    platform: str,
+def _openvmm_non_negative_int(
     document: dict[str, object],
+    section: str,
     backend: str,
+    field: str,
     source: Path,
-) -> None:
-    cold_start = _openvmm_value(document, "backends", backend, "p50_ms", source)
-    snapshot_restore = _openvmm_value(
-        document, "snapshot_restore", backend, "p50_ms", source
-    )
-    cold_rss = _openvmm_value(
-        document, "backends", backend, "peak_rss_p50_bytes", source
-    )
-    restore_rss = _openvmm_value(
-        document,
-        "snapshot_restore",
-        backend,
-        "peak_rss_p50_bytes",
-        source,
-    )
-    title = PLATFORM_NAMES.get(platform, platform)
-    speedup = cold_start / snapshot_restore
-    savings = (1 - snapshot_restore / cold_start) * 100
-    lines = [
-        f"## {title} benchmark diagnostics",
-        "",
-        "Peak RSS is informational and excluded from regression gating.",
-        "",
-        "| Measurement | Value |",
-        "| --- | ---: |",
-        f"| Cold-start peak RSS p50 | {cold_rss / 1024 / 1024:.2f} MiB |",
-        f"| Snapshot-restore peak RSS p50 | {restore_rss / 1024 / 1024:.2f} MiB |",
-        f"| Snapshot-restore speedup | {speedup:.2f}x |",
-        f"| Snapshot-restore latency savings | {savings:.2f}% |",
-        "",
-    ]
-    with path.open("a", encoding="utf-8", newline="\n") as output:
-        output.write("\n" + "\n".join(lines))
+) -> int:
+    backend_value = _openvmm_backend_object(document, section, backend, source)
+    value = backend_value.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PerformanceError(
+            f"expected a non-negative integer at {source}:{section}.{backend}.{field}"
+        )
+    return value
 
 
-def collect_openvmm_results(
-    platform: str,
-    commit: str,
-    input_path: Path,
-    output_dir: Path,
-    summary_path: Path | None = None,
-) -> Path:
+def _openvmm_samples(
+    document: dict[str, object],
+    section: str,
+    backend: str,
+    field: str,
+    source: Path,
+) -> list[float]:
+    backend_value = _openvmm_backend_object(document, section, backend, source)
+    samples = backend_value.get(field)
+    if not isinstance(samples, list) or not samples:
+        raise PerformanceError(
+            f"expected a non-empty sample list at {source}:{section}.{backend}.{field}"
+        )
+    typed_samples = cast(list[object], samples)
+    parsed: list[float] = []
+    for index, value in enumerate(typed_samples):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise PerformanceError(
+                f"expected a positive finite sample at "
+                f"{source}:{section}.{backend}.{field}[{index}]"
+            )
+        parsed.append(float(value))
+    return parsed
+
+
+def _openvmm_statistics(
+    document: dict[str, object],
+    section: str,
+    backend: str,
+    fields: tuple[str, str, str, str],
+    source: Path,
+    *,
+    integer_median: bool = False,
+) -> tuple[float, float, float, int]:
+    p50_field, min_field, max_field, samples_field = fields
+    p50 = _openvmm_value(document, section, backend, p50_field, source)
+    minimum = _openvmm_value(document, section, backend, min_field, source)
+    maximum = _openvmm_value(document, section, backend, max_field, source)
+    samples = _openvmm_samples(document, section, backend, samples_field, source)
+    expected_p50 = statistics.median(samples)
+    if integer_median:
+        expected_p50 = float(int(expected_p50))
+    expected = (expected_p50, min(samples), max(samples))
+    actual = (p50, minimum, maximum)
+    if any(
+        not math.isclose(observed, calculated, rel_tol=1e-12, abs_tol=1e-9)
+        for observed, calculated in zip(actual, expected, strict=True)
+    ):
+        raise PerformanceError(
+            f"inconsistent statistics at {source}:{section}.{backend}: "
+            f"reported p50/min/max {actual!r}, calculated {expected!r}"
+        )
+    return p50, minimum, maximum, len(samples)
+
+
+def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
     backend = OPENVMM_BACKENDS.get(platform)
     if backend is None:
         raise PerformanceError(f"unsupported OpenVMM benchmark platform: {platform!r}")
-    if not commit:
-        raise PerformanceError("commit must not be empty")
     try:
         document = _json_object(
             json.loads(input_path.read_text(encoding="utf-8")), str(input_path)
@@ -516,33 +573,296 @@ def collect_openvmm_results(
         raise PerformanceError(
             f"{input_path} is not an e2e benchmark result: {controls.get('suite')!r}"
         )
-    metrics = (
-        ("openvmm_cold_start", "backends", "p50_ms"),
-        ("openvmm_snapshot_restore", "snapshot_restore", "p50_ms"),
-        ("openvmm_cold_start_teardown", "backends", "teardown_p50_ms"),
+    if controls.get("memory_mib") != LIFECYCLE_MEMORY_MIB:
+        raise PerformanceError(
+            f"{input_path} must use the {LIFECYCLE_MEMORY_MIB} MiB lifecycle "
+            f"baseline, found {controls.get('memory_mib')!r}"
+        )
+    if controls.get("teardown_mode") != "guest-exit":
+        raise PerformanceError(
+            f"{input_path} must use guest-exit teardown, found "
+            f"{controls.get('teardown_mode')!r}"
+        )
+    if controls.get("marker") != LIFECYCLE_BOOT_MARKER:
+        raise PerformanceError(
+            f"{input_path} has unexpected cold-start marker {controls.get('marker')!r}"
+        )
+    if controls.get("restore_marker") != LIFECYCLE_RESTORE_MARKER:
+        raise PerformanceError(
+            f"{input_path} has unexpected snapshot-restore marker "
+            f"{controls.get('restore_marker')!r}"
+        )
+
+    runs = controls.get("runs")
+    if isinstance(runs, bool) or not isinstance(runs, int) or runs <= 0:
+        raise PerformanceError(f"{input_path}:controls.runs must be a positive integer")
+
+    timing_statistics = (
         (
-            "openvmm_snapshot_restore_teardown",
+            "backends",
+            ("p50_ms", "min_ms", "max_ms", "samples_ms"),
+        ),
+        (
+            "snapshot_capture",
+            (
+                "request_to_publication_p50_ms",
+                "request_to_publication_min_ms",
+                "request_to_publication_max_ms",
+                "request_to_publication_samples_ms",
+            ),
+        ),
+        (
             "snapshot_restore",
-            "teardown_p50_ms",
+            ("p50_ms", "min_ms", "max_ms", "samples_ms"),
+        ),
+        (
+            "backends",
+            (
+                "teardown_p50_ms",
+                "teardown_min_ms",
+                "teardown_max_ms",
+                "teardown_completed_samples_ms",
+            ),
+        ),
+        (
+            "snapshot_restore",
+            (
+                "teardown_p50_ms",
+                "teardown_min_ms",
+                "teardown_max_ms",
+                "teardown_completed_samples_ms",
+            ),
         ),
     )
-    results = [
-        Result(
-            commit,
-            metric,
-            "ms",
-            "lower",
-            _openvmm_value(document, section, backend, field, input_path),
+    for section, fields in timing_statistics:
+        *_, count = _openvmm_statistics(document, section, backend, fields, input_path)
+        if count != runs:
+            raise PerformanceError(
+                f"{input_path}:{section}.{backend}.{fields[3]} contains "
+                f"{count} samples, expected {runs}"
+            )
+
+    for section in ("backends", "snapshot_restore"):
+        timeouts = _openvmm_non_negative_int(
+            document,
+            section,
+            backend,
+            "teardown_timeout_count",
+            input_path,
         )
-        for metric, section, field in metrics
+        if timeouts:
+            raise PerformanceError(
+                f"{input_path}:{section}.{backend} contains {timeouts} "
+                "guest-exit teardown timeout(s)"
+            )
+
+    rss_statistics = (
+        "peak_rss_p50_bytes",
+        "peak_rss_min_bytes",
+        "peak_rss_max_bytes",
+        "peak_rss_samples_bytes",
+    )
+    for section in ("backends", "snapshot_capture", "snapshot_restore"):
+        *_, count = _openvmm_statistics(
+            document,
+            section,
+            backend,
+            rss_statistics,
+            input_path,
+            integer_median=True,
+        )
+        if count != runs:
+            raise PerformanceError(
+                f"{input_path}:{section}.{backend}.peak_rss_samples_bytes "
+                f"contains {count} samples, expected {runs}"
+            )
+
+    metric_fields = (
+        ("openvmm_cold_start", "backends", "p50_ms", "ms"),
+        (
+            "openvmm_snapshot_generation",
+            "snapshot_capture",
+            "request_to_publication_p50_ms",
+            "ms",
+        ),
+        ("openvmm_snapshot_restore", "snapshot_restore", "p50_ms", "ms"),
+        (
+            "openvmm_cold_start_guest_exit_teardown",
+            "backends",
+            "teardown_p50_ms",
+            "ms",
+        ),
+        (
+            "openvmm_snapshot_restore_guest_exit_teardown",
+            "snapshot_restore",
+            "teardown_p50_ms",
+            "ms",
+        ),
+        (
+            "openvmm_cold_start_peak_rss",
+            "backends",
+            "peak_rss_p50_bytes",
+            "MiB",
+        ),
+        (
+            "openvmm_snapshot_generation_peak_rss",
+            "snapshot_capture",
+            "peak_rss_p50_bytes",
+            "MiB",
+        ),
+        (
+            "openvmm_snapshot_restore_peak_rss",
+            "snapshot_restore",
+            "peak_rss_p50_bytes",
+            "MiB",
+        ),
+    )
+    metrics = {
+        metric: (
+            unit,
+            "lower",
+            value / BYTES_PER_MIB if unit == "MiB" else value,
+        )
+        for metric, section, field, unit in metric_fields
+        for value in [_openvmm_value(document, section, backend, field, input_path)]
+    }
+    if metrics.keys() != LIFECYCLE_METRICS:
+        raise AssertionError("lifecycle metric definition is incomplete")
+    return LifecycleData(document, backend, metrics)
+
+
+def append_openvmm_diagnostics(
+    path: Path,
+    platform: str,
+    lifecycle: LifecycleData,
+    source: Path,
+) -> None:
+    document = lifecycle.document
+    backend = lifecycle.backend
+    cold_start = _openvmm_value(document, "backends", backend, "p50_ms", source)
+    snapshot_restore = _openvmm_value(
+        document, "snapshot_restore", backend, "p50_ms", source
+    )
+    timing_rows = (
+        (
+            "Cold start",
+            "backends",
+            ("p50_ms", "min_ms", "max_ms", "samples_ms"),
+        ),
+        (
+            "Snapshot generation",
+            "snapshot_capture",
+            (
+                "request_to_publication_p50_ms",
+                "request_to_publication_min_ms",
+                "request_to_publication_max_ms",
+                "request_to_publication_samples_ms",
+            ),
+        ),
+        (
+            "Snapshot restore",
+            "snapshot_restore",
+            ("p50_ms", "min_ms", "max_ms", "samples_ms"),
+        ),
+        (
+            "Cold-start guest-exit teardown",
+            "backends",
+            (
+                "teardown_p50_ms",
+                "teardown_min_ms",
+                "teardown_max_ms",
+                "teardown_completed_samples_ms",
+            ),
+        ),
+        (
+            "Snapshot-restore guest-exit teardown",
+            "snapshot_restore",
+            (
+                "teardown_p50_ms",
+                "teardown_min_ms",
+                "teardown_max_ms",
+                "teardown_completed_samples_ms",
+            ),
+        ),
+    )
+    rss_rows = (
+        ("Cold start", "backends"),
+        ("Snapshot generation", "snapshot_capture"),
+        ("Snapshot restore", "snapshot_restore"),
+    )
+    title = PLATFORM_NAMES.get(platform, platform)
+    speedup = cold_start / snapshot_restore
+    savings = (1 - snapshot_restore / cold_start) * 100
+    lines = [
+        f"## {title} lifecycle diagnostics",
+        "",
+        (
+            "128 MiB shell baseline. Timings and peak RSS p50 values are "
+            "included in regression gating."
+        ),
+        "",
+        "| Timing | p50 | min | max | samples |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for label, section, fields in timing_rows:
+        p50, minimum, maximum, count = _openvmm_statistics(
+            document, section, backend, fields, source
+        )
+        lines.append(
+            f"| {label} | {p50:.2f} ms | {minimum:.2f} ms | "
+            f"{maximum:.2f} ms | {count} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Guest-exit teardown timeouts: 0.",
+            "",
+            "| Process phase | Peak RSS p50 | Peak RSS max |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    for label, section in rss_rows:
+        p50 = _openvmm_value(document, section, backend, "peak_rss_p50_bytes", source)
+        maximum = _openvmm_value(
+            document, section, backend, "peak_rss_max_bytes", source
+        )
+        lines.append(
+            f"| {label} | {p50 / BYTES_PER_MIB:.2f} MiB | "
+            f"{maximum / BYTES_PER_MIB:.2f} MiB |"
+        )
+    lines.extend(
+        [
+            "",
+            "| Comparison | Value |",
+            "| --- | ---: |",
+            f"| Snapshot-restore speedup | {speedup:.2f}x |",
+            f"| Snapshot-restore latency savings | {savings:.2f}% |",
+            "",
+        ]
+    )
+    with path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write("\n" + "\n".join(lines))
+
+
+def collect_openvmm_results(
+    platform: str,
+    commit: str,
+    input_path: Path,
+    output_dir: Path,
+    summary_path: Path | None = None,
+) -> Path:
+    if not commit:
+        raise PerformanceError("commit must not be empty")
+    lifecycle = read_lifecycle_data(platform, input_path)
+    results = [
+        Result(commit, metric, unit, direction, p50)
+        for metric, (unit, direction, p50) in sorted(lifecycle.metrics.items())
     ]
     output_path = output_dir / f"{platform}.csv"
     write_results(output_path, results)
     if summary_path is not None:
         append_results_summary(summary_path, platform, results)
-        append_openvmm_diagnostics(
-            summary_path, platform, document, backend, input_path
-        )
+        append_openvmm_diagnostics(summary_path, platform, lifecycle, input_path)
     print(
         f"Collected {len(results)} OpenVMM p50 metric(s) for {platform}: {output_path}"
     )
@@ -558,6 +878,7 @@ def collect_results(
     require_shell_snapshot: bool = False,
     require_shared_suite: bool = False,
     summary_path: Path | None = None,
+    lifecycle_input: Path | None = None,
 ) -> Path:
     if not platform or "/" in platform or platform in {".", ".."}:
         raise PerformanceError(f"invalid platform name: {platform!r}")
@@ -582,9 +903,22 @@ def collect_results(
                 raise PerformanceError(f"duplicate collected metric: {metric}")
             collected[metric] = value
 
+    lifecycle = (
+        read_lifecycle_data(platform, lifecycle_input)
+        if lifecycle_input is not None
+        else None
+    )
+    if lifecycle is not None:
+        for metric, value in lifecycle.metrics.items():
+            if metric in collected:
+                raise PerformanceError(f"duplicate collected metric: {metric}")
+            collected[metric] = value
+
     if not collected:
         raise PerformanceError(f"no performance metrics found in {input_dir}")
-    expected_metrics = SHARED_METRICS
+    expected_metrics = (
+        SHARED_METRICS | LIFECYCLE_METRICS if lifecycle is not None else SHARED_METRICS
+    )
     if require_shared_suite and collected.keys() != expected_metrics:
         missing = sorted(expected_metrics - collected.keys())
         extra = sorted(collected.keys() - expected_metrics)
@@ -607,6 +941,14 @@ def collect_results(
     write_results(output_path, results)
     if summary_path is not None:
         append_results_summary(summary_path, platform, results)
+        if lifecycle is not None:
+            assert lifecycle_input is not None
+            append_openvmm_diagnostics(
+                summary_path,
+                platform,
+                lifecycle,
+                lifecycle_input,
+            )
     print(f"Collected {len(results)} p50 metric(s) for {platform}: {output_path}")
     return output_path
 
@@ -843,6 +1185,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--require-network", action="store_true")
     collect.add_argument("--require-shell-snapshot", action="store_true")
     collect.add_argument("--require-shared-suite", action="store_true")
+    collect.add_argument(
+        "--lifecycle-input",
+        type=Path,
+        help="merge a 128 MiB e2e lifecycle benchmark JSON result",
+    )
     collect.add_argument("--summary", type=Path)
 
     collect_openvmm = commands.add_parser(
@@ -897,6 +1244,7 @@ def command_performance(args: argparse.Namespace) -> int:
                 require_shell_snapshot=args.require_shell_snapshot,
                 require_shared_suite=args.require_shared_suite,
                 summary_path=args.summary,
+                lifecycle_input=args.lifecycle_input,
             )
             return 0
         if args.performance_command == "collect-openvmm":

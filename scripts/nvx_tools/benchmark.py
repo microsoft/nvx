@@ -40,6 +40,7 @@ BASE_TUNING = (
     "cryptomgr.notests quiet loglevel=0"
 )
 KVM_RESULT_PREFIX = "OPENVMM_KVM_RESULT="
+KVM_E2E_RESULT_PREFIX = "OPENVMM_KVM_E2E_RESULT="
 KVM_RESTORE_RESULT_PREFIX = "OPENVMM_KVM_RESTORE_RESULT="
 KVM_SNAPSHOT_RESULT_PREFIX = "OPENVMM_KVM_SNAPSHOT_RESULT="
 PHASE2_RESULT_PREFIX = "OPENVMM_PHASE2_RESULT="
@@ -99,6 +100,10 @@ class SnapshotCaptureResult(TypedDict):
     post_publication_exit_p50_ms: float
     post_publication_exit_min_ms: float
     post_publication_exit_max_ms: float
+    peak_rss_samples_bytes: list[int]
+    peak_rss_p50_bytes: int
+    peak_rss_min_bytes: int
+    peak_rss_max_bytes: int
 
 
 class Phase2Metric(TypedDict):
@@ -142,6 +147,12 @@ class ResultDocument(TypedDict):
     e2e_comparison: dict[str, E2EComparison]
 
 
+class KvmE2EResult(TypedDict):
+    cold_start: BenchmarkResult
+    snapshot_capture: SnapshotCaptureResult
+    snapshot_restore: BenchmarkResult
+
+
 class GuestCommandResult(TypedDict):
     text: str
     wall_ms: float
@@ -174,9 +185,9 @@ def configure_parser(
         ),
         default="boot",
         help=(
-            "benchmark suite to run: e2e measures cold boot and full "
-            "snapshot restore; performance runs the canonical non-Python "
-            "workloads (default: boot)"
+            "benchmark suite to run: e2e measures cold boot, snapshot "
+            "generation, and full snapshot restore; performance runs the "
+            "canonical non-Python workloads (default: boot)"
         ),
     )
     parser.add_argument(
@@ -1540,7 +1551,9 @@ def capture_snapshot(
     *,
     timeout: float,
     windows_cpus: set[int] | None = None,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, int]:
+    if snapshot_path.exists():
+        shutil.rmtree(snapshot_path)
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off,openvmm_entry::vm_controller=info"
     interaction = InteractiveProcess(command, environment)
@@ -1557,6 +1570,7 @@ def capture_snapshot(
     snapshot_requested = False
     snapshot_started_ns = None
     snapshot_published_ns = None
+    peak_bytes = 0
 
     def observe_snapshot_publication() -> None:
         nonlocal snapshot_published_ns
@@ -1569,6 +1583,7 @@ def capture_snapshot(
 
     try:
         while True:
+            peak_bytes = _try_peak_rss(process, peak_bytes)
             observe_snapshot_publication()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1577,6 +1592,7 @@ def capture_snapshot(
                 poll_interval = 0.001 if snapshot_requested else 0.25
                 chunk = chunks.get(timeout=min(remaining, poll_interval))
             except queue.Empty:
+                peak_bytes = _try_peak_rss(process, peak_bytes)
                 observe_snapshot_publication()
                 if process.poll() is not None and snapshot_published_ns is None:
                     raise RuntimeError(
@@ -1587,6 +1603,7 @@ def capture_snapshot(
                 observe_snapshot_publication()
                 break
             output.extend(chunk)
+            peak_bytes = _try_peak_rss(process, peak_bytes)
             if not snapshot_requested and BOOT_MARKER in output:
                 snapshot_started_ns = time.perf_counter_ns()
                 interaction.write_input(b"nvx-snapshot; echo " + RESTORE_MARKER + b"\n")
@@ -1616,6 +1633,7 @@ def capture_snapshot(
             request_to_publication_ms,
             request_to_publication_ms,
             (source_exited_ns - snapshot_published_ns) / 1_000_000,
+            peak_bytes,
         )
     except Exception as error:
         terminate(process)
@@ -1631,6 +1649,7 @@ def summarize_snapshot_samples(
     samples: list[float],
     request_to_publication_samples: list[float],
     post_publication_exit_samples: list[float],
+    peak_rss_samples: list[int],
 ) -> SnapshotCaptureResult:
     return {
         "samples_ms": samples,
@@ -1649,6 +1668,10 @@ def summarize_snapshot_samples(
         ),
         "post_publication_exit_min_ms": min(post_publication_exit_samples),
         "post_publication_exit_max_ms": max(post_publication_exit_samples),
+        "peak_rss_samples_bytes": peak_rss_samples,
+        "peak_rss_p50_bytes": int(statistics.median(peak_rss_samples)),
+        "peak_rss_min_bytes": min(peak_rss_samples),
+        "peak_rss_max_bytes": max(peak_rss_samples),
     }
 
 
@@ -1657,37 +1680,59 @@ def benchmark_snapshot_capture(
     boot_command: Sequence[str],
     *,
     windows_cpus: set[int] | None = None,
+    retained_snapshot_path: Path | None = None,
 ) -> SnapshotCaptureResult:
     samples: list[float] = []
     request_to_publication_samples: list[float] = []
     post_publication_exit_samples: list[float] = []
+    peak_rss_samples: list[int] = []
     for index in range(args.warmups + args.runs):
-        with tempfile.TemporaryDirectory(
-            prefix="openvmm-snapshot-capture-"
-        ) as temp_dir:
-            snapshot_path = Path(temp_dir) / "snapshot"
-            value, request_to_publication, post_publication_exit = capture_snapshot(
-                [*boot_command, "--snapshot-destination", str(snapshot_path)],
-                snapshot_path,
-                timeout=args.timeout,
-                windows_cpus=windows_cpus,
+        retain = (
+            retained_snapshot_path is not None and index == args.warmups + args.runs - 1
+        )
+        with contextlib.ExitStack() as temporary:
+            snapshot_path = (
+                retained_snapshot_path
+                if retain
+                else Path(
+                    temporary.enter_context(
+                        tempfile.TemporaryDirectory(prefix="openvmm-snapshot-capture-")
+                    )
+                )
+                / "snapshot"
+            )
+            assert snapshot_path is not None
+            value, request_to_publication, post_publication_exit, peak_bytes = (
+                capture_snapshot(
+                    [*boot_command, "--snapshot-destination", str(snapshot_path)],
+                    snapshot_path,
+                    timeout=args.timeout,
+                    windows_cpus=windows_cpus,
+                )
             )
         if index < args.warmups:
-            print(f"  warmup {index + 1}/{args.warmups}: {value:.3f} ms", flush=True)
+            print(
+                f"  warmup {index + 1}/{args.warmups}: {value:.3f} ms, "
+                f"peak RSS={bytes_to_mib(peak_bytes):.3f} MiB",
+                flush=True,
+            )
         else:
             samples.append(value)
             request_to_publication_samples.append(request_to_publication)
             post_publication_exit_samples.append(post_publication_exit)
+            peak_rss_samples.append(peak_bytes)
             print(
                 f"  sample {index - args.warmups + 1}/{args.runs}: {value:.3f} ms, "
                 f"request-to-publication={request_to_publication:.3f} ms, "
-                f"post-publication exit={post_publication_exit:.3f} ms",
+                f"post-publication exit={post_publication_exit:.3f} ms, "
+                f"peak RSS={bytes_to_mib(peak_bytes):.3f} MiB",
                 flush=True,
             )
     return summarize_snapshot_samples(
         samples,
         request_to_publication_samples,
         post_publication_exit_samples,
+        peak_rss_samples,
     )
 
 
@@ -1696,7 +1741,9 @@ def print_snapshot_summary(backend: str, result: SnapshotCaptureResult) -> None:
         f"snapshot/{backend}: p50={result['p50_ms']:.3f} ms "
         f"min={result['min_ms']:.3f} ms max={result['max_ms']:.3f} ms "
         f"post-publication-exit-p50="
-        f"{result['post_publication_exit_p50_ms']:.3f} ms",
+        f"{result['post_publication_exit_p50_ms']:.3f} ms "
+        f"peak-rss-p50={bytes_to_mib(result['peak_rss_p50_bytes']):.3f} MiB "
+        f"peak-rss-max={bytes_to_mib(result['peak_rss_max_bytes']):.3f} MiB",
         flush=True,
     )
 
@@ -1732,15 +1779,9 @@ def benchmark_snapshot_restore(
     *,
     command_prefix: Sequence[str] = (),
     windows_cpus: set[int] | None = None,
+    snapshot_path: Path | None = None,
 ) -> BenchmarkResult:
-    with tempfile.TemporaryDirectory(prefix="openvmm-e2e-restore-") as temp_dir:
-        snapshot_path = Path(temp_dir) / "snapshot"
-        capture_snapshot(
-            [*boot_command, "--snapshot-destination", str(snapshot_path)],
-            snapshot_path,
-            timeout=args.timeout,
-            windows_cpus=windows_cpus,
-        )
+    if snapshot_path is not None:
         return benchmark(
             [
                 *command_prefix,
@@ -1757,6 +1798,28 @@ def benchmark_snapshot_restore(
             marker=RESTORE_MARKER,
             windows_cpus=windows_cpus,
             teardown_mode=args.teardown_mode,
+        )
+
+    with tempfile.TemporaryDirectory(prefix="openvmm-e2e-restore-") as temp_dir:
+        generated_snapshot_path = Path(temp_dir) / "snapshot"
+        capture_snapshot(
+            [
+                *boot_command,
+                "--snapshot-destination",
+                str(generated_snapshot_path),
+            ],
+            generated_snapshot_path,
+            timeout=args.timeout,
+            windows_cpus=windows_cpus,
+        )
+        return benchmark_snapshot_restore(
+            args,
+            executable,
+            hypervisor,
+            boot_command,
+            command_prefix=command_prefix,
+            windows_cpus=windows_cpus,
+            snapshot_path=generated_snapshot_path,
         )
 
 
@@ -2151,6 +2214,43 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
     ]
     if args.net is not None:
         append_network_arguments(boot_command, args.net, args.network_profile)
+    if args.suite == "e2e":
+        print("Benchmarking OpenVMM/KVM lifecycle", flush=True)
+        cold_start = benchmark(
+            boot_command,
+            warmups=args.warmups,
+            runs=args.runs,
+            timeout=args.timeout,
+            teardown_mode=args.teardown_mode,
+        )
+        print_summary("kvm", cold_start)
+        with tempfile.TemporaryDirectory(prefix="openvmm-e2e-") as temp_dir:
+            snapshot_path = Path(temp_dir) / "snapshot"
+            snapshot_capture = benchmark_snapshot_capture(
+                args,
+                boot_command,
+                retained_snapshot_path=snapshot_path,
+            )
+            print_snapshot_summary("kvm", snapshot_capture)
+            snapshot_restore = benchmark_snapshot_restore(
+                args,
+                stage / "openvmm",
+                "kvm",
+                boot_command,
+                command_prefix=("taskset", "-c", args.cpus),
+                snapshot_path=snapshot_path,
+            )
+        print_summary("snapshot-restore/kvm", snapshot_restore)
+        e2e_result: KvmE2EResult = {
+            "cold_start": cold_start,
+            "snapshot_capture": snapshot_capture,
+            "snapshot_restore": snapshot_restore,
+        }
+        print(
+            KVM_E2E_RESULT_PREFIX + json.dumps(e2e_result, separators=(",", ":")),
+            flush=True,
+        )
+        return 0
     if args.suite == "snapshot":
         print("Benchmarking OpenVMM/KVM snapshot capture", flush=True)
         result = benchmark_snapshot_capture(args, boot_command)
@@ -2212,7 +2312,11 @@ def result_document(
                 "restored OpenVMM process launch through restored guest marker; "
                 "teardown excluded and recorded separately"
             ),
-            "peak_rss_scope": "OpenVMM process launch through guest marker",
+            "peak_rss_scope": (
+                "per-process high-water mark; cold and restore samples end at "
+                "their guest marker, snapshot generation ends when the source "
+                "OpenVMM process exits after publishing the snapshot"
+            ),
             "snapshot_capture_scope": (
                 "guest nvx-snapshot command dispatch through first host "
                 "observation of atomic snapshot publication"
@@ -2264,7 +2368,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
     openvmm_dir = args.openvmm_dir.resolve()
     require_file(openvmm_dir / "Cargo.toml", "OpenVMM Cargo.toml")
     run_boot = args.suite in ("boot", "e2e", "all")
-    run_snapshot = args.suite in ("snapshot", "all")
+    run_snapshot = args.suite in ("snapshot", "e2e", "all")
     run_restore = args.suite in ("restore", "e2e", "all")
     run_phase2 = args.suite in ("phase2", "all")
     run_workloads = args.suite in WORKLOAD_SUITES
@@ -2370,20 +2474,36 @@ def run_native_linux(args: argparse.Namespace) -> int:
             )
             results["backends"][backend] = result
             print_summary(backend, result)
-        if run_snapshot:
-            result = benchmark_snapshot_capture(args, boot_command)
-            results["snapshot_capture"][backend] = result
-            print_snapshot_summary(backend, result)
-        if run_restore:
-            result = benchmark_snapshot_restore(
-                args,
-                executable,
-                backend,
-                boot_command,
-                command_prefix=prefix,
+        with contextlib.ExitStack() as snapshots:
+            retained_snapshot_path = (
+                Path(
+                    snapshots.enter_context(
+                        tempfile.TemporaryDirectory(prefix="openvmm-e2e-")
+                    )
+                )
+                / "snapshot"
+                if args.suite == "e2e"
+                else None
             )
-            results["snapshot_restore"][backend] = result
-            print_summary(f"snapshot-restore/{backend}", result)
+            if run_snapshot:
+                result = benchmark_snapshot_capture(
+                    args,
+                    boot_command,
+                    retained_snapshot_path=retained_snapshot_path,
+                )
+                results["snapshot_capture"][backend] = result
+                print_snapshot_summary(backend, result)
+            if run_restore:
+                result = benchmark_snapshot_restore(
+                    args,
+                    executable,
+                    backend,
+                    boot_command,
+                    command_prefix=prefix,
+                    snapshot_path=retained_snapshot_path,
+                )
+                results["snapshot_restore"][backend] = result
+                print_summary(f"snapshot-restore/{backend}", result)
     if run_phase2:
         assert phase2_executable is not None
         result = run_phase2_benchmark(
@@ -2457,6 +2577,62 @@ def benchmark_kvm(
                     json.loads(line.removeprefix(KVM_RESULT_PREFIX)),
                 )
         raise RuntimeError("KVM worker did not emit a result")
+    except subprocess.CalledProcessError as error:
+        if error.stdout:
+            print(error.stdout, end="", file=sys.stderr)
+        if error.stderr:
+            print(error.stderr, end="", file=sys.stderr)
+        raise
+    finally:
+        if not args.keep_kvm_stage:
+            cleanup_kvm(stage_dir)
+
+
+def benchmark_e2e_kvm(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+) -> KvmE2EResult:
+    stage_dir = "/tmp/openvmm-microvm-benchmark"
+    stage_kvm(executable, kernel, initrd, stage_dir)
+    script_wsl = windows_to_wsl(NVX_SCRIPT)
+    command = [
+        "wsl.exe",
+        "--exec",
+        "python3",
+        script_wsl,
+        "benchmark",
+        "--_kvm-worker",
+        "--_stage-dir",
+        stage_dir,
+        "--suite",
+        "e2e",
+        "--warmups",
+        str(args.warmups),
+        "--runs",
+        str(args.runs),
+        "--memory-mib",
+        str(args.memory_mib),
+        "--cpus",
+        args.cpus,
+        "--timeout",
+        str(args.timeout),
+        "--teardown-mode",
+        args.teardown_mode,
+    ]
+    if args.net is not None:
+        command.extend(("--net", args.net))
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        print(completed.stdout, end="")
+        for line in completed.stdout.splitlines():
+            if line.startswith(KVM_E2E_RESULT_PREFIX):
+                return cast(
+                    KvmE2EResult,
+                    json.loads(line.removeprefix(KVM_E2E_RESULT_PREFIX)),
+                )
+        raise RuntimeError("KVM e2e worker did not emit a result")
     except subprocess.CalledProcessError as error:
         if error.stdout:
             print(error.stdout, end="", file=sys.stderr)
@@ -2591,7 +2767,7 @@ def run(args: argparse.Namespace) -> int:
     openvmm_dir = args.openvmm_dir.resolve()
     require_file(openvmm_dir / "Cargo.toml", "OpenVMM Cargo.toml")
     run_boot = args.suite in ("boot", "e2e", "all")
-    run_snapshot = args.suite in ("snapshot", "all")
+    run_snapshot = args.suite in ("snapshot", "e2e", "all")
     run_restore = args.suite in ("restore", "e2e", "all")
     run_phase2 = args.suite in ("phase2", "all")
     run_workloads = args.suite in WORKLOAD_SUITES
@@ -2672,6 +2848,15 @@ def run(args: argparse.Namespace) -> int:
         )
 
     results = result_document(args, kernel, initrd)
+    kvm_e2e = None
+    if args.suite == "e2e" and "kvm" in selected:
+        assert kernel is not None and initrd is not None
+        kvm_e2e = benchmark_e2e_kvm(
+            args,
+            boot_binaries["kvm"],
+            kernel,
+            initrd,
+        )
 
     backends = results["backends"]
     assert isinstance(backends, dict)
@@ -2697,70 +2882,95 @@ def run(args: argparse.Namespace) -> int:
 
     if run_boot and "kvm" in selected:
         assert kernel is not None and initrd is not None
-        backends["kvm"] = benchmark_kvm(
-            args,
-            boot_binaries["kvm"],
-            kernel,
-            initrd,
+        backends["kvm"] = (
+            kvm_e2e["cold_start"]
+            if kvm_e2e is not None
+            else benchmark_kvm(
+                args,
+                boot_binaries["kvm"],
+                kernel,
+                initrd,
+            )
         )
 
     snapshot_capture_results = results["snapshot_capture"]
     assert isinstance(snapshot_capture_results, dict)
-    if run_snapshot and "whp" in selected:
-        assert kernel is not None and initrd is not None
-        print("Benchmarking OpenVMM/WHP snapshot capture", flush=True)
-        whp_snapshot = benchmark_snapshot_capture(
-            args,
-            whp_command(
-                boot_binaries["whp"],
-                kernel,
-                initrd,
-                args.memory_mib,
-                args.net,
-            ),
-            windows_cpus=cpus,
-        )
-        snapshot_capture_results["whp"] = whp_snapshot
-        print_snapshot_summary("whp", whp_snapshot)
-
-    if run_snapshot and "kvm" in selected:
-        assert kernel is not None and initrd is not None
-        snapshot_capture_results["kvm"] = benchmark_snapshot_kvm(
-            args,
-            boot_binaries["kvm"],
-            kernel,
-            initrd,
-        )
-
     snapshot_restore_results = results["snapshot_restore"]
     assert isinstance(snapshot_restore_results, dict)
-    if run_restore and "whp" in selected:
-        assert kernel is not None and initrd is not None
-        print("Benchmarking OpenVMM/WHP E2E snapshot restore", flush=True)
-        whp_restore = benchmark_snapshot_restore(
-            args,
-            boot_binaries["whp"],
-            "whp",
-            whp_command(
-                boot_binaries["whp"],
-                kernel,
-                initrd,
-                args.memory_mib,
-                args.net,
-            ),
-            windows_cpus=cpus,
+    with contextlib.ExitStack() as snapshots:
+        retained_whp_snapshot = (
+            Path(
+                snapshots.enter_context(
+                    tempfile.TemporaryDirectory(prefix="openvmm-e2e-")
+                )
+            )
+            / "snapshot"
+            if args.suite == "e2e" and "whp" in selected
+            else None
         )
-        snapshot_restore_results["whp"] = whp_restore
-        print_summary("snapshot-restore/whp", whp_restore)
+        if run_snapshot and "whp" in selected:
+            assert kernel is not None and initrd is not None
+            print("Benchmarking OpenVMM/WHP snapshot capture", flush=True)
+            whp_snapshot = benchmark_snapshot_capture(
+                args,
+                whp_command(
+                    boot_binaries["whp"],
+                    kernel,
+                    initrd,
+                    args.memory_mib,
+                    args.net,
+                ),
+                windows_cpus=cpus,
+                retained_snapshot_path=retained_whp_snapshot,
+            )
+            snapshot_capture_results["whp"] = whp_snapshot
+            print_snapshot_summary("whp", whp_snapshot)
 
-    if run_restore and "kvm" in selected:
-        assert kernel is not None and initrd is not None
-        snapshot_restore_results["kvm"] = benchmark_snapshot_restore_kvm(
-            args,
-            boot_binaries["kvm"],
-            kernel,
-            initrd,
-        )
+        if run_snapshot and "kvm" in selected:
+            assert kernel is not None and initrd is not None
+            snapshot_capture_results["kvm"] = (
+                kvm_e2e["snapshot_capture"]
+                if kvm_e2e is not None
+                else benchmark_snapshot_kvm(
+                    args,
+                    boot_binaries["kvm"],
+                    kernel,
+                    initrd,
+                )
+            )
+
+        if run_restore and "whp" in selected:
+            assert kernel is not None and initrd is not None
+            print("Benchmarking OpenVMM/WHP E2E snapshot restore", flush=True)
+            whp_restore = benchmark_snapshot_restore(
+                args,
+                boot_binaries["whp"],
+                "whp",
+                whp_command(
+                    boot_binaries["whp"],
+                    kernel,
+                    initrd,
+                    args.memory_mib,
+                    args.net,
+                ),
+                windows_cpus=cpus,
+                snapshot_path=retained_whp_snapshot,
+            )
+            snapshot_restore_results["whp"] = whp_restore
+            print_summary("snapshot-restore/whp", whp_restore)
+
+        if run_restore and "kvm" in selected:
+            assert kernel is not None and initrd is not None
+            snapshot_restore_results["kvm"] = (
+                kvm_e2e["snapshot_restore"]
+                if kvm_e2e is not None
+                else benchmark_snapshot_restore_kvm(
+                    args,
+                    boot_binaries["kvm"],
+                    kernel,
+                    initrd,
+                )
+            )
 
     phase2_results = results["phase2"]
     assert isinstance(phase2_results, dict)

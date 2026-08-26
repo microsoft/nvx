@@ -13,6 +13,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from typing import cast
 from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -407,6 +408,198 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.SNAPSHOT_FILENAMES,
             ("manifest.bin", "state.bin", "memory.bin"),
         )
+
+    def test_snapshot_capture_excludes_warmup_and_retains_last_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            retained = Path(temporary) / "retained"
+            observed_paths: list[Path] = []
+
+            def capture(
+                _command: object,
+                snapshot_path: Path,
+                **_kwargs: object,
+            ) -> tuple[float, float, float, int]:
+                snapshot_path.mkdir()
+                observed_paths.append(snapshot_path)
+                sample = float(len(observed_paths))
+                return sample, sample, sample / 10, len(observed_paths) * 1024
+
+            args = argparse.Namespace(warmups=1, runs=2, timeout=1.0)
+            with patch.object(benchmark, "capture_snapshot", side_effect=capture):
+                result = benchmark.benchmark_snapshot_capture(
+                    args,
+                    ["openvmm"],
+                    retained_snapshot_path=retained,
+                )
+
+            self.assertEqual(result["samples_ms"], [2.0, 3.0])
+            self.assertEqual(result["peak_rss_samples_bytes"], [2048, 3072])
+            self.assertEqual(result["peak_rss_p50_bytes"], 2560)
+            self.assertEqual(result["peak_rss_max_bytes"], 3072)
+            self.assertEqual(observed_paths[-1], retained)
+            self.assertTrue(retained.is_dir())
+
+    def test_snapshot_restore_reuses_provided_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "snapshot"
+            snapshot.mkdir()
+            args = argparse.Namespace(
+                warmups=1,
+                runs=2,
+                timeout=3.0,
+                teardown_mode="guest-exit",
+            )
+            expected = {"p50_ms": 1.0}
+            with (
+                patch.object(benchmark, "capture_snapshot") as capture,
+                patch.object(benchmark, "benchmark", return_value=expected) as run,
+            ):
+                result = benchmark.benchmark_snapshot_restore(
+                    args,
+                    Path("openvmm"),
+                    "whp",
+                    ["openvmm", "--kernel", "vmlinux"],
+                    snapshot_path=snapshot,
+                )
+
+            self.assertIs(result, expected)
+            capture.assert_not_called()
+            self.assertIn(str(snapshot), run.call_args.args[0])
+            self.assertEqual(run.call_args.kwargs["marker"], benchmark.RESTORE_MARKER)
+            self.assertEqual(run.call_args.kwargs["teardown_mode"], "guest-exit")
+
+    def test_native_e2e_measures_and_reuses_snapshot_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            openvmm = root / "openvmm"
+            executable = openvmm / "target" / "release" / "openvmm"
+            build_dir = root / "build"
+            executable.parent.mkdir(parents=True)
+            build_dir.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            executable.touch()
+            (build_dir / "vmlinux").touch()
+            (build_dir / "initramfs.cpio.gz").touch()
+            output = root / "e2e.json"
+            args = nvx.parse_args(
+                [
+                    "benchmark",
+                    "--suite",
+                    "e2e",
+                    "--backend",
+                    "kvm",
+                    "--openvmm-dir",
+                    str(openvmm),
+                    "--nvx-dir",
+                    str(root),
+                    "--cpus",
+                    "0",
+                    "--warmups",
+                    "1",
+                    "--runs",
+                    "1",
+                    "--skip-build",
+                    "--output",
+                    str(output),
+                ]
+            )
+            run_result: benchmark.BenchmarkResult = {
+                "samples_ms": [10.0],
+                "p50_ms": 10.0,
+                "min_ms": 10.0,
+                "max_ms": 10.0,
+                "wall_samples_ms": [12.0],
+                "wall_p50_ms": 12.0,
+                "wall_min_ms": 12.0,
+                "wall_max_ms": 12.0,
+                "peak_rss_samples_bytes": [1024],
+                "peak_rss_p50_bytes": 1024,
+                "peak_rss_min_bytes": 1024,
+                "peak_rss_max_bytes": 1024,
+                "teardown_samples_ms": [2.0],
+                "teardown_completed_samples_ms": [2.0],
+                "teardown_timeout_count": 0,
+                "teardown_timeout_seconds": 5.0,
+                "teardown_p50_ms": 2.0,
+                "teardown_min_ms": 2.0,
+                "teardown_max_ms": 2.0,
+            }
+            capture_result: benchmark.SnapshotCaptureResult = {
+                "samples_ms": [3.0],
+                "p50_ms": 3.0,
+                "min_ms": 3.0,
+                "max_ms": 3.0,
+                "request_to_publication_samples_ms": [3.0],
+                "request_to_publication_p50_ms": 3.0,
+                "request_to_publication_min_ms": 3.0,
+                "request_to_publication_max_ms": 3.0,
+                "post_publication_exit_samples_ms": [1.0],
+                "post_publication_exit_p50_ms": 1.0,
+                "post_publication_exit_min_ms": 1.0,
+                "post_publication_exit_max_ms": 1.0,
+                "peak_rss_samples_bytes": [2048],
+                "peak_rss_p50_bytes": 2048,
+                "peak_rss_min_bytes": 2048,
+                "peak_rss_max_bytes": 2048,
+            }
+            with (
+                patch.object(benchmark, "benchmark", return_value=run_result),
+                patch.object(
+                    benchmark,
+                    "benchmark_snapshot_capture",
+                    return_value=capture_result,
+                ) as capture,
+                patch.object(
+                    benchmark,
+                    "benchmark_snapshot_restore",
+                    return_value=run_result,
+                ) as restore,
+            ):
+                self.assertEqual(benchmark.run_native_linux(args), 0)
+
+            retained = capture.call_args.kwargs["retained_snapshot_path"]
+            self.assertIsInstance(retained, Path)
+            self.assertEqual(restore.call_args.kwargs["snapshot_path"], retained)
+            document = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                document["snapshot_capture"]["kvm"]["peak_rss_p50_bytes"],
+                2048,
+            )
+
+    def test_kvm_worker_e2e_restores_the_measured_snapshot(self):
+        args = argparse.Namespace(
+            _stage_dir="/tmp/stage",
+            cpus="0",
+            memory_mib=128,
+            net=None,
+            suite="e2e",
+            warmups=1,
+            runs=1,
+            timeout=1.0,
+            teardown_mode="guest-exit",
+        )
+        run_result = cast(benchmark.BenchmarkResult, {"p50_ms": 10.0})
+        capture_result = cast(benchmark.SnapshotCaptureResult, {"p50_ms": 3.0})
+        with (
+            patch.object(benchmark, "benchmark", return_value=run_result),
+            patch.object(
+                benchmark,
+                "benchmark_snapshot_capture",
+                return_value=capture_result,
+            ) as capture,
+            patch.object(
+                benchmark,
+                "benchmark_snapshot_restore",
+                return_value=run_result,
+            ) as restore,
+            patch.object(benchmark, "print_summary"),
+            patch.object(benchmark, "print_snapshot_summary"),
+        ):
+            self.assertEqual(benchmark.run_kvm_worker(args), 0)
+
+        retained = capture.call_args.kwargs["retained_snapshot_path"]
+        self.assertIsInstance(retained, Path)
+        self.assertEqual(restore.call_args.kwargs["snapshot_path"], retained)
 
     def test_virtfs_honors_host_termination_mode(self):
         guest_exit = benchmark._virtfs_script(1, "guest-exit")

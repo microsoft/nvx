@@ -1,17 +1,19 @@
 # Benchmark
 
-The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites plus the
-23-metric non-Python performance suite used by CI on Linux/KVM, Linux/MSHV, and Windows/WHP. CI
-reports the median (p50) for each metric in the job summary. Latency metrics are lower-is-better;
-throughput metrics are higher-is-better.
+The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites plus a
+23-metric non-Python workload suite on Linux/KVM, Linux/MSHV, and Windows/WHP. CI combines those
+metrics with eight 128 MiB shell lifecycle metrics and reports all 31 median (p50) values in the
+job summary. Latency and resident-memory metrics are lower-is-better; throughput metrics are
+higher-is-better.
 
 The suite uses the base Alpine guest. Python application snapshots, the Python-agent console
 workload, and its snapshot-prefetch experiment are intentionally excluded because the supported
 guest build does not include a Python initramfs.
 
-Raw benchmark logs also report peak resident set size (RSS) for the measured OpenVMM process.
-Linux reads the process high-water mark; Windows reads the cumulative peak working set. RSS
-includes resident guest-memory mappings and is diagnostic rather than regression-gated.
+Lifecycle results report peak resident set size (RSS) for the measured OpenVMM process. Linux
+reads the process high-water mark; Windows reads the cumulative peak working set. RSS includes
+resident guest-memory mappings. CI persists and gates p50 RSS and reports both p50 and maximum RSS
+in its lifecycle diagnostics.
 
 Use this page for metric names and methodology. Current historical p50 values live in
 `data/`; timings copied into old discussions or commit messages are
@@ -26,7 +28,7 @@ Run the acceptance and diagnostic suites with:
 
 ```console
 python3 scripts/nvx.py benchmark --suite boot --backend whp
-python3 scripts/nvx.py benchmark --suite e2e --backend kvm
+python3 scripts/nvx.py benchmark --suite e2e --backend kvm --memory-mib 128 --output data/runs/linux-kvm/acceptance.json
 ```
 
 Run the complete performance suite with:
@@ -54,13 +56,14 @@ MSHV, and WHP. They do not create TAP devices or require host firewall rules.
 Collect a completed suite with:
 
 ```console
-python3 scripts/nvx.py performance collect --platform linux-kvm --commit HEAD --input-dir data/runs/linux-kvm --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite
+python3 scripts/nvx.py performance collect --platform linux-kvm --commit HEAD --input-dir data/runs/linux-kvm --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm/acceptance.json
 ```
 
 ## Benchmark commands
 
 | Benchmark | Command | Description |
 | --- | --- | --- |
+| Shell lifecycle | `benchmark --suite e2e` | Measures cold start, snapshot generation, snapshot restore, teardown, and peak RSS using a shell-ready guest. |
 | All supported non-Python workloads | `benchmark --suite performance` | Runs 23 metrics and writes collector-compatible logs. |
 | Cold start | `benchmark --suite cold-start` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
@@ -81,6 +84,8 @@ replace `console=hvc0` with `console=hvc1` when a virtio console is selected.
 
 | Benchmark | Phase | Kernel command line |
 | --- | --- | --- |
+| Shell lifecycle | cold/capture | `BASE` plus the combined `BASE_TUNING` parameters; CI uses 128 MiB. |
+| Shell lifecycle | restore | restore (from the measured shell-ready snapshot) |
 | Cold start | baseline | `QUIET` |
 | Cold start | tuning variant | `QUIET` plus one of `clocksource=<backend>`, `tsc=reliable`, `no_timer_check`, `random.trust_cpu=on`, `rcupdate.rcu_expedited=1`, `nokaslr`, `mitigations=off`, or `cryptomgr.notests` |
 | Virtual file system | guest runs | `QUIET` |
@@ -92,6 +97,27 @@ replace `console=hvc0` with `console=hvc1` when a virtio console is selected.
 | Network snapshot | restore | restore (from snapshot) |
 
 ## Canonical metrics
+
+### Shell lifecycle
+
+CI runs one warmup and three measured samples with a 128 MiB guest. Each phase uses a fresh
+OpenVMM process. The final measured snapshot is retained for the restore samples.
+
+| Metric | Unit | Description |
+| --- | --- | --- |
+| `openvmm_cold_start` | ms | Immediately before OpenVMM process creation through `ALPINE-MICROVM-BOOT-OK`. |
+| `openvmm_snapshot_generation` | ms | Immediately before dispatching guest `nvx-snapshot` through the first host observation of the atomically published snapshot directory. |
+| `openvmm_snapshot_restore` | ms | Immediately before restored OpenVMM process creation through `OPENVMM-SNAPSHOT-RESTORE-OK`. |
+| `openvmm_cold_start_guest_exit_teardown` | ms | Dispatch of guest `nvx-exit 0` after the cold-start marker through successful OpenVMM process exit. |
+| `openvmm_snapshot_restore_guest_exit_teardown` | ms | Dispatch of guest `nvx-exit 0` after the restore marker through successful OpenVMM process exit. |
+| `openvmm_cold_start_peak_rss` | MiB | Per-process peak RSS through the cold-start marker. |
+| `openvmm_snapshot_generation_peak_rss` | MiB | Per-process peak RSS for the snapshot-generating process. |
+| `openvmm_snapshot_restore_peak_rss` | MiB | Per-process peak RSS through the restore marker. |
+
+Warmups are excluded from every aggregate. The CSV stores and gates p50 values. Lifecycle
+diagnostics additionally report timing minimum, maximum, and sample count plus peak-RSS maximum.
+Collection rejects host-termination semantics, missing samples, and any guest-exit teardown
+timeout.
 
 ### Cold start
 
@@ -153,15 +179,29 @@ successful packets.
 
 ## CI collection
 
-`python scripts/nvx.py performance collect --require-shared-suite` rejects a backend result
-unless it contains exactly the 23 shared metrics. Each backend job publishes its p50 table to
-`$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
-latest base-branch history.
+`python scripts/nvx.py performance collect --require-shared-suite` rejects a workload result
+unless it contains exactly the 23 shared metrics. Supplying `--lifecycle-input` requires and merges
+the eight lifecycle metrics, producing the 31-metric result used by CI. Each backend job publishes
+its p50 table and lifecycle diagnostics to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks
+compare KVM, MSHV, and WHP results with the latest base-branch history.
 
 The current workflow uses the latest 10 p50 samples on the pull request's base branch. A metric
 regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be
 more than 10 ms slower; higher-is-better metrics use the percentage comparison alone. A missing
 history is a warmup, not a failure. Successful `dev` builds append collected results to `data/`.
+
+## Lifecycle methodology
+
+The lifecycle benchmark uses the optimized 128 MiB shell-ready guest as one baseline across KVM,
+MSHV, and WHP. Host timing starts immediately before `Popen`, so cold-start and restore values
+include OpenVMM process startup and VM construction. Snapshot-generation timing starts immediately
+before the host writes `nvx-snapshot` to the guest shell and ends when the host first observes the
+atomically published snapshot directory; publication is polled every 1 ms after dispatch.
+
+After the cold-start and restore markers, the host dispatches guest `nvx-exit 0` and measures until
+the OpenVMM process exits successfully. CI requires this guest-exit path on every backend and
+rejects any measured teardown timeout. Snapshot-source exit after publication is retained in the
+raw JSON as a diagnostic but is not the guest-exit teardown metric.
 
 ## Cold-start methodology
 

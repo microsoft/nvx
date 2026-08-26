@@ -54,7 +54,8 @@ runs:
           --output-dir data/results \
           --require-network \
           --require-shell-snapshot \
-          --require-shared-suite
+          --require-shared-suite \
+          --lifecycle-input data/runs/linux-kvm/acceptance.json
         python3 scripts/nvx.py performance collect \
           --platform linux-mshv \
           --commit "${GITHUB_SHA}" \
@@ -62,7 +63,8 @@ runs:
           --output-dir data/results \
           --require-network \
           --require-shell-snapshot \
-          --require-shared-suite
+          --require-shared-suite \
+          --lifecycle-input data/runs/linux-mshv/acceptance.json
         python3 scripts/nvx.py performance collect \
           --platform windows-whp \
           --commit "${GITHUB_SHA}" \
@@ -70,4 +72,5 @@ runs:
           --output-dir data/results \
           --require-network \
           --require-shell-snapshot \
-          --require-shared-suite
+          --require-shared-suite \
+          --lifecycle-input data/runs/windows-whp/acceptance.json

@@ -161,6 +161,7 @@ runs:
         --require-network
         --require-shell-snapshot
         --require-shared-suite
+        --lifecycle-input "data/runs/${{ inputs.platform }}/acceptance.json"
         --summary "${GITHUB_STEP_SUMMARY}"
 
     - name: Publish Windows performance results
@@ -175,6 +176,7 @@ runs:
         --require-network
         --require-shell-snapshot
         --require-shared-suite
+        --lifecycle-input "data/runs/${{ inputs.platform }}/acceptance.json"
         --summary $env:GITHUB_STEP_SUMMARY
 
     - name: Save benchmark results

@@ -314,7 +314,7 @@ jobs:
             release-platform: linux-mshv
             build-target: x86_64-unknown-linux-musl
             build-mode: musl
-            teardown-mode: host-terminate
+            teardown-mode: guest-exit
             cache-compression: gzip
           - name: Windows / WHP
             runner: '["self-hosted", "windows", "whp", "baremetal"]'

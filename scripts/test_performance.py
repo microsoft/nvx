@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
@@ -70,23 +71,106 @@ SHELL_SNAPSHOT_LOG = """
 """
 
 
+def lifecycle_document(
+    backend: str = "kvm",
+    *,
+    teardown_mode: str = "guest-exit",
+    teardown_timeout_count: int = 0,
+) -> dict[str, object]:
+    mib = 1024 * 1024
+    return {
+        "controls": {
+            "suite": "e2e",
+            "runs": 3,
+            "memory_mib": 128,
+            "teardown_mode": teardown_mode,
+            "marker": "ALPINE-MICROVM-BOOT-OK",
+            "restore_marker": "OPENVMM-SNAPSHOT-RESTORE-OK",
+        },
+        "backends": {
+            backend: {
+                "samples_ms": [190.0, 200.5, 210.0],
+                "p50_ms": 200.5,
+                "min_ms": 190.0,
+                "max_ms": 210.0,
+                "peak_rss_samples_bytes": [60 * mib, 64 * mib, 70 * mib],
+                "peak_rss_p50_bytes": 64 * mib,
+                "peak_rss_min_bytes": 60 * mib,
+                "peak_rss_max_bytes": 70 * mib,
+                "teardown_completed_samples_ms": [24.0, 25.25, 27.0],
+                "teardown_timeout_count": teardown_timeout_count,
+                "teardown_p50_ms": 25.25,
+                "teardown_min_ms": 24.0,
+                "teardown_max_ms": 27.0,
+            }
+        },
+        "snapshot_capture": {
+            backend: {
+                "samples_ms": [30.0, 31.0, 32.0],
+                "p50_ms": 31.0,
+                "min_ms": 30.0,
+                "max_ms": 32.0,
+                "request_to_publication_samples_ms": [30.0, 31.0, 32.0],
+                "request_to_publication_p50_ms": 31.0,
+                "request_to_publication_min_ms": 30.0,
+                "request_to_publication_max_ms": 32.0,
+                "post_publication_exit_samples_ms": [1.0, 1.1, 1.2],
+                "post_publication_exit_p50_ms": 1.1,
+                "post_publication_exit_min_ms": 1.0,
+                "post_publication_exit_max_ms": 1.2,
+                "peak_rss_samples_bytes": [70 * mib, 72 * mib, 75 * mib],
+                "peak_rss_p50_bytes": 72 * mib,
+                "peak_rss_min_bytes": 70 * mib,
+                "peak_rss_max_bytes": 75 * mib,
+            }
+        },
+        "snapshot_restore": {
+            backend: {
+                "samples_ms": [19.0, 20.25, 21.0],
+                "p50_ms": 20.25,
+                "min_ms": 19.0,
+                "max_ms": 21.0,
+                "peak_rss_samples_bytes": [30 * mib, 32 * mib, 34 * mib],
+                "peak_rss_p50_bytes": 32 * mib,
+                "peak_rss_min_bytes": 30 * mib,
+                "peak_rss_max_bytes": 34 * mib,
+                "teardown_completed_samples_ms": [5.0, 5.5, 6.0],
+                "teardown_timeout_count": teardown_timeout_count,
+                "teardown_p50_ms": 5.5,
+                "teardown_min_ms": 5.0,
+                "teardown_max_ms": 6.0,
+            }
+        },
+    }
+
+
 class PerformanceTests(unittest.TestCase):
+    def test_collect_cli_accepts_lifecycle_input(self):
+        args = nvx.parse_args(
+            [
+                "performance",
+                "collect",
+                "--platform",
+                "linux-kvm",
+                "--commit",
+                "abc123",
+                "--input-dir",
+                "logs",
+                "--output-dir",
+                "results",
+                "--lifecycle-input",
+                "acceptance.json",
+            ]
+        )
+
+        self.assertEqual(args.lifecycle_input, Path("acceptance.json"))
+
     def test_collects_openvmm_mshv_json(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "linux-mshv.json"
             source.write_text(
-                json.dumps(
-                    {
-                        "controls": {"suite": "e2e"},
-                        "backends": {
-                            "mshv": {"p50_ms": 150.0, "teardown_p50_ms": 20.0}
-                        },
-                        "snapshot_restore": {
-                            "mshv": {"p50_ms": 15.0, "teardown_p50_ms": 4.0}
-                        },
-                    }
-                ),
+                json.dumps(lifecycle_document("mshv")),
                 encoding="utf-8",
             )
 
@@ -99,12 +183,16 @@ class PerformanceTests(unittest.TestCase):
                 [result.metric for result in results],
                 [
                     "openvmm_cold_start",
+                    "openvmm_cold_start_guest_exit_teardown",
+                    "openvmm_cold_start_peak_rss",
+                    "openvmm_snapshot_generation",
+                    "openvmm_snapshot_generation_peak_rss",
                     "openvmm_snapshot_restore",
-                    "openvmm_cold_start_teardown",
-                    "openvmm_snapshot_restore_teardown",
+                    "openvmm_snapshot_restore_guest_exit_teardown",
+                    "openvmm_snapshot_restore_peak_rss",
                 ],
             )
-            self.assertEqual(results[0].p50, 150.0)
+            self.assertEqual(results[0].p50, 200.5)
 
     def test_collects_openvmm_json_and_appends_diagnostics(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -112,25 +200,7 @@ class PerformanceTests(unittest.TestCase):
             source = root / "linux-kvm.json"
             summary = root / "summary.md"
             source.write_text(
-                json.dumps(
-                    {
-                        "controls": {"suite": "e2e"},
-                        "backends": {
-                            "kvm": {
-                                "p50_ms": 200.5,
-                                "peak_rss_p50_bytes": 64 * 1024 * 1024,
-                                "teardown_p50_ms": 25.25,
-                            }
-                        },
-                        "snapshot_restore": {
-                            "kvm": {
-                                "p50_ms": 20.25,
-                                "peak_rss_p50_bytes": 32 * 1024 * 1024,
-                                "teardown_p50_ms": 5.5,
-                            }
-                        },
-                    }
-                ),
+                json.dumps(lifecycle_document()),
                 encoding="utf-8",
             )
 
@@ -139,35 +209,40 @@ class PerformanceTests(unittest.TestCase):
             )
 
             results = performance.read_results(result_path)
-            self.assertEqual(
-                [result.metric for result in results],
-                [
-                    "openvmm_cold_start",
-                    "openvmm_snapshot_restore",
-                    "openvmm_cold_start_teardown",
-                    "openvmm_snapshot_restore_teardown",
-                ],
-            )
+            self.assertEqual(len(results), 8)
             self.assertEqual(results[0].p50, 200.5)
             self.assertTrue(all(result.direction == "lower" for result in results))
+            by_metric = {result.metric: result for result in results}
+            self.assertEqual(
+                by_metric["openvmm_snapshot_generation_peak_rss"].unit,
+                "MiB",
+            )
+            self.assertEqual(
+                by_metric["openvmm_snapshot_generation_peak_rss"].p50,
+                72.0,
+            )
             markdown = summary.read_text(encoding="utf-8")
             self.assertIn("## Linux / KVM benchmark results", markdown)
             self.assertIn("| `openvmm_snapshot_restore` | 20.25 ms |", markdown)
-            self.assertIn("## Linux / KVM benchmark diagnostics", markdown)
-            self.assertIn("| Cold-start peak RSS p50 | 64.00 MiB |", markdown)
+            self.assertIn("## Linux / KVM lifecycle diagnostics", markdown)
+            self.assertIn(
+                "| Snapshot generation | 31.00 ms | 30.00 ms | 32.00 ms | 3 |",
+                markdown,
+            )
+            self.assertIn("| Cold start | 64.00 MiB | 70.00 MiB |", markdown)
+            self.assertIn(
+                "| Snapshot generation | 72.00 MiB | 75.00 MiB |",
+                markdown,
+            )
             self.assertIn("| Snapshot-restore speedup | 9.90x |", markdown)
 
     def test_openvmm_json_requires_the_platform_backend(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "windows-whp.json"
+            document = lifecycle_document("whp")
+            document["backends"] = {}
             source.write_text(
-                json.dumps(
-                    {
-                        "controls": {"suite": "e2e"},
-                        "backends": {},
-                        "snapshot_restore": {},
-                    }
-                ),
+                json.dumps(document),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(
@@ -179,6 +254,54 @@ class PerformanceTests(unittest.TestCase):
                     "abc123",
                     source,
                     Path(temporary) / "results",
+                )
+
+    def test_openvmm_json_requires_guest_exit_without_timeouts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "linux-mshv.json"
+            source.write_text(
+                json.dumps(lifecycle_document("mshv", teardown_mode="host-terminate")),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"must use guest-exit teardown",
+            ):
+                performance.collect_openvmm_results(
+                    "linux-mshv", "abc123", source, root / "results"
+                )
+
+            source.write_text(
+                json.dumps(lifecycle_document("mshv", teardown_timeout_count=1)),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"guest-exit teardown timeout",
+            ):
+                performance.collect_openvmm_results(
+                    "linux-mshv", "abc123", source, root / "results"
+                )
+
+    def test_openvmm_json_rejects_aggregates_that_do_not_match_samples(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "linux-kvm.json"
+            document = lifecycle_document()
+            backends = cast(dict[str, object], document["backends"])
+            kvm = cast(dict[str, object], backends["kvm"])
+            kvm["p50_ms"] = 1.0
+            kvm["min_ms"] = 1.0
+            kvm["max_ms"] = 1.0
+            source.write_text(json.dumps(document), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"inconsistent statistics.*calculated",
+            ):
+                performance.collect_openvmm_results(
+                    "linux-kvm", "abc123", source, root / "results"
                 )
 
     def test_collect_appends_ci_benchmark_table(self):
@@ -238,6 +361,11 @@ class PerformanceTests(unittest.TestCase):
             (logs / "shell-snapshot.log").write_text(
                 SHELL_SNAPSHOT_LOG, encoding="utf-8"
             )
+            lifecycle = root / "acceptance.json"
+            lifecycle.write_text(
+                json.dumps(lifecycle_document()),
+                encoding="utf-8",
+            )
 
             result_path = performance.collect_results(
                 "linux-kvm",
@@ -248,10 +376,11 @@ class PerformanceTests(unittest.TestCase):
                 require_shell_snapshot=True,
                 require_shared_suite=True,
                 summary_path=root / "summary.md",
+                lifecycle_input=lifecycle,
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 23)
+            self.assertEqual(len(results), 31)
             by_metric = {result.metric: result for result in results}
             self.assertEqual(by_metric["cold_start_base"].p50, 101.0)
             self.assertEqual(by_metric["cold_start_cryptomgr_notests"].p50, 109.0)
@@ -261,15 +390,21 @@ class PerformanceTests(unittest.TestCase):
             self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].p50, 510.0)
             self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].direction, "lower")
             self.assertEqual(by_metric["shell_snapshot_restore_512_mib"].p50, 7.0)
+            self.assertEqual(by_metric["openvmm_snapshot_generation"].p50, 31.0)
+            self.assertEqual(
+                by_metric["openvmm_snapshot_restore_peak_rss"].p50,
+                32.0,
+            )
             markdown = (root / "summary.md").read_text(encoding="utf-8")
             self.assertIn("## Linux / KVM benchmark results", markdown)
-            self.assertEqual(markdown.count("\n| `"), 23)
+            self.assertEqual(markdown.count("\n| `"), 31)
             self.assertIn(
                 "| `virtfs_live_read` | 1200.00 MB/s | Higher is better |", markdown
             )
             self.assertIn(
                 "| `network_snapshot_restore` | 40.00 ms | Lower is better |", markdown
             )
+            self.assertIn("## Linux / KVM lifecycle diagnostics", markdown)
 
     def test_collects_mshv_shared_suite_with_network(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -471,6 +606,47 @@ class PerformanceTests(unittest.TestCase):
             )
 
             self.assertEqual(performance.gate_results(baseline, target, 10, 40.0), 1)
+
+    def test_gate_applies_relative_threshold_to_peak_rss(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            performance.write_results(
+                baseline / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        "base",
+                        "openvmm_cold_start_peak_rss",
+                        "MiB",
+                        "lower",
+                        100.0,
+                    )
+                ],
+            )
+            performance.write_results(
+                target / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        "pr",
+                        "openvmm_cold_start_peak_rss",
+                        "MiB",
+                        "lower",
+                        151.0,
+                    )
+                ],
+            )
+
+            self.assertEqual(
+                performance.gate_results(
+                    baseline,
+                    target,
+                    10,
+                    50.0,
+                    absolute_tolerance_ms=1000.0,
+                ),
+                1,
+            )
 
     def test_gate_warms_up_metric_without_history(self):
         with tempfile.TemporaryDirectory() as temporary:

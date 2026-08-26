@@ -232,6 +232,9 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--keep-kvm-stage` | off | Keep temporary staged KVM benchmark binaries. |
 
 Positive counts must be at least 1, and `--timeout` must be greater than zero.
+The `e2e` suite uses the general memory size and measures cold start, snapshot
+generation, snapshot restore, guest-exit teardown, and peak RSS against the
+shell-ready markers. CI uses the default 128 MiB baseline.
 See [Benchmark](benchmarks.md) for suite semantics, platform support, metric
 definitions, and complete examples.
 
@@ -251,12 +254,15 @@ python3 scripts/nvx.py performance collect
     [--require-network]
     [--require-shell-snapshot]
     [--require-shared-suite]
+    [--lifecycle-input PATH]
     [--summary PATH]
 ```
 
 Parses canonical benchmark logs into p50 CSV files. The three `--require-*`
 flags reject incomplete inputs for their respective workload sets.
-`--summary` writes a Markdown summary.
+`--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
+result, producing the 31-metric CI result. `--summary` writes the p50 table
+plus lifecycle min/max/sample-count and RSS diagnostics.
 
 #### `performance collect-openvmm`
 
@@ -269,7 +275,8 @@ python3 scripts/nvx.py performance collect-openvmm
     [--summary PATH]
 ```
 
-Converts an OpenVMM benchmark JSON result into p50 CSV files.
+Converts a complete 128 MiB, guest-exit OpenVMM `e2e` result into an
+eight-metric lifecycle p50 CSV.
 
 #### `performance gate`
 
