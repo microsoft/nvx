@@ -34,7 +34,7 @@
   "openvmm": {
     "repository": "https://github.com/nanvix/openvmm.git",
     "branch": "copilot/issue-157-checksum-free-snapshots",
-    "commit": "bb4a854daad1df5e08bc495f136d912a3f770e6b",
+    "commit": "bd3d38cc860b1e97737b23fcb81315a3a92323ad",
     "source_delivery": "private-git-submodule"
   }
 }
