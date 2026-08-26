@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import cast
 
 INVENTORY_FILENAME = ".nvx-hosts.json"
-INVENTORY_VERSION = 2
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BACKEND_PLATFORMS = {
     "kvm": "linux-kvm",
@@ -118,20 +117,11 @@ def load_inventory(path: Path) -> list[HostProfile] | None:
         raise InventoryError(f"cannot read {path}: {error}") from error
 
     inventory = _mapping(raw, "inventory")
-    unknown_keys = sorted(inventory.keys() - {"version", "hosts"})
+    unknown_keys = sorted(inventory.keys() - {"hosts"})
     if unknown_keys:
         raise InventoryError(
             f"inventory has unsupported fields: {', '.join(unknown_keys)}"
         )
-    version = inventory.get("version")
-    if version != INVENTORY_VERSION or isinstance(version, bool):
-        if version == 1 and not isinstance(version, bool):
-            raise InventoryError(
-                "inventory.version 1 is no longer supported; add host_type "
-                "('baremetal' or 'virtual-machine') to every host and set "
-                f"inventory.version to {INVENTORY_VERSION}"
-            )
-        raise InventoryError(f"inventory.version must be {INVENTORY_VERSION}")
 
     hosts = _mapping(inventory.get("hosts"), "inventory.hosts")
     return [_parse_profile(name, hosts[name]) for name in sorted(hosts)]

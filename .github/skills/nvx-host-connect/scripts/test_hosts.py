@@ -33,7 +33,6 @@ class HostInventoryTests(unittest.TestCase):
             path = self.write_inventory(
                 Path(temporary),
                 {
-                    "version": 2,
                     "hosts": {
                         "bare": self.profile("baremetal"),
                         "virtual": self.profile("virtual-machine"),
@@ -64,7 +63,7 @@ class HostInventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = self.write_inventory(
                 Path(temporary),
-                {"version": 2, "hosts": {"lab": self.profile(None)}},
+                {"hosts": {"lab": self.profile(None)}},
             )
 
             with self.assertRaisesRegex(
@@ -77,7 +76,7 @@ class HostInventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = self.write_inventory(
                 Path(temporary),
-                {"version": 2, "hosts": {"lab": self.profile("container")}},
+                {"hosts": {"lab": self.profile("container")}},
             )
 
             with self.assertRaisesRegex(
@@ -86,18 +85,25 @@ class HostInventoryTests(unittest.TestCase):
             ):
                 hosts.load_inventory(path)
 
-    def test_version_one_reports_migration_guidance(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = self.write_inventory(
-                Path(temporary),
-                {"version": 1, "hosts": {"lab": self.profile(None)}},
-            )
-
-            with self.assertRaisesRegex(
-                hosts.InventoryError,
-                r"add host_type.*set inventory\.version to 2",
+    def test_rejects_version_field(self):
+        for version in (1, 2):
+            with (
+                self.subTest(version=version),
+                tempfile.TemporaryDirectory() as temporary,
             ):
-                hosts.load_inventory(path)
+                path = self.write_inventory(
+                    Path(temporary),
+                    {
+                        "version": version,
+                        "hosts": {"lab": self.profile()},
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    hosts.InventoryError,
+                    r"inventory has unsupported fields: version",
+                ):
+                    hosts.load_inventory(path)
 
 
 if __name__ == "__main__":

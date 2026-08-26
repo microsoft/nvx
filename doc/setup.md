@@ -116,22 +116,19 @@ On Windows PowerShell:
 Copy-Item scripts\nvx-hosts.example.json .nvx-hosts.json
 ```
 
+The inventory schema is intentionally unversioned. Its top-level object contains
+only `hosts`; do not add a `version` field.
+
 Edit each profile in `.nvx-hosts.json`:
 
-- `version` must be `2`.
 - The profile name is the name supplied to the `nvx-host-connect` skill.
 - `ssh_target` is one destination or alias configured in the developer's SSH configuration.
 - `backend` is exactly one of `kvm`, `mshv`, or `whp`.
-- `host_type` identifies the server itself and is exactly one of `baremetal` or
-  `virtual-machine`.
+- `host_type` is required, identifies the server itself, and is exactly one of
+  `baremetal` or `virtual-machine`.
 - `remote_repo` is the absolute path to the NVX checkout on that host. It may be omitted so the
   agent asks for it when connecting.
 - `notes` is optional developer-local context.
-
-Inventory version 2 makes `host_type` required. Existing version 1 inventories are
-not accepted because the resolver cannot reliably infer the host type. To migrate,
-add `host_type` to every profile and change `version` from `1` to `2`; the resolver
-reports these steps when it encounters a version 1 inventory.
 
 Keep authentication in the SSH agent and SSH configuration. Do not put passwords, tokens,
 private keys, passphrases, or SSH options in `.nvx-hosts.json`. The file is ignored by Git.
