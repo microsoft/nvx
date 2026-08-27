@@ -153,7 +153,9 @@ class CliTests(unittest.TestCase):
 
         with (
             patch.object(nvx, "require_file", return_value=Path("openvmm")) as require,
-            patch.object(nvx, "_format_command", return_value="formatted") as format_command,
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
         ):
             nvx.command_run(args)
 
