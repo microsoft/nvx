@@ -227,6 +227,7 @@ class CiTests(unittest.TestCase):
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", return_value="cargo"),
                 patch.object(ci, "run_checked") as run_checked,
+                patch.dict(os.environ, {"PETRI_CAPABILITIES": "vpci"}),
             ):
                 ci.run_openvmm_tests(backend)
 
@@ -243,6 +244,7 @@ class CiTests(unittest.TestCase):
             env = tests.kwargs["env"]
             self.assertEqual(env["OPENVMM_MICROVM_PVH_KERNEL"], str(kernel.resolve()))
             self.assertEqual(env["OPENVMM_MICROVM_PVH_INITRD"], str(initrd.resolve()))
+            self.assertEqual(env["PETRI_CAPABILITIES"], "vpci,microvm_pvh")
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):

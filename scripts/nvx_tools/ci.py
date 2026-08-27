@@ -59,6 +59,14 @@ def run_openvmm_tests(backend: str) -> None:
     env = os.environ.copy()
     env["OPENVMM_MICROVM_PVH_KERNEL"] = os.fspath(kernel)
     env["OPENVMM_MICROVM_PVH_INITRD"] = os.fspath(initrd)
+    capabilities = [
+        capability.strip()
+        for capability in env.get("PETRI_CAPABILITIES", "").split(",")
+        if capability.strip()
+    ]
+    if "microvm_pvh" not in capabilities:
+        capabilities.append("microvm_pvh")
+    env["PETRI_CAPABILITIES"] = ",".join(capabilities)
     cargo = require_tool("cargo")
 
     run_checked(
