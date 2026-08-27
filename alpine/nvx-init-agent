@@ -197,6 +197,8 @@ fi
 [ "$scratch_fstype" = ext4 ] || fatal "unsupported scratch filesystem: $scratch_fstype"
 scratch_device=$(resolve_block_device "$scratch_address") ||
     fatal "scratch device at $scratch_address did not appear"
+blockdev --flushbufs "$scratch_device" ||
+    fatal "failed to drop cached blocks for scratch"
 mount -t ext4 -o rw,nosuid,nodev "$scratch_device" "$scratch" ||
     fatal "failed to mount scratch from $scratch_device"
 mkdir -p "$scratch/upper" "$scratch/work"

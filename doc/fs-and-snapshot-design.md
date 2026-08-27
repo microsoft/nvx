@@ -11,8 +11,9 @@
 > fixed virtio-blk topology, and an initramfs bootstrap that resolves device
 > roles, assembles EROFS layers over ext4 scratch, enters isolated namespaces,
 > drops workload capabilities, and supervises the child. The VMM-populated
-> configuration region, final Rust agent, restore gate, and paired-scratch
-> snapshot transaction remain later stages; the bootstrap therefore accepts
+> configuration region, final Rust agent, and restore gate remain later
+> stages. The paired-scratch snapshot transaction is implemented for raw-file
+> ABI-v2 blocks; the bootstrap therefore accepts
 > only non-secret launch tokens and is not the production agent contract.
 
 ---

@@ -1,3 +1,94 @@
 #!/bin/sh
-# Request a snapshot at this execution boundary through the KVM/WHP port 0x605 control ABI.
-printf '\001' | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null
+set -eu
+
+scratch_policy=paired
+case "${1:-}" in
+    "") ;;
+    --fresh-scratch) scratch_policy=fresh ;;
+    *)
+        echo "usage: nvx-snapshot [--fresh-scratch]" >&2
+        exit 2
+        ;;
+esac
+
+container_cgroup=/sys/fs/cgroup/container
+scratch_mount=/run/nvx/scratch
+container_frozen=false
+scratch_frozen=false
+
+fail_closed() {
+    echo "nvx-snapshot: $*; terminating the VM" >&2
+    /sbin/nvx-exit 1 2>/dev/null || true
+    exit 1
+}
+
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$scratch_frozen" = true ]; then
+        fsfreeze -u "$scratch_mount" >/dev/null 2>&1 ||
+            fail_closed "failed to thaw the scratch filesystem"
+        scratch_frozen=false
+    fi
+    if [ "$container_frozen" = true ]; then
+        echo 0 >"$container_cgroup/cgroup.freeze" 2>/dev/null ||
+            fail_closed "failed to thaw the workload cgroup"
+        container_frozen=false
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+has_scratch=false
+case " $(cat /proc/cmdline) " in
+    *" virtio_mmio.device=0x1000@0xd0006000:11 "*) has_scratch=true ;;
+esac
+scratch_mounted=false
+mountpoint -q "$scratch_mount" && scratch_mounted=true
+
+if [ "$has_scratch" = true ]; then
+    if [ "$scratch_policy" = paired ] && [ "$scratch_mounted" = false ]; then
+        echo "nvx-snapshot: paired capture requires mounted scratch" >&2
+        exit 1
+    fi
+    if [ "$scratch_policy" = fresh ] && [ "$scratch_mounted" = true ]; then
+        echo "nvx-snapshot: fresh-scratch capture requires unmounted scratch" >&2
+        exit 1
+    fi
+elif [ "$scratch_policy" = fresh ]; then
+    echo "nvx-snapshot: fresh-scratch capture requires an ABI-v2 scratch device" >&2
+    exit 1
+fi
+
+if [ "$has_scratch" = true ] && [ "$scratch_policy" = paired ]; then
+    if [ ! -w "$container_cgroup/cgroup.freeze" ] ||
+        [ ! -r "$container_cgroup/cgroup.events" ]; then
+        echo "nvx-snapshot: workload cgroup freezer is unavailable" >&2
+        exit 1
+    fi
+    echo 1 >"$container_cgroup/cgroup.freeze"
+    container_frozen=true
+    attempts=0
+    while ! grep -q '^frozen 1$' "$container_cgroup/cgroup.events"; do
+        if [ "$attempts" -ge 500 ]; then
+            echo "nvx-snapshot: timed out freezing the workload cgroup" >&2
+            exit 1
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.01
+    done
+    sync
+    fsfreeze -f "$scratch_mount"
+    scratch_frozen=true
+fi
+
+# A successful capture terminates the source before this write returns. On a
+# rejected capture, the trap thaws every guest-owned barrier before returning.
+if [ "$scratch_policy" = fresh ]; then
+    printf '\000'
+else
+    printf '\001'
+fi | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null

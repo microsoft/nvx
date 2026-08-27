@@ -19,7 +19,11 @@ guest without firmware or a PC platform. Its design has four primary goals:
 - capture a running VM into immutable artifacts that can be restored in a new
   process without serializing host handles.
 
-The current profile is `MachineProfile::Microvm { abi_version: 1 }`. KVM and
+The implemented profiles are `MachineProfile::Microvm { abi_version: 1 }`,
+selected by `--machine microvm`, and
+`MachineProfile::Microvm { abi_version: 2 }`, selected by
+`--machine microvm-v2`. ABI v2 retains the base machine while replacing the
+single optional block slot with fixed sandbox layer and scratch roles. KVM and
 MSHV are supported on Linux and WHP is supported on Windows. Hypervisor-specific
 code provides partition creation, vCPU execution, interrupt injection, and host
 resource integration. The machine profile owns the boot protocol, memory map,
@@ -29,11 +33,11 @@ device topology, command line, and snapshot compatibility contract.
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart TB
    Inputs["NVX CLI<br/>PVH kernel and Alpine initramfs"]
-   Profile["OpenVMM microVM ABI version 1<br/>boot, memory, devices, and snapshots"]
+   Profile["OpenVMM microVM ABI versions 1 and 2<br/>boot, memory, devices, and snapshots"]
    Kvm["Linux / KVM"]
    Mshv["Linux / MSHV"]
    Whp["Windows / WHP"]
-   Contract["One guest-visible PVH machine contract"]
+   Contract["Versioned guest-visible PVH machine contracts"]
 
    Inputs --> Profile
    Profile --> Kvm
@@ -52,6 +56,9 @@ profile is selected independently from the hypervisor, for example:
 openvmm --machine microvm --hypervisor kvm  --kernel vmlinux --initrd initramfs.cpio
 openvmm --machine microvm --hypervisor mshv --kernel vmlinux --initrd initramfs.cpio
 openvmm --machine microvm --hypervisor whp  --kernel vmlinux --initrd initramfs.cpio
+openvmm --machine microvm-v2 --hypervisor kvm --kernel vmlinux --initrd initramfs.cpio \
+   --microvm-sandbox-block distro:file:distro.erofs,ro \
+   --microvm-sandbox-block scratch:file:scratch.raw
 ```
 
 The supported user entry point in this repository is `python scripts/nvx.py`;
@@ -60,11 +67,11 @@ see [Run](run.md) for complete commands and host-specific options.
 ## Configuration boundary
 
 Machine identity is explicit rather than inferred from a kernel, device, or
-hypervisor choice. OpenVMM carries it through CLI, TTRPC, worker, Petri, and
-snapshot configuration. Validation occurs before host resources are opened and
-again at the worker boundary.
+hypervisor choice. OpenVMM carries it through CLI, worker, Petri, and snapshot
+configuration. TTRPC currently exposes ABI v1. Validation occurs before host
+resources are opened and again at the worker boundary.
 
-ABI version 1 requires:
+Both ABI versions require:
 
 - an x86-64 guest;
 - exactly one vCPU with the fixed APIC topology;
@@ -73,6 +80,12 @@ ABI version 1 requires:
 - KVM, MSHV, or WHP;
 - no VTL2, isolation, nested virtualization, or Hyper-V enlightenments; and
 - the exact chipset and device inventory described below.
+
+ABI v1 permits its original single roleless virtio-blk cold-boot extension, but
+snapshots reject that device because it has no immutable media contract. ABI v2
+uses role-bearing block devices. Snapshot capture requires one to three
+read-only lower layers followed by writable scratch, all backed by cached,
+regular raw files with nonzero 512-byte-aligned geometry.
 
 It rejects UEFI, PCAT, IGVM, caller-supplied ACPI, SMBIOS, device tree,
 PCI/PCIe, VPCI, VMBus, ISA DMA, IDE, floppy, VMGS, graphics, VGA firmware,
@@ -147,7 +160,7 @@ flowchart LR
    Low["Low RAM<br/>0x00000000 through 0xbfffffff<br/>up to 3 GiB"]
    Gap["Fixed MMIO gap<br/>0xc0000000 through 0xffffffff<br/>1 GiB"]
    High["High RAM<br/>0x100000000 and above"]
-   Slots["Reserved virtio-mmio slots<br/>0xd0000000 through 0xd0003fff"]
+   Slots["Reserved virtio-mmio slots<br/>ABI v1 through 0xd0003fff<br/>ABI v2 through 0xd0006fff"]
 
    Low --- Gap
    Gap --- High
@@ -213,12 +226,12 @@ firmware helpers, and standard-PC missing-port shims are absent.
 flowchart TB
    Guest["x86-64 Linux guest<br/>Xen PVH, one vCPU"]
 
-   subgraph Abi["microVM ABI version 1"]
+   subgraph Abi["microVM ABI versions 1 and 2"]
       direction LR
       Boot["PVH boot state<br/>and fixed RAM layout"]
       Interrupts["PIC, IOAPIC, LAPIC<br/>PIT, RTC, and VM time"]
       Pmio["PMIO devices<br/>portb, shutdown, snapshot"]
-      Virtio["Fixed virtio-mmio<br/>net, fs, console, block"]
+      Virtio["Fixed virtio-mmio<br/>net, fs, console, and versioned block roles"]
    end
 
    Common["OpenVMM worker<br/>state units and resource resolvers"]
@@ -250,7 +263,7 @@ flowchart TB
 | `0xe9` | portb data | Raw byte input and output; reads consume one pending byte and zero-fill the remaining access width. |
 | `0xea` | portb status | Bit 0 reports pending host input. Writing `0xa5` after restore selects the one-time entropy packet. |
 | `0x604` | shutdown | The first output byte becomes the process status carried with the VM power-off request. Reads return all ones. |
-| `0x605` | snapshot request | Reads return all ones. Writes are coalesced and routed asynchronously to the capture controller. |
+| `0x605` | snapshot request | Reads return all ones. Writes are coalesced and routed asynchronously to the capture controller. For ABI v2, zero requests fresh scratch and a nonzero first byte requests paired scratch. |
 
 The portb implementation is in
 [`vm/devices/chipset/src/microvm.rs`](../openvmm/vm/devices/chipset/src/microvm.rs).
@@ -264,6 +277,8 @@ the guest continues. With a destination, the device permits at most one pending
 transaction and defers completion long enough for the controller to establish
 the exact post-`out` capture boundary. Repeated writes are coalesced. The PMIO
 callback itself never pauses vCPUs, drains devices, hashes RAM, or writes files.
+The scratch policy travels with the deferred boundary request; ABI v1 has no
+sandbox scratch and therefore ignores that distinction.
 
 ### Fixed virtio-mmio transport
 
@@ -301,12 +316,25 @@ its command-line/device contract are unchanged.
 
 #### Block
 
-The optional block device is routed directly to virtio-mmio rather than VPCI.
-It retains the existing OpenVMM read-only or writable disk behavior on cold
-boot. Packed rings are unavailable. Current guest-triggered microVM snapshots
-reject a configured block device because immutable external-media identity and
-writable point-in-time cloning are not part of the implemented snapshot
-contract.
+Block devices are routed directly to virtio-mmio rather than VPCI. Packed rings
+are unavailable. The ABI-v1 optional block device retains the existing
+read-only or writable cold-boot behavior and remains ineligible for snapshots.
+
+ABI v2 assigns each block a stable role, MMIO address, IRQ, access mode, and
+fixed feature mask. Its snapshot contract records the role, read-only flag,
+logical length, logical and physical block sizes, and identity policy. Each
+external read-only layer is identified by SHA-256 and must be supplied again on
+restore. Writable scratch uses one of two policies:
+
+- **paired**: capture publishes `scratch.img` with its exact length and SHA-256;
+   each restore verifies it and creates a process-private writable copy;
+- **fresh**: capture occurs before scratch is mounted, publishes no scratch
+   artifact, and restore requires a new writable file with matching geometry.
+
+Virtio transport and queue progress are saved with the other device state.
+Stopping a queue prevents new descriptor intake and drains every accepted I/O
+to one used-ring completion under the bounded snapshot quiesce timeout. The
+controller flushes the exact scratch handle and copies it only after that drain.
 
 #### Console
 
@@ -372,7 +400,11 @@ handles are not serialized.
 
 Generic host save and pulse-save/restore RPCs are deliberately unavailable for
 the microVM profile. Capture is requested by the guest through PMIO `0x605` and
-is coordinated as a bounded transaction:
+is coordinated as a bounded transaction. For paired ABI-v2 scratch,
+`nvx-snapshot` first freezes the workload cgroup with a bounded wait, calls
+`sync`, and freezes the mounted filesystem. `nvx-snapshot --fresh-scratch`
+instead requires scratch to be unmounted. A rejected capture thaws every
+guest-owned barrier; failure to thaw terminates the VM.
 
 1. gate host input and defer completion of the snapshot-port write;
 2. stop the vCPU at the I/O boundary while completing the write, so saved state
@@ -380,10 +412,12 @@ is coordinated as a bounded transaction:
 3. preflight the profile, destination, backend, external attachments, and
    snapshot eligibility; a missing destination or rejected preflight releases
    the boundary and lets the guest continue;
-4. quiesce the remaining device workers and VM time in dependency order;
+4. quiesce the remaining device workers and VM time in dependency order,
+   including bounded virtio-blk queue drain;
 5. save the exact state-unit inventory, processor state, device-private state,
    and memory;
-6. write and flush all artifacts in a unique sibling staging directory;
+6. copy and flush state, memory, and any paired scratch into a unique sibling
+   staging directory;
 7. publish the directory with one no-replace rename; and
 8. terminate the source worker and process after publication.
 
@@ -400,7 +434,10 @@ sequenceDiagram
    end
 
    rect rgb(255, 255, 255)
-   Guest->>Port: OUT snapshot request
+   opt Paired mounted scratch
+      Guest->>Guest: Freeze workload, sync, and freeze scratch
+   end
+   Guest->>Port: OUT snapshot request and scratch policy
    Port->>Worker: Bounded asynchronous notification
    Worker->>Units: Gate host input
    Worker->>Worker: Stop vCPU at I/O boundary
@@ -415,7 +452,7 @@ sequenceDiagram
       Controller->>Worker: QuiesceForSnapshot
       Worker->>Units: Stop and save in dependency order
       Units-->>Controller: State, inventory, CPU, and clock contract
-      Controller->>Storage: Write and flush staging directory
+      Controller->>Storage: Copy state, memory, and optional scratch
       Controller->>Storage: Publish with no-replace rename
       Controller->>Worker: Terminate committed source
    end
@@ -475,7 +512,8 @@ A published snapshot contains:
 snapshot/
 |-- manifest.bin
 |-- state.bin
-`-- memory.bin
+|-- memory.bin
+`-- scratch.img    # paired ABI-v2 scratch only
 ```
 
 ```mermaid
@@ -483,12 +521,14 @@ snapshot/
 flowchart LR
    State["Stopped VM state"]
    Ram["Exact guest-RAM<br/>file handle"]
+   Scratch["Optional exact scratch<br/>file handle"]
 
    subgraph Staging["Unique private sibling staging directory"]
       direction TB
       StateFile["state.bin<br/>write and flush"]
       MemoryFile["memory.bin<br/>exact-length copy and flush"]
-      ManifestFile["manifest.bin<br/>record lengths<br/>write last, then flush"]
+      ScratchFile["scratch.img<br/>copy, verify, and flush"]
+      ManifestFile["manifest.bin<br/>record contract and lengths<br/>write last, then flush"]
    end
 
    SyncStaging["Flush staging directory"]
@@ -499,6 +539,7 @@ flowchart LR
 
    State --> StateFile --> ManifestFile
    Ram --> MemoryFile --> ManifestFile
+   Scratch -. paired policy .-> ScratchFile --> ManifestFile
    ManifestFile --> SyncStaging --> Rename --> Final --> SyncParent
    Staging -. failure before commit .-> Cleanup
 ```
@@ -519,18 +560,22 @@ The manifest is authoritative for:
 - exact device order, stable IDs, state-unit names, MMIO/PMIO ranges, IRQs,
   transport, feature masks, and queue limits;
 - CPU, XSAVE, MSR, TSC-frequency, and clock compatibility data;
-- required host attachments and their policies; and
-- exact lengths of `state.bin` and `memory.bin`.
+- required host attachments and their policies;
+- ABI-v2 block roles, access, geometry, layer identities, and scratch policy;
+- exact lengths of `state.bin` and `memory.bin`; and
+- the exact length and SHA-256 of paired `scratch.img`.
 
 Snapshot paths and repeated fields are bounded. Restore rejects truncated,
 oversized, malformed, wrong-type, path-escaping, symlinked, incompatible,
-missing, extra, or reordered state before guest execution. Version 3 does not
-store or validate embedded checksums for `state.bin` or `memory.bin`; a
-same-length payload change is therefore outside the validation contract.
-Version 2 manifests remain readable, but their legacy checksum fields are
-accepted without re-hashing either payload. Snapshot directories rely on host
-access control, while authenticated export or transport belongs outside the
-default local artifact format.
+missing, extra, or reordered state before guest execution. New snapshots use
+version 4. It does not store or validate embedded checksums for `state.bin` or
+`memory.bin`; a same-length change to either payload is therefore outside the
+validation contract. Paired scratch is checked because it must match captured
+filesystem state. Versions 2 and 3 remain readable, but they cannot describe
+ABI-v2 blocks; legacy version-2 checksum fields are accepted without re-hashing
+either payload. Snapshot directories rely on host access control, while
+authenticated export or transport belongs outside the default local artifact
+format.
 
 ### Authoritative restore
 
@@ -538,9 +583,12 @@ Restore proceeds in the opposite direction from capture:
 
 1. read the bounded manifest and derive the authoritative machine
    configuration;
-2. resolve console, network, filesystem, and policy attachments by stable ID;
-3. validate state and memory file types and exact lengths;
-4. create writable private copy-on-write mappings of the opened `memory.bin`;
+2. resolve console, network, filesystem, policy, and ABI-v2 read-only layer
+   attachments by stable ID or role;
+3. validate state, memory, block geometry and identities, and any paired
+   scratch artifact before worker construction;
+4. create a writable private copy-on-write mapping of `memory.bin` and either a
+   verified private scratch copy or a caller-supplied fresh scratch file;
 5. construct the partition and exact device inventory from the manifest;
 6. compare the destination CPU, XSAVE/MSR, TSC, topology, device, and queue
    contract with the saved contract;
@@ -557,8 +605,8 @@ comparison and all saved-state validation still complete before a vCPU runs.
 flowchart LR
    Manifest["Bounded manifest"]
    Config["Authoritative machine config<br/>and host attachments"]
-   Verify["Validate state and memory<br/>types and exact lengths"]
-   Cow["Private COW mapping<br/>of memory.bin"]
+   Verify["Validate state, memory, and blocks<br/>types, geometry, and identities"]
+   Cow["Private memory mapping<br/>and scratch instance"]
    Machine["Construct partition<br/>and exact devices"]
    Validate["Validate destination CPU<br/>and saved device state"]
    Restore["Restore time, devices,<br/>partition, and vCPU"]
@@ -567,12 +615,13 @@ flowchart LR
    Manifest --> Config --> Verify --> Cow --> Machine --> Validate --> Restore --> Run
 ```
 
-The memory artifact is mapped private and copy-on-write across restores.
-Multiple restored VMs may dirty all guest RAM without changing the snapshot
-file. Initial compatibility is same-backend: KVM snapshots restore on
-compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on compatible WHP
-hosts. Cross-backend conversion and standalone NVX snapshot import are not
-supported.
+The memory artifact is mapped private and copy-on-write across restores. Paired
+scratch is copied into a private temporary file for each restore. Multiple
+restored VMs may therefore dirty RAM and scratch without changing reusable
+snapshot artifacts. Initial compatibility is same-backend: KVM snapshots
+restore on compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on
+compatible WHP hosts. Cross-backend conversion and standalone NVX snapshot
+import are not supported.
 
 ### Time and entropy
 
@@ -604,7 +653,7 @@ Each external resource has a stable ID and a declarative reconstruction policy.
 | console | Queue progress, staged RX, partial TX, policy | Listener, client connection, or supplied handle |
 | network | Static identity, queue/packet progress, backend and policy identity | TAP or user-mode endpoint and matching egress policy |
 | filesystem | FUSE namespace, handles, cookies, root/object identity, access mode | Fresh host-directory attachment |
-| block | Not supported by the current snapshot contract | N/A |
+| ABI-v2 block | Queue/device state, fixed roles, access, geometry, read-only layer identities, and scratch policy | Matching read-only layers plus a verified private paired scratch copy, or a new same-geometry scratch file |
 
 Attachment resolution happens before vCPU start. Missing privileges, endpoint
 binding failures, changed egress policy, replaced filesystem objects, or a
@@ -637,19 +686,25 @@ The process-level suite boots the same PVH artifacts on the available native
 backend and covers IRQ0/RTC behavior, raw portb I/O, shutdown status, exact
 snapshot sequencing, repeated immutable restore, coherent downtime, entropy
 reseed, active console RX/TX, network policy and HTTP traffic, and live
-virtio-fs attachment revalidation. Platform CI and the benchmark histories in
-`data/` provide the KVM, MSHV, and WHP host matrix.
+virtio-fs attachment revalidation. ABI-v2 coverage adds deterministic active
+block-I/O drain, paired scratch publication, two private restores, fresh
+scratch replacement, and pre-entry rejection of missing, corrupt, mismatched,
+or wrong-geometry media. The same eight-test microVM suite passes on KVM, MSHV,
+and WHP. Platform CI and the benchmark histories in `data/` provide the wider
+host matrix.
 
 ## Current limits
 
-ABI version 1 intentionally does not provide:
+The current ABI family intentionally does not provide:
 
 - SMP, multiple NUMA nodes, non-x86 guests, or nested virtualization;
 - firmware boot, caller-defined ACPI, SMBIOS, PCI, VPCI, VMBus, hotplug, or
   arbitrary devices;
 - cross-hypervisor snapshot restore;
 - capture-and-continue or live migration;
-- snapshots with virtio-blk attached;
+- ABI-v1 snapshots with its roleless virtio-blk extension;
+- ABI-v2 snapshot media other than cached regular raw files;
+- ABI-v2 construction through TTRPC;
 - serialization of live network flows or native host handles;
 - snapshotting of the contents of a live virtio-fs export; or
 - compatibility with standalone NVX `MVMSNAP*` or `WHPSNAP*` files.
@@ -667,7 +722,7 @@ runtime modes. The current tree integrates their main deliverables as follows:
 | Proposal | Current implementation |
 | --- | --- |
 | Phase 1: base machine | PVH boot, fixed layout, MP/ACPI boot metadata, chipset/PMIO devices, and optional cold-boot virtio-blk are implemented. Linux/MSHV is supported in addition to the originally named KVM and WHP backends. |
-| Phase 2: snapshot | Guest-requested capture with staged checksum-free v3 artifacts and structurally validated new-process restore is implemented for the no-block profile. Legacy v2 manifests remain readable without payload checksum validation. Restore is same-backend and RAM uses private COW mappings. |
+| Phase 2: snapshot | Guest-requested capture with staged version-4 artifacts and structurally validated new-process restore is implemented for ABI v1 without block and ABI v2 with fixed-role layers plus paired or fresh scratch. Versions 2 and 3 remain readable for ABI-v1 snapshots. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. |
 | Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
 | Phase 4: network | Static identity, fixed transport, TAP/user-mode endpoints, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
 | Phase 5: filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |
@@ -692,6 +747,7 @@ and the limits above remain authoritative.
 | Virtio device-private saved state | [`vm/devices/virtio`](../openvmm/vm/devices/virtio) |
 | Snapshot format, machine contract, publication, validation | [`openvmm_helpers/src/snapshot.rs`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs) |
 | Capture orchestration | [`openvmm_entry/src/vm_controller.rs`](../openvmm/openvmm/openvmm_entry/src/vm_controller.rs) |
+| Guest workload and scratch quiesce | [`alpine/nvx-snapshot`](../alpine/nvx-snapshot) and [`alpine/nvx-init-agent`](../alpine/nvx-init-agent) |
 | End-to-end profile tests | [`vmm_tests/tests/tests/x86_64/microvm.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/x86_64/microvm.rs) |
 
 The five phase documents remain useful for design rationale and rejected
