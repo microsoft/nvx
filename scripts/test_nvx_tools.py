@@ -137,6 +137,53 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "--net and --network-profile"):
             nvx.command_run(missing_network)
 
+    def test_run_exposes_restore_readiness(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--hypervisor",
+                "mshv",
+                "--restore-snapshot",
+                "snapshot",
+                "--restore-ready-path",
+                "ready.sock",
+                "--dry-run",
+            ]
+        )
+
+        with (
+            patch.object(nvx, "require_file", return_value=Path("openvmm")) as require,
+            patch.object(nvx, "_format_command", return_value="formatted") as format_command,
+        ):
+            nvx.command_run(args)
+
+        require.assert_called_once()
+        command = format_command.call_args.args[0]
+        self.assertEqual(
+            command,
+            [
+                "openvmm",
+                "--single-process",
+                "--machine",
+                "microvm",
+                "--hypervisor",
+                "mshv",
+                "--restore-snapshot",
+                "snapshot",
+                "--restore-entropy",
+                "--restore-ready-path",
+                "ready.sock",
+            ],
+        )
+
+        missing_snapshot = nvx.parse_args(
+            ["run", "--restore-ready-path", "ready.sock", "--dry-run"]
+        )
+        with self.assertRaisesRegex(
+            common.ScriptError, "--restore-ready-path requires --restore-snapshot"
+        ):
+            nvx.command_run(missing_snapshot)
+
     def test_openvmm_build_skips_compatibility_igvm(self):
         with (
             patch.object(nvx, "require_file"),

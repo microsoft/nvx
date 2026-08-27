@@ -158,12 +158,9 @@ def _format_command(command: list[str]) -> str:
 def command_run(args: argparse.Namespace) -> None:
     if (args.net is None) != (args.network_profile is None):
         raise ScriptError("--net and --network-profile must be specified together")
+    if args.restore_ready_path is not None and args.restore_snapshot is None:
+        raise ScriptError("--restore-ready-path requires --restore-snapshot")
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
-    initrd = require_file(
-        artifact_path("initramfs.cpio.gz"),
-        "initramfs",
-    )
     command = [
         str(executable),
         "--single-process",
@@ -171,13 +168,29 @@ def command_run(args: argparse.Namespace) -> None:
         "microvm",
         "--hypervisor",
         _hypervisor(args.hypervisor),
-        "--memory",
-        f"{args.memory_mib}M",
-        "--kernel",
-        str(kernel),
-        "--initrd",
-        str(initrd),
     ]
+    if args.restore_snapshot is not None:
+        command.extend(
+            ["--restore-snapshot", str(args.restore_snapshot), "--restore-entropy"]
+        )
+        if args.restore_ready_path is not None:
+            command.extend(["--restore-ready-path", str(args.restore_ready_path)])
+    else:
+        kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+        initrd = require_file(
+            artifact_path("initramfs.cpio.gz"),
+            "initramfs",
+        )
+        command.extend(
+            [
+                "--memory",
+                f"{args.memory_mib}M",
+                "--kernel",
+                str(kernel),
+                "--initrd",
+                str(initrd),
+            ]
+        )
     if args.mount is not None:
         if args.mount.count(",") not in (1, 2):
             raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
@@ -324,6 +337,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--net", metavar="IPV4/PREFIX")
     run.add_argument("--network-profile", choices=NETWORK_PROFILES)
     run.add_argument("--cmdline", default="")
+    run.add_argument("--restore-snapshot", type=Path)
+    run.add_argument("--restore-ready-path", type=Path)
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(handler=command_run)
 

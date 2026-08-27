@@ -39,6 +39,22 @@ Networking requires the explicit `portable` capability profile. It uses the
 same in-process data plane on KVM, MSHV, and WHP; omitting either `--net` or
 `--network-profile portable` is rejected before OpenVMM starts.
 
+## Snapshot restore readiness
+
+Restore an existing microVM snapshot with an optional host-readiness endpoint:
+
+```bash
+python3 scripts/nvx.py run \
+  --restore-snapshot /var/lib/nvx/snapshot \
+  --restore-ready-path /run/nvx/restore-ready.sock
+```
+
+The endpoint must already be listening. OpenVMM connects to a Unix domain
+socket on Linux or a `//./pipe/...` named pipe on Windows and writes exactly
+`OPENVMM_RESTORE_READY_V1\n` after snapshot verification, attachment
+resolution, and worker startup complete, but before the restored vCPU can run.
+Failure to write the complete event aborts and tears down the restore.
+
 ## virtio-fs host mapping
 
 The microVM supports one mapping with a fixed `microvm` tag. The initramfs
