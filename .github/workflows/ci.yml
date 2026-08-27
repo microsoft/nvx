@@ -300,30 +300,56 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux / KVM
+          - name: Linux / KVM / Bare metal
             runner: '["self-hosted", "linux", "kvm", "baremetal"]'
             backend: kvm
             release-platform: linux-kvm
+            benchmark-platform: linux-kvm-baremetal
             build-target: x86_64-unknown-linux-gnu
             build-mode: native
             teardown-mode: guest-exit
             cache-compression: zstd
-          - name: Linux / MSHV
+            package-release: true
+          - name: Linux / MSHV / Bare metal
             runner: '["self-hosted", "linux", "mshv", "baremetal"]'
             backend: mshv
             release-platform: linux-mshv
+            benchmark-platform: linux-mshv-baremetal
             build-target: x86_64-unknown-linux-musl
             build-mode: musl
             teardown-mode: guest-exit
             cache-compression: gzip
-          - name: Windows / WHP
+            package-release: true
+          - name: Linux / MSHV / Virtual machine
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-1"]'
+            backend: mshv
+            release-platform: linux-mshv
+            benchmark-platform: linux-mshv-virtual-machine
+            build-target: x86_64-unknown-linux-musl
+            build-mode: musl
+            teardown-mode: guest-exit
+            cache-compression: gzip
+            package-release: false
+          - name: Windows / WHP / Bare metal
             runner: '["self-hosted", "windows", "whp", "baremetal"]'
             backend: whp
             release-platform: windows-whp
+            benchmark-platform: windows-whp-baremetal
             build-target: x86_64-pc-windows-msvc
             build-mode: native
             teardown-mode: guest-exit
             cache-compression: zstd
+            package-release: true
+          - name: Windows / WHP / Virtual machine
+            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-1"]'
+            backend: whp
+            release-platform: windows-whp
+            benchmark-platform: windows-whp-virtual-machine
+            build-target: x86_64-pc-windows-msvc
+            build-mode: native
+            teardown-mode: guest-exit
+            cache-compression: zstd
+            package-release: false
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -350,13 +376,16 @@ jobs:
         uses: ./.github/actions/run-benchmark
         with:
           backend: ${{ matrix.backend }}
-          platform: ${{ matrix.release-platform }}
+          platform: ${{ matrix.benchmark-platform }}
           teardown-mode: ${{ matrix.teardown-mode }}
           kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
           alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
       - name: Package release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          matrix.package-release
         uses: ./.github/actions/package-release
         with:
           platform: ${{ matrix.release-platform }}

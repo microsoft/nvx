@@ -34,6 +34,12 @@ runs:
           filename="$(basename "${result}")"
           candidate="data/${filename}"
           history="FETCH_HEAD:data/${filename}"
+          legacy_filename=""
+          case "${filename}" in
+            linux-kvm-baremetal.csv) legacy_filename="linux-kvm.csv" ;;
+            linux-mshv-baremetal.csv) legacy_filename="linux-mshv.csv" ;;
+            windows-whp-baremetal.csv) legacy_filename="windows-whp.csv" ;;
+          esac
           if [ -f "${candidate}" ] &&
             [ "$(wc -l < "${candidate}")" -eq 1 ] &&
             [ "$(head -n 1 "${candidate}")" = "commit,metric,unit,direction,p50" ]; then
@@ -41,6 +47,10 @@ runs:
             echo "::notice::${filename} history is explicitly reset in this pull request; warming up the baseline"
           elif git cat-file -e "${history}" 2>/dev/null; then
             git show "${history}" > "data/baseline/${filename}"
+          elif [ -n "${legacy_filename}" ] &&
+            git cat-file -e "FETCH_HEAD:data/${legacy_filename}" 2>/dev/null; then
+            git show "FETCH_HEAD:data/${legacy_filename}" > "data/baseline/${filename}"
+            echo "::notice::Using legacy ${legacy_filename} history for ${filename}"
           else
             echo "::notice::No ${filename} performance history on ${BASE_REF}; warming up the baseline"
           fi

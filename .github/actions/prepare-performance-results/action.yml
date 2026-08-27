@@ -1,5 +1,5 @@
 name: Prepare performance results
-description: Restore platform benchmarks and collect their p50 results
+description: Restore host-typed benchmark series and collect their p50 results
 
 runs:
   using: composite
@@ -15,31 +15,49 @@ runs:
         ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
         echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
 
-    - name: Restore Linux / KVM benchmark results
+    - name: Restore Linux / KVM / bare metal benchmark results
       uses: actions/cache/restore@v5
       env:
         PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
-        path: data/runs/linux-kvm
-        key: benchmark-linux-kvm-${{ github.run_id }}
+        path: data/runs/linux-kvm-baremetal
+        key: benchmark-linux-kvm-baremetal-${{ github.run_id }}
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
-    - name: Restore Linux / MSHV benchmark results
+    - name: Restore Linux / MSHV / bare metal benchmark results
       uses: actions/cache/restore@v5
       env:
         PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
-        path: data/runs/linux-mshv
-        key: benchmark-linux-mshv-${{ github.run_id }}
+        path: data/runs/linux-mshv-baremetal
+        key: benchmark-linux-mshv-baremetal-${{ github.run_id }}
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
-    - name: Restore Windows / WHP benchmark results
+    - name: Restore Linux / MSHV / virtual machine benchmark results
+      uses: actions/cache/restore@v5
+      env:
+        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
+      with:
+        path: data/runs/linux-mshv-virtual-machine
+        key: benchmark-linux-mshv-virtual-machine-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
+
+    - name: Restore Windows / WHP / bare metal benchmark results
       uses: actions/cache/restore@v5
       with:
-        path: data/runs/windows-whp
-        key: benchmark-windows-whp-${{ github.run_id }}
+        path: data/runs/windows-whp-baremetal
+        key: benchmark-windows-whp-baremetal-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
+
+    - name: Restore Windows / WHP / virtual machine benchmark results
+      uses: actions/cache/restore@v5
+      with:
+        path: data/runs/windows-whp-virtual-machine
+        key: benchmark-windows-whp-virtual-machine-${{ github.run_id }}
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
@@ -47,30 +65,19 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python3 scripts/nvx.py performance collect \
-          --platform linux-kvm \
-          --commit "${GITHUB_SHA}" \
-          --input-dir data/runs/linux-kvm \
-          --output-dir data/results \
-          --require-network \
-          --require-shell-snapshot \
-          --require-shared-suite \
-          --lifecycle-input data/runs/linux-kvm/acceptance.json
-        python3 scripts/nvx.py performance collect \
-          --platform linux-mshv \
-          --commit "${GITHUB_SHA}" \
-          --input-dir data/runs/linux-mshv \
-          --output-dir data/results \
-          --require-network \
-          --require-shell-snapshot \
-          --require-shared-suite \
-          --lifecycle-input data/runs/linux-mshv/acceptance.json
-        python3 scripts/nvx.py performance collect \
-          --platform windows-whp \
-          --commit "${GITHUB_SHA}" \
-          --input-dir data/runs/windows-whp \
-          --output-dir data/results \
-          --require-network \
-          --require-shell-snapshot \
-          --require-shared-suite \
-          --lifecycle-input data/runs/windows-whp/acceptance.json
+        for platform in \
+          linux-kvm-baremetal \
+          linux-mshv-baremetal \
+          linux-mshv-virtual-machine \
+          windows-whp-baremetal \
+          windows-whp-virtual-machine; do
+            python3 scripts/nvx.py performance collect \
+              --platform "${platform}" \
+              --commit "${GITHUB_SHA}" \
+              --input-dir "data/runs/${platform}" \
+              --output-dir data/results \
+              --require-network \
+              --require-shell-snapshot \
+              --require-shared-suite \
+              --lifecycle-input "data/runs/${platform}/acceptance.json"
+        done

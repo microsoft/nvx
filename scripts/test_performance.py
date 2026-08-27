@@ -168,14 +168,14 @@ class PerformanceTests(unittest.TestCase):
     def test_collects_openvmm_mshv_json(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = root / "linux-mshv.json"
+            source = root / "linux-mshv-virtual-machine.json"
             source.write_text(
                 json.dumps(lifecycle_document("mshv")),
                 encoding="utf-8",
             )
 
             result_path = performance.collect_openvmm_results(
-                "linux-mshv", "abc123", source, root / "results"
+                "linux-mshv-virtual-machine", "abc123", source, root / "results"
             )
 
             results = performance.read_results(result_path)
@@ -197,7 +197,7 @@ class PerformanceTests(unittest.TestCase):
     def test_collects_openvmm_json_and_appends_diagnostics(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = root / "linux-kvm.json"
+            source = root / "linux-kvm-baremetal.json"
             summary = root / "summary.md"
             source.write_text(
                 json.dumps(lifecycle_document()),
@@ -205,7 +205,7 @@ class PerformanceTests(unittest.TestCase):
             )
 
             result_path = performance.collect_openvmm_results(
-                "linux-kvm", "abc123", source, root / "results", summary
+                "linux-kvm-baremetal", "abc123", source, root / "results", summary
             )
 
             results = performance.read_results(result_path)
@@ -222,9 +222,9 @@ class PerformanceTests(unittest.TestCase):
                 72.0,
             )
             markdown = summary.read_text(encoding="utf-8")
-            self.assertIn("## Linux / KVM benchmark results", markdown)
+            self.assertIn("## Linux / KVM / Bare metal benchmark results", markdown)
             self.assertIn("| `openvmm_snapshot_restore` | 20.25 ms |", markdown)
-            self.assertIn("## Linux / KVM lifecycle diagnostics", markdown)
+            self.assertIn("## Linux / KVM / Bare metal lifecycle diagnostics", markdown)
             self.assertIn(
                 "| Snapshot generation | 31.00 ms | 30.00 ms | 32.00 ms | 3 |",
                 markdown,
@@ -238,7 +238,7 @@ class PerformanceTests(unittest.TestCase):
 
     def test_openvmm_json_requires_the_platform_backend(self):
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary) / "windows-whp.json"
+            source = Path(temporary) / "windows-whp-virtual-machine.json"
             document = lifecycle_document("whp")
             document["backends"] = {}
             source.write_text(
@@ -250,7 +250,7 @@ class PerformanceTests(unittest.TestCase):
                 r"backends\.whp",
             ):
                 performance.collect_openvmm_results(
-                    "windows-whp",
+                    "windows-whp-virtual-machine",
                     "abc123",
                     source,
                     Path(temporary) / "results",
@@ -683,7 +683,7 @@ class PerformanceTests(unittest.TestCase):
             target = root / "target"
             summary = root / "summary.md"
             performance.write_results(
-                baseline / "windows-whp.csv",
+                baseline / "windows-whp-baremetal.csv",
                 [
                     *[
                         performance.Result(
@@ -715,7 +715,7 @@ class PerformanceTests(unittest.TestCase):
                 ],
             )
             performance.write_results(
-                target / "windows-whp.csv",
+                target / "windows-whp-baremetal.csv",
                 [performance.Result("pr", "virtfs_reuse", "ms", "lower", 2270.0)],
             )
 
@@ -770,7 +770,14 @@ class PerformanceTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source"
             history = root / "history"
-            platforms = ("linux-kvm", "linux-mshv", "windows-whp")
+            platforms = (
+                "linux-kvm-baremetal",
+                "linux-kvm-virtual-machine",
+                "linux-mshv-baremetal",
+                "linux-mshv-virtual-machine",
+                "windows-whp-baremetal",
+                "windows-whp-virtual-machine",
+            )
             results = [performance.Result("commit", "latency", "ms", "lower", 10.0)]
             for platform in platforms:
                 performance.write_results(source / f"{platform}.csv", results)

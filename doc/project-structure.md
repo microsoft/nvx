@@ -35,9 +35,11 @@ nvx/
 |   |-- nvx-init-agent           EROFS/overlay sandbox bootstrap and supervisor
 |   `-- nvx-snapshot             Snapshot preparation helper
 |-- data/                        Benchmark data
-|   |-- linux-kvm.csv            Rolling Linux/KVM history
-|   |-- linux-mshv.csv           Rolling Linux/MSHV history
-|   `-- windows-whp.csv          Rolling Windows/WHP history
+|   |-- linux-kvm-baremetal.csv              Rolling bare-metal Linux/KVM history
+|   |-- linux-mshv-baremetal.csv             Rolling bare-metal Linux/MSHV history
+|   |-- linux-mshv-virtual-machine.csv       Rolling virtual-machine Linux/MSHV history
+|   |-- windows-whp-baremetal.csv            Rolling bare-metal Windows/WHP history
+|   `-- windows-whp-virtual-machine.csv      Rolling virtual-machine Windows/WHP history
 |-- build/                       Generated build products (ignored)
 |-- dist/                        Generated release packages (ignored)
 |-- docker/

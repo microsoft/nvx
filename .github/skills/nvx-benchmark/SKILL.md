@@ -59,10 +59,12 @@ results. Use the branch matching the selected backend.
 ```bash
 commit="$(git rev-parse HEAD)"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD)"
-output_dir="data/runs/manual/${run_id}-linux-kvm"
+host_type=baremetal # Use the host type resolved by nvx-host-connect.
+platform="linux-kvm-${host_type}"
+output_dir="data/runs/manual/${run_id}-${platform}"
 python3 scripts/nvx.py benchmark --suite performance --backend kvm \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$output_dir"
-python3 scripts/nvx.py performance collect --platform linux-kvm \
+python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
     --require-network --require-shell-snapshot --require-shared-suite \
     --summary "$output_dir/summary.md"
@@ -77,10 +79,12 @@ TAP creation or host firewall changes.
 ```bash
 commit="$(git rev-parse HEAD)"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD)"
-output_dir="data/runs/manual/${run_id}-linux-mshv"
+host_type=baremetal # Use the host type resolved by nvx-host-connect.
+platform="linux-mshv-${host_type}"
+output_dir="data/runs/manual/${run_id}-${platform}"
 python3 scripts/nvx.py benchmark --suite performance --backend mshv \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$output_dir"
-python3 scripts/nvx.py performance collect --platform linux-mshv \
+python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
     --require-network --require-shell-snapshot --require-shared-suite \
     --summary "$output_dir/summary.md"
@@ -95,10 +99,12 @@ TAP creation or host firewall changes.
 ```powershell
 $commit = (git rev-parse HEAD).Trim()
 $runId = "$(Get-Date -AsUTC -Format 'yyyyMMddTHHmmssZ')-$((git rev-parse --short HEAD).Trim())"
-$outputDir = "data\runs\manual\$runId-windows-whp"
+$hostType = "baremetal" # Use the host type resolved by nvx-host-connect.
+$platform = "windows-whp-$hostType"
+$outputDir = "data\runs\manual\$runId-$platform"
 python scripts\nvx.py benchmark --suite performance --backend whp `
     --runs 5 --virtfs-runs 3 --skip-build --output-dir $outputDir
-python scripts\nvx.py performance collect --platform windows-whp `
+python scripts\nvx.py performance collect --platform $platform `
     --commit $commit --input-dir $outputDir --output-dir "$outputDir\results" `
     --require-network --require-shell-snapshot --require-shared-suite `
     --summary "$outputDir\summary.md"
@@ -124,8 +130,8 @@ collected CSV files.
 
 ## Report
 
-Report whether execution was local or SSH, the host, platform ID, backend, commit,
-dirty status, artifact source, host conditions, exact commands, exit status,
-benchmark summary, and result paths. For remote execution, report both local and
-remote paths. Name every skipped metric, changed option, privilege limitation, or
-interrupted run.
+Report whether execution was local or SSH, the host, host type, performance series,
+platform ID, backend, commit, dirty status, artifact source, host conditions, exact
+commands, exit status, benchmark summary, and result paths. For remote execution,
+report both local and remote paths. Name every skipped metric, changed option,
+privilege limitation, or interrupted run.

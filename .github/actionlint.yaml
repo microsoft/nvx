@@ -1,5 +1,9 @@
 self-hosted-runner:
   labels:
+    - azure-azlinux-1
+    - azure-windows-1
+    - baremetal
     - kvm
     - mshv
+    - virtual-machine
     - whp

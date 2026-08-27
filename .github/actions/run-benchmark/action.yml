@@ -1,12 +1,12 @@
 name: Run benchmark
-description: Run and publish an OpenVMM acceptance benchmark
+description: Run and publish an OpenVMM performance series
 
 inputs:
   backend:
     description: OpenVMM backend to benchmark
     required: true
   platform:
-    description: Platform name used for results and artifacts
+    description: Host-typed performance series name used for results and artifacts
     required: true
   kernel-cache-key:
     description: Exact Linux kernel cache key produced by the build job

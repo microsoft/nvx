@@ -338,13 +338,25 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
 
 PLATFORM_NAMES = {
     "linux-kvm": "Linux / KVM",
+    "linux-kvm-baremetal": "Linux / KVM / Bare metal",
+    "linux-kvm-virtual-machine": "Linux / KVM / Virtual machine",
     "linux-mshv": "Linux / MSHV",
+    "linux-mshv-baremetal": "Linux / MSHV / Bare metal",
+    "linux-mshv-virtual-machine": "Linux / MSHV / Virtual machine",
     "windows-whp": "Windows / WHP",
+    "windows-whp-baremetal": "Windows / WHP / Bare metal",
+    "windows-whp-virtual-machine": "Windows / WHP / Virtual machine",
 }
 OPENVMM_BACKENDS = {
     "linux-kvm": "kvm",
+    "linux-kvm-baremetal": "kvm",
+    "linux-kvm-virtual-machine": "kvm",
     "linux-mshv": "mshv",
+    "linux-mshv-baremetal": "mshv",
+    "linux-mshv-virtual-machine": "mshv",
     "windows-whp": "whp",
+    "windows-whp-baremetal": "whp",
+    "windows-whp-virtual-machine": "whp",
 }
 
 
@@ -975,7 +987,7 @@ def _compatible_baseline_results(
         ),
         None,
     )
-    if platform != "windows-whp" or transition is None:
+    if OPENVMM_BACKENDS.get(platform) != "whp" or transition is None:
         return list(results)
 
     compatible: list[Result] = []

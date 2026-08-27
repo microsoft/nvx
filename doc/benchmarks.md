@@ -2,9 +2,9 @@
 
 The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites plus a
 23-metric non-Python workload suite on Linux/KVM, Linux/MSHV, and Windows/WHP. CI combines those
-metrics with eight 128 MiB shell lifecycle metrics and reports all 31 median (p50) values in the
-job summary. Latency and resident-memory metrics are lower-is-better; throughput metrics are
-higher-is-better.
+metrics with eight 128 MiB shell lifecycle metrics and reports all 31 median (p50) values for each
+host-typed performance series in the job summary. Latency and resident-memory metrics are
+lower-is-better; throughput metrics are higher-is-better.
 
 The suite uses the base Alpine guest. Python application snapshots, the Python-agent console
 workload, and its snapshot-prefetch experiment are intentionally excluded because the supported
@@ -16,9 +16,18 @@ resident guest-memory mappings. CI persists and gates p50 RSS and reports both p
 in its lifecycle diagnostics.
 
 Use this page for metric names and methodology. Current historical p50 values live in
-`data/`; timings copied into old discussions or commit messages are
-not baselines. The OpenVMM benchmark coordinator is implemented in
-`scripts/nvx_tools/benchmark.py` and exposed through the supported NVX CLI.
+`data/`; timings copied into old discussions or commit messages are not baselines. Bare-metal and
+virtual-machine results have separate histories and must not be compared as one regression series.
+The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
+through the supported NVX CLI.
+
+| CI performance series | Backend | Host type |
+| --- | --- | --- |
+| `linux-kvm-baremetal` | KVM | Bare metal |
+| `linux-mshv-baremetal` | MSHV | Bare metal |
+| `linux-mshv-virtual-machine` | MSHV | Virtual machine |
+| `windows-whp-baremetal` | WHP | Bare metal |
+| `windows-whp-virtual-machine` | WHP | Virtual machine |
 
 ## Running locally
 
@@ -28,20 +37,20 @@ Run the acceptance and diagnostic suites with:
 
 ```console
 python3 scripts/nvx.py benchmark --suite boot --backend whp
-python3 scripts/nvx.py benchmark --suite e2e --backend kvm --memory-mib 128 --output data/runs/linux-kvm/acceptance.json
+python3 scripts/nvx.py benchmark --suite e2e --backend kvm --memory-mib 128 --output data/runs/linux-kvm-baremetal/acceptance.json
 ```
 
 Run the complete performance suite with:
 
 ```console
 # Linux/KVM: run all 23 metrics and write collector-compatible logs
-python3 scripts/nvx.py benchmark --suite performance --backend kvm --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm
+python3 scripts/nvx.py benchmark --suite performance --backend kvm --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal
 
 # Linux/MSHV: run all 23 metrics
-python3 scripts/nvx.py benchmark --suite performance --backend mshv --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv
+python3 scripts/nvx.py benchmark --suite performance --backend mshv --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal
 
 # Windows/WHP
-python scripts\nvx.py benchmark --suite performance --backend whp --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp
+python scripts\nvx.py benchmark --suite performance --backend whp --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal
 ```
 
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
@@ -56,7 +65,7 @@ MSHV, and WHP. They do not create TAP devices or require host firewall rules.
 Collect a completed suite with:
 
 ```console
-python3 scripts/nvx.py performance collect --platform linux-kvm --commit HEAD --input-dir data/runs/linux-kvm --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm/acceptance.json
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm-baremetal/acceptance.json
 ```
 
 ## Benchmark commands
