@@ -367,16 +367,14 @@ class BenchmarkTests(unittest.TestCase):
             Path("openvmm"),
             "mshv",
             Path("snapshot"),
-            True,
             network_profile="portable",
         )
 
         self.assertEqual(
-            command[-3:],
+            command[-2:],
             [
                 "--network-profile",
                 "portable",
-                "--unsafe-skip-snapshot-memory-verification",
             ],
         )
 
