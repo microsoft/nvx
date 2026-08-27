@@ -448,6 +448,7 @@ class BenchmarkTests(unittest.TestCase):
                 runs=2,
                 timeout=3.0,
                 teardown_mode="guest-exit",
+                network_profile=None,
             )
             expected = {"p50_ms": 1.0}
             with (
