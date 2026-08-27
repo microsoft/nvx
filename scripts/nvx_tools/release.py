@@ -557,7 +557,12 @@ def verify_source_tree() -> None:
         capture_output=True,
         text=True,
     ).stdout.strip()
-    expected = manifest["openvmm"]["commit"]
+    expected = subprocess.run(
+        ["git", "-C", REPO_ROOT, "rev-parse", ":openvmm"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     if head != expected:
         raise ScriptError(f"OpenVMM submodule is at {head}, expected {expected}")
     print(">> source tree and submodule metadata are consistent")

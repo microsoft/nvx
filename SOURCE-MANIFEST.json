@@ -26,11 +26,5 @@
     "guest_sources": "alpine",
     "package_manifests": "build/*.packages.json",
     "source_output": "build/sources/alpine"
-  },
-  "openvmm": {
-    "repository": "https://github.com/nanvix/openvmm.git",
-    "branch": "issue-82-restore-readiness",
-    "commit": "e7189acf3ef34c20105cdd0145f0efdf9b5742d4",
-    "source_delivery": "private-git-submodule"
   }
 }
