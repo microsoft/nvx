@@ -526,7 +526,7 @@ flowchart LR
    subgraph Staging["Unique private sibling staging directory"]
       direction TB
       StateFile["state.bin<br/>write and flush"]
-      MemoryFile["memory.bin<br/>exact-length copy and flush"]
+      MemoryFile["memory.bin<br/>sparse independent clone and flush"]
       ScratchFile["scratch.img<br/>copy, verify, and flush"]
       ManifestFile["manifest.bin<br/>record contract and lengths<br/>write last, then flush"]
    end
@@ -545,9 +545,13 @@ flowchart LR
 ```
 
 [`openvmm_helpers::snapshot`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs)
-implements bounded decoding, exact-length memory copying, artifact length
-checks, restrictive creation, flushing, unique staging paths, and same-parent
-no-replace publication. The manifest is written last within the staging
+implements bounded decoding, exact-length sparse-aware memory cloning, artifact
+length checks, restrictive creation, flushing, unique staging paths, and
+same-parent no-replace publication. Linux uses `FICLONE` with
+`SEEK_DATA`/`SEEK_HOLE` and zero-scan fallbacks. Windows uses block cloning with
+allocated-range and zero-data fallbacks. The clone is independently owned, its
+logical and allocated lengths are reported, and later source writes cannot
+change the published artifact. The manifest is written last within the staging
 directory. A pre-existing final destination is never deleted or replaced.
 
 The manifest is authoritative for:
