@@ -34,7 +34,7 @@
   "openvmm": {
     "repository": "https://github.com/nanvix/openvmm.git",
     "branch": "issue-82-restore-readiness",
-    "commit": "476d6e045ae110e9a16dac52bd994dfb23480444",
+    "commit": "41cbfc788b251730597d8efd5a386ca9192d0a29",
     "source_delivery": "private-git-submodule"
   }
 }
