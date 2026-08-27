@@ -53,7 +53,9 @@ The endpoint must already be listening. OpenVMM connects to a Unix domain
 socket on Linux or a `//./pipe/...` named pipe on Windows and writes exactly
 `OPENVMM_RESTORE_READY_V1\n` after snapshot verification, attachment
 resolution, and worker startup complete, but before the restored vCPU can run.
-Failure to write the complete event aborts and tears down the restore.
+The peer must accept and read while startup is in progress; Windows flush
+completion waits for the named-pipe peer to consume the frame. Failure to write
+the complete event aborts and tears down the restore.
 
 ## virtio-fs host mapping
 
