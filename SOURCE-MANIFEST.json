@@ -27,10 +27,6 @@
     "package_manifests": "build/*.packages.json",
     "source_output": "build/sources/alpine"
   },
-  "nvx_source": {
-    "repository": "https://github.com/nanvix/nvx.git",
-    "commit": "f79d7eb23fba30cfb5c1112c731dd2d6159840b2"
-  },
   "openvmm": {
     "repository": "https://github.com/nanvix/openvmm.git",
     "branch": "issue-82-restore-readiness",

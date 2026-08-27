@@ -143,7 +143,7 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | `README.md` | Project overview and documentation index |
 | `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
 | `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
-| `SOURCE-MANIFEST.json` | Exact Linux, Alpine, NVX, and OpenVMM source identities and output locations |
+| `SOURCE-MANIFEST.json` | Exact Linux, Alpine, and OpenVMM source identities and output locations |
 | `VERSION` | Distribution version consumed by packaging tools |
 | `.gitmodules` | OpenVMM repository URL, path, and tracking branch |
 | `.gitignore` | Excludes build products, caches, virtual environments, logs, and platform metadata |
