@@ -33,8 +33,8 @@
   },
   "openvmm": {
     "repository": "https://github.com/nanvix/openvmm.git",
-    "branch": "issue-85-network-portable-profile",
-    "commit": "0e2cfa78de43be4d6bf2b70bac174ec83935c22f",
+    "branch": "fix/snapshot-cpu-clock-test",
+    "commit": "7cebbb7bee65d84b278867df6b6b572ee6781683",
     "source_delivery": "private-git-submodule"
   }
 }
