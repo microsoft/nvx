@@ -261,7 +261,7 @@ flowchart TB
 | Port | Device | Behavior |
 | ---: | --- | --- |
 | `0xe9` | portb data | Raw byte input and output; reads consume one pending byte and zero-fill the remaining access width. |
-| `0xea` | portb status | Bit 0 reports pending host input. Writing `0xa5` after restore selects the one-time entropy packet. |
+| `0xea` | portb status | Bit 0 reports pending host input and bit 1 reports a fresh restore packet. Writing `0xa5` after restore selects that one-time packet. |
 | `0x604` | shutdown | The first output byte becomes the process status carried with the VM power-off request. Reads return all ones. |
 | `0x605` | snapshot request | Reads return all ones. Writes are coalesced and routed asynchronously to the capture controller. For ABI v2, zero requests fresh scratch and a nonzero first byte requests paired scratch. |
 
@@ -323,8 +323,10 @@ read-only or writable cold-boot behavior and remains ineligible for snapshots.
 ABI v2 assigns each block a stable role, MMIO address, IRQ, access mode, and
 fixed feature mask. Its snapshot contract records the role, read-only flag,
 logical length, logical and physical block sizes, and identity policy. Each
-external read-only layer is identified by SHA-256 and must be supplied again on
-restore. Writable scratch uses one of two policies:
+consumed external read-only layer is identified by SHA-256 and must be supplied
+again on restore. Platform-tier layers are recorded as unbound because image
+binding has not been consumed; restore may supply different same-geometry
+layers. Writable scratch uses one of two policies:
 
 - **paired**: capture publishes `scratch.img` with its exact length and SHA-256;
    each restore verifies it and creates a process-private writable copy;
@@ -400,7 +402,10 @@ handles are not serialized.
 
 Generic host save and pulse-save/restore RPCs are deliberately unavailable for
 the microVM profile. Capture is requested by the guest through PMIO `0x605` and
-is coordinated as a bounded transaction. For paired ABI-v2 scratch,
+is coordinated as a bounded transaction. ABI-v2 capture also requires
+`--snapshot-tier platform|workload-start|instance-checkpoint`; inconsistent
+tier, clone/resume, and fresh/paired scratch combinations are rejected. For
+paired ABI-v2 scratch,
 `nvx-snapshot` first freezes the workload cgroup with a bounded wait, calls
 `sync`, and freezes the mounted filesystem. `nvx-snapshot --fresh-scratch`
 instead requires scratch to be unmounted. A rejected capture thaws every
@@ -566,18 +571,20 @@ The manifest is authoritative for:
 - CPU, XSAVE, MSR, TSC-frequency, and clock compatibility data;
 - required host attachments and their policies;
 - ABI-v2 block roles, access, geometry, layer identities, and scratch policy;
+- ABI-v2 snapshot tier, clone/resume policy, and consumed configuration sections;
 - exact lengths of `state.bin` and `memory.bin`; and
 - the exact length and SHA-256 of paired `scratch.img`.
 
 Snapshot paths and repeated fields are bounded. Restore rejects truncated,
 oversized, malformed, wrong-type, path-escaping, symlinked, incompatible,
 missing, extra, or reordered state before guest execution. New snapshots use
-version 4. It does not store or validate embedded checksums for `state.bin` or
+version 5. It does not store or validate embedded checksums for `state.bin` or
 `memory.bin`; a same-length change to either payload is therefore outside the
 validation contract. Paired scratch is checked because it must match captured
-filesystem state. Versions 2 and 3 remain readable, but they cannot describe
-ABI-v2 blocks; legacy version-2 checksum fields are accepted without re-hashing
-either payload. Snapshot directories rely on host access control, while
+filesystem state. Versions 2 through 4 remain readable; versions 2 and 3 cannot
+describe ABI-v2 blocks, and version 4 predates tier metadata. Legacy version-2
+checksum fields are accepted without re-hashing either payload. Snapshot
+directories rely on host access control, while
 authenticated export or transport belongs outside the default local artifact
 format.
 
@@ -597,8 +604,11 @@ Restore proceeds in the opposite direction from capture:
 6. compare the destination CPU, XSAVE/MSR, TSC, topology, device, and queue
    contract with the saved contract;
 7. restore VM time, chipset and virtio state, partition state, and vCPU state;
-8. finish reconnecting host resources; and
-9. start the vCPU only after every preceding step succeeds.
+8. finish reconnecting host resources;
+9. for tiered ABI-v2 restore, start devices with external input gated and then
+   release the restored vCPU so the agent can repair guest state; and
+10. on the agent's `0x605` acknowledgment, stop at the exact post-write
+   boundary, release input, and only then let the guest continue.
 
 The partition must exist before OpenVMM can derive its effective destination
 CPU contract. This does not expose a partially restored guest: contract
@@ -622,7 +632,12 @@ flowchart LR
 The memory artifact is mapped private and copy-on-write across restores. Paired
 scratch is copied into a private temporary file for each restore. Multiple
 restored VMs may therefore dirty RAM and scratch without changing reusable
-snapshot artifacts. Initial compatibility is same-backend: KVM snapshots
+clone artifacts. An instance checkpoint is single-use: the first artifact- and
+configuration-validated restore attempt atomically creates and flushes
+`resume.claim`; duplicate and concurrent restores fail before worker
+construction, and a later startup failure does not make the checkpoint
+reusable. Initial compatibility is
+same-backend: KVM snapshots
 restore on compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on
 compatible WHP hosts. Cross-backend conversion and standalone NVX snapshot
 import are not supported.
@@ -641,9 +656,16 @@ interrupt merely because a past deadline was restored. Exact deadline
 read-back is consequently excluded from state comparison.
 
 Replaying a snapshot also replays the guest's in-memory random-number-generator
-state. With restore entropy enabled, OpenVMM creates a fresh one-time packet and
-exposes it through the portb status/data protocol. The Alpine restore path must
-consume that packet and reseed the guest RNG before security-sensitive work.
+state. Tiered restore always creates a fresh one-time packet and exposes it
+through the portb status/data protocol. For clone policy, the Alpine restore
+path credits the seed with `RNDADDENTROPY`, forces `RNDRESEEDCRNG`, refreshes
+wall clock and machine identity, and requires the workload-start runtime hook
+to reset runtime-owned RNG state before accepting work. The workload's
+`/etc/machine-id` is a read-only bind of a runtime-tmpfs file, so the agent can
+refresh it while scratch remains frozen; the agent also updates the workload's
+UTS namespace before acknowledgement. It then
+acknowledges the VMM gate before thawing scratch and the workload cgroup. Resume
+policy preserves identity and RNG continuity and only acknowledges the gate.
 Fresh entropy is never stored in the reusable snapshot.
 
 ## Host attachment model
@@ -713,6 +735,17 @@ The current ABI family intentionally does not provide:
 - snapshotting of the contents of a live virtio-fs export; or
 - compatibility with standalone NVX `MVMSNAP*` or `WHPSNAP*` files.
 
+The tier contract and post-restore gate are currently low-level OpenVMM and
+guest-agent primitives exercised by the native lifecycle suite. The public
+`nvx sandbox` command does not yet orchestrate platform builds, warm-shim
+handoff, checkpoints, or sandbox restore. That integration depends on the
+replaceable configuration region, production agent, and versioned control
+protocol tracked by issues #158, #159, and #160. In particular, a platform
+snapshot must be produced only by a trusted pre-image-binding workflow: the
+current host validation rejects tenant command-line configuration and records
+layer identities as unbound, but cannot prove that arbitrary guest code did
+not read an attached layer before requesting capture.
+
 Changing a guest-visible address, IRQ, command-line token, feature mask, queue
 shape, time policy, or device behavior requires a new microVM ABI version. A
 backend-specific difference is valid only when it is explicitly part of that
@@ -726,7 +759,7 @@ runtime modes. The current tree integrates their main deliverables as follows:
 | Proposal | Current implementation |
 | --- | --- |
 | Phase 1: base machine | PVH boot, fixed layout, MP/ACPI boot metadata, chipset/PMIO devices, and optional cold-boot virtio-blk are implemented. Linux/MSHV is supported in addition to the originally named KVM and WHP backends. |
-| Phase 2: snapshot | Guest-requested capture with staged version-4 artifacts and structurally validated new-process restore is implemented for ABI v1 without block and ABI v2 with fixed-role layers plus paired or fresh scratch. Versions 2 and 3 remain readable for ABI-v1 snapshots. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. |
+| Phase 2: snapshot | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented for ABI v1 without block and ABI v2 with three-tier policy, fixed-role layers, paired or fresh scratch, a post-restore input gate, and single-use resume claims. Versions 2 through 4 remain readable. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. Public sandbox orchestration remains gated on issues #158–#160. |
 | Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
 | Phase 4: network | Static identity, fixed transport, TAP/user-mode endpoints, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
 | Phase 5: filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |

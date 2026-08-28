@@ -1,22 +1,38 @@
 #!/bin/sh
 set -eu
 
+snapshot_tier=legacy
 scratch_policy=paired
-case "${1:-}" in
-    "") ;;
-    --fresh-scratch) scratch_policy=fresh ;;
+case "$#:${1:-}" in
+    0:) ;;
+    1:--fresh-scratch) scratch_policy=fresh ;;
+    2:--tier)
+        snapshot_tier=$2
+        case "$snapshot_tier" in
+            platform) scratch_policy=fresh ;;
+            workload-start | instance-checkpoint) scratch_policy=paired ;;
+            *)
+                echo "nvx-snapshot: unsupported snapshot tier: $snapshot_tier" >&2
+                exit 2
+                ;;
+        esac
+        ;;
     *)
-        echo "usage: nvx-snapshot [--fresh-scratch]" >&2
+        echo "usage: nvx-snapshot [--fresh-scratch | --tier TIER]" >&2
         exit 2
         ;;
 esac
 
+runtime=/run/nvx
 container_cgroup=/sys/fs/cgroup/container
-scratch_mount=/run/nvx/scratch
+scratch_mount=$runtime/scratch
 container_frozen=false
 scratch_frozen=false
+post_restore_pending=false
+mkdir -p "$runtime"
 
 fail_closed() {
+    post_restore_pending=true
     echo "nvx-snapshot: $*; terminating the VM" >&2
     /sbin/nvx-exit 1 2>/dev/null || true
     exit 1
@@ -25,6 +41,10 @@ fail_closed() {
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
+    if [ "$post_restore_pending" = true ]; then
+        /sbin/nvx-exit 1 2>/dev/null || true
+        exit 1
+    fi
     if [ "$scratch_frozen" = true ]; then
         fsfreeze -u "$scratch_mount" >/dev/null 2>&1 ||
             fail_closed "failed to thaw the scratch filesystem"
@@ -37,6 +57,112 @@ cleanup() {
     fi
     exit "$status"
 }
+
+cmdline_value() {
+    key=$1
+    set -f
+    # Kernel command-line tokens are deliberately split on spaces.
+    # shellcheck disable=SC2013,SC2086
+    for token in $(cat /proc/cmdline); do
+        case "$token" in
+            "$key"=*)
+                set +f
+                printf '%s\n' "${token#*=}"
+                return 0
+                ;;
+        esac
+    done
+    set +f
+    return 1
+}
+
+read_port_byte() {
+    dd if=/dev/port bs=1 skip="$1" count=1 2>/dev/null |
+        od -An -tu1 | tr -d '[:space:]'
+}
+
+configured_snapshot_tier=$(cmdline_value nvx_snapshot_tier || true)
+if [ -n "$configured_snapshot_tier" ]; then
+    case "$configured_snapshot_tier:$scratch_policy" in
+        platform:* | workload-start:* | instance-checkpoint:*) ;;
+        *)
+            echo "nvx-snapshot: host snapshot tier is invalid" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$snapshot_tier" = legacy ]; then
+        snapshot_tier=$configured_snapshot_tier
+    elif [ "$snapshot_tier" != "$configured_snapshot_tier" ]; then
+        echo "nvx-snapshot: requested tier does not match host snapshot tier" >&2
+        exit 1
+    fi
+    case "$snapshot_tier" in
+        platform) scratch_policy=fresh ;;
+        workload-start | instance-checkpoint) scratch_policy=paired ;;
+    esac
+elif [ "$snapshot_tier" != legacy ]; then
+    echo "nvx-snapshot: host did not configure a snapshot tier" >&2
+    exit 1
+fi
+
+post_restore() {
+    post_restore_pending=true
+    restore_packet=$runtime/restore-packet
+    entropy=$runtime/restore-entropy
+    printf '\245' | dd of=/dev/port bs=1 seek=234 count=1 conv=notrunc 2>/dev/null
+    : >"$restore_packet"
+    count=0
+    while [ "$count" -lt 83 ]; do
+        dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>"$restore_packet"
+        count=$((count + 1))
+    done
+    head -c 18 "$restore_packet" | grep -q '^OPENVMM_ENTROPY_V1$' ||
+        fail_closed "restore packet has an invalid header"
+
+    if [ "$snapshot_tier" != instance-checkpoint ]; then
+        tail -c 64 "$restore_packet" >"$entropy"
+        /sbin/nvx-reseed "$entropy" || fail_closed "failed to reseed the guest CRNG"
+        machine_id=$(sha256sum "$entropy" | cut -c1-32)
+        printf '%s\n' "$machine_id" >/etc/machine-id ||
+            fail_closed "failed to refresh machine identity"
+        workload_machine_id=$runtime/workload-machine-id
+        workload_pid_file=$runtime/container.pid
+        if [ -f "$workload_machine_id" ] && [ ! -L "$workload_machine_id" ]; then
+            printf '%s\n' "$machine_id" >"$workload_machine_id" ||
+                fail_closed "failed to refresh workload machine identity"
+        elif [ "$snapshot_tier" = workload-start ]; then
+            fail_closed "workload-start restore requires workload machine identity"
+        fi
+        hostname_value=$(cmdline_value nvx_hostname || true)
+        [ -n "$hostname_value" ] || hostname_value=nvx-sandbox
+        hostname "$hostname_value" || fail_closed "failed to refresh hostname"
+        if [ -s "$workload_pid_file" ]; then
+            IFS= read -r workload_pid <"$workload_pid_file"
+            case "$workload_pid" in
+                '' | *[!0-9]*) fail_closed "workload PID is invalid" ;;
+            esac
+            kill -0 "$workload_pid" 2>/dev/null ||
+                fail_closed "workload process is unavailable"
+            nsenter -t "$workload_pid" -u hostname "$hostname_value" ||
+                fail_closed "failed to refresh workload hostname"
+        elif [ "$snapshot_tier" = workload-start ]; then
+            fail_closed "workload-start restore requires a workload process"
+        fi
+        if [ "$snapshot_tier" = workload-start ]; then
+            [ -x "$runtime/runtime-post-restore" ] ||
+                fail_closed "workload-start restore requires a runtime hook"
+        fi
+        if [ -x "$runtime/runtime-post-restore" ]; then
+            "$runtime/runtime-post-restore" || fail_closed "runtime RNG hook failed"
+        fi
+    fi
+
+    rm -f "$restore_packet" "$entropy"
+    printf '\002' | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null ||
+        fail_closed "failed to release the VMM restore gate"
+    post_restore_pending=false
+    echo "NVX-POST-RESTORE-OK: tier=$snapshot_tier"
+}
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -48,6 +174,12 @@ case " $(cat /proc/cmdline) " in
 esac
 scratch_mounted=false
 mountpoint -q "$scratch_mount" && scratch_mounted=true
+
+if [ "$snapshot_tier" = workload-start ] &&
+    [ ! -x "$runtime/runtime-post-restore" ]; then
+    echo "nvx-snapshot: workload-start capture requires a runtime hook" >&2
+    exit 1
+fi
 
 if [ "$has_scratch" = true ]; then
     if [ "$scratch_policy" = paired ] && [ "$scratch_mounted" = false ]; then
@@ -69,8 +201,12 @@ if [ "$has_scratch" = true ] && [ "$scratch_policy" = paired ]; then
         echo "nvx-snapshot: workload cgroup freezer is unavailable" >&2
         exit 1
     fi
-    echo 1 >"$container_cgroup/cgroup.freeze"
     container_frozen=true
+    if ! echo 1 >"$container_cgroup/cgroup.freeze"; then
+        container_frozen=false
+        echo "nvx-snapshot: failed to freeze the workload cgroup" >&2
+        exit 1
+    fi
     attempts=0
     while ! grep -q '^frozen 1$' "$container_cgroup/cgroup.events"; do
         if [ "$attempts" -ge 500 ]; then
@@ -81,8 +217,12 @@ if [ "$has_scratch" = true ] && [ "$scratch_policy" = paired ]; then
         sleep 0.01
     done
     sync
-    fsfreeze -f "$scratch_mount"
     scratch_frozen=true
+    if ! fsfreeze -f "$scratch_mount"; then
+        scratch_frozen=false
+        echo "nvx-snapshot: failed to freeze the scratch filesystem" >&2
+        exit 1
+    fi
 fi
 
 # A successful capture terminates the source before this write returns. On a
@@ -92,3 +232,14 @@ if [ "$scratch_policy" = fresh ]; then
 else
     printf '\001'
 fi | dd of=/dev/port bs=1 seek=1541 count=1 conv=notrunc 2>/dev/null
+
+post_restore_pending=true
+restore_status=$(read_port_byte 234)
+case "$restore_status" in
+    '' | *[!0-9]*) fail_closed "failed to read restore status" ;;
+esac
+if [ $((restore_status & 2)) -ne 0 ] && [ "$snapshot_tier" != legacy ]; then
+    post_restore
+else
+    post_restore_pending=false
+fi

@@ -28,6 +28,17 @@ mkdir -p "$rootfs/dev/pts" "$rootfs/dev/shm"
 mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$rootfs/dev/pts"
 mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$rootfs/dev/shm"
 
+workload_machine_id=/run/nvx/workload-machine-id
+[ -f "$workload_machine_id" ] && [ ! -L "$workload_machine_id" ] || exit 125
+if [ -L "$rootfs/etc" ] || { [ -e "$rootfs/etc" ] && [ ! -d "$rootfs/etc" ]; }; then
+    exit 125
+fi
+mkdir -p "$rootfs/etc"
+rm -f "$rootfs/etc/machine-id"
+: >"$rootfs/etc/machine-id"
+mount --bind "$workload_machine_id" "$rootfs/etc/machine-id"
+mount -o remount,bind,ro,nosuid,nodev "$rootfs/etc/machine-id"
+
 mknod -m 666 "$rootfs/dev/null" c 1 3
 mknod -m 666 "$rootfs/dev/zero" c 1 5
 mknod -m 666 "$rootfs/dev/full" c 1 7

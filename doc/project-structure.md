@@ -33,7 +33,8 @@ nvx/
 |   |-- nvx-exit                 Clean guest shutdown helper
 |   |-- nvx-hostmount            virtio-fs host mount helper
 |   |-- nvx-init-agent           EROFS/overlay sandbox bootstrap and supervisor
-|   `-- nvx-snapshot             Snapshot preparation helper
+|   |-- nvx-reseed.c             Static clone-restore CRNG reseed helper
+|   `-- nvx-snapshot             Snapshot preparation and restore repair helper
 |-- data/                        Benchmark data
 |   |-- linux-kvm-baremetal.csv              Rolling bare-metal Linux/KVM history
 |   |-- linux-mshv-baremetal.csv             Rolling bare-metal Linux/MSHV history

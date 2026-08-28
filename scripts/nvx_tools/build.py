@@ -233,6 +233,27 @@ def _install(source: Path, destination: Path) -> None:
     destination.chmod(0o755)
 
 
+def _build_reseed_helper(work: Path, destination: Path) -> None:
+    compiler = require_tool("cc")
+    output = work / "nvx-reseed"
+    run_checked(
+        [
+            compiler,
+            "-static",
+            "-Os",
+            "-s",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-o",
+            output,
+            REPO_ROOT / "alpine" / "nvx-reseed.c",
+        ]
+    )
+    shutil.copyfile(output, destination)
+    destination.chmod(0o755)
+
+
 def _apk_add(root: Path, *packages: str) -> None:
     loader = root / "lib" / "ld-musl-x86_64.so.1"
     environment = os.environ.copy()
@@ -372,6 +393,7 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         root,
         "blkid",
         "busybox-extras",
+        "e2fsprogs",
         "util-linux",
         "util-linux-misc",
     )
@@ -397,6 +419,7 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         root / "sbin" / "nvx-init-agent",
     )
     _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
+    _build_reseed_helper(config.work, root / "sbin" / "nvx-reseed")
     config.output.parent.mkdir(parents=True, exist_ok=True)
     _write_apk_manifest(root, config.output, config)
     _pack_initramfs(root, config.output)

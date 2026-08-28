@@ -225,6 +225,8 @@ done
 set +f
 
 barrier=$runtime/container-start
+workload_machine_id=$(tr -d - </proc/sys/kernel/random/uuid)
+printf '%s\n' "$workload_machine_id" >"$runtime/workload-machine-id"
 mkfifo "$barrier"
 /sbin/nvx-container-launch "$barrier" "$rootfs" "$hostname_value" "$@" &
 container_pid=$!
@@ -233,12 +235,14 @@ if ! echo "$container_pid" >/sys/fs/cgroup/container/cgroup.procs; then
     wait "$container_pid" 2>/dev/null || true
     fatal "failed to place the workload in its cgroup"
 fi
+printf '%s\n' "$container_pid" >"$runtime/container.pid"
 printf 'start\n' >"$barrier"
 rm -f "$barrier"
 
 echo "NVX-SANDBOX-READY: pid=$container_pid layers=$layer_count"
 status=0
 wait "$container_pid" || status=$?
+rm -f "$runtime/container.pid" "$runtime/workload-machine-id"
 if ! umount "$rootfs"; then
     echo "NVX-SANDBOX-ERROR: failed to unmount the container overlay" >&2
     status=1
