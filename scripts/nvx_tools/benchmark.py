@@ -68,10 +68,12 @@ LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 class BenchmarkResult(TypedDict):
     samples_ms: list[float]
     p50_ms: float
+    p95_ms: float
     min_ms: float
     max_ms: float
     wall_samples_ms: list[float]
     wall_p50_ms: float
+    wall_p95_ms: float
     wall_min_ms: float
     wall_max_ms: float
     peak_rss_samples_bytes: list[int]
@@ -83,6 +85,7 @@ class BenchmarkResult(TypedDict):
     teardown_timeout_count: int
     teardown_timeout_seconds: float
     teardown_p50_ms: float | None
+    teardown_p95_ms: float | None
     teardown_min_ms: float | None
     teardown_max_ms: float | None
 
@@ -90,14 +93,17 @@ class BenchmarkResult(TypedDict):
 class SnapshotCaptureResult(TypedDict):
     samples_ms: list[float]
     p50_ms: float
+    p95_ms: float
     min_ms: float
     max_ms: float
     request_to_publication_samples_ms: list[float]
     request_to_publication_p50_ms: float
+    request_to_publication_p95_ms: float
     request_to_publication_min_ms: float
     request_to_publication_max_ms: float
     post_publication_exit_samples_ms: list[float]
     post_publication_exit_p50_ms: float
+    post_publication_exit_p95_ms: float
     post_publication_exit_min_ms: float
     post_publication_exit_max_ms: float
     peak_rss_samples_bytes: list[int]
@@ -731,10 +737,12 @@ def benchmark(
     return {
         "samples_ms": samples,
         "p50_ms": statistics.median(samples),
+        "p95_ms": nearest_rank_percentile(samples, 95),
         "min_ms": min(samples),
         "max_ms": max(samples),
         "wall_samples_ms": wall_samples,
         "wall_p50_ms": statistics.median(wall_samples),
+        "wall_p95_ms": nearest_rank_percentile(wall_samples, 95),
         "wall_min_ms": min(wall_samples),
         "wall_max_ms": max(wall_samples),
         "peak_rss_samples_bytes": peak_rss_samples,
@@ -748,9 +756,24 @@ def benchmark(
         "teardown_p50_ms": (
             statistics.median(completed_teardowns) if completed_teardowns else None
         ),
+        "teardown_p95_ms": (
+            nearest_rank_percentile(completed_teardowns, 95)
+            if completed_teardowns
+            else None
+        ),
         "teardown_min_ms": min(completed_teardowns, default=None),
         "teardown_max_ms": max(completed_teardowns, default=None),
     }
+
+
+def nearest_rank_percentile(samples: Sequence[float], percentile: int) -> float:
+    if not samples:
+        raise ValueError("cannot calculate a percentile without samples")
+    if not 1 <= percentile <= 100:
+        raise ValueError("percentile must be in 1..100")
+    ordered = sorted(samples)
+    index = (percentile * len(ordered) + 99) // 100 - 1
+    return ordered[index]
 
 
 def format_sample_summary(samples: Sequence[float], *, unit: str = "ms") -> str:
@@ -758,7 +781,8 @@ def format_sample_summary(samples: Sequence[float], *, unit: str = "ms") -> str:
         raise ValueError("cannot summarize an empty sample set")
     return (
         f"{statistics.median(samples):.1f} {unit}  "
-        f"(min {min(samples):.1f}, max {max(samples):.1f}, n={len(samples)})"
+        f"(p95 {nearest_rank_percentile(samples, 95):.1f}, "
+        f"min {min(samples):.1f}, max {max(samples):.1f}, n={len(samples)})"
     )
 
 
@@ -1217,7 +1241,8 @@ def _print_shell_snapshot_summary(
     def line(name: str, values: Sequence[float]) -> str:
         return (
             f"  {name:<20}: median {statistics.median(values):7.1f} ms   "
-            f"(min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
+            f"(p95 {nearest_rank_percentile(values, 95):.1f}, "
+            f"min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
         )
 
     print(f"== {memory_mib} MiB ==")
@@ -1654,17 +1679,24 @@ def summarize_snapshot_samples(
     return {
         "samples_ms": samples,
         "p50_ms": statistics.median(samples),
+        "p95_ms": nearest_rank_percentile(samples, 95),
         "min_ms": min(samples),
         "max_ms": max(samples),
         "request_to_publication_samples_ms": request_to_publication_samples,
         "request_to_publication_p50_ms": statistics.median(
             request_to_publication_samples
         ),
+        "request_to_publication_p95_ms": nearest_rank_percentile(
+            request_to_publication_samples, 95
+        ),
         "request_to_publication_min_ms": min(request_to_publication_samples),
         "request_to_publication_max_ms": max(request_to_publication_samples),
         "post_publication_exit_samples_ms": post_publication_exit_samples,
         "post_publication_exit_p50_ms": statistics.median(
             post_publication_exit_samples
+        ),
+        "post_publication_exit_p95_ms": nearest_rank_percentile(
+            post_publication_exit_samples, 95
         ),
         "post_publication_exit_min_ms": min(post_publication_exit_samples),
         "post_publication_exit_max_ms": max(post_publication_exit_samples),
@@ -1739,6 +1771,7 @@ def benchmark_snapshot_capture(
 def print_snapshot_summary(backend: str, result: SnapshotCaptureResult) -> None:
     print(
         f"snapshot/{backend}: p50={result['p50_ms']:.3f} ms "
+        f"p95={result['p95_ms']:.3f} ms "
         f"min={result['min_ms']:.3f} ms max={result['max_ms']:.3f} ms "
         f"post-publication-exit-p50="
         f"{result['post_publication_exit_p50_ms']:.3f} ms "
@@ -1825,14 +1858,19 @@ def benchmark_snapshot_restore(
 
 def print_summary(backend: str, result: BenchmarkResult) -> None:
     teardown_p50 = result["teardown_p50_ms"]
+    teardown_p95 = result["teardown_p95_ms"]
     teardown_max = result["teardown_max_ms"]
     teardown = (
-        f"teardown-p50={teardown_p50:.3f} ms teardown-max={teardown_max:.3f} ms"
-        if teardown_p50 is not None and teardown_max is not None
+        f"teardown-p50={teardown_p50:.3f} ms "
+        f"teardown-p95={teardown_p95:.3f} ms teardown-max={teardown_max:.3f} ms"
+        if teardown_p50 is not None
+        and teardown_p95 is not None
+        and teardown_max is not None
         else "teardown=no-completed-samples"
     )
     print(
         f"{backend}: p50={result['p50_ms']:.3f} ms "
+        f"p95={result['p95_ms']:.3f} ms "
         f"min={result['min_ms']:.3f} ms max={result['max_ms']:.3f} ms "
         f"peak-rss-p50={bytes_to_mib(result['peak_rss_p50_bytes']):.3f} MiB "
         f"peak-rss-max={bytes_to_mib(result['peak_rss_max_bytes']):.3f} MiB "

@@ -453,12 +453,20 @@ class BenchmarkTests(unittest.TestCase):
             result = benchmark.benchmark(["openvmm"], warmups=0, runs=2, timeout=1)
 
         self.assertEqual(result["samples_ms"], [10.0, 12.0])
+        self.assertEqual(result["p95_ms"], 12.0)
         self.assertEqual(result["wall_samples_ms"], [13.5, 16.5])
         self.assertEqual(result["wall_p50_ms"], 15.0)
+        self.assertEqual(result["wall_p95_ms"], 16.5)
         self.assertEqual(
             benchmark.SNAPSHOT_FILENAMES,
             ("manifest.bin", "state.bin", "memory.bin"),
         )
+
+    def test_nearest_rank_percentile(self):
+        self.assertEqual(benchmark.nearest_rank_percentile(range(1, 22), 95), 20)
+        self.assertEqual(benchmark.nearest_rank_percentile([7.0], 95), 7.0)
+        with self.assertRaisesRegex(ValueError, "without samples"):
+            benchmark.nearest_rank_percentile([], 95)
 
     def test_snapshot_capture_excludes_warmup_and_retains_last_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -558,10 +566,12 @@ class BenchmarkTests(unittest.TestCase):
             run_result: benchmark.BenchmarkResult = {
                 "samples_ms": [10.0],
                 "p50_ms": 10.0,
+                "p95_ms": 10.0,
                 "min_ms": 10.0,
                 "max_ms": 10.0,
                 "wall_samples_ms": [12.0],
                 "wall_p50_ms": 12.0,
+                "wall_p95_ms": 12.0,
                 "wall_min_ms": 12.0,
                 "wall_max_ms": 12.0,
                 "peak_rss_samples_bytes": [1024],
@@ -573,20 +583,24 @@ class BenchmarkTests(unittest.TestCase):
                 "teardown_timeout_count": 0,
                 "teardown_timeout_seconds": 5.0,
                 "teardown_p50_ms": 2.0,
+                "teardown_p95_ms": 2.0,
                 "teardown_min_ms": 2.0,
                 "teardown_max_ms": 2.0,
             }
             capture_result: benchmark.SnapshotCaptureResult = {
                 "samples_ms": [3.0],
                 "p50_ms": 3.0,
+                "p95_ms": 3.0,
                 "min_ms": 3.0,
                 "max_ms": 3.0,
                 "request_to_publication_samples_ms": [3.0],
                 "request_to_publication_p50_ms": 3.0,
+                "request_to_publication_p95_ms": 3.0,
                 "request_to_publication_min_ms": 3.0,
                 "request_to_publication_max_ms": 3.0,
                 "post_publication_exit_samples_ms": [1.0],
                 "post_publication_exit_p50_ms": 1.0,
+                "post_publication_exit_p95_ms": 1.0,
                 "post_publication_exit_min_ms": 1.0,
                 "post_publication_exit_max_ms": 1.0,
                 "peak_rss_samples_bytes": [2048],

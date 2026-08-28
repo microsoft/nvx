@@ -10,6 +10,9 @@ The suite uses the base Alpine guest. Python application snapshots, the Python-a
 workload, and its snapshot-prefetch experiment are intentionally excluded because the supported
 guest build does not include a Python initramfs.
 
+Human-readable timing summaries and lifecycle JSON report p50 and nearest-rank p95. The tracked
+platform CSVs continue to persist and gate p50 so the historical schema remains unchanged.
+
 Lifecycle results report peak resident set size (RSS) for the measured OpenVMM process. Linux
 reads the process high-water mark; Windows reads the cumulative peak working set. RSS includes
 resident guest-memory mappings. CI persists and gates p50 RSS and reports both p50 and maximum RSS
@@ -61,6 +64,13 @@ instead of `performance`. Use `--shell-memories 64 128 256 512`,
 
 The network benchmarks select the same in-process portable data plane on KVM,
 MSHV, and WHP. They do not create TAP devices or require host firewall rules.
+
+### MSHV registration diagnostics
+
+The Linux/MSHV backend emits an opt-in `MSHV_SET_GUEST_MEMORY completed` event from the existing
+`mshv map user memory` span. The span identifies the guest range and permissions; the event records
+`elapsed_us` and `success`. Enable `virt_mshv=info` only for diagnostic `run` invocations. Benchmark
+measurements force OpenVMM logging off to avoid changing the measured path.
 
 Collect a completed suite with:
 
