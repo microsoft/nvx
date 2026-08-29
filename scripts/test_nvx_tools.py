@@ -49,6 +49,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.virtfs_runs, 3)
         self.assertEqual(args.payload_mib, 64)
         self.assertEqual(args.network_memory_mib, 256)
+        self.assertEqual(args.host_cpu_reserve, 2)
         self.assertEqual(args.output_dir, Path("results"))
         self.assertIs(args.handler, benchmark.run)
 
@@ -523,9 +524,11 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("die_id", script)
         self.assertIn("thread_siblings_list", script)
         self.assertIn('taskset -c "$cpu"', script)
+        self.assertIn("for pid in $worker_pids", script)
         self.assertIn("loc_before", script)
         self.assertIn("SMP-LAPIC-FAIL", script)
         self.assertIn("SMP-IPI-FAIL", script)
+        self.assertNotIn("sleep 0.1", script)
         self.assertIn("apic_ids=0,1,2,3 bsp=0 workers=$workers", script)
         self.assertIn("NVX-SMP-PROBE-OK", script)
         self.assertTrue(script.endswith("nvx-exit 0\n"))
@@ -547,6 +550,9 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires at least 10"):
             benchmark.validate_benchmark_cpu_set(set(range(9)), 8)
         benchmark.validate_benchmark_cpu_set({0, 2, 4}, 1)
+        benchmark.validate_benchmark_cpu_set(set(range(8)), 8, 0)
+        with self.assertRaisesRegex(ValueError, "requires at least 8"):
+            benchmark.validate_benchmark_cpu_set(set(range(7)), 8, 0)
 
     def test_snapshot_capture_runs_smp_probe_for_selected_count(self):
         args = argparse.Namespace(warmups=0, runs=1, timeout=1.0, processors=8)
@@ -1003,6 +1009,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(metadata["microvm_abi_version"], 3)
             self.assertEqual(metadata["processors"], 8)
             self.assertEqual(metadata["host_affinity_set"], args.cpus)
+            self.assertEqual(metadata["host_cpu_reserve"], args.host_cpu_reserve)
             cold.assert_called_once()
             self.assertEqual(virtfs.call_args.kwargs["runs"], 3)
             shell.assert_called_once()

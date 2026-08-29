@@ -83,6 +83,13 @@ and at least `N+2` processors for an `N`-vCPU guest. The additional processors
 cover VMM and device work. The default selector follows this policy; an
 explicit undersized `--cpus` set is rejected before measurement.
 
+The two pinned virtual-machine CI runners expose four cores as eight sibling
+logical CPUs. Their virtual-machine series deliberately use the fixed `0-7`
+set with `--host-cpu-reserve 0`, including sibling CPUs and sharing capacity
+between guest, VMM, and device work. These constrained nested-host results are
+kept separate from the bare-metal series; other runs retain the two-CPU
+reserve.
+
 ### MSHV lifecycle diagnostics
 
 The Linux/MSHV backend emits an opt-in `MSHV_SET_GUEST_MEMORY completed` event from the existing
@@ -160,7 +167,8 @@ Collection rejects host-termination semantics, missing samples, and any guest-ex
 timeout.
 Lifecycle capture runs a deterministic affinity-pinned worker on every vCPU
 before the snapshot request and again after restore continuation. The probe is
-outside the snapshot-generation timing interval.
+outside the snapshot-generation timing interval. Each worker completes only
+after its CPU's LAPIC counter advances, avoiding fixed-duration guest sleeps.
 
 ### Cold start
 

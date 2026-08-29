@@ -278,6 +278,12 @@ def configure_parser(
         help=f"logical CPUs used for affinity, in taskset syntax (default: {default_cpus})",
     )
     parser.add_argument(
+        "--host-cpu-reserve",
+        type=nonnegative_int,
+        default=2,
+        help="affinity CPUs reserved for VMM/device work (default: 2)",
+    )
+    parser.add_argument(
         "--timeout",
         type=positive_float,
         default=10.0,
@@ -335,6 +341,13 @@ def positive_float(value: str) -> float:
     parsed = float(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
     return parsed
 
 
@@ -455,12 +468,15 @@ def windows_physical_cpu_representatives() -> set[int]:
     return representatives
 
 
-def validate_benchmark_cpu_set(cpus: set[int], processors: int) -> None:
-    required = processors + 2
+def validate_benchmark_cpu_set(
+    cpus: set[int], processors: int, host_cpu_reserve: int = 2
+) -> None:
+    required = processors + host_cpu_reserve
     if len(cpus) < required:
         raise ValueError(
             f"CPU set selects {len(cpus)} logical CPUs; a {processors}-vCPU benchmark "
-            f"requires at least {required} for the guest plus VMM/device work"
+            f"requires at least {required} for the guest plus "
+            f"{host_cpu_reserve} reserved for VMM/device work"
         )
 
 
@@ -1185,8 +1201,29 @@ def smp_probe_script(
         '[ "$online" -eq "$expected" ] || { echo "SMP-ONLINE-FAIL expected=$expected actual=$online"; exit 81; }',
         'loc_before="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"',
         '[ "$(printf "%s\n" "$loc_before" | awk \'{ print NF }\')" -eq "$expected" ] || { echo "SMP-LAPIC-FAIL missing-local-timer-counters"; exit 87; }',
-        "uptime_before=\"$(awk '{ print int($1 * 100); exit }' /proc/uptime)\"",
+        'worker_dir="/tmp/nvx-smp-probe-$$"',
+        'worker_script="$worker_dir/worker"',
+        'rm -rf "$worker_dir"',
+        'mkdir -p "$worker_dir"',
+        "cat >\"$worker_script\" <<'NVX_SMP_WORKER'",
+        "#!/bin/sh",
+        "set -eu",
+        'cpu="$1"',
+        'before="$2"',
+        'result="$3"',
+        'apic_id="$4"',
+        "field=$((cpu + 2))",
+        "actual=\"$(awk '{ print $39 }' /proc/self/stat)\"",
+        '[ "$actual" -eq "$cpu" ] || { echo "SMP-WORKER-FAIL requested=$cpu actual=$actual"; exit 87; }',
+        "while :; do",
+        '  current="$(awk -v field="$field" \'/^LOC:/ { print $field; exit }\' /proc/interrupts)"',
+        '  [ "$current" -gt "$before" ] && break',
+        "done",
+        'printf \'%s %s %s\\n\' "$actual" "$current" "$apic_id" >"$result"',
+        "NVX_SMP_WORKER",
+        'chmod +x "$worker_script"',
         "workers=0",
+        'worker_pids=""',
         "for cpu in $(seq 0 $((expected - 1))); do",
         '  topology="/sys/devices/system/cpu/cpu${cpu}/topology"',
         '  [ "$(cat "$topology/physical_package_id")" -eq 0 ] || exit 82',
@@ -1195,13 +1232,20 @@ def smp_probe_script(
         '  [ "$(cat "$topology/thread_siblings_list")" = "$cpu" ] || exit 85',
         '  apic_id="$(awk -v target="$cpu" \'$1 == "processor" { processor = $3 } $1 == "apicid" && processor == target { print $3; exit }\' /proc/cpuinfo)"',
         '  [ "$apic_id" -eq "$cpu" ] || { echo "SMP-APIC-FAIL cpu=$cpu apic=$apic_id"; exit 86; }',
-        '  actual="$(taskset -c "$cpu" sh -c \'awk "{print \\$39}" /proc/self/stat\')"',
-        '  [ "$actual" -eq "$cpu" ] || { echo "SMP-WORKER-FAIL requested=$cpu actual=$actual"; exit 87; }',
-        '  taskset -c "$cpu" sleep 0.1 &',
-        '  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id"',
+        "  field=$((cpu + 1))",
+        '  before="$(printf "%s\\n" "$loc_before" | awk -v field="$field" \'{ print $field }\')"',
+        '  result="$worker_dir/$cpu"',
+        '  taskset -c "$cpu" "$worker_script" "$cpu" "$before" "$result" "$apic_id" &',
+        '  worker_pids="$worker_pids $!"',
         "  workers=$((workers + 1))",
         "done",
-        "wait",
+        "for pid in $worker_pids; do",
+        '  wait "$pid"',
+        "done",
+        "for cpu in $(seq 0 $((expected - 1))); do",
+        '  read -r actual current apic_id <"$worker_dir/$cpu"',
+        '  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id actual=$actual loc_after=$current"',
+        "done",
         'loc_after="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"',
         "for cpu in $(seq 0 $((expected - 1))); do",
         "  field=$((cpu + 1))",
@@ -1213,10 +1257,9 @@ def smp_probe_script(
         '    [ "$ipi" -gt 0 ] || { echo "SMP-IPI-FAIL cpu=$cpu count=$ipi"; exit 89; }',
         "  fi",
         "done",
-        "uptime_after=\"$(awk '{ print int($1 * 100); exit }' /proc/uptime)\"",
-        '[ "$uptime_after" -gt "$uptime_before" ] || { echo "SMP-TIMER-FAIL before=$uptime_before after=$uptime_after"; exit 90; }',
-        'echo "SMP-INTERRUPTS-OK loc_before=$loc_before loc_after=$loc_after uptime_before=$uptime_before uptime_after=$uptime_after"',
+        'echo "SMP-INTERRUPTS-OK loc_before=$loc_before loc_after=$loc_after"',
         f'echo "SMP-TOPOLOGY-OK requested=$expected online=$online sockets=1 cores=$expected threads=1 apic_ids={apic_ids} bsp=0 workers=$workers"',
+        'rm -rf "$worker_dir"',
     ]
     if network_gateway is not None and ioapic_irq is not None:
         lines.extend(
@@ -1705,6 +1748,7 @@ def write_benchmark_metadata(
         "network": effective_network,
         "lifecycle_network": args.net,
         "host_affinity_set": args.cpus,
+        "host_cpu_reserve": args.host_cpu_reserve,
         "memory_mib": {
             "lifecycle": args.memory_mib,
             "virtfs": args.virtfs_memory_mib,
@@ -2714,6 +2758,7 @@ def result_document(
             "teardown_mode": args.teardown_mode,
             "teardown_timeout_seconds": TEARDOWN_TIMEOUT_SECONDS,
             "cpus": args.cpus,
+            "host_cpu_reserve": args.host_cpu_reserve,
             "timeout_seconds": args.timeout,
             "kernel": str(kernel) if kernel is not None else None,
             "initrd": str(initrd) if initrd is not None else None,
@@ -2802,7 +2847,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
             f"CPU set {args.cpus!r} exceeds the {available_cpus} available logical CPUs"
         )
     if run_guest:
-        validate_benchmark_cpu_set(cpus, args.processors)
+        validate_benchmark_cpu_set(cpus, args.processors, args.host_cpu_reserve)
     prefix = ["taskset", "-c", args.cpus]
     if run_workloads:
         assert executable is not None and kernel is not None and initrd is not None
@@ -2934,6 +2979,8 @@ def benchmark_kvm(
         str(args.memory_mib),
         "--processors",
         str(args.processors),
+        "--host-cpu-reserve",
+        str(args.host_cpu_reserve),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -2992,6 +3039,8 @@ def benchmark_e2e_kvm(
         str(args.memory_mib),
         "--processors",
         str(args.processors),
+        "--host-cpu-reserve",
+        str(args.host_cpu_reserve),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -3050,6 +3099,8 @@ def benchmark_snapshot_restore_kvm(
         str(args.memory_mib),
         "--processors",
         str(args.processors),
+        "--host-cpu-reserve",
+        str(args.host_cpu_reserve),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -3108,6 +3159,8 @@ def benchmark_snapshot_kvm(
         str(args.memory_mib),
         "--processors",
         str(args.processors),
+        "--host-cpu-reserve",
+        str(args.host_cpu_reserve),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -3175,7 +3228,7 @@ def run(args: argparse.Namespace) -> int:
             f"CPU set {args.cpus!r} exceeds the {available_cpus} available logical CPUs"
         )
     if run_guest:
-        validate_benchmark_cpu_set(cpus, args.processors)
+        validate_benchmark_cpu_set(cpus, args.processors, args.host_cpu_reserve)
 
     selected = ("whp", "kvm") if args.backend == "both" else (args.backend,)
     boot_binaries: dict[str, Path] = {}

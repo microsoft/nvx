@@ -997,6 +997,7 @@ class PerformanceTests(unittest.TestCase):
                 "network": "10.0.0.2/24",
                 "lifecycle_network": "10.0.0.2/24",
                 "host_affinity_set": "0-5",
+                "host_cpu_reserve": 2,
                 "memory_mib": {"lifecycle": 128},
                 "artifact_revisions": {"nvx": "a", "openvmm": "b"},
                 "warmups": 1,
@@ -1020,6 +1021,7 @@ class PerformanceTests(unittest.TestCase):
                     "processors": 4,
                     "network": "10.0.0.2/24",
                     "cpus": "0-5",
+                    "host_cpu_reserve": 2,
                     "artifact_revisions": {"nvx": "a", "openvmm": "b"},
                     "warmups": 1,
                 }

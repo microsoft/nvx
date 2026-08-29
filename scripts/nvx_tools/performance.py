@@ -1098,6 +1098,10 @@ def collect_results(
                     lifecycle_controls.get("cpus"),
                     workload_metadata.get("host_affinity_set"),
                 ),
+                "host_cpu_reserve": (
+                    lifecycle_controls.get("host_cpu_reserve"),
+                    workload_metadata.get("host_cpu_reserve"),
+                ),
                 "memory_mib": (
                     lifecycle_controls.get("memory_mib"),
                     _json_object(

@@ -18,6 +18,14 @@ inputs:
     description: How to stop OpenVMM after each guest readiness marker
     required: false
     default: guest-exit
+  cpus:
+    description: Optional fixed logical CPU affinity set
+    required: false
+    default: ""
+  host-cpu-reserve:
+    description: Affinity CPUs reserved for VMM and device work
+    required: false
+    default: "2"
 runs:
   using: composite
   steps:
@@ -97,8 +105,15 @@ runs:
     - name: Run Linux acceptance test
       if: runner.os != 'Windows'
       shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
       run: |
         set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
         for processors in 1 2 4 8; do
           run_dir="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu"
           python3 scripts/nvx.py benchmark \
@@ -106,6 +121,7 @@ runs:
             --backend "${{ inputs.backend }}" \
             --platform "${{ inputs.platform }}" \
             --processors "${processors}" \
+            "${cpu_args[@]}" \
             --warmups 1 \
             --runs 3 \
             --skip-build \
@@ -116,8 +132,15 @@ runs:
     - name: Run Linux performance suite
       if: runner.os != 'Windows'
       shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
       run: |
         set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
         for processors in 1 2 4 8; do
           run_dir="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu"
           python3 scripts/nvx.py benchmark \
@@ -125,6 +148,7 @@ runs:
             --backend "${{ inputs.backend }}" \
             --platform "${{ inputs.platform }}" \
             --processors "${processors}" \
+            "${cpu_args[@]}" \
             --warmups 1 \
             --runs 5 \
             --virtfs-runs 3 \
@@ -136,8 +160,15 @@ runs:
     - name: Run Windows acceptance test
       if: runner.os == 'Windows'
       shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
       run: |
         $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
         foreach ($Processors in 1, 2, 4, 8) {
           $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu"
           python scripts\nvx.py benchmark `
@@ -149,15 +180,23 @@ runs:
             --runs 3 `
             --skip-build `
             --teardown-mode "${{ inputs.teardown-mode }}" `
-            --output "$RunDir/acceptance.json"
+            --output "$RunDir/acceptance.json" `
+            @CpuArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
 
     - name: Run Windows performance suite
       if: runner.os == 'Windows'
       shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
       run: |
         $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
         foreach ($Processors in 1, 2, 4, 8) {
           $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu"
           python scripts\nvx.py benchmark `
@@ -170,7 +209,8 @@ runs:
             --virtfs-runs 3 `
             --skip-build `
             --teardown-mode "${{ inputs.teardown-mode }}" `
-            --output-dir "$RunDir"
+            --output-dir "$RunDir" `
+            @CpuArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
 

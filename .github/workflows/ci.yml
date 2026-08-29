@@ -308,6 +308,8 @@ jobs:
             build-target: x86_64-unknown-linux-gnu
             build-mode: native
             teardown-mode: guest-exit
+            benchmark-cpus: ""
+            host-cpu-reserve: 2
             cache-compression: zstd
             package-release: true
           - name: Linux / MSHV / Bare metal
@@ -318,6 +320,8 @@ jobs:
             build-target: x86_64-unknown-linux-musl
             build-mode: musl
             teardown-mode: guest-exit
+            benchmark-cpus: ""
+            host-cpu-reserve: 2
             cache-compression: gzip
             package-release: true
           - name: Linux / MSHV / Virtual machine
@@ -328,6 +332,8 @@ jobs:
             build-target: x86_64-unknown-linux-musl
             build-mode: musl
             teardown-mode: guest-exit
+            benchmark-cpus: 0-7
+            host-cpu-reserve: 0
             cache-compression: gzip
             package-release: false
           - name: Windows / WHP / Bare metal
@@ -338,6 +344,8 @@ jobs:
             build-target: x86_64-pc-windows-msvc
             build-mode: native
             teardown-mode: guest-exit
+            benchmark-cpus: ""
+            host-cpu-reserve: 2
             cache-compression: zstd
             package-release: true
           - name: Windows / WHP / Virtual machine
@@ -348,6 +356,8 @@ jobs:
             build-target: x86_64-pc-windows-msvc
             build-mode: native
             teardown-mode: guest-exit
+            benchmark-cpus: 0-7
+            host-cpu-reserve: 0
             cache-compression: zstd
             package-release: false
     steps:
@@ -378,6 +388,8 @@ jobs:
           backend: ${{ matrix.backend }}
           platform: ${{ matrix.benchmark-platform }}
           teardown-mode: ${{ matrix.teardown-mode }}
+          cpus: ${{ matrix.benchmark-cpus }}
+          host-cpu-reserve: ${{ matrix.host-cpu-reserve }}
           kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
           alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
