@@ -65,12 +65,15 @@ instead of `performance`. Use `--shell-memories 64 128 256 512`,
 The network benchmarks select the same in-process portable data plane on KVM,
 MSHV, and WHP. They do not create TAP devices or require host firewall rules.
 
-### MSHV registration diagnostics
+### MSHV lifecycle diagnostics
 
 The Linux/MSHV backend emits an opt-in `MSHV_SET_GUEST_MEMORY completed` event from the existing
 `mshv map user memory` span. The span identifies the guest range and permissions; the event records
-`elapsed_us` and `success`. Enable `virt_mshv=info` only for diagnostic `run` invocations. Benchmark
-measurements force OpenVMM logging off to avoid changing the measured path.
+`elapsed_us` and `success`. On x86_64, `MSHV_CREATE_VCPU completed` reports BSP creation after RAM
+attachment. The backend-neutral `post-memory partition finalization completed` event includes BSP
+creation and capability discovery. These scopes are nested and must not be summed. Enable
+`virt_mshv=info,openvmm_core::worker::dispatch=info` only for diagnostic `run` invocations.
+Benchmark measurements force OpenVMM logging off to avoid changing the measured path.
 
 Collect a completed suite with:
 
