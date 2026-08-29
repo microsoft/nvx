@@ -88,7 +88,8 @@ logical CPUs. Their virtual-machine series deliberately use the fixed `0-7`
 set with `--host-cpu-reserve 0`, including sibling CPUs and sharing capacity
 between guest, VMM, and device work. These constrained nested-host results are
 kept separate from the bare-metal series; other runs retain the two-CPU
-reserve.
+reserve. CI gives the constrained series a 40-second guest-marker deadline;
+completed measurements still record their actual latency.
 
 ### MSHV lifecycle diagnostics
 

@@ -26,6 +26,10 @@ inputs:
     description: Affinity CPUs reserved for VMM and device work
     required: false
     default: "2"
+  marker-timeout:
+    description: Seconds allowed for each guest benchmark marker
+    required: false
+    default: "10"
 runs:
   using: composite
   steps:
@@ -108,6 +112,7 @@ runs:
       env:
         NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
         NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
       run: |
         set -euo pipefail
         cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
@@ -124,6 +129,7 @@ runs:
             "${cpu_args[@]}" \
             --warmups 1 \
             --runs 3 \
+            --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
             --skip-build \
             --teardown-mode "${{ inputs.teardown-mode }}" \
             --output "${run_dir}/acceptance.json"
@@ -135,6 +141,7 @@ runs:
       env:
         NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
         NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
       run: |
         set -euo pipefail
         cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
@@ -152,6 +159,7 @@ runs:
             --warmups 1 \
             --runs 5 \
             --virtfs-runs 3 \
+            --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
             --skip-build \
             --teardown-mode "${{ inputs.teardown-mode }}" \
             --output-dir "${run_dir}"
@@ -163,6 +171,7 @@ runs:
       env:
         NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
         NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
       run: |
         $ErrorActionPreference = "Stop"
         $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
@@ -178,6 +187,7 @@ runs:
             --processors $Processors `
             --warmups 1 `
             --runs 3 `
+            --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
             --skip-build `
             --teardown-mode "${{ inputs.teardown-mode }}" `
             --output "$RunDir/acceptance.json" `
@@ -191,6 +201,7 @@ runs:
       env:
         NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
         NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
       run: |
         $ErrorActionPreference = "Stop"
         $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
@@ -207,6 +218,7 @@ runs:
             --warmups 1 `
             --runs 5 `
             --virtfs-runs 3 `
+            --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
             --skip-build `
             --teardown-mode "${{ inputs.teardown-mode }}" `
             --output-dir "$RunDir" `

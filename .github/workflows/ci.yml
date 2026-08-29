@@ -310,6 +310,7 @@ jobs:
             teardown-mode: guest-exit
             benchmark-cpus: ""
             host-cpu-reserve: 2
+            marker-timeout: 10
             cache-compression: zstd
             package-release: true
           - name: Linux / MSHV / Bare metal
@@ -322,6 +323,7 @@ jobs:
             teardown-mode: guest-exit
             benchmark-cpus: ""
             host-cpu-reserve: 2
+            marker-timeout: 10
             cache-compression: gzip
             package-release: true
           - name: Linux / MSHV / Virtual machine
@@ -334,6 +336,7 @@ jobs:
             teardown-mode: guest-exit
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
+            marker-timeout: 40
             cache-compression: gzip
             package-release: false
           - name: Windows / WHP / Bare metal
@@ -346,6 +349,7 @@ jobs:
             teardown-mode: guest-exit
             benchmark-cpus: ""
             host-cpu-reserve: 2
+            marker-timeout: 10
             cache-compression: zstd
             package-release: true
           - name: Windows / WHP / Virtual machine
@@ -358,6 +362,7 @@ jobs:
             teardown-mode: guest-exit
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
+            marker-timeout: 40
             cache-compression: zstd
             package-release: false
     steps:
@@ -390,6 +395,7 @@ jobs:
           teardown-mode: ${{ matrix.teardown-mode }}
           cpus: ${{ matrix.benchmark-cpus }}
           host-cpu-reserve: ${{ matrix.host-cpu-reserve }}
+          marker-timeout: ${{ matrix.marker-timeout }}
           kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
           alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
