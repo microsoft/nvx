@@ -17,8 +17,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-CSV_FIELDS = ["commit", "metric", "unit", "direction", "p50"]
+LEGACY_CSV_FIELDS = ["commit", "metric", "unit", "direction", "p50"]
+CSV_FIELDS = [
+    "platform",
+    "microvm_abi_version",
+    "processors",
+    *LEGACY_CSV_FIELDS,
+]
 DIRECTIONS = {"lower", "higher"}
+MICROVM_PROCESSOR_COUNTS = {
+    1: frozenset({1}),
+    2: frozenset({1}),
+    3: frozenset({1, 2, 4, 8}),
+}
 SHARED_METRICS = frozenset(
     {
         "cold_start_base",
@@ -65,6 +76,7 @@ LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
+BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
 SHELL_SNAPSHOT_SECTION = re.compile(
     r"^==\s*(?P<memory>[0-9]+)\s+MiB\s*==\s*$"
     r"(?P<body>.*?)(?=^==\s*[0-9]+\s+MiB\s*==\s*$|\Z)",
@@ -83,6 +95,9 @@ class Result:
     unit: str
     direction: str
     p50: float
+    platform: str = ""
+    microvm_abi_version: int = 1
+    processors: int = 1
 
 
 @dataclass(frozen=True)
@@ -90,6 +105,15 @@ class LifecycleData:
     document: dict[str, object]
     backend: str
     metrics: dict[str, MetricValue]
+    microvm_abi_version: int
+    processors: int
+
+
+@dataclass(frozen=True)
+class BenchmarkDimensions:
+    platform: str
+    microvm_abi_version: int
+    processors: int
 
 
 MetricValue = tuple[str, str, float]
@@ -364,6 +388,26 @@ def _platform_metric_name(platform: str, metric: str) -> str:
     return metric
 
 
+def _validate_microvm_dimensions(
+    microvm_abi_version: int, processors: int, location: str
+) -> None:
+    supported = MICROVM_PROCESSOR_COUNTS.get(microvm_abi_version)
+    if supported is None or processors not in supported:
+        raise PerformanceError(
+            f"unsupported microVM ABI/processor dimensions at {location}: "
+            f"v{microvm_abi_version}/{processors} vCPU"
+        )
+
+
+def _result_filename(dimensions: BenchmarkDimensions) -> str:
+    if dimensions.microvm_abi_version == 1 and dimensions.processors == 1:
+        return f"{dimensions.platform}.csv"
+    return (
+        f"{dimensions.platform}-microvm-v{dimensions.microvm_abi_version}-"
+        f"{dimensions.processors}vcpu.csv"
+    )
+
+
 def write_results(path: Path, results: Iterable[Result]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = list(results)
@@ -375,6 +419,9 @@ def write_results(path: Path, results: Iterable[Result]) -> None:
         for result in rows:
             writer.writerow(
                 {
+                    "platform": result.platform,
+                    "microvm_abi_version": result.microvm_abi_version,
+                    "processors": result.processors,
                     "commit": result.commit,
                     "metric": result.metric,
                     "unit": result.unit,
@@ -390,7 +437,8 @@ def read_results(path: Path) -> list[Result]:
     try:
         with path.open("r", encoding="utf-8", newline="") as source:
             reader = csv.DictReader(source)
-            if reader.fieldnames != CSV_FIELDS:
+            legacy = reader.fieldnames == LEGACY_CSV_FIELDS
+            if not legacy and reader.fieldnames != CSV_FIELDS:
                 raise PerformanceError(
                     f"unsupported CSV header in {path}: {reader.fieldnames}"
                 )
@@ -415,6 +463,24 @@ def read_results(path: Path) -> list[Result]:
                         f"invalid direction in {path}:{line_number}: "
                         f"{row['direction']!r}"
                     )
+                if legacy:
+                    platform = path.stem
+                    microvm_abi_version = 1
+                    processors = 1
+                else:
+                    platform = row["platform"]
+                    try:
+                        microvm_abi_version = int(row["microvm_abi_version"])
+                        processors = int(row["processors"])
+                    except (TypeError, ValueError) as error:
+                        raise PerformanceError(
+                            f"invalid microVM dimensions in {path}:{line_number}"
+                        ) from error
+                _validate_microvm_dimensions(
+                    microvm_abi_version,
+                    processors,
+                    f"{path}:{line_number}",
+                )
                 results.append(
                     Result(
                         commit=row["commit"],
@@ -422,6 +488,9 @@ def read_results(path: Path) -> list[Result]:
                         unit=row["unit"],
                         direction=row["direction"],
                         p50=p50,
+                        platform=platform,
+                        microvm_abi_version=microvm_abi_version,
+                        processors=processors,
                     )
                 )
     except FileNotFoundError as error:
@@ -434,8 +503,11 @@ def append_results_summary(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     title = PLATFORM_NAMES.get(platform, platform)
+    dimensions = results[0]
     lines: list[str] = [
         f"## {title} benchmark results",
+        "",
+        f"microVM ABI v{dimensions.microvm_abi_version}, {dimensions.processors} vCPU",
         "",
         "| Metric | p50 | Preferred direction |",
         "| --- | ---: | --- |",
@@ -456,6 +528,57 @@ def _json_object(value: object, location: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise PerformanceError(f"expected an object at {location}")
     return cast(dict[str, object], value)
+
+
+def _benchmark_dimensions(
+    values: dict[str, object], expected_platform: str, location: str
+) -> BenchmarkDimensions:
+    abi_value = values.get("microvm_abi_version")
+    processors_value = values.get("processors")
+    if abi_value is None and processors_value is None:
+        return BenchmarkDimensions(expected_platform, 1, 1)
+    if (
+        isinstance(abi_value, bool)
+        or not isinstance(abi_value, int)
+        or isinstance(processors_value, bool)
+        or not isinstance(processors_value, int)
+    ):
+        raise PerformanceError(
+            f"{location} must contain integer microvm_abi_version and processors"
+        )
+    platform_value = values.get("platform", expected_platform)
+    if platform_value is None:
+        platform_value = expected_platform
+    if not isinstance(platform_value, str) or platform_value != expected_platform:
+        raise PerformanceError(
+            f"{location} platform {platform_value!r} does not match {expected_platform!r}"
+        )
+    _validate_microvm_dimensions(abi_value, processors_value, location)
+    return BenchmarkDimensions(platform_value, abi_value, processors_value)
+
+
+def read_workload_dimensions(
+    input_dir: Path, expected_platform: str
+) -> tuple[BenchmarkDimensions, dict[str, object] | None]:
+    metadata_path = input_dir / BENCHMARK_METADATA_FILENAME
+    if not metadata_path.exists():
+        return BenchmarkDimensions(expected_platform, 1, 1), None
+    try:
+        document = _json_object(
+            json.loads(metadata_path.read_text(encoding="utf-8")), str(metadata_path)
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PerformanceError(
+            f"invalid benchmark metadata JSON {metadata_path}: {error}"
+        ) from error
+    dimensions = _benchmark_dimensions(document, expected_platform, str(metadata_path))
+    expected_backend = OPENVMM_BACKENDS.get(expected_platform)
+    if document.get("backend") != expected_backend:
+        raise PerformanceError(
+            f"{metadata_path} backend {document.get('backend')!r} does not match "
+            f"platform {expected_platform!r}"
+        )
+    return dimensions, document
 
 
 def _openvmm_backend_object(
@@ -581,6 +704,13 @@ def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
         ) from error
 
     controls = _json_object(document.get("controls"), f"{input_path}:controls")
+    dimensions = _benchmark_dimensions(controls, platform, f"{input_path}:controls")
+    recorded_backend = controls.get("backend")
+    if recorded_backend is not None and recorded_backend not in {backend, "both"}:
+        raise PerformanceError(
+            f"{input_path}:controls.backend {recorded_backend!r} does not match "
+            f"platform {platform!r}"
+        )
     if controls.get("suite") != "e2e":
         raise PerformanceError(
             f"{input_path} is not an e2e benchmark result: {controls.get('suite')!r}"
@@ -740,7 +870,13 @@ def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
     }
     if metrics.keys() != LIFECYCLE_METRICS:
         raise AssertionError("lifecycle metric definition is incomplete")
-    return LifecycleData(document, backend, metrics)
+    return LifecycleData(
+        document,
+        backend,
+        metrics,
+        dimensions.microvm_abi_version,
+        dimensions.processors,
+    )
 
 
 def append_openvmm_diagnostics(
@@ -867,10 +1003,22 @@ def collect_openvmm_results(
         raise PerformanceError("commit must not be empty")
     lifecycle = read_lifecycle_data(platform, input_path)
     results = [
-        Result(commit, metric, unit, direction, p50)
+        Result(
+            commit,
+            metric,
+            unit,
+            direction,
+            p50,
+            platform,
+            lifecycle.microvm_abi_version,
+            lifecycle.processors,
+        )
         for metric, (unit, direction, p50) in sorted(lifecycle.metrics.items())
     ]
-    output_path = output_dir / f"{platform}.csv"
+    dimensions = BenchmarkDimensions(
+        platform, lifecycle.microvm_abi_version, lifecycle.processors
+    )
+    output_path = output_dir / _result_filename(dimensions)
     write_results(output_path, results)
     if summary_path is not None:
         append_results_summary(summary_path, platform, results)
@@ -897,6 +1045,8 @@ def collect_results(
     if not commit:
         raise PerformanceError("commit must not be empty")
 
+    dimensions, workload_metadata = read_workload_dimensions(input_dir, platform)
+
     required_optional_logs = {
         "network.log": require_network,
         "shell-snapshot.log": require_shell_snapshot,
@@ -921,6 +1071,95 @@ def collect_results(
         else None
     )
     if lifecycle is not None:
+        lifecycle_dimensions = (
+            lifecycle.microvm_abi_version,
+            lifecycle.processors,
+        )
+        workload_dimensions = (
+            dimensions.microvm_abi_version,
+            dimensions.processors,
+        )
+        if lifecycle_dimensions != workload_dimensions:
+            raise PerformanceError(
+                "lifecycle/workload microVM metadata mismatch: "
+                f"v{lifecycle_dimensions[0]}/{lifecycle_dimensions[1]} vCPU vs "
+                f"v{workload_dimensions[0]}/{workload_dimensions[1]} vCPU"
+            )
+        if workload_metadata is not None:
+            lifecycle_controls = _json_object(
+                lifecycle.document.get("controls"), f"{lifecycle_input}:controls"
+            )
+            comparable = {
+                "backend": (
+                    lifecycle.backend,
+                    workload_metadata.get("backend"),
+                ),
+                "host_affinity_set": (
+                    lifecycle_controls.get("cpus"),
+                    workload_metadata.get("host_affinity_set"),
+                ),
+                "memory_mib": (
+                    lifecycle_controls.get("memory_mib"),
+                    _json_object(
+                        workload_metadata.get("memory_mib"),
+                        f"{input_dir / BENCHMARK_METADATA_FILENAME}:memory_mib",
+                    ).get("lifecycle"),
+                ),
+                "artifact_revisions": (
+                    lifecycle_controls.get("artifact_revisions"),
+                    workload_metadata.get("artifact_revisions"),
+                ),
+                "warmups": (
+                    lifecycle_controls.get("warmups"),
+                    workload_metadata.get("warmups"),
+                ),
+                "network": (
+                    lifecycle_controls.get("network"),
+                    workload_metadata.get("lifecycle_network"),
+                ),
+            }
+            for field, (lifecycle_value, workload_value) in comparable.items():
+                if lifecycle_value != workload_value:
+                    raise PerformanceError(
+                        f"lifecycle/workload metadata mismatch for {field}: "
+                        f"{lifecycle_value!r} != {workload_value!r}"
+                    )
+            if require_shared_suite:
+                sampling = {
+                    "lifecycle warmups": lifecycle_controls.get("warmups"),
+                    "lifecycle measured runs": lifecycle_controls.get("runs"),
+                    "workload warmups": workload_metadata.get("warmups"),
+                    "workload measured runs": workload_metadata.get("measured_runs"),
+                    "virtio-fs measured runs": workload_metadata.get(
+                        "virtfs_measured_runs"
+                    ),
+                }
+                expected_sampling = {
+                    "lifecycle warmups": 1,
+                    "lifecycle measured runs": 3,
+                    "workload warmups": 1,
+                    "workload measured runs": 5,
+                    "virtio-fs measured runs": 3,
+                }
+                for field, expected in expected_sampling.items():
+                    if sampling[field] != expected:
+                        raise PerformanceError(
+                            f"noncanonical benchmark sampling for {field}: "
+                            f"{sampling[field]!r}, expected {expected}"
+                        )
+                workload_controls = {
+                    "payload_mib": 64,
+                    "virtfs_memory_mib": 512,
+                    "shell_memories_mib": [64, 128, 256, 512],
+                    "network_memory_mib": 256,
+                    "network": "10.0.0.2/24",
+                }
+                for field, expected in workload_controls.items():
+                    if workload_metadata.get(field) != expected:
+                        raise PerformanceError(
+                            f"noncanonical benchmark control {field}: "
+                            f"{workload_metadata.get(field)!r}, expected {expected!r}"
+                        )
         for metric, value in lifecycle.metrics.items():
             if metric in collected:
                 raise PerformanceError(f"duplicate collected metric: {metric}")
@@ -946,10 +1185,19 @@ def collect_results(
         )
 
     results = [
-        Result(commit, metric, unit, direction, p50)
+        Result(
+            commit,
+            metric,
+            unit,
+            direction,
+            p50,
+            platform,
+            dimensions.microvm_abi_version,
+            dimensions.processors,
+        )
         for metric, (unit, direction, p50) in sorted(collected.items())
     ]
-    output_path = output_dir / f"{platform}.csv"
+    output_path = output_dir / _result_filename(dimensions)
     write_results(output_path, results)
     if summary_path is not None:
         append_results_summary(summary_path, platform, results)
@@ -966,14 +1214,45 @@ def collect_results(
 
 
 def _validate_current_results(path: Path, results: Sequence[Result]) -> None:
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, int, int, str, str]] = set()
     for result in results:
-        key = (result.commit, result.metric)
+        key = (
+            result.platform,
+            result.microvm_abi_version,
+            result.processors,
+            result.commit,
+            result.metric,
+        )
         if key in seen:
             raise PerformanceError(
-                f"duplicate commit/metric row in {path}: {result.commit}/{result.metric}"
+                f"duplicate platform/ABI/processors/commit/metric row in {path}: "
+                f"{result.platform}/v{result.microvm_abi_version}/"
+                f"{result.processors}/{result.commit}/{result.metric}"
             )
         seen.add(key)
+
+
+def _validate_result_files(
+    files: Sequence[Path], loaded: dict[Path, list[Result]]
+) -> None:
+    seen: dict[tuple[str, int, int, str, str], Path] = {}
+    for path in files:
+        for result in loaded[path]:
+            key = (
+                result.platform or path.stem,
+                result.microvm_abi_version,
+                result.processors,
+                result.commit,
+                result.metric,
+            )
+            previous = seen.get(key)
+            if previous is not None:
+                raise PerformanceError(
+                    f"duplicate dimensional row across {previous} and {path}: "
+                    f"{result.platform or path.stem}/v{result.microvm_abi_version}/"
+                    f"{result.processors}/{result.commit}/{result.metric}"
+                )
+            seen[key] = path
 
 
 def _compatible_baseline_results(
@@ -1000,6 +1279,9 @@ def _compatible_baseline_results(
                     result.unit,
                     result.direction,
                     result.p50,
+                    result.platform,
+                    result.microvm_abi_version,
+                    result.processors,
                 )
             )
         elif result.metric != "virtfs_reuse" or index > transition:
@@ -1017,18 +1299,34 @@ def persist_results(
         raise PerformanceError(f"no result CSV files found in {source_dir}")
     history_dir.mkdir(parents=True, exist_ok=True)
     excluded = frozenset(excluded_metrics)
+    loaded = {path: read_results(path) for path in source_files}
+    for path, results in loaded.items():
+        _validate_current_results(path, results)
+    _validate_result_files(source_files, loaded)
 
     for source_path in source_files:
-        source_results = read_results(source_path)
-        _validate_current_results(source_path, source_results)
+        source_results = loaded[source_path]
         current = [result for result in source_results if result.metric not in excluded]
         history_path = history_dir / source_path.name
         existing = read_results(history_path) if history_path.exists() else []
         metadata = {
-            result.metric: (result.unit, result.direction) for result in existing
+            (
+                result.platform,
+                result.microvm_abi_version,
+                result.processors,
+                result.metric,
+            ): (result.unit, result.direction)
+            for result in existing
         }
         for result in current:
-            expected = metadata.get(result.metric)
+            expected = metadata.get(
+                (
+                    result.platform,
+                    result.microvm_abi_version,
+                    result.processors,
+                    result.metric,
+                )
+            )
             actual = (result.unit, result.direction)
             if expected is not None and expected != actual:
                 raise PerformanceError(
@@ -1036,11 +1334,27 @@ def persist_results(
                     f"{expected} -> {actual}"
                 )
 
-        existing_keys = {(result.commit, result.metric) for result in existing}
+        existing_keys = {
+            (
+                result.platform,
+                result.microvm_abi_version,
+                result.processors,
+                result.commit,
+                result.metric,
+            )
+            for result in existing
+        }
         new_results = [
             result
             for result in current
-            if (result.commit, result.metric) not in existing_keys
+            if (
+                result.platform,
+                result.microvm_abi_version,
+                result.processors,
+                result.commit,
+                result.metric,
+            )
+            not in existing_keys
         ]
         if not new_results:
             print(f"No new performance rows to persist for {source_path.name}")
@@ -1051,6 +1365,22 @@ def persist_results(
 
 def _format_value(value: float, unit: str) -> str:
     return f"{value:.2f} {unit}"
+
+
+def _dimension_key(result: Result, fallback_platform: str) -> tuple[str, int, int, str]:
+    return (
+        result.platform or fallback_platform,
+        result.microvm_abi_version,
+        result.processors,
+        result.metric,
+    )
+
+
+def _dimension_label(result: Result, fallback_platform: str) -> str:
+    platform = result.platform or fallback_platform
+    if result.microvm_abi_version == 1 and result.processors == 1:
+        return platform
+    return f"{platform}/microvm-v{result.microvm_abi_version}/{result.processors}vcpu"
 
 
 def gate_results(
@@ -1064,6 +1394,10 @@ def gate_results(
     target_files = sorted(target_dir.glob("*.csv"))
     if not target_files:
         raise PerformanceError(f"no result CSV files found in {target_dir}")
+    loaded_targets = {path: read_results(path) for path in target_files}
+    for path, results in loaded_targets.items():
+        _validate_current_results(path, results)
+    _validate_result_files(target_files, loaded_targets)
 
     checked = 0
     regressions = 0
@@ -1079,28 +1413,31 @@ def gate_results(
     ]
 
     for target_path in target_files:
-        platform = target_path.stem
-        targets = read_results(target_path)
-        _validate_current_results(target_path, targets)
+        targets = loaded_targets[target_path]
+        fallback_platform = target_path.stem
+        platform = targets[0].platform or fallback_platform
         baseline_path = baseline_dir / target_path.name
         baselines = (
             _compatible_baseline_results(platform, read_results(baseline_path))
             if baseline_path.exists()
             else []
         )
-        history: dict[str, deque[Result]] = defaultdict(lambda: deque(maxlen=window))
+        history: dict[tuple[str, int, int, str], deque[Result]] = defaultdict(
+            lambda: deque(maxlen=window)
+        )
         for result in baselines:
-            history[result.metric].append(result)
+            history[_dimension_key(result, platform)].append(result)
 
         for target in sorted(targets, key=lambda result: result.metric):
-            samples = history.get(target.metric)
+            dimension = _dimension_label(target, platform)
+            samples = history.get(_dimension_key(target, platform))
             if not samples:
                 message = (
-                    f"WARMUP: {platform}/{target.metric} has no base-branch history"
+                    f"WARMUP: {dimension}/{target.metric} has no base-branch history"
                 )
                 print(message)
                 summary.append(
-                    f"| {platform} | `{target.metric}` | "
+                    f"| {dimension} | `{target.metric}` | "
                     f"{_format_value(target.p50, target.unit)} | - | - | Warmup |"
                 )
                 continue
@@ -1112,7 +1449,7 @@ def gate_results(
                 ):
                     raise PerformanceError(
                         f"metric metadata differs between target and baseline for "
-                        f"{platform}/{target.metric}"
+                        f"{dimension}/{target.metric}"
                     )
 
             baseline_average = statistics.fmean(sample.p50 for sample in samples)
@@ -1138,14 +1475,14 @@ def gate_results(
                 else ""
             )
             print(
-                f"{status}: {platform}/{target.metric}: p50 "
+                f"{status}: {dimension}/{target.metric}: p50 "
                 f"{_format_value(target.p50, target.unit)} vs "
                 f"{len(samples)}-point base average "
                 f"{_format_value(baseline_average, target.unit)} "
                 f"({delta:+.1f}%{absolute_detail})"
             )
             summary.append(
-                f"| {platform} | `{target.metric}` | "
+                f"| {dimension} | `{target.metric}` | "
                 f"{_format_value(target.p50, target.unit)} | "
                 f"{_format_value(baseline_average, target.unit)} "
                 f"({len(samples)}/{window}) | {delta:+.1f}%{absolute_detail} | "

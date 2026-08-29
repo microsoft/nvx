@@ -160,12 +160,16 @@ def command_run(args: argparse.Namespace) -> None:
         raise ScriptError("--net and --network-profile must be specified together")
     if args.restore_ready_path is not None and args.restore_snapshot is None:
         raise ScriptError("--restore-ready-path requires --restore-snapshot")
+    if args.machine != "microvm-v3" and args.processors != 1:
+        raise ScriptError(f"--machine {args.machine} requires exactly one processor")
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     command = [
         str(executable),
         "--single-process",
         "--machine",
-        "microvm",
+        args.machine,
+        "--processors",
+        str(args.processors),
         "--hypervisor",
         _hypervisor(args.hypervisor),
     ]
@@ -332,7 +336,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     run = subparsers.add_parser("run", help="run an OpenVMM microVM")
     run.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
+    run.add_argument(
+        "--machine",
+        choices=("microvm", "microvm-v2", "microvm-v3"),
+        default="microvm",
+    )
     run.add_argument("--memory-mib", type=int, default=128)
+    run.add_argument("--processors", type=int, choices=(1, 2, 4, 8), default=1)
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
     run.add_argument("--net", metavar="IPV4/PREFIX")
     run.add_argument("--network-profile", choices=NETWORK_PROFILES)

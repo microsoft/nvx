@@ -25,7 +25,8 @@ ZSTD_URL = (
 ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
 OPENVMM_MICROVM_TEST_FILTER = (
-    "test(x86_64::microvm) + test(test_ttrpc_microvm_snapshot_restore)"
+    "test(x86_64::microvm) + test(test_ttrpc_microvm_snapshot_restore) + "
+    "test(test_ttrpc_microvm_v3_smp_snapshot_restore)"
 )
 
 

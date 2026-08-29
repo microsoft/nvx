@@ -63,6 +63,7 @@ host_type=baremetal # Use the host type resolved by nvx-host-connect.
 platform="linux-kvm-${host_type}"
 output_dir="data/runs/manual/${run_id}-${platform}"
 python3 scripts/nvx.py benchmark --suite performance --backend kvm \
+    --platform "$platform" --processors 8 \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$output_dir"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
@@ -83,6 +84,7 @@ host_type=baremetal # Use the host type resolved by nvx-host-connect.
 platform="linux-mshv-${host_type}"
 output_dir="data/runs/manual/${run_id}-${platform}"
 python3 scripts/nvx.py benchmark --suite performance --backend mshv \
+    --platform "$platform" --processors 8 \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$output_dir"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
@@ -103,6 +105,7 @@ $hostType = "baremetal" # Use the host type resolved by nvx-host-connect.
 $platform = "windows-whp-$hostType"
 $outputDir = "data\runs\manual\$runId-$platform"
 python scripts\nvx.py benchmark --suite performance --backend whp `
+    --platform $platform --processors 8 `
     --runs 5 --virtfs-runs 3 --skip-build --output-dir $outputDir
 python scripts\nvx.py performance collect --platform $platform `
     --commit $commit --input-dir $outputDir --output-dir "$outputDir\results" `

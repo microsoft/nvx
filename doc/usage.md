@@ -139,7 +139,9 @@ and MSHV. Set `GH_TOKEN` when the selected repository requires authentication.
 ```text
 python3 scripts/nvx.py run
     [--hypervisor {auto,whp,kvm,mshv}]
+    [--machine {microvm,microvm-v2,microvm-v3}]
     [--memory-mib MIB]
+    [--processors {1,2,4,8}]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
     [--net IPV4/PREFIX]
     [--network-profile {portable}]
@@ -150,7 +152,9 @@ python3 scripts/nvx.py run
 | Option | Default | Description |
 | --- | --- | --- |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
+| `--machine {microvm,microvm-v2,microvm-v3}` | `microvm` | Select the guest ABI explicitly. ABI v1/v2 remain one-vCPU profiles. |
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
+| `--processors {1,2,4,8}` | `1` | Select the microVM ABI-v3 processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target, optionally read-only or read-write. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
@@ -211,11 +215,13 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | --- | --- | --- |
 | `--suite {boot,snapshot,restore,e2e,phase2,all,cold-start,network-snapshot,performance,shell-snapshot,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
 | `--backend {whp,kvm,mshv,both}` | `both` on Windows; `kvm` elsewhere | Select the hypervisor backend. |
+| `--platform NAME` | inferred OS/backend | Record the host-typed performance series. |
 | `--openvmm-dir PATH` | `openvmm/` | Select the OpenVMM repository. |
 | `--nvx-dir PATH` | repository root | Select the NVX repository containing guest artifacts. |
 | `--warmups N` | `3` | Set the number of warmup runs. |
 | `--runs N` | `11` | Set the number of measured runs. |
 | `--memory-mib MIB` | `128` | Set guest memory for the general suites. |
+| `--processors {1,2,4,8}` | `1` | Run every cold, capture, restore, and workload launch with this ABI-v3 count. |
 | `--virtfs-runs N` | `3` | Set the number of virtio-fs workload samples. |
 | `--virtfs-memory-mib MIB` | `512` | Set guest memory for the virtio-fs workload. |
 | `--payload-mib MIB` | `64` | Set the virtio-fs sequential I/O payload size. |

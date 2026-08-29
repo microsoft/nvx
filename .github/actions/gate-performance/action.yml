@@ -42,7 +42,8 @@ runs:
           esac
           if [ -f "${candidate}" ] &&
             [ "$(wc -l < "${candidate}")" -eq 1 ] &&
-            [ "$(head -n 1 "${candidate}")" = "commit,metric,unit,direction,p50" ]; then
+            { [ "$(head -n 1 "${candidate}")" = "commit,metric,unit,direction,p50" ] ||
+              [ "$(head -n 1 "${candidate}")" = "platform,microvm_abi_version,processors,commit,metric,unit,direction,p50" ]; }; then
             cp "${candidate}" "data/baseline/${filename}"
             echo "::notice::${filename} history is explicitly reset in this pull request; warming up the baseline"
           elif git cat-file -e "${history}" 2>/dev/null; then

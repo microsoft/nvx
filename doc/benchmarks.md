@@ -21,6 +21,9 @@ in its lifecycle diagnostics.
 Use this page for metric names and methodology. Current historical p50 values live in
 `data/`; timings copied into old discussions or commit messages are not baselines. Bare-metal and
 virtual-machine results have separate histories and must not be compared as one regression series.
+ABI version and processor count are also separate history dimensions. Legacy
+CSV rows are interpreted as ABI v1 with one vCPU; they are never used as an
+ABI-v3 one-vCPU baseline.
 The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
 through the supported NVX CLI.
 
@@ -32,6 +35,11 @@ through the supported NVX CLI.
 | `windows-whp-baremetal` | WHP | Bare metal |
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
 
+CI runs every series sequentially at `1`, `2`, `4`, and `8` vCPUs under
+microVM ABI v3. This produces 124 p50 values per series (31 metrics times four
+counts) and 620 values across the five-series matrix. Counts run sequentially
+on each host so benchmark workloads never overlap on the same physical host.
+
 ## Running locally
 
 Build the release VMM and guest artifacts first. See [Build](build.md).
@@ -40,20 +48,20 @@ Run the acceptance and diagnostic suites with:
 
 ```console
 python3 scripts/nvx.py benchmark --suite boot --backend whp
-python3 scripts/nvx.py benchmark --suite e2e --backend kvm --memory-mib 128 --output data/runs/linux-kvm-baremetal/acceptance.json
+python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-baremetal --processors 8 --memory-mib 128 --output data/runs/linux-kvm-baremetal/microvm-v3/8vcpu/acceptance.json
 ```
 
 Run the complete performance suite with:
 
 ```console
 # Linux/KVM: run all 23 metrics and write collector-compatible logs
-python3 scripts/nvx.py benchmark --suite performance --backend kvm --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal
+python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v3/8vcpu
 
 # Linux/MSHV: run all 23 metrics
-python3 scripts/nvx.py benchmark --suite performance --backend mshv --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal
+python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v3/8vcpu
 
 # Windows/WHP
-python scripts\nvx.py benchmark --suite performance --backend whp --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal
+python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v3\8vcpu
 ```
 
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
@@ -64,6 +72,16 @@ instead of `performance`. Use `--shell-memories 64 128 256 512`,
 
 The network benchmarks select the same in-process portable data plane on KVM,
 MSHV, and WHP. They do not create TAP devices or require host firewall rules.
+
+Each workload directory includes `benchmark-metadata.json` with the platform,
+backend, ABI, processor count, host affinity set, memory sizes, artifact
+revisions, warmups, and measured run counts. Collection rejects mismatched
+lifecycle/workload metadata and duplicate topology rows.
+
+Use a fixed affinity set containing one logical processor per physical core
+and at least `N+2` processors for an `N`-vCPU guest. The additional processors
+cover VMM and device work. The default selector follows this policy; an
+explicit undersized `--cpus` set is rejected before measurement.
 
 ### MSHV lifecycle diagnostics
 
@@ -78,7 +96,7 @@ Benchmark measurements force OpenVMM logging off to avoid changing the measured 
 Collect a completed suite with:
 
 ```console
-python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm-baremetal/acceptance.json
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v3/8vcpu --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm-baremetal/microvm-v3/8vcpu/acceptance.json
 ```
 
 ## Benchmark commands
@@ -140,6 +158,9 @@ Warmups are excluded from every aggregate. The CSV stores and gates p50 values. 
 diagnostics additionally report timing minimum, maximum, and sample count plus peak-RSS maximum.
 Collection rejects host-termination semantics, missing samples, and any guest-exit teardown
 timeout.
+Lifecycle capture runs a deterministic affinity-pinned worker on every vCPU
+before the snapshot request and again after restore continuation. The probe is
+outside the snapshot-generation timing interval.
 
 ### Cold start
 
@@ -210,7 +231,9 @@ compare KVM, MSHV, and WHP results with the latest base-branch history.
 The current workflow uses the latest 10 p50 samples on the pull request's base branch. A metric
 regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be
 more than 10 ms slower; higher-is-better metrics use the percentage comparison alone. A missing
-history is a warmup, not a failure. Successful `dev` builds append collected results to `data/`.
+history is a warmup, not a failure. Successful `dev` builds append collected
+results to topology-specific files in `data/`. Every new ABI-v3/count series
+begins as a warmup baseline before its regression gate has matching history.
 
 ## Lifecycle methodology
 

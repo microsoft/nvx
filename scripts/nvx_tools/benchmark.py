@@ -55,6 +55,7 @@ VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"
 VIRTFS_GUEST_TO_HOST = b"guest-to-host\n"
 VIRTFS_HOST_WAITING = b"waiting\n"
 VIRTFS_HOST_TO_GUEST = b"host-to-guest\n"
+SMP_PROBE_COMPLETION_MARKER = b"NVX-SMP-PROBE-OK"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 PERFORMANCE_LOG_FILENAMES = (
     "cold-start.log",
@@ -63,6 +64,8 @@ PERFORMANCE_LOG_FILENAMES = (
     "network.log",
 )
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
+BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
+MICROVM_ABI_VERSION = 3
 
 
 class BenchmarkResult(TypedDict):
@@ -169,11 +172,7 @@ def configure_parser(
     parser: argparse.ArgumentParser,
     repository_dir: Path,
 ) -> None:
-    cpu_count = os.cpu_count() or 1
-    cpu_start = max(0, cpu_count - min(cpu_count, 4))
-    default_cpus = (
-        str(cpu_start) if cpu_start == cpu_count - 1 else f"{cpu_start}-{cpu_count - 1}"
-    )
+    default_cpus = ",".join(str(cpu) for cpu in sorted(physical_cpu_representatives()))
     parser.description = (
         "Build and benchmark OpenVMM microVM boot or the host-side phase 2 "
         "snapshot foundations. No NVX VMM binary is built or run."
@@ -203,6 +202,10 @@ def configure_parser(
         help="backend to benchmark (default: both on Windows, kvm on Linux)",
     )
     parser.add_argument(
+        "--platform",
+        help=("host-typed performance series (for example, linux-kvm-baremetal)"),
+    )
+    parser.add_argument(
         "--openvmm-dir",
         type=Path,
         default=repository_dir / "openvmm",
@@ -217,6 +220,13 @@ def configure_parser(
     parser.add_argument("--warmups", type=positive_int, default=3)
     parser.add_argument("--runs", type=positive_int, default=11)
     parser.add_argument("--memory-mib", type=positive_int, default=128)
+    parser.add_argument(
+        "--processors",
+        type=int,
+        choices=(1, 2, 4, 8),
+        default=1,
+        help="microVM ABI-v3 processor count (default: 1)",
+    )
     parser.add_argument(
         "--virtfs-runs",
         type=positive_int,
@@ -369,6 +379,89 @@ def parse_cpu_set(spec: str) -> set[int]:
     if not cpus or min(cpus) < 0:
         raise ValueError(f"invalid CPU set {spec!r}")
     return cpus
+
+
+def physical_cpu_representatives() -> set[int]:
+    if os.name == "nt":
+        return windows_physical_cpu_representatives()
+    if sys.platform.startswith("linux"):
+        representatives: set[int] = set()
+        sibling_sets: set[str] = set()
+        for topology in sorted(
+            Path("/sys/devices/system/cpu").glob("cpu[0-9]*/topology")
+        ):
+            siblings_path = topology / "thread_siblings_list"
+            try:
+                siblings = siblings_path.read_text(encoding="ascii").strip()
+                available = parse_cpu_set(siblings)
+            except (OSError, ValueError):
+                continue
+            key = ",".join(str(cpu) for cpu in sorted(available))
+            if key not in sibling_sets:
+                sibling_sets.add(key)
+                representatives.add(min(available))
+        if representatives:
+            return representatives
+    return set(range(os.cpu_count() or 1))
+
+
+def windows_physical_cpu_representatives() -> set[int]:
+    if os.name != "nt":
+        raise RuntimeError("Windows processor topology is unavailable")
+
+    class GroupAffinity(ctypes.Structure):
+        _fields_ = [
+            ("mask", ctypes.c_size_t),
+            ("group", ctypes.c_ushort),
+            ("reserved", ctypes.c_ushort * 3),
+        ]
+
+    relation_processor_core = 0
+    error_insufficient_buffer = 122
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    query = kernel32.GetLogicalProcessorInformationEx
+    query.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    query.restype = ctypes.c_int
+    length = ctypes.c_ulong()
+    if query(relation_processor_core, None, ctypes.byref(length)):
+        raise RuntimeError("processor topology size query unexpectedly succeeded")
+    if ctypes.get_last_error() != error_insufficient_buffer:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_string_buffer(length.value)
+    if not query(relation_processor_core, buffer, ctypes.byref(length)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    representatives: set[int] = set()
+    offset = 0
+    while offset < length.value:
+        relationship = ctypes.c_uint32.from_buffer(buffer, offset).value
+        record_size = ctypes.c_uint32.from_buffer(buffer, offset + 4).value
+        if relationship == relation_processor_core:
+            group_count = ctypes.c_ushort.from_buffer(buffer, offset + 30).value
+            group_offset = offset + 32
+            for index in range(group_count):
+                affinity = GroupAffinity.from_buffer(
+                    buffer, group_offset + index * ctypes.sizeof(GroupAffinity)
+                )
+                if affinity.group == 0 and affinity.mask:
+                    representatives.add(
+                        (int(affinity.mask) & -int(affinity.mask)).bit_length() - 1
+                    )
+        if record_size == 0:
+            raise RuntimeError("Windows processor topology contains an empty record")
+        offset += record_size
+    if not representatives:
+        raise RuntimeError("Windows did not report any physical processor cores")
+    return representatives
+
+
+def validate_benchmark_cpu_set(cpus: set[int], processors: int) -> None:
+    required = processors + 2
+    if len(cpus) < required:
+        raise ValueError(
+            f"CPU set selects {len(cpus)} logical CPUs; a {processors}-vCPU benchmark "
+            f"requires at least {required} for the guest plus VMM/device work"
+        )
 
 
 def set_windows_affinity(pid: int, cpus: set[int]) -> None:
@@ -820,6 +913,7 @@ def workload_boot_command(
     memory_mib: int,
     cmdline: str,
     *,
+    processors: int = 1,
     command_prefix: Sequence[str] = (),
     network: str | None = None,
     mount: str | None = None,
@@ -829,7 +923,9 @@ def workload_boot_command(
         str(executable),
         "--single-process",
         "--machine",
-        "microvm",
+        "microvm-v3",
+        "--processors",
+        str(processors),
         "--hypervisor",
         backend,
         "--memory",
@@ -1028,7 +1124,7 @@ def benchmark_cold_start_workload(
     )
     print(
         "cold-start (OpenVMM process launch -> shell marker), "
-        f"median of {args.runs} runs, {args.memory_mib} MiB, 1 vCPU"
+        f"median of {args.runs} runs, {args.memory_mib} MiB, {args.processors} vCPU"
     )
     print()
     print("isolated kernel command-line scenarios:")
@@ -1044,6 +1140,7 @@ def benchmark_cold_start_workload(
                 initrd,
                 args.memory_mib,
                 cmdline,
+                processors=args.processors,
                 command_prefix=command_prefix,
             ),
             warmups=args.warmups,
@@ -1066,6 +1163,76 @@ def _format_rate_summary(samples: Sequence[float]) -> str:
 
 def _guest_exit_script(teardown_mode: str) -> str:
     return "nvx-exit 0\n" if teardown_mode == "guest-exit" else ""
+
+
+def smp_probe_script(
+    processors: int,
+    *,
+    exit_guest: bool = True,
+    network_gateway: str | None = None,
+    ioapic_irq: int | None = None,
+) -> str:
+    if processors not in (1, 2, 4, 8):
+        raise ValueError("microVM ABI-v3 SMP probe supports 1, 2, 4, or 8 vCPUs")
+    if (network_gateway is None) != (ioapic_irq is None):
+        raise ValueError("network gateway and IOAPIC IRQ must be specified together")
+    apic_ids = ",".join(str(cpu) for cpu in range(processors))
+    lines = [
+        "set -eu",
+        'trap \'status=$?; if [ "$status" -ne 0 ]; then nvx-exit "$status"; fi\' EXIT',
+        f"expected={processors}",
+        'online="$(getconf _NPROCESSORS_ONLN)"',
+        '[ "$online" -eq "$expected" ] || { echo "SMP-ONLINE-FAIL expected=$expected actual=$online"; exit 81; }',
+        'loc_before="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"',
+        '[ "$(printf "%s\n" "$loc_before" | awk \'{ print NF }\')" -eq "$expected" ] || { echo "SMP-LAPIC-FAIL missing-local-timer-counters"; exit 87; }',
+        "uptime_before=\"$(awk '{ print int($1 * 100); exit }' /proc/uptime)\"",
+        "workers=0",
+        "for cpu in $(seq 0 $((expected - 1))); do",
+        '  topology="/sys/devices/system/cpu/cpu${cpu}/topology"',
+        '  [ "$(cat "$topology/physical_package_id")" -eq 0 ] || exit 82',
+        '  [ "$(cat "$topology/die_id")" -eq 0 ] || exit 83',
+        '  [ "$(cat "$topology/core_id")" -eq "$cpu" ] || exit 84',
+        '  [ "$(cat "$topology/thread_siblings_list")" = "$cpu" ] || exit 85',
+        '  apic_id="$(awk -v target="$cpu" \'$1 == "processor" { processor = $3 } $1 == "apicid" && processor == target { print $3; exit }\' /proc/cpuinfo)"',
+        '  [ "$apic_id" -eq "$cpu" ] || { echo "SMP-APIC-FAIL cpu=$cpu apic=$apic_id"; exit 86; }',
+        '  actual="$(taskset -c "$cpu" sh -c \'awk "{print \\$39}" /proc/self/stat\')"',
+        '  [ "$actual" -eq "$cpu" ] || { echo "SMP-WORKER-FAIL requested=$cpu actual=$actual"; exit 87; }',
+        '  taskset -c "$cpu" sleep 0.1 &',
+        '  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id"',
+        "  workers=$((workers + 1))",
+        "done",
+        "wait",
+        'loc_after="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"',
+        "for cpu in $(seq 0 $((expected - 1))); do",
+        "  field=$((cpu + 1))",
+        '  before="$(printf "%s\n" "$loc_before" | awk -v field="$field" \'{ print $field }\')"',
+        '  after="$(printf "%s\n" "$loc_after" | awk -v field="$field" \'{ print $field }\')"',
+        '  [ "$after" -gt "$before" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu before=$before after=$after"; exit 88; }',
+        '  if [ "$cpu" -gt 0 ]; then',
+        "    ipi=\"$(awk -v field=$((cpu + 2)) '/^(RES|CAL):/ { total += $field } END { print total + 0 }' /proc/interrupts)\"",
+        '    [ "$ipi" -gt 0 ] || { echo "SMP-IPI-FAIL cpu=$cpu count=$ipi"; exit 89; }',
+        "  fi",
+        "done",
+        "uptime_after=\"$(awk '{ print int($1 * 100); exit }' /proc/uptime)\"",
+        '[ "$uptime_after" -gt "$uptime_before" ] || { echo "SMP-TIMER-FAIL before=$uptime_before after=$uptime_after"; exit 90; }',
+        'echo "SMP-INTERRUPTS-OK loc_before=$loc_before loc_after=$loc_after uptime_before=$uptime_before uptime_after=$uptime_after"',
+        f'echo "SMP-TOPOLOGY-OK requested=$expected online=$online sockets=1 cores=$expected threads=1 apic_ids={apic_ids} bsp=0 workers=$workers"',
+    ]
+    if network_gateway is not None and ioapic_irq is not None:
+        lines.extend(
+            (
+                f"ioapic_irq={ioapic_irq}",
+                'irq_before="$(awk -v irq="$ioapic_irq" -v expected="$expected" \'$1 == irq ":" { for (cpu = 0; cpu < expected; cpu++) total += $(cpu + 2) } END { print total + 0 }\' /proc/interrupts)"',
+                f'ping -c 2 -W 1 "{network_gateway}" >/dev/null',
+                'irq_after="$(awk -v irq="$ioapic_irq" -v expected="$expected" \'$1 == irq ":" { for (cpu = 0; cpu < expected; cpu++) total += $(cpu + 2) } END { print total + 0 }\' /proc/interrupts)"',
+                '[ "$irq_after" -gt "$irq_before" ] || { echo "SMP-IOAPIC-FAIL irq=$ioapic_irq before=$irq_before after=$irq_after"; exit 91; }',
+                'echo "SMP-IOAPIC-OK irq=$ioapic_irq before=$irq_before after=$irq_after"',
+            )
+        )
+    lines.append(f"echo {SMP_PROBE_COMPLETION_MARKER.decode()}")
+    if exit_guest:
+        lines.append("nvx-exit 0")
+    return "\n".join(lines) + "\n"
 
 
 def _virtfs_script(payload_mib: int, teardown_mode: str) -> str:
@@ -1168,19 +1335,22 @@ def benchmark_virtfs_workload(
             initrd,
             args.virtfs_memory_mib,
             "quiet loglevel=0",
+            processors=args.processors,
             command_prefix=command_prefix,
             mount=mount,
         )
         print(
             f"virtfs benchmark: {args.payload_mib} MiB payload, "
-            f"{args.virtfs_memory_mib} MiB guest, 1 vCPU, median of {runs} runs"
+            f"{args.virtfs_memory_mib} MiB guest, {args.processors} vCPU, "
+            f"median of {runs} runs"
         )
         print()
         print("== sequential throughput (guest dd, conv=fsync writes) ==")
         write_rates: list[float] = []
         read_rates: list[float] = []
         io_rss: list[int] = []
-        for run_number in range(1, runs + 1):
+        for index in range(args.warmups + runs):
+            run_number = index - args.warmups + 1
             result = run_guest_script(
                 command,
                 _virtfs_script(args.payload_mib, args.teardown_mode),
@@ -1193,8 +1363,11 @@ def benchmark_virtfs_workload(
             read_rate = parse_dd_rate(result["text"], 2)
             if write_rate is None or read_rate is None:
                 raise RuntimeError(
-                    f"virtfs run {run_number}/{runs} did not report both dd rates"
+                    f"virtfs run {index + 1}/{args.warmups + runs} did not report both dd rates"
                 )
+            if index < args.warmups:
+                print(f"  warmup {index + 1}/{args.warmups}: excluded")
+                continue
             write_rates.append(write_rate)
             read_rates.append(read_rate)
             io_rss.append(result["peak_rss_bytes"])
@@ -1208,7 +1381,8 @@ def benchmark_virtfs_workload(
         print("== live host <-> guest visibility (same running VM) ==")
         roundtrip_samples: list[float] = []
         roundtrip_rss: list[int] = []
-        for run_number in range(1, runs + 1):
+        for index in range(args.warmups + runs):
+            run_number = index - args.warmups + 1
             result = _run_virtfs_roundtrip(
                 command,
                 directory,
@@ -1218,6 +1392,9 @@ def benchmark_virtfs_workload(
                 windows_cpus=windows_cpus,
                 teardown_mode=args.teardown_mode,
             )
+            if index < args.warmups:
+                print(f"  warmup {index + 1}/{args.warmups}: excluded")
+                continue
             roundtrip_samples.append(result["wall_ms"])
             roundtrip_rss.append(result["peak_rss_bytes"])
         print(
@@ -1278,7 +1455,7 @@ def benchmark_shell_snapshot_workload(
 ) -> None:
     print(
         "boot-to-shell: cold OpenVMM launch vs snapshot restore, "
-        f"median of {args.runs} runs, 1 vCPU"
+        f"median of {args.runs} runs, {args.processors} vCPU"
     )
     print(f'marker : "{BOOT_MARKER.decode()}"')
     print(f"kernel : {kernel}")
@@ -1294,6 +1471,7 @@ def benchmark_shell_snapshot_workload(
                 initrd,
                 memory_mib,
                 "quiet loglevel=0",
+                processors=args.processors,
                 command_prefix=command_prefix,
             )
             cold = benchmark(
@@ -1313,6 +1491,7 @@ def benchmark_shell_snapshot_workload(
                 initrd,
                 memory_mib,
                 "quiet loglevel=0 shellsnap",
+                processors=args.processors,
                 command_prefix=command_prefix,
             )
             capture_automatic_snapshot(
@@ -1332,6 +1511,7 @@ def benchmark_shell_snapshot_workload(
                         executable,
                         backend,
                         snapshot_path,
+                        processors=args.processors,
                     ),
                 ],
                 warmups=args.warmups,
@@ -1364,7 +1544,8 @@ def benchmark_network_snapshot_workload(
     restore_marker = f"NETSNAP-RESTORE-PROBE-OK: {gateway}".encode()
     print(
         "networking + snapshot benchmark, "
-        f"median of {args.runs}, {args.network_memory_mib} MiB, 1 vCPU, "
+        f"median of {args.runs}, {args.network_memory_mib} MiB, "
+        f"{args.processors} vCPU, "
         f"--net {network} --network-profile portable"
     )
     print()
@@ -1377,8 +1558,21 @@ def benchmark_network_snapshot_workload(
         initrd,
         args.network_memory_mib,
         probe_cmdline,
+        processors=args.processors,
         command_prefix=command_prefix,
         network=network,
+    )
+    ioapic_irq = 5 if backend == "whp" else 10
+    run_guest_script(
+        cold_command,
+        smp_probe_script(
+            args.processors,
+            network_gateway=gateway,
+            ioapic_irq=ioapic_irq,
+        ),
+        SMP_PROBE_COMPLETION_MARKER,
+        timeout=max(args.timeout, 40.0),
+        windows_cpus=windows_cpus,
     )
     cold = benchmark(
         cold_command,
@@ -1408,6 +1602,7 @@ def benchmark_network_snapshot_workload(
             initrd,
             args.network_memory_mib,
             f"{probe_cmdline} netsnap",
+            processors=args.processors,
             command_prefix=command_prefix,
             network=network,
         )
@@ -1431,6 +1626,7 @@ def benchmark_network_snapshot_workload(
                     executable,
                     backend,
                     snapshot_path,
+                    processors=args.processors,
                     network_profile="portable",
                 ),
             ],
@@ -1474,6 +1670,69 @@ class TeeWriter:
             stream.flush()
 
 
+def _git_revision(repository: Path) -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def write_benchmark_metadata(
+    args: argparse.Namespace,
+    output_dir: Path,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+) -> Path:
+    platform = args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
+    effective_network = (
+        args.net or "10.0.0.2/24"
+        if args.suite in {"network-snapshot", "performance"}
+        else args.net
+    )
+    document = {
+        "schema_version": 1,
+        "platform": platform,
+        "backend": backend,
+        "microvm_abi_version": MICROVM_ABI_VERSION,
+        "processors": args.processors,
+        "network": effective_network,
+        "lifecycle_network": args.net,
+        "host_affinity_set": args.cpus,
+        "memory_mib": {
+            "lifecycle": args.memory_mib,
+            "virtfs": args.virtfs_memory_mib,
+            "shell": args.shell_memories,
+            "network": args.network_memory_mib,
+        },
+        "warmups": args.warmups,
+        "measured_runs": args.runs,
+        "virtfs_measured_runs": args.virtfs_runs,
+        "payload_mib": args.payload_mib,
+        "virtfs_memory_mib": args.virtfs_memory_mib,
+        "shell_memories_mib": args.shell_memories,
+        "network_memory_mib": args.network_memory_mib,
+        "artifacts": {
+            "openvmm": str(executable),
+            "kernel": str(kernel),
+            "initrd": str(initrd),
+        },
+        "artifact_revisions": {
+            "nvx": _git_revision(args.nvx_dir.resolve()),
+            "openvmm": _git_revision(args.openvmm_dir.resolve()),
+        },
+    }
+    path = output_dir / BENCHMARK_METADATA_FILENAME
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def run_workload_benchmarks(
     args: argparse.Namespace,
     executable: Path,
@@ -1496,14 +1755,25 @@ def run_workload_benchmarks(
         requested = [args.suite]
     output_dir = args.output_dir
     if output_dir is None and args.suite == "performance":
-        platform = f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
-        output_dir = args.nvx_dir.resolve() / "data" / "runs" / platform
+        platform = (
+            args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
+        )
+        output_dir = (
+            args.nvx_dir.resolve()
+            / "data"
+            / "runs"
+            / f"{platform}-microvm-v{MICROVM_ABI_VERSION}-{args.processors}vcpu"
+        )
     if output_dir is not None:
         output_dir = output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         if args.suite == "performance":
             for filename in (*PERFORMANCE_LOG_FILENAMES, *LEGACY_PYTHON_LOG_FILENAMES):
                 (output_dir / filename).unlink(missing_ok=True)
+        metadata_path = write_benchmark_metadata(
+            args, output_dir, executable, kernel, initrd, backend
+        )
+        print(f"Wrote {metadata_path}", flush=True)
 
     callbacks: dict[str, tuple[str, Callable[[], None]]] = {
         "cold-start": (
@@ -1576,6 +1846,9 @@ def capture_snapshot(
     *,
     timeout: float,
     windows_cpus: set[int] | None = None,
+    processors: int | None = None,
+    smp_network_gateway: str | None = None,
+    smp_ioapic_irq: int | None = None,
 ) -> tuple[float, float, float, int]:
     if snapshot_path.exists():
         shutil.rmtree(snapshot_path)
@@ -1592,6 +1865,7 @@ def capture_snapshot(
     ).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
+    boot_seen = False
     snapshot_requested = False
     snapshot_started_ns = None
     snapshot_published_ns = None
@@ -1605,6 +1879,29 @@ def capture_snapshot(
             and snapshot_path.is_dir()
         ):
             snapshot_published_ns = time.perf_counter_ns()
+
+    def request_snapshot() -> None:
+        nonlocal snapshot_requested, snapshot_started_ns, deadline
+        snapshot_started_ns = time.perf_counter_ns()
+        post_restore_probe = (
+            smp_probe_script(
+                processors,
+                exit_guest=False,
+                network_gateway=smp_network_gateway,
+                ioapic_irq=smp_ioapic_irq,
+            )
+            if processors is not None
+            else ""
+        )
+        interaction.write_input(
+            (
+                "nvx-snapshot\n"
+                + post_restore_probe
+                + f"echo {RESTORE_MARKER.decode()}\n"
+            ).encode("utf-8")
+        )
+        snapshot_requested = True
+        deadline = time.monotonic() + timeout
 
     try:
         while True:
@@ -1629,11 +1926,25 @@ def capture_snapshot(
                 break
             output.extend(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
-            if not snapshot_requested and BOOT_MARKER in output:
-                snapshot_started_ns = time.perf_counter_ns()
-                interaction.write_input(b"nvx-snapshot; echo " + RESTORE_MARKER + b"\n")
-                snapshot_requested = True
-                deadline = time.monotonic() + timeout
+            if not boot_seen and BOOT_MARKER in output:
+                boot_seen = True
+                if processors is None:
+                    request_snapshot()
+                else:
+                    interaction.write_input(
+                        smp_probe_script(
+                            processors,
+                            exit_guest=False,
+                            network_gateway=smp_network_gateway,
+                            ioapic_irq=smp_ioapic_irq,
+                        ).encode("utf-8")
+                    )
+            if (
+                boot_seen
+                and not snapshot_requested
+                and contains_output_line(output, SMP_PROBE_COMPLETION_MARKER)
+            ):
+                request_snapshot()
             if snapshot_requested and contains_output_line(output, RESTORE_MARKER):
                 raise RuntimeError("source guest continued past the snapshot boundary")
             if len(output) > 1024 * 1024:
@@ -1644,7 +1955,7 @@ def capture_snapshot(
         if snapshot_published_ns is None and snapshot_path.is_dir():
             snapshot_published_ns = source_exited_ns
         if not snapshot_requested:
-            raise RuntimeError("source guest exited before its boot marker")
+            raise RuntimeError("source guest exited before its snapshot request")
         if returncode != 0:
             raise RuntimeError(f"snapshot source exited with status {returncode}")
         if not snapshot_path.is_dir():
@@ -1740,6 +2051,7 @@ def benchmark_snapshot_capture(
                     snapshot_path,
                     timeout=args.timeout,
                     windows_cpus=windows_cpus,
+                    processors=args.processors,
                 )
             )
         if index < args.warmups:
@@ -1786,13 +2098,16 @@ def snapshot_restore_command(
     hypervisor: str,
     snapshot_path: Path,
     *,
+    processors: int = 1,
     network_profile: str | None = None,
 ) -> list[str]:
     command = [
         str(executable),
         "--single-process",
         "--machine",
-        "microvm",
+        "microvm-v3",
+        "--processors",
+        str(processors),
         "--hypervisor",
         hypervisor,
         "--restore-snapshot",
@@ -1822,6 +2137,7 @@ def benchmark_snapshot_restore(
                     executable,
                     hypervisor,
                     snapshot_path,
+                    processors=args.processors,
                     network_profile=args.network_profile,
                 ),
             ],
@@ -1844,6 +2160,7 @@ def benchmark_snapshot_restore(
             generated_snapshot_path,
             timeout=args.timeout,
             windows_cpus=windows_cpus,
+            processors=args.processors,
         )
         return benchmark_snapshot_restore(
             args,
@@ -2094,12 +2411,16 @@ def whp_command(
     initrd: Path,
     memory_mib: int,
     network: str | None,
+    *,
+    processors: int = 1,
 ) -> list[str]:
     command = [
         str(executable),
         "--single-process",
         "--machine",
-        "microvm",
+        "microvm-v3",
+        "--processors",
+        str(processors),
         "--hypervisor",
         "whp",
         "--memory",
@@ -2238,7 +2559,9 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         str(stage / "openvmm"),
         "--single-process",
         "--machine",
-        "microvm",
+        "microvm-v3",
+        "--processors",
+        str(args.processors),
         "--hypervisor",
         "kvm",
         "--memory",
@@ -2332,6 +2655,7 @@ def result_document(
     args: argparse.Namespace,
     kernel: Path | None,
     initrd: Path | None,
+    backend: str | None = None,
 ) -> ResultDocument:
     return {
         "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -2340,6 +2664,14 @@ def result_document(
             "warmups": args.warmups,
             "runs": args.runs,
             "memory_mib": args.memory_mib,
+            "platform": args.platform,
+            "backend": backend or args.backend,
+            "microvm_abi_version": MICROVM_ABI_VERSION,
+            "processors": args.processors,
+            "artifact_revisions": {
+                "nvx": _git_revision(args.nvx_dir.resolve()),
+                "openvmm": _git_revision(args.openvmm_dir.resolve()),
+            },
             "network": args.net,
             "snapshot_artifact_validation": "structural-and-semantic",
             "cold_start_scope": (
@@ -2469,6 +2801,8 @@ def run_native_linux(args: argparse.Namespace) -> int:
         raise ValueError(
             f"CPU set {args.cpus!r} exceeds the {available_cpus} available logical CPUs"
         )
+    if run_guest:
+        validate_benchmark_cpu_set(cpus, args.processors)
     prefix = ["taskset", "-c", args.cpus]
     if run_workloads:
         assert executable is not None and kernel is not None and initrd is not None
@@ -2480,7 +2814,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
             backend,
             command_prefix=prefix,
         )
-    results = result_document(args, kernel, initrd)
+    results = result_document(args, kernel, initrd, backend)
     if run_guest:
         assert executable is not None and kernel is not None and initrd is not None
         boot_command = [
@@ -2488,7 +2822,9 @@ def run_native_linux(args: argparse.Namespace) -> int:
             str(executable),
             "--single-process",
             "--machine",
-            "microvm",
+            "microvm-v3",
+            "--processors",
+            str(args.processors),
             "--hypervisor",
             backend,
             "--memory",
@@ -2596,6 +2932,8 @@ def benchmark_kvm(
         str(args.runs),
         "--memory-mib",
         str(args.memory_mib),
+        "--processors",
+        str(args.processors),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -2652,6 +2990,8 @@ def benchmark_e2e_kvm(
         str(args.runs),
         "--memory-mib",
         str(args.memory_mib),
+        "--processors",
+        str(args.processors),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -2708,6 +3048,8 @@ def benchmark_snapshot_restore_kvm(
         str(args.runs),
         "--memory-mib",
         str(args.memory_mib),
+        "--processors",
+        str(args.processors),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -2764,6 +3106,8 @@ def benchmark_snapshot_kvm(
         str(args.runs),
         "--memory-mib",
         str(args.memory_mib),
+        "--processors",
+        str(args.processors),
         "--cpus",
         args.cpus,
         "--timeout",
@@ -2830,6 +3174,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(
             f"CPU set {args.cpus!r} exceeds the {available_cpus} available logical CPUs"
         )
+    if run_guest:
+        validate_benchmark_cpu_set(cpus, args.processors)
 
     selected = ("whp", "kvm") if args.backend == "both" else (args.backend,)
     boot_binaries: dict[str, Path] = {}
@@ -2908,6 +3254,7 @@ def run(args: argparse.Namespace) -> int:
                 initrd,
                 args.memory_mib,
                 args.net,
+                processors=args.processors,
             ),
             warmups=args.warmups,
             runs=args.runs,
@@ -2957,6 +3304,7 @@ def run(args: argparse.Namespace) -> int:
                     initrd,
                     args.memory_mib,
                     args.net,
+                    processors=args.processors,
                 ),
                 windows_cpus=cpus,
                 retained_snapshot_path=retained_whp_snapshot,
@@ -2990,6 +3338,7 @@ def run(args: argparse.Namespace) -> int:
                     initrd,
                     args.memory_mib,
                     args.net,
+                    processors=args.processors,
                 ),
                 windows_cpus=cpus,
                 snapshot_path=retained_whp_snapshot,

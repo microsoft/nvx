@@ -143,8 +143,12 @@ class CliTests(unittest.TestCase):
                 "run",
                 "--hypervisor",
                 "mshv",
+                "--machine",
+                "microvm-v3",
                 "--restore-snapshot",
                 "snapshot",
+                "--processors",
+                "4",
                 "--restore-ready-path",
                 "ready.sock",
                 "--dry-run",
@@ -167,7 +171,9 @@ class CliTests(unittest.TestCase):
                 "openvmm",
                 "--single-process",
                 "--machine",
-                "microvm",
+                "microvm-v3",
+                "--processors",
+                "4",
                 "--hypervisor",
                 "mshv",
                 "--restore-snapshot",
@@ -185,6 +191,25 @@ class CliTests(unittest.TestCase):
             common.ScriptError, "--restore-ready-path requires --restore-snapshot"
         ):
             nvx.command_run(missing_snapshot)
+
+        legacy = nvx.parse_args(["run", "--restore-snapshot", "snapshot", "--dry-run"])
+        with (
+            patch.object(nvx, "require_file", return_value=Path("openvmm")),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(legacy)
+        self.assertIn("microvm", format_command.call_args.args[0])
+        self.assertNotIn("microvm-v3", format_command.call_args.args[0])
+
+        invalid_old_smp = nvx.parse_args(
+            ["run", "--machine", "microvm-v2", "--processors", "2", "--dry-run"]
+        )
+        with self.assertRaisesRegex(
+            common.ScriptError, "requires exactly one processor"
+        ):
+            nvx.command_run(invalid_old_smp)
 
     def test_openvmm_build_skips_compatibility_igvm(self):
         with (
@@ -379,12 +404,24 @@ class BenchmarkTests(unittest.TestCase):
             Path("initramfs.cpio.gz"),
             128,
             "quiet loglevel=0 nokaslr",
+            processors=8,
             command_prefix=("taskset", "-c", "2-3"),
             network="10.0.0.2/24",
             mount="/mnt/host,C:/work,rw",
         )
 
         self.assertEqual(command[:4], ["taskset", "-c", "2-3", "openvmm"])
+        self.assertEqual(
+            command[4:10],
+            [
+                "--single-process",
+                "--machine",
+                "microvm-v3",
+                "--processors",
+                "8",
+                "--hypervisor",
+            ],
+        )
         self.assertIn("quiet loglevel=0 nokaslr", command)
         self.assertEqual(
             command[-6:],
@@ -419,7 +456,13 @@ class BenchmarkTests(unittest.TestCase):
             Path("openvmm"),
             "mshv",
             Path("snapshot"),
+            processors=4,
             network_profile="portable",
+        )
+
+        self.assertEqual(
+            command[2:8],
+            ["--machine", "microvm-v3", "--processors", "4", "--hypervisor", "mshv"],
         )
 
         self.assertEqual(
@@ -428,6 +471,34 @@ class BenchmarkTests(unittest.TestCase):
                 "--network-profile",
                 "portable",
             ],
+        )
+
+    def test_benchmark_snapshot_restore_propagates_processors(self):
+        args = argparse.Namespace(
+            processors=4,
+            network_profile=None,
+            warmups=1,
+            runs=1,
+            timeout=1.0,
+            teardown_mode="guest-exit",
+        )
+        result = cast(benchmark.BenchmarkResult, {"p50_ms": 10.0})
+        with patch.object(benchmark, "benchmark", return_value=result) as run:
+            self.assertIs(
+                benchmark.benchmark_snapshot_restore(
+                    args,
+                    Path("openvmm"),
+                    "kvm",
+                    ["unused-cold-command"],
+                    snapshot_path=Path("snapshot"),
+                ),
+                result,
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[2:8],
+            ["--machine", "microvm-v3", "--processors", "4", "--hypervisor", "kvm"],
         )
 
     def test_parses_dd_rates_and_network_gateway(self):
@@ -443,6 +514,99 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.clocksource_parameter("kvm"), "clocksource=kvm-clock"
         )
         self.assertEqual(benchmark.clocksource_parameter("mshv"), "clocksource=tsc")
+
+    def test_smp_probe_uses_explicit_topology_and_worker_rendezvous(self):
+        script = benchmark.smp_probe_script(4)
+
+        self.assertIn("getconf _NPROCESSORS_ONLN", script)
+        self.assertIn("physical_package_id", script)
+        self.assertIn("die_id", script)
+        self.assertIn("thread_siblings_list", script)
+        self.assertIn('taskset -c "$cpu"', script)
+        self.assertIn("loc_before", script)
+        self.assertIn("SMP-LAPIC-FAIL", script)
+        self.assertIn("SMP-IPI-FAIL", script)
+        self.assertIn("apic_ids=0,1,2,3 bsp=0 workers=$workers", script)
+        self.assertIn("NVX-SMP-PROBE-OK", script)
+        self.assertTrue(script.endswith("nvx-exit 0\n"))
+        network_script = benchmark.smp_probe_script(
+            4,
+            network_gateway="10.0.0.1",
+            ioapic_irq=10,
+        )
+        self.assertIn('ping -c 2 -W 1 "10.0.0.1"', network_script)
+        self.assertIn("SMP-IOAPIC-FAIL", network_script)
+        self.assertIn("SMP-IOAPIC-OK", network_script)
+        with self.assertRaises(ValueError):
+            benchmark.smp_probe_script(3)
+        with self.assertRaises(ValueError):
+            benchmark.smp_probe_script(4, network_gateway="10.0.0.1")
+
+    def test_benchmark_cpu_set_reserves_host_worker_capacity(self):
+        benchmark.validate_benchmark_cpu_set(set(range(10)), 8)
+        with self.assertRaisesRegex(ValueError, "requires at least 10"):
+            benchmark.validate_benchmark_cpu_set(set(range(9)), 8)
+        benchmark.validate_benchmark_cpu_set({0, 2, 4}, 1)
+
+    def test_snapshot_capture_runs_smp_probe_for_selected_count(self):
+        args = argparse.Namespace(warmups=0, runs=1, timeout=1.0, processors=8)
+        with patch.object(
+            benchmark,
+            "capture_snapshot",
+            return_value=(1.0, 1.0, 1.0, 1024),
+        ) as capture:
+            benchmark.benchmark_snapshot_capture(args, ["openvmm"])
+
+        self.assertEqual(capture.call_args.kwargs["processors"], 8)
+
+    def test_network_workload_runs_unmeasured_smp_interrupt_preflight(self):
+        args = argparse.Namespace(
+            net=None,
+            network_memory_mib=128,
+            processors=4,
+            warmups=0,
+            runs=1,
+            timeout=1.0,
+            teardown_mode="guest-exit",
+        )
+        result: benchmark.BenchmarkResult = {
+            "samples_ms": [1.0],
+            "p50_ms": 1.0,
+            "min_ms": 1.0,
+            "max_ms": 1.0,
+            "wall_samples_ms": [1.0],
+            "wall_p50_ms": 1.0,
+            "wall_min_ms": 1.0,
+            "wall_max_ms": 1.0,
+            "peak_rss_samples_bytes": [1],
+            "peak_rss_p50_bytes": 1,
+            "peak_rss_min_bytes": 1,
+            "peak_rss_max_bytes": 1,
+            "teardown_samples_ms": [1.0],
+            "teardown_completed_samples_ms": [1.0],
+            "teardown_timeout_count": 0,
+            "teardown_timeout_seconds": 5.0,
+            "teardown_p50_ms": 1.0,
+            "teardown_min_ms": 1.0,
+            "teardown_max_ms": 1.0,
+        }
+        with (
+            patch.object(benchmark, "run_guest_script") as probe,
+            patch.object(benchmark, "benchmark", return_value=result),
+            patch.object(benchmark, "capture_automatic_snapshot"),
+        ):
+            benchmark.benchmark_network_snapshot_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+            )
+
+        self.assertEqual(probe.call_count, 1)
+        self.assertIn("--network-profile", probe.call_args.args[0])
+        self.assertIn("SMP-IOAPIC-OK", probe.call_args.args[1])
+        self.assertEqual(probe.call_args.args[2], benchmark.SMP_PROBE_COMPLETION_MARKER)
 
     def test_benchmark_preserves_exact_process_wall_samples(self):
         samples = [
@@ -483,7 +647,7 @@ class BenchmarkTests(unittest.TestCase):
                 sample = float(len(observed_paths))
                 return sample, sample, sample / 10, len(observed_paths) * 1024
 
-            args = argparse.Namespace(warmups=1, runs=2, timeout=1.0)
+            args = argparse.Namespace(warmups=1, runs=2, timeout=1.0, processors=1)
             with patch.object(benchmark, "capture_snapshot", side_effect=capture):
                 result = benchmark.benchmark_snapshot_capture(
                     args,
@@ -508,6 +672,7 @@ class BenchmarkTests(unittest.TestCase):
                 timeout=3.0,
                 teardown_mode="guest-exit",
                 network_profile=None,
+                processors=1,
             )
             expected = {"p50_ms": 1.0}
             with (
@@ -553,7 +718,7 @@ class BenchmarkTests(unittest.TestCase):
                     "--nvx-dir",
                     str(root),
                     "--cpus",
-                    "0",
+                    "0-2",
                     "--warmups",
                     "1",
                     "--runs",
@@ -637,6 +802,7 @@ class BenchmarkTests(unittest.TestCase):
             _stage_dir="/tmp/stage",
             cpus="0",
             memory_mib=128,
+            processors=4,
             net=None,
             suite="e2e",
             warmups=1,
@@ -711,6 +877,43 @@ class BenchmarkTests(unittest.TestCase):
                 b"host-to-guest\n",
             )
 
+    def test_virtfs_excludes_declared_warmup(self):
+        args = argparse.Namespace(
+            virtfs_memory_mib=128,
+            payload_mib=1,
+            processors=1,
+            warmups=1,
+            timeout=1.0,
+            teardown_mode="guest-exit",
+        )
+        io_result: benchmark.GuestCommandResult = {
+            "text": "1 byte copied, 1 s, 1 MB/s\n1 byte copied, 1 s, 2 MB/s\n",
+            "wall_ms": 1.0,
+            "peak_rss_bytes": 1,
+        }
+        roundtrip_result: benchmark.GuestCommandResult = {
+            "text": "",
+            "wall_ms": 2.0,
+            "peak_rss_bytes": 1,
+        }
+        with (
+            patch.object(benchmark, "run_guest_script", return_value=io_result) as io,
+            patch.object(
+                benchmark, "_run_virtfs_roundtrip", return_value=roundtrip_result
+            ) as roundtrip,
+        ):
+            benchmark.benchmark_virtfs_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                runs=3,
+            )
+
+        self.assertEqual(io.call_count, 4)
+        self.assertEqual(roundtrip.call_count, 4)
+
     def test_managed_tap_cleanup_uses_openvmm_pid(self):
         query: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
             ["ip"], 0, "", ""
@@ -754,6 +957,10 @@ class BenchmarkTests(unittest.TestCase):
                     "performance",
                     "--backend",
                     "whp",
+                    "--platform",
+                    "windows-whp-baremetal",
+                    "--processors",
+                    "8",
                     "--output-dir",
                     str(output),
                 ]
@@ -777,8 +984,22 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(
                 {path.name for path in output.iterdir()},
-                {"cold-start.log", "virtfs.log", "shell-snapshot.log", "network.log"},
+                {
+                    "benchmark-metadata.json",
+                    "cold-start.log",
+                    "virtfs.log",
+                    "shell-snapshot.log",
+                    "network.log",
+                },
             )
+            metadata = json.loads(
+                (output / "benchmark-metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["platform"], "windows-whp-baremetal")
+            self.assertEqual(metadata["backend"], "whp")
+            self.assertEqual(metadata["microvm_abi_version"], 3)
+            self.assertEqual(metadata["processors"], 8)
+            self.assertEqual(metadata["host_affinity_set"], args.cpus)
             cold.assert_called_once()
             self.assertEqual(virtfs.call_args.kwargs["runs"], 3)
             shell.assert_called_once()
@@ -816,7 +1037,13 @@ class BenchmarkTests(unittest.TestCase):
 
             self.assertEqual(
                 {path.name for path in output.iterdir()},
-                {"cold-start.log", "virtfs.log", "shell-snapshot.log", "network.log"},
+                {
+                    "benchmark-metadata.json",
+                    "cold-start.log",
+                    "virtfs.log",
+                    "shell-snapshot.log",
+                    "network.log",
+                },
             )
             network.assert_called_once()
 
@@ -866,10 +1093,16 @@ class BenchmarkTests(unittest.TestCase):
                     backend,
                 )
 
-            output = repository / "data" / "runs" / platform
+            output = repository / "data" / "runs" / f"{platform}-microvm-v3-1vcpu"
             self.assertEqual(
                 {path.name for path in output.iterdir()},
-                {"cold-start.log", "virtfs.log", "shell-snapshot.log", "network.log"},
+                {
+                    "benchmark-metadata.json",
+                    "cold-start.log",
+                    "virtfs.log",
+                    "shell-snapshot.log",
+                    "network.log",
+                },
             )
 
     def test_package_command_forwards_parsed_options(self):

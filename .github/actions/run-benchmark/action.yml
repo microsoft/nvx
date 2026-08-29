@@ -18,7 +18,6 @@ inputs:
     description: How to stop OpenVMM after each guest readiness marker
     required: false
     default: guest-exit
-
 runs:
   using: composite
   steps:
@@ -98,93 +97,152 @@ runs:
     - name: Run Linux acceptance test
       if: runner.os != 'Windows'
       shell: bash
-      run: >-
-        python3 scripts/nvx.py benchmark
-        --suite e2e
-        --backend "${{ inputs.backend }}"
-        --warmups 1
-        --runs 3
-        --skip-build
-        --teardown-mode "${{ inputs.teardown-mode }}"
-        --output "data/runs/${{ inputs.platform }}/acceptance.json"
+      run: |
+        set -euo pipefail
+        for processors in 1 2 4 8; do
+          run_dir="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu"
+          python3 scripts/nvx.py benchmark \
+            --suite e2e \
+            --backend "${{ inputs.backend }}" \
+            --platform "${{ inputs.platform }}" \
+            --processors "${processors}" \
+            --warmups 1 \
+            --runs 3 \
+            --skip-build \
+            --teardown-mode "${{ inputs.teardown-mode }}" \
+            --output "${run_dir}/acceptance.json"
+        done
 
     - name: Run Linux performance suite
       if: runner.os != 'Windows'
       shell: bash
-      run: >-
-        python3 scripts/nvx.py benchmark
-        --suite performance
-        --backend "${{ inputs.backend }}"
-        --warmups 1
-        --runs 5
-        --virtfs-runs 3
-        --skip-build
-        --teardown-mode "${{ inputs.teardown-mode }}"
-        --output-dir "data/runs/${{ inputs.platform }}"
+      run: |
+        set -euo pipefail
+        for processors in 1 2 4 8; do
+          run_dir="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu"
+          python3 scripts/nvx.py benchmark \
+            --suite performance \
+            --backend "${{ inputs.backend }}" \
+            --platform "${{ inputs.platform }}" \
+            --processors "${processors}" \
+            --warmups 1 \
+            --runs 5 \
+            --virtfs-runs 3 \
+            --skip-build \
+            --teardown-mode "${{ inputs.teardown-mode }}" \
+            --output-dir "${run_dir}"
+        done
 
     - name: Run Windows acceptance test
       if: runner.os == 'Windows'
       shell: powershell
-      run: >-
-        python scripts\nvx.py benchmark
-        --suite e2e
-        --backend "${{ inputs.backend }}"
-        --warmups 1
-        --runs 3
-        --skip-build
-        --teardown-mode "${{ inputs.teardown-mode }}"
-        --output "data/runs/${{ inputs.platform }}/acceptance.json"
+      run: |
+        $ErrorActionPreference = "Stop"
+        foreach ($Processors in 1, 2, 4, 8) {
+          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu"
+          python scripts\nvx.py benchmark `
+            --suite e2e `
+            --backend "${{ inputs.backend }}" `
+            --platform "${{ inputs.platform }}" `
+            --processors $Processors `
+            --warmups 1 `
+            --runs 3 `
+            --skip-build `
+            --teardown-mode "${{ inputs.teardown-mode }}" `
+            --output "$RunDir/acceptance.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
 
     - name: Run Windows performance suite
       if: runner.os == 'Windows'
       shell: powershell
-      run: >-
-        python scripts\nvx.py benchmark
-        --suite performance
-        --backend "${{ inputs.backend }}"
-        --warmups 1
-        --runs 5
-        --virtfs-runs 3
-        --skip-build
-        --teardown-mode "${{ inputs.teardown-mode }}"
-        --output-dir "data/runs/${{ inputs.platform }}"
+      run: |
+        $ErrorActionPreference = "Stop"
+        foreach ($Processors in 1, 2, 4, 8) {
+          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu"
+          python scripts\nvx.py benchmark `
+            --suite performance `
+            --backend "${{ inputs.backend }}" `
+            --platform "${{ inputs.platform }}" `
+            --processors $Processors `
+            --warmups 1 `
+            --runs 5 `
+            --virtfs-runs 3 `
+            --skip-build `
+            --teardown-mode "${{ inputs.teardown-mode }}" `
+            --output-dir "$RunDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
 
     - name: Publish Linux performance results
       if: runner.os != 'Windows'
       shell: bash
-      run: >-
-        python3 scripts/nvx.py performance collect
-        --platform "${{ inputs.platform }}"
-        --commit "${GITHUB_SHA}"
-        --input-dir "data/runs/${{ inputs.platform }}"
-        --output-dir "data/runs/${{ inputs.platform }}"
-        --require-network
-        --require-shell-snapshot
-        --require-shared-suite
-        --lifecycle-input "data/runs/${{ inputs.platform }}/acceptance.json"
-        --summary "${GITHUB_STEP_SUMMARY}"
+      run: |
+        set -euo pipefail
+        for processors in 1 2 4 8; do
+          run_dir="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu"
+          python3 scripts/nvx.py performance collect \
+            --platform "${{ inputs.platform }}" \
+            --commit "${GITHUB_SHA}" \
+            --input-dir "${run_dir}" \
+            --output-dir "${run_dir}" \
+            --require-network \
+            --require-shell-snapshot \
+            --require-shared-suite \
+            --lifecycle-input "${run_dir}/acceptance.json" \
+            --summary "${GITHUB_STEP_SUMMARY}"
+        done
 
     - name: Publish Windows performance results
       if: runner.os == 'Windows'
       shell: powershell
-      run: >-
-        python scripts\nvx.py performance collect
-        --platform "${{ inputs.platform }}"
-        --commit $env:GITHUB_SHA
-        --input-dir "data/runs/${{ inputs.platform }}"
-        --output-dir "data/runs/${{ inputs.platform }}"
-        --require-network
-        --require-shell-snapshot
-        --require-shared-suite
-        --lifecycle-input "data/runs/${{ inputs.platform }}/acceptance.json"
-        --summary $env:GITHUB_STEP_SUMMARY
+      run: |
+        $ErrorActionPreference = "Stop"
+        foreach ($Processors in 1, 2, 4, 8) {
+          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu"
+          python scripts\nvx.py performance collect `
+            --platform "${{ inputs.platform }}" `
+            --commit $env:GITHUB_SHA `
+            --input-dir $RunDir `
+            --output-dir $RunDir `
+            --require-network `
+            --require-shell-snapshot `
+            --require-shared-suite `
+            --lifecycle-input "$RunDir/acceptance.json" `
+            --summary $env:GITHUB_STEP_SUMMARY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+
+    - name: Verify complete Linux benchmark matrix
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        for processors in 1 2 4 8; do
+          result="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu/${{ inputs.platform }}-microvm-v3-${processors}vcpu.csv"
+          test -s "${result}" || {
+            echo "::error::Missing benchmark result ${result}"
+            exit 1
+          }
+        done
+
+    - name: Verify complete Windows benchmark matrix
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        foreach ($Processors in 1, 2, 4, 8) {
+          $Result = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu/${{ inputs.platform }}-microvm-v3-${Processors}vcpu.csv"
+          if (-not (Test-Path $Result -PathType Leaf) -or (Get-Item $Result).Length -eq 0) {
+            throw "Missing benchmark result $Result"
+          }
+        }
 
     - name: Save benchmark results
-      if: always() && hashFiles(format('data/runs/{0}/{0}.csv', inputs.platform)) != ''
       uses: actions/cache/save@v5
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path || steps.cache-tools-windows.outputs.path }}
       with:
         path: data/runs/${{ inputs.platform }}
-        key: benchmark-${{ inputs.platform }}-${{ github.run_id }}
+        key: benchmark-${{ inputs.platform }}-microvm-v3-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
         enableCrossOsArchive: true

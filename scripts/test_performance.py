@@ -413,6 +413,7 @@ class PerformanceTests(unittest.TestCase):
             logs.mkdir()
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
             (logs / "shell-snapshot.log").write_text(
                 SHELL_SNAPSHOT_LOG, encoding="utf-8"
             )
@@ -441,6 +442,7 @@ class PerformanceTests(unittest.TestCase):
             logs = root / "logs"
             logs.mkdir()
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
             (logs / "shell-snapshot.log").write_text(
                 SHELL_SNAPSHOT_LOG, encoding="utf-8"
@@ -822,6 +824,217 @@ class PerformanceTests(unittest.TestCase):
                 performance.read_results(history / "linux-kvm.csv"),
                 [performance.Result("commit", "keep", "ms", "lower", 10.0)],
             )
+
+    def test_reads_legacy_history_as_microvm_v1_one_vcpu(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "linux-kvm-baremetal.csv"
+            path.write_text(
+                "commit,metric,unit,direction,p50\nlegacy,latency,ms,lower,10\n",
+                encoding="utf-8",
+            )
+
+            result = performance.read_results(path)[0]
+            self.assertEqual(result.platform, "linux-kvm-baremetal")
+            self.assertEqual(result.microvm_abi_version, 1)
+            self.assertEqual(result.processors, 1)
+
+    def test_collects_dimensioned_microvm_v3_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "platform": "linux-kvm-baremetal",
+                        "backend": "kvm",
+                        "microvm_abi_version": 3,
+                        "processors": 4,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            path = performance.collect_results(
+                "linux-kvm-baremetal", "commit", logs, root / "results"
+            )
+            self.assertEqual(path.name, "linux-kvm-baremetal-microvm-v3-4vcpu.csv")
+            results = performance.read_results(path)
+            self.assertTrue(results)
+            self.assertTrue(
+                all(
+                    result.platform == "linux-kvm-baremetal"
+                    and result.microvm_abi_version == 3
+                    and result.processors == 4
+                    for result in results
+                )
+            )
+
+    def test_rejects_lifecycle_workload_processor_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "platform": "linux-kvm-baremetal",
+                        "backend": "kvm",
+                        "microvm_abi_version": 3,
+                        "processors": 4,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            lifecycle = lifecycle_document()
+            controls = cast(dict[str, object], lifecycle["controls"])
+            controls.update(
+                {
+                    "platform": "linux-kvm-baremetal",
+                    "microvm_abi_version": 3,
+                    "processors": 2,
+                }
+            )
+            lifecycle_path = root / "lifecycle.json"
+            lifecycle_path.write_text(json.dumps(lifecycle), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError, "metadata mismatch"
+            ):
+                performance.collect_results(
+                    "linux-kvm-baremetal",
+                    "commit",
+                    logs,
+                    root / "results",
+                    lifecycle_input=lifecycle_path,
+                )
+
+    def test_persist_and_gate_isolate_processor_counts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            history = root / "history"
+            baseline = root / "baseline"
+            target = root / "target"
+            filename = "linux-kvm-baremetal-microvm-v3.csv"
+            one_vcpu = performance.Result(
+                "commit",
+                "latency",
+                "ms",
+                "lower",
+                10.0,
+                "linux-kvm-baremetal",
+                3,
+                1,
+            )
+            two_vcpu = performance.Result(
+                "commit",
+                "latency",
+                "ms",
+                "lower",
+                20.0,
+                "linux-kvm-baremetal",
+                3,
+                2,
+            )
+            performance.write_results(source / filename, [one_vcpu, two_vcpu])
+            performance.persist_results(source, history)
+            self.assertEqual(len(performance.read_results(history / filename)), 2)
+
+            performance.write_results(baseline / filename, [one_vcpu])
+            performance.write_results(target / filename, [two_vcpu])
+            summary = root / "summary.md"
+            self.assertEqual(
+                performance.gate_results(baseline, target, 10, 0, summary), 0
+            )
+            self.assertIn(
+                "linux-kvm-baremetal/microvm-v3/2vcpu",
+                summary.read_text(encoding="utf-8"),
+            )
+
+    def test_rejects_duplicate_dimensional_rows_across_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            result = performance.Result(
+                "commit",
+                "latency",
+                "ms",
+                "lower",
+                10.0,
+                "linux-kvm-baremetal",
+                3,
+                4,
+            )
+            performance.write_results(source / "first.csv", [result])
+            performance.write_results(source / "second.csv", [result])
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError, "duplicate dimensional row"
+            ):
+                performance.persist_results(source, root / "history")
+            with self.assertRaisesRegex(
+                performance.PerformanceError, "duplicate dimensional row"
+            ):
+                performance.gate_results(root / "baseline", source, 10, 40)
+
+    def test_matching_explicit_network_metadata_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            metadata = {
+                "platform": "linux-kvm-baremetal",
+                "backend": "kvm",
+                "microvm_abi_version": 3,
+                "processors": 4,
+                "network": "10.0.0.2/24",
+                "lifecycle_network": "10.0.0.2/24",
+                "host_affinity_set": "0-5",
+                "memory_mib": {"lifecycle": 128},
+                "artifact_revisions": {"nvx": "a", "openvmm": "b"},
+                "warmups": 1,
+                "measured_runs": 5,
+                "virtfs_measured_runs": 3,
+                "payload_mib": 64,
+                "virtfs_memory_mib": 512,
+                "shell_memories_mib": [64, 128, 256, 512],
+                "network_memory_mib": 256,
+            }
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+            lifecycle = lifecycle_document()
+            controls = cast(dict[str, object], lifecycle["controls"])
+            controls.update(
+                {
+                    "platform": "linux-kvm-baremetal",
+                    "backend": "kvm",
+                    "microvm_abi_version": 3,
+                    "processors": 4,
+                    "network": "10.0.0.2/24",
+                    "cpus": "0-5",
+                    "artifact_revisions": {"nvx": "a", "openvmm": "b"},
+                    "warmups": 1,
+                }
+            )
+            lifecycle_path = root / "lifecycle.json"
+            lifecycle_path.write_text(json.dumps(lifecycle), encoding="utf-8")
+
+            result = performance.collect_results(
+                "linux-kvm-baremetal",
+                "commit",
+                logs,
+                root / "results",
+                lifecycle_input=lifecycle_path,
+            )
+            self.assertTrue(result.is_file())
 
 
 if __name__ == "__main__":
