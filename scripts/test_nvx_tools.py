@@ -572,10 +572,12 @@ class BenchmarkTests(unittest.TestCase):
         result: benchmark.BenchmarkResult = {
             "samples_ms": [1.0],
             "p50_ms": 1.0,
+            "p95_ms": 1.0,
             "min_ms": 1.0,
             "max_ms": 1.0,
             "wall_samples_ms": [1.0],
             "wall_p50_ms": 1.0,
+            "wall_p95_ms": 1.0,
             "wall_min_ms": 1.0,
             "wall_max_ms": 1.0,
             "peak_rss_samples_bytes": [1],
@@ -587,6 +589,7 @@ class BenchmarkTests(unittest.TestCase):
             "teardown_timeout_count": 0,
             "teardown_timeout_seconds": 5.0,
             "teardown_p50_ms": 1.0,
+            "teardown_p95_ms": 1.0,
             "teardown_min_ms": 1.0,
             "teardown_max_ms": 1.0,
         }
