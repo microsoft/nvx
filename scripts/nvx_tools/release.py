@@ -27,8 +27,14 @@ from .build import (
     DEFAULT_KERNEL_SHA256,
     DEFAULT_KERNEL_URL,
     DEFAULT_KERNEL_VERSION,
+    GUEST_AGENT_ARTIFACT_NAME,
+    GUEST_AGENT_SHA256_NAME,
+    GUEST_AGENT_TARGET,
+    OPENVMM_PROVENANCE_NAME,
+    REQUIRED_SANDBOX_KERNEL_CONFIG,
     DockerBuildConfig,
     build_docker_linux_source,
+    validate_static_x86_64_elf,
 )
 from .collect_alpine_sources import collect_alpine_sources
 from .common import (
@@ -40,6 +46,7 @@ from .common import (
     download,
     openvmm_binary_path,
     require_file,
+    sha256_file,
     verify_sha256_sums,
     write_sha256_sums,
 )
@@ -235,9 +242,89 @@ def _install_release_archive(archive_path: Path) -> None:
             )
             for name in GUEST_RELEASE_NAMES
         }
+        runtime_manifest = json.loads(
+            require_file(
+                package_root / "SOURCE-MANIFEST.json",
+                "packaged source manifest",
+            ).read_text(encoding="utf-8")
+        )
+        try:
+            openvmm_manifest = runtime_manifest["openvmm"]
+            linux_manifest = runtime_manifest["linux"]
+            alpine_manifest = runtime_manifest["alpine"]
+            agent_manifest = runtime_manifest["guest_agent"]
+            source_revision = openvmm_manifest["source_revision"]
+            expected_agent_sha256 = agent_manifest["sha256"]
+            expected_agent_size = agent_manifest["size"]
+        except (KeyError, TypeError) as error:
+            raise ScriptError(
+                "packaged source manifest is missing required runtime identity fields"
+            ) from error
+        if (
+            not isinstance(source_revision, str)
+            or len(source_revision) != 40
+            or re.fullmatch(r"[0-9a-f]{40}", source_revision) is None
+        ):
+            raise ScriptError("packaged OpenVMM source revision is invalid")
+        expected_runtime_hashes = {
+            binary_source: openvmm_manifest.get("executable_sha256"),
+            guest_sources["vmlinux"]: linux_manifest.get("kernel_sha256"),
+            guest_sources["initramfs.cpio.gz"]: alpine_manifest.get("initramfs_sha256"),
+        }
+        for source, expected in expected_runtime_hashes.items():
+            actual = sha256_file(source)
+            if expected != actual:
+                raise ScriptError(
+                    f"packaged identity for {source.name} is {expected}, actual {actual}"
+                )
+        agent_source = package_root / "guest" / GUEST_AGENT_ARTIFACT_NAME
+        agent_sha256: str | None = None
+        agent_present = agent_source.is_file()
+        agent_declared = expected_agent_sha256 is not None
+        if agent_present != agent_declared:
+            raise ScriptError(
+                "packaged NVX guest-agent presence does not match SOURCE-MANIFEST.json"
+            )
+        if agent_source.is_file():
+            agent_sha256 = sha256_file(agent_source)
+            if expected_agent_sha256 != agent_sha256:
+                raise ScriptError(
+                    "packaged NVX guest-agent identity does not match "
+                    "SOURCE-MANIFEST.json"
+                )
+            if expected_agent_size != agent_source.stat().st_size:
+                raise ScriptError(
+                    "packaged NVX guest-agent size does not match SOURCE-MANIFEST.json"
+                )
+            validate_static_x86_64_elf(agent_source)
+        elif expected_agent_size is not None:
+            raise ScriptError(
+                "packaged NVX guest-agent size is present without an artifact"
+            )
+        provenance = {
+            "format": 1,
+            "source_revision": source_revision,
+            "source_clean": True,
+            "executable_sha256": sha256_file(binary_source),
+            "origin": "release",
+        }
+
         _replace_runtime_file(binary_source, binary_destination)
         for name, source in guest_sources.items():
             _replace_runtime_file(source, artifact_path(name))
+        agent_destination = artifact_path(GUEST_AGENT_ARTIFACT_NAME)
+        agent_pin = artifact_path(GUEST_AGENT_SHA256_NAME)
+        if agent_sha256 is not None:
+            _replace_runtime_file(agent_source, agent_destination)
+            agent_pin.write_text(f"{agent_sha256}\n", encoding="ascii")
+        else:
+            agent_destination.unlink(missing_ok=True)
+            agent_pin.unlink(missing_ok=True)
+        provenance_path = artifact_path(OPENVMM_PROVENANCE_NAME)
+        provenance_path.write_text(
+            json.dumps(provenance, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def download_latest_release(repository: str, platform: str) -> None:
@@ -385,8 +472,50 @@ def _guest_release_inputs() -> tuple[list[str], list[Path]]:
     for name in GUEST_RELEASE_NAMES:
         require_file(artifact_path(name), f"required guest artifact {name}")
     guest_names: list[str] = list(GUEST_RELEASE_NAMES)
+    agent = artifact_path(GUEST_AGENT_ARTIFACT_NAME)
+    pin = artifact_path(GUEST_AGENT_SHA256_NAME)
+    if agent.exists() or pin.exists():
+        require_file(agent, "staged NVX guest agent")
+        expected = (
+            require_file(pin, "staged NVX guest-agent SHA-256 pin")
+            .read_text(encoding="ascii")
+            .strip()
+        )
+        actual = sha256_file(agent)
+        if actual != expected:
+            raise ScriptError(
+                f"staged NVX guest-agent SHA-256 is {actual}, expected {expected}"
+            )
+        guest_names.append(GUEST_AGENT_ARTIFACT_NAME)
     package_manifests = [artifact_path("initramfs.cpio.gz.packages.json")]
     return guest_names, package_manifests
+
+
+def _runtime_source_manifest(
+    release_destination: Path,
+    binary_name: str,
+    guest_names: list[str],
+) -> bytes:
+    manifest = json.loads(
+        (REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+    )
+    manifest["openvmm"]["executable_sha256"] = sha256_file(
+        release_destination / "bin" / binary_name
+    )
+    manifest["linux"]["kernel_sha256"] = sha256_file(
+        release_destination / "guest" / "vmlinux"
+    )
+    manifest["alpine"]["initramfs_sha256"] = sha256_file(
+        release_destination / "guest" / "initramfs.cpio.gz"
+    )
+    if GUEST_AGENT_ARTIFACT_NAME in guest_names:
+        agent = release_destination / "guest" / GUEST_AGENT_ARTIFACT_NAME
+        manifest["guest_agent"]["sha256"] = sha256_file(agent)
+        manifest["guest_agent"]["size"] = agent.stat().st_size
+    else:
+        manifest["guest_agent"]["sha256"] = None
+        manifest["guest_agent"]["size"] = None
+    return (json.dumps(manifest, indent=2) + "\n").encode("utf-8")
 
 
 def collect_release_sources() -> None:
@@ -444,16 +573,48 @@ def package_release(
             )
         shutil.rmtree(release_destination)
     binary = openvmm_binary_path()
+    provenance_path = require_file(
+        artifact_path(OPENVMM_PROVENANCE_NAME),
+        "OpenVMM build provenance",
+    )
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    source_manifest = json.loads(
+        (REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+    )
+    expected_revision = source_manifest["openvmm"]["source_revision"]
+    actual_binary_sha256 = sha256_file(binary)
+    if (
+        provenance.get("format") != 1
+        or provenance.get("source_revision") != expected_revision
+        or provenance.get("source_clean") is not True
+        or provenance.get("executable_sha256") != actual_binary_sha256
+    ):
+        raise ScriptError(
+            "OpenVMM build provenance does not match the clean pinned source and binary"
+        )
     _copy_release_file(binary, release_destination / "bin" / binary.name)
+    packaged_binary = release_destination / "bin" / binary.name
+    if sha256_file(packaged_binary) != provenance["executable_sha256"]:
+        raise ScriptError("packaged OpenVMM binary does not match its build provenance")
     for name in guest_names:
         _copy_release_file(artifact_path(name), release_destination / "guest" / name)
-    for name in (
-        "LICENSE",
-        "README.md",
-        "SOURCE-MANIFEST.json",
-        "THIRD_PARTY_NOTICES.md",
-    ):
+    if GUEST_AGENT_ARTIFACT_NAME in guest_names:
+        packaged_agent = release_destination / "guest" / GUEST_AGENT_ARTIFACT_NAME
+        expected_agent_sha256 = (
+            require_file(
+                artifact_path(GUEST_AGENT_SHA256_NAME),
+                "staged NVX guest-agent SHA-256 pin",
+            )
+            .read_text(encoding="ascii")
+            .strip()
+        )
+        if sha256_file(packaged_agent) != expected_agent_sha256:
+            raise ScriptError("packaged NVX guest agent does not match its staged pin")
+    for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
         _copy_release_file(REPO_ROOT / name, release_destination / name)
+    (release_destination / "SOURCE-MANIFEST.json").write_bytes(
+        _runtime_source_manifest(release_destination, binary.name, guest_names)
+    )
     _copy_release_file(
         OPENVMM_DIR / "LICENSE",
         release_destination / "licenses" / "LICENSE-OPENVMM",
@@ -558,7 +719,11 @@ def verify_source_tree() -> None:
     generated_config = artifact_path("vmlinux.config")
     if generated_config.is_file():
         generated = generated_config.read_text(encoding="utf-8").splitlines()
-        for setting in ("CONFIG_PVH=y", "CONFIG_HVC_XE9=y"):
+        for setting in (
+            "CONFIG_PVH=y",
+            "CONFIG_HVC_XE9=y",
+            *REQUIRED_SANDBOX_KERNEL_CONFIG,
+        ):
             if setting not in generated:
                 raise ScriptError(f"{generated_config} is missing {setting}")
     head = subprocess.run(
@@ -575,4 +740,22 @@ def verify_source_tree() -> None:
     ).stdout.strip()
     if head != expected:
         raise ScriptError(f"OpenVMM submodule is at {head}, expected {expected}")
+    openvmm_manifest = manifest["openvmm"]
+    if openvmm_manifest.get("source_revision") != expected:
+        raise ScriptError(
+            "SOURCE-MANIFEST.json OpenVMM source revision does not match the submodule"
+        )
+    expected_agent = {
+        "artifact": f"guest/{GUEST_AGENT_ARTIFACT_NAME}",
+        "target": GUEST_AGENT_TARGET,
+        "optional": True,
+        "installed_in_initramfs": False,
+        "protocol_schema_version": 1,
+    }
+    agent_manifest = manifest["guest_agent"]
+    for field, value in expected_agent.items():
+        if agent_manifest.get(field) != value:
+            raise ScriptError(
+                f"SOURCE-MANIFEST.json guest-agent {field} does not match the build contract"
+            )
     print(">> source tree and submodule metadata are consistent")

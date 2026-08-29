@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import ssl
+import struct
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
@@ -17,6 +20,8 @@ from .common import (
     ScriptError,
     download,
     format_size,
+    require_file,
+    require_success,
     require_tool,
     run_capture,
     run_checked,
@@ -50,8 +55,14 @@ REQUIRED_SANDBOX_KERNEL_CONFIG = (
     "CONFIG_EXT4_FS=y",
     "CONFIG_MEMCG=y",
     "CONFIG_OVERLAY_FS=y",
+    "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
+    "CONFIG_SECCOMP_FILTER=y",
     "CONFIG_VIRTIO_BLK=y",
 )
+GUEST_AGENT_ARTIFACT_NAME = "nvx-agent"
+GUEST_AGENT_SHA256_NAME = f"{GUEST_AGENT_ARTIFACT_NAME}.sha256"
+GUEST_AGENT_TARGET = "x86_64-unknown-linux-musl"
+OPENVMM_PROVENANCE_NAME = "openvmm.provenance.json"
 
 
 class ApkPackage(TypedDict):
@@ -104,6 +115,139 @@ def _assert_shared_status_kernel_config(path: Path) -> None:
             "kernel configuration cannot consume shared virtio interrupt status: "
             + ", ".join(missing)
         )
+
+
+def validate_static_x86_64_elf(path: Path) -> None:
+    data = path.read_bytes()
+    if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
+        raise ScriptError("NVX guest agent must be a little-endian ELF64 binary")
+    if struct.unpack_from("<H", data, 16)[0] not in (2, 3):
+        raise ScriptError("NVX guest agent must be an ELF executable")
+    if struct.unpack_from("<H", data, 18)[0] != 62:
+        raise ScriptError("NVX guest agent must target x86-64")
+    program_offset = struct.unpack_from("<Q", data, 32)[0]
+    program_entry_size = struct.unpack_from("<H", data, 54)[0]
+    program_count = struct.unpack_from("<H", data, 56)[0]
+    if program_entry_size != 56 or program_count == 0:
+        raise ScriptError("NVX guest agent has an invalid ELF program header")
+    program_bytes = program_entry_size * program_count
+    if program_offset > len(data) or program_bytes > len(data) - program_offset:
+        raise ScriptError("NVX guest agent has truncated ELF program headers")
+    has_load_segment = False
+    entry_point = struct.unpack_from("<Q", data, 24)[0]
+    entry_is_executable = False
+    for index in range(program_count):
+        offset = program_offset + index * program_entry_size
+        segment_type = struct.unpack_from("<I", data, offset)[0]
+        flags = struct.unpack_from("<I", data, offset + 4)[0]
+        file_offset = struct.unpack_from("<Q", data, offset + 8)[0]
+        virtual_address = struct.unpack_from("<Q", data, offset + 16)[0]
+        file_size = struct.unpack_from("<Q", data, offset + 32)[0]
+        memory_size = struct.unpack_from("<Q", data, offset + 40)[0]
+        if file_size > memory_size:
+            raise ScriptError("NVX guest agent has an invalid ELF segment size")
+        if file_offset > len(data) or file_size > len(data) - file_offset:
+            raise ScriptError("NVX guest agent has an ELF segment beyond end of file")
+        has_load_segment |= segment_type == 1
+        if (
+            segment_type == 1
+            and flags & 1
+            and virtual_address <= entry_point < virtual_address + memory_size
+        ):
+            entry_is_executable = True
+        if segment_type == 3:
+            raise ScriptError("NVX guest agent must be statically linked")
+        if segment_type == 2:
+            if file_size % 16:
+                raise ScriptError("NVX guest agent has an invalid dynamic section")
+            dynamic_end = file_offset + file_size
+            dynamic_offset = file_offset
+            terminated = False
+            while dynamic_offset + 16 <= dynamic_end:
+                dynamic_tag = struct.unpack_from("<q", data, dynamic_offset)[0]
+                if dynamic_tag == 0:
+                    terminated = True
+                    break
+                if dynamic_tag == 1:
+                    raise ScriptError(
+                        "NVX guest agent must not have dynamic dependencies"
+                    )
+                dynamic_offset += 16
+            if not terminated:
+                raise ScriptError("NVX guest agent has an invalid dynamic section")
+    if not has_load_segment:
+        raise ScriptError("NVX guest agent has no loadable ELF segment")
+    if not entry_is_executable:
+        raise ScriptError("NVX guest agent entry point is not executable")
+
+
+def stage_guest_agent(source: Path, expected_sha256: str) -> Path:
+    """Stage a pinned guest-agent binary without enabling it in the initramfs."""
+    source = source.expanduser().resolve()
+    if not source.is_file():
+        raise ScriptError(f"NVX guest agent not found: {source}")
+    expected_sha256 = expected_sha256.lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise ScriptError("NVX guest agent SHA-256 must contain 64 hexadecimal digits")
+    destination = REPO_ROOT / "build" / GUEST_AGENT_ARTIFACT_NAME
+    pin = REPO_ROOT / "build" / GUEST_AGENT_SHA256_NAME
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with (
+            source.open("rb") as input_file,
+            tempfile.NamedTemporaryFile(
+                dir=destination.parent,
+                prefix=f"{destination.name}.",
+                suffix=".part",
+                delete=False,
+            ) as output_file,
+        ):
+            shutil.copyfileobj(input_file, output_file)
+            temporary_path = Path(output_file.name)
+        actual_sha256 = sha256_file(temporary_path)
+        if actual_sha256 != expected_sha256:
+            raise ScriptError(
+                f"NVX guest agent SHA-256 is {actual_sha256}, expected {expected_sha256}"
+            )
+        validate_static_x86_64_elf(temporary_path)
+        temporary_path.chmod(0o755)
+        temporary_path.replace(destination)
+        temporary_path = None
+        pin.write_text(f"{expected_sha256}\n", encoding="ascii")
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    print(f">> staged {destination} for {GUEST_AGENT_TARGET}")
+    return destination
+
+
+def record_openvmm_provenance(executable: Path) -> None:
+    """Bind an OpenVMM executable to the exact clean submodule revision."""
+    openvmm_dir = REPO_ROOT / "openvmm"
+    head = run_capture(["git", "-C", openvmm_dir, "rev-parse", "HEAD"])
+    require_success(head, "OpenVMM revision query")
+    gitlink = run_capture(["git", "-C", REPO_ROOT, "rev-parse", ":openvmm"])
+    require_success(gitlink, "OpenVMM gitlink query")
+    status = run_capture(["git", "-C", openvmm_dir, "status", "--porcelain"])
+    require_success(status, "OpenVMM status query")
+    source_revision = head.stdout.decode("ascii").strip()
+    expected_revision = gitlink.stdout.decode("ascii").strip()
+    if source_revision != expected_revision:
+        raise ScriptError(
+            f"OpenVMM submodule is at {source_revision}, expected {expected_revision}"
+        )
+    require_file(executable, "OpenVMM release binary")
+    provenance = {
+        "format": 1,
+        "source_revision": source_revision,
+        "source_clean": not status.stdout.strip(),
+        "executable_sha256": sha256_file(executable),
+        "origin": "local-build",
+    }
+    path = REPO_ROOT / "build" / OPENVMM_PROVENANCE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
 
 
 @dataclass(frozen=True)
