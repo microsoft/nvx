@@ -65,7 +65,7 @@ PERFORMANCE_LOG_FILENAMES = (
 )
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
-MICROVM_ABI_VERSION = 3
+MICROVM_ABI_VERSION = 2
 
 
 class BenchmarkResult(TypedDict):
@@ -225,7 +225,7 @@ def configure_parser(
         type=int,
         choices=(1, 2, 4, 8),
         default=1,
-        help="microVM ABI-v3 processor count (default: 1)",
+        help="microVM ABI-v2 processor count (default: 1)",
     )
     parser.add_argument(
         "--virtfs-runs",
@@ -939,7 +939,7 @@ def workload_boot_command(
         str(executable),
         "--single-process",
         "--machine",
-        "microvm-v3",
+        "microvm-v2",
         "--processors",
         str(processors),
         "--hypervisor",
@@ -1189,7 +1189,7 @@ def smp_probe_script(
     ioapic_irq: int | None = None,
 ) -> str:
     if processors not in (1, 2, 4, 8):
-        raise ValueError("microVM ABI-v3 SMP probe supports 1, 2, 4, or 8 vCPUs")
+        raise ValueError("microVM ABI-v2 SMP probe supports 1, 2, 4, or 8 vCPUs")
     if (network_gateway is None) != (ioapic_irq is None):
         raise ValueError("network gateway and IOAPIC IRQ must be specified together")
     apic_ids = ",".join(str(cpu) for cpu in range(processors))
@@ -2149,7 +2149,7 @@ def snapshot_restore_command(
         str(executable),
         "--single-process",
         "--machine",
-        "microvm-v3",
+        "microvm-v2",
         "--processors",
         str(processors),
         "--hypervisor",
@@ -2462,7 +2462,7 @@ def whp_command(
         str(executable),
         "--single-process",
         "--machine",
-        "microvm-v3",
+        "microvm-v2",
         "--processors",
         str(processors),
         "--hypervisor",
@@ -2603,7 +2603,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         str(stage / "openvmm"),
         "--single-process",
         "--machine",
-        "microvm-v3",
+        "microvm-v2",
         "--processors",
         str(args.processors),
         "--hypervisor",
@@ -2867,7 +2867,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
             str(executable),
             "--single-process",
             "--machine",
-            "microvm-v3",
+            "microvm-v2",
             "--processors",
             str(args.processors),
             "--hypervisor",

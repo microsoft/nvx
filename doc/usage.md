@@ -139,7 +139,7 @@ and MSHV. Set `GH_TOKEN` when the selected repository requires authentication.
 ```text
 python3 scripts/nvx.py run
     [--hypervisor {auto,whp,kvm,mshv}]
-    [--machine {microvm,microvm-v2,microvm-v3}]
+    [--machine {microvm,microvm-v2}]
     [--memory-mib MIB]
     [--processors {1,2,4,8}]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
@@ -152,9 +152,9 @@ python3 scripts/nvx.py run
 | Option | Default | Description |
 | --- | --- | --- |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
-| `--machine {microvm,microvm-v2,microvm-v3}` | `microvm` | Select the guest ABI explicitly. ABI v1/v2 remain one-vCPU profiles. |
+| `--machine {microvm,microvm-v2}` | `microvm` | Select the guest ABI explicitly. ABI v1 is a one-vCPU profile; ABI v2 supports 1, 2, 4, or 8 vCPUs. |
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
-| `--processors {1,2,4,8}` | `1` | Select the microVM ABI-v3 processor count. |
+| `--processors {1,2,4,8}` | `1` | Select the microVM ABI-v2 processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target, optionally read-only or read-write. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
@@ -221,7 +221,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--warmups N` | `3` | Set the number of warmup runs. |
 | `--runs N` | `11` | Set the number of measured runs. |
 | `--memory-mib MIB` | `128` | Set guest memory for the general suites. |
-| `--processors {1,2,4,8}` | `1` | Run every cold, capture, restore, and workload launch with this ABI-v3 count. |
+| `--processors {1,2,4,8}` | `1` | Run every cold, capture, restore, and workload launch with this ABI-v2 count. |
 | `--virtfs-runs N` | `3` | Set the number of virtio-fs workload samples. |
 | `--virtfs-memory-mib MIB` | `512` | Set guest memory for the virtio-fs workload. |
 | `--payload-mib MIB` | `64` | Set the virtio-fs sequential I/O payload size. |

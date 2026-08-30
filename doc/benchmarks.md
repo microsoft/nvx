@@ -23,7 +23,7 @@ Use this page for metric names and methodology. Current historical p50 values li
 virtual-machine results have separate histories and must not be compared as one regression series.
 ABI version and processor count are also separate history dimensions. Legacy
 CSV rows are interpreted as ABI v1 with one vCPU; they are never used as an
-ABI-v3 one-vCPU baseline.
+ABI-v2 one-vCPU baseline.
 The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
 through the supported NVX CLI.
 
@@ -36,7 +36,7 @@ through the supported NVX CLI.
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
 
 CI runs every series sequentially at `1`, `2`, `4`, and `8` vCPUs under
-microVM ABI v3. This produces 124 p50 values per series (31 metrics times four
+microVM ABI v2. This produces 124 p50 values per series (31 metrics times four
 counts) and 620 values across the five-series matrix. Counts run sequentially
 on each host so benchmark workloads never overlap on the same physical host.
 
@@ -48,20 +48,20 @@ Run the acceptance and diagnostic suites with:
 
 ```console
 python3 scripts/nvx.py benchmark --suite boot --backend whp
-python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-baremetal --processors 8 --memory-mib 128 --output data/runs/linux-kvm-baremetal/microvm-v3/8vcpu/acceptance.json
+python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-baremetal --processors 8 --memory-mib 128 --output data/runs/linux-kvm-baremetal/microvm-v2/8vcpu/acceptance.json
 ```
 
 Run the complete performance suite with:
 
 ```console
 # Linux/KVM: run all 23 metrics and write collector-compatible logs
-python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v3/8vcpu
+python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu
 
 # Linux/MSHV: run all 23 metrics
-python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v3/8vcpu
+python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v2/8vcpu
 
 # Windows/WHP
-python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v3\8vcpu
+python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\8vcpu
 ```
 
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
@@ -104,7 +104,7 @@ Benchmark measurements force OpenVMM logging off to avoid changing the measured 
 Collect a completed suite with:
 
 ```console
-python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v3/8vcpu --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm-baremetal/microvm-v3/8vcpu/acceptance.json
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm-baremetal/microvm-v2/8vcpu/acceptance.json
 ```
 
 ## Benchmark commands
@@ -241,7 +241,7 @@ The current workflow uses the latest 10 p50 samples on the pull request's base b
 regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be
 more than 10 ms slower; higher-is-better metrics use the percentage comparison alone. A missing
 history is a warmup, not a failure. Successful `dev` builds append collected
-results to topology-specific files in `data/`. Every new ABI-v3/count series
+results to topology-specific files in `data/`. Every new ABI-v2/count series
 begins as a warmup baseline before its regression gate has matching history.
 
 ## Lifecycle methodology

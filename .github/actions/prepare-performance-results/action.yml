@@ -21,8 +21,8 @@ runs:
         PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
         path: data/runs/linux-kvm-baremetal
-        key: benchmark-linux-kvm-baremetal-microvm-v3-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-kvm-baremetal-microvm-v3-1-2-4-8-${{ github.run_id }}-
+        key: benchmark-linux-kvm-baremetal-microvm-v2-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: benchmark-linux-kvm-baremetal-microvm-v2-1-2-4-8-${{ github.run_id }}-
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
@@ -32,8 +32,8 @@ runs:
         PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
         path: data/runs/linux-mshv-baremetal
-        key: benchmark-linux-mshv-baremetal-microvm-v3-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-mshv-baremetal-microvm-v3-1-2-4-8-${{ github.run_id }}-
+        key: benchmark-linux-mshv-baremetal-microvm-v2-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: benchmark-linux-mshv-baremetal-microvm-v2-1-2-4-8-${{ github.run_id }}-
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
@@ -43,8 +43,8 @@ runs:
         PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
       with:
         path: data/runs/linux-mshv-virtual-machine
-        key: benchmark-linux-mshv-virtual-machine-microvm-v3-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-mshv-virtual-machine-microvm-v3-1-2-4-8-${{ github.run_id }}-
+        key: benchmark-linux-mshv-virtual-machine-microvm-v2-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: benchmark-linux-mshv-virtual-machine-microvm-v2-1-2-4-8-${{ github.run_id }}-
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
@@ -52,8 +52,8 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: data/runs/windows-whp-baremetal
-        key: benchmark-windows-whp-baremetal-microvm-v3-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-windows-whp-baremetal-microvm-v3-1-2-4-8-${{ github.run_id }}-
+        key: benchmark-windows-whp-baremetal-microvm-v2-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: benchmark-windows-whp-baremetal-microvm-v2-1-2-4-8-${{ github.run_id }}-
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
@@ -61,8 +61,8 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: data/runs/windows-whp-virtual-machine
-        key: benchmark-windows-whp-virtual-machine-microvm-v3-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-windows-whp-virtual-machine-microvm-v3-1-2-4-8-${{ github.run_id }}-
+        key: benchmark-windows-whp-virtual-machine-microvm-v2-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: benchmark-windows-whp-virtual-machine-microvm-v2-1-2-4-8-${{ github.run_id }}-
         enableCrossOsArchive: true
         fail-on-cache-miss: true
 
@@ -77,7 +77,7 @@ runs:
           windows-whp-baremetal \
           windows-whp-virtual-machine; do
           for processors in 1 2 4 8; do
-            run_dir="data/runs/${platform}/microvm-v3/${processors}vcpu"
+            run_dir="data/runs/${platform}/microvm-v2/${processors}vcpu"
             python3 scripts/nvx.py performance collect \
               --platform "${platform}" \
               --commit "${GITHUB_SHA}" \

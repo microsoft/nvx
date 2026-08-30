@@ -33,7 +33,7 @@ device topology, command line, and snapshot compatibility contract.
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart TB
    Inputs["NVX CLI<br/>PVH kernel and Alpine initramfs"]
-   Profile["OpenVMM microVM ABI versions 1, 2, and 3<br/>boot, memory, devices, and snapshots"]
+   Profile["OpenVMM microVM ABI versions 1 and 2<br/>boot, memory, devices, and snapshots"]
    Kvm["Linux / KVM"]
    Mshv["Linux / MSHV"]
    Whp["Windows / WHP"]
@@ -59,7 +59,7 @@ openvmm --machine microvm --hypervisor whp  --kernel vmlinux --initrd initramfs.
 openvmm --machine microvm-v2 --hypervisor kvm --kernel vmlinux --initrd initramfs.cpio \
    --microvm-sandbox-block distro:file:distro.erofs,ro \
    --microvm-sandbox-block scratch:file:scratch.raw
-openvmm --machine microvm-v3 --processors 8 --hypervisor kvm \
+openvmm --machine microvm-v2 --processors 8 --hypervisor kvm \
    --kernel vmlinux --initrd initramfs.cpio
 ```
 
@@ -70,7 +70,7 @@ see [Run](run.md) for complete commands and host-specific options.
 
 Machine identity is explicit rather than inferred from a kernel, device, or
 hypervisor choice. OpenVMM carries it through CLI, worker, Petri, and snapshot
-configuration. TTRPC exposes ABI v1 and the no-block ABI v3 profile. Validation occurs before host
+configuration. TTRPC exposes ABI v1 and the no-block ABI v2 profile. Validation occurs before host
 resources are opened and again at the worker boundary.
 
 All ABI versions require:
@@ -82,16 +82,17 @@ All ABI versions require:
 - no VTL2, isolation, nested virtualization, or Hyper-V enlightenments; and
 - the exact chipset and device inventory described below.
 
-ABI v1 and v2 require exactly one vCPU. ABI v3 accepts exactly 1, 2, 4, or 8
+ABI v1 requires exactly one vCPU. ABI v2 accepts exactly 1, 2, 4, or 8
 vCPUs in one socket and one die, with one core per vCPU, no SMT, xAPIC mode,
 and contiguous APIC IDs starting at zero. Its PVH layout moves the GDT to
-`0x800`; v1/v2 retain the original one-vCPU layout.
+`0x800`; v1 retains the original one-vCPU layout.
 
 ABI v1 permits its original single roleless virtio-blk cold-boot extension, but
 snapshots reject that device because it has no immutable media contract. ABI v2
 uses role-bearing block devices. Snapshot capture requires one to three
 read-only lower layers followed by writable scratch, all backed by cached,
-regular raw files with nonzero 512-byte-aligned geometry.
+regular raw files with nonzero 512-byte-aligned geometry. ABI-v2 blockless
+snapshots are also supported and do not use sandbox tier metadata.
 
 It rejects UEFI, PCAT, IGVM, caller-supplied ACPI, SMBIOS, device tree,
 PCI/PCIe, VPCI, VMBus, ISA DMA, IDE, floppy, VMGS, graphics, VGA firmware,
@@ -141,10 +142,10 @@ The fixed boot reservations are:
 | ---: | --- |
 | `0x0000..0x000f` | Intel MP 1.4 floating pointer |
 | `0x0400...` | MP configuration table (`180 + 20 * vCPU count` bytes) |
-| `0x500..0x51f` | ABI-v1/v2 four-entry bootstrap GDT |
-| `0x520` | ABI-v1/v2 empty IDT |
-| `0x800..0x81f` | ABI-v3 four-entry bootstrap GDT |
-| `0x820` | ABI-v3 empty IDT |
+| `0x500..0x51f` | ABI-v1 four-entry bootstrap GDT |
+| `0x520` | ABI-v1 empty IDT |
+| `0x800..0x81f` | ABI-v2 four-entry bootstrap GDT |
+| `0x820` | ABI-v2 empty IDT |
 | `0x6000` | Xen `hvm_start_info` |
 | `0x6040` | Optional initramfs module entry |
 | `0x7000` | Xen PVH RAM map |
@@ -232,9 +233,9 @@ firmware helpers, and standard-PC missing-port shims are absent.
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart TB
-   Guest["x86-64 Linux guest<br/>Xen PVH, 1/2/4/8 vCPUs in ABI v3"]
+   Guest["x86-64 Linux guest<br/>Xen PVH, 1/2/4/8 vCPUs in ABI v2"]
 
-   subgraph Abi["microVM ABI versions 1, 2, and 3"]
+   subgraph Abi["microVM ABI versions 1 and 2"]
       direction LR
       Boot["PVH boot state<br/>and fixed RAM layout"]
       Interrupts["PIC, IOAPIC, LAPIC<br/>PIT, RTC, and VM time"]
@@ -724,7 +725,7 @@ virtio-fs attachment revalidation. ABI-v2 coverage adds deterministic active
 block-I/O drain, paired scratch publication, two private restores, fresh
 scratch replacement, and pre-entry rejection of missing, corrupt, mismatched,
 or wrong-geometry media. The same eight-test microVM suite passes on KVM, MSHV,
-and WHP. ABI-v3 coverage adds 1/2/4/8-vCPU topology, APIC identity, pinned
+and WHP. ABI-v2 coverage also includes 1/2/4/8-vCPU topology, APIC identity, pinned
 per-vCPU execution, timer/interrupt progress, reset, cancellation, count and
 topology mismatch rejection, and repeated immutable restore. Platform CI and
 the benchmark histories in `data/` provide the wider host matrix.
@@ -740,8 +741,7 @@ The current ABI family intentionally does not provide:
 - capture-and-continue or live migration;
 - ABI-v1 snapshots with its roleless virtio-blk extension;
 - ABI-v2 snapshot media other than cached regular raw files;
-- ABI-v2 construction through TTRPC;
-- ABI-v3 sandbox-block construction through TTRPC;
+- ABI-v2 sandbox-block construction through TTRPC;
 - serialization of live network flows or native host handles;
 - snapshotting of the contents of a live virtio-fs export; or
 - compatibility with standalone NVX `MVMSNAP*` or `WHPSNAP*` files.
@@ -769,8 +769,8 @@ runtime modes. The current tree integrates their main deliverables as follows:
 
 | Proposal | Current implementation |
 | --- | --- |
-| Phase 1: base machine | PVH boot, versioned MP/ACPI boot metadata, chipset/PMIO devices, optional cold-boot virtio-blk, and ABI-v3 1/2/4/8-vCPU SMP are implemented. Linux/MSHV is supported in addition to KVM and WHP. |
-| Phase 2: snapshot | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented for ABI v1 without block, ABI v2 with three-tier policy and fixed-role layers, and ABI v3 with exact multi-VP topology and either no block or ABI-v2-style layers. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. Public sandbox orchestration remains gated on issues #158–#160. |
+| Phase 1: base machine | PVH boot, versioned MP/ACPI boot metadata, chipset/PMIO devices, optional cold-boot virtio-blk, and ABI-v2 1/2/4/8-vCPU SMP are implemented. Linux/MSHV is supported in addition to KVM and WHP. |
+| Phase 2: snapshot | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented for ABI v1 without block and ABI v2 with exact multi-VP topology plus either no block or three-tier fixed-role layers. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. Public sandbox orchestration remains gated on issues #158–#160. |
 | Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
 | Phase 4: network | Static identity, fixed transport, TAP/user-mode endpoints, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
 | Phase 5: filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |

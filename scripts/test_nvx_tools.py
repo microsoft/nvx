@@ -145,7 +145,7 @@ class CliTests(unittest.TestCase):
                 "--hypervisor",
                 "mshv",
                 "--machine",
-                "microvm-v3",
+                "microvm-v2",
                 "--restore-snapshot",
                 "snapshot",
                 "--processors",
@@ -172,7 +172,7 @@ class CliTests(unittest.TestCase):
                 "openvmm",
                 "--single-process",
                 "--machine",
-                "microvm-v3",
+                "microvm-v2",
                 "--processors",
                 "4",
                 "--hypervisor",
@@ -202,15 +202,18 @@ class CliTests(unittest.TestCase):
         ):
             nvx.command_run(legacy)
         self.assertIn("microvm", format_command.call_args.args[0])
-        self.assertNotIn("microvm-v3", format_command.call_args.args[0])
+        self.assertNotIn("microvm-v2", format_command.call_args.args[0])
 
-        invalid_old_smp = nvx.parse_args(
-            ["run", "--machine", "microvm-v2", "--processors", "2", "--dry-run"]
+        invalid_v1_smp = nvx.parse_args(
+            ["run", "--machine", "microvm", "--processors", "2", "--dry-run"]
         )
         with self.assertRaisesRegex(
             common.ScriptError, "requires exactly one processor"
         ):
-            nvx.command_run(invalid_old_smp)
+            nvx.command_run(invalid_v1_smp)
+
+        with self.assertRaises(SystemExit):
+            nvx.parse_args(["run", "--machine", "microvm-v3", "--dry-run"])
 
     def test_openvmm_build_skips_compatibility_igvm(self):
         with (
@@ -417,7 +420,7 @@ class BenchmarkTests(unittest.TestCase):
             [
                 "--single-process",
                 "--machine",
-                "microvm-v3",
+                "microvm-v2",
                 "--processors",
                 "8",
                 "--hypervisor",
@@ -463,7 +466,7 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(
             command[2:8],
-            ["--machine", "microvm-v3", "--processors", "4", "--hypervisor", "mshv"],
+            ["--machine", "microvm-v2", "--processors", "4", "--hypervisor", "mshv"],
         )
 
         self.assertEqual(
@@ -499,7 +502,7 @@ class BenchmarkTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(
             command[2:8],
-            ["--machine", "microvm-v3", "--processors", "4", "--hypervisor", "kvm"],
+            ["--machine", "microvm-v2", "--processors", "4", "--hypervisor", "kvm"],
         )
 
     def test_parses_dd_rates_and_network_gateway(self):
@@ -1006,7 +1009,7 @@ class BenchmarkTests(unittest.TestCase):
             )
             self.assertEqual(metadata["platform"], "windows-whp-baremetal")
             self.assertEqual(metadata["backend"], "whp")
-            self.assertEqual(metadata["microvm_abi_version"], 3)
+            self.assertEqual(metadata["microvm_abi_version"], 2)
             self.assertEqual(metadata["processors"], 8)
             self.assertEqual(metadata["host_affinity_set"], args.cpus)
             self.assertEqual(metadata["host_cpu_reserve"], args.host_cpu_reserve)
@@ -1103,7 +1106,7 @@ class BenchmarkTests(unittest.TestCase):
                     backend,
                 )
 
-            output = repository / "data" / "runs" / f"{platform}-microvm-v3-1vcpu"
+            output = repository / "data" / "runs" / f"{platform}-microvm-v2-1vcpu"
             self.assertEqual(
                 {path.name for path in output.iterdir()},
                 {

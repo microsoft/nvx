@@ -838,7 +838,7 @@ class PerformanceTests(unittest.TestCase):
             self.assertEqual(result.microvm_abi_version, 1)
             self.assertEqual(result.processors, 1)
 
-    def test_collects_dimensioned_microvm_v3_results(self):
+    def test_collects_dimensioned_microvm_v2_results(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             logs = root / "logs"
@@ -850,7 +850,7 @@ class PerformanceTests(unittest.TestCase):
                     {
                         "platform": "linux-kvm-baremetal",
                         "backend": "kvm",
-                        "microvm_abi_version": 3,
+                        "microvm_abi_version": 2,
                         "processors": 4,
                     }
                 ),
@@ -860,13 +860,13 @@ class PerformanceTests(unittest.TestCase):
             path = performance.collect_results(
                 "linux-kvm-baremetal", "commit", logs, root / "results"
             )
-            self.assertEqual(path.name, "linux-kvm-baremetal-microvm-v3-4vcpu.csv")
+            self.assertEqual(path.name, "linux-kvm-baremetal-microvm-v2-4vcpu.csv")
             results = performance.read_results(path)
             self.assertTrue(results)
             self.assertTrue(
                 all(
                     result.platform == "linux-kvm-baremetal"
-                    and result.microvm_abi_version == 3
+                    and result.microvm_abi_version == 2
                     and result.processors == 4
                     for result in results
                 )
@@ -884,7 +884,7 @@ class PerformanceTests(unittest.TestCase):
                     {
                         "platform": "linux-kvm-baremetal",
                         "backend": "kvm",
-                        "microvm_abi_version": 3,
+                        "microvm_abi_version": 2,
                         "processors": 4,
                     }
                 ),
@@ -895,7 +895,7 @@ class PerformanceTests(unittest.TestCase):
             controls.update(
                 {
                     "platform": "linux-kvm-baremetal",
-                    "microvm_abi_version": 3,
+                    "microvm_abi_version": 2,
                     "processors": 2,
                 }
             )
@@ -920,7 +920,7 @@ class PerformanceTests(unittest.TestCase):
             history = root / "history"
             baseline = root / "baseline"
             target = root / "target"
-            filename = "linux-kvm-baremetal-microvm-v3.csv"
+            filename = "linux-kvm-baremetal-microvm-v2.csv"
             one_vcpu = performance.Result(
                 "commit",
                 "latency",
@@ -928,7 +928,7 @@ class PerformanceTests(unittest.TestCase):
                 "lower",
                 10.0,
                 "linux-kvm-baremetal",
-                3,
+                2,
                 1,
             )
             two_vcpu = performance.Result(
@@ -938,7 +938,7 @@ class PerformanceTests(unittest.TestCase):
                 "lower",
                 20.0,
                 "linux-kvm-baremetal",
-                3,
+                2,
                 2,
             )
             performance.write_results(source / filename, [one_vcpu, two_vcpu])
@@ -952,7 +952,7 @@ class PerformanceTests(unittest.TestCase):
                 performance.gate_results(baseline, target, 10, 0, summary), 0
             )
             self.assertIn(
-                "linux-kvm-baremetal/microvm-v3/2vcpu",
+                "linux-kvm-baremetal/microvm-v2/2vcpu",
                 summary.read_text(encoding="utf-8"),
             )
 
@@ -967,7 +967,7 @@ class PerformanceTests(unittest.TestCase):
                 "lower",
                 10.0,
                 "linux-kvm-baremetal",
-                3,
+                2,
                 4,
             )
             performance.write_results(source / "first.csv", [result])
@@ -992,7 +992,7 @@ class PerformanceTests(unittest.TestCase):
             metadata = {
                 "platform": "linux-kvm-baremetal",
                 "backend": "kvm",
-                "microvm_abi_version": 3,
+                "microvm_abi_version": 2,
                 "processors": 4,
                 "network": "10.0.0.2/24",
                 "lifecycle_network": "10.0.0.2/24",
@@ -1017,7 +1017,7 @@ class PerformanceTests(unittest.TestCase):
                 {
                     "platform": "linux-kvm-baremetal",
                     "backend": "kvm",
-                    "microvm_abi_version": 3,
+                    "microvm_abi_version": 2,
                     "processors": 4,
                     "network": "10.0.0.2/24",
                     "cpus": "0-5",
