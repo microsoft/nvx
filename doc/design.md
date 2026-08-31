@@ -597,18 +597,31 @@ directories rely on host access control, while
 authenticated export or transport belongs outside the default local artifact
 format.
 
+Restore opens the snapshot directory once and resolves manifest, state, memory,
+paired scratch, and `resume.claim` relative to that directory handle. Windows
+opens restore artifacts with read sharing only, rejects reparse points, checks
+`FILE_ID_INFO` and EOF around COW-section creation, and retains the directory
+and artifact guards in the VM worker so writes, truncation, deletion, and rename
+remain blocked until teardown. Linux retains the exact `O_NOFOLLOW` directory
+and regular-file descriptors, detects observable metadata changes before
+worker handoff, and is therefore immune to pathname replacement; mandatory
+content immutability still depends on host access control or an explicit
+stronger mode such as a lease, fs-verity, or a verified artifact broker.
+
 ### Authoritative restore
 
 Restore proceeds in the opposite direction from capture:
 
-1. read the bounded manifest and derive the authoritative machine
-   configuration;
+1. open one exact snapshot generation, read its bounded manifest, and derive
+   the authoritative machine configuration;
 2. resolve console, network, filesystem, policy, and ABI-v2 read-only layer
    attachments by stable ID or role;
 3. validate state, memory, block geometry and identities, and any paired
    scratch artifact before worker construction;
-4. create a writable private copy-on-write mapping of `memory.bin` and either a
-   verified private scratch copy or a caller-supplied fresh scratch file;
+4. create a writable private copy-on-write mapping from the exact opened
+   `memory.bin` handle, transfer its generation guards to the worker, and use
+   either a verified private scratch copy or a caller-supplied fresh scratch
+   file;
 5. construct the partition and exact device inventory from the manifest;
 6. compare the destination CPU, XSAVE/MSR, TSC, topology, device, and queue
    contract with the saved contract;
