@@ -686,7 +686,7 @@ Each external resource has a stable ID and a declarative reconstruction policy.
 | --- | --- | --- |
 | portb | Pending RX/TX bytes | Host serial endpoint |
 | console | Queue progress, staged RX, partial TX, policy | Listener, client connection, or supplied handle |
-| network | Static identity, queue/packet progress, backend and policy identity | TAP or user-mode endpoint and matching egress policy |
+| network | Static identity, queue/packet progress, profile and policy identity | Fresh in-process Consomme endpoint and matching egress policy |
 | filesystem | FUSE namespace, handles, cookies, root/object identity, access mode | Fresh host-directory attachment |
 | ABI-v2 block | Queue/device state, fixed roles, access, geometry, read-only layer identities, and scratch policy | Matching read-only layers plus a verified private paired scratch copy, or a new same-geometry scratch file |
 
@@ -724,11 +724,12 @@ reseed, active console RX/TX, network policy and HTTP traffic, and live
 virtio-fs attachment revalidation. ABI-v2 coverage adds deterministic active
 block-I/O drain, paired scratch publication, two private restores, fresh
 scratch replacement, and pre-entry rejection of missing, corrupt, mismatched,
-or wrong-geometry media. The same eight-test microVM suite passes on KVM, MSHV,
-and WHP. ABI-v2 coverage also includes 1/2/4/8-vCPU topology, APIC identity, pinned
-per-vCPU execution, timer/interrupt progress, reset, cancellation, count and
-topology mismatch rejection, and repeated immutable restore. Platform CI and
-the benchmark histories in `data/` provide the wider host matrix.
+or wrong-geometry media. The same selected native microVM suite passes on KVM,
+MSHV, and WHP. ABI-v2 coverage also includes 1/2/4/8-vCPU topology, APIC
+identity, pinned per-vCPU execution, timer/interrupt progress, reset,
+cancellation, count and topology mismatch rejection, and repeated immutable
+restore. Platform CI and the benchmark histories in `data/` provide the wider
+host matrix.
 
 ## Current limits
 
@@ -772,7 +773,7 @@ runtime modes. The current tree integrates their main deliverables as follows:
 | Phase 1: base machine | PVH boot, versioned MP/ACPI boot metadata, chipset/PMIO devices, optional cold-boot virtio-blk, and ABI-v2 1/2/4/8-vCPU SMP are implemented. Linux/MSHV is supported in addition to KVM and WHP. |
 | Phase 2: snapshot | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented for ABI v1 without block and ABI v2 with exact multi-VP topology plus either no block or three-tier fixed-role layers. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. Public sandbox orchestration remains gated on issues #158–#160. |
 | Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
-| Phase 4: network | Static identity, fixed transport, TAP/user-mode endpoints, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
+| Phase 4: network | Static identity, fixed transport, the portable in-process Consomme endpoint, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
 | Phase 5: filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |
 
 The end-to-end tests establish process-boundary behavior for the available
