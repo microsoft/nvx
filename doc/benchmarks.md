@@ -1,10 +1,11 @@
 # Benchmark
 
 The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites plus a
-23-metric non-Python workload suite on Linux/KVM, Linux/MSHV, and Windows/WHP. CI combines those
-metrics with eight 128 MiB shell lifecycle metrics and reports all 31 median (p50) values for each
-host-typed performance series in the job summary. Latency and resident-memory metrics are
-lower-is-better; throughput metrics are higher-is-better.
+23-metric non-Python workload suite on Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI
+combines those metrics with eight 128 MiB shell lifecycle metrics and reports all 31 median (p50)
+values for each host-typed performance series. At 2, 4, and 8 vCPUs, CI records only
+`shell_snapshot_restore_512_mib`. Latency and resident-memory metrics are lower-is-better;
+throughput metrics are higher-is-better.
 
 The suite uses the base Alpine guest. Python application snapshots, the Python-agent console
 workload, and its snapshot-prefetch experiment are intentionally excluded because the supported
@@ -35,10 +36,10 @@ through the supported NVX CLI.
 | `windows-whp-baremetal` | WHP | Bare metal |
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
 
-CI runs every series sequentially at `1`, `2`, `4`, and `8` vCPUs under
-microVM ABI v2. This produces 124 p50 values per series (31 metrics times four
-counts) and 620 values across the five-series matrix. Counts run sequentially
-on each host so benchmark workloads never overlap on the same physical host.
+CI runs the complete acceptance and performance suites at one vCPU under microVM ABI v2. It then
+runs only the 512 MiB shell snapshot restore at `2`, `4`, and `8` vCPUs. This produces 34 p50
+values per series and 170 values across the five-series matrix. Counts run sequentially on each
+host so benchmark workloads never overlap on the same physical host.
 
 ## Running locally
 
@@ -62,6 +63,13 @@ python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform l
 
 # Windows/WHP
 python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\8vcpu
+```
+
+Run the restore-only shape used by CI for higher-vCPU coverage with:
+
+```console
+python3 scripts/nvx.py benchmark --suite shell-snapshot-restore --backend kvm --platform linux-kvm-baremetal --processors 8 --shell-memories 512 --warmups 1 --runs 5 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu --output-dir data/results --require-shell-snapshot-restore-512
 ```
 
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
@@ -116,6 +124,7 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Cold start | `benchmark --suite cold-start` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
 | Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
+| Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured shell-ready snapshot and measures only restore latency for the selected memory sizes. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 
 ## Kernel command lines
@@ -233,9 +242,12 @@ successful packets.
 
 `python scripts/nvx.py performance collect --require-shared-suite` rejects a workload result
 unless it contains exactly the 23 shared metrics. Supplying `--lifecycle-input` requires and merges
-the eight lifecycle metrics, producing the 31-metric result used by CI. Each backend job publishes
-its p50 table and lifecycle diagnostics to `$GITHUB_STEP_SUMMARY`. Pull-request regression checks
-compare KVM, MSHV, and WHP results with the latest base-branch history.
+the eight lifecycle metrics, producing the 31-metric one-vCPU result used by CI. Higher-vCPU
+collection uses `--require-shell-snapshot-restore-512`, which requires exactly
+`shell_snapshot_restore_512_mib` plus canonical one-warmup/five-sample metadata for a 2-, 4-, or
+8-vCPU guest. Each backend job publishes its p50 tables and one-vCPU lifecycle diagnostics to
+`$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
+latest base-branch history.
 
 The current workflow uses the latest 10 p50 samples on the pull request's base branch. A metric
 regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be

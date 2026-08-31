@@ -53,6 +53,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.output_dir, Path("results"))
         self.assertIs(args.handler, benchmark.run)
 
+    def test_benchmark_exposes_restore_only_shell_suite(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "shell-snapshot-restore",
+                "--shell-memories",
+                "512",
+                "--processors",
+                "8",
+                "--output-dir",
+                "results",
+            ]
+        )
+
+        self.assertEqual(args.suite, "shell-snapshot-restore")
+        self.assertEqual(args.shell_memories, [512])
+        self.assertEqual(args.processors, 8)
+        self.assertIs(args.handler, benchmark.run)
+
     def test_release_commands_keep_their_cli_contract(self):
         download = nvx.parse_args(
             ["download", "--repository", "example/nvx", "--hypervisor", "auto"]
@@ -623,6 +643,40 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("SMP-IOAPIC-OK", probe.call_args.args[1])
         self.assertEqual(probe.call_args.args[2], benchmark.SMP_PROBE_COMPLETION_MARKER)
 
+    def test_shell_snapshot_restore_suite_only_measures_restore(self):
+        args = argparse.Namespace(
+            processors=8,
+            shell_memories=[512],
+            warmups=1,
+            runs=5,
+            timeout=40.0,
+            teardown_mode="guest-exit",
+        )
+        result = cast(benchmark.BenchmarkResult, {"samples_ms": [10.0, 12.0]})
+        with (
+            patch.object(benchmark, "capture_automatic_snapshot") as capture,
+            patch.object(benchmark, "benchmark", return_value=result) as run,
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            benchmark.benchmark_shell_snapshot_restore_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+            )
+
+        capture.assert_called_once()
+        run.assert_called_once()
+        restore_command = run.call_args.args[0]
+        self.assertIn("--restore-snapshot", restore_command)
+        self.assertEqual(
+            restore_command[restore_command.index("--processors") + 1], "8"
+        )
+        self.assertIn("== 512 MiB ==", output.getvalue())
+        self.assertIn("snapshot restore", output.getvalue())
+        self.assertNotIn("cold boot", output.getvalue())
+
     def test_benchmark_preserves_exact_process_wall_samples(self):
         samples = [
             (10.0, 1024, 2.0, 13.5),
@@ -1020,6 +1074,47 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(virtfs.call_args.kwargs["runs"], 3)
             shell.assert_called_once()
             network.assert_called_once()
+
+    def test_restore_only_suite_writes_only_its_canonical_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "cold-start.log").write_text("stale", encoding="ascii")
+            (output / "shell-snapshot.log").write_text("stale", encoding="ascii")
+            (output / "acceptance.json").write_text("stale", encoding="ascii")
+            args = nvx.parse_args(
+                [
+                    "benchmark",
+                    "--suite",
+                    "shell-snapshot-restore",
+                    "--backend",
+                    "whp",
+                    "--platform",
+                    "windows-whp-virtual-machine",
+                    "--processors",
+                    "8",
+                    "--shell-memories",
+                    "512",
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            with patch.object(
+                benchmark, "benchmark_shell_snapshot_restore_workload"
+            ) as restore:
+                result = benchmark.run_workload_benchmarks(
+                    args,
+                    Path("openvmm.exe"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    "whp",
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {"benchmark-metadata.json", "shell-snapshot-restore.log"},
+            )
+            restore.assert_called_once()
 
     def test_mshv_performance_suite_includes_network(self):
         with tempfile.TemporaryDirectory() as temporary:

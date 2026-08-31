@@ -213,7 +213,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--suite {boot,snapshot,restore,e2e,phase2,all,cold-start,network-snapshot,performance,shell-snapshot,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
+| `--suite {boot,snapshot,restore,e2e,phase2,all,cold-start,network-snapshot,performance,shell-snapshot,shell-snapshot-restore,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
 | `--backend {whp,kvm,mshv,both}` | `both` on Windows; `kvm` elsewhere | Select the hypervisor backend. |
 | `--platform NAME` | inferred OS/backend | Record the host-typed performance series. |
 | `--openvmm-dir PATH` | `openvmm/` | Select the OpenVMM repository. |
@@ -261,12 +261,15 @@ python3 scripts/nvx.py performance collect
     [--require-network]
     [--require-shell-snapshot]
     [--require-shared-suite]
+    [--require-shell-snapshot-restore-512]
     [--lifecycle-input PATH]
     [--summary PATH]
 ```
 
-Parses canonical benchmark logs into p50 CSV files. The three `--require-*`
-flags reject incomplete inputs for their respective workload sets.
+Parses canonical benchmark logs into p50 CSV files. The `--require-*` flags
+reject incomplete inputs for their respective workload sets.
+`--require-shell-snapshot-restore-512` accepts only the canonical 512 MiB
+restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
 result, producing the 31-metric CI result. `--summary` writes the p50 table
 plus lifecycle min/max/sample-count and RSS diagnostics.

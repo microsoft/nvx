@@ -295,7 +295,7 @@ jobs:
         )
       }}
     runs-on: ${{ fromJSON(matrix.runner) }}
-    timeout-minutes: 240
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

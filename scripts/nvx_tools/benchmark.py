@@ -46,7 +46,14 @@ KVM_SNAPSHOT_RESULT_PREFIX = "OPENVMM_KVM_SNAPSHOT_RESULT="
 PHASE2_RESULT_PREFIX = "OPENVMM_PHASE2_RESULT="
 NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
 WORKLOAD_SUITES = frozenset(
-    {"cold-start", "virtfs", "shell-snapshot", "network-snapshot", "performance"}
+    {
+        "cold-start",
+        "virtfs",
+        "shell-snapshot",
+        "shell-snapshot-restore",
+        "network-snapshot",
+        "performance",
+    }
 )
 NETWORK_SNAPSHOT_BACKENDS = frozenset({"kvm", "mshv", "whp"})
 DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
@@ -61,6 +68,7 @@ PERFORMANCE_LOG_FILENAMES = (
     "cold-start.log",
     "virtfs.log",
     "shell-snapshot.log",
+    "shell-snapshot-restore.log",
     "network.log",
 )
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
@@ -1467,6 +1475,14 @@ def benchmark_virtfs_workload(
         )
 
 
+def _format_shell_snapshot_line(name: str, values: Sequence[float]) -> str:
+    return (
+        f"  {name:<20}: median {statistics.median(values):7.1f} ms   "
+        f"(p95 {nearest_rank_percentile(values, 95):.1f}, "
+        f"min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
+    )
+
+
 def _print_shell_snapshot_summary(
     memory_mib: int,
     cold: Sequence[float],
@@ -1476,15 +1492,8 @@ def _print_shell_snapshot_summary(
     fast = [value for value in cold if value < split_ms]
     slow = [value for value in cold if value >= split_ms]
 
-    def line(name: str, values: Sequence[float]) -> str:
-        return (
-            f"  {name:<20}: median {statistics.median(values):7.1f} ms   "
-            f"(p95 {nearest_rank_percentile(values, 95):.1f}, "
-            f"min {min(values):.1f}, max {max(values):.1f}, n={len(values)})"
-        )
-
     print(f"== {memory_mib} MiB ==")
-    print(line("cold boot", cold))
+    print(_format_shell_snapshot_line("cold boot", cold))
     if fast and slow:
         print(
             f"       fast path {statistics.median(fast):7.1f} ms (n={len(fast)})  |  "
@@ -1492,7 +1501,7 @@ def _print_shell_snapshot_summary(
             f"+~{statistics.median(slow) - statistics.median(fast):.0f} ms "
             "TSC PIT-calib)"
         )
-    print(line("snapshot restore", restored))
+    print(_format_shell_snapshot_line("snapshot restore", restored))
     restore_p50 = statistics.median(restored)
     if restore_p50 > 0:
         base = statistics.median(fast) if fast else statistics.median(cold)
@@ -1502,6 +1511,57 @@ def _print_shell_snapshot_summary(
             "faster via snapshot"
         )
     print()
+
+
+def _benchmark_shell_snapshot_restore(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    memory_mib: int,
+    snapshot_path: Path,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> BenchmarkResult:
+    capture_command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0 shellsnap",
+        processors=args.processors,
+        command_prefix=command_prefix,
+    )
+    capture_automatic_snapshot(
+        [
+            *capture_command,
+            "--snapshot-destination",
+            str(snapshot_path),
+        ],
+        snapshot_path,
+        timeout=max(args.timeout, 30.0),
+        windows_cpus=windows_cpus,
+    )
+    return benchmark(
+        [
+            *command_prefix,
+            *snapshot_restore_command(
+                executable,
+                backend,
+                snapshot_path,
+                processors=args.processors,
+            ),
+        ],
+        warmups=args.warmups,
+        runs=args.runs,
+        timeout=args.timeout,
+        marker=BOOT_MARKER,
+        windows_cpus=windows_cpus,
+        teardown_mode=args.teardown_mode,
+    )
 
 
 def benchmark_shell_snapshot_workload(
@@ -1545,48 +1605,61 @@ def benchmark_shell_snapshot_workload(
             )
 
             snapshot_path = root / f"shell-{memory_mib}-mib"
-            capture_command = workload_boot_command(
+            restored = _benchmark_shell_snapshot_restore(
+                args,
                 executable,
-                backend,
                 kernel,
                 initrd,
+                backend,
                 memory_mib,
-                "quiet loglevel=0 shellsnap",
-                processors=args.processors,
-                command_prefix=command_prefix,
-            )
-            capture_automatic_snapshot(
-                [
-                    *capture_command,
-                    "--snapshot-destination",
-                    str(snapshot_path),
-                ],
                 snapshot_path,
-                timeout=max(args.timeout, 30.0),
+                command_prefix=command_prefix,
                 windows_cpus=windows_cpus,
-            )
-            restored = benchmark(
-                [
-                    *command_prefix,
-                    *snapshot_restore_command(
-                        executable,
-                        backend,
-                        snapshot_path,
-                        processors=args.processors,
-                    ),
-                ],
-                warmups=args.warmups,
-                runs=args.runs,
-                timeout=args.timeout,
-                marker=BOOT_MARKER,
-                windows_cpus=windows_cpus,
-                teardown_mode=args.teardown_mode,
             )
             _print_shell_snapshot_summary(
                 memory_mib,
                 cold["samples_ms"],
                 restored["samples_ms"],
             )
+
+
+def benchmark_shell_snapshot_restore_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    print(
+        "boot-to-shell snapshot restore, "
+        f"median of {args.runs} runs, {args.processors} vCPU"
+    )
+    print(f'marker : "{BOOT_MARKER.decode()}"')
+    print(f"kernel : {kernel}")
+    print(f"initrd : {initrd}")
+    print()
+    with tempfile.TemporaryDirectory(prefix="openvmm-shell-restore-") as temporary:
+        root = Path(temporary)
+        for memory_mib in args.shell_memories:
+            restored = _benchmark_shell_snapshot_restore(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib,
+                root / f"shell-{memory_mib}-mib",
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            )
+            print(f"== {memory_mib} MiB ==")
+            print(
+                _format_shell_snapshot_line("snapshot restore", restored["samples_ms"])
+            )
+            print()
 
 
 def benchmark_network_snapshot_workload(
@@ -1829,9 +1902,11 @@ def run_workload_benchmarks(
     if output_dir is not None:
         output_dir = output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
-        if args.suite == "performance":
+        if args.suite in {"performance", "shell-snapshot-restore"}:
             for filename in (*PERFORMANCE_LOG_FILENAMES, *LEGACY_PYTHON_LOG_FILENAMES):
                 (output_dir / filename).unlink(missing_ok=True)
+        if args.suite == "shell-snapshot-restore":
+            (output_dir / "acceptance.json").unlink(missing_ok=True)
         metadata_path = write_benchmark_metadata(
             args, output_dir, executable, kernel, initrd, backend
         )
@@ -1866,6 +1941,18 @@ def run_workload_benchmarks(
         "shell-snapshot": (
             "shell-snapshot.log",
             lambda: benchmark_shell_snapshot_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+        "shell-snapshot-restore": (
+            "shell-snapshot-restore.log",
+            lambda: benchmark_shell_snapshot_restore_workload(
                 args,
                 executable,
                 kernel,

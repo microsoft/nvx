@@ -247,15 +247,18 @@ def _parse_hello_snapshot(text: str) -> dict[str, MetricValue]:
     return _parse_fixed(text, "snapshot-hello.log", patterns)
 
 
-def _parse_shell_snapshot(text: str) -> dict[str, MetricValue]:
+def _shell_snapshot_sections(text: str, source: str) -> dict[int, str]:
     sections: dict[int, str] = {}
     for match in SHELL_SNAPSHOT_SECTION.finditer(text):
         memory_mib = int(match.group("memory"))
         if memory_mib in sections:
-            raise PerformanceError(
-                f"duplicate {memory_mib} MiB section in shell-snapshot.log"
-            )
+            raise PerformanceError(f"duplicate {memory_mib} MiB section in {source}")
         sections[memory_mib] = match.group("body")
+    return sections
+
+
+def _parse_shell_snapshot(text: str) -> dict[str, MetricValue]:
+    sections = _shell_snapshot_sections(text, "shell-snapshot.log")
 
     missing = [
         memory_mib
@@ -289,6 +292,32 @@ def _parse_shell_snapshot(text: str) -> dict[str, MetricValue]:
                         rf"^\s*snapshot restore\s*:\s*median\s+"
                         rf"(?P<value>{NUMBER})\s*ms\b",
                     ),
+                ],
+            )
+        )
+    return metrics
+
+
+def _parse_shell_snapshot_restore(text: str) -> dict[str, MetricValue]:
+    source = "shell-snapshot-restore.log"
+    sections = _shell_snapshot_sections(text, source)
+    if not sections:
+        raise PerformanceError(f"missing memory sections in {source}")
+
+    metrics: dict[str, MetricValue] = {}
+    for memory_mib, body in sorted(sections.items()):
+        metrics.update(
+            _parse_fixed(
+                body,
+                f"{source} ({memory_mib} MiB)",
+                [
+                    (
+                        f"shell_snapshot_restore_{memory_mib}_mib",
+                        "ms",
+                        "lower",
+                        rf"^\s*snapshot restore\s*:\s*median\s+"
+                        rf"(?P<value>{NUMBER})\s*ms\b",
+                    )
                 ],
             )
         )
@@ -356,6 +385,7 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "snapshot.log": (_parse_snapshot, False),
     "snapshot-hello.log": (_parse_hello_snapshot, False),
     "shell-snapshot.log": (_parse_shell_snapshot, False),
+    "shell-snapshot-restore.log": (_parse_shell_snapshot_restore, False),
     "network.log": (_parse_network, False),
 }
 
@@ -1038,11 +1068,22 @@ def collect_results(
     require_shared_suite: bool = False,
     summary_path: Path | None = None,
     lifecycle_input: Path | None = None,
+    require_shell_snapshot_restore_512: bool = False,
 ) -> Path:
     if not platform or "/" in platform or platform in {".", ".."}:
         raise PerformanceError(f"invalid platform name: {platform!r}")
     if not commit:
         raise PerformanceError("commit must not be empty")
+    if require_shell_snapshot_restore_512 and (
+        require_network
+        or require_shell_snapshot
+        or require_shared_suite
+        or lifecycle_input is not None
+    ):
+        raise PerformanceError(
+            "the 512 MiB shell restore result cannot be combined with full-suite "
+            "collection options"
+        )
 
     dimensions, workload_metadata = read_workload_dimensions(input_dir, platform)
 
@@ -1051,10 +1092,15 @@ def collect_results(
         "shell-snapshot.log": require_shell_snapshot,
     }
     collected: dict[str, MetricValue] = {}
-    for filename, (parser, required) in LOG_PARSERS.items():
+    for filename, (parser, required_by_default) in LOG_PARSERS.items():
         path = input_dir / filename
+        required = (
+            filename == "shell-snapshot-restore.log"
+            if require_shell_snapshot_restore_512
+            else required_by_default or required_optional_logs.get(filename, False)
+        )
         if not path.exists():
-            if required or required_optional_logs.get(filename, False):
+            if required:
                 raise PerformanceError(f"required benchmark log not found: {path}")
             print(f"SKIP: optional benchmark log not found: {path}")
             continue
@@ -1170,6 +1216,40 @@ def collect_results(
 
     if not collected:
         raise PerformanceError(f"no performance metrics found in {input_dir}")
+    if require_shell_snapshot_restore_512:
+        expected_restore_metrics = {"shell_snapshot_restore_512_mib"}
+        if collected.keys() != expected_restore_metrics:
+            missing = sorted(expected_restore_metrics - collected.keys())
+            extra = sorted(collected.keys() - expected_restore_metrics)
+            details: list[str] = []
+            if missing:
+                details.append("missing: " + ", ".join(missing))
+            if extra:
+                details.append("unexpected: " + ", ".join(extra))
+            raise PerformanceError(
+                "512 MiB shell restore result must contain exactly "
+                "shell_snapshot_restore_512_mib (" + "; ".join(details) + ")"
+            )
+        if dimensions.processors not in {2, 4, 8}:
+            raise PerformanceError(
+                "512 MiB shell restore result requires 2, 4, or 8 vCPUs, got "
+                f"{dimensions.processors}"
+            )
+        if workload_metadata is None:
+            raise PerformanceError(
+                "512 MiB shell restore result requires benchmark metadata"
+            )
+        expected_controls: dict[str, object] = {
+            "warmups": 1,
+            "measured_runs": 5,
+            "shell_memories_mib": [512],
+        }
+        for field, expected in expected_controls.items():
+            if workload_metadata.get(field) != expected:
+                raise PerformanceError(
+                    f"noncanonical 512 MiB shell restore control {field}: "
+                    f"{workload_metadata.get(field)!r}, expected {expected!r}"
+                )
     expected_metrics = (
         SHARED_METRICS | LIFECYCLE_METRICS if lifecycle is not None else SHARED_METRICS
     )
@@ -1538,6 +1618,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--require-shell-snapshot", action="store_true")
     collect.add_argument("--require-shared-suite", action="store_true")
     collect.add_argument(
+        "--require-shell-snapshot-restore-512",
+        action="store_true",
+        help="require the canonical restore-only 512 MiB higher-vCPU result",
+    )
+    collect.add_argument(
         "--lifecycle-input",
         type=Path,
         help="merge a 128 MiB e2e lifecycle benchmark JSON result",
@@ -1597,6 +1682,9 @@ def command_performance(args: argparse.Namespace) -> int:
                 require_shared_suite=args.require_shared_suite,
                 summary_path=args.summary,
                 lifecycle_input=args.lifecycle_input,
+                require_shell_snapshot_restore_512=(
+                    args.require_shell_snapshot_restore_512
+                ),
             )
             return 0
         if args.performance_command == "collect-openvmm":

@@ -70,6 +70,11 @@ SHELL_SNAPSHOT_LOG = """
     speedup             : 83x (fast-path cold) .. 83x (median cold) faster via snapshot
 """
 
+SHELL_SNAPSHOT_RESTORE_LOG = """
+== 512 MiB ==
+    snapshot restore    : median     7.0 ms   (p95 7.2, min 6.8, max 7.2, n=5)
+"""
+
 
 def lifecycle_document(
     backend: str = "kvm",
@@ -164,6 +169,25 @@ class PerformanceTests(unittest.TestCase):
         )
 
         self.assertEqual(args.lifecycle_input, Path("acceptance.json"))
+
+    def test_collect_cli_accepts_restore_only_contract(self):
+        args = nvx.parse_args(
+            [
+                "performance",
+                "collect",
+                "--platform",
+                "linux-kvm-baremetal",
+                "--commit",
+                "abc123",
+                "--input-dir",
+                "logs",
+                "--output-dir",
+                "results",
+                "--require-shell-snapshot-restore-512",
+            ]
+        )
+
+        self.assertTrue(args.require_shell_snapshot_restore_512)
 
     def test_collects_openvmm_mshv_json(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -468,6 +492,89 @@ class PerformanceTests(unittest.TestCase):
             r"missing memory section\(s\).*512 MiB",
         ):
             performance._parse_shell_snapshot(incomplete_log)
+
+    def test_collects_only_canonical_higher_vcpu_shell_restore(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "shell-snapshot-restore.log").write_text(
+                SHELL_SNAPSHOT_RESTORE_LOG, encoding="utf-8"
+            )
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "platform": "linux-kvm-baremetal",
+                        "backend": "kvm",
+                        "microvm_abi_version": 2,
+                        "processors": 8,
+                        "warmups": 1,
+                        "measured_runs": 5,
+                        "shell_memories_mib": [512],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result_path = performance.collect_results(
+                "linux-kvm-baremetal",
+                "abc123",
+                logs,
+                root / "results",
+                require_shell_snapshot_restore_512=True,
+            )
+
+            self.assertEqual(
+                performance.read_results(result_path),
+                [
+                    performance.Result(
+                        "abc123",
+                        "shell_snapshot_restore_512_mib",
+                        "ms",
+                        "lower",
+                        7.0,
+                        "linux-kvm-baremetal",
+                        2,
+                        8,
+                    )
+                ],
+            )
+
+    def test_restore_only_collection_rejects_other_metrics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "shell-snapshot-restore.log").write_text(
+                SHELL_SNAPSHOT_RESTORE_LOG, encoding="utf-8"
+            )
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "platform": "linux-kvm-baremetal",
+                        "backend": "kvm",
+                        "microvm_abi_version": 2,
+                        "processors": 8,
+                        "warmups": 1,
+                        "measured_runs": 5,
+                        "shell_memories_mib": [512],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"unexpected: cold_start_base",
+            ):
+                performance.collect_results(
+                    "linux-kvm-baremetal",
+                    "abc123",
+                    logs,
+                    root / "results",
+                    require_shell_snapshot_restore_512=True,
+                )
 
     def test_collect_requires_shell_snapshot_log_when_requested(self):
         with tempfile.TemporaryDirectory() as temporary:

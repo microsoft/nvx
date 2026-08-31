@@ -119,21 +119,19 @@ runs:
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
-        for processors in 1 2 4 8; do
-          run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
-          python3 scripts/nvx.py benchmark \
-            --suite e2e \
-            --backend "${{ inputs.backend }}" \
-            --platform "${{ inputs.platform }}" \
-            --processors "${processors}" \
-            "${cpu_args[@]}" \
-            --warmups 1 \
-            --runs 3 \
-            --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
-            --skip-build \
-            --teardown-mode "${{ inputs.teardown-mode }}" \
-            --output "${run_dir}/acceptance.json"
-        done
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python3 scripts/nvx.py benchmark \
+          --suite e2e \
+          --backend "${{ inputs.backend }}" \
+          --platform "${{ inputs.platform }}" \
+          --processors 1 \
+          "${cpu_args[@]}" \
+          --warmups 1 \
+          --runs 3 \
+          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+          --skip-build \
+          --teardown-mode "${{ inputs.teardown-mode }}" \
+          --output "${run_dir}/acceptance.json"
 
     - name: Run Linux performance suite
       if: runner.os != 'Windows'
@@ -148,17 +146,45 @@ runs:
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
-        for processors in 1 2 4 8; do
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python3 scripts/nvx.py benchmark \
+          --suite performance \
+          --backend "${{ inputs.backend }}" \
+          --platform "${{ inputs.platform }}" \
+          --processors 1 \
+          "${cpu_args[@]}" \
+          --warmups 1 \
+          --runs 5 \
+          --virtfs-runs 3 \
+          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+          --skip-build \
+          --teardown-mode "${{ inputs.teardown-mode }}" \
+          --output-dir "${run_dir}"
+
+    - name: Run Linux multi-vCPU shell restore
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
+        for processors in 2 4 8; do
           run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
           python3 scripts/nvx.py benchmark \
-            --suite performance \
+            --suite shell-snapshot-restore \
             --backend "${{ inputs.backend }}" \
             --platform "${{ inputs.platform }}" \
             --processors "${processors}" \
             "${cpu_args[@]}" \
             --warmups 1 \
             --runs 5 \
-            --virtfs-runs 3 \
+            --shell-memories 512 \
             --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
             --skip-build \
             --teardown-mode "${{ inputs.teardown-mode }}" \
@@ -178,22 +204,20 @@ runs:
         if ($env:NVX_BENCHMARK_CPUS) {
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
-        foreach ($Processors in 1, 2, 4, 8) {
-          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
-          python scripts\nvx.py benchmark `
-            --suite e2e `
-            --backend "${{ inputs.backend }}" `
-            --platform "${{ inputs.platform }}" `
-            --processors $Processors `
-            --warmups 1 `
-            --runs 3 `
-            --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
-            --skip-build `
-            --teardown-mode "${{ inputs.teardown-mode }}" `
-            --output "$RunDir/acceptance.json" `
-            @CpuArgs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        }
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python scripts\nvx.py benchmark `
+          --suite e2e `
+          --backend "${{ inputs.backend }}" `
+          --platform "${{ inputs.platform }}" `
+          --processors 1 `
+          --warmups 1 `
+          --runs 3 `
+          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+          --skip-build `
+          --teardown-mode "${{ inputs.teardown-mode }}" `
+          --output "$RunDir/acceptance.json" `
+          @CpuArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Run Windows performance suite
       if: runner.os == 'Windows'
@@ -208,16 +232,45 @@ runs:
         if ($env:NVX_BENCHMARK_CPUS) {
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
-        foreach ($Processors in 1, 2, 4, 8) {
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python scripts\nvx.py benchmark `
+          --suite performance `
+          --backend "${{ inputs.backend }}" `
+          --platform "${{ inputs.platform }}" `
+          --processors 1 `
+          --warmups 1 `
+          --runs 5 `
+          --virtfs-runs 3 `
+          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+          --skip-build `
+          --teardown-mode "${{ inputs.teardown-mode }}" `
+          --output-dir "$RunDir" `
+          @CpuArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Run Windows multi-vCPU shell restore
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        foreach ($Processors in 2, 4, 8) {
           $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
           python scripts\nvx.py benchmark `
-            --suite performance `
+            --suite shell-snapshot-restore `
             --backend "${{ inputs.backend }}" `
             --platform "${{ inputs.platform }}" `
             --processors $Processors `
             --warmups 1 `
             --runs 5 `
-            --virtfs-runs 3 `
+            --shell-memories 512 `
             --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
             --skip-build `
             --teardown-mode "${{ inputs.teardown-mode }}" `
@@ -231,17 +284,25 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        for processors in 1 2 4 8; do
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python3 scripts/nvx.py performance collect \
+          --platform "${{ inputs.platform }}" \
+          --commit "${GITHUB_SHA}" \
+          --input-dir "${run_dir}" \
+          --output-dir "${run_dir}" \
+          --require-network \
+          --require-shell-snapshot \
+          --require-shared-suite \
+          --lifecycle-input "${run_dir}/acceptance.json" \
+          --summary "${GITHUB_STEP_SUMMARY}"
+        for processors in 2 4 8; do
           run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
           python3 scripts/nvx.py performance collect \
             --platform "${{ inputs.platform }}" \
             --commit "${GITHUB_SHA}" \
             --input-dir "${run_dir}" \
             --output-dir "${run_dir}" \
-            --require-network \
-            --require-shell-snapshot \
-            --require-shared-suite \
-            --lifecycle-input "${run_dir}/acceptance.json" \
+            --require-shell-snapshot-restore-512 \
             --summary "${GITHUB_STEP_SUMMARY}"
         done
 
@@ -250,17 +311,26 @@ runs:
       shell: powershell
       run: |
         $ErrorActionPreference = "Stop"
-        foreach ($Processors in 1, 2, 4, 8) {
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python scripts\nvx.py performance collect `
+          --platform "${{ inputs.platform }}" `
+          --commit $env:GITHUB_SHA `
+          --input-dir $RunDir `
+          --output-dir $RunDir `
+          --require-network `
+          --require-shell-snapshot `
+          --require-shared-suite `
+          --lifecycle-input "$RunDir/acceptance.json" `
+          --summary $env:GITHUB_STEP_SUMMARY
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        foreach ($Processors in 2, 4, 8) {
           $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
           python scripts\nvx.py performance collect `
             --platform "${{ inputs.platform }}" `
             --commit $env:GITHUB_SHA `
             --input-dir $RunDir `
             --output-dir $RunDir `
-            --require-network `
-            --require-shell-snapshot `
-            --require-shared-suite `
-            --lifecycle-input "$RunDir/acceptance.json" `
+            --require-shell-snapshot-restore-512 `
             --summary $env:GITHUB_STEP_SUMMARY
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
@@ -276,6 +346,12 @@ runs:
             echo "::error::Missing benchmark result ${result}"
             exit 1
           }
+          if [[ "${processors}" != 1 ]] &&
+            { [[ "$(wc -l < "${result}")" -ne 2 ]] ||
+              [[ "$(awk -F, 'NR == 2 { print $5 }' "${result}")" != shell_snapshot_restore_512_mib ]]; }; then
+            echo "::error::Expected only shell_snapshot_restore_512_mib in ${result}"
+            exit 1
+          fi
         done
 
     - name: Verify complete Windows benchmark matrix
@@ -288,6 +364,12 @@ runs:
           if (-not (Test-Path $Result -PathType Leaf) -or (Get-Item $Result).Length -eq 0) {
             throw "Missing benchmark result $Result"
           }
+          if ($Processors -ne 1) {
+            $Rows = @(Import-Csv $Result)
+            if ($Rows.Count -ne 1 -or $Rows[0].metric -ne "shell_snapshot_restore_512_mib") {
+              throw "Expected only shell_snapshot_restore_512_mib in $Result"
+            }
+          }
         }
 
     - name: Save benchmark results
@@ -296,5 +378,5 @@ runs:
         PATH: ${{ steps.cache-tools-linux.outputs.path || steps.cache-tools-windows.outputs.path }}
       with:
         path: data/runs/${{ inputs.platform }}
-        key: benchmark-${{ inputs.platform }}-microvm-v2-1-2-4-8-${{ github.run_id }}-${{ github.run_attempt }}
+        key: benchmark-${{ inputs.platform }}-microvm-v2-1-full-2-4-8-shell-restore-512-${{ github.run_id }}-${{ github.run_attempt }}
         enableCrossOsArchive: true
