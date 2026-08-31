@@ -1185,7 +1185,7 @@ def collect_results(
                 }
                 expected_sampling = {
                     "lifecycle warmups": 1,
-                    "lifecycle measured runs": 3,
+                    "lifecycle measured runs": 10,
                     "workload warmups": 1,
                     "workload measured runs": 5,
                     "virtio-fs measured runs": 3,
@@ -1473,7 +1473,12 @@ def gate_results(
     threshold: float,
     summary_path: Path | None = None,
     absolute_tolerance_ms: float = 5.0,
+    minimum_history: int = 10,
 ) -> int:
+    if minimum_history > window:
+        raise PerformanceError(
+            f"minimum history ({minimum_history}) exceeds window ({window})"
+        )
     target_files = sorted(target_dir.glob("*.csv"))
     if not target_files:
         raise PerformanceError(f"no result CSV files found in {target_dir}")
@@ -1487,11 +1492,12 @@ def gate_results(
     summary = [
         "## Performance regression gate",
         "",
-        f"PR p50 versus the base branch's latest {window}-point p50 moving average "
-        f"(failure threshold: >{threshold:g}%; lower-is-better millisecond metrics "
+        f"PR p50 versus the median of the base branch's latest {window} p50 values "
+        f"(minimum history: {minimum_history}; failure threshold: >{threshold:g}%; "
+        f"lower-is-better millisecond metrics "
         f"must also increase by >{absolute_tolerance_ms:g} ms).",
         "",
-        "| Platform | Metric | PR p50 | Base p50 average | Delta | Result |",
+        "| Platform | Metric | PR p50 | Base p50 median | Delta | Result |",
         "| --- | --- | ---: | ---: | ---: | --- |",
     ]
 
@@ -1524,6 +1530,19 @@ def gate_results(
                     f"{_format_value(target.p50, target.unit)} | - | - | Warmup |"
                 )
                 continue
+            if len(samples) < minimum_history:
+                message = (
+                    f"WARMUP: {dimension}/{target.metric} has {len(samples)} "
+                    f"of {minimum_history} required base-branch points"
+                )
+                print(message)
+                summary.append(
+                    f"| {dimension} | `{target.metric}` | "
+                    f"{_format_value(target.p50, target.unit)} | - "
+                    f"({len(samples)}/{minimum_history}) | - | "
+                    f"Warmup ({len(samples)}/{minimum_history}) |"
+                )
+                continue
 
             for sample in samples:
                 if (sample.unit, sample.direction) != (
@@ -1535,15 +1554,15 @@ def gate_results(
                         f"{dimension}/{target.metric}"
                     )
 
-            baseline_average = statistics.fmean(sample.p50 for sample in samples)
+            baseline_median = statistics.median(sample.p50 for sample in samples)
             if target.direction == "lower":
-                delta = (target.p50 - baseline_average) / baseline_average * 100
+                delta = (target.p50 - baseline_median) / baseline_median * 100
             else:
-                delta = (baseline_average - target.p50) / baseline_average * 100
+                delta = (baseline_median - target.p50) / baseline_median * 100
 
             checked += 1
             absolute_delta_ms = (
-                target.p50 - baseline_average
+                target.p50 - baseline_median
                 if target.direction == "lower" and target.unit == "ms"
                 else None
             )
@@ -1560,14 +1579,14 @@ def gate_results(
             print(
                 f"{status}: {dimension}/{target.metric}: p50 "
                 f"{_format_value(target.p50, target.unit)} vs "
-                f"{len(samples)}-point base average "
-                f"{_format_value(baseline_average, target.unit)} "
+                f"{len(samples)}-point base median "
+                f"{_format_value(baseline_median, target.unit)} "
                 f"({delta:+.1f}%{absolute_detail})"
             )
             summary.append(
                 f"| {dimension} | `{target.metric}` | "
                 f"{_format_value(target.p50, target.unit)} | "
-                f"{_format_value(baseline_average, target.unit)} "
+                f"{_format_value(baseline_median, target.unit)} "
                 f"({len(samples)}/{window}) | {delta:+.1f}%{absolute_detail} | "
                 f"{status} |"
             )
@@ -1586,7 +1605,8 @@ def gate_results(
 
     print(
         f"Checked {checked} metric(s), found {regressions} regression(s) "
-        f"(threshold: >{threshold:g}% vs {window}-point moving average; "
+        f"(threshold: >{threshold:g}% vs {window}-point median; "
+        f"minimum history: {minimum_history}; "
         f"absolute latency tolerance: {absolute_tolerance_ms:g} ms)."
     )
     return 1 if regressions else 0
@@ -1642,6 +1662,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     gate.add_argument("--baseline-dir", type=Path, required=True)
     gate.add_argument("--target-dir", type=Path, required=True)
     gate.add_argument("--window", type=_positive_int, default=10)
+    gate.add_argument(
+        "--minimum-history",
+        type=_positive_int,
+        default=10,
+        help="base-branch points required before gating a metric (default: 10)",
+    )
     gate.add_argument("--threshold", type=_non_negative_float, default=40)
     gate.add_argument(
         "--absolute-tolerance-ms",
@@ -1698,12 +1724,13 @@ def command_performance(args: argparse.Namespace) -> int:
             return 0
         if args.performance_command == "gate":
             return gate_results(
-                args.baseline_dir,
-                args.target_dir,
-                args.window,
-                args.threshold,
-                args.summary,
-                args.absolute_tolerance_ms,
+                baseline_dir=args.baseline_dir,
+                target_dir=args.target_dir,
+                window=args.window,
+                threshold=args.threshold,
+                summary_path=args.summary,
+                absolute_tolerance_ms=args.absolute_tolerance_ms,
+                minimum_history=args.minimum_history,
             )
         persist_results(args.source_dir, args.history_dir, args.exclude_metric)
         return 0

@@ -249,12 +249,16 @@ collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
 latest base-branch history.
 
-The current workflow uses the latest 10 p50 samples on the pull request's base branch. A metric
-regresses only when it is more than 50% worse. Lower-is-better millisecond metrics must also be
-more than 10 ms slower; higher-is-better metrics use the percentage comparison alone. A missing
-history is a warmup, not a failure. Successful `dev` builds append collected
-results to topology-specific files in `data/`. Every new ABI-v2/count series
-begins as a warmup baseline before its regression gate has matching history.
+The current workflow collects 10 measured lifecycle samples after one warmup.
+The regression gate compares the target p50 with the median of the latest 10
+p50 values on the pull request's base branch and requires all 10
+matching history points. A metric regresses only when it is more than 50%
+worse. Lower-is-better millisecond metrics must also be more than 10 ms
+slower; higher-is-better metrics use the percentage comparison alone.
+Missing or insufficient history is a warmup, not a failure. Successful `dev`
+builds append collected results to topology-specific files in `data/`. Every
+new ABI-v2/count series begins as a warmup baseline before its regression gate
+has enough matching history.
 
 ## Lifecycle methodology
 
@@ -264,11 +268,14 @@ include OpenVMM process startup and VM construction. Snapshot-generation timing 
 before the host writes `nvx-snapshot` to the guest shell and ends when the host first observes the
 atomically published snapshot directory; publication is polled every 1 ms after dispatch.
 
-After the cold-start and restore markers, the host dispatches guest `nvx-exit 0` and measures until
-the OpenVMM process exits successfully. CI requires this guest-exit path on every backend and
-allows up to 15 seconds for backend teardown before rejecting a measured sample. Snapshot-source
-exit after publication is retained in the raw JSON as a diagnostic but is not the guest-exit
-teardown metric.
+After a cold-start marker, the host dispatches guest `nvx-exit 0` and measures
+until the OpenVMM process exits successfully. Snapshot capture instead queues
+the restore marker and `nvx-exit 0` together after the capture boundary.
+Restore teardown therefore begins at the standalone marker line and does not
+depend on a second host-to-guest poll of the interrupt-less `hvc0` console.
+CI allows up to 15 seconds for process exit before rejecting a measured
+sample. Snapshot-source exit after publication is retained in the raw JSON as
+a diagnostic but is not the guest-exit teardown metric.
 
 ## Cold-start methodology
 

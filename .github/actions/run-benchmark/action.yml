@@ -127,7 +127,7 @@ runs:
           --processors 1 \
           "${cpu_args[@]}" \
           --warmups 1 \
-          --runs 3 \
+          --runs 10 \
           --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
           --skip-build \
           --teardown-mode "${{ inputs.teardown-mode }}" \
@@ -211,7 +211,7 @@ runs:
           --platform "${{ inputs.platform }}" `
           --processors 1 `
           --warmups 1 `
-          --runs 3 `
+          --runs 10 `
           --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
           --skip-build `
           --teardown-mode "${{ inputs.teardown-mode }}" `

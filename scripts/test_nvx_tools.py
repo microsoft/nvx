@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import queue
 import subprocess
 import sys
 import tarfile
@@ -420,6 +421,50 @@ class SandboxTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_measure_once_does_not_resend_prequeued_guest_exit(self):
+        class FakeProcess:
+            pid = 123
+            returncode = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                raise AssertionError("guest-exit teardown terminated the host process")
+
+        class FakeInteraction:
+            def __init__(self):
+                self.process = FakeProcess()
+                self.writes: list[bytes] = []
+
+            def read_output(self, chunks: queue.Queue[bytes | None]):
+                chunks.put(b"/ # echo OPENVMM-SNAPSHOT-RESTORE-OK\r\n")
+                chunks.put(b"OPENVMM-SNAPSHOT-RESTORE-OK\r\n")
+
+            def write_input(self, data: bytes):
+                self.writes.append(data)
+
+            def close(self):
+                pass
+
+        interaction = FakeInteraction()
+        with (
+            patch.object(benchmark, "InteractiveProcess", return_value=interaction),
+            patch.object(benchmark, "peak_rss_bytes", return_value=1024),
+            patch.object(benchmark, "wait_for_process_exit", return_value=0),
+        ):
+            result = benchmark.measure_once(
+                ["openvmm"],
+                environment={},
+                timeout=1,
+                marker=benchmark.RESTORE_MARKER,
+                marker_must_be_line=True,
+                guest_exit_prequeued=True,
+            )
+
+        self.assertEqual(result[0] >= 0, True)
+        self.assertEqual(interaction.writes, [])
+
     def test_builds_isolated_workload_command(self):
         command = benchmark.workload_boot_command(
             Path("openvmm"),
@@ -524,6 +569,8 @@ class BenchmarkTests(unittest.TestCase):
             command[2:8],
             ["--machine", "microvm-v2", "--processors", "4", "--hypervisor", "kvm"],
         )
+        self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
+        self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
 
     def test_parses_dd_rates_and_network_gateway(self):
         output = """
@@ -571,6 +618,38 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             benchmark.smp_probe_script(4, network_gateway="10.0.0.1")
 
+    def test_snapshot_restore_prequeues_guest_exit_after_marker(self):
+        script = benchmark.snapshot_post_restore_script(
+            4,
+            teardown_mode="guest-exit",
+        )
+        self.assertTrue(
+            script.endswith("echo OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n")
+        )
+
+        host_terminate = benchmark.snapshot_post_restore_script(
+            4,
+            teardown_mode="host-terminate",
+        )
+        self.assertTrue(host_terminate.endswith("echo OPENVMM-SNAPSHOT-RESTORE-OK\n"))
+        self.assertNotIn("nvx-exit 0", host_terminate)
+
+    def test_output_marker_must_be_a_complete_line(self):
+        marker = benchmark.RESTORE_MARKER
+        self.assertFalse(
+            benchmark.contains_output_line(
+                b"/ # echo OPENVMM-SNAPSHOT-RESTORE-OK\r\n",
+                marker,
+            )
+        )
+        self.assertTrue(
+            benchmark.contains_output_line(
+                b"/ # echo OPENVMM-SNAPSHOT-RESTORE-OK\r\n"
+                b"OPENVMM-SNAPSHOT-RESTORE-OK\r\n",
+                marker,
+            )
+        )
+
     def test_benchmark_cpu_set_reserves_host_worker_capacity(self):
         benchmark.validate_benchmark_cpu_set(set(range(10)), 8)
         with self.assertRaisesRegex(ValueError, "requires at least 10"):
@@ -581,7 +660,13 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.validate_benchmark_cpu_set(set(range(7)), 8, 0)
 
     def test_snapshot_capture_runs_smp_probe_for_selected_count(self):
-        args = argparse.Namespace(warmups=0, runs=1, timeout=1.0, processors=8)
+        args = argparse.Namespace(
+            warmups=0,
+            runs=1,
+            timeout=1.0,
+            processors=8,
+            teardown_mode="guest-exit",
+        )
         with patch.object(
             benchmark,
             "capture_snapshot",
@@ -590,6 +675,7 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.benchmark_snapshot_capture(args, ["openvmm"])
 
         self.assertEqual(capture.call_args.kwargs["processors"], 8)
+        self.assertEqual(capture.call_args.kwargs["teardown_mode"], "guest-exit")
 
     def test_network_workload_runs_unmeasured_smp_interrupt_preflight(self):
         args = argparse.Namespace(
@@ -716,7 +802,13 @@ class BenchmarkTests(unittest.TestCase):
                 sample = float(len(observed_paths))
                 return sample, sample, sample / 10, len(observed_paths) * 1024
 
-            args = argparse.Namespace(warmups=1, runs=2, timeout=1.0, processors=1)
+            args = argparse.Namespace(
+                warmups=1,
+                runs=2,
+                timeout=1.0,
+                processors=1,
+                teardown_mode="guest-exit",
+            )
             with patch.object(benchmark, "capture_snapshot", side_effect=capture):
                 result = benchmark.benchmark_snapshot_capture(
                     args,
@@ -760,7 +852,9 @@ class BenchmarkTests(unittest.TestCase):
             capture.assert_not_called()
             self.assertIn(str(snapshot), run.call_args.args[0])
             self.assertEqual(run.call_args.kwargs["marker"], benchmark.RESTORE_MARKER)
+            self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
             self.assertEqual(run.call_args.kwargs["teardown_mode"], "guest-exit")
+            self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
 
     def test_native_e2e_measures_and_reuses_snapshot_capture(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -295,14 +295,17 @@ python3 scripts/nvx.py performance gate
     --baseline-dir PATH
     --target-dir PATH
     [--window N]
+    [--minimum-history N]
     [--threshold PERCENT]
     [--absolute-tolerance-ms MILLISECONDS]
     [--summary PATH]
 ```
 
 Checks target p50 values for regressions against rolling baseline histories.
-`--window` defaults to `10`, `--threshold` to `40`, and
-`--absolute-tolerance-ms` to `5`. `--summary` writes a Markdown summary.
+`--window` defaults to `10`, `--minimum-history` to `10`, `--threshold` to
+`40`, and `--absolute-tolerance-ms` to `5`. The gate uses the median of the
+available window and treats metrics with insufficient history as warmups.
+`--summary` writes a Markdown summary.
 
 #### `performance persist`
 

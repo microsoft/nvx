@@ -83,10 +83,14 @@ def lifecycle_document(
     teardown_timeout_count: int = 0,
 ) -> dict[str, object]:
     mib = 1024 * 1024
+
+    def samples(minimum: int | float, median: int | float, maximum: int | float):
+        return [minimum, *([median] * 8), maximum]
+
     return {
         "controls": {
             "suite": "e2e",
-            "runs": 3,
+            "runs": 10,
             "memory_mib": 128,
             "teardown_mode": teardown_mode,
             "marker": "ALPINE-MICROVM-BOOT-OK",
@@ -94,15 +98,15 @@ def lifecycle_document(
         },
         "backends": {
             backend: {
-                "samples_ms": [190.0, 200.5, 210.0],
+                "samples_ms": samples(190.0, 200.5, 210.0),
                 "p50_ms": 200.5,
                 "min_ms": 190.0,
                 "max_ms": 210.0,
-                "peak_rss_samples_bytes": [60 * mib, 64 * mib, 70 * mib],
+                "peak_rss_samples_bytes": samples(60 * mib, 64 * mib, 70 * mib),
                 "peak_rss_p50_bytes": 64 * mib,
                 "peak_rss_min_bytes": 60 * mib,
                 "peak_rss_max_bytes": 70 * mib,
-                "teardown_completed_samples_ms": [24.0, 25.25, 27.0],
+                "teardown_completed_samples_ms": samples(24.0, 25.25, 27.0),
                 "teardown_timeout_count": teardown_timeout_count,
                 "teardown_p50_ms": 25.25,
                 "teardown_min_ms": 24.0,
@@ -111,19 +115,19 @@ def lifecycle_document(
         },
         "snapshot_capture": {
             backend: {
-                "samples_ms": [30.0, 31.0, 32.0],
+                "samples_ms": samples(30.0, 31.0, 32.0),
                 "p50_ms": 31.0,
                 "min_ms": 30.0,
                 "max_ms": 32.0,
-                "request_to_publication_samples_ms": [30.0, 31.0, 32.0],
+                "request_to_publication_samples_ms": samples(30.0, 31.0, 32.0),
                 "request_to_publication_p50_ms": 31.0,
                 "request_to_publication_min_ms": 30.0,
                 "request_to_publication_max_ms": 32.0,
-                "post_publication_exit_samples_ms": [1.0, 1.1, 1.2],
+                "post_publication_exit_samples_ms": samples(1.0, 1.1, 1.2),
                 "post_publication_exit_p50_ms": 1.1,
                 "post_publication_exit_min_ms": 1.0,
                 "post_publication_exit_max_ms": 1.2,
-                "peak_rss_samples_bytes": [70 * mib, 72 * mib, 75 * mib],
+                "peak_rss_samples_bytes": samples(70 * mib, 72 * mib, 75 * mib),
                 "peak_rss_p50_bytes": 72 * mib,
                 "peak_rss_min_bytes": 70 * mib,
                 "peak_rss_max_bytes": 75 * mib,
@@ -131,15 +135,15 @@ def lifecycle_document(
         },
         "snapshot_restore": {
             backend: {
-                "samples_ms": [19.0, 20.25, 21.0],
+                "samples_ms": samples(19.0, 20.25, 21.0),
                 "p50_ms": 20.25,
                 "min_ms": 19.0,
                 "max_ms": 21.0,
-                "peak_rss_samples_bytes": [30 * mib, 32 * mib, 34 * mib],
+                "peak_rss_samples_bytes": samples(30 * mib, 32 * mib, 34 * mib),
                 "peak_rss_p50_bytes": 32 * mib,
                 "peak_rss_min_bytes": 30 * mib,
                 "peak_rss_max_bytes": 34 * mib,
-                "teardown_completed_samples_ms": [5.0, 5.5, 6.0],
+                "teardown_completed_samples_ms": samples(5.0, 5.5, 6.0),
                 "teardown_timeout_count": teardown_timeout_count,
                 "teardown_p50_ms": 5.5,
                 "teardown_min_ms": 5.0,
@@ -250,7 +254,7 @@ class PerformanceTests(unittest.TestCase):
             self.assertIn("| `openvmm_snapshot_restore` | 20.25 ms |", markdown)
             self.assertIn("## Linux / KVM / Bare metal lifecycle diagnostics", markdown)
             self.assertIn(
-                "| Snapshot generation | 31.00 ms | 30.00 ms | 32.00 ms | 3 |",
+                "| Snapshot generation | 31.00 ms | 30.00 ms | 32.00 ms | 10 |",
                 markdown,
             )
             self.assertIn("| Cold start | 64.00 MiB | 70.00 MiB |", markdown)
@@ -659,6 +663,69 @@ class PerformanceTests(unittest.TestCase):
             )
             self.assertEqual(performance.gate_results(baseline, target, 10, 40.0), 1)
 
+    def test_gate_uses_baseline_median_for_multimodal_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            performance.write_results(
+                baseline / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        f"base-{index}",
+                        "latency",
+                        "ms",
+                        "lower",
+                        value,
+                    )
+                    for index, value in enumerate(
+                        (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 100.0, 100.0, 100.0, 100.0)
+                    )
+                ],
+            )
+            performance.write_results(
+                target / "linux-kvm.csv",
+                [performance.Result("pr", "latency", "ms", "lower", 10.0)],
+            )
+
+            self.assertEqual(
+                performance.gate_results(baseline, target, 10, 40.0),
+                1,
+            )
+
+    def test_gate_warms_up_until_minimum_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            summary = root / "summary.md"
+            performance.write_results(
+                baseline / "linux-kvm.csv",
+                [
+                    performance.Result(
+                        f"base-{index}",
+                        "latency",
+                        "ms",
+                        "lower",
+                        10.0,
+                    )
+                    for index in range(9)
+                ],
+            )
+            performance.write_results(
+                target / "linux-kvm.csv",
+                [performance.Result("pr", "latency", "ms", "lower", 100.0)],
+            )
+
+            self.assertEqual(
+                performance.gate_results(baseline, target, 10, 40.0, summary),
+                0,
+            )
+            self.assertIn(
+                "Warmup (9/10)",
+                summary.read_text(encoding="utf-8"),
+            )
+
     def test_gate_requires_absolute_latency_regression_beyond_tolerance(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -681,7 +748,15 @@ class PerformanceTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                performance.gate_results(baseline, target, 10, 40.0, summary, 5.0),
+                performance.gate_results(
+                    baseline,
+                    target,
+                    10,
+                    40.0,
+                    summary,
+                    5.0,
+                    minimum_history=1,
+                ),
                 0,
             )
             self.assertIn("+71.4%, +5.00 ms", summary.read_text(encoding="utf-8"))
@@ -695,7 +770,12 @@ class PerformanceTests(unittest.TestCase):
             )
             self.assertEqual(
                 performance.gate_results(
-                    baseline, target, 10, 40.0, absolute_tolerance_ms=5.0
+                    baseline,
+                    target,
+                    10,
+                    40.0,
+                    absolute_tolerance_ms=5.0,
+                    minimum_history=1,
                 ),
                 1,
             )
@@ -714,7 +794,16 @@ class PerformanceTests(unittest.TestCase):
                 [performance.Result("pr", "throughput", "MB/s", "higher", 5.0)],
             )
 
-            self.assertEqual(performance.gate_results(baseline, target, 10, 40.0), 1)
+            self.assertEqual(
+                performance.gate_results(
+                    baseline,
+                    target,
+                    10,
+                    40.0,
+                    minimum_history=1,
+                ),
+                1,
+            )
 
     def test_gate_applies_relative_threshold_to_peak_rss(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -753,6 +842,7 @@ class PerformanceTests(unittest.TestCase):
                     10,
                     50.0,
                     absolute_tolerance_ms=1000.0,
+                    minimum_history=1,
                 ),
                 1,
             )
@@ -777,7 +867,14 @@ class PerformanceTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                performance.gate_results(baseline, target, 10, 40.0, summary),
+                performance.gate_results(
+                    baseline,
+                    target,
+                    10,
+                    40.0,
+                    summary,
+                    minimum_history=4,
+                ),
                 0,
             )
             self.assertIn(
@@ -829,11 +926,18 @@ class PerformanceTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                performance.gate_results(baseline, target, 10, 40.0, summary),
+                performance.gate_results(
+                    baseline,
+                    target,
+                    10,
+                    40.0,
+                    summary,
+                    minimum_history=4,
+                ),
                 0,
             )
             markdown = summary.read_text(encoding="utf-8")
-            self.assertIn("2257.50 ms (4/10)", markdown)
+            self.assertIn("2250.00 ms (4/10)", markdown)
             self.assertNotIn("500.00 ms", markdown)
 
     def test_persist_is_idempotent_per_commit_and_metric(self):

@@ -17,6 +17,7 @@ permissions:
 
 env:
   PERFORMANCE_BASELINE_WINDOW: 10
+  PERFORMANCE_BASELINE_MINIMUM_HISTORY: 10
   PERFORMANCE_REGRESSION_THRESHOLD: 50
   PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 10
 
@@ -456,6 +457,7 @@ jobs:
         with:
           base-ref: dev
           baseline-window: ${{ env.PERFORMANCE_BASELINE_WINDOW }}
+          minimum-history: ${{ env.PERFORMANCE_BASELINE_MINIMUM_HISTORY }}
           regression-threshold: ${{ env.PERFORMANCE_REGRESSION_THRESHOLD }}
           absolute-tolerance-ms: ${{ env.PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS }}
 

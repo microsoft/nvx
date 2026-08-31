@@ -9,6 +9,9 @@ inputs:
   baseline-window:
     description: Number of recent baseline samples to compare
     required: true
+  minimum-history:
+    description: Minimum baseline samples required before gating
+    required: true
   regression-threshold:
     description: Relative regression threshold
     required: true
@@ -61,6 +64,7 @@ runs:
       shell: bash
       env:
         PERFORMANCE_BASELINE_WINDOW: ${{ inputs.baseline-window }}
+        PERFORMANCE_BASELINE_MINIMUM_HISTORY: ${{ inputs.minimum-history }}
         PERFORMANCE_REGRESSION_THRESHOLD: ${{ inputs.regression-threshold }}
         PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: ${{ inputs.absolute-tolerance-ms }}
       run: >-
@@ -68,6 +72,7 @@ runs:
         --baseline-dir data/baseline
         --target-dir data/results
         --window "${PERFORMANCE_BASELINE_WINDOW}"
+        --minimum-history "${PERFORMANCE_BASELINE_MINIMUM_HISTORY}"
         --threshold "${PERFORMANCE_REGRESSION_THRESHOLD}"
         --absolute-tolerance-ms "${PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS}"
         --summary "${GITHUB_STEP_SUMMARY}"

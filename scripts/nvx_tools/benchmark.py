@@ -715,8 +715,10 @@ def measure_once(
     environment: dict[str, str],
     timeout: float,
     marker: bytes = BOOT_MARKER,
+    marker_must_be_line: bool = False,
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
+    guest_exit_prequeued: bool = False,
     cleanup_managed_network: bool = False,
 ) -> tuple[float, int, float | None, float]:
     started = time.perf_counter_ns()
@@ -747,14 +749,19 @@ def measure_once(
             if chunk is None:
                 raise RuntimeError(f"OpenVMM exited with status {process.poll()}")
             output.extend(chunk)
-            if marker in output:
+            marker_seen = (
+                contains_output_line(output, marker)
+                if marker_must_be_line
+                else marker in output
+            )
+            if marker_seen:
                 marker_reached = time.perf_counter_ns()
                 elapsed_ms = (marker_reached - started) / 1_000_000
                 peak_bytes = peak_rss_bytes(process.pid)
                 teardown_started = time.perf_counter_ns()
                 if teardown_mode != "guest-exit":
                     process.terminate()
-                else:
+                elif not guest_exit_prequeued:
                     interaction.write_input(b"nvx-exit 0\n")
                 try:
                     returncode = wait_for_process_exit(
@@ -794,8 +801,10 @@ def benchmark(
     runs: int,
     timeout: float,
     marker: bytes = BOOT_MARKER,
+    marker_must_be_line: bool = False,
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
+    guest_exit_prequeued: bool = False,
     cleanup_managed_network: bool = False,
 ) -> BenchmarkResult:
     environment = os.environ.copy()
@@ -806,8 +815,10 @@ def benchmark(
             environment=environment,
             timeout=timeout,
             marker=marker,
+            marker_must_be_line=marker_must_be_line,
             windows_cpus=windows_cpus,
             teardown_mode=teardown_mode,
+            guest_exit_prequeued=guest_exit_prequeued,
             cleanup_managed_network=cleanup_managed_network,
         )
         teardown = (
@@ -831,8 +842,10 @@ def benchmark(
             environment=environment,
             timeout=timeout,
             marker=marker,
+            marker_must_be_line=marker_must_be_line,
             windows_cpus=windows_cpus,
             teardown_mode=teardown_mode,
+            guest_exit_prequeued=guest_exit_prequeued,
             cleanup_managed_network=cleanup_managed_network,
         )
         samples.append(value)
@@ -1989,6 +2002,28 @@ def run_workload_benchmarks(
     return 0
 
 
+def snapshot_post_restore_script(
+    processors: int | None,
+    *,
+    teardown_mode: str,
+    network_gateway: str | None = None,
+    ioapic_irq: int | None = None,
+) -> str:
+    probe = (
+        smp_probe_script(
+            processors,
+            exit_guest=False,
+            network_gateway=network_gateway,
+            ioapic_irq=ioapic_irq,
+        )
+        if processors is not None
+        else ""
+    )
+    return (
+        probe + f"echo {RESTORE_MARKER.decode()}\n" + _guest_exit_script(teardown_mode)
+    )
+
+
 def capture_snapshot(
     command: Sequence[str],
     snapshot_path: Path,
@@ -1996,6 +2031,7 @@ def capture_snapshot(
     timeout: float,
     windows_cpus: set[int] | None = None,
     processors: int | None = None,
+    teardown_mode: str = "guest-exit",
     smp_network_gateway: str | None = None,
     smp_ioapic_irq: int | None = None,
 ) -> tuple[float, float, float, int]:
@@ -2032,21 +2068,15 @@ def capture_snapshot(
     def request_snapshot() -> None:
         nonlocal snapshot_requested, snapshot_started_ns, deadline
         snapshot_started_ns = time.perf_counter_ns()
-        post_restore_probe = (
-            smp_probe_script(
-                processors,
-                exit_guest=False,
-                network_gateway=smp_network_gateway,
-                ioapic_irq=smp_ioapic_irq,
-            )
-            if processors is not None
-            else ""
-        )
         interaction.write_input(
             (
                 "nvx-snapshot\n"
-                + post_restore_probe
-                + f"echo {RESTORE_MARKER.decode()}\n"
+                + snapshot_post_restore_script(
+                    processors,
+                    teardown_mode=teardown_mode,
+                    network_gateway=smp_network_gateway,
+                    ioapic_irq=smp_ioapic_irq,
+                )
             ).encode("utf-8")
         )
         snapshot_requested = True
@@ -2201,6 +2231,7 @@ def benchmark_snapshot_capture(
                     timeout=args.timeout,
                     windows_cpus=windows_cpus,
                     processors=args.processors,
+                    teardown_mode=args.teardown_mode,
                 )
             )
         if index < args.warmups:
@@ -2294,8 +2325,10 @@ def benchmark_snapshot_restore(
             runs=args.runs,
             timeout=args.timeout,
             marker=RESTORE_MARKER,
+            marker_must_be_line=True,
             windows_cpus=windows_cpus,
             teardown_mode=args.teardown_mode,
+            guest_exit_prequeued=args.teardown_mode == "guest-exit",
         )
 
     with tempfile.TemporaryDirectory(prefix="openvmm-e2e-restore-") as temp_dir:
@@ -2310,6 +2343,7 @@ def benchmark_snapshot_restore(
             timeout=args.timeout,
             windows_cpus=windows_cpus,
             processors=args.processors,
+            teardown_mode=args.teardown_mode,
         )
         return benchmark_snapshot_restore(
             args,
@@ -2857,8 +2891,9 @@ def result_document(
                 "host process termination request through OpenVMM process exit; "
                 "TerminateProcess on WHP and SIGTERM on Linux"
                 if args.teardown_mode != "guest-exit"
-                else "host dispatch of nvx-exit 0 at guest readiness through "
-                "successful OpenVMM process exit"
+                else "cold start dispatches nvx-exit 0 after readiness; snapshot "
+                "restore executes a prequeued nvx-exit 0 immediately after its "
+                "marker; both end at successful OpenVMM process exit"
             ),
             "teardown_mode": args.teardown_mode,
             "teardown_timeout_seconds": TEARDOWN_TIMEOUT_SECONDS,
