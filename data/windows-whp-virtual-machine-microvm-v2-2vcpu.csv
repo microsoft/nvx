@@ -124,3 +124,4 @@ windows-whp-virtual-machine,2,2,3199587b4d19978f584c7914e92de80d647c6eae,virtfs_
 windows-whp-virtual-machine,2,2,3199587b4d19978f584c7914e92de80d647c6eae,virtfs_live_roundtrip,ms,lower,2941.9
 windows-whp-virtual-machine,2,2,3199587b4d19978f584c7914e92de80d647c6eae,virtfs_live_write,MB/s,higher,152.9
 windows-whp-virtual-machine,2,2,0ce2b8ad85c0aab4549e11b7a9f46474cd4bbcb3,shell_snapshot_restore_512_mib,ms,lower,163.7
+windows-whp-virtual-machine,2,2,b735bfac3c61f734f3f42083e71d8dee0587379f,shell_snapshot_restore_512_mib,ms,lower,186.2
