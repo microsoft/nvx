@@ -531,6 +531,9 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("loc_before", script)
         self.assertIn("SMP-LAPIC-FAIL", script)
         self.assertIn("SMP-IPI-FAIL", script)
+        self.assertIn("read_loc_counter", script)
+        poll_loop = script.split("while :; do\n", 1)[1].split("\ndone", 1)[0]
+        self.assertNotIn("$(", poll_loop)
         self.assertNotIn("sleep 0.1", script)
         self.assertIn("apic_ids=0,1,2,3 bsp=0 workers=$workers", script)
         self.assertIn("NVX-SMP-PROBE-OK", script)
