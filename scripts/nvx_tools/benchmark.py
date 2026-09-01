@@ -757,9 +757,7 @@ class SnapshotProfileCollector:
         record = parse_snapshot_profile_line(line)
         if record is None:
             return
-        record["observer_elapsed_ns"] = max(
-            0, observed_ns - self.process_started_ns
-        )
+        record["observer_elapsed_ns"] = max(0, observed_ns - self.process_started_ns)
         counters = process_resource_counters(self.pid)
         if counters:
             record["host_counters"] = counters
@@ -1058,7 +1056,9 @@ def measure_once(
     started = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
-    profile = SnapshotProfileCollector(process.pid, started) if snapshot_profile else None
+    profile = (
+        SnapshotProfileCollector(process.pid, started) if snapshot_profile else None
+    )
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
@@ -2834,7 +2834,11 @@ def prepared_snapshot_cache(
     cache_state: str,
 ) -> Generator[tuple[Path, Callable[[], None], str]]:
     if cache_state == "warm":
-        yield snapshot_path, lambda: warm_snapshot_artifacts(snapshot_path), "sequential-read"
+        yield (
+            snapshot_path,
+            lambda: warm_snapshot_artifacts(snapshot_path),
+            "sequential-read",
+        )
         return
     if cache_state != "cold":
         raise ValueError(f"unsupported snapshot cache state {cache_state!r}")
@@ -2846,9 +2850,7 @@ def prepared_snapshot_cache(
         )
         return
     if os.name == "nt":
-        with tempfile.TemporaryDirectory(
-            prefix="openvmm-cold-snapshot-"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(prefix="openvmm-cold-snapshot-") as temporary:
             cold_path = Path(temporary) / "snapshot"
             yield (
                 cold_path,
@@ -2875,12 +2877,13 @@ def benchmark_snapshot_profile_matrix(
         ("warm", "cold") if args.cache_state == "both" else (args.cache_state,)
     )
     matrix: dict[str, dict[str, object]] = {}
-    with tempfile.TemporaryDirectory(
-        prefix="openvmm-snapshot-profile-"
-    ) as temporary:
+    with tempfile.TemporaryDirectory(prefix="openvmm-snapshot-profile-") as temporary:
         root = Path(temporary)
         for memory_mib in args.shell_memories:
-            print(f"Profiling {backend} snapshot lifecycle at {memory_mib} MiB", flush=True)
+            print(
+                f"Profiling {backend} snapshot lifecycle at {memory_mib} MiB",
+                flush=True,
+            )
             snapshot_path = root / f"snapshot-{memory_mib}-mib"
             boot_command = make_boot_command(memory_mib)
             capture = benchmark_snapshot_capture(
@@ -2975,8 +2978,7 @@ def print_phase2_summary(backend: str, result: Phase2Result) -> None:
         metric = metrics[name]
         p50_ms = float(metric["p50_ms"])
         print(
-            f"  {name}: p50={p50_ms:.3f} ms "
-            f"p95={float(metric['p95_ms']):.3f} ms",
+            f"  {name}: p50={p50_ms:.3f} ms p95={float(metric['p95_ms']):.3f} ms",
             flush=True,
         )
 
@@ -3587,6 +3589,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
     results = result_document(args, kernel, initrd, backend)
     if run_guest:
         assert executable is not None and kernel is not None and initrd is not None
+
         def make_boot_command(memory_mib: int) -> list[str]:
             command = [
                 *prefix,
@@ -4053,14 +4056,12 @@ def run(args: argparse.Namespace) -> int:
                 processors=args.processors,
             )
 
-        results["snapshot_profile_matrix"]["whp"] = (
-            benchmark_snapshot_profile_matrix(
-                args,
-                executable,
-                "whp",
-                make_whp_profile_command,
-                windows_cpus=cpus,
-            )
+        results["snapshot_profile_matrix"]["whp"] = benchmark_snapshot_profile_matrix(
+            args,
+            executable,
+            "whp",
+            make_whp_profile_command,
+            windows_cpus=cpus,
         )
         if args.output:
             output = args.output.resolve()
