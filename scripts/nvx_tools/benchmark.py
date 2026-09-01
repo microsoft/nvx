@@ -1093,10 +1093,13 @@ def measure_once(
             )
             if marker_seen:
                 marker_reached = time.perf_counter_ns()
+                # A prequeued guest exit can terminate OpenVMM immediately
+                # after writing the marker. Sample RSS before the more detailed
+                # opt-in profile counters, and tolerate an already-gone process.
+                peak_bytes = _try_peak_rss(process, 0)
                 if profile is not None and profile_sink is not None:
                     profile_sink.append(profile.finish_restore(marker_reached))
                 elapsed_ms = (marker_reached - started) / 1_000_000
-                peak_bytes = peak_rss_bytes(process.pid)
                 teardown_started = time.perf_counter_ns()
                 if teardown_mode != "guest-exit":
                     process.terminate()
