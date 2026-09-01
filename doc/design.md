@@ -540,9 +540,9 @@ flowchart LR
    subgraph Staging["Unique private sibling staging directory"]
       direction TB
       StateFile["state.bin<br/>write and flush"]
-      MemoryFile["memory.bin<br/>sparse independent clone and flush"]
+      MemoryFile["memory.bin<br/>exact automatic RAM file<br/>or independent supplied-RAM clone"]
       ScratchFile["scratch.img<br/>copy, verify, and flush"]
-      ManifestFile["manifest.bin<br/>record contract and lengths<br/>write last, then flush"]
+      ManifestFile["manifest.bin<br/>record contract and lengths<br/>write and flush before automatic RAM link"]
    end
 
    SyncStaging["Flush staging directory"]
@@ -559,14 +559,23 @@ flowchart LR
 ```
 
 [`openvmm_helpers::snapshot`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs)
-implements bounded decoding, exact-length sparse-aware memory cloning, artifact
-length checks, restrictive creation, flushing, unique staging paths, and
-same-parent no-replace publication. Linux uses `FICLONE` with
-`SEEK_DATA`/`SEEK_HOLE` and zero-scan fallbacks. Windows uses block cloning with
-allocated-range and zero-data fallbacks. The clone is independently owned, its
-logical and allocated lengths are reported, and later source writes cannot
-change the published artifact. The manifest is written last within the staging
-directory. A pre-existing final destination is never deleted or replaced.
+implements bounded decoding, exact-length publication, artifact length checks,
+restrictive creation, flushing, unique staging paths, and same-parent
+no-replace publication. Automatic OpenVMM-owned microVM RAM is flushed, linked
+from the exact handle after its shared mappings, state, and manifest are
+durable, and checked for matching identity and EOF. Linux uses
+`linkat(AT_EMPTY_PATH)` or a `/proc/self/fd` link plus device/inode proof;
+Windows uses handle-relative `FileLinkInformation` plus `FILE_ID_INFO`.
+Unsupported filesystems fall back to an independent copy. User-supplied
+backing always takes that copy path: Linux uses `FICLONE` with
+`SEEK_DATA`/`SEEK_HOLE` and zero-scan fallbacks, while Windows uses a dense
+copy. A pre-existing final destination is never deleted or replaced.
+
+The source VM is terminal after an automatic RAM link commits. A failure after
+creating the staging alias is rollback-safe only after the complete private
+staging directory has been synchronously removed and its parent flushed. If
+that proof fails, OpenVMM terminates the source rather than resuming it with a
+surviving writable alias to the artifact.
 
 The manifest is authoritative for:
 
