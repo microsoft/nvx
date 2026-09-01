@@ -125,3 +125,4 @@ linux-mshv-baremetal,2,4,3199587b4d19978f584c7914e92de80d647c6eae,virtfs_live_ro
 linux-mshv-baremetal,2,4,3199587b4d19978f584c7914e92de80d647c6eae,virtfs_live_write,MB/s,higher,374.3
 linux-mshv-baremetal,2,4,0ce2b8ad85c0aab4549e11b7a9f46474cd4bbcb3,shell_snapshot_restore_512_mib,ms,lower,90.3
 linux-mshv-baremetal,2,4,b735bfac3c61f734f3f42083e71d8dee0587379f,shell_snapshot_restore_512_mib,ms,lower,89.2
+linux-mshv-baremetal,2,4,0e85a133e6a86511e4bcb5070d00dec066758773,shell_snapshot_restore_512_mib,ms,lower,91.7
