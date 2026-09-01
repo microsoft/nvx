@@ -155,7 +155,7 @@ python3 scripts/nvx.py run
 | `--machine {microvm,microvm-v2}` | `microvm` | Select the guest ABI explicitly. ABI v1 is a one-vCPU profile; ABI v2 supports 1, 2, 4, or 8 vCPUs. |
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM ABI-v2 processor count. |
-| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target, optionally read-only or read-write. |
+| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target. Active snapshot restore requires the same canonical path, target, and mode; a dormant-slot restore may attach a new mapping that the resumed guest mounts explicitly. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--cmdline TEXT` | empty | Append a kernel command-line string. |

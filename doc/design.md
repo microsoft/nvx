@@ -291,15 +291,16 @@ sandbox scratch and therefore ignores that distinction.
 
 ### Fixed virtio-mmio transport
 
-All four ABI-v1 slots are reserved from the first version, whether or not the
-device is present. A cold boot may instantiate at most one device of each type.
+All four ABI-v1 address slots are reserved. Snapshot-capable builds instantiate
+the virtio-fs transport even without a host attachment so it is discoverable
+before capture; the other optional devices are instantiated only when active.
 Every device uses virtio-mmio, is omitted from ACPI, and has packed-ring support
 masked.
 
 | Device | Stable identity | MMIO range | IRQ | Delivery |
 | --- | --- | ---: | ---: | --- |
 | virtio-net | `net:microvm0` | `0xd0000000..0xd0000fff` | KVM/MSHV 10, WHP 5 | Optional |
-| virtio-fs | `fs:microvm0` | `0xd0001000..0xd0001fff` | 6 | Optional |
+| virtio-fs | `fs:microvm0` | `0xd0001000..0xd0001fff` | 6 | Reserved dormant slot; HostFs optional |
 | virtio-console | `console:microvm-virtio0` | `0xd0002000..0xd0002fff` | 7 | Optional |
 | virtio-blk | fixed block slot | `0xd0003000..0xd0003fff` | 4 | Optional cold-boot extension |
 
@@ -389,21 +390,26 @@ traffic must establish fresh post-restore flows.
 
 #### Filesystem
 
-The optional filesystem is a no-DAX HostFs virtio-fs device with tag
-`microvm`, one high-priority queue, one request queue, direct I/O, and zero
-guest cache lifetimes. Its explicit profile rejects SectionFs, Aggregate,
-alternate tags, extra queues, shared-memory windows, and PCI transport.
+The filesystem slot is a no-DAX virtio-fs device with tag `microvm`, one
+high-priority queue, one request queue, direct I/O, and zero guest cache
+lifetimes. Without `--mount`, it has no HostFs backend or active filesystem
+policy but remains guest-discoverable. Its explicit profile rejects SectionFs,
+Aggregate, alternate tags, extra queues, shared-memory windows, and PCI
+transport.
 Read-only mode rejects mutation in the host device before invoking host
 filesystem operations; read-write mode exposes only the supported common host
 contract.
 
 The exported directory is external live state, not part of the VM snapshot.
-Capture saves FUSE negotiation, node and handle allocation, aliases, lookup
-counts, directory snapshots and cookies, and the identities needed to reopen
-objects. Restore requires a fresh `fs:microvm0` attachment, pins its root, and
-revalidates every saved object before a vCPU runs. Host changes can therefore
-be visible or can make restore fail. Native file descriptors and Windows
-handles are not serialized.
+An active capture saves its exact canonical host path, FUSE negotiation, node
+and handle allocation, aliases, lookup counts, directory snapshots and cookies,
+and the identities needed to reopen objects. Restore requires the same path,
+target, mode, root identity, and reopenable objects. A dormant capture instead
+saves explicit unattached state and may restore with no attachment or bind a
+new HostFs backend. The resumed guest then mounts tag `microvm` explicitly;
+the cold-boot mount hook has already run. Snapshots without this capability
+cannot add an attachment. Native file descriptors and Windows handles are not
+serialized.
 
 ## Snapshot and restore
 

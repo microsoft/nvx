@@ -59,8 +59,8 @@ the complete event aborts and tears down the restore.
 
 ## virtio-fs host mapping
 
-The microVM supports one mapping with a fixed `microvm` tag. The initramfs
-mounts it automatically:
+The microVM reserves one mapping slot with a fixed `microvm` tag. On a cold
+boot with `--mount`, the initramfs mounts it automatically:
 
 ```bash
 python3 scripts/nvx.py run --mount "/mnt/host,/absolute/host/share,rw"
@@ -75,8 +75,16 @@ python scripts\nvx.py run `
 
 Use `ro` for read-only access. The guest target must be an absolute Linux path.
 Host paths containing commas are unsupported. To expose multiple directories,
-place them under one exported host root. Snapshot restore requires the same
-target, mode, and underlying host directory.
+place them under one exported host root. A snapshot captured with a mapping
+requires the same canonical host path, target, mode, and filesystem identity.
+A snapshot captured without a mapping may restore with a new `--mount`; after
+resume, mount it explicitly inside the guest because the initramfs hook has
+already completed:
+
+```sh
+mkdir -p /mnt/host
+mount -t virtiofs microvm /mnt/host
+```
 
 ## Experimental single-workload sandbox
 
