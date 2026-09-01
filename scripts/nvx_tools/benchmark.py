@@ -27,7 +27,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 from typing import TextIO, TypedDict, cast
 
@@ -44,6 +44,8 @@ KVM_E2E_RESULT_PREFIX = "OPENVMM_KVM_E2E_RESULT="
 KVM_RESTORE_RESULT_PREFIX = "OPENVMM_KVM_RESTORE_RESULT="
 KVM_SNAPSHOT_RESULT_PREFIX = "OPENVMM_KVM_SNAPSHOT_RESULT="
 PHASE2_RESULT_PREFIX = "OPENVMM_PHASE2_RESULT="
+SNAPSHOT_PROFILE_ENV = "OPENVMM_STARTUP_PROFILE"
+SNAPSHOT_PROFILE_PREFIX = b"OPENVMM_SNAPSHOT_PROFILE_V1 "
 NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
 WORKLOAD_SUITES = frozenset(
     {
@@ -64,6 +66,8 @@ VIRTFS_HOST_WAITING = b"waiting\n"
 VIRTFS_HOST_TO_GUEST = b"host-to-guest\n"
 SMP_PROBE_COMPLETION_MARKER = b"NVX-SMP-PROBE-OK"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
+SHELL_SNAPSHOT_MEMORY_MIB = (64, 128, 256, 512)
+SNAPSHOT_PROFILE_MEMORY_MIB = (*SHELL_SNAPSHOT_MEMORY_MIB, 1024)
 PERFORMANCE_LOG_FILENAMES = (
     "cold-start.log",
     "virtfs.log",
@@ -76,7 +80,17 @@ BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
 MICROVM_ABI_VERSION = 2
 
 
-class BenchmarkResult(TypedDict):
+class ProfiledResult(TypedDict, total=False):
+    profile: LifecycleProfileSummary
+
+
+class LifecycleProfileSummary(TypedDict):
+    schema_version: int
+    raw_samples: list[dict[str, object]]
+    phases: dict[str, dict[str, object]]
+
+
+class BenchmarkResult(ProfiledResult):
     samples_ms: list[float]
     p50_ms: float
     p95_ms: float
@@ -101,7 +115,7 @@ class BenchmarkResult(TypedDict):
     teardown_max_ms: float | None
 
 
-class SnapshotCaptureResult(TypedDict):
+class SnapshotCaptureResult(ProfiledResult):
     samples_ms: list[float]
     p50_ms: float
     p95_ms: float
@@ -124,7 +138,11 @@ class SnapshotCaptureResult(TypedDict):
 
 
 class Phase2Metric(TypedDict):
+    samples_ms: list[float]
     p50_ms: float
+    p95_ms: float
+    min_ms: float
+    max_ms: float
 
 
 class Phase2Result(TypedDict):
@@ -162,6 +180,7 @@ class ResultDocument(TypedDict):
     phase2: dict[str, Phase2Result]
     comparison: dict[str, ColdRestoreComparison]
     e2e_comparison: dict[str, E2EComparison]
+    snapshot_profile_matrix: dict[str, dict[str, dict[str, object]]]
 
 
 class KvmE2EResult(TypedDict):
@@ -193,6 +212,7 @@ def configure_parser(
             "restore",
             "e2e",
             "phase2",
+            "snapshot-profile",
             "all",
             *sorted(WORKLOAD_SUITES),
         ),
@@ -257,9 +277,12 @@ def configure_parser(
         "--shell-memories",
         type=positive_int,
         nargs="+",
-        default=[64, 128, 256, 512],
+        default=None,
         metavar="MIB",
-        help="shell snapshot memory sizes (default: 64 128 256 512)",
+        help=(
+            "snapshot memory sizes (default: 64 128 256 512, or "
+            "64 128 256 512 1024 for --suite snapshot-profile)"
+        ),
     )
     parser.add_argument(
         "--network-memory-mib",
@@ -312,6 +335,23 @@ def configure_parser(
         help="reuse existing release binaries",
     )
     parser.add_argument(
+        "--snapshot-profile",
+        action="store_true",
+        help=(
+            "retain opt-in OpenVMM snapshot lifecycle phase samples and host "
+            "counters; implied by --suite snapshot-profile"
+        ),
+    )
+    parser.add_argument(
+        "--cache-state",
+        choices=("warm", "cold", "both"),
+        default="both",
+        help=(
+            "snapshot artifact cache states for --suite snapshot-profile "
+            "(default: both)"
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="optional JSON result path",
@@ -343,6 +383,16 @@ def positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
     return parsed
+
+
+def apply_benchmark_suite_defaults(args: argparse.Namespace) -> None:
+    if args.shell_memories is None:
+        default = (
+            SNAPSHOT_PROFILE_MEMORY_MIB
+            if args.suite == "snapshot-profile"
+            else SHELL_SNAPSHOT_MEMORY_MIB
+        )
+        args.shell_memories = list(default)
 
 
 def positive_float(value: str) -> float:
@@ -522,10 +572,11 @@ class ProcessMemoryCounters(ctypes.Structure):
         ("quota_nonpaged_pool_usage", ctypes.c_size_t),
         ("pagefile_usage", ctypes.c_size_t),
         ("peak_pagefile_usage", ctypes.c_size_t),
+        ("private_usage", ctypes.c_size_t),
     ]
 
 
-def windows_peak_rss_bytes(pid: int) -> int:
+def windows_process_memory_counters(pid: int) -> ProcessMemoryCounters:
     if os.name != "nt":
         raise RuntimeError("Windows process memory counters are unavailable")
     process_query_limited_information = 0x1000
@@ -553,9 +604,13 @@ def windows_peak_rss_bytes(pid: int) -> int:
             counters.cb,
         ):
             raise ctypes.WinError(ctypes.get_last_error())
-        return int(counters.peak_working_set_size)
+        return counters
     finally:
         kernel32.CloseHandle(handle)
+
+
+def windows_peak_rss_bytes(pid: int) -> int:
+    return int(windows_process_memory_counters(pid).peak_working_set_size)
 
 
 def linux_peak_rss_bytes(pid: int) -> int:
@@ -575,6 +630,283 @@ def peak_rss_bytes(pid: int) -> int:
     if sys.platform.startswith("linux"):
         return linux_peak_rss_bytes(pid)
     raise RuntimeError(f"peak RSS measurement is unsupported on {sys.platform}")
+
+
+def _linux_status_bytes(status: str, name: str) -> int | None:
+    prefix = f"{name}:"
+    for line in status.splitlines():
+        if line.startswith(prefix):
+            _, value, unit = line.split()
+            if unit != "kB":
+                raise RuntimeError(f"unexpected {name} unit {unit!r}")
+            return int(value) * 1024
+    return None
+
+
+def process_resource_counters(pid: int) -> dict[str, int]:
+    """Return cheap process counters available on the current host."""
+    try:
+        if os.name == "nt":
+            counters = windows_process_memory_counters(pid)
+            return {
+                "rss_bytes": int(counters.working_set_size),
+                "peak_rss_bytes": int(counters.peak_working_set_size),
+                "commit_bytes": int(counters.private_usage),
+                "page_faults": int(counters.page_fault_count),
+            }
+        if sys.platform.startswith("linux"):
+            status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+            values: dict[str, int] = {}
+            for field, name in (
+                ("rss_bytes", "VmRSS"),
+                ("peak_rss_bytes", "VmHWM"),
+            ):
+                value = _linux_status_bytes(status, name)
+                if value is not None:
+                    values[field] = value
+
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            fields = stat.rsplit(")", 1)[1].split()
+            values["minor_faults"] = int(fields[7])
+            values["major_faults"] = int(fields[9])
+            values["page_faults"] = values["minor_faults"] + values["major_faults"]
+
+            try:
+                rollup = Path(f"/proc/{pid}/smaps_rollup").read_text(encoding="ascii")
+                private_clean = _linux_status_bytes(rollup, "Private_Clean") or 0
+                private_dirty = _linux_status_bytes(rollup, "Private_Dirty") or 0
+                values["private_dirty_bytes"] = private_dirty
+                values["private_rss_bytes"] = private_clean + private_dirty
+            except (OSError, RuntimeError, ValueError):
+                pass
+            return values
+    except (OSError, RuntimeError, ValueError):
+        return {}
+    return {}
+
+
+def parse_snapshot_profile_line(line: bytes) -> dict[str, object] | None:
+    line = line.removesuffix(b"\r")
+    if not line.startswith(SNAPSHOT_PROFILE_PREFIX):
+        return None
+    fields: dict[str, object] = {}
+    for token in line.removeprefix(SNAPSHOT_PROFILE_PREFIX).decode("ascii").split():
+        name, separator, value = token.partition("=")
+        if not separator or not name or not value:
+            raise ValueError(f"invalid snapshot profile field {token!r}")
+        if name in {
+            "duration_ns",
+            "process_elapsed_ns",
+            "pid",
+            "logical_bytes",
+            "allocated_bytes",
+            "gpa_faults",
+            "populated_bytes",
+        }:
+            fields[name] = int(value)
+        elif name == "exclusive":
+            if value not in ("0", "1"):
+                raise ValueError(f"invalid exclusive value {value!r}")
+            fields[name] = value == "1"
+        else:
+            fields[name] = value
+    required = {
+        "operation",
+        "phase",
+        "exclusive",
+        "duration_ns",
+        "process_elapsed_ns",
+        "pid",
+    }
+    missing = required.difference(fields)
+    if missing:
+        raise ValueError(f"snapshot profile record is missing {sorted(missing)}")
+    fields["source"] = "openvmm"
+    return fields
+
+
+def _profile_int(record: dict[str, object], name: str) -> int:
+    value = record[name]
+    if not isinstance(value, int):
+        raise ValueError(f"snapshot profile field {name!r} is not an integer")
+    return value
+
+
+def _profile_float(record: dict[str, object], name: str) -> float:
+    value = record[name]
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"snapshot profile field {name!r} is not numeric")
+    return float(value)
+
+
+class SnapshotProfileCollector:
+    def __init__(self, pid: int, process_started_ns: int) -> None:
+        self.pid = pid
+        self.process_started_ns = process_started_ns
+        self.pending = bytearray()
+        self.records: list[dict[str, object]] = []
+
+    def feed(self, chunk: bytes) -> None:
+        self.pending.extend(chunk)
+        while b"\n" in self.pending:
+            raw_line, _, remaining = self.pending.partition(b"\n")
+            self.pending = bytearray(remaining)
+            self._parse_line(bytes(raw_line), time.perf_counter_ns())
+
+    def _parse_line(self, line: bytes, observed_ns: int) -> None:
+        record = parse_snapshot_profile_line(line)
+        if record is None:
+            return
+        record["observer_elapsed_ns"] = max(
+            0, observed_ns - self.process_started_ns
+        )
+        counters = process_resource_counters(self.pid)
+        if counters:
+            record["host_counters"] = counters
+        self.records.append(record)
+
+    def _finish_pending(self) -> None:
+        if self.pending:
+            self._parse_line(bytes(self.pending), time.perf_counter_ns())
+            self.pending.clear()
+
+    def _external_record(
+        self,
+        operation: str,
+        phase: str,
+        duration_ns: int,
+        ended_ns: int,
+        *,
+        exclusive: bool,
+    ) -> dict[str, object]:
+        record: dict[str, object] = {
+            "operation": operation,
+            "phase": phase,
+            "exclusive": exclusive,
+            "duration_ns": max(0, duration_ns),
+            "observer_elapsed_ns": max(0, ended_ns - self.process_started_ns),
+            "pid": self.pid,
+            "source": "benchmark_observer",
+        }
+        counters = process_resource_counters(self.pid)
+        if counters:
+            record["host_counters"] = counters
+        return record
+
+    def finish_restore(self, marker_reached_ns: int) -> dict[str, object]:
+        self._finish_pending()
+        if self.records:
+            first = self.records[0]
+            first_elapsed = _profile_int(first, "process_elapsed_ns")
+            first_duration = _profile_int(first, "duration_ns")
+            self.records.insert(
+                0,
+                {
+                    "operation": "startup",
+                    "phase": "process_startup",
+                    "exclusive": True,
+                    "duration_ns": max(0, first_elapsed - first_duration),
+                    "process_elapsed_ns": max(0, first_elapsed - first_duration),
+                    "pid": self.pid,
+                    "source": "openvmm_clock",
+                },
+            )
+        device_start = next(
+            (
+                record
+                for record in reversed(self.records)
+                if record.get("operation") == "restore"
+                and record.get("phase") == "device_start"
+            ),
+            None,
+        )
+        if device_start is not None:
+            device_end_ns = self.process_started_ns + int(
+                _profile_int(device_start, "observer_elapsed_ns")
+            )
+            self.records.append(
+                self._external_record(
+                    "restore",
+                    "resume_to_readiness",
+                    marker_reached_ns - device_end_ns,
+                    marker_reached_ns,
+                    exclusive=True,
+                )
+            )
+        self.records.append(
+            self._external_record(
+                "restore",
+                "process_launch_to_readiness",
+                marker_reached_ns - self.process_started_ns,
+                marker_reached_ns,
+                exclusive=False,
+            )
+        )
+        return {"records": self.records}
+
+    def finish_capture(
+        self,
+        snapshot_started_ns: int,
+        snapshot_published_ns: int,
+        source_exited_ns: int,
+    ) -> dict[str, object]:
+        self._finish_pending()
+        self.records.extend(
+            (
+                self._external_record(
+                    "capture",
+                    "request_to_publication",
+                    snapshot_published_ns - snapshot_started_ns,
+                    snapshot_published_ns,
+                    exclusive=False,
+                ),
+                self._external_record(
+                    "capture",
+                    "source_teardown",
+                    source_exited_ns - snapshot_published_ns,
+                    source_exited_ns,
+                    exclusive=True,
+                ),
+            )
+        )
+        return {"records": self.records}
+
+
+def summarize_lifecycle_profiles(
+    raw_samples: list[dict[str, object]],
+) -> LifecycleProfileSummary:
+    duration_samples: dict[str, list[float]] = {}
+    attributes: dict[str, tuple[bool, str]] = {}
+    for sample in raw_samples:
+        records = cast(list[dict[str, object]], sample.get("records", []))
+        for record in records:
+            operation = str(record["operation"])
+            phase = str(record["phase"])
+            key = f"{operation}.{phase}"
+            duration_samples.setdefault(key, []).append(
+                _profile_int(record, "duration_ns") / 1_000_000
+            )
+            attributes[key] = (
+                bool(record["exclusive"]),
+                str(record.get("source", "unknown")),
+            )
+    phases: dict[str, dict[str, object]] = {}
+    for key, samples in duration_samples.items():
+        exclusive, source = attributes[key]
+        phases[key] = {
+            "exclusive": exclusive,
+            "source": source,
+            "samples_ms": samples,
+            "p50_ms": statistics.median(samples),
+            "p95_ms": nearest_rank_percentile(samples, 95),
+            "min_ms": min(samples),
+            "max_ms": max(samples),
+        }
+    return {
+        "schema_version": 1,
+        "raw_samples": raw_samples,
+        "phases": phases,
+    }
 
 
 def bytes_to_mib(value: int | float) -> float:
@@ -720,10 +1052,13 @@ def measure_once(
     teardown_mode: str = "guest-exit",
     guest_exit_prequeued: bool = False,
     cleanup_managed_network: bool = False,
+    snapshot_profile: bool = False,
+    profile_sink: list[dict[str, object]] | None = None,
 ) -> tuple[float, int, float | None, float]:
     started = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
+    profile = SnapshotProfileCollector(process.pid, started) if snapshot_profile else None
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
@@ -748,6 +1083,8 @@ def measure_once(
                 continue
             if chunk is None:
                 raise RuntimeError(f"OpenVMM exited with status {process.poll()}")
+            if profile is not None:
+                profile.feed(chunk)
             output.extend(chunk)
             marker_seen = (
                 contains_output_line(output, marker)
@@ -756,6 +1093,8 @@ def measure_once(
             )
             if marker_seen:
                 marker_reached = time.perf_counter_ns()
+                if profile is not None and profile_sink is not None:
+                    profile_sink.append(profile.finish_restore(marker_reached))
                 elapsed_ms = (marker_reached - started) / 1_000_000
                 peak_bytes = peak_rss_bytes(process.pid)
                 teardown_started = time.perf_counter_ns()
@@ -806,10 +1145,17 @@ def benchmark(
     teardown_mode: str = "guest-exit",
     guest_exit_prequeued: bool = False,
     cleanup_managed_network: bool = False,
+    snapshot_profile: bool = False,
+    before_each: Callable[[], None] | None = None,
 ) -> BenchmarkResult:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
+    environment.pop(SNAPSHOT_PROFILE_ENV, None)
+    if snapshot_profile:
+        environment[SNAPSHOT_PROFILE_ENV] = "1"
     for index in range(warmups):
+        if before_each is not None:
+            before_each()
         value, peak_bytes, teardown_ms, _wall_ms = measure_once(
             command,
             environment=environment,
@@ -820,6 +1166,7 @@ def benchmark(
             teardown_mode=teardown_mode,
             guest_exit_prequeued=guest_exit_prequeued,
             cleanup_managed_network=cleanup_managed_network,
+            snapshot_profile=snapshot_profile,
         )
         teardown = (
             f"{teardown_ms:.3f} ms"
@@ -836,7 +1183,10 @@ def benchmark(
     wall_samples: list[float] = []
     peak_rss_samples: list[int] = []
     teardown_samples: list[float | None] = []
+    profile_samples: list[dict[str, object]] = []
     for index in range(runs):
+        if before_each is not None:
+            before_each()
         value, peak_bytes, teardown_ms, wall_ms = measure_once(
             command,
             environment=environment,
@@ -847,6 +1197,8 @@ def benchmark(
             teardown_mode=teardown_mode,
             guest_exit_prequeued=guest_exit_prequeued,
             cleanup_managed_network=cleanup_managed_network,
+            snapshot_profile=snapshot_profile,
+            profile_sink=profile_samples,
         )
         samples.append(value)
         wall_samples.append(wall_ms)
@@ -864,7 +1216,7 @@ def benchmark(
         )
 
     completed_teardowns = [value for value in teardown_samples if value is not None]
-    return {
+    result: BenchmarkResult = {
         "samples_ms": samples,
         "p50_ms": statistics.median(samples),
         "p95_ms": nearest_rank_percentile(samples, 95),
@@ -894,6 +1246,9 @@ def benchmark(
         "teardown_min_ms": min(completed_teardowns, default=None),
         "teardown_max_ms": max(completed_teardowns, default=None),
     }
+    if snapshot_profile:
+        result["profile"] = summarize_lifecycle_profiles(profile_samples)
+    return result
 
 
 def nearest_rank_percentile(samples: Sequence[float], percentile: int) -> float:
@@ -2034,13 +2389,24 @@ def capture_snapshot(
     teardown_mode: str = "guest-exit",
     smp_network_gateway: str | None = None,
     smp_ioapic_irq: int | None = None,
+    snapshot_profile: bool = False,
+    profile_sink: list[dict[str, object]] | None = None,
 ) -> tuple[float, float, float, int]:
     if snapshot_path.exists():
         shutil.rmtree(snapshot_path)
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off,openvmm_entry::vm_controller=info"
+    environment.pop(SNAPSHOT_PROFILE_ENV, None)
+    if snapshot_profile:
+        environment[SNAPSHOT_PROFILE_ENV] = "1"
+    process_started_ns = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
+    profile = (
+        SnapshotProfileCollector(process.pid, process_started_ns)
+        if snapshot_profile
+        else None
+    )
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
@@ -2103,6 +2469,8 @@ def capture_snapshot(
             if chunk is None:
                 observe_snapshot_publication()
                 break
+            if profile is not None:
+                profile.feed(chunk)
             output.extend(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
             if not boot_seen and BOOT_MARKER in output:
@@ -2141,6 +2509,14 @@ def capture_snapshot(
             raise RuntimeError(f"snapshot was not published at {snapshot_path}")
         assert snapshot_started_ns is not None
         assert snapshot_published_ns is not None
+        if profile is not None and profile_sink is not None:
+            profile_sink.append(
+                profile.finish_capture(
+                    snapshot_started_ns,
+                    snapshot_published_ns,
+                    source_exited_ns,
+                )
+            )
         request_to_publication_ms = (
             snapshot_published_ns - snapshot_started_ns
         ) / 1_000_000
@@ -2165,8 +2541,9 @@ def summarize_snapshot_samples(
     request_to_publication_samples: list[float],
     post_publication_exit_samples: list[float],
     peak_rss_samples: list[int],
+    profile_samples: list[dict[str, object]] | None = None,
 ) -> SnapshotCaptureResult:
-    return {
+    result: SnapshotCaptureResult = {
         "samples_ms": samples,
         "p50_ms": statistics.median(samples),
         "p95_ms": nearest_rank_percentile(samples, 95),
@@ -2195,6 +2572,9 @@ def summarize_snapshot_samples(
         "peak_rss_min_bytes": min(peak_rss_samples),
         "peak_rss_max_bytes": max(peak_rss_samples),
     }
+    if profile_samples is not None:
+        result["profile"] = summarize_lifecycle_profiles(profile_samples)
+    return result
 
 
 def benchmark_snapshot_capture(
@@ -2204,10 +2584,12 @@ def benchmark_snapshot_capture(
     windows_cpus: set[int] | None = None,
     retained_snapshot_path: Path | None = None,
 ) -> SnapshotCaptureResult:
+    snapshot_profile = bool(getattr(args, "snapshot_profile", False))
     samples: list[float] = []
     request_to_publication_samples: list[float] = []
     post_publication_exit_samples: list[float] = []
     peak_rss_samples: list[int] = []
+    profile_samples: list[dict[str, object]] = []
     for index in range(args.warmups + args.runs):
         retain = (
             retained_snapshot_path is not None and index == args.warmups + args.runs - 1
@@ -2232,6 +2614,8 @@ def benchmark_snapshot_capture(
                     windows_cpus=windows_cpus,
                     processors=args.processors,
                     teardown_mode=args.teardown_mode,
+                    snapshot_profile=snapshot_profile,
+                    profile_sink=(profile_samples if index >= args.warmups else None),
                 )
             )
         if index < args.warmups:
@@ -2257,6 +2641,7 @@ def benchmark_snapshot_capture(
         request_to_publication_samples,
         post_publication_exit_samples,
         peak_rss_samples,
+        profile_samples if snapshot_profile else None,
     )
 
 
@@ -2309,6 +2694,7 @@ def benchmark_snapshot_restore(
     windows_cpus: set[int] | None = None,
     snapshot_path: Path | None = None,
 ) -> BenchmarkResult:
+    snapshot_profile = bool(getattr(args, "snapshot_profile", False))
     if snapshot_path is not None:
         return benchmark(
             [
@@ -2329,6 +2715,7 @@ def benchmark_snapshot_restore(
             windows_cpus=windows_cpus,
             teardown_mode=args.teardown_mode,
             guest_exit_prequeued=args.teardown_mode == "guest-exit",
+            snapshot_profile=snapshot_profile,
         )
 
     with tempfile.TemporaryDirectory(prefix="openvmm-e2e-restore-") as temp_dir:
@@ -2379,6 +2766,187 @@ def print_summary(backend: str, result: BenchmarkResult) -> None:
     )
 
 
+def print_lifecycle_profile_summary(
+    label: str, profile: LifecycleProfileSummary
+) -> None:
+    print(f"{label} lifecycle phases:", flush=True)
+    for name, metric in profile["phases"].items():
+        print(
+            f"  {name}: p50={_profile_float(metric, 'p50_ms'):.3f} ms "
+            f"p95={_profile_float(metric, 'p95_ms'):.3f} ms "
+            f"n={len(cast(list[float], metric['samples_ms']))} "
+            f"exclusive={str(bool(metric['exclusive'])).lower()}",
+            flush=True,
+        )
+
+
+def warm_snapshot_artifacts(snapshot_path: Path) -> None:
+    for name in SNAPSHOT_FILENAMES:
+        with (snapshot_path / name).open("rb", buffering=0) as artifact:
+            while artifact.read(4 * 1024 * 1024):
+                pass
+
+
+def drop_linux_snapshot_artifacts(snapshot_path: Path) -> None:
+    posix_fadvise = cast(
+        Callable[[int, int, int, int], None] | None,
+        getattr(os, "posix_fadvise", None),
+    )
+    dontneed = cast(int | None, getattr(os, "POSIX_FADV_DONTNEED", None))
+    if posix_fadvise is None or dontneed is None:
+        raise RuntimeError("POSIX_FADV_DONTNEED is unavailable on this Linux host")
+    for name in SNAPSHOT_FILENAMES:
+        with (snapshot_path / name).open("rb", buffering=0) as artifact:
+            posix_fadvise(artifact.fileno(), 0, 0, dontneed)
+
+
+def copy_windows_snapshot_unbuffered(source: Path, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    completed = subprocess.run(
+        [
+            "robocopy.exe",
+            str(source),
+            str(destination),
+            "/E",
+            "/J",
+            "/NFL",
+            "/NDL",
+            "/NJH",
+            "/NJS",
+            "/NP",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode >= 8:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(
+            f"unbuffered snapshot copy failed with status {completed.returncode}: "
+            f"{detail}"
+        )
+
+
+@contextlib.contextmanager
+def prepared_snapshot_cache(
+    snapshot_path: Path,
+    cache_state: str,
+) -> Generator[tuple[Path, Callable[[], None], str]]:
+    if cache_state == "warm":
+        yield snapshot_path, lambda: warm_snapshot_artifacts(snapshot_path), "sequential-read"
+        return
+    if cache_state != "cold":
+        raise ValueError(f"unsupported snapshot cache state {cache_state!r}")
+    if sys.platform.startswith("linux"):
+        yield (
+            snapshot_path,
+            lambda: drop_linux_snapshot_artifacts(snapshot_path),
+            "posix-fadvise-dontneed",
+        )
+        return
+    if os.name == "nt":
+        with tempfile.TemporaryDirectory(
+            prefix="openvmm-cold-snapshot-"
+        ) as temporary:
+            cold_path = Path(temporary) / "snapshot"
+            yield (
+                cold_path,
+                lambda: copy_windows_snapshot_unbuffered(snapshot_path, cold_path),
+                "robocopy-unbuffered-clone",
+            )
+        return
+    raise RuntimeError(f"cold snapshot cache control is unsupported on {sys.platform}")
+
+
+def benchmark_snapshot_profile_matrix(
+    args: argparse.Namespace,
+    executable: Path,
+    backend: str,
+    make_boot_command: Callable[[int], list[str]],
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> dict[str, dict[str, object]]:
+    profile_args_values = vars(args).copy()
+    profile_args_values["snapshot_profile"] = True
+    profile_args = argparse.Namespace(**profile_args_values)
+    cache_states = (
+        ("warm", "cold") if args.cache_state == "both" else (args.cache_state,)
+    )
+    matrix: dict[str, dict[str, object]] = {}
+    with tempfile.TemporaryDirectory(
+        prefix="openvmm-snapshot-profile-"
+    ) as temporary:
+        root = Path(temporary)
+        for memory_mib in args.shell_memories:
+            print(f"Profiling {backend} snapshot lifecycle at {memory_mib} MiB", flush=True)
+            snapshot_path = root / f"snapshot-{memory_mib}-mib"
+            boot_command = make_boot_command(memory_mib)
+            capture = benchmark_snapshot_capture(
+                profile_args,
+                boot_command,
+                windows_cpus=windows_cpus,
+                retained_snapshot_path=snapshot_path,
+            )
+            print_snapshot_summary(backend, capture)
+            if "profile" in capture:
+                print_lifecycle_profile_summary(
+                    f"snapshot-capture/{backend}/{memory_mib}-mib",
+                    capture["profile"],
+                )
+
+            restore_results: dict[str, object] = {}
+            for cache_state in cache_states:
+                with prepared_snapshot_cache(snapshot_path, cache_state) as (
+                    restore_path,
+                    condition_cache,
+                    cache_control,
+                ):
+                    restore = benchmark(
+                        [
+                            *command_prefix,
+                            *snapshot_restore_command(
+                                executable,
+                                backend,
+                                restore_path,
+                                processors=args.processors,
+                                network_profile=args.network_profile,
+                            ),
+                        ],
+                        warmups=args.warmups,
+                        runs=args.runs,
+                        timeout=args.timeout,
+                        marker=RESTORE_MARKER,
+                        marker_must_be_line=True,
+                        windows_cpus=windows_cpus,
+                        teardown_mode=args.teardown_mode,
+                        guest_exit_prequeued=args.teardown_mode == "guest-exit",
+                        snapshot_profile=True,
+                        before_each=condition_cache,
+                    )
+                print_summary(
+                    f"snapshot-restore/{backend}/{memory_mib}-mib/{cache_state}",
+                    restore,
+                )
+                restore_profile = restore.get("profile")
+                assert restore_profile is not None
+                print_lifecycle_profile_summary(
+                    f"snapshot-restore/{backend}/{memory_mib}-mib/{cache_state}",
+                    restore_profile,
+                )
+                restore_results[cache_state] = {
+                    "cache_control": cache_control,
+                    "result": restore,
+                }
+            matrix[str(memory_mib)] = {
+                "memory_mib": memory_mib,
+                "capture": capture,
+                "restore": restore_results,
+            }
+    return matrix
+
+
 def print_phase2_summary(backend: str, result: Phase2Result) -> None:
     memory_mib = int(result["memory_mib"])
     metrics = result["metrics"]
@@ -2389,19 +2957,28 @@ def print_phase2_summary(backend: str, result: Phase2Result) -> None:
         "new_process_restore_prepare",
     ):
         metric = metrics[name]
-        print(f"  {name}: p50={float(metric['p50_ms']):.3f} ms", flush=True)
+        print(
+            f"  {name}: p50={float(metric['p50_ms']):.3f} ms "
+            f"p95={float(metric['p95_ms']):.3f} ms",
+            flush=True,
+        )
     for name in ("snapshot_publish", "snapshot_verify", "repeat_verify"):
         metric = metrics[name]
         p50_ms = float(metric["p50_ms"])
         throughput = memory_mib / (p50_ms / 1000.0)
         print(
-            f"  {name}: p50={p50_ms:.3f} ms ({throughput:.1f} MiB/s)",
+            f"  {name}: p50={p50_ms:.3f} ms "
+            f"p95={float(metric['p95_ms']):.3f} ms ({throughput:.1f} MiB/s)",
             flush=True,
         )
     for name in ("cow_map", "repeat_cow_map", "cow_dirty_all"):
         metric = metrics[name]
         p50_ms = float(metric["p50_ms"])
-        print(f"  {name}: p50={p50_ms:.3f} ms", flush=True)
+        print(
+            f"  {name}: p50={p50_ms:.3f} ms "
+            f"p95={float(metric['p95_ms']):.3f} ms",
+            flush=True,
+        )
 
 
 def compare_cold_start_to_restore_prepare(
@@ -2904,6 +3481,11 @@ def result_document(
             "initrd": str(initrd) if initrd is not None else None,
             "marker": BOOT_MARKER.decode(),
             "restore_marker": RESTORE_MARKER.decode(),
+            "snapshot_profile": bool(
+                args.snapshot_profile or args.suite == "snapshot-profile"
+            ),
+            "snapshot_profile_environment": SNAPSHOT_PROFILE_ENV,
+            "cache_state": args.cache_state,
         },
         "backends": {},
         "snapshot_capture": {},
@@ -2911,10 +3493,12 @@ def result_document(
         "phase2": {},
         "comparison": {},
         "e2e_comparison": {},
+        "snapshot_profile_matrix": {},
     }
 
 
 def run_native_linux(args: argparse.Namespace) -> int:
+    apply_benchmark_suite_defaults(args)
     if args.backend not in ("kvm", "mshv"):
         raise ValueError("native Linux benchmark runs support --backend kvm or mshv")
 
@@ -2926,8 +3510,9 @@ def run_native_linux(args: argparse.Namespace) -> int:
     run_snapshot = args.suite in ("snapshot", "e2e", "all")
     run_restore = args.suite in ("restore", "e2e", "all")
     run_phase2 = args.suite in ("phase2", "all")
+    run_profile = args.suite == "snapshot-profile"
     run_workloads = args.suite in WORKLOAD_SUITES
-    run_guest = run_boot or run_snapshot or run_restore or run_workloads
+    run_guest = run_boot or run_snapshot or run_restore or run_profile or run_workloads
     kernel = None
     initrd = None
     executable = None
@@ -3002,27 +3587,48 @@ def run_native_linux(args: argparse.Namespace) -> int:
     results = result_document(args, kernel, initrd, backend)
     if run_guest:
         assert executable is not None and kernel is not None and initrd is not None
-        boot_command = [
-            *prefix,
-            str(executable),
-            "--single-process",
-            "--machine",
-            "microvm-v2",
-            "--processors",
-            str(args.processors),
-            "--hypervisor",
-            backend,
-            "--memory",
-            f"{args.memory_mib}M",
-            "--kernel",
-            str(kernel),
-            "--initrd",
-            str(initrd),
-            "--cmdline",
-            f"{'clocksource=kvm-clock ' if backend == 'kvm' else ''}{BASE_TUNING}",
-        ]
-        if args.net is not None:
-            append_network_arguments(boot_command, args.net, args.network_profile)
+        def make_boot_command(memory_mib: int) -> list[str]:
+            command = [
+                *prefix,
+                str(executable),
+                "--single-process",
+                "--machine",
+                "microvm-v2",
+                "--processors",
+                str(args.processors),
+                "--hypervisor",
+                backend,
+                "--memory",
+                f"{memory_mib}M",
+                "--kernel",
+                str(kernel),
+                "--initrd",
+                str(initrd),
+                "--cmdline",
+                f"{'clocksource=kvm-clock ' if backend == 'kvm' else ''}{BASE_TUNING}",
+            ]
+            if args.net is not None:
+                append_network_arguments(command, args.net, args.network_profile)
+            return command
+
+        boot_command = make_boot_command(args.memory_mib)
+        if run_profile:
+            results["snapshot_profile_matrix"][backend] = (
+                benchmark_snapshot_profile_matrix(
+                    args,
+                    executable,
+                    backend,
+                    make_boot_command,
+                    command_prefix=prefix,
+                )
+            )
+            if args.output is not None:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(
+                    json.dumps(results, indent=2) + "\n", encoding="utf-8"
+                )
+                print(f"Wrote {args.output}", flush=True)
+            return 0
         if run_boot:
             result = benchmark(
                 boot_command,
@@ -3030,6 +3636,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 runs=args.runs,
                 timeout=args.timeout,
                 teardown_mode=args.teardown_mode,
+                snapshot_profile=args.snapshot_profile,
             )
             results["backends"][backend] = result
             print_summary(backend, result)
@@ -3330,6 +3937,7 @@ def benchmark_snapshot_kvm(
 
 
 def run(args: argparse.Namespace) -> int:
+    apply_benchmark_suite_defaults(args)
     if (args.net is None) != (args.network_profile is None):
         raise ValueError("--net and --network-profile must be specified together")
     if args._kvm_worker:
@@ -3345,13 +3953,19 @@ def run(args: argparse.Namespace) -> int:
     run_snapshot = args.suite in ("snapshot", "e2e", "all")
     run_restore = args.suite in ("restore", "e2e", "all")
     run_phase2 = args.suite in ("phase2", "all")
+    run_profile = args.suite == "snapshot-profile"
     run_workloads = args.suite in WORKLOAD_SUITES
     if run_workloads and args.backend != "whp":
         raise ValueError(
             "Windows workload suites require --backend whp; run KVM/MSHV "
             "workloads on native Linux"
         )
-    run_guest = run_boot or run_snapshot or run_restore or run_workloads
+    if run_profile and args.backend != "whp":
+        raise ValueError(
+            "Windows snapshot-profile runs require --backend whp; run KVM or "
+            "MSHV profiles on a native Linux host"
+        )
+    run_guest = run_boot or run_snapshot or run_restore or run_profile or run_workloads
     kernel = None
     initrd = None
     if run_guest:
@@ -3425,6 +4039,35 @@ def run(args: argparse.Namespace) -> int:
         )
 
     results = result_document(args, kernel, initrd)
+    if run_profile:
+        assert kernel is not None and initrd is not None
+        executable = boot_binaries["whp"]
+
+        def make_whp_profile_command(memory_mib: int) -> list[str]:
+            return whp_command(
+                executable,
+                kernel,
+                initrd,
+                memory_mib,
+                args.net,
+                processors=args.processors,
+            )
+
+        results["snapshot_profile_matrix"]["whp"] = (
+            benchmark_snapshot_profile_matrix(
+                args,
+                executable,
+                "whp",
+                make_whp_profile_command,
+                windows_cpus=cpus,
+            )
+        )
+        if args.output:
+            output = args.output.resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+            print(f"Wrote {output}")
+        return 0
     kvm_e2e = None
     if args.suite == "e2e" and "kvm" in selected:
         assert kernel is not None and initrd is not None
@@ -3454,6 +4097,7 @@ def run(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             windows_cpus=cpus,
             teardown_mode=args.teardown_mode,
+            snapshot_profile=args.snapshot_profile,
         )
         backends["whp"] = whp_result
         print_summary("whp", whp_result)

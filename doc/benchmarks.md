@@ -72,6 +72,21 @@ python3 scripts/nvx.py benchmark --suite shell-snapshot-restore --backend kvm --
 python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu --output-dir data/results --require-shell-snapshot-restore-512
 ```
 
+Run the diagnostic snapshot lifecycle matrix with:
+
+```console
+# Linux/KVM or Linux/MSHV
+python3 scripts/nvx.py benchmark --suite snapshot-profile --backend kvm --warmups 1 --runs 5 --output data/runs/linux-kvm-baremetal/snapshot-profile.json
+
+# Windows/WHP
+python scripts\nvx.py benchmark --suite snapshot-profile --backend whp --warmups 1 --runs 5 --output data\runs\windows-whp-baremetal\snapshot-profile.json
+```
+
+The default matrix profiles 64, 128, 256, 512, and 1024 MiB snapshots with both warm and cold
+restore artifacts. Use `--shell-memories` to select sizes and `--cache-state warm`, `cold`, or
+`both` to select cache conditions. The suite enables OpenVMM profiling only for these diagnostic
+runs; ordinary benchmark paths leave it disabled.
+
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
 instead of `performance`. Use `--shell-memories 64 128 256 512`,
 `--payload-mib 64`, and
@@ -126,6 +141,7 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
 | Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured shell-ready snapshot and measures only restore latency for the selected memory sizes. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
+| Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 64/128/256/512/1024 MiB warm/cold restores. |
 
 ## Kernel command lines
 
@@ -224,6 +240,45 @@ milliseconds to the shell-ready `ALPINE-MICROVM-BOOT-OK` marker.
 | `shell_snapshot_restore_256_mib` | Restore process launch to a shell-ready 256 MiB snapshot. |
 | `shell_snapshot_cold_512_mib` | OpenVMM launch to a shell-ready guest with 512 MiB of memory. |
 | `shell_snapshot_restore_512_mib` | Restore process launch to a shell-ready 512 MiB snapshot. |
+
+### Snapshot lifecycle profile
+
+This diagnostic suite captures a fresh snapshot at each selected memory size, then restores that
+artifact under each selected cache condition. A warm run sequentially reads `manifest.bin`,
+`state.bin`, and `memory.bin` before every restore. Linux cold runs apply
+`POSIX_FADV_DONTNEED` to each artifact. Windows cold runs restore from a fresh unbuffered
+`robocopy /J` clone. The selected mechanism is recorded as `cache_control` alongside each result.
+
+OpenVMM profiling is opt-in through `OPENVMM_STARTUP_PROFILE=1`. The coordinator removes that
+variable from ordinary benchmark subprocesses and sets it only when `--snapshot-profile` is
+requested or the `snapshot-profile` suite is selected. OpenVMM emits one ASCII record per phase
+with the versioned `OPENVMM_SNAPSHOT_PROFILE_V1` prefix. Each record contains:
+
+- `operation`, `phase`, and `exclusive`, where exclusive phases are disjoint intervals and
+	non-exclusive phases are cumulative milestones that may contain nested work;
+- monotonic `duration_ns` and process-relative `process_elapsed_ns`, plus the emitting `pid`;
+- phase-specific `logical_bytes`, `allocated_bytes`, `gpa_faults`, and `populated_bytes` when
+	available.
+
+The coordinator retains every record in `profile.raw_samples`. It adds observer-defined
+`process_startup`, `request_to_publication`, `source_teardown`, `resume_to_readiness`, and
+`process_launch_to_readiness` boundaries without mixing them into OpenVMM-exclusive intervals.
+Each observed record also includes available process counters. Linux reports RSS, peak RSS,
+minor and major faults, total page faults, and, when `smaps_rollup` is available, private dirty
+and private RSS bytes. Windows reports working set, peak working set, private commit, and page
+faults.
+
+`profile.phases` groups samples by `operation.phase` and stores raw `samples_ms` plus p50,
+nearest-rank p95, minimum, and maximum. The top-level JSON path is
+`snapshot_profile_matrix.<backend>.<memory_mib>`. Each memory entry contains the capture result and
+`restore.warm` and/or `restore.cold`, including its cache control and full restore result. Warmups
+are excluded from raw samples and summaries.
+
+Capture records isolate guest quiesce, state save, mapped-memory and memory-handle flushes, each
+publication step, publication observation, and source teardown. Restore records isolate artifact
+open and preparation, COW section and mapping/view creation, prototype and final partition work,
+GPA registration, saved-state restore, device start, and guest resume to readiness. State and
+memory SHA stages are intentionally absent from the final capture and restore path.
 
 ### Network snapshot
 

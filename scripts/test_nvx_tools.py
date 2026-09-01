@@ -74,6 +74,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.processors, 8)
         self.assertIs(args.handler, benchmark.run)
 
+    def test_benchmark_exposes_snapshot_profile_matrix(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "snapshot-profile",
+                "--backend",
+                "mshv",
+                "--cache-state",
+                "cold",
+            ]
+        )
+
+        self.assertEqual(args.suite, "snapshot-profile")
+        self.assertIsNone(args.shell_memories)
+        benchmark.apply_benchmark_suite_defaults(args)
+        self.assertEqual(args.shell_memories, [64, 128, 256, 512, 1024])
+        self.assertEqual(args.cache_state, "cold")
+        self.assertFalse(args.snapshot_profile)
+        self.assertIs(args.handler, benchmark.run)
+
+    def test_benchmark_preserves_canonical_shell_memory_defaults(self):
+        args = nvx.parse_args(["benchmark", "--suite", "performance"])
+
+        benchmark.apply_benchmark_suite_defaults(args)
+
+        self.assertEqual(args.shell_memories, [64, 128, 256, 512])
+
     def test_release_commands_keep_their_cli_contract(self):
         download = nvx.parse_args(
             ["download", "--repository", "example/nvx", "--hypervisor", "auto"]
@@ -421,6 +449,42 @@ class SandboxTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_snapshot_profile_records_are_parsed_and_summarized(self):
+        record = benchmark.parse_snapshot_profile_line(
+            b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=restore "
+            b"phase=artifact_open exclusive=1 duration_ns=1500000 "
+            b"process_elapsed_ns=2000000 pid=42 logical_bytes=1024 "
+            b"allocated_bytes=512\r"
+        )
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record["operation"], "restore")
+        self.assertEqual(record["duration_ns"], 1_500_000)
+        self.assertTrue(record["exclusive"])
+        summary = benchmark.summarize_lifecycle_profiles(
+            [{"records": [record, {**record, "duration_ns": 2_500_000}]}]
+        )
+        metric = summary["phases"]["restore.artifact_open"]
+        self.assertEqual(metric["samples_ms"], [1.5, 2.5])
+        self.assertEqual(metric["p50_ms"], 2.0)
+        self.assertEqual(metric["p95_ms"], 2.5)
+        self.assertTrue(metric["exclusive"])
+
+    def test_snapshot_profile_rejects_incomplete_records(self):
+        with self.assertRaisesRegex(ValueError, "missing"):
+            benchmark.parse_snapshot_profile_line(
+                b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=restore phase=open"
+            )
+
+    def test_warm_snapshot_cache_reads_every_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary)
+            for index, name in enumerate(benchmark.SNAPSHOT_FILENAMES):
+                (snapshot / name).write_bytes(bytes([index]) * 32)
+
+            benchmark.warm_snapshot_artifacts(snapshot)
+
     def test_measure_once_does_not_resend_prequeued_guest_exit(self):
         class FakeProcess:
             pid = 123
