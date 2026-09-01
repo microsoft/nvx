@@ -66,8 +66,8 @@ sudo chmod a+rw /dev/mshv
 test -r /dev/mshv && test -w /dev/mshv
 ```
 
-Azure Linux self-hosted runners also need the native toolchain used to build
-the pinned cargo-nextest release:
+RPM-based MSHV hosts also need the native toolchain used to build the pinned
+cargo-nextest release:
 
 ```bash
 sudo tdnf install -y \
@@ -87,6 +87,16 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
 
 Building NVX locally also requires Rust stable, Visual Studio 2022 C++ build tools, the Windows
 SDK, and Docker Desktop using Linux containers.
+
+## Automated environment bootstrap
+
+The scripts in [`scripts/setup`](../scripts/setup/README.md) prepare an existing checkout for
+Linux/MSHV or Windows/WHP development. They install the platform build prerequisites, configure
+hypervisor access, build NVX, and provide non-mutating dependency and build validation modes.
+They do not create machines, initialize checkouts, or manage repository credentials.
+
+Linux can also emit a revision-bound, checksummed guest artifact bundle for Windows. The Windows
+script verifies that bundle before copying it into the checkout and building OpenVMM natively.
 
 ## Remote agent hosts
 
@@ -159,14 +169,14 @@ python3 -m ruff check scripts benchmarks
 shellcheck --shell=sh \
   alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
   alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot
+  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
 python3 -m pyright --pythonplatform Linux
 python3 -m pyright --pythonplatform Windows
 python3 -m ruff format --check scripts benchmarks
 shfmt -d -ln posix -i 4 -ci \
   alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
   alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot
+  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
 ```
 
 Pyright runs in strict mode for both Linux and Windows platform APIs.
@@ -178,5 +188,5 @@ python3 -m ruff format scripts benchmarks
 shfmt -w -ln posix -i 4 -ci \
   alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
   alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot
+  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
 ```

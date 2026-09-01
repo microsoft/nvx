@@ -33,11 +33,28 @@ runs:
         ${SHELLCHECK} --shell=sh \
           alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-          alpine/nvx-snapshot
+          alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
         python -m pyright --pythonplatform Linux
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts
         ${SHFMT} -d -ln posix -i 4 -ci \
           alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-          alpine/nvx-snapshot
+          alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+
+    - name: Check PowerShell syntax
+      shell: pwsh
+      run: |
+        $tokens = $null
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile(
+          (Resolve-Path "scripts/setup/setup-windows-whp.ps1"),
+          [ref]$tokens,
+          [ref]$errors
+        )
+        foreach ($error in $errors) {
+          Write-Error $error -ErrorAction Continue
+        }
+        if ($errors.Count -ne 0) {
+          exit 1
+        }
