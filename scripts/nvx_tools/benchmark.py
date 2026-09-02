@@ -2110,11 +2110,11 @@ def benchmark_snapshot_restore_vcpu_workload(
             )
             print(f"== restore-online {target} vCPU ==")
             print(
-                _format_shell_snapshot_line(
-                    "snapshot restore", restored["samples_ms"]
-                )
+                _format_shell_snapshot_line("snapshot restore", restored["samples_ms"])
             )
-            print(f"  OpenVMM peak RSS    : {format_rss_summary(restored['peak_rss_samples_bytes'])}")
+            print(
+                f"  OpenVMM peak RSS    : {format_rss_summary(restored['peak_rss_samples_bytes'])}"
+            )
             restore_profile = restored.get("profile")
             if restore_profile is not None:
                 print_lifecycle_profile_summary(

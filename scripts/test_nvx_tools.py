@@ -977,9 +977,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(invocation.kwargs["timeout"], args.timeout)
             self.assertTrue(invocation.kwargs["snapshot_profile"])
             self.assertEqual(command[command.index("--processors") + 1], "8")
-            targets.append(
-                int(command[command.index("--restore-processors") + 1])
-            )
+            targets.append(int(command[command.index("--restore-processors") + 1]))
         self.assertEqual(targets, [1, 2, 4, 8])
         self.assertIn("restore-online 8 vCPU", output.getvalue())
         self.assertIn(

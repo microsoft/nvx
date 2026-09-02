@@ -168,7 +168,9 @@ def command_run(args: argparse.Namespace) -> None:
         if args.machine != "microvm-v2":
             raise ScriptError("--restore-processors requires --machine microvm-v2")
         if args.restore_processors > args.processors:
-            raise ScriptError("--restore-processors cannot exceed --processors capacity")
+            raise ScriptError(
+                "--restore-processors cannot exceed --processors capacity"
+            )
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     command = [
         str(executable),
