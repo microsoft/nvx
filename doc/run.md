@@ -179,9 +179,10 @@ configuration on the kernel command line. Broker launch rejects `init`,
 other host-owned parameters. The generated command supplies no init override
 and relies on the verified `/init -> /sbin/nvx-agent` image layout.
 
-Remaining cross-repository gates are the ttrpc writer priority/FIFO fix and
-contention test; real privileged MMIO/HVC E2E from broker READY through
-authenticated GetGuestInfo self-hash, Bootstrap, WaitReady, Shutdown, and
-failure cases; tenant-safe snapshot freeze/restore lifecycle; and external
+The source-level ttrpc writer priority/FIFO blocker is resolved. Remaining
+cross-repository gates are live host-observed stress proving bounded downstream
+HVC latency under contention; real privileged MMIO/HVC E2E from broker READY
+through authenticated GetGuestInfo self-hash, Bootstrap, WaitReady, Shutdown,
+and failure cases; tenant-safe snapshot freeze/restore lifecycle; and external
 live-gate proof delivery. Local packaging or initramfs inspection does not
 satisfy those gates, and broker release publication remains disabled.

@@ -52,9 +52,10 @@ These are the ABI-v1/legacy artifacts. They continue to use `alpine/init` and,
 when selected by the legacy sandbox token, `nvx-init-agent`.
 
 The broker artifact uses the reviewed ACI-04 source revision
-`2e162fc068cef028e38ac23b6e0a1892a01a209c`. That revision computes the
+`93cb452f298dd0ae806279e0b158cabe0437bafb`. That revision computes the
 running `/proc/self/exe` SHA-256 and compares it with the authenticated
-manifest, and includes the required typed admission and gap semantics. Build
+manifest, includes the required typed admission and gap semantics, and gives
+control traffic priority over downstream console traffic. Build
 `guestagent-nvx` from a clean checkout at that revision with locked
 dependencies, an external target directory, and static musl:
 
@@ -71,9 +72,9 @@ sha256sum \
 The ACI validator rejects `PT_INTERP`, forbidden CLH/runc/tonic dependencies,
 and binaries larger than 16 MiB. The release input is the persistent staged
 artifact whose SHA-256 is
-`5cc3ea5612eaa1a3b1e301b0107123fd71e56e632742e72a9372632c22206d69`,
-size is `1,786,656` bytes, and ELF GNU build ID is
-`1fba7a91409d351e484de4c6d792ac009ca34f63`. The source revision records
+`7cefe10d7dab2797b200db39048e829f089a462c5d6bfe465ae0226342bef97d`,
+size is `1,823,520` bytes, and ELF GNU build ID is
+`536d8da982ba5e3ebab8f863ba9eb8cc8327c9ff`. The source revision records
 provenance; it is not sufficient byte identity. The current linker build ID is
 affected by the Cargo target path, so a build from the same source into a
 different target directory can have another digest. Do not claim source-only
@@ -81,8 +82,8 @@ byte reproducibility. Stage only the reviewed external input:
 
 ```bash
 python3 scripts/nvx.py stage-agent \
-  --input build/nvx-agent-2e162fc0-input \
-  --sha256 5cc3ea5612eaa1a3b1e301b0107123fd71e56e632742e72a9372632c22206d69
+  --input build/nvx-agent-93cb452f-input \
+  --sha256 7cefe10d7dab2797b200db39048e829f089a462c5d6bfe465ae0226342bef97d
 ```
 
 The command requires a static x86-64 ELF and writes `build/nvx-agent` plus its
