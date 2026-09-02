@@ -971,7 +971,7 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(any("maxcpus=1" in argument for argument in capture_command))
         self.assertEqual(run.call_count, 4)
-        targets = []
+        targets: list[int] = []
         for invocation in run.call_args_list:
             command = invocation.args[0]
             self.assertEqual(invocation.kwargs["timeout"], args.timeout)

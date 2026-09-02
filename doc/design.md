@@ -270,7 +270,7 @@ flowchart TB
 | Port | Device | Behavior |
 | ---: | --- | --- |
 | `0xe9` | portb data | Raw byte input and output; reads consume one pending byte and zero-fill the remaining access width. |
-| `0xea` | portb status | Bit 0 reports pending host input and bit 1 reports a fresh restore packet. Writing `0xa5` after restore selects that one-time packet. |
+| `0xea` | portb status | Bit 0 reports pending host input, bit 1 reports a fresh restore packet, and bit 2 identifies a version-2 packet carrying a processor target. Writing `0xa5` after restore selects that one-time packet. |
 | `0x604` | shutdown | The first output byte becomes the process status carried with the VM power-off request. Reads return all ones. |
 | `0x605` | snapshot request | Reads return all ones. Writes are coalesced and routed asynchronously to the capture controller. For ABI v2, zero requests fresh scratch and a nonzero first byte requests paired scratch. |
 
@@ -724,11 +724,12 @@ original immutable snapshot remains reusable for independent restores at
 other valid targets.
 
 After host-side state restoration, the version-2 private restore packet carries
-`N` to the Alpine agent. While external input remains gated, the agent onlines
-CPUs from `B` through `N-1`, verifies that `/sys/devices/system/cpu/online` is
-exactly the requested prefix, and acknowledges through PMIO `0x605`. OpenVMM
-stops at that post-write boundary, releases host input, and then resumes the
-guest.
+`N` to the Alpine agent and portb status bit 2 distinguishes it without
+consuming a legacy version-1 entropy packet. While external input remains
+gated, the agent onlines CPUs from `B` through `N-1`, verifies that
+`/sys/devices/system/cpu/online` is exactly the requested prefix, and
+acknowledges through PMIO `0x605`. OpenVMM stops at that post-write boundary,
+releases host input, and then resumes the guest.
 
 A fixed-capacity `N`-vCPU snapshot and a capacity-`C`, boot-online-`B` template
 restored to `N` therefore reach the same online prefix but do not contain the

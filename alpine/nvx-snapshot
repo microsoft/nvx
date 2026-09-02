@@ -309,7 +309,8 @@ restore_status=$(read_port_byte 234)
 case "$restore_status" in
     '' | *[!0-9]*) fail_closed "failed to read restore status" ;;
 esac
-if [ $((restore_status & 2)) -ne 0 ]; then
+if [ $((restore_status & 2)) -ne 0 ] &&
+    { [ "$snapshot_tier" != legacy ] || [ $((restore_status & 4)) -ne 0 ]; }; then
     post_restore
 else
     post_restore_pending=false
