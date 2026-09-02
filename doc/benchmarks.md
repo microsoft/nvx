@@ -1,11 +1,12 @@
 # Benchmark
 
-The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites plus a
-23-metric non-Python workload suite on Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI
-combines those metrics with eight 128 MiB shell lifecycle metrics and reports all 31 median (p50)
-values for each host-typed performance series. At 2, 4, and 8 vCPUs, CI records only
+The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites, a
+23-metric ABI-v2 non-Python workload suite, and five ABI-v1 device operation-rate metrics on
+Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI combines the ABI-v2 workloads with eight
+128 MiB shell lifecycle metrics and reports all 31 median (p50) values. The device metrics remain
+in their separate ABI-v1 dimension. At 2, 4, and 8 vCPUs, CI records only
 `shell_snapshot_restore_512_mib`. Latency and resident-memory metrics are lower-is-better;
-throughput metrics are higher-is-better.
+throughput and operation-rate metrics are higher-is-better.
 
 The suite uses the base Alpine guest. Python application snapshots, the Python-agent console
 workload, and its snapshot-prefetch experiment are intentionally excluded because the supported
@@ -36,10 +37,11 @@ through the supported NVX CLI.
 | `windows-whp-baremetal` | WHP | Bare metal |
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
 
-CI runs the complete acceptance and performance suites at one vCPU under microVM ABI v2. It then
-runs only the 512 MiB shell snapshot restore at `2`, `4`, and `8` vCPUs. This produces 34 p50
-values per series and 170 values across the five-series matrix. Counts run sequentially on each
-host so benchmark workloads never overlap on the same physical host.
+CI runs the complete acceptance and performance suites at one vCPU under microVM ABI v2, the
+five device metrics at one vCPU under ABI v1, and only the 512 MiB shell snapshot restore at `2`,
+`4`, and `8` vCPUs. This produces 39 p50 values per series and 195 values across the five-series
+matrix. Counts run sequentially on each host so benchmark workloads never overlap on the same
+physical host.
 
 ## Running locally
 
@@ -64,6 +66,21 @@ python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform l
 # Windows/WHP
 python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\8vcpu
 ```
+
+Run the canonical device operation-rate suite with its default five warmups, 30 retained attempts
+per device, ten-second operation windows, and 512 MiB backing objects:
+
+```console
+# Linux/KVM; use --backend mshv and the matching platform on Linux/MSHV.
+python3 scripts/nvx.py benchmark --suite device-io --backend kvm --platform linux-kvm-baremetal --processors 1 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v1/1vcpu
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v1/1vcpu --output-dir data/results
+
+# Windows/WHP.
+python scripts\nvx.py benchmark --suite device-io --backend whp --platform windows-whp-baremetal --processors 1 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v1\1vcpu
+python scripts\nvx.py performance collect --platform windows-whp-baremetal --commit HEAD --input-dir data\runs\windows-whp-baremetal\microvm-v1\1vcpu --output-dir data\results
+```
+
+For a smoke test, pass `--warmups 0 --runs 1 --device-io-duration-seconds 1`.
 
 Run the restore-only shape used by CI for higher-vCPU coverage with:
 
@@ -145,7 +162,7 @@ Host-observed marker timing includes serial delivery and scheduler delay, and re
 reuse one fresh snapshot per scenario; compare results only on the same host under equivalent
 load and power conditions.
 
-Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
+Run one workload by selecting `cold-start`, `device-io`, `virtfs`, `shell-snapshot`, or `network-snapshot`
 instead of `performance`. Use `--shell-memories 64 128 256 512`,
 `--payload-mib 64`, and
 `--net 10.0.0.2/24 --network-profile portable` to override their defaults. Run
@@ -154,10 +171,11 @@ instead of `performance`. Use `--shell-memories 64 128 256 512`,
 The network benchmarks select the same in-process portable data plane on KVM,
 MSHV, and WHP. They do not create TAP devices or require host firewall rules.
 
-Each workload directory includes `benchmark-metadata.json` with the platform,
-backend, ABI, processor count, host affinity set, memory sizes, artifact
-revisions, warmups, and measured run counts. Collection rejects mismatched
-lifecycle/workload metadata and duplicate topology rows.
+Each workload directory includes `benchmark-metadata.json` with the platform, backend, ABI,
+processor count, host affinity set, memory sizes, artifact revisions, repository dirty state,
+warmups, measured run counts, and SHA-256 values for the VMM, kernel, initramfs, and coordinator.
+Device metadata also records helper source and packaged-binary hashes. Collection rejects
+mismatched lifecycle/workload metadata and duplicate topology rows.
 
 Use a fixed affinity set containing one logical processor per physical core
 and at least `N+2` processors for an `N`-vCPU guest. The additional processors
@@ -194,6 +212,7 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | --- | --- | --- |
 | Shell lifecycle | `benchmark --suite e2e` | Measures cold start, snapshot generation, snapshot restore, teardown, and peak RSS using a shell-ready guest. |
 | All supported non-Python workloads | `benchmark --suite performance` | Runs 23 metrics and writes collector-compatible logs. |
+| Device operation rates | `benchmark --suite device-io` | Measures five random storage and UDP round-trip operation rates with resumable raw attempts. |
 | Cold start | `benchmark --suite cold-start` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
 | Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with lifecycle-aligned snapshot restore at 64, 128, 256, and 512 MiB. |
@@ -222,6 +241,7 @@ replace `console=hvc0` with `console=hvc1` when a virtio console is selected.
 | Cold start | baseline | `QUIET` |
 | Cold start | tuning variant | `QUIET` plus one of `clocksource=<backend>`, `tsc=reliable`, `no_timer_check`, `random.trust_cpu=on`, `rcupdate.rcu_expedited=1`, `nokaslr`, `mitigations=off`, or `cryptomgr.notests` |
 | Virtual file system | guest runs | `QUIET` |
+| Device operation rates | guest runs | `QUIET`; virtio-net uses the portable profile at `10.0.0.2/24` |
 | Shell snapshot | cold | `QUIET` |
 | Shell snapshot | capture | `QUIET`; host-driven after the boot marker and SMP/LAPIC probe |
 | Shell snapshot | restore | restore through the post-restore SMP/LAPIC probe and lifecycle restore marker |
@@ -289,6 +309,35 @@ measures complete process wall time while host and guest exchange files through 
 | `virtfs_live_write` | MB/s | Sequential guest `dd` write with `fsync` directly into the host directory. |
 | `virtfs_live_read` | MB/s | Sequential guest read from the host file after dropping guest page cache. |
 | `virtfs_live_roundtrip` | ms | Guest creates a marker observed by the host, then observes a host rewrite before that VM exits. |
+
+### Device operation rates
+
+The dedicated suite uses microVM ABI v1 because its fixed one-vCPU workload attaches the existing
+unroled `--virtio-blk` device. Every guest has 256 MiB RAM and runs the same static, dependency-free
+x86-64 helper from the reproducible initramfs. Canonical runs execute five warmups followed by 30
+retained attempts for each device. Every operation window lasts ten seconds against a 512 MiB
+backing object.
+
+| Metric | Unit | Timed work |
+| --- | --- | --- |
+| `virtio_blk_random_read_iops` | ops/s | QD1 aligned 4 KiB random `pread64` with `O_DIRECT`. |
+| `virtio_blk_random_write_iops` | ops/s | QD1 aligned 4 KiB random `pwrite64` with `O_DIRECT`. |
+| `virtio_fs_random_read_iops` | ops/s | QD1 buffered 4 KiB random `pread64` after `sync` and a guest page-cache drop. |
+| `virtio_fs_random_write_iops` | ops/s | QD1 buffered 4 KiB random `pwrite64`; the final flush starts after timing ends. |
+| `virtio_net_udp_roundtrip_ops` | ops/s | Completed 64-byte UDP echo request/response transactions through portable virtio-net. |
+
+Storage offsets use the same deterministic pseudo-random sequence in every backend. The host UDP
+server binds the host's primary IPv4 address, requires no TAP or firewall changes, and stops before
+the suite returns. The rate is derived during aggregation as
+$\mathrm{ops/s}=N\times10^9/t_{ns}$ from integer operation counts and monotonic elapsed nanoseconds.
+
+`device-io.log` stores one versioned JSON record per warmup or retained attempt. Missing,
+duplicate, malformed, or zero-work helper output turns that attempt into an explicit failure;
+failed attempts stay in the log and never enter p50 or p95. Warmup and retained indices are fixed,
+so a failure cannot shift sampling. Re-running with identical metadata skips completed identities
+and resumes the first absent attempt. Changed controls or provenance are rejected. Temporary raw
+disks, shared directories, the UDP server, and each benchmark-owned VMM are cleaned on success,
+failure, or interruption.
 
 ### Shell snapshot
 
@@ -386,9 +435,13 @@ unless it contains exactly the 23 shared metrics. Supplying `--lifecycle-input` 
 the eight lifecycle metrics, producing the 31-metric one-vCPU result used by CI. Higher-vCPU
 collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 `shell_snapshot_restore_512_mib` plus canonical one-warmup/five-sample metadata for a 2-, 4-, or
-8-vCPU guest. Each backend job publishes its p50 tables and one-vCPU lifecycle diagnostics to
+8-vCPU guest. A `device-io` directory is recognized from metadata and must contain exactly its five
+metrics and every configured attempt. Each backend job publishes its p50 tables and one-vCPU lifecycle diagnostics to
 `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
 latest base-branch history.
+
+CI uses an explicit reduced device contract of zero warmups, one retained attempt, and one-second
+windows. Canonical baseline collection uses the full `5 + 30` contract.
 
 The current workflow collects 10 measured lifecycle samples after one warmup.
 The regression gate compares the target p50 with the median of the latest 10

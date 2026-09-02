@@ -33,6 +33,7 @@ nvx/
 |   |-- nvx-exit                 Clean guest shutdown helper
 |   |-- nvx-hostmount            virtio-fs host mount helper
 |   |-- nvx-init-agent           EROFS/overlay sandbox bootstrap and supervisor
+|   |-- nvx-device-io.c          Static device operation-rate workload helper
 |   |-- nvx-reseed.c             Static clone-restore CRNG reseed helper
 |   `-- nvx-snapshot             Snapshot preparation and restore repair helper
 |-- data/                        Benchmark data

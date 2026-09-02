@@ -191,6 +191,34 @@ runs:
             --output-dir "${run_dir}"
         done
 
+    - name: Run Linux device operation rates
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        python3 scripts/nvx.py benchmark \
+          --suite device-io \
+          --backend "${{ inputs.backend }}" \
+          --platform "${{ inputs.platform }}" \
+          --processors 1 \
+          "${cpu_args[@]}" \
+          --warmups 0 \
+          --runs 1 \
+          --device-io-duration-seconds 1 \
+          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+          --skip-build \
+          --teardown-mode "${{ inputs.teardown-mode }}" \
+          --output-dir "${run_dir}"
+
     - name: Run Windows acceptance test
       if: runner.os == 'Windows'
       shell: powershell
@@ -279,6 +307,35 @@ runs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
 
+    - name: Run Windows device operation rates
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        python scripts\nvx.py benchmark `
+          --suite device-io `
+          --backend "${{ inputs.backend }}" `
+          --platform "${{ inputs.platform }}" `
+          --processors 1 `
+          --warmups 0 `
+          --runs 1 `
+          --device-io-duration-seconds 1 `
+          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+          --skip-build `
+          --teardown-mode "${{ inputs.teardown-mode }}" `
+          --output-dir "$RunDir" `
+          @CpuArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: Publish Linux performance results
       if: runner.os != 'Windows'
       shell: bash
@@ -294,6 +351,13 @@ runs:
           --require-shell-snapshot \
           --require-shared-suite \
           --lifecycle-input "${run_dir}/acceptance.json" \
+          --summary "${GITHUB_STEP_SUMMARY}"
+        device_run_dir="data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        python3 scripts/nvx.py performance collect \
+          --platform "${{ inputs.platform }}" \
+          --commit "${GITHUB_SHA}" \
+          --input-dir "${device_run_dir}" \
+          --output-dir "${device_run_dir}" \
           --summary "${GITHUB_STEP_SUMMARY}"
         for processors in 2 4 8; do
           run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
@@ -321,6 +385,14 @@ runs:
           --require-shell-snapshot `
           --require-shared-suite `
           --lifecycle-input "$RunDir/acceptance.json" `
+          --summary $env:GITHUB_STEP_SUMMARY
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $DeviceRunDir = "data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        python scripts\nvx.py performance collect `
+          --platform "${{ inputs.platform }}" `
+          --commit $env:GITHUB_SHA `
+          --input-dir $DeviceRunDir `
+          --output-dir $DeviceRunDir `
           --summary $env:GITHUB_STEP_SUMMARY
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         foreach ($Processors in 2, 4, 8) {
@@ -353,6 +425,15 @@ runs:
             exit 1
           fi
         done
+        device_result="data/runs/${{ inputs.platform }}/microvm-v1/1vcpu/${{ inputs.platform }}.csv"
+        test -s "${device_result}" || {
+          echo "::error::Missing device benchmark result ${device_result}"
+          exit 1
+        }
+        if [[ "$(wc -l < "${device_result}")" -ne 6 ]]; then
+          echo "::error::Expected five device operation-rate metrics in ${device_result}"
+          exit 1
+        fi
 
     - name: Verify complete Windows benchmark matrix
       if: runner.os == 'Windows'
@@ -371,6 +452,13 @@ runs:
             }
           }
         }
+        $DeviceResult = "data/runs/${{ inputs.platform }}/microvm-v1/1vcpu/${{ inputs.platform }}.csv"
+        if (-not (Test-Path $DeviceResult -PathType Leaf) -or (Get-Item $DeviceResult).Length -eq 0) {
+          throw "Missing device benchmark result $DeviceResult"
+        }
+        if (@(Import-Csv $DeviceResult).Count -ne 5) {
+          throw "Expected five device operation-rate metrics in $DeviceResult"
+        }
 
     - name: Save benchmark results
       uses: actions/cache/save@v5
@@ -378,5 +466,5 @@ runs:
         PATH: ${{ steps.cache-tools-linux.outputs.path || steps.cache-tools-windows.outputs.path }}
       with:
         path: data/runs/${{ inputs.platform }}
-        key: benchmark-${{ inputs.platform }}-microvm-v2-1-full-2-4-8-shell-restore-512-${{ github.run_id }}-${{ github.run_attempt }}
+        key: benchmark-${{ inputs.platform }}-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
         enableCrossOsArchive: true

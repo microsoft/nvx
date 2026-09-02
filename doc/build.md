@@ -32,11 +32,12 @@ build/initramfs.cpio.gz.packages.json
 openvmm/target/release/openvmm[.exe]
 ```
 
-The initramfs includes the sandbox PID-1 bootstrap and its container namespace
-helpers under `/sbin`. The matching kernel enables virtio-blk, compressed
-EROFS, overlayfs, ext4 scratch, memory cgroups, and cgroup BPF. The build fails
-if `olddefconfig` drops any required option, and the APK manifest records the
-`blkid` and `util-linux` tools used by the bootstrap.
+The initramfs includes the sandbox PID-1 bootstrap, its container namespace
+helpers, and the static `nvx-device-io` benchmark helper under `/sbin`. The
+matching kernel enables virtio-blk, compressed EROFS, overlayfs, ext4 scratch,
+memory cgroups, and cgroup BPF. The build fails if `olddefconfig` drops any
+required option. The APK manifest records the `blkid` and `util-linux` tools
+used by the bootstrap plus the device helper's source and binary SHA-256 values.
 
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact

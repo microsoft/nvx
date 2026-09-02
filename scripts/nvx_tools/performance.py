@@ -76,6 +76,20 @@ NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
+DEVICE_IO_RESULT_PREFIX = "NVX_DEVICE_IO_RESULT="
+DEVICE_IO_OPERATIONS = {
+    "virtio-blk": ("read", "write"),
+    "virtio-fs": ("read", "write"),
+    "virtio-net": ("roundtrip",),
+}
+DEVICE_IO_METRICS = {
+    ("virtio-blk", "read"): "virtio_blk_random_read_iops",
+    ("virtio-blk", "write"): "virtio_blk_random_write_iops",
+    ("virtio-fs", "read"): "virtio_fs_random_read_iops",
+    ("virtio-fs", "write"): "virtio_fs_random_write_iops",
+    ("virtio-net", "roundtrip"): "virtio_net_udp_roundtrip_ops",
+}
+DEVICE_IO_METRIC_NAMES = frozenset(DEVICE_IO_METRICS.values())
 SHELL_SNAPSHOT_SECTION = re.compile(
     r"^==\s*(?P<memory>[0-9]+)\s+MiB\s*==\s*$"
     r"(?P<body>.*?)(?=^==\s*[0-9]+\s+MiB\s*==\s*$|\Z)",
@@ -379,6 +393,195 @@ def _parse_virtfs(text: str) -> dict[str, MetricValue]:
     )
 
 
+def _device_io_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PerformanceError(f"device I/O {field} must be a nonnegative integer")
+    return value
+
+
+def _parse_device_io(
+    text: str,
+    *,
+    expected_warmups: int | None = None,
+    expected_runs: int | None = None,
+) -> dict[str, MetricValue]:
+    samples: dict[tuple[str, str], list[float]] = defaultdict(list)
+    attempts: dict[tuple[str, int], tuple[bool, int | None]] = {}
+    records = 0
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line.startswith(DEVICE_IO_RESULT_PREFIX):
+            continue
+        records += 1
+        try:
+            decoded: object = json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
+        except json.JSONDecodeError as error:
+            raise PerformanceError(
+                f"malformed device I/O result on line {line_number}: {error}"
+            ) from error
+        if not isinstance(decoded, dict):
+            raise PerformanceError(
+                f"device I/O result on line {line_number} must be an object"
+            )
+        record = cast(dict[str, object], decoded)
+        if record.get("schema_version") != 1:
+            raise PerformanceError(
+                f"unsupported device I/O schema on line {line_number}: "
+                f"{record.get('schema_version')!r}"
+            )
+        device_value = record.get("device")
+        if (
+            not isinstance(device_value, str)
+            or device_value not in DEVICE_IO_OPERATIONS
+        ):
+            raise PerformanceError(
+                f"invalid device I/O device on line {line_number}: {device_value!r}"
+            )
+        device = device_value
+        attempt_index = _device_io_int(record.get("attempt_index"), "attempt_index")
+        warmup = record.get("warmup")
+        if not isinstance(warmup, bool):
+            raise PerformanceError("device I/O warmup must be a boolean")
+        sample_value = record.get("sample_index")
+        if warmup:
+            if sample_value is not None:
+                raise PerformanceError("device I/O warmup sample_index must be null")
+            sample_index = None
+        else:
+            sample_index = _device_io_int(sample_value, "sample_index")
+        identity = (device, attempt_index)
+        if identity in attempts:
+            if warmup:
+                raise PerformanceError(
+                    f"duplicate {device} warmup attempt {attempt_index}"
+                )
+            raise PerformanceError(f"duplicate retained {device} sample {sample_index}")
+        attempts[identity] = (warmup, sample_index)
+        status = record.get("status")
+        if status not in {"success", "failure"}:
+            raise PerformanceError(
+                f"invalid device I/O status on line {line_number}: {status!r}"
+            )
+        results_value = record.get("results")
+        if not isinstance(results_value, list):
+            raise PerformanceError("device I/O results must be an array")
+        results = cast(list[object], results_value)
+        if status == "failure":
+            error_value = record.get("error")
+            if not isinstance(error_value, str) or not error_value:
+                raise PerformanceError("failed device I/O result must include an error")
+            if results:
+                raise PerformanceError(
+                    "failed device I/O result must not include measurements"
+                )
+            continue
+
+        expected_operations = set(DEVICE_IO_OPERATIONS[device])
+        actual_operations: set[str] = set()
+        parsed: dict[str, float] = {}
+        for result_value in results:
+            if not isinstance(result_value, dict):
+                raise PerformanceError("device I/O measurement must be an object")
+            result = cast(dict[str, object], result_value)
+            required = {
+                "device",
+                "operation",
+                "operations",
+                "bytes_per_operation",
+                "elapsed_ns",
+            }
+            if set(result) != required:
+                raise PerformanceError(
+                    f"device I/O measurement keys must be {sorted(required)}"
+                )
+            if result.get("device") != device:
+                raise PerformanceError(
+                    f"device I/O measurement device does not match {device}"
+                )
+            operation_value = result.get("operation")
+            if (
+                not isinstance(operation_value, str)
+                or operation_value not in expected_operations
+            ):
+                raise PerformanceError(
+                    f"invalid {device} operation in device I/O result: {operation_value!r}"
+                )
+            operation = operation_value
+            if operation in actual_operations:
+                raise PerformanceError(f"duplicate {device} {operation} measurement")
+            actual_operations.add(operation)
+            operations = _device_io_int(result.get("operations"), "operations")
+            elapsed_ns = _device_io_int(result.get("elapsed_ns"), "elapsed_ns")
+            bytes_per_operation = _device_io_int(
+                result.get("bytes_per_operation"), "bytes_per_operation"
+            )
+            expected_bytes = 64 if device == "virtio-net" else 4096
+            if operations == 0 or elapsed_ns == 0:
+                raise PerformanceError(
+                    f"{device} {operation} measurement must report nonzero work"
+                )
+            if bytes_per_operation != expected_bytes:
+                raise PerformanceError(
+                    f"{device} {operation} bytes_per_operation must be {expected_bytes}"
+                )
+            parsed[operation] = operations * 1_000_000_000 / elapsed_ns
+        if actual_operations != expected_operations:
+            missing = sorted(expected_operations - actual_operations)
+            raise PerformanceError(
+                f"missing {device} device I/O measurement(s): {', '.join(missing)}"
+            )
+        if not warmup:
+            for operation, value in parsed.items():
+                samples[(device, operation)].append(value)
+
+    if records == 0:
+        raise PerformanceError("missing device I/O result records")
+    if (expected_warmups is None) != (expected_runs is None):
+        raise PerformanceError(
+            "device I/O expected warmups and runs must be supplied together"
+        )
+    if expected_warmups is not None and expected_runs is not None:
+        if expected_warmups < 0 or expected_runs <= 0:
+            raise PerformanceError("invalid expected device I/O sampling controls")
+        total = expected_warmups + expected_runs
+        expected_attempts = {
+            (device, attempt_index)
+            for device in DEVICE_IO_OPERATIONS
+            for attempt_index in range(total)
+        }
+        missing_attempts = sorted(expected_attempts - set(attempts))
+        extra_attempts = sorted(set(attempts) - expected_attempts)
+        if missing_attempts or extra_attempts:
+            details: list[str] = []
+            if missing_attempts:
+                details.append(f"missing {missing_attempts}")
+            if extra_attempts:
+                details.append(f"unexpected {extra_attempts}")
+            raise PerformanceError(
+                "device I/O attempt coverage mismatch: " + "; ".join(details)
+            )
+        for (device, attempt_index), (warmup, sample_index) in attempts.items():
+            expected_warmup = attempt_index < expected_warmups
+            expected_sample = (
+                None if expected_warmup else attempt_index - expected_warmups
+            )
+            if warmup != expected_warmup or sample_index != expected_sample:
+                raise PerformanceError(
+                    f"device I/O attempt identity mismatch for {device}/{attempt_index}: "
+                    f"warmup={warmup!r}, sample_index={sample_index!r}"
+                )
+    missing_metrics = [
+        metric for key, metric in DEVICE_IO_METRICS.items() if not samples[key]
+    ]
+    if missing_metrics:
+        raise PerformanceError(
+            "missing successful device I/O samples: " + ", ".join(missing_metrics)
+        )
+    return {
+        metric: ("ops/s", "higher", statistics.median(samples[key]))
+        for key, metric in DEVICE_IO_METRICS.items()
+    }
+
+
 LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "cold-start.log": (_parse_cold_start, True),
     "virtfs.log": (_parse_virtfs, True),
@@ -387,6 +590,7 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
     "shell-snapshot.log": (_parse_shell_snapshot, False),
     "shell-snapshot-restore.log": (_parse_shell_snapshot_restore, False),
     "network.log": (_parse_network, False),
+    "device-io.log": (_parse_device_io, False),
 }
 
 PLATFORM_NAMES = {
@@ -1086,6 +1290,19 @@ def collect_results(
         )
 
     dimensions, workload_metadata = read_workload_dimensions(input_dir, platform)
+    device_io_suite = (
+        workload_metadata is not None and workload_metadata.get("suite") == "device-io"
+    )
+    if device_io_suite and (
+        require_network
+        or require_shell_snapshot
+        or require_shared_suite
+        or lifecycle_input is not None
+        or require_shell_snapshot_restore_512
+    ):
+        raise PerformanceError(
+            "device-io collection cannot be combined with lifecycle/shared-suite options"
+        )
 
     required_optional_logs = {
         "network.log": require_network,
@@ -1094,17 +1311,40 @@ def collect_results(
     collected: dict[str, MetricValue] = {}
     for filename, (parser, required_by_default) in LOG_PARSERS.items():
         path = input_dir / filename
-        required = (
-            filename == "shell-snapshot-restore.log"
-            if require_shell_snapshot_restore_512
-            else required_by_default or required_optional_logs.get(filename, False)
-        )
+        if device_io_suite:
+            required = filename == "device-io.log"
+        else:
+            required = (
+                filename == "shell-snapshot-restore.log"
+                if require_shell_snapshot_restore_512
+                else required_by_default or required_optional_logs.get(filename, False)
+            )
         if not path.exists():
             if required:
                 raise PerformanceError(f"required benchmark log not found: {path}")
             print(f"SKIP: optional benchmark log not found: {path}")
             continue
-        for metric, value in parser(_read_log(path)).items():
+        if filename == "device-io.log" and device_io_suite:
+            assert workload_metadata is not None
+            warmups = workload_metadata.get("warmups")
+            runs = workload_metadata.get("measured_runs")
+            if (
+                isinstance(warmups, bool)
+                or not isinstance(warmups, int)
+                or isinstance(runs, bool)
+                or not isinstance(runs, int)
+            ):
+                raise PerformanceError(
+                    "device-io metadata must contain integer warmups and measured_runs"
+                )
+            parsed_metrics = _parse_device_io(
+                _read_log(path),
+                expected_warmups=warmups,
+                expected_runs=runs,
+            )
+        else:
+            parsed_metrics = parser(_read_log(path))
+        for metric, value in parsed_metrics.items():
             metric = _platform_metric_name(platform, metric)
             if metric in collected:
                 raise PerformanceError(f"duplicate collected metric: {metric}")
@@ -1216,6 +1456,13 @@ def collect_results(
 
     if not collected:
         raise PerformanceError(f"no performance metrics found in {input_dir}")
+    if device_io_suite and collected.keys() != DEVICE_IO_METRIC_NAMES:
+        missing = sorted(DEVICE_IO_METRIC_NAMES - collected.keys())
+        extra = sorted(collected.keys() - DEVICE_IO_METRIC_NAMES)
+        raise PerformanceError(
+            "device-io suite must contain exactly five metrics "
+            f"(missing: {missing}; unexpected: {extra})"
+        )
     if require_shell_snapshot_restore_512:
         expected_restore_metrics = {"shell_snapshot_restore_512_mib"}
         if collected.keys() != expected_restore_metrics:

@@ -12,6 +12,7 @@ import contextlib
 import ctypes
 import datetime as dt
 import errno
+import hashlib
 import io
 import ipaddress
 import json
@@ -21,6 +22,7 @@ import re
 import select
 import shlex
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
@@ -50,6 +52,7 @@ NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
 WORKLOAD_SUITES = frozenset(
     {
         "cold-start",
+        "device-io",
         "virtfs",
         "shell-snapshot",
         "shell-snapshot-restore",
@@ -65,6 +68,23 @@ DEVICE_RESTORE_MODES = ("active", "deferred")
 DEVICE_RESTORE_MARKER_PREFIX = "NVX-VIRTIO-RESTORE-PROBE "
 VIRTIO_RESTORE_TRACE_MESSAGE = "virtio restore lifecycle"
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+DEVICE_IO_BACKENDS = frozenset({"kvm", "mshv", "whp"})
+DEVICE_IO_DEVICES = ("virtio-blk", "virtio-fs", "virtio-net")
+DEVICE_IO_OPERATIONS = {
+    "virtio-blk": ("read", "write"),
+    "virtio-fs": ("read", "write"),
+    "virtio-net": ("roundtrip",),
+}
+DEVICE_IO_GUEST_RESULT_PREFIX = "NVX_DEVICE_IO_GUEST_RESULT="
+DEVICE_IO_RESULT_PREFIX = "NVX_DEVICE_IO_RESULT="
+DEVICE_IO_COMPLETION_MARKER = b"NVX-DEVICE-IO-COMPLETE"
+DEVICE_IO_LOG_FILENAME = "device-io.log"
+DEVICE_IO_MEMORY_MIB = 256
+DEVICE_IO_SIZE_MIB = 512
+DEVICE_IO_DURATION_SECONDS = 10.0
+DEVICE_IO_WARMUPS = 5
+DEVICE_IO_RUNS = 30
+DEVICE_IO_PORT = 5201
 DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 VIRTFS_COMPLETION_MARKER = b"NVX-VIRTFS-WORKLOAD-COMPLETE"
 VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"
@@ -89,6 +109,7 @@ PERFORMANCE_LOG_FILENAMES = (
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
 MICROVM_ABI_VERSION = 2
+DEVICE_IO_MICROVM_ABI_VERSION = 1
 
 
 class ProfiledResult(TypedDict, total=False):
@@ -278,8 +299,18 @@ def configure_parser(
         default=repository_dir,
         help="repository containing build/vmlinux and build/initramfs.cpio.gz",
     )
-    parser.add_argument("--warmups", type=positive_int)
-    parser.add_argument("--runs", type=positive_int)
+    parser.add_argument(
+        "--warmups",
+        type=nonnegative_int,
+        default=None,
+        help=("excluded warmup attempts (default: 5 for device-io, 3 otherwise)"),
+    )
+    parser.add_argument(
+        "--runs",
+        type=positive_int,
+        default=None,
+        help=("retained attempts (default: 30 for device-io, 11 otherwise)"),
+    )
     parser.add_argument("--memory-mib", type=positive_int, default=128)
     parser.add_argument(
         "--processors",
@@ -338,6 +369,24 @@ def configure_parser(
         default=list(DEVICE_RESTORE_MODES),
         metavar="MODE",
         help="activation modes for --suite device-restore-profile",
+    )
+    parser.add_argument(
+        "--device-io-duration-seconds",
+        type=positive_float,
+        default=DEVICE_IO_DURATION_SECONDS,
+        help="measurement window for each device operation (default: 10)",
+    )
+    parser.add_argument(
+        "--device-io-size-mib",
+        type=positive_int,
+        default=DEVICE_IO_SIZE_MIB,
+        help="virtio-blk and virtio-fs backing-object size (default: 512)",
+    )
+    parser.add_argument(
+        "--device-io-port",
+        type=network_port,
+        default=DEVICE_IO_PORT,
+        help="same-host UDP echo port (default: 5201)",
     )
     parser.add_argument(
         "--net",
@@ -436,9 +485,19 @@ def positive_int(value: str) -> int:
 
 def apply_benchmark_suite_defaults(args: argparse.Namespace) -> None:
     if args.warmups is None:
-        args.warmups = 1 if args.suite == "device-restore-profile" else 3
+        if args.suite == "device-restore-profile":
+            args.warmups = 1
+        elif args.suite == "device-io":
+            args.warmups = DEVICE_IO_WARMUPS
+        else:
+            args.warmups = 3
     if args.runs is None:
-        args.runs = 5 if args.suite == "device-restore-profile" else 11
+        if args.suite == "device-restore-profile":
+            args.runs = 5
+        elif args.suite == "device-io":
+            args.runs = DEVICE_IO_RUNS
+        else:
+            args.runs = 11
     if args.shell_memories is None:
         default = (
             SNAPSHOT_PROFILE_MEMORY_MIB
@@ -459,6 +518,13 @@ def nonnegative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
+def network_port(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be in 1..65535")
     return parsed
 
 
@@ -1436,17 +1502,19 @@ def workload_boot_command(
     memory_mib: int,
     cmdline: str,
     *,
+    machine: str = "microvm-v2",
     processors: int = 1,
     command_prefix: Sequence[str] = (),
     network: str | None = None,
     mount: str | None = None,
+    virtio_blk: Path | None = None,
 ) -> list[str]:
     command = [
         *command_prefix,
         str(executable),
         "--single-process",
         "--machine",
-        "microvm-v2",
+        machine,
         "--processors",
         str(processors),
         "--hypervisor",
@@ -1464,6 +1532,8 @@ def workload_boot_command(
         append_network_arguments(command, network)
     if mount is not None:
         command.extend(("--mount", mount))
+    if virtio_blk is not None:
+        command.extend(("--virtio-blk", f"file:{virtio_blk}"))
     return command
 
 
@@ -1774,8 +1844,10 @@ def run_guest_script(
             "wall_ms": (time.perf_counter_ns() - started_ns) / 1_000_000,
             "peak_rss_bytes": peak_bytes,
         }
-    except Exception as error:
+    except BaseException as error:
         terminate(process)
+        if not isinstance(error, Exception):
+            raise
         tail = output[-4096:].decode("utf-8", "replace")
         if tail:
             raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
@@ -2284,6 +2356,472 @@ def _format_rate_summary(samples: Sequence[float]) -> str:
 
 def _guest_exit_script(teardown_mode: str) -> str:
     return "nvx-exit 0\n" if teardown_mode == "guest-exit" else ""
+
+
+def _device_io_script(
+    device: str,
+    duration_seconds: float,
+    size_mib: int,
+    teardown_mode: str,
+    *,
+    network_target: str | None = None,
+    network_port: int = DEVICE_IO_PORT,
+) -> str:
+    duration_ms = max(1, round(duration_seconds * 1000))
+    size_bytes = size_mib * 1024 * 1024
+    lines = [
+        "set -eu",
+        'trap \'status=$?; if [ "$status" -ne 0 ]; then echo "NVX-DEVICE-IO-ERROR status=$status"; nvx-exit "$status"; fi\' EXIT',
+        f"result_prefix={DEVICE_IO_GUEST_RESULT_PREFIX.removesuffix('=')}",
+        "emit_result() {",
+        '  result="$(/sbin/nvx-device-io "$@")"',
+        '  printf \'%s=%s\\n\' "$result_prefix" "$result"',
+        "}",
+    ]
+    if device == "virtio-blk":
+        lines.extend(
+            (
+                "tries=0",
+                'while [ ! -b /dev/vda ] && [ "$tries" -lt 200 ]; do sleep 0.05; tries=$((tries + 1)); done',
+                "[ -b /dev/vda ]",
+                f"emit_result file /dev/vda write {duration_ms} {size_bytes} direct existing",
+                f"emit_result file /dev/vda read {duration_ms} {size_bytes} direct existing",
+            )
+        )
+    elif device == "virtio-fs":
+        lines.extend(
+            (
+                f"emit_result file /mnt/host/device-io.bin write {duration_ms} {size_bytes} buffered create",
+                "sync",
+                "echo 3 > /proc/sys/vm/drop_caches",
+                f"emit_result file /mnt/host/device-io.bin read {duration_ms} {size_bytes} buffered existing",
+            )
+        )
+    elif device == "virtio-net":
+        if network_target is None:
+            raise ValueError("virtio-net device I/O requires a network target")
+        lines.append(
+            f"emit_result network {network_target} {network_port} {duration_ms}"
+        )
+    else:
+        raise ValueError(f"unsupported device I/O device: {device}")
+    lines.append(f"echo {DEVICE_IO_COMPLETION_MARKER.decode()}")
+    if teardown_mode == "guest-exit":
+        lines.append("nvx-exit 0")
+    return "\n".join(lines) + "\n"
+
+
+def _device_io_positive_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"device I/O result {field} must be a positive integer")
+    return value
+
+
+def parse_device_io_guest_results(text: str, device: str) -> list[dict[str, object]]:
+    if device not in DEVICE_IO_OPERATIONS:
+        raise ValueError(f"unsupported device I/O device: {device}")
+    parsed: dict[str, dict[str, object]] = {}
+    decoder = json.JSONDecoder()
+    for line in text.replace("\r", "\n").splitlines():
+        prefix = line.find(DEVICE_IO_GUEST_RESULT_PREFIX)
+        if prefix < 0:
+            continue
+        payload = line[prefix + len(DEVICE_IO_GUEST_RESULT_PREFIX) :].lstrip()
+        try:
+            decoded: object
+            decoded, _ = decoder.raw_decode(payload)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid device I/O result JSON: {error.msg}") from error
+        if not isinstance(decoded, dict):
+            raise ValueError("device I/O result must be an object")
+        value = cast(dict[str, object], decoded)
+        required = {
+            "device",
+            "operation",
+            "operations",
+            "bytes_per_operation",
+            "elapsed_ns",
+        }
+        if set(value) != required:
+            raise ValueError(f"device I/O result keys must be {sorted(required)}")
+        expected_helper = "network" if device == "virtio-net" else "file"
+        if value["device"] != expected_helper:
+            raise ValueError(
+                f"{device} result reports helper device {value['device']!r}"
+            )
+        operation_value = value["operation"]
+        if (
+            not isinstance(operation_value, str)
+            or operation_value not in DEVICE_IO_OPERATIONS[device]
+        ):
+            raise ValueError(f"unexpected {device} operation {operation_value!r}")
+        operation = operation_value
+        if operation in parsed:
+            raise ValueError(f"duplicate {device} {operation} result")
+        operations = _device_io_positive_int(value["operations"], "operations")
+        bytes_per_operation = _device_io_positive_int(
+            value["bytes_per_operation"], "bytes_per_operation"
+        )
+        elapsed_ns = _device_io_positive_int(value["elapsed_ns"], "elapsed_ns")
+        expected_bytes = 64 if device == "virtio-net" else 4096
+        if bytes_per_operation != expected_bytes:
+            raise ValueError(
+                f"{device} {operation} bytes_per_operation must be {expected_bytes}"
+            )
+        parsed[operation] = {
+            "device": device,
+            "operation": operation,
+            "operations": operations,
+            "bytes_per_operation": bytes_per_operation,
+            "elapsed_ns": elapsed_ns,
+        }
+    expected = set(DEVICE_IO_OPERATIONS[device])
+    missing = sorted(expected - set(parsed))
+    if missing:
+        raise ValueError(f"{device} results are missing {missing}")
+    return [parsed[operation] for operation in DEVICE_IO_OPERATIONS[device]]
+
+
+class UdpEchoServer:
+    def __init__(self, port: int) -> None:
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("0.0.0.0", port))
+        self.socket.settimeout(0.2)
+        self.stop = threading.Event()
+        self.error: OSError | None = None
+        self.thread = threading.Thread(
+            target=self._serve,
+            name="nvx-device-io-udp-echo",
+            daemon=True,
+        )
+
+    def __enter__(self) -> UdpEchoServer:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.stop.set()
+        self.thread.join(timeout=2)
+        self.socket.close()
+        if self.thread.is_alive() and exc_info[0] is None:
+            raise RuntimeError("UDP echo server did not stop")
+        if self.error is not None and exc_info[0] is None:
+            raise RuntimeError(f"UDP echo server failed: {self.error}")
+
+    def check(self) -> None:
+        if self.error is not None:
+            raise RuntimeError(f"UDP echo server failed: {self.error}")
+
+    def _serve(self) -> None:
+        try:
+            while not self.stop.is_set():
+                try:
+                    payload, address = self.socket.recvfrom(65535)
+                except TimeoutError:
+                    continue
+                if payload:
+                    self.socket.sendto(payload, address)
+        except OSError as error:
+            if not self.stop.is_set():
+                self.error = error
+
+
+def host_ipv4_address() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect(("1.1.1.1", 53))
+        address = probe.getsockname()[0]
+    try:
+        return str(ipaddress.IPv4Address(address))
+    except ipaddress.AddressValueError as error:
+        raise RuntimeError(
+            f"cannot determine host IPv4 address: {address!r}"
+        ) from error
+
+
+def _device_io_attempt_record(
+    device: str,
+    attempt_index: int,
+    warmups: int,
+    result: GuestCommandResult | None,
+    error: Exception | None,
+) -> dict[str, object]:
+    warmup = attempt_index < warmups
+    record: dict[str, object] = {
+        "schema_version": 1,
+        "attempt_index": attempt_index,
+        "sample_index": None if warmup else attempt_index - warmups,
+        "warmup": warmup,
+        "device": device,
+    }
+    if result is None:
+        assert error is not None
+        record.update(
+            {
+                "status": "failure",
+                "results": [],
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        return record
+    try:
+        measurements = parse_device_io_guest_results(result["text"], device)
+    except ValueError as parse_error:
+        record.update(
+            {
+                "status": "failure",
+                "results": [],
+                "error": f"{type(parse_error).__name__}: {parse_error}",
+            }
+        )
+        return record
+    record.update(
+        {
+            "status": "success",
+            "results": measurements,
+            "wall_ms": result["wall_ms"],
+            "peak_rss_bytes": result["peak_rss_bytes"],
+        }
+    )
+    return record
+
+
+def _device_io_completed_attempts(path: Path | None) -> set[tuple[str, int]]:
+    if path is None or not path.is_file():
+        return set()
+    completed: set[tuple[str, int]] = set()
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if not line.startswith(DEVICE_IO_RESULT_PREFIX):
+            continue
+        try:
+            decoded: object = json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid resumable device I/O record at {path}:{line_number}: {error}"
+            ) from error
+        if not isinstance(decoded, dict):
+            raise ValueError(
+                f"resumable device I/O record at {path}:{line_number} must be an object"
+            )
+        record = cast(dict[str, object], decoded)
+        device_value = record.get("device")
+        attempt_index = record.get("attempt_index")
+        if (
+            not isinstance(device_value, str)
+            or device_value not in DEVICE_IO_OPERATIONS
+            or (isinstance(attempt_index, bool) or not isinstance(attempt_index, int))
+        ):
+            raise ValueError(
+                f"invalid resumable device I/O identity at {path}:{line_number}"
+            )
+        device = device_value
+        identity = (device, attempt_index)
+        if identity in completed:
+            raise ValueError(
+                f"duplicate resumable device I/O attempt {device}/{attempt_index}"
+            )
+        completed.add(identity)
+    return completed
+
+
+def _append_device_io_record(path: Path | None, record: dict[str, object]) -> None:
+    line = DEVICE_IO_RESULT_PREFIX + json.dumps(
+        record, sort_keys=True, separators=(",", ":")
+    )
+    print(line, flush=True)
+    if path is None:
+        return
+    with path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write(line + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _read_device_io_records(path: Path) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(DEVICE_IO_RESULT_PREFIX):
+            decoded: object = json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
+            if isinstance(decoded, dict):
+                records.append(cast(dict[str, object], decoded))
+    return records
+
+
+def _print_device_io_summary(records: Sequence[dict[str, object]]) -> int:
+    rates: dict[tuple[str, str], list[float]] = {}
+    failures: dict[str, int] = {device: 0 for device in DEVICE_IO_DEVICES}
+    for record in records:
+        if record.get("warmup") is True:
+            continue
+        device = cast(str, record["device"])
+        if record.get("status") != "success":
+            failures[device] += 1
+            continue
+        for result in cast(list[dict[str, object]], record["results"]):
+            operation = cast(str, result["operation"])
+            rate = (
+                cast(int, result["operations"])
+                * 1_000_000_000
+                / cast(int, result["elapsed_ns"])
+            )
+            rates.setdefault((device, operation), []).append(rate)
+    print("device I/O operation rates:")
+    for device in DEVICE_IO_DEVICES:
+        for operation in DEVICE_IO_OPERATIONS[device]:
+            samples = rates.get((device, operation), [])
+            if samples:
+                print(
+                    f"  {device:<10} {operation:<9}: "
+                    f"{statistics.median(samples):.1f} ops/s  "
+                    f"(p95 {nearest_rank_percentile(samples, 95):.1f}, "
+                    f"min {min(samples):.1f}, max {max(samples):.1f}, "
+                    f"n={len(samples)}, failures={failures[device]})"
+                )
+            else:
+                print(
+                    f"  {device:<10} {operation:<9}: no successful samples "
+                    f"(failures={failures[device]})"
+                )
+    return sum(failures.values())
+
+
+def benchmark_device_io_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    output_path: Path | None,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> int:
+    if backend not in DEVICE_IO_BACKENDS:
+        raise ValueError(f"device-io is unsupported on OpenVMM/{backend}")
+    if args.processors != 1:
+        raise ValueError("device-io requires exactly one processor")
+    if args.device_io_size_mib < 64:
+        raise ValueError("device-io backing objects must be at least 64 MiB")
+    completed = _device_io_completed_attempts(output_path)
+    total_attempts = args.warmups + args.runs
+    expected_attempts = {
+        (device, attempt_index)
+        for device in DEVICE_IO_DEVICES
+        for attempt_index in range(total_attempts)
+    }
+    unexpected_attempts = sorted(completed - expected_attempts)
+    if unexpected_attempts:
+        raise ValueError(
+            f"device-io log contains unexpected attempts: {unexpected_attempts}"
+        )
+    with tempfile.TemporaryDirectory(prefix="openvmm-device-io-") as temporary:
+        root = Path(temporary)
+        if "," in str(root):
+            raise ValueError("device-io temporary directory must not contain a comma")
+        block = root / "block.raw"
+        with block.open("wb") as backing:
+            backing.truncate(args.device_io_size_mib * 1024 * 1024)
+        shared = root / "shared"
+        shared.mkdir()
+        network_target = None
+        for device in DEVICE_IO_DEVICES:
+            pending = any(
+                (device, attempt) not in completed for attempt in range(total_attempts)
+            )
+            if not pending:
+                print(
+                    f"device-io {device}: all {total_attempts} attempts already recorded"
+                )
+                continue
+            if device == "virtio-net":
+                network_target = host_ipv4_address()
+            network = (
+                getattr(args, "net", None) or "10.0.0.2/24"
+                if device == "virtio-net"
+                else None
+            )
+            mount = f"/mnt/host,{shared},rw" if device == "virtio-fs" else None
+            command = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                DEVICE_IO_MEMORY_MIB,
+                "quiet loglevel=0",
+                machine="microvm",
+                processors=1,
+                command_prefix=command_prefix,
+                network=network,
+                mount=mount,
+                virtio_blk=block if device == "virtio-blk" else None,
+            )
+            context = (
+                UdpEchoServer(args.device_io_port)
+                if device == "virtio-net"
+                else contextlib.nullcontext()
+            )
+            with context as echo_server:
+                for attempt_index in range(total_attempts):
+                    identity = (device, attempt_index)
+                    if identity in completed:
+                        continue
+                    warmup = attempt_index < args.warmups
+                    label = (
+                        f"warmup {attempt_index + 1}/{args.warmups}"
+                        if warmup
+                        else f"sample {attempt_index - args.warmups + 1}/{args.runs}"
+                    )
+                    print(f"device-io {device} {label}", flush=True)
+                    result = None
+                    error = None
+                    try:
+                        result = run_guest_script(
+                            command,
+                            _device_io_script(
+                                device,
+                                args.device_io_duration_seconds,
+                                args.device_io_size_mib,
+                                args.teardown_mode,
+                                network_target=network_target,
+                                network_port=args.device_io_port,
+                            ),
+                            DEVICE_IO_COMPLETION_MARKER,
+                            timeout=max(
+                                args.timeout,
+                                args.device_io_duration_seconds
+                                * len(DEVICE_IO_OPERATIONS[device])
+                                + 30,
+                            ),
+                            windows_cpus=windows_cpus,
+                            teardown_mode=args.teardown_mode,
+                        )
+                        if isinstance(echo_server, UdpEchoServer):
+                            echo_server.check()
+                    except Exception as run_error:
+                        error = run_error
+                    record = _device_io_attempt_record(
+                        device,
+                        attempt_index,
+                        args.warmups,
+                        result,
+                        error,
+                    )
+                    _append_device_io_record(output_path, record)
+                    completed.add(identity)
+    if completed != expected_attempts:
+        raise RuntimeError(
+            "device-io attempt set is incomplete after execution: "
+            f"{sorted(expected_attempts - completed)}"
+        )
+    if output_path is None:
+        return 0
+    failures = _print_device_io_summary(_read_device_io_records(output_path))
+    if failures:
+        raise RuntimeError(
+            f"device-io retained {failures} failed attempt(s); see {output_path}"
+        )
+    return 0
 
 
 def smp_probe_script(
@@ -3040,6 +3578,62 @@ def _git_revision(repository: Path) -> str | None:
         return None
 
 
+def _git_status(repository: Path) -> list[str] | None:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repository), "status", "--short"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _device_io_helper_provenance(
+    args: argparse.Namespace, initrd: Path
+) -> dict[str, str]:
+    source = require_file(
+        args.nvx_dir.resolve() / "alpine" / "nvx-device-io.c",
+        "device I/O helper source",
+    )
+    manifest_path = require_file(
+        initrd.with_name(f"{initrd.name}.packages.json"),
+        "initramfs package manifest",
+    )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        helper = manifest["helpers"]["nvx-device-io"]
+        source_sha256 = helper["source_sha256"]
+        binary_sha256 = helper["binary_sha256"]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"invalid nvx-device-io provenance in {manifest_path}"
+        ) from error
+    actual_source_sha256 = _sha256_file(source)
+    if source_sha256 != actual_source_sha256:
+        raise ValueError(
+            "initramfs device I/O helper source does not match the current checkout"
+        )
+    if not isinstance(binary_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", binary_sha256
+    ):
+        raise ValueError(f"invalid nvx-device-io binary hash in {manifest_path}")
+    return {
+        "source": str(source),
+        "source_sha256": actual_source_sha256,
+        "binary_sha256": binary_sha256,
+    }
+
+
 def write_benchmark_metadata(
     args: argparse.Namespace,
     output_dir: Path,
@@ -3049,17 +3643,23 @@ def write_benchmark_metadata(
     backend: str,
 ) -> Path:
     platform = args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
+    device_io = args.suite == "device-io"
+    microvm_abi_version = (
+        DEVICE_IO_MICROVM_ABI_VERSION if device_io else MICROVM_ABI_VERSION
+    )
+    processors = 1 if device_io else args.processors
     effective_network = (
         args.net or "10.0.0.2/24"
-        if args.suite in {"network-snapshot", "performance"}
+        if args.suite in {"network-snapshot", "performance", "device-io"}
         else args.net
     )
     document = {
         "schema_version": 1,
+        "suite": args.suite,
         "platform": platform,
         "backend": backend,
-        "microvm_abi_version": MICROVM_ABI_VERSION,
-        "processors": args.processors,
+        "microvm_abi_version": microvm_abi_version,
+        "processors": processors,
         "restore_processor_targets": (
             list(RESTORE_VCPU_TARGETS)
             if args.suite == "snapshot-restore-vcpu"
@@ -3074,6 +3674,7 @@ def write_benchmark_metadata(
             "virtfs": args.virtfs_memory_mib,
             "shell": args.shell_memories,
             "network": args.network_memory_mib,
+            "device_io": DEVICE_IO_MEMORY_MIB,
         },
         "warmups": args.warmups,
         "measured_runs": args.runs,
@@ -3082,6 +3683,9 @@ def write_benchmark_metadata(
         "virtfs_memory_mib": args.virtfs_memory_mib,
         "shell_memories_mib": args.shell_memories,
         "network_memory_mib": args.network_memory_mib,
+        "device_io_duration_seconds": args.device_io_duration_seconds,
+        "device_io_size_mib": args.device_io_size_mib,
+        "device_io_port": args.device_io_port,
         "artifacts": {
             "openvmm": str(executable),
             "kernel": str(kernel),
@@ -3091,8 +3695,30 @@ def write_benchmark_metadata(
             "nvx": _git_revision(args.nvx_dir.resolve()),
             "openvmm": _git_revision(args.openvmm_dir.resolve()),
         },
+        "repository_status": {
+            "nvx": _git_status(args.nvx_dir.resolve()),
+            "openvmm": _git_status(args.openvmm_dir.resolve()),
+        },
     }
+    if device_io:
+        document["artifact_sha256"] = {
+            "openvmm": _sha256_file(executable),
+            "kernel": _sha256_file(kernel),
+            "initrd": _sha256_file(initrd),
+            "benchmark_coordinator": _sha256_file(Path(__file__)),
+        }
+        document["device_io_helper"] = _device_io_helper_provenance(args, initrd)
     path = output_dir / BENCHMARK_METADATA_FILENAME
+    if device_io and path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"invalid resumable benchmark metadata {path}") from error
+        if existing != document:
+            raise ValueError(
+                f"device-io resume controls or provenance do not match {path}"
+            )
+        return path
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -3111,6 +3737,8 @@ def run_workload_benchmarks(
         raise ValueError("workload suites use --output-dir instead of --output")
     if args.suite == "network-snapshot" and backend not in NETWORK_SNAPSHOT_BACKENDS:
         raise ValueError(f"network-snapshot is unsupported on OpenVMM/{backend}")
+    if args.suite == "device-io" and backend not in DEVICE_IO_BACKENDS:
+        raise ValueError(f"device-io is unsupported on OpenVMM/{backend}")
     if args.suite == "performance":
         requested = ["cold-start", "virtfs", "shell-snapshot"]
         if backend in NETWORK_SNAPSHOT_BACKENDS:
@@ -3118,16 +3746,26 @@ def run_workload_benchmarks(
     else:
         requested = [args.suite]
     output_dir = args.output_dir
-    if output_dir is None and args.suite == "performance":
+    if output_dir is None and args.suite in {"performance", "device-io"}:
         platform = (
             args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
         )
-        output_dir = (
-            args.nvx_dir.resolve()
-            / "data"
-            / "runs"
-            / f"{platform}-microvm-v{MICROVM_ABI_VERSION}-{args.processors}vcpu"
-        )
+        if args.suite == "device-io":
+            output_dir = (
+                args.nvx_dir.resolve()
+                / "data"
+                / "runs"
+                / platform
+                / f"microvm-v{DEVICE_IO_MICROVM_ABI_VERSION}"
+                / "1vcpu"
+            )
+        else:
+            output_dir = (
+                args.nvx_dir.resolve()
+                / "data"
+                / "runs"
+                / f"{platform}-microvm-v{MICROVM_ABI_VERSION}-{args.processors}vcpu"
+            )
     if args.suite == "device-restore-profile" and output_dir is None:
         raise ValueError("device-restore-profile requires --output-dir")
     if output_dir is not None:
@@ -3165,6 +3803,22 @@ def run_workload_benchmarks(
             windows_cpus=windows_cpus,
         )
         return 0
+
+    if args.suite == "device-io":
+        assert output_dir is not None
+        path = output_dir / DEVICE_IO_LOG_FILENAME
+        result = benchmark_device_io_workload(
+            args,
+            executable,
+            kernel,
+            initrd,
+            backend,
+            output_path=path,
+            command_prefix=command_prefix,
+            windows_cpus=windows_cpus,
+        )
+        print(f"Wrote {path}", flush=True)
+        return result
 
     callbacks: dict[str, tuple[str, Callable[[], None]]] = {
         "cold-start": (

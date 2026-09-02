@@ -78,6 +78,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.output_dir, Path("results"))
         self.assertIs(args.handler, benchmark.run)
 
+    def test_device_io_uses_canonical_sampling_defaults(self):
+        args = nvx.parse_args(["benchmark", "--suite", "device-io"])
+
+        benchmark.apply_benchmark_suite_defaults(args)
+
+        self.assertEqual(args.warmups, 5)
+        self.assertEqual(args.runs, 30)
+        self.assertEqual(args.device_io_duration_seconds, 10.0)
+        self.assertEqual(args.device_io_size_mib, 512)
+        self.assertEqual(args.device_io_port, 5201)
+
     def test_benchmark_exposes_restore_only_shell_suite(self):
         args = nvx.parse_args(
             [
@@ -409,6 +420,36 @@ class CiTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_device_io_helper_is_static_with_nonexecutable_stack(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            destination = root / "root" / "sbin" / "nvx-device-io"
+            work.mkdir()
+            destination.parent.mkdir(parents=True)
+
+            def compile_helper(
+                command: list[str | os.PathLike[str]], **_kwargs: object
+            ) -> None:
+                output = Path(command[command.index("-o") + 1])
+                output.write_bytes(b"static-elf")
+
+            with (
+                patch.object(build, "require_tool", return_value="cc"),
+                patch.object(build, "run_checked", side_effect=compile_helper) as run,
+            ):
+                provenance = build._build_device_io_helper(work, destination)
+
+            command = run.call_args.args[0]
+            self.assertIn("-nostdlib", command)
+            self.assertIn("-static", command)
+            self.assertIn("-Wl,-z,noexecstack", command)
+            self.assertEqual(destination.read_bytes(), b"static-elf")
+            self.assertEqual(
+                provenance["binary_sha256"], common.sha256_file(destination)
+            )
+            self.assertEqual(len(provenance["source_sha256"]), 64)
+
     def test_sandbox_kernel_config_requires_every_feature(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / ".config"
@@ -1828,6 +1869,97 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(io.call_count, 4)
         self.assertEqual(roundtrip.call_count, 4)
+
+    def test_device_io_retains_failure_and_resumes_completed_attempts(self):
+        args = argparse.Namespace(
+            processors=1,
+            warmups=1,
+            runs=1,
+            device_io_duration_seconds=1.0,
+            device_io_size_mib=64,
+            device_io_port=5201,
+            net="192.0.2.2/24",
+            timeout=1.0,
+            teardown_mode="guest-exit",
+        )
+
+        def guest_result(command: list[str], *_args: object, **_kwargs: object):
+            if "--net" in command:
+                payload = (
+                    'NVX_DEVICE_IO_GUEST_RESULT={"device":"network",'
+                    '"operation":"roundtrip","operations":100,'
+                    '"bytes_per_operation":64,"elapsed_ns":1000000000}\n'
+                )
+            else:
+                payload = (
+                    'NVX_DEVICE_IO_GUEST_RESULT={"device":"file",'
+                    '"operation":"write","operations":100,'
+                    '"bytes_per_operation":4096,"elapsed_ns":1000000000}\n'
+                    'NVX_DEVICE_IO_GUEST_RESULT={"device":"file",'
+                    '"operation":"read","operations":100,'
+                    '"bytes_per_operation":4096,"elapsed_ns":1000000000}\n'
+                )
+            return {"text": payload, "wall_ms": 1.0, "peak_rss_bytes": 1}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "device-io.log"
+            with (
+                patch.object(benchmark, "host_ipv4_address", return_value="192.0.2.1"),
+                patch.object(benchmark, "UdpEchoServer") as echo_server,
+                patch.object(
+                    benchmark,
+                    "run_guest_script",
+                    side_effect=guest_result,
+                ) as run_guest,
+            ):
+                echo_server.return_value.__enter__.return_value = None
+                benchmark.benchmark_device_io_workload(
+                    args,
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initramfs"),
+                    "mshv",
+                    output_path=output,
+                )
+                self.assertEqual(run_guest.call_count, 6)
+                network_commands = [
+                    call.args[0]
+                    for call in run_guest.call_args_list
+                    if "--net" in call.args[0]
+                ]
+                self.assertEqual(len(network_commands), 2)
+                self.assertIn("192.0.2.2/24", network_commands[0])
+
+                benchmark.benchmark_device_io_workload(
+                    args,
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initramfs"),
+                    "mshv",
+                    output_path=output,
+                )
+                self.assertEqual(run_guest.call_count, 6)
+
+            records = benchmark._read_device_io_records(output)
+            self.assertEqual(len(records), 6)
+            retained = [record for record in records if not record["warmup"]]
+            self.assertEqual([record["sample_index"] for record in retained], [0, 0, 0])
+
+    def test_device_io_missing_guest_result_becomes_failure(self):
+        result: benchmark.GuestCommandResult = {
+            "text": (
+                'NVX_DEVICE_IO_GUEST_RESULT={"device":"file",'
+                '"operation":"read","operations":1,'
+                '"bytes_per_operation":4096,"elapsed_ns":1}\n'
+            ),
+            "wall_ms": 1.0,
+            "peak_rss_bytes": 1,
+        }
+
+        record = benchmark._device_io_attempt_record("virtio-blk", 0, 0, result, None)
+
+        self.assertEqual(record["status"], "failure")
+        self.assertIn("missing", str(record["error"]))
 
     def test_managed_tap_cleanup_uses_openvmm_pid(self):
         query: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(

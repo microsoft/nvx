@@ -219,13 +219,13 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,network-snapshot,performance,shell-snapshot,shell-snapshot-restore,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
+| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,device-io,network-snapshot,performance,shell-snapshot,shell-snapshot-restore,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
 | `--backend {whp,kvm,mshv,both}` | `both` on Windows; `kvm` elsewhere | Select the hypervisor backend. |
 | `--platform NAME` | inferred OS/backend | Record the host-typed performance series. |
 | `--openvmm-dir PATH` | `openvmm/` | Select the OpenVMM repository. |
 | `--nvx-dir PATH` | repository root | Select the NVX repository containing guest artifacts. |
-| `--warmups N` | `3` | Set the number of warmup runs. |
-| `--runs N` | `11` | Set the number of measured runs. |
+| `--warmups N` | `5` for `device-io`; `3` otherwise | Set the number of excluded warmup attempts; zero is allowed. |
+| `--runs N` | `30` for `device-io`; `11` otherwise | Set the number of retained attempts. |
 | `--memory-mib MIB` | `128` | Set guest memory for the general suites. |
 | `--processors {1,2,4,8}` | `1` | Run every cold, capture, restore, and workload launch with this ABI-v2 count. |
 | `--virtfs-runs N` | `3` | Set the number of virtio-fs workload samples. |
@@ -233,6 +233,9 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--payload-mib MIB` | `64` | Set the virtio-fs sequential I/O payload size. |
 | `--shell-memories MIB [MIB ...]` | `64 128 256 512` | Set the guest memory sizes for shell snapshot measurements. |
 | `--network-memory-mib MIB` | `256` | Set guest memory for the network snapshot workload. |
+| `--device-io-duration-seconds SECONDS` | `10` | Set each storage-operation or UDP round-trip measurement window. |
+| `--device-io-size-mib MIB` | `512` | Set the virtio-blk and virtio-fs backing-object size. |
+| `--device-io-port PORT` | `5201` | Set the same-host UDP echo port. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
 | `--network-profile {portable}` | none | Required with `--net`; selects the portable KVM/MSHV/WHP contract. |
 | `--cpus CPUSET` | one logical CPU per physical core | Set process affinity in `taskset` syntax. |
@@ -244,7 +247,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--output-dir PATH` | none | Write canonical workload logs to a directory. |
 | `--keep-kvm-stage` | off | Keep temporary staged KVM benchmark binaries. |
 
-Positive counts must be at least 1, and `--timeout` must be greater than zero.
+Measured counts must be at least 1; warmups may be zero, and timeouts must be greater than zero.
 The `e2e` suite uses the general memory size and measures cold start, snapshot
 generation, snapshot restore, guest-exit teardown, and peak RSS against the
 shell-ready markers. CI uses the default 128 MiB baseline.
@@ -277,8 +280,9 @@ reject incomplete inputs for their respective workload sets.
 `--require-shell-snapshot-restore-512` accepts only the canonical 512 MiB
 restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
-result, producing the 31-metric CI result. `--summary` writes the p50 table
-plus lifecycle min/max/sample-count and RSS diagnostics.
+result, producing the 31-metric ABI-v2 CI result. A directory whose metadata
+selects `device-io` is collected as five ABI-v1, one-vCPU `ops/s` metrics.
+`--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
 
 #### `performance collect-openvmm`
 

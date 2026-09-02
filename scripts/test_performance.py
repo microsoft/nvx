@@ -30,6 +30,48 @@ VIRTFS_LOG = """
     live exchange (cold each)         :     200 ms  (min 190, max 210, n=3)
 """
 
+DEVICE_IO_LOG = """
+NVX_DEVICE_IO_RESULT={"schema_version":1,"attempt_index":0,"device":"virtio-blk","sample_index":null,"status":"success","warmup":true,"results":[{"device":"virtio-blk","operation":"read","operations":900,"bytes_per_operation":4096,"elapsed_ns":1000000000},{"device":"virtio-blk","operation":"write","operations":800,"bytes_per_operation":4096,"elapsed_ns":1000000000}]}
+NVX_DEVICE_IO_RESULT={"schema_version":1,"attempt_index":1,"device":"virtio-blk","sample_index":0,"status":"success","warmup":false,"results":[{"device":"virtio-blk","operation":"read","operations":100,"bytes_per_operation":4096,"elapsed_ns":1000000000},{"device":"virtio-blk","operation":"write","operations":80,"bytes_per_operation":4096,"elapsed_ns":1000000000}]}
+NVX_DEVICE_IO_RESULT={"schema_version":1,"attempt_index":2,"device":"virtio-blk","sample_index":1,"status":"failure","warmup":false,"results":[],"error":"missing read result"}
+NVX_DEVICE_IO_RESULT={"schema_version":1,"attempt_index":3,"device":"virtio-blk","sample_index":2,"status":"success","warmup":false,"results":[{"device":"virtio-blk","operation":"read","operations":600,"bytes_per_operation":4096,"elapsed_ns":2000000000},{"device":"virtio-blk","operation":"write","operations":400,"bytes_per_operation":4096,"elapsed_ns":2000000000}]}
+NVX_DEVICE_IO_RESULT={"schema_version":1,"attempt_index":0,"device":"virtio-fs","sample_index":0,"status":"success","warmup":false,"results":[{"device":"virtio-fs","operation":"read","operations":300,"bytes_per_operation":4096,"elapsed_ns":1000000000},{"device":"virtio-fs","operation":"write","operations":200,"bytes_per_operation":4096,"elapsed_ns":1000000000}]}
+NVX_DEVICE_IO_RESULT={"schema_version":1,"attempt_index":0,"device":"virtio-net","sample_index":0,"status":"success","warmup":false,"results":[{"device":"virtio-net","operation":"roundtrip","operations":75,"bytes_per_operation":64,"elapsed_ns":500000000}]}
+"""
+
+
+def device_io_log(*, warmups: int = 0, runs: int = 1) -> str:
+    lines: list[str] = []
+    for device, operations in performance.DEVICE_IO_OPERATIONS.items():
+        for attempt_index in range(warmups + runs):
+            warmup = attempt_index < warmups
+            results: list[dict[str, object]] = []
+            for operation in operations:
+                results.append(
+                    {
+                        "device": device,
+                        "operation": operation,
+                        "operations": 100 + attempt_index,
+                        "bytes_per_operation": 64 if device == "virtio-net" else 4096,
+                        "elapsed_ns": 1_000_000_000,
+                    }
+                )
+            record: dict[str, object] = {
+                "schema_version": 1,
+                "attempt_index": attempt_index,
+                "device": device,
+                "sample_index": None if warmup else attempt_index - warmups,
+                "status": "success",
+                "warmup": warmup,
+                "results": results,
+            }
+            lines.append(
+                performance.DEVICE_IO_RESULT_PREFIX
+                + json.dumps(record, separators=(",", ":"))
+            )
+    return "\n".join(lines) + "\n"
+
+
 SNAPSHOT_LOG = """
   cold:       300.0 ms  (min 290.0, max 310.0, n=5)
   restore:     30.0 ms  (min 29.0, max 31.0, n=5)
@@ -376,6 +418,97 @@ class PerformanceTests(unittest.TestCase):
             performance._platform_metric_name("linux-kvm", "virtfs_live_roundtrip"),
             "virtfs_live_roundtrip",
         )
+
+    def test_device_io_parser_filters_warmups_and_retains_failures(self):
+        metrics = performance._parse_device_io(DEVICE_IO_LOG)
+
+        self.assertEqual(
+            metrics,
+            {
+                "virtio_blk_random_read_iops": ("ops/s", "higher", 200.0),
+                "virtio_blk_random_write_iops": ("ops/s", "higher", 140.0),
+                "virtio_fs_random_read_iops": ("ops/s", "higher", 300.0),
+                "virtio_fs_random_write_iops": ("ops/s", "higher", 200.0),
+                "virtio_net_udp_roundtrip_ops": ("ops/s", "higher", 150.0),
+            },
+        )
+
+    def test_device_io_parser_rejects_duplicate_attempts(self):
+        duplicate = DEVICE_IO_LOG + DEVICE_IO_LOG.splitlines()[2] + "\n"
+
+        with self.assertRaisesRegex(
+            performance.PerformanceError,
+            r"duplicate retained virtio-blk sample 0",
+        ):
+            performance._parse_device_io(duplicate)
+
+    def test_device_io_parser_rejects_missing_and_zero_results(self):
+        missing = device_io_log().replace(
+            ',{"device":"virtio-blk","operation":"write","operations":100,"bytes_per_operation":4096,"elapsed_ns":1000000000}',
+            "",
+            1,
+        )
+        with self.assertRaisesRegex(
+            performance.PerformanceError, r"missing virtio-blk"
+        ):
+            performance._parse_device_io(missing)
+
+        zero = device_io_log().replace('"operations":100', '"operations":0', 1)
+        with self.assertRaisesRegex(performance.PerformanceError, r"nonzero work"):
+            performance._parse_device_io(zero)
+
+    def test_device_io_parser_requires_every_configured_attempt(self):
+        incomplete = "\n".join(device_io_log(warmups=1, runs=2).splitlines()[:-1])
+
+        with self.assertRaisesRegex(
+            performance.PerformanceError,
+            r"attempt coverage mismatch.*virtio-net",
+        ):
+            performance._parse_device_io(
+                incomplete,
+                expected_warmups=1,
+                expected_runs=2,
+            )
+
+    def test_collects_device_io_metrics_with_abi_dimension(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "device-io.log").write_text(
+                device_io_log(warmups=1, runs=2), encoding="utf-8"
+            )
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "suite": "device-io",
+                        "platform": "linux-mshv-baremetal",
+                        "backend": "mshv",
+                        "microvm_abi_version": 1,
+                        "processors": 1,
+                        "warmups": 1,
+                        "measured_runs": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result_path = performance.collect_results(
+                "linux-mshv-baremetal",
+                "abc123",
+                logs,
+                root / "results",
+            )
+            results = performance.read_results(result_path)
+
+            self.assertEqual(result_path.name, "linux-mshv-baremetal.csv")
+            self.assertEqual(
+                {result.metric for result in results},
+                set(performance.DEVICE_IO_METRIC_NAMES),
+            )
+            self.assertEqual(len(results), 5)
+            self.assertTrue(all(result.unit == "ops/s" for result in results))
+            self.assertTrue(all(result.direction == "higher" for result in results))
 
     def test_collects_linux_metrics_from_utf8_and_utf16_logs(self):
         with tempfile.TemporaryDirectory() as temporary:

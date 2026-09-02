@@ -69,6 +69,13 @@ python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
     --require-network --require-shell-snapshot --require-shared-suite \
     --summary "$output_dir/summary.md"
+device_output_dir="$output_dir/device-io"
+python3 scripts/nvx.py benchmark --suite device-io --backend kvm \
+    --platform "$platform" --processors 1 --skip-build \
+    --output-dir "$device_output_dir"
+python3 scripts/nvx.py performance collect --platform "$platform" \
+    --commit "$commit" --input-dir "$device_output_dir" \
+    --output-dir "$output_dir/results" --summary "$output_dir/summary.md"
 printf 'NVX_RESULTS=%s\n' "$output_dir"
 ```
 
@@ -90,6 +97,13 @@ python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
     --require-network --require-shell-snapshot --require-shared-suite \
     --summary "$output_dir/summary.md"
+device_output_dir="$output_dir/device-io"
+python3 scripts/nvx.py benchmark --suite device-io --backend mshv \
+    --platform "$platform" --processors 1 --skip-build \
+    --output-dir "$device_output_dir"
+python3 scripts/nvx.py performance collect --platform "$platform" \
+    --commit "$commit" --input-dir "$device_output_dir" \
+    --output-dir "$output_dir/results" --summary "$output_dir/summary.md"
 printf 'NVX_RESULTS=%s\n' "$output_dir"
 ```
 
@@ -111,6 +125,13 @@ python scripts\nvx.py performance collect --platform $platform `
     --commit $commit --input-dir $outputDir --output-dir "$outputDir\results" `
     --require-network --require-shell-snapshot --require-shared-suite `
     --summary "$outputDir\summary.md"
+$deviceOutputDir = "$outputDir\device-io"
+python scripts\nvx.py benchmark --suite device-io --backend whp `
+    --platform $platform --processors 1 --skip-build `
+    --output-dir $deviceOutputDir
+python scripts\nvx.py performance collect --platform $platform `
+    --commit $commit --input-dir $deviceOutputDir `
+    --output-dir "$outputDir\results" --summary "$outputDir\summary.md"
 Write-Output "NVX_RESULTS=$outputDir"
 ```
 
@@ -128,8 +149,8 @@ For SSH execution, retrieve only that fresh directory with the user's configured
 the full checkout or credential files. Preserve the remote copy unless the user asks
 for cleanup.
 
-Verify that the retained result set contains raw workload logs, `summary.md`, and
-collected CSV files.
+Verify that the retained result set contains raw workload logs, `device-io/device-io.log`,
+`summary.md`, and collected CSV files.
 
 ## Report
 

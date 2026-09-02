@@ -254,6 +254,36 @@ def _build_static_helper(work: Path, source: Path, destination: Path) -> None:
     destination.chmod(0o755)
 
 
+def _build_device_io_helper(work: Path, destination: Path) -> dict[str, str]:
+    compiler = require_tool("cc")
+    source = REPO_ROOT / "alpine" / "nvx-device-io.c"
+    output = work / "nvx-device-io"
+    run_checked(
+        [
+            compiler,
+            "-nostdlib",
+            "-static",
+            "-Os",
+            "-fno-builtin",
+            "-fno-pie",
+            "-fno-stack-protector",
+            "-no-pie",
+            "-Wl,--build-id=none",
+            "-Wl,-z,noexecstack",
+            "-s",
+            "-o",
+            output,
+            source,
+        ]
+    )
+    shutil.copyfile(output, destination)
+    destination.chmod(0o755)
+    return {
+        "source_sha256": sha256_file(source),
+        "binary_sha256": sha256_file(output),
+    }
+
+
 def _apk_add(root: Path, *packages: str) -> None:
     loader = root / "lib" / "ld-musl-x86_64.so.1"
     environment = os.environ.copy()
@@ -344,6 +374,7 @@ def _write_apk_manifest(
     root: Path,
     output: Path,
     config: AlpineBuildConfig,
+    helpers: dict[str, dict[str, str]],
 ) -> None:
     installed = root / "lib" / "apk" / "db" / "installed"
     packages: list[ApkPackage] = []
@@ -377,6 +408,7 @@ def _write_apk_manifest(
                 "alpine_branch": config.branch,
                 "architecture": "x86_64",
                 "packages": packages,
+                "helpers": helpers,
             },
             indent=2,
         )
@@ -433,8 +465,14 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         REPO_ROOT / "alpine" / "nvx-mmio-write.c",
         root / "sbin" / "nvx-mmio-write",
     )
+    device_io = _build_device_io_helper(config.work, root / "sbin" / "nvx-device-io")
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    _write_apk_manifest(root, config.output, config)
+    _write_apk_manifest(
+        root,
+        config.output,
+        config,
+        {"nvx-device-io": device_io},
+    )
     _pack_initramfs(root, config.output)
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
 
