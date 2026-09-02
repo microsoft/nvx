@@ -48,27 +48,91 @@ The first command needs only the OpenVMM checkout. The second needs the
 standard build outputs above and writes complete per-scenario logs under
 `build/test-results/microvm` by default.
 
-An NVX guest-agent binary is a separately built, optional input. Stage it only
-with its expected SHA-256:
+These are the ABI-v1/legacy artifacts. They continue to use `alpine/init` and,
+when selected by the legacy sandbox token, `nvx-init-agent`.
+
+The broker artifact uses the reviewed ACI-04 source revision
+`2e162fc068cef028e38ac23b6e0a1892a01a209c`. That revision computes the
+running `/proc/self/exe` SHA-256 and compares it with the authenticated
+manifest, and includes the required typed admission and gap semantics. Build
+`guestagent-nvx` from a clean checkout at that revision with locked
+dependencies, an external target directory, and static musl:
+
+```bash
+cd ACI.Sandbox.GuestAgent.Rust
+export CARGO_TARGET_DIR=/outside/source/nvx-agent-target
+export NVX_VALIDATION_OUT=/outside/source/nvx-agent-validation
+rustup target add x86_64-unknown-linux-musl
+sh scripts/validate-nvx-agent.sh
+sha256sum \
+  "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/nvx-agent"
+```
+
+The ACI validator rejects `PT_INTERP`, forbidden CLH/runc/tonic dependencies,
+and binaries larger than 16 MiB. The release input is the persistent staged
+artifact whose SHA-256 is
+`5cc3ea5612eaa1a3b1e301b0107123fd71e56e632742e72a9372632c22206d69`,
+size is `1,786,656` bytes, and ELF GNU build ID is
+`1fba7a91409d351e484de4c6d792ac009ca34f63`. The source revision records
+provenance; it is not sufficient byte identity. The current linker build ID is
+affected by the Cargo target path, so a build from the same source into a
+different target directory can have another digest. Do not claim source-only
+byte reproducibility. Stage only the reviewed external input:
 
 ```bash
 python3 scripts/nvx.py stage-agent \
-  --input /path/to/nvx-agent \
-  --sha256 <64-hex-digit-sha256>
+  --input build/nvx-agent-2e162fc0-input \
+  --sha256 5cc3ea5612eaa1a3b1e301b0107123fd71e56e632742e72a9372632c22206d69
 ```
 
 The command requires a static x86-64 ELF and writes `build/nvx-agent` plus its
-pin. It does not install or select the agent in the initramfs; that cutover is a
-separate integration step after the PID-1 runtime is complete.
+pin. It rejects missing inputs, any digest or size other than the reviewed
+external input, a dynamic or wrong-arch ELF, and the size limit. Build the
+distinct broker image explicitly:
 
-The initramfs includes the sandbox PID-1 bootstrap, its container namespace
-helpers, the static `nvx-device-io` benchmark helper, and the static
-`nvx-port-io` restore packet helper under `/sbin`. The matching kernel enables
-virtio-blk, compressed EROFS, overlayfs, ext4 scratch, memory cgroups, cgroup
-BPF, seccomp filters, and safe overlay redirect handling. The build fails if
-`olddefconfig` drops any required option. The APK manifest records the `blkid`
-and `util-linux` tools used by the bootstrap plus the device helper's source
-and binary SHA-256 values.
+```bash
+python3 scripts/nvx.py build-agent-initramfs       # Docker
+# or on Linux:
+python3 scripts/nvx.py build-agent-initramfs --native
+```
+
+Native initramfs construction automatically uses
+`~/.cache/nvx/native-work/<profile>` rather than the repository filesystem.
+Set `NVX_NATIVE_WORK_DIR` to select another native Linux work root. The command
+rejects DrvFS/9P, NTFS, CIFS, and other filesystems that cannot preserve the
+mode and symlink probe. The verified archive and package manifest are copied
+atomically to `build/` only after construction and readback succeed. Docker
+builds use the container's native Linux filesystem.
+
+This produces `build/initramfs-agent.cpio.gz` and its package manifest without
+changing `build/initramfs.cpio.gz`. `/init` is a symlink to the verified
+`/sbin/nvx-agent`, so the kernel invokes the agent as PID 1 with no arguments.
+The verifier models kernel extraction in archive order. It rejects duplicate,
+case-colliding, or non-canonical paths; missing, symlink, or non-directory
+ancestors; type replacement; untrusted or escaping symlinks; repeated inode
+identities and regular-file hardlinks; unsafe entry types or modes; flattened
+directory modes; wrong ownership; incorrect Alpine password/group/shadow
+modes; and a wrong agent or PID-1 identity. The packer emits every file with
+an independent inode identity and link count one. The broker image retains the
+legacy helper files so its rootfs differs only by the intended `/init`
+replacement and `/sbin/nvx-agent` addition.
+
+The matching kernel assertions cover cgroup-v2 memory, pids, CPU weight,
+freezer and BPF; BPF and seccomp syscalls/filters; EROFS, overlay, ext4 and GPT;
+virtio block/console/MMIO; devtmpfs, PTYs, proc/sysfs/tmpfs; and mount, PID,
+UTS, and IPC namespaces. CFS bandwidth remains disabled because CPU quota is
+unused. Linux 6.18 supplies `clone3`, pidfds, `openat2`, and `close_range`
+unconditionally; their runtime availability is exercised by ACI-04 rather
+than represented by obsolete/nonexistent Kconfig switches.
+
+The executable SHA-256 above is the authoritative byte identity used by the
+manifest contract; source revision and ELF build ID remain separate fields.
+The source revision does not reproduce or authenticate binary bytes by itself.
+
+Both initramfs profiles retain the sandbox helpers, including the static
+`nvx-device-io` benchmark helper and static `nvx-port-io` restore packet helper
+under `/sbin`. The APK manifest records the device helper's source and binary
+SHA-256 values.
 
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact

@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
+import hashlib
 import json
 import os
 import re
 import shutil
 import ssl
+import stat
 import struct
-import subprocess
 import sys
+import tarfile
 import tempfile
+import zlib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TypedDict
 
 from .common import (
@@ -48,21 +53,111 @@ REQUIRED_VIRTIO_CONSOLE_CONFIG = (
 REQUIRED_SHARED_STATUS_KERNEL_CONFIG = ("CONFIG_VIRTIO_MMIO_SHARED_STATUS=y",)
 REQUIRED_SANDBOX_KERNEL_CONFIG = (
     "CONFIG_BPF_SYSCALL=y",
+    "CONFIG_CGROUPS=y",
     "CONFIG_CGROUP_BPF=y",
+    "CONFIG_CGROUP_FREEZER=y",
+    "CONFIG_CGROUP_PIDS=y",
+    "CONFIG_CGROUP_SCHED=y",
+    "CONFIG_DEVTMPFS=y",
+    "CONFIG_EFI_PARTITION=y",
     "CONFIG_EROFS_FS=y",
     "CONFIG_EROFS_FS_ZIP=y",
     "CONFIG_EROFS_FS_ZIP_ZSTD=y",
     "CONFIG_EXT4_FS=y",
+    "CONFIG_FAIR_GROUP_SCHED=y",
+    "# CONFIG_CFS_BANDWIDTH is not set",
     "CONFIG_MEMCG=y",
+    "CONFIG_NAMESPACES=y",
+    "CONFIG_UTS_NS=y",
+    "CONFIG_IPC_NS=y",
+    "CONFIG_PID_NS=y",
     "CONFIG_OVERLAY_FS=y",
     "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
+    "CONFIG_PROC_FS=y",
+    "CONFIG_SECCOMP=y",
     "CONFIG_SECCOMP_FILTER=y",
+    "CONFIG_SYSFS=y",
+    "CONFIG_TMPFS=y",
+    "CONFIG_UNIX98_PTYS=y",
     "CONFIG_VIRTIO_BLK=y",
+    "CONFIG_VIRTIO_CONSOLE=y",
+    "CONFIG_VIRTIO_MMIO=y",
+    "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
 )
 GUEST_AGENT_ARTIFACT_NAME = "nvx-agent"
 GUEST_AGENT_SHA256_NAME = f"{GUEST_AGENT_ARTIFACT_NAME}.sha256"
+AGENT_INITRAMFS_NAME = "initramfs-agent.cpio.gz"
+GUEST_AGENT_ARTIFACT_PATH = f"guest/{GUEST_AGENT_ARTIFACT_NAME}"
+GUEST_AGENT_INITRAMFS_ARTIFACT_PATH = f"guest/{AGENT_INITRAMFS_NAME}"
+GUEST_AGENT_INSTALLED_PATH = f"/sbin/{GUEST_AGENT_ARTIFACT_NAME}"
 GUEST_AGENT_TARGET = "x86_64-unknown-linux-musl"
+GUEST_AGENT_MAXIMUM_BYTES = 16 * 1024 * 1024
+GUEST_AGENT_SOURCE_REVISION = "2e162fc068cef028e38ac23b6e0a1892a01a209c"
+GUEST_AGENT_SHA256 = "5cc3ea5612eaa1a3b1e301b0107123fd71e56e632742e72a9372632c22206d69"
+GUEST_AGENT_SIZE_BYTES = 1_786_656
+GUEST_AGENT_BUILD_ID = "1fba7a91409d351e484de4c6d792ac009ca34f63"
+BROKER_TRANSPORT = "broker-ttrpc"
+GUEST_AGENT_PROTOCOL_SCHEMA_VERSION = 1
+MICROVM_ABI_VERSION = 2
+CONTROL_SESSION_PROTOCOL_VERSION = 1
+CONTROL_CONTRACT_REVISION = "nvx-microvm-v2-control-v1"
 OPENVMM_PROVENANCE_NAME = "openvmm.provenance.json"
+UNSAFE_INITRAMFS_FILESYSTEMS = frozenset(
+    {
+        "9p",
+        "cifs",
+        "drvfs",
+        "exfat",
+        "fuseblk",
+        "msdos",
+        "ntfs",
+        "smb2",
+        "v9fs",
+        "vfat",
+    }
+)
+INITRAMFS_MAX_COMPRESSED_BYTES = 512 * 1024 * 1024
+INITRAMFS_MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+INITRAMFS_MAX_MEMBERS = 200_000
+INITRAMFS_MAX_MEMBER_BYTES = 512 * 1024 * 1024
+INITRAMFS_MAX_NAME_BYTES = 4096
+# Exact path/target pairs from the pinned Alpine rootfs after required APK installs.
+_TRUSTED_INITRAMFS_SYMLINK_COUNT = 341
+_TRUSTED_INITRAMFS_SYMLINKS_SHA256 = (
+    "231e5e9d56f95831135f69559ec65cebf0ed111433176214be7a16b2bff76e32"
+)
+_TRUSTED_INITRAMFS_SYMLINKS_B85 = (
+    "c-qBU+ji=@4t-|*3jqS8?c4c}^U&eg4)IB1d)W@RuRn5tKoW_TcI>f7*Cm-#GO{dLvT3gLf;nE!7CAiStv}`F_$N"
+    "LykAOMzGTR_{&W$eAZpv^L5U^w+I1Jx8i@}W%7;Fw2fsOX|G{EQb7##B#8u<Xhf<#c{Gev=5+6&V#r8R4?VcN!44"
+    "MRRw!VC~}=OiLru-Z!u4!AE1QPeHAh6ORcKWRRNap7I7&kDm)v@|~8zEQwn0irBtHDXPbi%*CJWTZ;f^%Sj@u28f"
+    "+uG86~^{ykm3^57rWQ=i?MB=SBJB7g>!|=7L&jxW@!z$S*%xz62l*3?+<w;Wo*<j;a-1*IZifI{eVXZh~pjE;Y7_"
+    "4_Vnqjb&pVk?OK#%y+I;Dfuh^-crJ|K>9vM>(!uxl_3^}1{I+%gxCPxVq@VDQo@hJ-7YuD+I72I8yXLpUL5i(qKB"
+    "L!=|1X|VzkT#Goa#S^_Hrg2~a8~Z#d8#3@k6Ieb=5?FczFQ(POcewF$Cu<3{DY7wdYn4BsosjqSf=d??E1Ow-@KB"
+    "rP@j(>|K2G|CyKoa-C9AviVyr)w@<Wk}RY5{*>B21bi+xC!%NhKeF8@T+;4e=a@X7r6o_%JU#G7O_tHpeb{qbEX="
+    "8#WAcU*AszW~vD#Heu{?NA}@q>^?-k$YQDD*lD?yh@;crZbtw=OMaA(aiwe$w^dpc**L3z^cG{i7O>0CI3oD?Q6D"
+    "|DA!`XP+Fm%t_=jlNuZR+y{FLeEfd0_#I!112`$yGL>Xt=AaSOxaU!%@%Nn67s94xEYQw~|QMppE3o}%S@JS=&9)"
+    "l}keBn{1@RvAisu(>(bd92$DY`Ehwya=e%tf35@8*~f<5s2$j4(*i?-*+i(wPENa!d)<1_Sj1V`Xj(X1Qx{2U8IN"
+    "<t28&28{~Hkq{WiV$7dB4>e8@0Rs_+tF)rzmLtTTOzo}^2!l~)K2ES(YxZ9PCUADBa3UUSrgf`lIe||qTF-RtaY~"
+    "TW;&!J<Ene;kC0_ZqAt)$+j-VRCc5WJKG^-53IHO~2CdiWw_CSy=F)KkhT}W2fhEvWEYMgs_#?ea*n^M|pbtKr9!"
+    "W-K)7#=-s-oz$NYEK+3(}LuPl`9yBO@!bSHC|zAigA+gN)as7?x%AD5!-$t(n7n7f4~klv2nM4<4VHZa#DwS1`d;"
+    "o;MDp(o83-wJxB>_=&r}d$r~9Dnj{H56cL#9<Pg&{-V_wmdLpT6dK0P74Wk%iNwr37$$g|zkm0Z~5NuVb!cd%L-X"
+    "91@Ya+=t;a=UyK*f?aWlL;nIvyAZ3Tm6FC`CiqZ7k$8;m2q51uhV|W~Ub|JvF`C=&4D&)-&;VOvIJ-oN0;*<aPjO"
+    "Xkvqmz2UT}ePC<LLP@b+29i=|!Wb|AQbefai5nq_eDft+k&zB$y3L-^>u2P4l|G@(0W70PCj~{d#5#K82+zT3PEk"
+    "~V$k<W7p^S&7ks=fkn}J)u7f(w=ph7LkT7OY_;J{AIFhEgyuBxa$ATow(NrEAAEjS8iTq1q?l+P#u(m`;F;EWtNo"
+    "JfLBsY};Rn9|+rq|+MO>StXH^i+RI=9og;MX~gD0vuW4B1f%KtB+@jIa4Q$*3!Y!wnFmBW%Qkunr8Qkz@fJ#=Djy"
+    "H-M}7*^gQgS&Gk?!UQ(1H3Dzi*Q^aasF0>}0b7YR%hmJ=gppJCkbHX<K>up<JS4v!O*&g5EXZa|{nVsuhq?WVcYy"
+    "25Vn&wkF7rAscdQVo5lENAL$(meA9r}?c;COtQ+J5ZYbFv;t#Itli;QcLmAITj<TKM~5_t#|eC|3yOtKLWVx3Q19"
+    "i`QQ6{x+7=ymfFiIz%#?je#V4l(nqsXL5T^-nT<X0`b`>&mSf4K=PhW#0R2;n6H?FT60~v?Q9B-m&P~D1#W8JJ7I"
+    "{79pUfJzdjE6HZ;~>jO#{wd{5TH#cbP$IPPCSYB1ut7dhYfwBxVW#$xVEiS?8>zB`!FG=8GHT|7^|<mt)WP40_&j"
+    "+a#De5Kvwe(X*<qbWrp>u0k8`pInKSG!~@(MiZqN;f~SN)kg9Kq&!f{>4B=j`qR+ddmJny9{57C<y5<M6PGsEn!B"
+    "yATEritklp3#4C{}^ueh>IZEeZ&g-}#QUc>C-l_Qg8*+==^G>ipb8=5naIRtag~OF^%w9fCCNH&U&>s1ATl>VLz}"
+    "99LuX723OP~D3s)nz_r)&M5$dt^<1+&!x4lsVfVj0gi3pmz6P|d-Avi?u4eDKKy>b^ryjN8q(@2igw!Fl35OKjVH"
+    "efI;kUs{o^GA7sC<%?E~)le&3Qx@NvQo0f8Tb{q_iILi`Y={&3cuO}w@WZ1TVZ;9I-}l4!Y={#Qh0K58hetKchT0"
+    "gtdm%EjoTbY`zG}%x4YQ<C)_*feW%j|@%jq#z!;G+Spxo5*dpXbZeDjvQyj2X<erZKq<D94KAB4uE8fJxqR(1c)u"
+    "vjvlE<ZkAwPK|9TPs$X$k$8px-SN5m=%8gu{?fndF7^9y@{8jVyN~j8{*>fb<Tef6OU?`4RAF6&QKecvE}>b)eIf"
+    "0{lWs+f7i0u{9xN2sQtnMaA%gub@BQt4Ack<KEIa||Lj71(}-=Ft+?c`uf<U9cSe9;w^D9DUSE!Z+MhjxV{5$h0)"
+    "5x&?zscw?@3&+?$ujk>h7d>`?}dj`tm3KzSRwVknS39pyU7l2X5F9X#"
+)
 
 
 class ApkPackage(TypedDict):
@@ -75,6 +170,55 @@ class ApkPackage(TypedDict):
     description: str | None
     aports_commit: str | None
     build_time: str | None
+
+
+@dataclass(frozen=True)
+class InitramfsEntry:
+    order: int
+    name: str
+    inode: int
+    mode: int
+    file_type: int
+    uid: int
+    gid: int
+    nlink: int
+    devmajor: int
+    devminor: int
+    rdevmajor: int
+    rdevminor: int
+    data_start: int
+    data_end: int
+    data_sha256: str
+    data: bytes
+    symlink_target: str | None
+
+    @property
+    def identity(self) -> tuple[int, int, int]:
+        return (self.devmajor, self.devminor, self.inode)
+
+
+def _load_trusted_initramfs_symlinks() -> frozenset[tuple[str, str]]:
+    try:
+        raw = zlib.decompress(
+            base64.b85decode(_TRUSTED_INITRAMFS_SYMLINKS_B85.encode("ascii"))
+        )
+    except (ValueError, zlib.error) as error:
+        raise ScriptError("trusted initramfs symlink baseline is corrupt") from error
+    if hashlib.sha256(raw).hexdigest() != _TRUSTED_INITRAMFS_SYMLINKS_SHA256:
+        raise ScriptError("trusted initramfs symlink baseline has the wrong SHA-256")
+    parsed_links: list[tuple[str, str]] = []
+    for line in raw.decode("utf-8").splitlines():
+        name, separator, target = line.partition("\t")
+        if not separator:
+            raise ScriptError("trusted initramfs symlink baseline has invalid entries")
+        parsed_links.append((name, target))
+    links = frozenset(parsed_links)
+    if len(links) != _TRUSTED_INITRAMFS_SYMLINK_COUNT:
+        raise ScriptError("trusted initramfs symlink baseline has invalid entries")
+    return links
+
+
+TRUSTED_INITRAMFS_SYMLINKS = _load_trusted_initramfs_symlinks()
 
 
 def _assert_virtio_console_kernel_config(path: Path) -> None:
@@ -189,6 +333,11 @@ def stage_guest_agent(source: Path, expected_sha256: str) -> Path:
     expected_sha256 = expected_sha256.lower()
     if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
         raise ScriptError("NVX guest agent SHA-256 must contain 64 hexadecimal digits")
+    if expected_sha256 != GUEST_AGENT_SHA256:
+        raise ScriptError(
+            "NVX guest-agent SHA-256 does not match the required external input: "
+            f"{expected_sha256}, expected {GUEST_AGENT_SHA256}"
+        )
     destination = REPO_ROOT / "build" / GUEST_AGENT_ARTIFACT_NAME
     pin = REPO_ROOT / "build" / GUEST_AGENT_SHA256_NAME
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +359,16 @@ def stage_guest_agent(source: Path, expected_sha256: str) -> Path:
             raise ScriptError(
                 f"NVX guest agent SHA-256 is {actual_sha256}, expected {expected_sha256}"
             )
+        size = temporary_path.stat().st_size
+        if size != GUEST_AGENT_SIZE_BYTES:
+            raise ScriptError(
+                f"NVX guest-agent size is {size} bytes, "
+                f"expected {GUEST_AGENT_SIZE_BYTES} bytes"
+            )
+        if size > GUEST_AGENT_MAXIMUM_BYTES:
+            raise ScriptError(
+                f"NVX guest agent exceeds the 16-MiB release limit: {size} bytes"
+            )
         validate_static_x86_64_elf(temporary_path)
         temporary_path.chmod(0o755)
         temporary_path.replace(destination)
@@ -220,6 +379,42 @@ def stage_guest_agent(source: Path, expected_sha256: str) -> Path:
             temporary_path.unlink(missing_ok=True)
     print(f">> staged {destination} for {GUEST_AGENT_TARGET}")
     return destination
+
+
+def verified_staged_guest_agent() -> tuple[Path, str]:
+    source = require_file(
+        REPO_ROOT / "build" / GUEST_AGENT_ARTIFACT_NAME,
+        "staged NVX guest agent",
+    )
+    pin = require_file(
+        REPO_ROOT / "build" / GUEST_AGENT_SHA256_NAME,
+        "staged NVX guest-agent SHA-256 pin",
+    )
+    expected = pin.read_text(encoding="ascii").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise ScriptError("staged NVX guest-agent SHA-256 pin is invalid")
+    if expected != GUEST_AGENT_SHA256:
+        raise ScriptError(
+            "staged NVX guest-agent SHA-256 pin does not match the required "
+            f"external input: {expected}, expected {GUEST_AGENT_SHA256}"
+        )
+    actual = sha256_file(source)
+    if actual != expected:
+        raise ScriptError(
+            f"staged NVX guest-agent SHA-256 is {actual}, expected {expected}"
+        )
+    size = source.stat().st_size
+    if size != GUEST_AGENT_SIZE_BYTES:
+        raise ScriptError(
+            f"staged NVX guest-agent size is {size} bytes, "
+            f"expected {GUEST_AGENT_SIZE_BYTES} bytes"
+        )
+    if size > GUEST_AGENT_MAXIMUM_BYTES:
+        raise ScriptError(
+            f"staged NVX guest agent exceeds the 16-MiB release limit: {size} bytes"
+        )
+    validate_static_x86_64_elf(source)
+    return source, expected
 
 
 def record_openvmm_provenance(executable: Path) -> None:
@@ -256,6 +451,7 @@ class AlpineBuildConfig:
     branch: str = DEFAULT_ALPINE_BRANCH
     work: Path = Path.home() / "build" / "initramfs"
     output: Path = Path.home() / "build" / "initramfs.cpio.gz"
+    agent_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -380,11 +576,22 @@ def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
         tarball,
         DEFAULT_ALPINE_MINIROOTFS_SHA256,
     )
-    root = config.work / "root"
-    shutil.rmtree(root, ignore_errors=True)
-    root.mkdir(parents=True)
+    root = Path(tempfile.mkdtemp(prefix="root-", dir=config.work))
     require_tool("tar")
-    run_checked(["tar", "-xzf", tarball, "-C", root])
+    run_checked(
+        [
+            "tar",
+            "--extract",
+            "--gzip",
+            "--file",
+            tarball,
+            "--directory",
+            root,
+            "--numeric-owner",
+            "--no-same-owner",
+            "--same-permissions",
+        ]
+    )
     return root
 
 
@@ -478,59 +685,174 @@ def _normalize_initramfs_metadata(root: Path) -> None:
                 ) from error
 
 
-def _pack_initramfs(root: Path, output: Path) -> None:
-    require_tool("find")
-    require_tool("sort")
-    require_tool("cpio")
-    require_tool("gzip")
+def native_initramfs_work_directory(profile: str) -> Path:
+    configured = os.environ.get("NVX_NATIVE_WORK_DIR")
+    base = (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / ".cache" / "nvx" / "native-work"
+    )
+    return (base / profile).resolve()
+
+
+def _linux_filesystem_type(path: Path) -> str:
+    result = run_capture(["stat", "-f", "-c", "%T", path])
+    require_success(result, f"filesystem query for {path}")
+    return result.stdout.decode("ascii", errors="replace").strip().lower()
+
+
+def _require_metadata_preserving_work_directory(work: Path) -> Path:
+    work.mkdir(parents=True, exist_ok=True)
+    filesystem_type = _linux_filesystem_type(work)
+    if filesystem_type in UNSAFE_INITRAMFS_FILESYSTEMS:
+        raise ScriptError(
+            f"initramfs work directory {work} is on {filesystem_type}, which cannot "
+            "reliably preserve Unix modes and ownership; set NVX_NATIVE_WORK_DIR to "
+            "a native Linux filesystem and rerun the native build"
+        )
+    probe = Path(tempfile.mkdtemp(prefix=".nvx-metadata-probe-", dir=work))
+    try:
+        probe.chmod(0o1701)
+        file_probe = probe / "file"
+        file_probe.write_bytes(b"mode probe")
+        file_probe.chmod(0o640)
+        symlink_probe = probe / "link"
+        symlink_probe.symlink_to("file")
+        directory_stat = probe.lstat()
+        file_stat = file_probe.lstat()
+        symlink_stat = symlink_probe.lstat()
+        if (
+            stat.S_IMODE(directory_stat.st_mode) != 0o1701
+            or stat.S_IMODE(file_stat.st_mode) != 0o640
+            or not stat.S_ISLNK(symlink_stat.st_mode)
+        ):
+            raise ScriptError(
+                f"initramfs work directory {work} did not preserve a Unix metadata "
+                "probe; set NVX_NATIVE_WORK_DIR to a native Linux filesystem"
+            )
+    except OSError as error:
+        shutil.rmtree(probe, ignore_errors=True)
+        raise ScriptError(
+            f"initramfs work directory {work} cannot preserve required Unix "
+            f"metadata: {error}; set NVX_NATIVE_WORK_DIR to a native Linux filesystem"
+        ) from error
+    return probe
+
+
+def _trusted_alpine_owners(config: AlpineBuildConfig) -> dict[str, tuple[int, int]]:
+    owners: dict[str, tuple[int, int]] = {}
+    with tarfile.open(_alpine_tarball(config), "r:gz") as archive:
+        for member in archive:
+            name = member.name.removeprefix("./").rstrip("/") or "."
+            canonical = _canonical_newc_name(_alpine_tarball(config), name)
+            if canonical in owners:
+                raise ScriptError(
+                    f"Alpine minirootfs contains duplicate member {canonical!r}"
+                )
+            owners[canonical] = (member.uid, member.gid)
+    return owners
+
+
+def _pack_initramfs(
+    root: Path,
+    output: Path,
+    trusted_owners: dict[str, tuple[int, int]],
+) -> None:
     _normalize_initramfs_metadata(root)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("wb") as archive:
-        finder = subprocess.Popen(
-            ["find", ".", "-print0"], cwd=root, stdout=subprocess.PIPE
+    paths = [root, *root.rglob("*")]
+    paths.sort(
+        key=lambda path: os.fsencode(
+            "." if path == root else path.relative_to(root).as_posix()
         )
-        assert finder.stdout is not None
-        sort_environment = os.environ.copy()
-        sort_environment["LC_ALL"] = "C"
-        sorter = subprocess.Popen(
-            ["sort", "-z"],
-            cwd=root,
-            stdin=finder.stdout,
-            stdout=subprocess.PIPE,
-            env=sort_environment,
-        )
-        finder.stdout.close()
-        assert sorter.stdout is not None
-        cpio = subprocess.Popen(
-            [
-                "cpio",
-                "--null",
-                "--quiet",
-                "--reproducible",
-                "--owner=0:0",
-                "-o",
-                "-H",
-                "newc",
-            ],
-            cwd=root,
-            stdin=sorter.stdout,
-            stdout=subprocess.PIPE,
-        )
-        sorter.stdout.close()
-        assert cpio.stdout is not None
-        gzip = subprocess.Popen(["gzip", "-n", "-9"], stdin=cpio.stdout, stdout=archive)
-        cpio.stdout.close()
-        gzip_code = gzip.wait()
-        cpio_code = cpio.wait()
-        sorter_code = sorter.wait()
-        finder_code = finder.wait()
-    if finder_code or sorter_code or cpio_code or gzip_code:
+    )
+    try:
+        with output.open("wb") as raw:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=raw,
+                compresslevel=9,
+                mtime=0,
+            ) as archive:
+                written = 0
+
+                def write(data: bytes) -> None:
+                    nonlocal written
+                    archive.write(data)
+                    written += len(data)
+
+                for inode, path in enumerate(paths, start=1):
+                    metadata = path.lstat()
+                    name = "." if path == root else path.relative_to(root).as_posix()
+                    name_bytes = name.encode("utf-8") + b"\0"
+                    file_type = stat.S_IFMT(metadata.st_mode)
+                    if file_type == stat.S_IFREG:
+                        content = path.read_bytes()
+                    elif file_type == stat.S_IFLNK:
+                        content = os.readlink(path).encode("utf-8")
+                    elif file_type == stat.S_IFDIR:
+                        content = b""
+                    else:
+                        raise ScriptError(
+                            f"unsupported initramfs entry type for {path}"
+                        )
+                    uid, gid = trusted_owners.get(name, (0, 0))
+                    fields = (
+                        inode,
+                        metadata.st_mode,
+                        uid,
+                        gid,
+                        1,
+                        0,
+                        len(content),
+                        0,
+                        0,
+                        0,
+                        0,
+                        len(name_bytes),
+                        0,
+                    )
+                    write(
+                        b"070701"
+                        + b"".join(
+                            f"{field & 0xFFFFFFFF:08x}".encode("ascii")
+                            for field in fields
+                        )
+                    )
+                    write(name_bytes)
+                    write(b"\0" * (-written % 4))
+                    write(content)
+                    write(b"\0" * (-written % 4))
+
+                trailer_name = b"TRAILER!!!\0"
+                trailer = (
+                    len(paths) + 1,
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    len(trailer_name),
+                    0,
+                )
+                write(
+                    b"070701"
+                    + b"".join(
+                        f"{field & 0xFFFFFFFF:08x}".encode("ascii") for field in trailer
+                    )
+                )
+                write(trailer_name)
+                write(b"\0" * (-written % 4))
+                write(b"\0" * (-written % 512))
+    except OSError:
         output.unlink(missing_ok=True)
-        raise ScriptError(
-            "failed to pack initramfs "
-            f"(find={finder_code}, sort={sorter_code}, cpio={cpio_code}, "
-            f"gzip={gzip_code})"
-        )
+        raise
 
 
 def _write_apk_manifest(
@@ -538,6 +860,7 @@ def _write_apk_manifest(
     output: Path,
     config: AlpineBuildConfig,
     helpers: dict[str, dict[str, str]],
+    agent_sha256: str | None,
 ) -> None:
     installed = root / "lib" / "apk" / "db" / "installed"
     packages: list[ApkPackage] = []
@@ -570,6 +893,18 @@ def _write_apk_manifest(
                 "alpine_version": config.version,
                 "alpine_branch": config.branch,
                 "architecture": "x86_64",
+                "profile": "broker-ttrpc" if config.agent_enabled else "legacy",
+                "guest_agent": (
+                    {
+                        "path": GUEST_AGENT_INSTALLED_PATH,
+                        "sha256": agent_sha256,
+                        "size": GUEST_AGENT_SIZE_BYTES,
+                        "source_revision": GUEST_AGENT_SOURCE_REVISION,
+                        "build_id": GUEST_AGENT_BUILD_ID,
+                    }
+                    if agent_sha256 is not None
+                    else None
+                ),
                 "packages": packages,
                 "helpers": helpers,
             },
@@ -580,8 +915,362 @@ def _write_apk_manifest(
     )
 
 
+def _bind_apk_manifest_to_initramfs(output: Path) -> None:
+    manifest_path = output.with_name(f"{output.name}.packages.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact"] = {
+        "name": output.name,
+        "sha256": sha256_file(output),
+        "size": output.stat().st_size,
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _newc_entries(path: Path) -> tuple[InitramfsEntry, ...]:
+    if path.stat().st_size > INITRAMFS_MAX_COMPRESSED_BYTES:
+        raise ScriptError(f"{path} exceeds the compressed initramfs size limit")
+    try:
+        with gzip.open(path, "rb") as compressed:
+            data = compressed.read(INITRAMFS_MAX_UNCOMPRESSED_BYTES + 1)
+    except (gzip.BadGzipFile, EOFError, OSError) as error:
+        raise ScriptError(f"{path} is not a valid gzip initramfs: {error}") from error
+    if len(data) > INITRAMFS_MAX_UNCOMPRESSED_BYTES:
+        raise ScriptError(f"{path} exceeds the uncompressed initramfs size limit")
+    entries: list[InitramfsEntry] = []
+    names: set[str] = set()
+    casefolded_names: dict[str, str] = {}
+    offset = 0
+    found_trailer = False
+    while offset < len(data):
+        if bytes(data[offset : offset + 6]) != b"070701":
+            raise ScriptError(f"{path} is not a reproducible newc initramfs")
+        header = data[offset + 6 : offset + 110]
+        if len(header) != 104:
+            raise ScriptError(f"{path} has a truncated newc header")
+        try:
+            fields = [int(header[index : index + 8], 16) for index in range(0, 104, 8)]
+        except ValueError as error:
+            raise ScriptError(f"{path} has an invalid newc header") from error
+        file_size = fields[6]
+        name_size = fields[11]
+        if file_size > INITRAMFS_MAX_MEMBER_BYTES:
+            raise ScriptError(f"{path} contains an oversized newc member")
+        if name_size > INITRAMFS_MAX_NAME_BYTES:
+            raise ScriptError(f"{path} contains an oversized newc member name")
+        name_start = offset + 110
+        name_end = name_start + name_size
+        if name_size < 1 or name_end > len(data) or data[name_end - 1] != 0:
+            raise ScriptError(f"{path} has an invalid newc member name")
+        try:
+            name = data[name_start : name_end - 1].decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ScriptError(
+                f"{path} contains a non-UTF-8 newc member name"
+            ) from error
+        content_start = (name_end + 3) & ~3
+        content_end = content_start + file_size
+        if content_end > len(data):
+            raise ScriptError(f"{path} has a truncated newc member")
+        if name == "TRAILER!!!":
+            if file_size != 0:
+                raise ScriptError(f"{path} has a newc trailer with data")
+            next_offset = (content_end + 3) & ~3
+            if any(data[next_offset:]):
+                raise ScriptError(
+                    f"{path} contains a second archive after the newc trailer"
+                )
+            found_trailer = True
+            break
+        canonical_name = _canonical_newc_name(path, name)
+        if name != canonical_name:
+            raise ScriptError(f"{path} contains non-canonical newc member {name!r}")
+        if canonical_name in names:
+            raise ScriptError(
+                f"{path} contains duplicate newc member {canonical_name!r}"
+            )
+        names.add(canonical_name)
+        casefolded = canonical_name.casefold()
+        if previous_name := casefolded_names.get(casefolded):
+            raise ScriptError(
+                f"{path} contains case-colliding newc members "
+                f"{previous_name!r} and {canonical_name!r}"
+            )
+        casefolded_names[casefolded] = canonical_name
+        member_data = data[content_start:content_end]
+        file_type = stat.S_IFMT(fields[1])
+        symlink_target: str | None = None
+        if file_type == stat.S_IFLNK:
+            try:
+                symlink_target = member_data.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ScriptError(
+                    f"{path} contains non-UTF-8 symlink {canonical_name!r}"
+                ) from error
+        entries.append(
+            InitramfsEntry(
+                order=len(entries),
+                name=canonical_name,
+                inode=fields[0],
+                mode=fields[1],
+                file_type=file_type,
+                uid=fields[2],
+                gid=fields[3],
+                nlink=fields[4],
+                devmajor=fields[7],
+                devminor=fields[8],
+                rdevmajor=fields[9],
+                rdevminor=fields[10],
+                data_start=content_start,
+                data_end=content_end,
+                data_sha256=hashlib.sha256(member_data).hexdigest(),
+                data=member_data,
+                symlink_target=symlink_target,
+            )
+        )
+        if len(entries) > INITRAMFS_MAX_MEMBERS:
+            raise ScriptError(f"{path} exceeds the newc member-count limit")
+        offset = (content_end + 3) & ~3
+    if not found_trailer:
+        raise ScriptError(f"{path} has no newc trailer")
+    return tuple(entries)
+
+
+def _canonical_newc_name(path: Path, name: str) -> str:
+    if name == ".":
+        return name
+    canonical = name.removeprefix("./")
+    parts = canonical.split("/")
+    if (
+        not canonical
+        or name.startswith("/")
+        or "\0" in canonical
+        or "\\" in canonical
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        raise ScriptError(f"{path} contains non-canonical newc member {name!r}")
+    return canonical
+
+
+def _resolve_initramfs_symlink(path: Path, name: str, target: str) -> str:
+    if not target or "\0" in target or "\\" in target:
+        raise ScriptError(f"{path} contains unsafe symlink {name!r} -> {target!r}")
+    target_path = PurePosixPath(target)
+    resolved: list[str] = [] if target_path.is_absolute() else name.split("/")[:-1]
+    for part in target_path.parts:
+        if part in ("", ".", "/"):
+            continue
+        if part == "..":
+            if not resolved:
+                raise ScriptError(
+                    f"{path} contains escaping symlink {name!r} -> {target!r}"
+                )
+            resolved.pop()
+        else:
+            resolved.append(part)
+    return "/".join(resolved)
+
+
+def _validated_initramfs_entries(
+    path: Path,
+    *,
+    agent_profile: bool,
+) -> dict[str, InitramfsEntry]:
+    ordered_entries = _newc_entries(path)
+    entries: dict[str, InitramfsEntry] = {}
+    identities: dict[tuple[int, int, int], InitramfsEntry] = {}
+    allowed_types = (stat.S_IFDIR, stat.S_IFREG, stat.S_IFLNK)
+    allowed_symlinks = TRUSTED_INITRAMFS_SYMLINKS
+    if agent_profile:
+        allowed_symlinks |= frozenset({("init", "sbin/nvx-agent")})
+    for entry in ordered_entries:
+        name = entry.name
+        file_type = entry.file_type
+        permissions = stat.S_IMODE(entry.mode)
+        if name == ".":
+            if entry.order != 0:
+                raise ScriptError(f"{path} root newc member is not first")
+        else:
+            parts = name.split("/")
+            for index in range(1, len(parts)):
+                ancestor_name = "/".join(parts[:index])
+                ancestor = entries.get(ancestor_name)
+                if ancestor is None:
+                    raise ScriptError(
+                        f"{path} contains {name!r} before directory ancestor "
+                        f"{ancestor_name!r}"
+                    )
+                if ancestor.file_type != stat.S_IFDIR:
+                    raise ScriptError(
+                        f"{path} contains {name!r} below non-directory ancestor "
+                        f"{ancestor_name!r}"
+                    )
+        if file_type not in allowed_types:
+            raise ScriptError(f"{path} contains unsafe entry type for {name!r}")
+        if entry.nlink < 1:
+            raise ScriptError(f"{path} contains invalid link count for {name!r}")
+        if previous := identities.get(entry.identity):
+            raise ScriptError(
+                f"{path} contains repeated newc inode identity for "
+                f"{previous.name!r} and {name!r}"
+            )
+        identities[entry.identity] = entry
+        if file_type == stat.S_IFLNK:
+            if permissions != 0o777:
+                raise ScriptError(f"{path} contains symlink {name!r} with wrong mode")
+            if entry.nlink != 1:
+                raise ScriptError(
+                    f"{path} contains symlink {name!r} with unsafe link count"
+                )
+            target = entry.symlink_target
+            if target is None:
+                raise ScriptError(f"{path} contains invalid symlink {name!r}")
+            resolved_target = _resolve_initramfs_symlink(path, name, target)
+            if (name, target) not in allowed_symlinks:
+                raise ScriptError(
+                    f"{path} contains untrusted symlink {name!r} -> {target!r}"
+                )
+            if resolved_target in ("init", "sbin/nvx-agent") and (
+                name,
+                target,
+            ) != ("init", "sbin/nvx-agent"):
+                raise ScriptError(
+                    f"{path} contains symlink alias to security-critical "
+                    f"{resolved_target!r}"
+                )
+        elif file_type == stat.S_IFREG:
+            if entry.nlink != 1:
+                raise ScriptError(
+                    f"{path} contains regular file {name!r} with unsafe link count"
+                )
+            if permissions & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX | 0o002):
+                raise ScriptError(
+                    f"{path} contains unsafe regular-file mode for {name!r}"
+                )
+            if entry.data.startswith(b"\x7fELF") and permissions != 0o755:
+                raise ScriptError(f"{path} contains ELF binary {name!r} without 0755")
+        else:
+            if permissions & (stat.S_ISUID | stat.S_ISGID):
+                raise ScriptError(f"{path} contains unsafe directory mode for {name!r}")
+            if permissions & 0o002 and permissions != 0o1777:
+                raise ScriptError(
+                    f"{path} contains unsafe world-writable directory {name!r}"
+                )
+            if entry.data:
+                raise ScriptError(f"{path} contains directory {name!r} with data")
+        entries[name] = entry
+
+    critical = {
+        ".": (stat.S_IFDIR, 0o755, 0, 0),
+        "bin": (stat.S_IFDIR, 0o755, 0, 0),
+        "bin/busybox": (stat.S_IFREG, 0o755, 0, 0),
+        "etc": (stat.S_IFDIR, 0o755, 0, 0),
+        "etc/group": (stat.S_IFREG, 0o644, 0, 0),
+        "etc/passwd": (stat.S_IFREG, 0o644, 0, 0),
+        "etc/shadow": (stat.S_IFREG, 0o640, 0, 42),
+        "root": (stat.S_IFDIR, 0o700, 0, 0),
+        "sbin": (stat.S_IFDIR, 0o755, 0, 0),
+        "sbin/apk": (stat.S_IFREG, 0o755, 0, 0),
+        "tmp": (stat.S_IFDIR, 0o1777, 0, 0),
+        "var": (stat.S_IFDIR, 0o755, 0, 0),
+        "var/tmp": (stat.S_IFDIR, 0o1777, 0, 0),
+    }
+    for name, (file_type, permissions, uid, gid) in critical.items():
+        try:
+            entry = entries[name]
+        except KeyError as error:
+            raise ScriptError(
+                f"{path} is missing critical rootfs entry {name!r}"
+            ) from error
+        actual = (
+            stat.S_IFMT(entry.mode),
+            stat.S_IMODE(entry.mode),
+            entry.uid,
+            entry.gid,
+        )
+        if actual != (file_type, permissions, uid, gid):
+            raise ScriptError(
+                f"{path} has incorrect metadata for {name!r}: "
+                f"mode={entry.mode:#o} uid={entry.uid} gid={entry.gid}"
+            )
+    return entries
+
+
+def verify_agent_initramfs(path: Path, expected_sha256: str) -> None:
+    entries = _validated_initramfs_entries(path, agent_profile=True)
+    try:
+        agent_entry = entries["sbin/nvx-agent"]
+        init_entry = entries["init"]
+    except KeyError as error:
+        raise ScriptError(f"{path} does not contain the NVX PID-1 layout") from error
+    if (
+        stat.S_IFMT(agent_entry.mode) != stat.S_IFREG
+        or stat.S_IMODE(agent_entry.mode) != 0o755
+        or agent_entry.uid != 0
+        or agent_entry.gid != 0
+        or agent_entry.nlink != 1
+    ):
+        raise ScriptError(f"{path} contains /sbin/nvx-agent with the wrong mode")
+    actual_sha256 = agent_entry.data_sha256
+    if actual_sha256 != expected_sha256:
+        raise ScriptError(
+            f"embedded NVX guest-agent SHA-256 is {actual_sha256}, "
+            f"expected {expected_sha256}"
+        )
+    if (
+        stat.S_IFMT(init_entry.mode) != stat.S_IFLNK
+        or stat.S_IMODE(init_entry.mode) != 0o777
+        or init_entry.uid != 0
+        or init_entry.gid != 0
+        or init_entry.nlink != 1
+        or init_entry.symlink_target != "sbin/nvx-agent"
+        or any(name.startswith("init/") for name in entries)
+    ):
+        raise ScriptError(f"{path} does not select /sbin/nvx-agent as kernel PID 1")
+
+
+def verify_legacy_initramfs(path: Path) -> None:
+    entries = _validated_initramfs_entries(path, agent_profile=False)
+    if "sbin/nvx-agent" in entries:
+        raise ScriptError(f"{path} legacy profile contains /sbin/nvx-agent")
+    try:
+        init_entry = entries["init"]
+    except KeyError as error:
+        raise ScriptError(f"{path} legacy profile is missing /init") from error
+    expected_init = require_file(REPO_ROOT / "alpine" / "init", "legacy /init")
+    if (
+        stat.S_IFMT(init_entry.mode) != stat.S_IFREG
+        or stat.S_IMODE(init_entry.mode) != 0o755
+        or init_entry.uid != 0
+        or init_entry.gid != 0
+        or init_entry.nlink != 1
+        or init_entry.data != expected_init.read_bytes().replace(b"\r\n", b"\n")
+        or any(name.startswith("init/") for name in entries)
+    ):
+        raise ScriptError(f"{path} does not contain the exact legacy /init")
+
+
+def _publish_initramfs_output(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"{destination.name}.part")
+    temporary.unlink(missing_ok=True)
+    try:
+        shutil.copyfile(source, temporary)
+        temporary.chmod(0o644)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def build_initramfs(config: AlpineBuildConfig) -> None:
     _require_linux("build-initramfs")
+    metadata_probe = _require_metadata_preserving_work_directory(config.work)
+    agent_source: Path | None = None
+    agent_sha256: str | None = None
+    if config.agent_enabled:
+        agent_source, agent_sha256 = verified_staged_guest_agent()
     root = _prepare_alpine_root(config)
     print(">> installing sandbox utilities into the rootfs")
     _apk_add(
@@ -595,7 +1284,13 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
     resolver = root / "etc" / "resolv.conf"
     resolver.unlink(missing_ok=True)
     resolver.touch()
-    _install(REPO_ROOT / "alpine" / "init", root / "init")
+    if config.agent_enabled:
+        assert agent_source is not None
+        shutil.copyfile(agent_source, root / "sbin" / GUEST_AGENT_ARTIFACT_NAME)
+        (root / "sbin" / GUEST_AGENT_ARTIFACT_NAME).chmod(0o755)
+        (root / "init").symlink_to(f"sbin/{GUEST_AGENT_ARTIFACT_NAME}")
+    else:
+        _install(REPO_ROOT / "alpine" / "init", root / "init")
     _install(REPO_ROOT / "alpine" / "nvx-exit", root / "sbin" / "nvx-exit")
     _install(
         REPO_ROOT / "alpine" / "nvx-hostmount",
@@ -618,11 +1313,7 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",
         root / "sbin" / "nvx-virtio-restore-probe",
     )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-reseed.c",
-        root / "sbin" / "nvx-reseed",
-    )
+    _build_reseed_helper(config.work, root / "sbin" / "nvx-reseed")
     _build_static_helper(
         config.work,
         REPO_ROOT / "alpine" / "nvx-mmio-write.c",
@@ -639,14 +1330,28 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         root / "sbin" / "nvx-console-pending",
     )
     device_io = _build_device_io_helper(config.work, root / "sbin" / "nvx-device-io")
-    config.output.parent.mkdir(parents=True, exist_ok=True)
+    native_output = config.work / "output" / config.output.name
+    native_output.parent.mkdir(parents=True, exist_ok=True)
     _write_apk_manifest(
         root,
-        config.output,
+        native_output,
         config,
         {"nvx-device-io": device_io},
+        agent_sha256,
     )
-    _pack_initramfs(root, config.output)
+    _pack_initramfs(root, native_output, _trusted_alpine_owners(config))
+    _bind_apk_manifest_to_initramfs(native_output)
+    if agent_sha256 is not None:
+        verify_agent_initramfs(native_output, agent_sha256)
+    else:
+        verify_legacy_initramfs(native_output)
+    _publish_initramfs_output(native_output, config.output)
+    _publish_initramfs_output(
+        native_output.with_name(f"{native_output.name}.packages.json"),
+        config.output.with_name(f"{config.output.name}.packages.json"),
+    )
+    shutil.rmtree(root)
+    shutil.rmtree(metadata_probe)
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
 
 
@@ -720,6 +1425,39 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
         ]
     )
     return command
+
+
+def docker_build_agent_initramfs_command(
+    config: DockerBuildConfig,
+    agent_sha256: str,
+) -> list[str | Path]:
+    command = docker_build_command(config, "agent-initramfs-artifacts")
+    insert_at = len(command) - 3
+    command[insert_at:insert_at] = [
+        "--secret",
+        f"id=nvx-agent,src={REPO_ROOT / 'build' / GUEST_AGENT_ARTIFACT_NAME}",
+        "--build-arg",
+        f"NVX_AGENT_SHA256={agent_sha256}",
+    ]
+    return command
+
+
+def build_docker_agent_initramfs(config: DockerBuildConfig) -> Path:
+    require_tool(
+        "docker",
+        "docker was not found on PATH; install Docker with the Linux engine first",
+    )
+    _agent, agent_sha256 = verified_staged_guest_agent()
+    destination = _docker_destination(config.destination)
+    run_checked(
+        docker_build_agent_initramfs_command(config, agent_sha256),
+        cwd=REPO_ROOT,
+    )
+    output = destination / AGENT_INITRAMFS_NAME
+    require_file(output, "Docker agent initramfs output")
+    verify_agent_initramfs(output, agent_sha256)
+    print(f">> built {output} ({format_size(output.stat().st_size)})")
+    return output
 
 
 def _docker_destination(destination: Path) -> Path:

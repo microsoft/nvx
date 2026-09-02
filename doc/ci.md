@@ -35,3 +35,14 @@ Persistent runners accept pushes and same-repository pull requests only. Fork
 pull requests run the GitHub-hosted validation jobs but do not execute code on
 the Azure runner fleet. A maintainer must stage an external contribution on a
 trusted repository branch before running the backend matrices.
+
+CI caches only the pinned kernel and legacy initramfs. It does not restore or
+save a broker initramfs cache, and the benchmark action does not claim to run
+the broker profile. Development release jobs build and publish only explicit
+`-legacy` packages.
+
+Broker publication fails closed. A future privileged smoke/E2E job must build
+the agent image afresh, boot that exact bundle, and supply an independently
+authenticated live-gate proof accepted by `verify-broker-live-gate`. The
+publish action rejects an unproved broker archive. Pull-request runs are
+cancel-in-progress and do not publish releases.

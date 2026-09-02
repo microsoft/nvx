@@ -37,9 +37,16 @@
   },
   "guest_agent": {
     "artifact": "guest/nvx-agent",
+    "initramfs_artifact": "guest/initramfs-agent.cpio.gz",
     "target": "x86_64-unknown-linux-musl",
     "optional": true,
     "installed_in_initramfs": false,
-    "protocol_schema_version": 1
+    "maximum_size_bytes": 16777216,
+    "source_revision": "2e162fc068cef028e38ac23b6e0a1892a01a209c",
+    "build_id": "1fba7a91409d351e484de4c6d792ac009ca34f63",
+    "external_input_sha256": "5cc3ea5612eaa1a3b1e301b0107123fd71e56e632742e72a9372632c22206d69",
+    "external_input_size_bytes": 1786656,
+    "protocol_schema_version": 1,
+    "transport": "broker-ttrpc"
   }
 }

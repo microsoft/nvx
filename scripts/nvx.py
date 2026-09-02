@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -13,14 +14,19 @@ from pathlib import Path
 
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
+    AGENT_INITRAMFS_NAME,
     AlpineBuildConfig,
     DockerBuildConfig,
     KernelBuildConfig,
+    build_docker_agent_initramfs,
     build_docker_artifacts,
     build_initramfs,
     build_kernel,
+    native_initramfs_work_directory,
     record_openvmm_provenance,
     stage_guest_agent,
+    verified_staged_guest_agent,
+    verify_agent_initramfs,
 )
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
@@ -46,8 +52,10 @@ from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_p
 from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.release import (
     collect_release_sources,
+    create_release_archive,
     download_latest_release,
     package_release,
+    verify_broker_live_gate,
     verify_source_tree,
 )
 from nvx_tools.sandbox import SandboxLaunch, SandboxLayer
@@ -79,8 +87,18 @@ def _native_kernel() -> None:
 def _native_initramfs() -> None:
     build_initramfs(
         AlpineBuildConfig(
-            work=BUILD_DIR / "initramfs-work",
+            work=native_initramfs_work_directory("legacy"),
             output=artifact_path("initramfs.cpio.gz"),
+        )
+    )
+
+
+def _native_agent_initramfs() -> None:
+    build_initramfs(
+        AlpineBuildConfig(
+            work=native_initramfs_work_directory("broker-ttrpc"),
+            output=artifact_path(AGENT_INITRAMFS_NAME),
+            agent_enabled=True,
         )
     )
 
@@ -89,10 +107,14 @@ def command_build_guest(args: argparse.Namespace) -> None:
     if args.native:
         _native_kernel()
         _native_initramfs()
+        if args.with_agent:
+            _native_agent_initramfs()
         return
 
     config = DockerBuildConfig(destination=BUILD_DIR)
     build_docker_artifacts(config)
+    if args.with_agent:
+        build_docker_agent_initramfs(config)
 
 
 def command_build_kernel(_: argparse.Namespace) -> None:
@@ -103,8 +125,26 @@ def command_build_initramfs(_: argparse.Namespace) -> None:
     _native_initramfs()
 
 
+def command_build_agent_initramfs(args: argparse.Namespace) -> None:
+    if args.native:
+        _native_agent_initramfs()
+    else:
+        build_docker_agent_initramfs(DockerBuildConfig(destination=BUILD_DIR))
+
+
 def command_stage_agent(args: argparse.Namespace) -> None:
     stage_guest_agent(args.input, args.sha256)
+
+
+def command_verify_agent_initramfs(args: argparse.Namespace) -> None:
+    _agent, staged_sha256 = verified_staged_guest_agent()
+    expected_sha256 = args.sha256.lower()
+    if staged_sha256 != expected_sha256:
+        raise ScriptError(
+            f"staged NVX guest-agent SHA-256 is {staged_sha256}, "
+            f"expected {expected_sha256}"
+        )
+    verify_agent_initramfs(args.input, expected_sha256)
 
 
 def command_build_openvmm(args: argparse.Namespace) -> None:
@@ -160,7 +200,12 @@ def _release_platform(hypervisor: str) -> str:
 
 
 def command_download(args: argparse.Namespace) -> None:
-    download_latest_release(args.repository, _release_platform(args.hypervisor))
+    download_latest_release(
+        args.repository,
+        _release_platform(args.hypervisor),
+        args.transport,
+        args.manifest_sha256,
+    )
 
 
 def _format_command(command: list[str]) -> str:
@@ -241,26 +286,27 @@ def command_run(args: argparse.Namespace) -> None:
 
 
 def command_sandbox(args: argparse.Namespace) -> None:
+    if args.transport != "broker-ttrpc":
+        raise ScriptError("--transport broker-ttrpc must be selected explicitly")
     if (args.net is None) != (args.network_profile is None):
         raise ScriptError("--net and --network-profile must be specified together")
     launch = SandboxLaunch(
         layers=tuple(args.layer),
         scratch=args.scratch,
-        entrypoint=args.entrypoint,
-        args=tuple(args.sandbox_arg),
-        hostname=args.hostname,
-        memory_max=args.memory_max,
-        pids_max=args.pids_max,
     ).validated()
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
     initrd = require_file(
-        artifact_path("initramfs.cpio.gz"),
-        "initramfs",
+        artifact_path(AGENT_INITRAMFS_NAME),
+        "broker-ttrpc agent initramfs",
     )
     command = [
         str(executable),
-        *launch.openvmm_arguments(),
+        *launch.openvmm_arguments(
+            args.control_socket,
+            args.boot_console_socket,
+            args.control_auth_handle,
+        ),
         "--single-process",
         "--hypervisor",
         _hypervisor(args.hypervisor),
@@ -277,11 +323,26 @@ def command_sandbox(args: argparse.Namespace) -> None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
     print(f">> {_format_command(command)}")
     if not args.dry_run:
-        raise SystemExit(subprocess.run(command).returncode)
+        if os.name == "nt":
+            raise ScriptError("broker-ttrpc sandbox launch requires Linux")
+        try:
+            auth_handle = os.fstat(args.control_auth_handle)
+        except OSError as error:
+            raise ScriptError(
+                "control authentication handle is not open in this process"
+            ) from error
+        if not stat.S_ISFIFO(auth_handle.st_mode):
+            raise ScriptError("control authentication handle must be a pipe")
+        raise SystemExit(
+            subprocess.run(
+                command,
+                pass_fds=(args.control_auth_handle,),
+            ).returncode
+        )
 
 
-def command_collect_sources(_: argparse.Namespace) -> None:
-    collect_release_sources()
+def command_collect_sources(args: argparse.Namespace) -> None:
+    collect_release_sources(args.transport)
 
 
 def command_package(args: argparse.Namespace) -> None:
@@ -290,6 +351,23 @@ def command_package(args: argparse.Namespace) -> None:
         destination=args.destination,
         include_source=args.include_source,
         force=args.force,
+        transport=args.transport,
+        manifest_digest_output=args.manifest_digest_output,
+    )
+
+
+def command_archive_release(args: argparse.Namespace) -> None:
+    create_release_archive(args.bundle, args.output)
+
+
+def command_verify_broker_live_gate(args: argparse.Namespace) -> None:
+    verify_broker_live_gate(
+        args.archive,
+        args.manifest_digest,
+        args.proof,
+        args.proof_sha256,
+        args.platform,
+        args.archive_sha256,
     )
 
 
@@ -302,6 +380,11 @@ def _add_guest_options(parser: argparse.ArgumentParser) -> None:
         "--native",
         action="store_true",
         help="build directly on Linux instead of using Docker",
+    )
+    parser.add_argument(
+        "--with-agent",
+        action="store_true",
+        help="also build the staged broker-ttrpc agent initramfs",
     )
 
 
@@ -328,6 +411,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     initramfs.set_defaults(handler=command_build_initramfs)
 
+    agent_initramfs = subparsers.add_parser(
+        "build-agent-initramfs",
+        help="build the explicit broker-ttrpc agent initramfs",
+    )
+    agent_initramfs.add_argument(
+        "--native",
+        action="store_true",
+        help="build directly on Linux instead of using Docker",
+    )
+    agent_initramfs.set_defaults(handler=command_build_agent_initramfs)
+
     agent = subparsers.add_parser(
         "stage-agent",
         help="stage a pinned static NVX guest-agent build input",
@@ -335,6 +429,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     agent.add_argument("--input", type=Path, required=True)
     agent.add_argument("--sha256", required=True)
     agent.set_defaults(handler=command_stage_agent)
+
+    verify_agent = subparsers.add_parser(
+        "verify-agent-initramfs",
+        help="verify a broker initramfs against the staged agent and trusted SHA-256",
+    )
+    verify_agent.add_argument("--input", type=Path, required=True)
+    verify_agent.add_argument("--sha256", required=True)
+    verify_agent.set_defaults(handler=command_verify_agent_initramfs)
 
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")
     openvmm.add_argument("--skip-restore", action="store_true")
@@ -384,6 +486,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="OWNER/REPOSITORY",
     )
     download.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
+    download.add_argument(
+        "--transport",
+        choices=("legacy", "broker-ttrpc"),
+        required=True,
+    )
+    download.add_argument(
+        "--manifest-sha256",
+        help="independently delivered SOURCE-MANIFEST.json digest (broker only)",
+    )
     download.set_defaults(handler=command_download)
 
     run = subparsers.add_parser("run", help="run an OpenVMM microVM")
@@ -423,19 +534,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="append",
         required=True,
         type=sandbox_layer,
-        metavar="ROLE,PATH,EROFS_UUID",
+        metavar="ROLE,PATH",
     )
     sandbox.add_argument("--scratch", required=True, type=Path)
-    sandbox.add_argument("--entrypoint", default="/bin/sh")
-    sandbox.add_argument("--arg", action="append", default=[], dest="sandbox_arg")
-    sandbox.add_argument("--hostname", default="nvx-sandbox")
-    sandbox.add_argument("--memory-max", type=int)
-    sandbox.add_argument("--pids-max", type=int)
     sandbox.add_argument("--memory-mib", type=int, default=256)
     sandbox.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     sandbox.add_argument("--net", metavar="IPV4/PREFIX")
     sandbox.add_argument("--network-profile", choices=NETWORK_PROFILES)
     sandbox.add_argument("--cmdline", default="")
+    sandbox.add_argument(
+        "--transport",
+        choices=("broker-ttrpc",),
+        required=True,
+    )
+    sandbox.add_argument("--control-socket", required=True, type=Path)
+    sandbox.add_argument("--boot-console-socket", required=True, type=Path)
+    sandbox.add_argument("--control-auth-handle", required=True, type=int)
     sandbox.add_argument("--dry-run", action="store_true")
     sandbox.set_defaults(handler=command_sandbox)
 
@@ -454,6 +568,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sources = subparsers.add_parser(
         "collect-sources",
         help="materialize verified Linux and Alpine release-source artifacts",
+    )
+    sources.add_argument(
+        "--transport",
+        choices=("legacy", "broker-ttrpc"),
+        required=True,
     )
     sources.set_defaults(handler=command_collect_sources)
 
@@ -480,7 +599,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="stage binaries only; corresponding source must be published separately",
     )
     package.add_argument("--force", action="store_true")
+    package.add_argument(
+        "--transport",
+        choices=("legacy", "broker-ttrpc"),
+        required=True,
+    )
+    package.add_argument(
+        "--manifest-digest-output",
+        type=Path,
+        help="external broker manifest-digest artifact path",
+    )
     package.set_defaults(handler=command_package)
+
+    archive_release = subparsers.add_parser(
+        "archive-release",
+        help="create a release archive with canonical safe modes",
+    )
+    archive_release.add_argument("--bundle", type=Path, required=True)
+    archive_release.add_argument("--output", type=Path, required=True)
+    archive_release.set_defaults(handler=command_archive_release)
+
+    live_gate = subparsers.add_parser(
+        "verify-broker-live-gate",
+        help="verify an externally authenticated live broker smoke proof",
+    )
+    live_gate.add_argument("--archive", type=Path, required=True)
+    live_gate.add_argument("--manifest-digest", type=Path, required=True)
+    live_gate.add_argument("--proof", type=Path, required=True)
+    live_gate.add_argument("--proof-sha256", required=True)
+    live_gate.add_argument("--archive-sha256", required=True)
+    live_gate.add_argument("--platform", required=True)
+    live_gate.set_defaults(handler=command_verify_broker_live_gate)
 
     verify = subparsers.add_parser("verify", help="verify source and submodule inputs")
     verify.set_defaults(handler=command_verify)
