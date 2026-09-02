@@ -582,6 +582,51 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result[0] >= 0, True)
         self.assertEqual(interaction.writes, [])
 
+    def test_measure_once_retains_rss_when_process_exits_after_marker(self):
+        class FakeProcess:
+            pid = 123
+            returncode = 0
+
+            def __init__(self):
+                self.exited = False
+
+            def poll(self):
+                return 0 if self.exited else None
+
+            def terminate(self):
+                raise AssertionError("unexpected process termination")
+
+        class FakeInteraction:
+            def __init__(self):
+                self.process = FakeProcess()
+
+            def read_output(self, chunks: queue.Queue[bytes | None]):
+                self.process.exited = True
+                chunks.put(benchmark.RESTORE_MARKER + b"\n")
+
+            def write_input(self, data: bytes):
+                raise AssertionError(f"unexpected input: {data!r}")
+
+            def close(self):
+                pass
+
+        interaction = FakeInteraction()
+        with (
+            patch.object(benchmark, "InteractiveProcess", return_value=interaction),
+            patch.object(benchmark, "peak_rss_bytes", return_value=1024),
+            patch.object(benchmark, "wait_for_process_exit", return_value=0),
+        ):
+            result = benchmark.measure_once(
+                ["openvmm"],
+                environment={},
+                timeout=1,
+                marker=benchmark.RESTORE_MARKER,
+                marker_must_be_line=True,
+                guest_exit_prequeued=True,
+            )
+
+        self.assertEqual(result[1], 1024)
+
     def test_builds_isolated_workload_command(self):
         command = benchmark.workload_boot_command(
             Path("openvmm"),
