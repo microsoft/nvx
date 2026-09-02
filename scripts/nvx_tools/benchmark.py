@@ -55,10 +55,16 @@ WORKLOAD_SUITES = frozenset(
         "shell-snapshot-restore",
         "snapshot-restore-vcpu",
         "network-snapshot",
+        "device-restore-profile",
         "performance",
     }
 )
 NETWORK_SNAPSHOT_BACKENDS = frozenset({"kvm", "mshv", "whp"})
+DEVICE_RESTORE_DEVICES = ("console", "net", "virtiofs")
+DEVICE_RESTORE_MODES = ("active", "deferred")
+DEVICE_RESTORE_MARKER_PREFIX = "NVX-VIRTIO-RESTORE-PROBE "
+VIRTIO_RESTORE_TRACE_MESSAGE = "virtio restore lifecycle"
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 VIRTFS_COMPLETION_MARKER = b"NVX-VIRTFS-WORKLOAD-COMPLETE"
 VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"
@@ -197,6 +203,28 @@ class GuestCommandResult(TypedDict):
     peak_rss_bytes: int
 
 
+class DeviceRestoreSample(TypedDict):
+    process_launch_to_ready_ms: float
+    trigger_to_first_successful_io_ms: float
+    peak_rss_bytes: int
+    guest_markers: list[dict[str, str]]
+    events: list[dict[str, object]]
+    queue_start_count: int
+    staged_kick_dispatch_count: int
+    stale_premature_callback_count: int
+    log: str
+
+
+class DeviceRestoreMetric(TypedDict):
+    samples: list[float]
+    p50: float
+    p95: float
+
+
+DEVICE_RESTORE_TYPE_IDS = {"console": 3, "net": 1, "virtiofs": 26}
+DEVICE_RESTORE_QUEUE_COUNTS = {"console": 2, "net": 2, "virtiofs": 2}
+
+
 def configure_parser(
     parser: argparse.ArgumentParser,
     repository_dir: Path,
@@ -247,8 +275,8 @@ def configure_parser(
         default=repository_dir,
         help="repository containing build/vmlinux and build/initramfs.cpio.gz",
     )
-    parser.add_argument("--warmups", type=positive_int, default=3)
-    parser.add_argument("--runs", type=positive_int, default=11)
+    parser.add_argument("--warmups", type=positive_int)
+    parser.add_argument("--runs", type=positive_int)
     parser.add_argument("--memory-mib", type=positive_int, default=128)
     parser.add_argument(
         "--processors",
@@ -291,6 +319,22 @@ def configure_parser(
         type=positive_int,
         default=256,
         help="guest memory for the network snapshot workload (default: 256)",
+    )
+    parser.add_argument(
+        "--restore-devices",
+        choices=DEVICE_RESTORE_DEVICES,
+        nargs="+",
+        default=list(DEVICE_RESTORE_DEVICES),
+        metavar="DEVICE",
+        help="devices for --suite device-restore-profile",
+    )
+    parser.add_argument(
+        "--restore-modes",
+        choices=DEVICE_RESTORE_MODES,
+        nargs="+",
+        default=list(DEVICE_RESTORE_MODES),
+        metavar="MODE",
+        help="activation modes for --suite device-restore-profile",
     )
     parser.add_argument(
         "--net",
@@ -388,6 +432,10 @@ def positive_int(value: str) -> int:
 
 
 def apply_benchmark_suite_defaults(args: argparse.Namespace) -> None:
+    if args.warmups is None:
+        args.warmups = 1 if args.suite == "device-restore-profile" else 3
+    if args.runs is None:
+        args.runs = 5 if args.suite == "device-restore-profile" else 11
     if args.shell_memories is None:
         default = (
             SNAPSHOT_PROFILE_MEMORY_MIB
@@ -946,6 +994,44 @@ def contains_output_line(output: bytes | bytearray, marker: bytes) -> bool:
     return any(line.removesuffix(b"\r") == marker for line in output.split(b"\n"))
 
 
+def parse_device_restore_marker(line: str) -> dict[str, str] | None:
+    line = ANSI_ESCAPE_PATTERN.sub("", line).removesuffix("\r")
+    if not line.startswith(DEVICE_RESTORE_MARKER_PREFIX):
+        return None
+    fields: dict[str, str] = {}
+    for token in line.removeprefix(DEVICE_RESTORE_MARKER_PREFIX).split():
+        name, separator, value = token.partition("=")
+        if not separator or not name or not value:
+            raise ValueError(f"invalid device restore marker field {token!r}")
+        fields[name] = value
+    missing = {"phase", "device", "mode"}.difference(fields)
+    if missing:
+        raise ValueError(f"device restore marker is missing {sorted(missing)}")
+    return fields
+
+
+def _restore_trace_field(line: str, name: str) -> str:
+    match = re.search(rf'\b{re.escape(name)}(?:=|:\s*)(?:"([^"]*)"|([^,\s]+))', line)
+    if match is None:
+        raise ValueError(f"virtio restore event is missing {name!r}")
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def parse_virtio_restore_event(line: str) -> dict[str, object] | None:
+    line = ANSI_ESCAPE_PATTERN.sub("", line)
+    if VIRTIO_RESTORE_TRACE_MESSAGE not in line:
+        return None
+    event: dict[str, object] = {
+        "event": _restore_trace_field(line, "event"),
+        "device_type": int(_restore_trace_field(line, "device_type"), 0),
+        "trigger": _restore_trace_field(line, "trigger"),
+        "queue_index": int(_restore_trace_field(line, "queue_index")),
+        "restored_progress": _restore_trace_field(line, "restored_progress") == "true",
+        "success": _restore_trace_field(line, "success") == "true",
+    }
+    return event
+
+
 class InteractiveProcess:
     def __init__(self, command: Sequence[str], environment: dict[str, str]) -> None:
         self.terminal_fd: int | None = None
@@ -1343,6 +1429,238 @@ def workload_boot_command(
     return command
 
 
+def device_restore_commands(
+    executable: Path,
+    backend: str,
+    kernel: Path,
+    initrd: Path,
+    memory_mib: int,
+    device: str,
+    mode: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    network: str = "10.0.0.2/24",
+    host_directory: Path | None = None,
+    snapshot_path: Path = Path("SNAPSHOT_PATH"),
+) -> tuple[list[str], list[str]]:
+    if device not in DEVICE_RESTORE_DEVICES:
+        raise ValueError(f"unsupported device restore profile device {device!r}")
+    if mode not in DEVICE_RESTORE_MODES:
+        raise ValueError(f"unsupported device restore profile mode {mode!r}")
+    mount = None
+    if device == "virtiofs":
+        if host_directory is None:
+            raise ValueError("virtiofs restore profiling requires a host directory")
+        if "," in str(host_directory):
+            raise ValueError(
+                "virtiofs restore profile directory must not contain a comma"
+            )
+        mount = f"/mnt/host,{host_directory},rw"
+    boot = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        f"quiet loglevel=0 nvx_virtio_restore_probe={device},{mode}",
+        processors=1,
+        command_prefix=command_prefix,
+        network=network if device == "net" else None,
+        mount=mount,
+    )
+    restore = [
+        *command_prefix,
+        *snapshot_restore_command(
+            executable,
+            backend,
+            snapshot_path,
+            processors=1,
+            network_profile="portable" if device == "net" else None,
+        ),
+    ]
+    if device == "console":
+        boot.extend(("--virtio-console", "console"))
+        restore.extend(("--virtio-console", "console"))
+    elif mount is not None:
+        restore.extend(("--mount", mount))
+    return boot, restore
+
+
+def _device_restore_metric(samples: Sequence[float]) -> DeviceRestoreMetric:
+    if not samples:
+        raise ValueError("device restore metric requires at least one sample")
+    values = list(samples)
+    return {
+        "samples": values,
+        "p50": statistics.median(values),
+        "p95": nearest_rank_percentile(values, 95),
+    }
+
+
+def validate_device_restore_sample(
+    sample: DeviceRestoreSample,
+    device: str,
+    mode: str,
+) -> None:
+    events = [
+        event
+        for event in sample["events"]
+        if event.get("device_type") == DEVICE_RESTORE_TYPE_IDS[device]
+    ]
+    stages = [event for event in events if event.get("event") == "restore_staged"]
+    applications = [
+        event
+        for event in events
+        if event.get("event") == "private_state_apply" and event.get("success") is True
+    ]
+    queue_starts = [
+        event
+        for event in events
+        if event.get("event") == "queue_start" and event.get("success") is True
+    ]
+    staged_kick_dispatches = [
+        event
+        for event in events
+        if event.get("event") == "kick_dispatch"
+        and event.get("trigger") == "driver-ok"
+        and event.get("success") is True
+    ]
+    staged_kicks = [
+        event
+        for event in events
+        if event.get("event") == "kick_staged" and event.get("success") is True
+    ]
+    if len(stages) != 1:
+        raise RuntimeError(
+            f"{device}/{mode} emitted {len(stages)} restore-stage events"
+        )
+    if len(applications) != 1:
+        raise RuntimeError(
+            f"{device}/{mode} applied private state {len(applications)} times"
+        )
+    expected_queues = DEVICE_RESTORE_QUEUE_COUNTS[device]
+    if len(queue_starts) != expected_queues:
+        raise RuntimeError(
+            f"{device}/{mode} started {len(queue_starts)} queues, expected {expected_queues}"
+        )
+    failed_events = sum(event.get("success") is False for event in events)
+    premature = 0
+    trigger_markers = [
+        marker for marker in sample["guest_markers"] if marker.get("phase") == "trigger"
+    ]
+    ready_markers = [
+        marker
+        for marker in sample["guest_markers"]
+        if marker.get("phase") == "restore-ready"
+    ]
+    if len(trigger_markers) != 1:
+        raise RuntimeError(f"{device}/{mode} did not emit exactly one trigger marker")
+    if len(ready_markers) != 1:
+        raise RuntimeError(f"{device}/{mode} did not emit exactly one ready marker")
+    trigger_ms = float(trigger_markers[0]["observer_elapsed_ms"])
+    trigger_sequence = trigger_markers[0].get("observer_sequence")
+    ready_sequence = ready_markers[0].get("observer_sequence")
+    stage_sequence = stages[0].get("observer_sequence")
+    if (
+        ready_sequence is not None
+        and isinstance(stage_sequence, int)
+        and stage_sequence >= int(ready_sequence)
+    ):
+        raise RuntimeError(f"{device}/{mode} was staged after vCPU restore readiness")
+    if mode == "deferred":
+        for event in (
+            *applications,
+            *staged_kicks,
+            *queue_starts,
+            *staged_kick_dispatches,
+        ):
+            event_sequence = event.get("observer_sequence")
+            observed = event.get("observer_elapsed_ms")
+            if trigger_sequence is not None and isinstance(event_sequence, int):
+                is_premature = event_sequence < int(trigger_sequence)
+            else:
+                is_premature = (
+                    isinstance(observed, (int, float)) and observed < trigger_ms
+                )
+            if is_premature:
+                premature += 1
+        if stages[0].get("trigger") != "inactive-start":
+            raise RuntimeError(f"{device}/deferred was not staged as inactive")
+        if applications[0].get("trigger") != "kick":
+            raise RuntimeError(f"{device}/deferred was not applied by its staged kick")
+        if len(staged_kicks) != 1 or len(staged_kick_dispatches) != 1:
+            raise RuntimeError(
+                f"{device}/deferred staged {len(staged_kicks)} kicks and "
+                f"dispatched {len(staged_kick_dispatches)}"
+            )
+        dispatch_sequence = staged_kick_dispatches[0].get("observer_sequence")
+        last_queue_sequence = queue_starts[-1].get("observer_sequence")
+        if (
+            isinstance(dispatch_sequence, int)
+            and isinstance(last_queue_sequence, int)
+            and dispatch_sequence <= last_queue_sequence
+        ):
+            raise RuntimeError(
+                f"{device}/deferred dispatched its kick before queue start"
+            )
+    else:
+        if applications[0].get("trigger") != "active-start":
+            raise RuntimeError(f"{device}/active did not restore during active start")
+        if any(event.get("restored_progress") is not True for event in queue_starts):
+            raise RuntimeError(f"{device}/active queue progress was not restored")
+        if ready_sequence is not None and any(
+            not isinstance(event.get("observer_sequence"), int)
+            or cast(int, event["observer_sequence"]) >= int(ready_sequence)
+            for event in (*applications, *queue_starts)
+        ):
+            raise RuntimeError(
+                f"{device}/active activation completed after vCPU readiness"
+            )
+        if staged_kicks or staged_kick_dispatches:
+            raise RuntimeError(f"{device}/active unexpectedly staged a queue kick")
+    stale_premature = failed_events + premature
+    sample["queue_start_count"] = len(queue_starts)
+    sample["staged_kick_dispatch_count"] = len(staged_kick_dispatches)
+    sample["stale_premature_callback_count"] = stale_premature
+    if stale_premature != 0:
+        raise RuntimeError(
+            f"{device}/{mode} observed {stale_premature} failed or premature events"
+        )
+
+
+def summarize_device_restore_samples(
+    device: str,
+    mode: str,
+    samples: list[DeviceRestoreSample],
+) -> dict[str, object]:
+    if not samples:
+        raise ValueError("device restore scenario requires measured samples")
+    for sample in samples:
+        validate_device_restore_sample(sample, device, mode)
+    return {
+        "device": device,
+        "mode": mode,
+        "process_launch_to_ready_ms": _device_restore_metric(
+            [sample["process_launch_to_ready_ms"] for sample in samples]
+        ),
+        "trigger_to_first_successful_io_ms": _device_restore_metric(
+            [sample["trigger_to_first_successful_io_ms"] for sample in samples]
+        ),
+        "peak_rss_bytes": _device_restore_metric(
+            [float(sample["peak_rss_bytes"]) for sample in samples]
+        ),
+        "queue_start_counts": [sample["queue_start_count"] for sample in samples],
+        "staged_kick_dispatch_counts": [
+            sample["staged_kick_dispatch_count"] for sample in samples
+        ],
+        "stale_premature_callback_count": sum(
+            sample["stale_premature_callback_count"] for sample in samples
+        ),
+        "samples": samples,
+        "passed": True,
+    }
+
+
 def _try_peak_rss(process: subprocess.Popen[bytes], current: int) -> int:
     try:
         return max(current, peak_rss_bytes(process.pid))
@@ -1485,6 +1803,374 @@ def capture_automatic_snapshot(
         raise
     finally:
         interaction.close()
+
+
+def _device_restore_markers(
+    text: str,
+    device: str,
+    mode: str,
+) -> list[dict[str, str]]:
+    markers: list[dict[str, str]] = []
+    for line in text.splitlines():
+        marker = parse_device_restore_marker(line)
+        if marker is None:
+            continue
+        if marker["device"] != device or marker["mode"] != mode:
+            raise RuntimeError(
+                f"unexpected device restore marker for "
+                f"{marker['device']}/{marker['mode']}"
+            )
+        markers.append(marker)
+    return markers
+
+
+def capture_device_restore_snapshot(
+    command: Sequence[str],
+    snapshot_path: Path,
+    device: str,
+    mode: str,
+    *,
+    timeout: float,
+    log_path: Path,
+    windows_cpus: set[int] | None = None,
+) -> list[dict[str, str]]:
+    if snapshot_path.exists():
+        shutil.rmtree(snapshot_path)
+    environment = os.environ.copy()
+    environment["OPENVMM_LOG"] = "off"
+    interaction = InteractiveProcess(command, environment)
+    process = interaction.process
+    if windows_cpus is not None:
+        set_windows_affinity(process.pid, windows_cpus)
+    chunks: queue.Queue[bytes | None] = queue.Queue()
+    threading.Thread(
+        target=interaction.read_output, args=(chunks,), daemon=True
+    ).start()
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"{device}/{mode} source snapshot did not finish within {timeout:g}s"
+                )
+            try:
+                chunk = chunks.get(timeout=min(remaining, 0.1))
+            except queue.Empty:
+                if process.poll() is not None:
+                    continue
+                continue
+            if chunk is None:
+                break
+            output.extend(chunk)
+        returncode = process.wait()
+        if returncode != 0:
+            raise RuntimeError(
+                f"{device}/{mode} snapshot source exited with status {returncode}"
+            )
+        markers = _device_restore_markers(
+            output.decode("utf-8", "replace"), device, mode
+        )
+        phases = {marker["phase"] for marker in markers}
+        required = {"located", "pre-io-success", "capture-ready"}
+        if missing := required.difference(phases):
+            raise RuntimeError(
+                f"{device}/{mode} snapshot source is missing markers {sorted(missing)}"
+            )
+        for filename in SNAPSHOT_FILENAMES:
+            if not (snapshot_path / filename).is_file():
+                raise RuntimeError(
+                    f"{device}/{mode} snapshot did not publish "
+                    f"{snapshot_path / filename}"
+                )
+        return markers
+    except Exception as error:
+        terminate(process)
+        tail = output[-4096:].decode("utf-8", "replace")
+        if tail:
+            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
+        raise
+    finally:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_bytes(output)
+        interaction.close()
+
+
+def run_device_restore_sample(
+    command: Sequence[str],
+    device: str,
+    mode: str,
+    *,
+    timeout: float,
+    log_path: Path,
+    windows_cpus: set[int] | None = None,
+) -> DeviceRestoreSample:
+    environment = os.environ.copy()
+    environment["OPENVMM_LOG"] = "off,virtio_restore=debug"
+    started_ns = time.perf_counter_ns()
+    interaction = InteractiveProcess(command, environment)
+    process = interaction.process
+    if windows_cpus is not None:
+        set_windows_affinity(process.pid, windows_cpus)
+    chunks: queue.Queue[bytes | None] = queue.Queue()
+    threading.Thread(
+        target=interaction.read_output, args=(chunks,), daemon=True
+    ).start()
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    pending = bytearray()
+    markers: list[dict[str, str]] = []
+    events: list[dict[str, object]] = []
+    phase_times: dict[str, int] = {}
+    sequence = 0
+    peak_bytes = 0
+
+    def observe_line(raw_line: bytes, observed_ns: int) -> None:
+        nonlocal sequence
+        sequence += 1
+        line = raw_line.decode("utf-8", "replace").removesuffix("\r")
+        elapsed_ms = (observed_ns - started_ns) / 1_000_000
+        marker = parse_device_restore_marker(line)
+        if marker is not None:
+            if marker["device"] != device or marker["mode"] != mode:
+                raise RuntimeError(
+                    f"unexpected device restore marker for "
+                    f"{marker['device']}/{marker['mode']}"
+                )
+            marker["observer_elapsed_ms"] = f"{elapsed_ms:.6f}"
+            marker["observer_sequence"] = str(sequence)
+            markers.append(marker)
+            phase_times.setdefault(marker["phase"], observed_ns)
+            if marker["phase"] == "failure":
+                raise RuntimeError(
+                    f"{device}/{mode} guest probe failed: "
+                    f"{marker.get('reason', 'unknown')}"
+                )
+        event = parse_virtio_restore_event(line)
+        if event is not None:
+            event["observer_elapsed_ms"] = elapsed_ms
+            event["observer_sequence"] = sequence
+            events.append(event)
+
+    def observe_chunk(chunk: bytes, observed_ns: int) -> None:
+        pending.extend(chunk)
+        while b"\n" in pending:
+            raw_line, _, remaining = pending.partition(b"\n")
+            pending.clear()
+            pending.extend(remaining)
+            observe_line(bytes(raw_line), observed_ns)
+
+    try:
+        while True:
+            peak_bytes = _try_peak_rss(process, peak_bytes)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"{device}/{mode} restore did not finish within {timeout:g}s"
+                )
+            try:
+                chunk = chunks.get(timeout=min(remaining, 0.05))
+            except queue.Empty:
+                if process.poll() is not None:
+                    continue
+                continue
+            if chunk is None:
+                break
+            observed_ns = time.perf_counter_ns()
+            output.extend(chunk)
+            observe_chunk(chunk, observed_ns)
+        if pending:
+            observe_line(bytes(pending), time.perf_counter_ns())
+            pending.clear()
+        returncode = process.wait()
+        if returncode != 0:
+            raise RuntimeError(
+                f"{device}/{mode} restore exited with status {returncode}"
+            )
+        for phase in ("restore-ready", "trigger", "io-success"):
+            if phase not in phase_times:
+                raise RuntimeError(f"{device}/{mode} restore is missing {phase!r}")
+        if device == "console" and not contains_output_line(
+            output, b"NVX-VIRTIO-CONSOLE-IO-OK"
+        ):
+            raise RuntimeError(
+                "console restore did not emit its virtio-console I/O marker"
+            )
+        ready_ns = phase_times["restore-ready"]
+        trigger_ns = phase_times["trigger"]
+        io_ns = phase_times["io-success"]
+        if io_ns < trigger_ns:
+            raise RuntimeError(f"{device}/{mode} I/O completed before its trigger")
+        sample: DeviceRestoreSample = {
+            "process_launch_to_ready_ms": (ready_ns - started_ns) / 1_000_000,
+            "trigger_to_first_successful_io_ms": (io_ns - trigger_ns) / 1_000_000,
+            "peak_rss_bytes": peak_bytes,
+            "guest_markers": markers,
+            "events": events,
+            "queue_start_count": 0,
+            "staged_kick_dispatch_count": 0,
+            "stale_premature_callback_count": 0,
+            "log": str(log_path),
+        }
+        validate_device_restore_sample(sample, device, mode)
+        return sample
+    except Exception as error:
+        terminate(process)
+        tail = output[-4096:].decode("utf-8", "replace")
+        if tail:
+            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
+        raise
+    finally:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_bytes(output)
+        interaction.close()
+
+
+def benchmark_device_restore_profile(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    output_dir: Path,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> Path:
+    if args.processors != 1:
+        raise ValueError("device-restore-profile requires exactly one vCPU")
+    logs_root = output_dir / "device-restore-profile-logs"
+    if logs_root.exists():
+        raise FileExistsError(
+            f"device restore profile output already exists: {logs_root}"
+        )
+    logs_root.mkdir(parents=True)
+    scenarios: dict[str, object] = {}
+    network = args.net or "10.0.0.2/24"
+    timeout = max(args.timeout, 60.0)
+    for device in args.restore_devices:
+        for mode in args.restore_modes:
+            scenario_name = f"{device}-{mode}"
+            scenario_logs = logs_root / scenario_name
+            scenario_logs.mkdir()
+            with tempfile.TemporaryDirectory(
+                prefix=f"openvmm-device-restore-{scenario_name}-"
+            ) as temporary:
+                scenario_root = Path(temporary)
+                host_directory = scenario_root / "host"
+                host_directory.mkdir()
+                if device == "virtiofs":
+                    (host_directory / ".nvx-virtio-restore-host-seed").write_bytes(
+                        VIRTFS_HOST_TO_GUEST
+                    )
+                snapshot_path = scenario_root / "snapshot"
+                boot_command, restore_command = device_restore_commands(
+                    executable,
+                    backend,
+                    kernel,
+                    initrd,
+                    args.memory_mib,
+                    device,
+                    mode,
+                    command_prefix=command_prefix,
+                    network=network,
+                    host_directory=host_directory,
+                    snapshot_path=snapshot_path,
+                )
+                capture_markers = capture_device_restore_snapshot(
+                    [
+                        *boot_command,
+                        "--snapshot-destination",
+                        str(snapshot_path),
+                    ],
+                    snapshot_path,
+                    device,
+                    mode,
+                    timeout=timeout,
+                    log_path=scenario_logs / "capture.log",
+                    windows_cpus=windows_cpus,
+                )
+                measured: list[DeviceRestoreSample] = []
+                total_runs = args.warmups + args.runs
+                for index in range(total_runs):
+                    result_path = host_directory / ".nvx-virtio-restore-guest-result"
+                    result_path.unlink(missing_ok=True)
+                    label = (
+                        f"warmup-{index + 1}"
+                        if index < args.warmups
+                        else f"sample-{index - args.warmups + 1}"
+                    )
+                    log_path = scenario_logs / f"{label}.log"
+                    sample = run_device_restore_sample(
+                        restore_command,
+                        device,
+                        mode,
+                        timeout=timeout,
+                        log_path=log_path,
+                        windows_cpus=windows_cpus,
+                    )
+                    sample["log"] = str(log_path.relative_to(output_dir))
+                    if device == "virtiofs":
+                        if (
+                            not result_path.is_file()
+                            or result_path.read_text(encoding="ascii")
+                            != "guest-to-host\n"
+                        ):
+                            raise RuntimeError(
+                                f"{scenario_name} did not publish its guest result"
+                            )
+                    if index < args.warmups:
+                        print(
+                            f"  {scenario_name} warmup {index + 1}/{args.warmups}: "
+                            f"ready={sample['process_launch_to_ready_ms']:.3f} ms, "
+                            f"I/O={sample['trigger_to_first_successful_io_ms']:.3f} ms",
+                            flush=True,
+                        )
+                    else:
+                        measured.append(sample)
+                        print(
+                            f"  {scenario_name} sample "
+                            f"{index - args.warmups + 1}/{args.runs}: "
+                            f"ready={sample['process_launch_to_ready_ms']:.3f} ms, "
+                            f"I/O={sample['trigger_to_first_successful_io_ms']:.3f} ms, "
+                            f"peak RSS={bytes_to_mib(sample['peak_rss_bytes']):.3f} MiB",
+                            flush=True,
+                        )
+                result = summarize_device_restore_samples(device, mode, measured)
+                result["capture_markers"] = capture_markers
+                result["capture_log"] = str(
+                    (scenario_logs / "capture.log").relative_to(output_dir)
+                )
+                scenarios[scenario_name] = result
+    stale_count = 0
+    for result in scenarios.values():
+        value = cast(dict[str, object], result)["stale_premature_callback_count"]
+        if not isinstance(value, int):
+            raise TypeError("device restore stale callback count is not an integer")
+        stale_count += value
+    document = {
+        "schema_version": 1,
+        "non_canonical": True,
+        "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "platform": args.platform,
+        "backend": backend,
+        "processors": 1,
+        "memory_mib": args.memory_mib,
+        "warmups": args.warmups,
+        "runs": args.runs,
+        "devices": list(args.restore_devices),
+        "modes": list(args.restore_modes),
+        "scenarios": scenarios,
+        "assertions": {
+            "zero_stale_premature_callbacks": stale_count == 0,
+            "stale_premature_callback_count": stale_count,
+        },
+    }
+    result_path = output_dir / "device-restore-profile.json"
+    result_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    print(f"Wrote {result_path}", flush=True)
+    return result_path
 
 
 def format_rss_summary(samples: Sequence[int]) -> str:
@@ -2367,8 +3053,18 @@ def run_workload_benchmarks(
             / "runs"
             / f"{platform}-microvm-v{MICROVM_ABI_VERSION}-{args.processors}vcpu"
         )
+    if args.suite == "device-restore-profile" and output_dir is None:
+        raise ValueError("device-restore-profile requires --output-dir")
     if output_dir is not None:
         output_dir = output_dir.resolve()
+        if (
+            args.suite == "device-restore-profile"
+            and output_dir.is_dir()
+            and any(output_dir.iterdir())
+        ):
+            raise FileExistsError(
+                f"device-restore-profile requires an empty output directory: {output_dir}"
+            )
         output_dir.mkdir(parents=True, exist_ok=True)
         if args.suite in {"performance", "shell-snapshot-restore"}:
             for filename in (*PERFORMANCE_LOG_FILENAMES, *LEGACY_PYTHON_LOG_FILENAMES):
@@ -2381,6 +3077,19 @@ def run_workload_benchmarks(
             args, output_dir, executable, kernel, initrd, backend
         )
         print(f"Wrote {metadata_path}", flush=True)
+    if args.suite == "device-restore-profile":
+        assert output_dir is not None
+        benchmark_device_restore_profile(
+            args,
+            executable,
+            kernel,
+            initrd,
+            backend,
+            output_dir,
+            command_prefix=command_prefix,
+            windows_cpus=windows_cpus,
+        )
+        return 0
 
     callbacks: dict[str, tuple[str, Callable[[], None]]] = {
         "cold-start": (

@@ -116,6 +116,34 @@ restore artifacts. Use `--shell-memories` to select sizes and `--cache-state war
 `both` to select cache conditions. The suite enables OpenVMM profiling for these diagnostic runs;
 other benchmark paths leave it disabled unless `--snapshot-profile` is explicit.
 
+Run the non-canonical virtio restore diagnostic with a fresh output directory:
+
+```console
+python3 scripts/nvx.py benchmark --suite device-restore-profile --backend kvm --platform linux-kvm-baremetal --processors 1 --warmups 1 --runs 5 --skip-build --output-dir data/runs/device-restore-kvm
+python scripts\nvx.py benchmark --suite device-restore-profile --backend whp --platform windows-whp-baremetal --processors 1 --warmups 1 --runs 5 --skip-build --output-dir data\runs\device-restore-whp
+```
+
+By default the suite runs console, network, and virtio-fs in both active and deferred modes. Use
+`--restore-devices` and `--restore-modes` to select a subset. Deferred capture unbinds the selected
+built-in guest driver before `nvx-snapshot`; restore rebinds it and verifies I/O. Devices are
+located by the microVM ABI slots and virtio device IDs, not by unstable `virtioN` numbering:
+network at `0xd0000000`/ID 1, virtio-fs at `0xd0001000`/ID 26, and console at
+`0xd0002000`/ID 3. Probe control markers use port-B (`/dev/hvc0`) independently of the selected
+device. Before rebinding, deferred mode sends a descriptor-free queue-0 MMIO notification through
+`/sbin/nvx-mmio-write` to verify staged-kick ordering. Console verification writes through
+`/dev/hvc1`; network uses the portable profile and a gateway ping; virtio-fs reads a host seed and
+writes a host-visible result after remount.
+
+The output directory contains `device-restore-profile.json`, `benchmark-metadata.json`, and raw
+capture/restore logs. The JSON retains every measured sample, p50/p95 launch-to-ready and
+trigger-to-first-I/O timing, peak RSS, guest markers, structured restore event order, queue-start
+counts, staged-kick dispatch counts, and the required zero stale/premature callback assertion.
+Only this suite enables the `virtio_restore=debug` event stream. Its result is diagnostic: it is
+not accepted by `performance collect`, persisted to `data/*.csv`, or used by `performance gate`.
+Host-observed marker timing includes serial delivery and scheduler delay, and repeated restores
+reuse one fresh snapshot per scenario; compare results only on the same host under equivalent
+load and power conditions.
+
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
 instead of `performance`. Use `--shell-memories 64 128 256 512`,
 `--payload-mib 64`, and
@@ -172,6 +200,7 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Restore-time vCPU activation | `benchmark --suite snapshot-restore-vcpu --processors 8` | Restores one boot-online-1, capacity-8 snapshot at online targets 1/2/4/8 and reports latency plus peak RSS. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 | Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 64/128/256/512/1024 MiB warm/cold restores. |
+| Virtio device restore profile | `benchmark --suite device-restore-profile` | Verifies active and driver-unbound deferred restore for console, network, and virtio-fs; emits standalone diagnostic JSON and raw logs. |
 
 ## Kernel command lines
 

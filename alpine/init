@@ -236,6 +236,20 @@ echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
 echo " uname: $(uname -a)"
 echo "=========================================="
 echo
+restore_probe=$(sed -n 's/.*nvx_virtio_restore_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$restore_probe" ]; then
+    case "$restore_probe" in
+        *,*) ;;
+        *) fatal "nvx_virtio_restore_probe must be DEVICE,MODE" ;;
+    esac
+    restore_device=${restore_probe%%,*}
+    restore_mode=${restore_probe#*,}
+    case "$restore_mode" in
+        *,*) fatal "nvx_virtio_restore_probe has too many fields" ;;
+    esac
+    exec /sbin/nvx-virtio-restore-probe \
+        --device "$restore_device" --mode "$restore_mode"
+fi
 # snap: optional snapshot benchmark for a plain (non-networked) shell (see the shell-snapshot
 # benchmark). When the kernel command line contains "snap", ask the VMM to take a snapshot at
 # this fully-booted, shell-ready point through /sbin/nvx-snapshot. On the

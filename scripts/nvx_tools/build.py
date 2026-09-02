@@ -233,9 +233,9 @@ def _install(source: Path, destination: Path) -> None:
     destination.chmod(0o755)
 
 
-def _build_reseed_helper(work: Path, destination: Path) -> None:
+def _build_static_helper(work: Path, source: Path, destination: Path) -> None:
     compiler = require_tool("cc")
-    output = work / "nvx-reseed"
+    output = work / source.stem
     run_checked(
         [
             compiler,
@@ -247,7 +247,7 @@ def _build_reseed_helper(work: Path, destination: Path) -> None:
             "-Werror",
             "-o",
             output,
-            REPO_ROOT / "alpine" / "nvx-reseed.c",
+            source,
         ]
     )
     shutil.copyfile(output, destination)
@@ -419,7 +419,20 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         root / "sbin" / "nvx-init-agent",
     )
     _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
-    _build_reseed_helper(config.work, root / "sbin" / "nvx-reseed")
+    _install(
+        REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",
+        root / "sbin" / "nvx-virtio-restore-probe",
+    )
+    _build_static_helper(
+        config.work,
+        REPO_ROOT / "alpine" / "nvx-reseed.c",
+        root / "sbin" / "nvx-reseed",
+    )
+    _build_static_helper(
+        config.work,
+        REPO_ROOT / "alpine" / "nvx-mmio-write.c",
+        root / "sbin" / "nvx-mmio-write",
+    )
     config.output.parent.mkdir(parents=True, exist_ok=True)
     _write_apk_manifest(root, config.output, config)
     _pack_initramfs(root, config.output)

@@ -31,6 +31,30 @@ from nvx_tools import (  # noqa: E402
 
 
 class CliTests(unittest.TestCase):
+    def test_benchmark_exposes_device_restore_profile(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "device-restore-profile",
+                "--restore-devices",
+                "console",
+                "virtiofs",
+                "--restore-modes",
+                "deferred",
+                "--output-dir",
+                "results",
+            ]
+        )
+
+        benchmark.apply_benchmark_suite_defaults(args)
+        self.assertEqual(args.restore_devices, ["console", "virtiofs"])
+        self.assertEqual(args.restore_modes, ["deferred"])
+        self.assertEqual(args.warmups, 1)
+        self.assertEqual(args.runs, 5)
+        self.assertEqual(args.output_dir, Path("results"))
+        self.assertIs(args.handler, benchmark.run)
+
     def test_benchmark_exposes_non_python_performance_suite(self):
         args = nvx.parse_args(
             [
@@ -835,6 +859,375 @@ class BenchmarkTests(unittest.TestCase):
                 marker,
             )
         )
+
+    def test_device_restore_marker_and_trace_parsers(self):
+        marker = benchmark.parse_device_restore_marker(
+            "NVX-VIRTIO-RESTORE-PROBE phase=io-success device=net mode=deferred\r"
+        )
+        self.assertEqual(
+            marker,
+            {"phase": "io-success", "device": "net", "mode": "deferred"},
+        )
+        self.assertIsNone(benchmark.parse_device_restore_marker("unrelated"))
+
+        event = benchmark.parse_virtio_restore_event(
+            "DEBUG virtio_restore: virtio restore lifecycle "
+            'event: "queue_start", device_type: 0x1a, trigger: "driver-ok", '
+            "queue_index: 0, restored_progress: true, success: true"
+        )
+        self.assertEqual(
+            event,
+            {
+                "event": "queue_start",
+                "device_type": 0x1A,
+                "trigger": "driver-ok",
+                "queue_index": 0,
+                "restored_progress": True,
+                "success": True,
+            },
+        )
+        self.assertIsNone(benchmark.parse_virtio_restore_event("unrelated"))
+
+    def test_device_restore_commands_use_fixed_attachments(self):
+        common = (
+            Path("openvmm"),
+            "whp",
+            Path("vmlinux"),
+            Path("initrd"),
+            256,
+        )
+        console_boot, console_restore = benchmark.device_restore_commands(
+            *common, "console", "deferred"
+        )
+        self.assertIn(
+            "nvx_virtio_restore_probe=console,deferred",
+            console_boot[console_boot.index("--cmdline") + 1],
+        )
+        self.assertEqual(console_boot[-2:], ["--virtio-console", "console"])
+        self.assertEqual(console_restore[-2:], ["--virtio-console", "console"])
+
+        net_boot, net_restore = benchmark.device_restore_commands(
+            *common, "net", "active"
+        )
+        self.assertIn("--network-profile", net_boot)
+        self.assertIn("--network-profile", net_restore)
+
+        fs_boot, fs_restore = benchmark.device_restore_commands(
+            *common,
+            "virtiofs",
+            "deferred",
+            host_directory=Path("host-share"),
+        )
+        self.assertIn("--mount", fs_boot)
+        self.assertIn("--mount", fs_restore)
+
+    def test_device_restore_sample_rejects_premature_activation(self):
+        markers = [
+            {
+                "phase": "restore-ready",
+                "device": "net",
+                "mode": "deferred",
+                "observer_elapsed_ms": "8.0",
+            },
+            {
+                "phase": "trigger",
+                "device": "net",
+                "mode": "deferred",
+                "observer_elapsed_ms": "10.0",
+            },
+        ]
+        events: list[dict[str, object]] = [
+            {
+                "event": "restore_staged",
+                "device_type": 1,
+                "trigger": "inactive-start",
+                "queue_index": -1,
+                "restored_progress": False,
+                "success": True,
+                "observer_elapsed_ms": 5.0,
+            },
+            {
+                "event": "private_state_apply",
+                "device_type": 1,
+                "trigger": "kick",
+                "queue_index": -1,
+                "restored_progress": False,
+                "success": True,
+                "observer_elapsed_ms": 9.0,
+            },
+            {
+                "event": "kick_staged",
+                "device_type": 1,
+                "trigger": "kick",
+                "queue_index": 0,
+                "restored_progress": False,
+                "success": True,
+                "observer_elapsed_ms": 10.5,
+            },
+        ]
+        for queue_index in range(2):
+            events.append(
+                {
+                    "event": "queue_start",
+                    "device_type": 1,
+                    "trigger": "driver-ok",
+                    "queue_index": queue_index,
+                    "restored_progress": False,
+                    "success": True,
+                    "observer_elapsed_ms": 11.0,
+                }
+            )
+        events.append(
+            {
+                "event": "kick_dispatch",
+                "device_type": 1,
+                "trigger": "driver-ok",
+                "queue_index": 0,
+                "restored_progress": False,
+                "success": True,
+                "observer_elapsed_ms": 12.0,
+            }
+        )
+        sample = cast(
+            benchmark.DeviceRestoreSample,
+            {
+                "process_launch_to_ready_ms": 8.0,
+                "trigger_to_first_successful_io_ms": 2.0,
+                "peak_rss_bytes": 1,
+                "guest_markers": markers,
+                "events": events,
+                "queue_start_count": 0,
+                "staged_kick_dispatch_count": 0,
+                "stale_premature_callback_count": 0,
+                "log": "sample.log",
+            },
+        )
+        with self.assertRaisesRegex(RuntimeError, "premature"):
+            benchmark.validate_device_restore_sample(sample, "net", "deferred")
+        events[1]["observer_elapsed_ms"] = 10.25
+        benchmark.validate_device_restore_sample(sample, "net", "deferred")
+        self.assertEqual(sample["queue_start_count"], 2)
+        self.assertEqual(sample["staged_kick_dispatch_count"], 1)
+        self.assertEqual(sample["stale_premature_callback_count"], 0)
+
+    def test_device_restore_profile_writes_standalone_result(self):
+        args = argparse.Namespace(
+            processors=1,
+            restore_devices=["console"],
+            restore_modes=["active"],
+            net=None,
+            memory_mib=128,
+            timeout=1.0,
+            warmups=1,
+            runs=2,
+            platform="windows-whp-baremetal",
+        )
+
+        def sample() -> benchmark.DeviceRestoreSample:
+            return {
+                "process_launch_to_ready_ms": 10.0,
+                "trigger_to_first_successful_io_ms": 2.0,
+                "peak_rss_bytes": 1024,
+                "guest_markers": [
+                    {
+                        "phase": "restore-ready",
+                        "device": "console",
+                        "mode": "active",
+                        "observer_elapsed_ms": "10.0",
+                    },
+                    {
+                        "phase": "trigger",
+                        "device": "console",
+                        "mode": "active",
+                        "observer_elapsed_ms": "11.0",
+                    },
+                ],
+                "events": [
+                    {
+                        "event": "restore_staged",
+                        "device_type": 3,
+                        "trigger": "active-start",
+                        "queue_index": -1,
+                        "restored_progress": False,
+                        "success": True,
+                    },
+                    {
+                        "event": "private_state_apply",
+                        "device_type": 3,
+                        "trigger": "active-start",
+                        "queue_index": -1,
+                        "restored_progress": False,
+                        "success": True,
+                    },
+                    {
+                        "event": "kick_dispatch",
+                        "device_type": 3,
+                        "trigger": "kick",
+                        "queue_index": 1,
+                        "restored_progress": False,
+                        "success": True,
+                    },
+                    *[
+                        {
+                            "event": "queue_start",
+                            "device_type": 3,
+                            "trigger": "active-start",
+                            "queue_index": queue_index,
+                            "restored_progress": True,
+                            "success": True,
+                        }
+                        for queue_index in range(2)
+                    ],
+                ],
+                "queue_start_count": 0,
+                "staged_kick_dispatch_count": 0,
+                "stale_premature_callback_count": 0,
+                "log": "",
+            }
+
+        def restore_sample(
+            *_args: object, **_kwargs: object
+        ) -> benchmark.DeviceRestoreSample:
+            return sample()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            with (
+                patch.object(
+                    benchmark,
+                    "capture_device_restore_snapshot",
+                    return_value=[
+                        {
+                            "phase": "capture-ready",
+                            "device": "console",
+                            "mode": "active",
+                        }
+                    ],
+                ) as capture,
+                patch.object(
+                    benchmark,
+                    "run_device_restore_sample",
+                    side_effect=restore_sample,
+                ) as restore,
+            ):
+                path = benchmark.benchmark_device_restore_profile(
+                    args,
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "whp",
+                    output_dir,
+                )
+
+            self.assertEqual(capture.call_count, 1)
+            self.assertEqual(restore.call_count, 3)
+            document = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(document["non_canonical"])
+            self.assertTrue(document["assertions"]["zero_stale_premature_callbacks"])
+            scenario = document["scenarios"]["console-active"]
+            self.assertEqual(
+                scenario["process_launch_to_ready_ms"]["samples"], [10.0, 10.0]
+            )
+            self.assertEqual(scenario["process_launch_to_ready_ms"]["p50"], 10.0)
+            self.assertEqual(scenario["queue_start_counts"], [2, 2])
+
+    def test_device_restore_profile_writes_lf_only_virtiofs_seed(self):
+        args = argparse.Namespace(
+            processors=1,
+            restore_devices=["virtiofs"],
+            restore_modes=["active"],
+            net=None,
+            memory_mib=128,
+            timeout=1.0,
+            warmups=1,
+            runs=1,
+            platform="windows-whp-baremetal",
+        )
+        observed_seeds: list[bytes] = []
+        host_directories: list[Path] = []
+
+        def commands(*_args: object, **kwargs: object) -> tuple[list[str], list[str]]:
+            host_directory = cast(Path, kwargs["host_directory"])
+            host_directories.append(host_directory)
+            observed_seeds.append(
+                (host_directory / ".nvx-virtio-restore-host-seed").read_bytes()
+            )
+            return ["boot"], ["restore"]
+
+        sample = cast(
+            benchmark.DeviceRestoreSample,
+            {
+                "process_launch_to_ready_ms": 1.0,
+                "trigger_to_first_successful_io_ms": 1.0,
+                "peak_rss_bytes": 1,
+                "guest_markers": [],
+                "events": [],
+                "queue_start_count": 0,
+                "staged_kick_dispatch_count": 0,
+                "stale_premature_callback_count": 0,
+                "log": "sample.log",
+            },
+        )
+
+        def run_sample(
+            *_args: object, **_kwargs: object
+        ) -> benchmark.DeviceRestoreSample:
+            (host_directories[-1] / ".nvx-virtio-restore-guest-result").write_bytes(
+                benchmark.VIRTFS_GUEST_TO_HOST
+            )
+            return sample
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(
+                    benchmark, "device_restore_commands", side_effect=commands
+                ),
+                patch.object(
+                    benchmark,
+                    "capture_device_restore_snapshot",
+                    return_value=[],
+                ),
+                patch.object(
+                    benchmark,
+                    "run_device_restore_sample",
+                    side_effect=run_sample,
+                ),
+                patch.object(
+                    benchmark,
+                    "summarize_device_restore_samples",
+                    return_value={"stale_premature_callback_count": 0},
+                ),
+            ):
+                benchmark.benchmark_device_restore_profile(
+                    args,
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "whp",
+                    Path(temporary),
+                )
+
+        self.assertEqual(observed_seeds, [benchmark.VIRTFS_HOST_TO_GUEST])
+
+    def test_device_restore_profile_rejects_reused_output(self):
+        args = argparse.Namespace(
+            suite="device-restore-profile",
+            output=None,
+            output_dir=None,
+            platform="linux-kvm-baremetal",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            (output_dir / "stale.log").write_text("stale", encoding="ascii")
+            args.output_dir = output_dir
+            with self.assertRaisesRegex(FileExistsError, "empty output directory"):
+                benchmark.run_workload_benchmarks(
+                    args,
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "kvm",
+                )
 
     def test_benchmark_cpu_set_reserves_host_worker_capacity(self):
         benchmark.validate_benchmark_cpu_set(set(range(10)), 8)
