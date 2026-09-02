@@ -90,7 +90,6 @@ static int read_rtc_sample(int fd, struct rtc_sample *sample)
             fprintf(stderr, "nvx-reseed: CMOS update did not complete\n");
             return -1;
         }
-        usleep(1000);
     }
 
     return read_cmos_register(fd, 0x00, &sample->second) ||

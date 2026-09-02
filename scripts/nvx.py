@@ -160,8 +160,15 @@ def command_run(args: argparse.Namespace) -> None:
         raise ScriptError("--net and --network-profile must be specified together")
     if args.restore_ready_path is not None and args.restore_snapshot is None:
         raise ScriptError("--restore-ready-path requires --restore-snapshot")
+    if args.restore_processors is not None and args.restore_snapshot is None:
+        raise ScriptError("--restore-processors requires --restore-snapshot")
     if args.machine != "microvm-v2" and args.processors != 1:
         raise ScriptError(f"--machine {args.machine} requires exactly one processor")
+    if args.restore_processors is not None:
+        if args.machine != "microvm-v2":
+            raise ScriptError("--restore-processors requires --machine microvm-v2")
+        if args.restore_processors > args.processors:
+            raise ScriptError("--restore-processors cannot exceed --processors capacity")
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     command = [
         str(executable),
@@ -177,6 +184,8 @@ def command_run(args: argparse.Namespace) -> None:
         command.extend(
             ["--restore-snapshot", str(args.restore_snapshot), "--restore-entropy"]
         )
+        if args.restore_processors is not None:
+            command.extend(["--restore-processors", str(args.restore_processors)])
         if args.restore_ready_path is not None:
             command.extend(["--restore-ready-path", str(args.restore_ready_path)])
     else:
@@ -348,6 +357,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--network-profile", choices=NETWORK_PROFILES)
     run.add_argument("--cmdline", default="")
     run.add_argument("--restore-snapshot", type=Path)
+    run.add_argument("--restore-processors", type=int, choices=(1, 2, 4, 8))
     run.add_argument("--restore-ready-path", type=Path)
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(handler=command_run)

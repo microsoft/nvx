@@ -72,6 +72,35 @@ python3 scripts/nvx.py benchmark --suite shell-snapshot-restore --backend kvm --
 python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu --output-dir data/results --require-shell-snapshot-restore-512
 ```
 
+Measure restore-time vCPU activation from one immutable capacity-8 snapshot
+that boots with only CPU 0 online:
+
+```console
+python3 scripts/nvx.py benchmark --suite snapshot-restore-vcpu --backend kvm --processors 8 --memory-mib 512 --warmups 1 --runs 5 --skip-build --output-dir data/runs/restore-vcpu-kvm
+```
+
+Use `--backend mshv` on Linux/MSHV or `--backend whp` on Windows/WHP. The suite
+captures once with `maxcpus=1`, then restores that same artifact with online
+targets 1, 2, 4, and 8. Each sample reaches its marker only after the guest has
+verified the requested online prefix. Capture and restore use `--timeout`
+(10 seconds by default). Results are diagnostic and are not fed into the
+historical fixed-vCPU performance CSVs.
+
+For an explicit MSHV target, OpenVMM instantiates and binds only the requested
+VP prefix while retaining full-capacity topology and saved-state validation.
+MSHV restores without a target, and all KVM and WHP restores, instantiate the
+full capacity. A reduced-prefix MSHV runtime cannot be saved again.
+
+Add `--snapshot-profile` to print p50 and p95 lifecycle phases for every online
+target. Compare target 1 against a fixed-capacity run with the same memory and
+sample settings to measure residual full-topology overhead after avoiding
+dormant-suffix MSHV VP binding:
+
+```console
+python3 scripts/nvx.py benchmark --suite shell-snapshot-restore --backend mshv --processors 1 --memory-mib 128 --shell-memories 128 --warmups 1 --runs 5 --snapshot-profile --skip-build --output-dir data/runs/restore-vcpu-mshv-fixed-1
+python3 scripts/nvx.py benchmark --suite snapshot-restore-vcpu --backend mshv --processors 8 --memory-mib 128 --warmups 1 --runs 5 --snapshot-profile --skip-build --output-dir data/runs/restore-vcpu-mshv-capacity-8
+```
+
 Run the diagnostic snapshot lifecycle matrix with:
 
 ```console
@@ -84,8 +113,8 @@ python scripts\nvx.py benchmark --suite snapshot-profile --backend whp --warmups
 
 The default matrix profiles 64, 128, 256, 512, and 1024 MiB snapshots with both warm and cold
 restore artifacts. Use `--shell-memories` to select sizes and `--cache-state warm`, `cold`, or
-`both` to select cache conditions. The suite enables OpenVMM profiling only for these diagnostic
-runs; ordinary benchmark paths leave it disabled.
+`both` to select cache conditions. The suite enables OpenVMM profiling for these diagnostic runs;
+other benchmark paths leave it disabled unless `--snapshot-profile` is explicit.
 
 Run one workload by selecting `cold-start`, `virtfs`, `shell-snapshot`, or `network-snapshot`
 instead of `performance`. Use `--shell-memories 64 128 256 512`,
@@ -140,6 +169,7 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
 | Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
 | Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured shell-ready snapshot and measures only restore latency for the selected memory sizes. |
+| Restore-time vCPU activation | `benchmark --suite snapshot-restore-vcpu --processors 8` | Restores one boot-online-1, capacity-8 snapshot at online targets 1/2/4/8 and reports latency plus peak RSS. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 | Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 64/128/256/512/1024 MiB warm/cold restores. |
 
@@ -277,8 +307,14 @@ are excluded from raw samples and summaries.
 Capture records isolate guest quiesce, state save, mapped-memory and memory-handle flushes, each
 publication step, publication observation, and source teardown. Restore records isolate artifact
 open and preparation, COW section and mapping/view creation, prototype and final partition work,
-GPA registration, saved-state restore, device start, and guest resume to readiness. State and
-memory SHA stages are intentionally absent from the final capture and restore path.
+GPA registration, partition-unit creation, VP-thread binding, saved-state restore, state-unit time
+advance, per-VP TSC advance, backend clock advance, restored-VP stopping, input gating, device
+start, and guest resume to readiness. State and memory SHA stages are intentionally absent from
+the final capture and restore path.
+
+`startup.vp_thread_bind` is the exclusive wall interval for all VP threads to bind. Nested
+`startup.vp_bind_bsp` and `startup.vp_bind_ap_<INDEX>` records are non-exclusive per-VP intervals;
+compare their endpoints with the aggregate interval to expose serialized backend VP creation.
 
 ### Network snapshot
 

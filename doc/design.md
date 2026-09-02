@@ -679,6 +679,65 @@ restore on compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on
 compatible WHP hosts. Cross-backend conversion and standalone NVX snapshot
 import are not supported.
 
+### Restore-time processor activation
+
+ABI v2 separates the immutable processor capacity recorded by a snapshot from
+the process-local VP set needed by one restore:
+
+- `C` is the manifest VP capacity. Processor topology, APIC identities, ACPI
+   and MP tables, and saved VP inventory always contain exactly `C` entries.
+- `B` is the boot-online count recorded from an opt-in template's effective
+   `maxcpus=` command-line token. It must be one of 1, 2, 4, or 8 and no larger
+   than `C`. A snapshot without this opt-in records zero and rejects activation.
+- `N` is an explicit `--restore-processors` target. It must be supported and
+   satisfy `B <= N <= C`; it is process-local and does not modify the snapshot.
+
+The requested online set is always the contiguous prefix `0..N-1`. This is not
+a topology change or a general CPU-hotplug interface: the guest still sees the
+capacity-`C` machine contract, and bringing a suffix VP online after readiness
+is unsupported.
+
+Runtime VP materialization is backend-specific while the guest-visible
+contract remains backend-independent:
+
+| Restore shape | Process-local VP runners and backend binders | Saved VP state |
+| --- | --- | --- |
+| MSHV with explicit `N` | Instantiate and bind only `0..N-1` | Validate all `C` entries, then apply the prefix |
+| MSHV without explicit `N` | Instantiate and bind all `C` | Validate and apply all `C` entries |
+| KVM or WHP | Instantiate and bind all `C` | Validate and apply all `C` entries |
+
+MSHV creates application processors lazily while binding their VP runners, so
+discarding suffix binders before that boundary avoids creating processors that
+this restore will not run. KVM and WHP deliberately retain their existing
+full-capacity construction path, including when an explicit online target is
+sent to the guest.
+
+Saved state remains authoritative despite the narrower MSHV runtime. Before
+filtering, restore requires exactly one VP state entry for every index in
+`0..C-1` and rejects missing, duplicate, or out-of-range entries, including
+errors in the dormant suffix. Only after that validation may an explicit MSHV
+restore apply state for `0..N-1`. A reduced-prefix process cannot later produce
+a complete capacity-`C` VP inventory, so any attempt to save it fails with
+`SaveError::NotSupported`; dump or debug access to an uninstantiated suffix VP
+also fails explicitly instead of indexing nonexistent runtime state. The
+original immutable snapshot remains reusable for independent restores at
+other valid targets.
+
+After host-side state restoration, the version-2 private restore packet carries
+`N` to the Alpine agent. While external input remains gated, the agent onlines
+CPUs from `B` through `N-1`, verifies that `/sys/devices/system/cpu/online` is
+exactly the requested prefix, and acknowledges through PMIO `0x605`. OpenVMM
+stops at that post-write boundary, releases host input, and then resumes the
+guest.
+
+A fixed-capacity `N`-vCPU snapshot and a capacity-`C`, boot-online-`B` template
+restored to `N` therefore reach the same online prefix but do not contain the
+same guest state. The fixed snapshot captures all `N` CPUs online; the template
+captures only `B` online CPUs and performs CPU activation during gated repair.
+Performance comparisons should separate VP binding and worker construction
+from guest resume-to-readiness. Matching host-side phase costs do not require
+the total restore latencies or tail behavior to match.
+
 ### Time and entropy
 
 Capture records a coherent processor and clock boundary. Restore advances TSC,
@@ -690,16 +749,21 @@ downtime and elapsed host downtime greater than 30 days. If an advanced
 TSC-deadline timer would already be in the past, restore rearms it one
 millisecond beyond the restored TSC; some hypervisors do not inject an
 interrupt merely because a past deadline was restored. Exact deadline
-read-back is consequently excluded from state comparison.
+read-back is consequently excluded from state comparison. Versioned MSHV CPU
+contracts do not expose `IA32_TSC_ADJUST` because snapshot state cannot preserve
+that register independently of `IA32_TSC`; Linux therefore does not interpret
+OpenVMM's host-side TSC correction as per-vCPU firmware adjustment skew.
 
 Replaying a snapshot also replays the guest's in-memory random-number-generator
 state. Tiered restore always creates a fresh one-time packet and exposes it
 through the portb status/data protocol. For clone policy, the Alpine restore
 path credits the seed with `RNDADDENTROPY`, forces `RNDRESEEDCRNG`, refreshes
 wall clock and machine identity, and requires the workload-start runtime hook
-to reset runtime-owned RNG state before accepting work. The workload's
-`/etc/machine-id` is a read-only bind of a runtime-tmpfs file, so the agent can
-refresh it while scratch remains frozen; the agent also updates the workload's
+to reset runtime-owned RNG state before accepting work. RTC update-in-progress
+is polled with a bounded read loop rather than a timer sleep because guest
+timers are not authoritative until this wall-clock repair completes. The
+workload's `/etc/machine-id` is a read-only bind of a runtime-tmpfs file, so the
+agent can refresh it while scratch remains frozen; the agent also updates the workload's
 UTS namespace before acknowledgement. It then
 acknowledges the VMM gate before thawing scratch and the workload cgroup. Resume
 policy preserves identity and RNG continuity and only acknowledges the gate.
@@ -756,18 +820,28 @@ or wrong-geometry media. The same selected native microVM suite passes on KVM,
 MSHV, and WHP. ABI-v2 coverage also includes 1/2/4/8-vCPU topology, APIC
 identity, pinned per-vCPU execution, timer/interrupt progress, reset,
 cancellation, count and topology mismatch rejection, and repeated immutable
-restore. Platform CI and the benchmark histories in `data/` provide the wider
-host matrix.
+restore. Restore-time activation coverage captures one capacity-8 template
+with a boot-online count of one, restores it at 1/2/4/8 online VPs, schedules
+work on every requested CPU, and verifies that the artifact is unchanged.
+Unit coverage verifies that only an explicit MSHV target selects a runtime
+prefix, that the complete saved VP inventory is validated before filtering,
+that reduced-prefix saves are rejected, and that dormant VP access fails
+cleanly. Lifecycle profiling verifies that MSHV binds exactly the requested
+prefix while fixed-capacity comparisons retain equivalent per-prefix binding
+and worker-construction costs.
+Platform CI and the benchmark histories in `data/` provide the wider host
+matrix.
 
 ## Current limits
 
 The current ABI family intentionally does not provide:
 
 - processor counts other than 1/2/4/8, SMT, multiple NUMA nodes, non-x86 guests, or nested virtualization;
-- firmware boot, caller-defined ACPI, SMBIOS, PCI, VPCI, VMBus, hotplug, or
-  arbitrary devices;
+- firmware boot, caller-defined ACPI, SMBIOS, PCI, VPCI, VMBus, arbitrary
+   post-readiness CPU hotplug, or arbitrary devices;
 - cross-hypervisor snapshot restore;
-- capture-and-continue or live migration;
+- capture-and-continue, live migration, or saving a reduced-prefix MSHV
+   restore;
 - ABI-v1 snapshots with its roleless virtio-blk extension;
 - ABI-v2 snapshot media other than cached regular raw files;
 - ABI-v2 sandbox-block construction through TTRPC;
@@ -799,7 +873,7 @@ runtime modes. The current tree integrates their main deliverables as follows:
 | Proposal | Current implementation |
 | --- | --- |
 | Phase 1: base machine | PVH boot, versioned MP/ACPI boot metadata, chipset/PMIO devices, optional cold-boot virtio-blk, and ABI-v2 1/2/4/8-vCPU SMP are implemented. Linux/MSHV is supported in addition to KVM and WHP. |
-| Phase 2: snapshot | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented for ABI v1 without block and ABI v2 with exact multi-VP topology plus either no block or three-tier fixed-role layers. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. Public sandbox orchestration remains gated on issues #158–#160. |
+| Phase 2: snapshot | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented for ABI v1 without block and ABI v2 with exact multi-VP capacity plus either no block or three-tier fixed-role layers. Opt-in ABI-v2 contracts may record a smaller boot-online prefix and activate a requested prefix before restore readiness without changing topology or saved VP inventory. Explicit MSHV targets instantiate only that prefix and cannot be saved again; non-explicit MSHV, KVM, and WHP restores instantiate full capacity. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable and do not gain activation capability. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. Public sandbox orchestration remains gated on issues #158–#160. |
 | Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
 | Phase 4: network | Static identity, fixed transport, the portable in-process Consomme endpoint, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
 | Phase 5: filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |
@@ -816,6 +890,7 @@ and the limits above remain authoritative.
 | Public profile, ABI constants, validation, command line | [`openvmm_defs/src/config.rs`](../openvmm/openvmm/openvmm_defs/src/config.rs) |
 | CLI and host attachment construction | [`openvmm_entry/src`](../openvmm/openvmm/openvmm_entry/src) |
 | Worker composition and fixed virtio placement | [`openvmm_core/src/worker`](../openvmm/openvmm/openvmm_core/src/worker) |
+| Restore-time VP materialization and saved-state filtering | [`openvmm_core/src/worker/dispatch.rs`](../openvmm/openvmm/openvmm_core/src/worker/dispatch.rs) and [`vmm_core/src/partition_unit/vp_set.rs`](../openvmm/vmm_core/src/partition_unit/vp_set.rs) |
 | Xen PVH loading | [`vm/loader/src/pvh.rs`](../openvmm/vm/loader/src/pvh.rs) |
 | Minimal PVH ACPI construction | [`vmm_core/src/acpi_builder.rs`](../openvmm/vmm_core/src/acpi_builder.rs) |
 | Base-chipset allowlist and memory-layout defaults | [`vmm_core/vm_manifest_builder`](../openvmm/vmm_core/vm_manifest_builder) |

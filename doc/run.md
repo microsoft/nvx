@@ -45,17 +45,26 @@ Restore an existing microVM snapshot with an optional host-readiness endpoint:
 
 ```bash
 python3 scripts/nvx.py run \
+  --machine microvm-v2 \
+  --processors 8 \
   --restore-snapshot /var/lib/nvx/snapshot \
+  --restore-processors 4 \
   --restore-ready-path /run/nvx/restore-ready.sock
 ```
 
 The endpoint must already be listening. OpenVMM connects to a Unix domain
 socket on Linux or a `//./pipe/...` named pipe on Windows and writes exactly
 `OPENVMM_RESTORE_READY_V1\n` after snapshot verification, attachment
-resolution, and worker startup complete, but before the restored vCPU can run.
-The peer must accept and read while startup is in progress; Windows flush
-completion waits for the named-pipe peer to consume the frame. Failure to write
-the complete event aborts and tears down the restore.
+resolution, worker startup, gated guest repair, and host-input re-enable
+complete while the restored vCPU remains stopped. With
+`--restore-processors`, the snapshot keeps its immutable eight-vCPU capacity;
+the source must have captured a canonical `maxcpus` boot-online prefix, and the
+guest onlines exactly the requested prefix before readiness and host input
+release. Targets are limited to 1, 2, 4, or 8 and cannot be below the captured
+boot-online count or above capacity. Legacy snapshots reject the option. The
+peer must accept and read while startup is in progress; Windows flush
+completion waits for the named-pipe peer to consume the frame. Failure to
+write the complete event aborts and tears down the restore.
 
 ## virtio-fs host mapping
 

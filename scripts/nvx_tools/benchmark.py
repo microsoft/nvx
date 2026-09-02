@@ -53,6 +53,7 @@ WORKLOAD_SUITES = frozenset(
         "virtfs",
         "shell-snapshot",
         "shell-snapshot-restore",
+        "snapshot-restore-vcpu",
         "network-snapshot",
         "performance",
     }
@@ -68,6 +69,7 @@ SMP_PROBE_COMPLETION_MARKER = b"NVX-SMP-PROBE-OK"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 SHELL_SNAPSHOT_MEMORY_MIB = (64, 128, 256, 512)
 SNAPSHOT_PROFILE_MEMORY_MIB = (*SHELL_SNAPSHOT_MEMORY_MIB, 1024)
+RESTORE_VCPU_TARGETS = (1, 2, 4, 8)
 PERFORMANCE_LOG_FILENAMES = (
     "cold-start.log",
     "virtfs.log",
@@ -1932,6 +1934,7 @@ def _benchmark_shell_snapshot_restore(
         marker=BOOT_MARKER,
         windows_cpus=windows_cpus,
         teardown_mode=args.teardown_mode,
+        snapshot_profile=bool(getattr(args, "snapshot_profile", False)),
     )
 
 
@@ -2030,6 +2033,95 @@ def benchmark_shell_snapshot_restore_workload(
             print(
                 _format_shell_snapshot_line("snapshot restore", restored["samples_ms"])
             )
+            restore_profile = restored.get("profile")
+            if restore_profile is not None:
+                print_lifecycle_profile_summary(
+                    f"shell-snapshot-restore/{backend}/{args.processors}vcpu/"
+                    f"{memory_mib}-mib",
+                    restore_profile,
+                )
+            print()
+
+
+def benchmark_snapshot_restore_vcpu_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    if args.processors != 8:
+        raise ValueError("snapshot-restore-vcpu requires --processors 8")
+    snapshot_profile = bool(getattr(args, "snapshot_profile", False))
+
+    print(
+        "snapshot restore vCPU activation, "
+        f"median of {args.runs} runs, capacity 8, boot-online 1"
+    )
+    print(f'marker : "{BOOT_MARKER.decode()}"')
+    print(f"kernel : {kernel}")
+    print(f"initrd : {initrd}")
+    print()
+    with tempfile.TemporaryDirectory(prefix="openvmm-vcpu-restore-") as temporary:
+        snapshot_path = Path(temporary) / "snapshot"
+        capture_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            args.memory_mib,
+            "quiet loglevel=0 shellsnap maxcpus=1",
+            processors=args.processors,
+            command_prefix=command_prefix,
+        )
+        capture_automatic_snapshot(
+            [
+                *capture_command,
+                "--snapshot-destination",
+                str(snapshot_path),
+            ],
+            snapshot_path,
+            timeout=args.timeout,
+            windows_cpus=windows_cpus,
+        )
+
+        for target in RESTORE_VCPU_TARGETS:
+            restored = benchmark(
+                [
+                    *command_prefix,
+                    *snapshot_restore_command(
+                        executable,
+                        backend,
+                        snapshot_path,
+                        processors=args.processors,
+                        restore_processors=target,
+                    ),
+                ],
+                warmups=args.warmups,
+                runs=args.runs,
+                timeout=args.timeout,
+                marker=BOOT_MARKER,
+                windows_cpus=windows_cpus,
+                teardown_mode=args.teardown_mode,
+                snapshot_profile=snapshot_profile,
+            )
+            print(f"== restore-online {target} vCPU ==")
+            print(
+                _format_shell_snapshot_line(
+                    "snapshot restore", restored["samples_ms"]
+                )
+            )
+            print(f"  OpenVMM peak RSS    : {format_rss_summary(restored['peak_rss_samples_bytes'])}")
+            restore_profile = restored.get("profile")
+            if restore_profile is not None:
+                print_lifecycle_profile_summary(
+                    f"snapshot-restore-vcpu/{backend}/capacity-{args.processors}/"
+                    f"online-{target}",
+                    restore_profile,
+                )
             print()
 
 
@@ -2207,6 +2299,11 @@ def write_benchmark_metadata(
         "backend": backend,
         "microvm_abi_version": MICROVM_ABI_VERSION,
         "processors": args.processors,
+        "restore_processor_targets": (
+            list(RESTORE_VCPU_TARGETS)
+            if args.suite == "snapshot-restore-vcpu"
+            else None
+        ),
         "network": effective_network,
         "lifecycle_network": args.net,
         "host_affinity_set": args.cpus,
@@ -2278,6 +2375,8 @@ def run_workload_benchmarks(
                 (output_dir / filename).unlink(missing_ok=True)
         if args.suite == "shell-snapshot-restore":
             (output_dir / "acceptance.json").unlink(missing_ok=True)
+        if args.suite == "snapshot-restore-vcpu":
+            (output_dir / "snapshot-restore-vcpu.log").unlink(missing_ok=True)
         metadata_path = write_benchmark_metadata(
             args, output_dir, executable, kernel, initrd, backend
         )
@@ -2324,6 +2423,18 @@ def run_workload_benchmarks(
         "shell-snapshot-restore": (
             "shell-snapshot-restore.log",
             lambda: benchmark_shell_snapshot_restore_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+        "snapshot-restore-vcpu": (
+            "snapshot-restore-vcpu.log",
+            lambda: benchmark_snapshot_restore_vcpu_workload(
                 args,
                 executable,
                 kernel,
@@ -2667,6 +2778,7 @@ def snapshot_restore_command(
     snapshot_path: Path,
     *,
     processors: int = 1,
+    restore_processors: int | None = None,
     network_profile: str | None = None,
 ) -> list[str]:
     command = [
@@ -2682,6 +2794,8 @@ def snapshot_restore_command(
         str(snapshot_path),
         "--restore-entropy",
     ]
+    if restore_processors is not None:
+        command.extend(("--restore-processors", str(restore_processors)))
     if network_profile is not None:
         command.extend(("--network-profile", network_profile))
     return command

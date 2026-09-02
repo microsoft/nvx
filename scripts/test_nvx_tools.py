@@ -74,6 +74,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.processors, 8)
         self.assertIs(args.handler, benchmark.run)
 
+    def test_benchmark_exposes_restore_vcpu_matrix(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "snapshot-restore-vcpu",
+                "--processors",
+                "8",
+                "--memory-mib",
+                "512",
+                "--output-dir",
+                "results",
+            ]
+        )
+
+        self.assertEqual(args.suite, "snapshot-restore-vcpu")
+        self.assertEqual(args.processors, 8)
+        self.assertEqual(args.memory_mib, 512)
+        self.assertIs(args.handler, benchmark.run)
+
     def test_benchmark_exposes_snapshot_profile_matrix(self):
         args = nvx.parse_args(
             [
@@ -199,6 +219,8 @@ class CliTests(unittest.TestCase):
                 "snapshot",
                 "--processors",
                 "4",
+                "--restore-processors",
+                "2",
                 "--restore-ready-path",
                 "ready.sock",
                 "--dry-run",
@@ -229,6 +251,8 @@ class CliTests(unittest.TestCase):
                 "--restore-snapshot",
                 "snapshot",
                 "--restore-entropy",
+                "--restore-processors",
+                "2",
                 "--restore-ready-path",
                 "ready.sock",
             ],
@@ -241,6 +265,31 @@ class CliTests(unittest.TestCase):
             common.ScriptError, "--restore-ready-path requires --restore-snapshot"
         ):
             nvx.command_run(missing_snapshot)
+
+        missing_processor_snapshot = nvx.parse_args(
+            ["run", "--restore-processors", "1", "--dry-run"]
+        )
+        with self.assertRaisesRegex(
+            common.ScriptError, "--restore-processors requires --restore-snapshot"
+        ):
+            nvx.command_run(missing_processor_snapshot)
+
+        invalid_restore_capacity = nvx.parse_args(
+            [
+                "run",
+                "--machine",
+                "microvm-v2",
+                "--processors",
+                "2",
+                "--restore-snapshot",
+                "snapshot",
+                "--restore-processors",
+                "4",
+                "--dry-run",
+            ]
+        )
+        with self.assertRaisesRegex(common.ScriptError, "cannot exceed"):
+            nvx.command_run(invalid_restore_capacity)
 
         legacy = nvx.parse_args(["run", "--restore-snapshot", "snapshot", "--dry-run"])
         with (
@@ -320,6 +369,10 @@ class CiTests(unittest.TestCase):
             command = tests.args[0]
             self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
             self.assertEqual(command[-2:], ["--filter", ci.OPENVMM_MICROVM_TEST_FILTER])
+            self.assertIn(
+                "test_ttrpc_microvm_v2_restore_processor_activation",
+                ci.OPENVMM_MICROVM_TEST_FILTER,
+            )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
             env = tests.kwargs["env"]
             self.assertEqual(env["OPENVMM_MICROVM_PVH_KERNEL"], str(kernel.resolve()))
@@ -606,6 +659,18 @@ class BenchmarkTests(unittest.TestCase):
             ],
         )
 
+    def test_snapshot_restore_command_separates_capacity_from_online_target(self):
+        command = benchmark.snapshot_restore_command(
+            Path("openvmm"),
+            "kvm",
+            Path("snapshot"),
+            processors=8,
+            restore_processors=4,
+        )
+
+        self.assertEqual(command[command.index("--processors") + 1], "8")
+        self.assertEqual(command[command.index("--restore-processors") + 1], "4")
+
     def test_benchmark_snapshot_restore_propagates_processors(self):
         args = argparse.Namespace(
             processors=4,
@@ -801,8 +866,29 @@ class BenchmarkTests(unittest.TestCase):
             runs=5,
             timeout=40.0,
             teardown_mode="guest-exit",
+            snapshot_profile=True,
         )
-        result = cast(benchmark.BenchmarkResult, {"samples_ms": [10.0, 12.0]})
+        result = cast(
+            benchmark.BenchmarkResult,
+            {
+                "samples_ms": [10.0, 12.0],
+                "profile": {
+                    "schema_version": 1,
+                    "raw_samples": [],
+                    "phases": {
+                        "startup.partition_build": {
+                            "exclusive": True,
+                            "source": "openvmm",
+                            "samples_ms": [1.0],
+                            "p50_ms": 1.0,
+                            "p95_ms": 1.0,
+                            "min_ms": 1.0,
+                            "max_ms": 1.0,
+                        }
+                    },
+                },
+            },
+        )
         with (
             patch.object(benchmark, "capture_automatic_snapshot") as capture,
             patch.object(benchmark, "benchmark", return_value=result) as run,
@@ -826,6 +912,90 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("== 512 MiB ==", output.getvalue())
         self.assertIn("snapshot restore", output.getvalue())
         self.assertNotIn("cold boot", output.getvalue())
+        self.assertTrue(run.call_args.kwargs["snapshot_profile"])
+        self.assertIn(
+            "shell-snapshot-restore/whp/8vcpu/512-mib lifecycle phases:",
+            output.getvalue(),
+        )
+
+    def test_restore_vcpu_suite_reuses_one_capacity_snapshot_for_matrix(self):
+        args = argparse.Namespace(
+            processors=8,
+            memory_mib=512,
+            warmups=1,
+            runs=5,
+            timeout=40.0,
+            teardown_mode="guest-exit",
+            snapshot_profile=True,
+        )
+        result = cast(
+            benchmark.BenchmarkResult,
+            {
+                "samples_ms": [10.0, 12.0],
+                "peak_rss_samples_bytes": [1024, 2048],
+                "profile": {
+                    "schema_version": 1,
+                    "raw_samples": [],
+                    "phases": {
+                        "restore.saved_state_restore": {
+                            "exclusive": True,
+                            "source": "openvmm",
+                            "samples_ms": [2.0],
+                            "p50_ms": 2.0,
+                            "p95_ms": 2.0,
+                            "min_ms": 2.0,
+                            "max_ms": 2.0,
+                        }
+                    },
+                },
+            },
+        )
+        with (
+            patch.object(benchmark, "capture_automatic_snapshot") as capture,
+            patch.object(benchmark, "benchmark", return_value=result) as run,
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            benchmark.benchmark_snapshot_restore_vcpu_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "mshv",
+            )
+
+        capture.assert_called_once()
+        self.assertEqual(capture.call_args.kwargs["timeout"], args.timeout)
+        capture_command = capture.call_args.args[0]
+        self.assertEqual(
+            capture_command[capture_command.index("--processors") + 1], "8"
+        )
+        self.assertTrue(any("maxcpus=1" in argument for argument in capture_command))
+        self.assertEqual(run.call_count, 4)
+        targets = []
+        for invocation in run.call_args_list:
+            command = invocation.args[0]
+            self.assertEqual(invocation.kwargs["timeout"], args.timeout)
+            self.assertTrue(invocation.kwargs["snapshot_profile"])
+            self.assertEqual(command[command.index("--processors") + 1], "8")
+            targets.append(
+                int(command[command.index("--restore-processors") + 1])
+            )
+        self.assertEqual(targets, [1, 2, 4, 8])
+        self.assertIn("restore-online 8 vCPU", output.getvalue())
+        self.assertIn(
+            "snapshot-restore-vcpu/mshv/capacity-8/online-1 lifecycle phases:",
+            output.getvalue(),
+        )
+
+        args.processors = 4
+        with self.assertRaisesRegex(ValueError, "requires --processors 8"):
+            benchmark.benchmark_snapshot_restore_vcpu_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+            )
 
     def test_benchmark_preserves_exact_process_wall_samples(self):
         samples = [

@@ -81,6 +81,50 @@ read_port_byte() {
         od -An -tu1 | tr -d '[:space:]'
 }
 
+online_cpu_range() {
+    count=$1
+    if [ "$count" -eq 1 ]; then
+        printf '0\n'
+    else
+        printf '0-%s\n' "$((count - 1))"
+    fi
+}
+
+activate_restore_processors() {
+    target=$1
+    expected=$(online_cpu_range "$target")
+    before=$(cat /sys/devices/system/cpu/online) ||
+        fail_closed "failed to read the online CPU set"
+    case "$before" in
+        0) before_count=1 ;;
+        0-*)
+            last=${before#0-}
+            case "$last" in
+                '' | *[!0-9]*) fail_closed "online CPU set is not a contiguous prefix: $before" ;;
+            esac
+            before_count=$((last + 1))
+            ;;
+        *) fail_closed "online CPU set is not a contiguous prefix: $before" ;;
+    esac
+    [ "$before_count" -le "$target" ] ||
+        fail_closed "restore target $target is below the online CPU count $before_count"
+
+    cpu=1
+    while [ "$cpu" -lt "$target" ]; do
+        online=/sys/devices/system/cpu/cpu${cpu}/online
+        [ -w "$online" ] || fail_closed "CPU $cpu cannot be onlined"
+        if [ "$(cat "$online")" != 1 ]; then
+            echo 1 >"$online" || fail_closed "failed to online CPU $cpu"
+        fi
+        cpu=$((cpu + 1))
+    done
+    actual=$(cat /sys/devices/system/cpu/online) ||
+        fail_closed "failed to verify the online CPU set"
+    [ "$actual" = "$expected" ] ||
+        fail_closed "online CPU set $actual does not match requested prefix $expected"
+    echo "NVX-CPU-ONLINE-OK: count=$target"
+}
+
 configured_snapshot_tier=$(cmdline_value nvx_snapshot_tier || true)
 if [ -n "$configured_snapshot_tier" ]; then
     case "$configured_snapshot_tier:$scratch_policy" in
@@ -112,12 +156,39 @@ post_restore() {
     printf '\245' | dd of=/dev/port bs=1 seek=234 count=1 conv=notrunc 2>/dev/null
     : >"$restore_packet"
     count=0
-    while [ "$count" -lt 83 ]; do
+    while [ "$count" -lt 19 ]; do
         dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>"$restore_packet"
         count=$((count + 1))
     done
-    head -c 18 "$restore_packet" | grep -q '^OPENVMM_ENTROPY_V1$' ||
-        fail_closed "restore packet has an invalid header"
+    restore_online_count=
+    case "$(head -c 18 "$restore_packet")" in
+        OPENVMM_ENTROPY_V1) payload_size=64 ;;
+        OPENVMM_ENTROPY_V2) payload_size=65 ;;
+        *) fail_closed "restore packet has an invalid header" ;;
+    esac
+    count=0
+    while [ "$count" -lt "$payload_size" ]; do
+        dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>"$restore_packet"
+        count=$((count + 1))
+    done
+    if [ "$payload_size" -eq 65 ]; then
+        restore_online_count=$(dd if="$restore_packet" bs=1 skip=19 count=1 2>/dev/null |
+            od -An -tu1 | tr -d '[:space:]')
+        case "$restore_online_count" in
+            1 | 2 | 4 | 8) ;;
+            *) fail_closed "restore packet has an invalid online CPU count" ;;
+        esac
+    fi
+
+    if [ "$snapshot_tier" = legacy ] && [ -z "$restore_online_count" ]; then
+        rm -f "$restore_packet"
+        post_restore_pending=false
+        return
+    fi
+
+    if [ -n "$restore_online_count" ]; then
+        activate_restore_processors "$restore_online_count"
+    fi
 
     if [ "$snapshot_tier" != instance-checkpoint ]; then
         tail -c 64 "$restore_packet" >"$entropy"
@@ -238,7 +309,7 @@ restore_status=$(read_port_byte 234)
 case "$restore_status" in
     '' | *[!0-9]*) fail_closed "failed to read restore status" ;;
 esac
-if [ $((restore_status & 2)) -ne 0 ] && [ "$snapshot_tier" != legacy ]; then
+if [ $((restore_status & 2)) -ne 0 ]; then
     post_restore
 else
     post_restore_pending=false
