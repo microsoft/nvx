@@ -924,6 +924,8 @@ def terminate(process: subprocess.Popen[bytes]) -> None:
 
 
 def wait_for_process_exit(process: subprocess.Popen[bytes], timeout: float) -> int:
+    if process.returncode is not None:
+        return process.returncode
     pidfd_open = cast(
         Callable[[int], int] | None,
         getattr(os, "pidfd_open", None),

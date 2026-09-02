@@ -585,13 +585,15 @@ class BenchmarkTests(unittest.TestCase):
     def test_measure_once_retains_rss_when_process_exits_after_marker(self):
         class FakeProcess:
             pid = 123
-            returncode = 0
 
             def __init__(self):
                 self.exited = False
+                self.returncode: int | None = None
 
             def poll(self):
-                return 0 if self.exited else None
+                if self.exited:
+                    self.returncode = 0
+                return self.returncode
 
             def terminate(self):
                 raise AssertionError("unexpected process termination")
@@ -614,7 +616,13 @@ class BenchmarkTests(unittest.TestCase):
         with (
             patch.object(benchmark, "InteractiveProcess", return_value=interaction),
             patch.object(benchmark, "peak_rss_bytes", return_value=1024),
-            patch.object(benchmark, "wait_for_process_exit", return_value=0),
+            patch.object(benchmark.sys, "platform", "linux"),
+            patch.object(
+                benchmark.os,
+                "pidfd_open",
+                side_effect=ProcessLookupError(3, "No such process"),
+                create=True,
+            ) as pidfd_open,
         ):
             result = benchmark.measure_once(
                 ["openvmm"],
@@ -626,6 +634,7 @@ class BenchmarkTests(unittest.TestCase):
             )
 
         self.assertEqual(result[1], 1024)
+        pidfd_open.assert_not_called()
 
     def test_builds_isolated_workload_command(self):
         command = benchmark.workload_boot_command(
