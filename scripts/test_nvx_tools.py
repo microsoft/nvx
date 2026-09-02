@@ -613,16 +613,18 @@ class BenchmarkTests(unittest.TestCase):
                 pass
 
         interaction = FakeInteraction()
+
+        def peak_rss_bytes(_pid: int):
+            if interaction.process.returncode is not None:
+                raise ProcessLookupError(3, "No such process")
+            return 1024
+
         with (
             patch.object(benchmark, "InteractiveProcess", return_value=interaction),
-            patch.object(benchmark, "peak_rss_bytes", return_value=1024),
-            patch.object(benchmark.sys, "platform", "linux"),
             patch.object(
-                benchmark.os,
-                "pidfd_open",
-                side_effect=ProcessLookupError(3, "No such process"),
-                create=True,
-            ) as pidfd_open,
+                benchmark, "peak_rss_bytes", side_effect=peak_rss_bytes
+            ) as read_peak_rss,
+            patch.object(benchmark, "wait_for_process_exit", return_value=0),
         ):
             result = benchmark.measure_once(
                 ["openvmm"],
@@ -634,7 +636,8 @@ class BenchmarkTests(unittest.TestCase):
             )
 
         self.assertEqual(result[1], 1024)
-        pidfd_open.assert_not_called()
+        self.assertIsNone(interaction.process.returncode)
+        read_peak_rss.assert_called_once_with(123)
 
     def test_builds_isolated_workload_command(self):
         command = benchmark.workload_boot_command(

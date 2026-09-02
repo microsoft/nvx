@@ -1065,7 +1065,6 @@ def measure_once(
     )
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
-    peak_bytes = _try_peak_rss(process, 0)
 
     chunks: queue.Queue[bytes | None] = queue.Queue()
     threading.Thread(
@@ -1081,7 +1080,6 @@ def measure_once(
             try:
                 chunk = chunks.get(timeout=min(remaining, 0.25))
             except queue.Empty:
-                peak_bytes = _try_peak_rss(process, peak_bytes)
                 if process.poll() is not None:
                     raise RuntimeError(
                         f"OpenVMM exited with status {process.returncode}"
@@ -1089,7 +1087,6 @@ def measure_once(
                 continue
             if chunk is None:
                 raise RuntimeError(f"OpenVMM exited with status {process.poll()}")
-            peak_bytes = _try_peak_rss(process, peak_bytes)
             if profile is not None:
                 profile.feed(chunk)
             output.extend(chunk)
@@ -1103,7 +1100,7 @@ def measure_once(
                 # A prequeued guest exit can terminate OpenVMM immediately
                 # after writing the marker. Sample RSS before the more detailed
                 # opt-in profile counters, and tolerate an already-gone process.
-                peak_bytes = _try_peak_rss(process, peak_bytes)
+                peak_bytes = _try_peak_rss(process, 0)
                 if profile is not None and profile_sink is not None:
                     profile_sink.append(profile.finish_restore(marker_reached))
                 elapsed_ms = (marker_reached - started) / 1_000_000
@@ -1347,8 +1344,6 @@ def workload_boot_command(
 
 
 def _try_peak_rss(process: subprocess.Popen[bytes], current: int) -> int:
-    if process.poll() is not None:
-        return current
     try:
         return max(current, peak_rss_bytes(process.pid))
     except (OSError, RuntimeError):
