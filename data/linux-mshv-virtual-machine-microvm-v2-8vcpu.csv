@@ -1,1 +1,2 @@
 platform,microvm_abi_version,processors,commit,metric,unit,direction,p50
+linux-mshv-virtual-machine,2,8,7441b18f18a758845ae75930f278740786a6a52b,shell_snapshot_restore_512_mib,ms,lower,459.5
