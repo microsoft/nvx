@@ -1,3 +1,4 @@
 platform,microvm_abi_version,processors,commit,metric,unit,direction,p50
 linux-mshv-baremetal,2,8,7441b18f18a758845ae75930f278740786a6a52b,shell_snapshot_restore_512_mib,ms,lower,383.1
 linux-mshv-baremetal,2,8,ced57386190384cc882e45604b28d60465a27319,shell_snapshot_restore_512_mib,ms,lower,154.8
+linux-mshv-baremetal,2,8,a26c5f3c6cbf490b65e7cce41620465408e898ca,shell_snapshot_restore_512_mib,ms,lower,157.8
