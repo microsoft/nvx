@@ -1,2 +1,3 @@
 platform,microvm_abi_version,processors,commit,metric,unit,direction,p50
 windows-whp-baremetal,2,4,7441b18f18a758845ae75930f278740786a6a52b,shell_snapshot_restore_512_mib,ms,lower,665.6
+windows-whp-baremetal,2,4,ced57386190384cc882e45604b28d60465a27319,shell_snapshot_restore_512_mib,ms,lower,112
