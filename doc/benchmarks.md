@@ -255,6 +255,11 @@ Lifecycle capture runs a deterministic affinity-pinned worker on every vCPU
 before the snapshot request and again after restore continuation. The probe is
 outside the snapshot-generation timing interval. Each worker completes only
 after its CPU's LAPIC counter advances, avoiding fixed-duration guest sleeps.
+The coordinator stages the probe and a capture controller in guest memory. The
+controller runs the first probe, blocks in `read`, and invokes `nvx-snapshot` when the
+host sends the timed trigger. On restore, that same controller runs the second probe,
+prints the marker, and performs the selected teardown. This keeps the trigger on an
+active console read and avoids charging interactive-shell command polling to capture.
 
 ### Cold start
 
@@ -330,8 +335,14 @@ with the versioned `OPENVMM_SNAPSHOT_PROFILE_V1` prefix. Each record contains:
 	available.
 
 The coordinator retains every record in `profile.raw_samples`. It adds observer-defined
-`process_startup`, `request_to_publication`, `source_teardown`, `resume_to_readiness`, and
-`process_launch_to_readiness` boundaries without mixing them into OpenVMM-exclusive intervals.
+`process_startup`, `console_input_dispatch`, `console_command_round_trip`,
+`guest_dispatch_to_publication`, `request_to_publication`, `source_teardown`,
+`resume_to_readiness`, and `process_launch_to_readiness` boundaries without mixing them into
+OpenVMM-exclusive intervals. `console_input_dispatch` measures the synchronous write of the
+snapshot command and prequeued restore script to the OpenVMM console and records the payload size.
+Profiled captures additionally emit a guest marker immediately before `nvx-snapshot`;
+`console_command_round_trip` ends when the host observes that marker, and
+`guest_dispatch_to_publication` spans that observation through snapshot publication.
 Each observed record also includes available process counters. Linux reports RSS, peak RSS,
 minor and major faults, total page faults, and, when `smaps_rollup` is available, private dirty
 and private RSS bytes. Windows reports working set, peak working set, private commit, and page

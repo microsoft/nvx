@@ -72,6 +72,9 @@ VIRTFS_GUEST_TO_HOST = b"guest-to-host\n"
 VIRTFS_HOST_WAITING = b"waiting\n"
 VIRTFS_HOST_TO_GUEST = b"host-to-guest\n"
 SMP_PROBE_COMPLETION_MARKER = b"NVX-SMP-PROBE-OK"
+SMP_PROBE_PATH = "/tmp/nvx-smp-probe"
+SNAPSHOT_CAPTURE_PATH = "/tmp/nvx-c"
+SNAPSHOT_GUEST_DISPATCH_MARKER = b"NVX-SNAPSHOT-DISPATCHED"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 SHELL_SNAPSHOT_MEMORY_MIB = (64, 128, 256, 512)
 SNAPSHOT_PROFILE_MEMORY_MIB = (*SHELL_SNAPSHOT_MEMORY_MIB, 1024)
@@ -826,6 +829,7 @@ class SnapshotProfileCollector:
         ended_ns: int,
         *,
         exclusive: bool,
+        logical_bytes: int | None = None,
     ) -> dict[str, object]:
         record: dict[str, object] = {
             "operation": operation,
@@ -836,6 +840,8 @@ class SnapshotProfileCollector:
             "pid": self.pid,
             "source": "benchmark_observer",
         }
+        if logical_bytes is not None:
+            record["logical_bytes"] = logical_bytes
         counters = process_resource_counters(self.pid)
         if counters:
             record["host_counters"] = counters
@@ -895,10 +901,42 @@ class SnapshotProfileCollector:
     def finish_capture(
         self,
         snapshot_started_ns: int,
+        snapshot_dispatched_ns: int,
+        snapshot_guest_dispatched_ns: int | None,
         snapshot_published_ns: int,
         source_exited_ns: int,
+        snapshot_request_bytes: int,
     ) -> dict[str, object]:
         self._finish_pending()
+        self.records.append(
+            self._external_record(
+                "capture",
+                "console_input_dispatch",
+                snapshot_dispatched_ns - snapshot_started_ns,
+                snapshot_dispatched_ns,
+                exclusive=True,
+                logical_bytes=snapshot_request_bytes,
+            )
+        )
+        if snapshot_guest_dispatched_ns is not None:
+            self.records.extend(
+                (
+                    self._external_record(
+                        "capture",
+                        "console_command_round_trip",
+                        snapshot_guest_dispatched_ns - snapshot_started_ns,
+                        snapshot_guest_dispatched_ns,
+                        exclusive=False,
+                    ),
+                    self._external_record(
+                        "capture",
+                        "guest_dispatch_to_publication",
+                        snapshot_published_ns - snapshot_guest_dispatched_ns,
+                        snapshot_published_ns,
+                        exclusive=False,
+                    ),
+                )
+            )
         self.records.extend(
             (
                 self._external_record(
@@ -2363,6 +2401,51 @@ def smp_probe_script(
     return "\n".join(lines) + "\n"
 
 
+def prepare_snapshot_capture_script(
+    processors: int,
+    *,
+    teardown_mode: str,
+    snapshot_profile: bool,
+    network_gateway: str | None = None,
+    ioapic_irq: int | None = None,
+) -> str:
+    probe = smp_probe_script(
+        processors,
+        exit_guest=False,
+        network_gateway=network_gateway,
+        ioapic_irq=ioapic_irq,
+    )
+    probe_delimiter = "NVX_SMP_PROBE_SCRIPT"
+    capture_delimiter = "NVX_SNAPSHOT_CAPTURE_SCRIPT"
+    dispatch_marker = (
+        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n"
+        if snapshot_profile
+        else ""
+    )
+    capture = (
+        f"#!/bin/sh\nset -eu\n{SMP_PROBE_PATH}\n"
+        "IFS= read -r trigger\n"
+        "if [ \"$trigger\" != nvx-snapshot ]; then\n"
+        "  /sbin/nvx-exit 90\n"
+        "  exit 90\n"
+        "fi\n"
+        f"{dispatch_marker}"
+        "/sbin/nvx-snapshot\n"
+        f"echo {RESTORE_MARKER.decode()}\n"
+        f"{_guest_exit_script(teardown_mode)}"
+    )
+    return (
+        f"cat >{SMP_PROBE_PATH} <<'{probe_delimiter}'\n"
+        f"{probe}"
+        f"{probe_delimiter}\n"
+        f"cat >{SNAPSHOT_CAPTURE_PATH} <<'{capture_delimiter}'\n"
+        f"{capture}"
+        f"{capture_delimiter}\n"
+        f"chmod +x {SMP_PROBE_PATH} {SNAPSHOT_CAPTURE_PATH}\n"
+        f"{SNAPSHOT_CAPTURE_PATH}\n"
+    )
+
+
 def _virtfs_script(payload_mib: int, teardown_mode: str) -> str:
     return (
         f"dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count={payload_mib} "
@@ -3174,25 +3257,24 @@ def run_workload_benchmarks(
     return 0
 
 
-def snapshot_post_restore_script(
+def snapshot_request_script(
     processors: int | None,
     *,
     teardown_mode: str,
-    network_gateway: str | None = None,
-    ioapic_irq: int | None = None,
+    snapshot_profile: bool,
 ) -> str:
-    probe = (
-        smp_probe_script(
-            processors,
-            exit_guest=False,
-            network_gateway=network_gateway,
-            ioapic_irq=ioapic_irq,
-        )
-        if processors is not None
+    if processors is not None:
+        return "nvx-snapshot\n"
+    dispatch_marker = (
+        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n"
+        if snapshot_profile
         else ""
     )
     return (
-        probe + f"echo {RESTORE_MARKER.decode()}\n" + _guest_exit_script(teardown_mode)
+        dispatch_marker
+        + "nvx-snapshot\n"
+        + f"echo {RESTORE_MARKER.decode()}\n"
+        + _guest_exit_script(teardown_mode)
     )
 
 
@@ -3236,6 +3318,9 @@ def capture_snapshot(
     boot_seen = False
     snapshot_requested = False
     snapshot_started_ns = None
+    snapshot_dispatched_ns = None
+    snapshot_guest_dispatched_ns = None
+    snapshot_request_bytes = None
     snapshot_published_ns = None
     peak_bytes = 0
 
@@ -3249,19 +3334,17 @@ def capture_snapshot(
             snapshot_published_ns = time.perf_counter_ns()
 
     def request_snapshot() -> None:
-        nonlocal snapshot_requested, snapshot_started_ns, deadline
+        nonlocal snapshot_requested, snapshot_started_ns
+        nonlocal snapshot_dispatched_ns, snapshot_request_bytes, deadline
+        payload = snapshot_request_script(
+            processors,
+            teardown_mode=teardown_mode,
+            snapshot_profile=snapshot_profile,
+        ).encode("utf-8")
         snapshot_started_ns = time.perf_counter_ns()
-        interaction.write_input(
-            (
-                "nvx-snapshot\n"
-                + snapshot_post_restore_script(
-                    processors,
-                    teardown_mode=teardown_mode,
-                    network_gateway=smp_network_gateway,
-                    ioapic_irq=smp_ioapic_irq,
-                )
-            ).encode("utf-8")
-        )
+        interaction.write_input(payload)
+        snapshot_dispatched_ns = time.perf_counter_ns()
+        snapshot_request_bytes = len(payload)
         snapshot_requested = True
         deadline = time.monotonic() + timeout
 
@@ -3290,15 +3373,22 @@ def capture_snapshot(
                 profile.feed(chunk)
             output.extend(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
+            if (
+                snapshot_requested
+                and snapshot_guest_dispatched_ns is None
+                and contains_output_line(output, SNAPSHOT_GUEST_DISPATCH_MARKER)
+            ):
+                snapshot_guest_dispatched_ns = time.perf_counter_ns()
             if not boot_seen and BOOT_MARKER in output:
                 boot_seen = True
                 if processors is None:
                     request_snapshot()
                 else:
                     interaction.write_input(
-                        smp_probe_script(
+                        prepare_snapshot_capture_script(
                             processors,
-                            exit_guest=False,
+                            teardown_mode=teardown_mode,
+                            snapshot_profile=snapshot_profile,
                             network_gateway=smp_network_gateway,
                             ioapic_irq=smp_ioapic_irq,
                         ).encode("utf-8")
@@ -3325,13 +3415,18 @@ def capture_snapshot(
         if not snapshot_path.is_dir():
             raise RuntimeError(f"snapshot was not published at {snapshot_path}")
         assert snapshot_started_ns is not None
+        assert snapshot_dispatched_ns is not None
+        assert snapshot_request_bytes is not None
         assert snapshot_published_ns is not None
         if profile is not None and profile_sink is not None:
             profile_sink.append(
                 profile.finish_capture(
                     snapshot_started_ns,
+                    snapshot_dispatched_ns,
+                    snapshot_guest_dispatched_ns,
                     snapshot_published_ns,
                     source_exited_ns,
+                    snapshot_request_bytes,
                 )
             )
         request_to_publication_ms = (

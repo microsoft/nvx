@@ -554,6 +554,28 @@ class BenchmarkTests(unittest.TestCase):
                 b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=restore phase=open"
             )
 
+    def test_snapshot_profile_records_console_input_dispatch(self):
+        collector = benchmark.SnapshotProfileCollector(42, 100)
+
+        with patch.object(benchmark, "process_resource_counters", return_value={}):
+            sample = collector.finish_capture(200, 260, 300, 400, 450, 4096)
+
+        dispatch = sample["records"][0]
+        self.assertEqual(dispatch["operation"], "capture")
+        self.assertEqual(dispatch["phase"], "console_input_dispatch")
+        self.assertEqual(dispatch["duration_ns"], 60)
+        self.assertEqual(dispatch["observer_elapsed_ns"], 160)
+        self.assertEqual(dispatch["logical_bytes"], 4096)
+        self.assertTrue(dispatch["exclusive"])
+        round_trip = sample["records"][1]
+        self.assertEqual(round_trip["phase"], "console_command_round_trip")
+        self.assertEqual(round_trip["duration_ns"], 100)
+        guest_to_publication = sample["records"][2]
+        self.assertEqual(
+            guest_to_publication["phase"], "guest_dispatch_to_publication"
+        )
+        self.assertEqual(guest_to_publication["duration_ns"], 100)
+
     def test_warm_snapshot_cache_reads_every_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             snapshot = Path(temporary)
@@ -828,21 +850,64 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             benchmark.smp_probe_script(4, network_gateway="10.0.0.1")
 
-    def test_snapshot_restore_prequeues_guest_exit_after_marker(self):
-        script = benchmark.snapshot_post_restore_script(
+    def test_snapshot_request_triggers_waiting_capture_controller(self):
+        script = benchmark.snapshot_request_script(
             4,
             teardown_mode="guest-exit",
+            snapshot_profile=True,
         )
-        self.assertTrue(
-            script.endswith("echo OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n")
+        self.assertEqual(script, "nvx-snapshot\n")
+
+        no_controller = benchmark.snapshot_request_script(
+            None,
+            teardown_mode="guest-exit",
+            snapshot_profile=True,
+        )
+        self.assertEqual(
+            no_controller,
+            "echo NVX-SNAPSHOT-DISPATCHED\n"
+            "nvx-snapshot\n"
+            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n"
+            "nvx-exit 0\n",
         )
 
-        host_terminate = benchmark.snapshot_post_restore_script(
+    def test_prepare_snapshot_capture_stages_waiting_controller(self):
+        script = benchmark.prepare_snapshot_capture_script(
             4,
-            teardown_mode="host-terminate",
+            teardown_mode="guest-exit",
+            snapshot_profile=True,
+            network_gateway="10.0.0.1",
+            ioapic_irq=10,
         )
-        self.assertTrue(host_terminate.endswith("echo OPENVMM-SNAPSHOT-RESTORE-OK\n"))
-        self.assertNotIn("nvx-exit 0", host_terminate)
+
+        self.assertTrue(
+            script.startswith(
+                f"cat >{benchmark.SMP_PROBE_PATH} <<'NVX_SMP_PROBE_SCRIPT'\n"
+            )
+        )
+        self.assertIn('ping -c 2 -W 1 "10.0.0.1"', script)
+        self.assertIn("NVX-SMP-PROBE-OK", script)
+        self.assertIn(
+            f"cat >{benchmark.SNAPSHOT_CAPTURE_PATH} "
+            "<<'NVX_SNAPSHOT_CAPTURE_SCRIPT'\n",
+            script,
+        )
+        self.assertIn("IFS= read -r trigger\n", script)
+        self.assertIn("echo NVX-SNAPSHOT-DISPATCHED\n", script)
+        self.assertIn(
+            "/sbin/nvx-snapshot\n"
+            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n"
+            "nvx-exit 0\n",
+            script,
+        )
+        self.assertTrue(
+            script.endswith(
+                "NVX_SNAPSHOT_CAPTURE_SCRIPT\n"
+                f"chmod +x {benchmark.SMP_PROBE_PATH} "
+                f"{benchmark.SNAPSHOT_CAPTURE_PATH}\n"
+                f"{benchmark.SNAPSHOT_CAPTURE_PATH}\n"
+            )
+        )
 
     def test_output_marker_must_be_a_complete_line(self):
         marker = benchmark.RESTORE_MARKER
