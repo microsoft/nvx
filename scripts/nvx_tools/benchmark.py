@@ -2590,37 +2590,30 @@ def _benchmark_shell_snapshot_restore(
         kernel,
         initrd,
         memory_mib,
-        "quiet loglevel=0 shellsnap",
+        "quiet loglevel=0",
         processors=args.processors,
         command_prefix=command_prefix,
     )
-    capture_automatic_snapshot(
+    capture_snapshot(
         [
             *capture_command,
             "--snapshot-destination",
             str(snapshot_path),
         ],
         snapshot_path,
-        timeout=max(args.timeout, 30.0),
-        windows_cpus=windows_cpus,
-    )
-    return benchmark(
-        [
-            *command_prefix,
-            *snapshot_restore_command(
-                executable,
-                backend,
-                snapshot_path,
-                processors=args.processors,
-            ),
-        ],
-        warmups=args.warmups,
-        runs=args.runs,
         timeout=args.timeout,
-        marker=BOOT_MARKER,
         windows_cpus=windows_cpus,
+        processors=args.processors,
         teardown_mode=args.teardown_mode,
-        snapshot_profile=bool(getattr(args, "snapshot_profile", False)),
+    )
+    return benchmark_snapshot_restore(
+        args,
+        executable,
+        backend,
+        capture_command,
+        command_prefix=command_prefix,
+        windows_cpus=windows_cpus,
+        snapshot_path=snapshot_path,
     )
 
 
@@ -2635,10 +2628,11 @@ def benchmark_shell_snapshot_workload(
     windows_cpus: set[int] | None = None,
 ) -> None:
     print(
-        "boot-to-shell: cold OpenVMM launch vs snapshot restore, "
+        "cold boot vs lifecycle-aligned snapshot restore, "
         f"median of {args.runs} runs, {args.processors} vCPU"
     )
-    print(f'marker : "{BOOT_MARKER.decode()}"')
+    print(f'cold marker    : "{BOOT_MARKER.decode()}"')
+    print(f'restore marker : "{RESTORE_MARKER.decode()}"')
     print(f"kernel : {kernel}")
     print(f"initrd : {initrd}")
     print()
@@ -2694,10 +2688,10 @@ def benchmark_shell_snapshot_restore_workload(
     windows_cpus: set[int] | None = None,
 ) -> None:
     print(
-        "boot-to-shell snapshot restore, "
+        "lifecycle-aligned shell snapshot restore, "
         f"median of {args.runs} runs, {args.processors} vCPU"
     )
-    print(f'marker : "{BOOT_MARKER.decode()}"')
+    print(f'marker : "{RESTORE_MARKER.decode()}"')
     print(f"kernel : {kernel}")
     print(f"initrd : {initrd}")
     print()

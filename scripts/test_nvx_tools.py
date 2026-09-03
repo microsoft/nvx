@@ -1316,6 +1316,7 @@ class BenchmarkTests(unittest.TestCase):
             runs=5,
             timeout=40.0,
             teardown_mode="guest-exit",
+            network_profile=None,
             snapshot_profile=True,
         )
         result = cast(
@@ -1340,7 +1341,7 @@ class BenchmarkTests(unittest.TestCase):
             },
         )
         with (
-            patch.object(benchmark, "capture_automatic_snapshot") as capture,
+            patch.object(benchmark, "capture_snapshot") as capture,
             patch.object(benchmark, "benchmark", return_value=result) as run,
             patch("sys.stdout", new_callable=io.StringIO) as output,
         ):
@@ -1353,6 +1354,10 @@ class BenchmarkTests(unittest.TestCase):
             )
 
         capture.assert_called_once()
+        capture_command = capture.call_args.args[0]
+        self.assertNotIn("shellsnap", capture_command)
+        self.assertEqual(capture.call_args.kwargs["processors"], 8)
+        self.assertEqual(capture.call_args.kwargs["teardown_mode"], "guest-exit")
         run.assert_called_once()
         restore_command = run.call_args.args[0]
         self.assertIn("--restore-snapshot", restore_command)
@@ -1362,7 +1367,11 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("== 512 MiB ==", output.getvalue())
         self.assertIn("snapshot restore", output.getvalue())
         self.assertNotIn("cold boot", output.getvalue())
+        self.assertIn('marker : "OPENVMM-SNAPSHOT-RESTORE-OK"', output.getvalue())
         self.assertTrue(run.call_args.kwargs["snapshot_profile"])
+        self.assertEqual(run.call_args.kwargs["marker"], benchmark.RESTORE_MARKER)
+        self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
+        self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
         self.assertIn(
             "shell-snapshot-restore/whp/8vcpu/512-mib lifecycle phases:",
             output.getvalue(),

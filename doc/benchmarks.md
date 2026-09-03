@@ -92,12 +92,13 @@ MSHV restores without a target, and all KVM and WHP restores, instantiate the
 full capacity. A reduced-prefix MSHV runtime cannot be saved again.
 
 Add `--snapshot-profile` to print p50 and p95 lifecycle phases for every online
-target. Compare target 1 against a fixed-capacity run with the same memory and
-sample settings to measure residual full-topology overhead after avoiding
-dormant-suffix MSHV VP binding:
+target. The diagnostic retains its pre-banner capture so one immutable
+boot-online-1 snapshot can serve every target. Its total restore latency is not
+comparable with the lifecycle-aligned `shell-snapshot-restore` metric; compare
+host-side lifecycle phases to separate VP binding and worker construction from
+guest resume behavior:
 
 ```console
-python3 scripts/nvx.py benchmark --suite shell-snapshot-restore --backend mshv --processors 1 --memory-mib 128 --shell-memories 128 --warmups 1 --runs 5 --snapshot-profile --skip-build --output-dir data/runs/restore-vcpu-mshv-fixed-1
 python3 scripts/nvx.py benchmark --suite snapshot-restore-vcpu --backend mshv --processors 8 --memory-mib 128 --warmups 1 --runs 5 --snapshot-profile --skip-build --output-dir data/runs/restore-vcpu-mshv-capacity-8
 ```
 
@@ -195,8 +196,8 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | All supported non-Python workloads | `benchmark --suite performance` | Runs 23 metrics and writes collector-compatible logs. |
 | Cold start | `benchmark --suite cold-start` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
-| Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with shell-ready snapshot restore at 64, 128, 256, and 512 MiB. |
-| Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured shell-ready snapshot and measures only restore latency for the selected memory sizes. |
+| Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with lifecycle-aligned snapshot restore at 64, 128, 256, and 512 MiB. |
+| Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured lifecycle-aligned snapshot and measures only restore latency for the selected memory sizes. |
 | Restore-time vCPU activation | `benchmark --suite snapshot-restore-vcpu --processors 8` | Restores one boot-online-1, capacity-8 snapshot at online targets 1/2/4/8 and reports latency plus peak RSS. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 | Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 64/128/256/512/1024 MiB warm/cold restores. |
@@ -222,8 +223,8 @@ replace `console=hvc0` with `console=hvc1` when a virtio console is selected.
 | Cold start | tuning variant | `QUIET` plus one of `clocksource=<backend>`, `tsc=reliable`, `no_timer_check`, `random.trust_cpu=on`, `rcupdate.rcu_expedited=1`, `nokaslr`, `mitigations=off`, or `cryptomgr.notests` |
 | Virtual file system | guest runs | `QUIET` |
 | Shell snapshot | cold | `QUIET` |
-| Shell snapshot | capture | `QUIET shellsnap` |
-| Shell snapshot | restore | restore (from snapshot) |
+| Shell snapshot | capture | `QUIET`; host-driven after the boot marker and SMP/LAPIC probe |
+| Shell snapshot | restore | restore through the post-restore SMP/LAPIC probe and lifecycle restore marker |
 | Network snapshot | cold | `QUIET virtnet_probe=<gateway>` |
 | Network snapshot | capture | `QUIET virtnet_probe=<gateway> netsnap` |
 | Network snapshot | restore | restore (from snapshot) |
@@ -286,19 +287,28 @@ measures complete process wall time while host and guest exchange files through 
 
 ### Shell snapshot
 
-Each memory size normally uses five cold boots and five restores. Values are
-milliseconds to the shell-ready `ALPINE-MICROVM-BOOT-OK` marker.
+Each memory size normally uses five cold boots and five restores. Cold values
+run through the shell-ready `ALPINE-MICROVM-BOOT-OK` marker. The unmeasured
+capture then runs the same SMP/LAPIC probe as the shell lifecycle benchmark
+before requesting the snapshot. Restore values run through that probe and the
+standalone `OPENVMM-SNAPSHOT-RESTORE-OK` marker. Capture and restore boundaries
+therefore match the shell lifecycle benchmark; the kernel command lines remain
+different so the cold metrics are not interchangeable.
+
+This lifecycle-aligned methodology supersedes the earlier pre-banner
+`shellsnap` capture. Historical `shell_snapshot_restore_*` values produced by
+that methodology are not comparable with newly collected values.
 
 | Metric | Description |
 | --- | --- |
 | `shell_snapshot_cold_64_mib` | OpenVMM launch to a shell-ready guest with 64 MiB of memory. |
-| `shell_snapshot_restore_64_mib` | Restore process launch to a shell-ready 64 MiB snapshot. |
+| `shell_snapshot_restore_64_mib` | Restore process launch through lifecycle-aligned verification of a 64 MiB snapshot. |
 | `shell_snapshot_cold_128_mib` | OpenVMM launch to a shell-ready guest with 128 MiB of memory. |
-| `shell_snapshot_restore_128_mib` | Restore process launch to a shell-ready 128 MiB snapshot. |
+| `shell_snapshot_restore_128_mib` | Restore process launch through lifecycle-aligned verification of a 128 MiB snapshot. |
 | `shell_snapshot_cold_256_mib` | OpenVMM launch to a shell-ready guest with 256 MiB of memory. |
-| `shell_snapshot_restore_256_mib` | Restore process launch to a shell-ready 256 MiB snapshot. |
+| `shell_snapshot_restore_256_mib` | Restore process launch through lifecycle-aligned verification of a 256 MiB snapshot. |
 | `shell_snapshot_cold_512_mib` | OpenVMM launch to a shell-ready guest with 512 MiB of memory. |
-| `shell_snapshot_restore_512_mib` | Restore process launch to a shell-ready 512 MiB snapshot. |
+| `shell_snapshot_restore_512_mib` | Restore process launch through lifecycle-aligned verification of a 512 MiB snapshot. |
 
 ### Snapshot lifecycle profile
 

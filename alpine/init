@@ -218,9 +218,9 @@ case " $(cat /proc/cmdline) " in
         fi
         ;;
 esac
-# shellsnap: optional cold-vs-snapshot benchmark for the plain shell (see
-# `scripts/nvx.py bench-snapshot-shell`). When the kernel command line contains "shellsnap", ask the VMM
-# to take a snapshot through /sbin/nvx-snapshot just before the boot banner below.
+# shellsnap: optional pre-banner snapshot hook for the restore-vCPU diagnostic.
+# When the kernel command line contains "shellsnap", ask the VMM to take a snapshot
+# through /sbin/nvx-snapshot just before the boot banner below.
 # On the snapshot run the VMM captures here and exits; on a later restore, execution resumes at the
 # next line and falls through to the banner -- the same marker the benchmark times on a cold boot.
 # On a plain cold boot (no --snapshot) the VMM ignores the write, so this stays a no-op.
