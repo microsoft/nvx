@@ -560,20 +560,19 @@ class BenchmarkTests(unittest.TestCase):
         with patch.object(benchmark, "process_resource_counters", return_value={}):
             sample = collector.finish_capture(200, 260, 300, 400, 450, 4096)
 
-        dispatch = sample["records"][0]
+        records = cast(list[dict[str, object]], sample["records"])
+        dispatch = records[0]
         self.assertEqual(dispatch["operation"], "capture")
         self.assertEqual(dispatch["phase"], "console_input_dispatch")
         self.assertEqual(dispatch["duration_ns"], 60)
         self.assertEqual(dispatch["observer_elapsed_ns"], 160)
         self.assertEqual(dispatch["logical_bytes"], 4096)
         self.assertTrue(dispatch["exclusive"])
-        round_trip = sample["records"][1]
+        round_trip = records[1]
         self.assertEqual(round_trip["phase"], "console_command_round_trip")
         self.assertEqual(round_trip["duration_ns"], 100)
-        guest_to_publication = sample["records"][2]
-        self.assertEqual(
-            guest_to_publication["phase"], "guest_dispatch_to_publication"
-        )
+        guest_to_publication = records[2]
+        self.assertEqual(guest_to_publication["phase"], "guest_dispatch_to_publication")
         self.assertEqual(guest_to_publication["duration_ns"], 100)
 
     def test_warm_snapshot_cache_reads_every_artifact(self):
@@ -888,16 +887,13 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn('ping -c 2 -W 1 "10.0.0.1"', script)
         self.assertIn("NVX-SMP-PROBE-OK", script)
         self.assertIn(
-            f"cat >{benchmark.SNAPSHOT_CAPTURE_PATH} "
-            "<<'NVX_SNAPSHOT_CAPTURE_SCRIPT'\n",
+            f"cat >{benchmark.SNAPSHOT_CAPTURE_PATH} <<'NVX_SNAPSHOT_CAPTURE_SCRIPT'\n",
             script,
         )
         self.assertIn("IFS= read -r trigger\n", script)
         self.assertIn("echo NVX-SNAPSHOT-DISPATCHED\n", script)
         self.assertIn(
-            "/sbin/nvx-snapshot\n"
-            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n"
-            "nvx-exit 0\n",
+            "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n",
             script,
         )
         self.assertTrue(

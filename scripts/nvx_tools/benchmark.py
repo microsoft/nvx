@@ -2418,14 +2418,12 @@ def prepare_snapshot_capture_script(
     probe_delimiter = "NVX_SMP_PROBE_SCRIPT"
     capture_delimiter = "NVX_SNAPSHOT_CAPTURE_SCRIPT"
     dispatch_marker = (
-        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n"
-        if snapshot_profile
-        else ""
+        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n" if snapshot_profile else ""
     )
     capture = (
         f"#!/bin/sh\nset -eu\n{SMP_PROBE_PATH}\n"
         "IFS= read -r trigger\n"
-        "if [ \"$trigger\" != nvx-snapshot ]; then\n"
+        'if [ "$trigger" != nvx-snapshot ]; then\n'
         "  /sbin/nvx-exit 90\n"
         "  exit 90\n"
         "fi\n"
@@ -3266,9 +3264,7 @@ def snapshot_request_script(
     if processors is not None:
         return "nvx-snapshot\n"
     dispatch_marker = (
-        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n"
-        if snapshot_profile
-        else ""
+        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n" if snapshot_profile else ""
     )
     return (
         dispatch_marker
