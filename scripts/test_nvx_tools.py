@@ -982,16 +982,16 @@ class BuildTests(unittest.TestCase):
     def test_guest_agent_identity_is_exact_aci04_input(self):
         self.assertEqual(
             build.GUEST_AGENT_SOURCE_REVISION,
-            "ebc15b495e7359280003b0190632b48820d5cd45",
+            "d4488b20fe4d53bf98b48333af367283571e4032",
         )
         self.assertEqual(
             build.GUEST_AGENT_SHA256,
-            "48e04d9f03d85a72a20b2659df3631afdd26f2c57150c877b0015340fe2a8ca3",
+            "87fbff5ab886495e7bcf93048503c038fc5af35a19b4acbb51bec565fc7c44c9",
         )
         self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_823_520)
         self.assertEqual(
             build.GUEST_AGENT_BUILD_ID,
-            "5043b9426511b5533fb023fb899ad1fc299788cf",
+            "41a5051b9860038d2a7221f1ddf2a125e57291e7",
         )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
