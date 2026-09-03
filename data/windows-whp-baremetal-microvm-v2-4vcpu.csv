@@ -133,3 +133,4 @@ windows-whp-baremetal,2,4,f66ef34a275dd235b3078eafdf761b1df4fb3ab0,shell_snapsho
 windows-whp-baremetal,2,4,f778088b6e8ceebeb1cc67ff77edfb4408fe9fe1,shell_snapshot_restore_512_mib,ms,lower,120.2
 windows-whp-baremetal,2,4,1acef1bac5574b483f2212b1022d739222043f59,shell_snapshot_restore_512_mib,ms,lower,118.8
 windows-whp-baremetal,2,4,1e899edaeba12217a3855d68a92d9e180f5ce76c,shell_snapshot_restore_512_mib,ms,lower,115
+windows-whp-baremetal,2,4,bb5f9f3568aa8aae78b6520b70a6e6f4b204330e,shell_snapshot_restore_512_mib,ms,lower,122.3
