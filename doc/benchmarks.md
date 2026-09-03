@@ -280,9 +280,11 @@ outside the snapshot-generation timing interval. Each worker completes only
 after its CPU's LAPIC counter advances, avoiding fixed-duration guest sleeps.
 The coordinator stages the probe and a capture controller in guest memory. The
 controller runs the first probe, blocks in `read`, and invokes `nvx-snapshot` when the
-host sends the timed trigger. On restore, that same controller runs the second probe,
-prints the marker, and performs the selected teardown. This keeps the trigger on an
-active console read and avoids charging interactive-shell command polling to capture.
+host sends the timed trigger. On restore, that same controller runs the second probe and
+prints the marker before returning to the interactive shell. After observing the marker,
+the coordinator performs the selected teardown, sending `nvx-exit 0` in guest-exit mode.
+This keeps the trigger on an active console read and avoids charging interactive-shell
+command polling to capture.
 
 ### Cold start
 

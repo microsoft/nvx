@@ -2992,7 +2992,6 @@ def prepare_snapshot_capture_script(
         f"{dispatch_marker}"
         "/sbin/nvx-snapshot\n"
         f"echo {RESTORE_MARKER.decode()}\n"
-        f"{_guest_exit_script(teardown_mode)}"
     )
     return (
         f"cat >{SMP_PROBE_PATH} <<'{probe_delimiter}'\n"
@@ -3947,12 +3946,7 @@ def snapshot_request_script(
     dispatch_marker = (
         f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n" if snapshot_profile else ""
     )
-    return (
-        dispatch_marker
-        + "nvx-snapshot\n"
-        + f"echo {RESTORE_MARKER.decode()}\n"
-        + _guest_exit_script(teardown_mode)
-    )
+    return dispatch_marker + "nvx-snapshot\n" + f"echo {RESTORE_MARKER.decode()}\n"
 
 
 def capture_snapshot(
@@ -4306,7 +4300,7 @@ def benchmark_snapshot_restore(
             marker_must_be_line=True,
             windows_cpus=windows_cpus,
             teardown_mode=args.teardown_mode,
-            guest_exit_prequeued=args.teardown_mode == "guest-exit",
+            guest_exit_prequeued=False,
             snapshot_profile=snapshot_profile,
         )
 
@@ -4516,7 +4510,7 @@ def benchmark_snapshot_profile_matrix(
                         marker_must_be_line=True,
                         windows_cpus=windows_cpus,
                         teardown_mode=args.teardown_mode,
-                        guest_exit_prequeued=args.teardown_mode == "guest-exit",
+                        guest_exit_prequeued=False,
                         snapshot_profile=True,
                         before_each=condition_cache,
                     )
@@ -5062,9 +5056,9 @@ def result_document(
                 "host process termination request through OpenVMM process exit; "
                 "TerminateProcess on WHP and SIGTERM on Linux"
                 if args.teardown_mode != "guest-exit"
-                else "cold start dispatches nvx-exit 0 after readiness; snapshot "
-                "restore executes a prequeued nvx-exit 0 immediately after its "
-                "marker; both end at successful OpenVMM process exit"
+                else "the host dispatches nvx-exit 0 after observing the cold or "
+                "snapshot-restore readiness marker; both end at successful "
+                "OpenVMM process exit"
             ),
             "teardown_mode": args.teardown_mode,
             "teardown_timeout_seconds": TEARDOWN_TIMEOUT_SECONDS,

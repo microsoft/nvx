@@ -875,7 +875,7 @@ class BenchmarkTests(unittest.TestCase):
             ["--machine", "microvm-v2", "--processors", "4", "--hypervisor", "kvm"],
         )
         self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
-        self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
+        self.assertFalse(run.call_args.kwargs["guest_exit_prequeued"])
 
     def test_parses_dd_rates_and_network_gateway(self):
         output = """
@@ -940,8 +940,7 @@ class BenchmarkTests(unittest.TestCase):
             no_controller,
             "echo NVX-SNAPSHOT-DISPATCHED\n"
             "nvx-snapshot\n"
-            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n"
-            "nvx-exit 0\n",
+            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n",
         )
 
     def test_prepare_snapshot_capture_stages_waiting_controller(self):
@@ -967,9 +966,10 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("IFS= read -r trigger\n", script)
         self.assertIn("echo NVX-SNAPSHOT-DISPATCHED\n", script)
         self.assertIn(
-            "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n",
+            "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\n",
             script,
         )
+        self.assertNotIn("nvx-exit 0", script)
         self.assertTrue(
             script.endswith(
                 "NVX_SNAPSHOT_CAPTURE_SCRIPT\n"
@@ -1506,7 +1506,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs["snapshot_profile"])
         self.assertEqual(run.call_args.kwargs["marker"], benchmark.RESTORE_MARKER)
         self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
-        self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
+        self.assertFalse(run.call_args.kwargs["guest_exit_prequeued"])
         self.assertIn(
             "shell-snapshot-restore/whp/8vcpu/512-mib lifecycle phases:",
             output.getvalue(),
@@ -1680,7 +1680,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["marker"], benchmark.RESTORE_MARKER)
             self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
             self.assertEqual(run.call_args.kwargs["teardown_mode"], "guest-exit")
-            self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
+            self.assertFalse(run.call_args.kwargs["guest_exit_prequeued"])
 
     def test_native_e2e_measures_and_reuses_snapshot_capture(self):
         with tempfile.TemporaryDirectory() as temporary:
