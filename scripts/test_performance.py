@@ -1111,6 +1111,43 @@ class PerformanceTests(unittest.TestCase):
                 len(performance.read_results(history / "linux-kvm.csv")), 4
             )
 
+    def test_persist_merges_distinct_metrics_for_same_abi_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            history = root / "history"
+            filename = "linux-kvm-baremetal-microvm-v2-1vcpu.csv"
+            lifecycle = performance.Result(
+                "commit-1",
+                "cold_start_base",
+                "ms",
+                "lower",
+                10.0,
+                "linux-kvm-baremetal",
+                2,
+                1,
+            )
+            device = performance.Result(
+                "commit-1",
+                "virtio_blk_random_read_iops",
+                "ops/s",
+                "higher",
+                20.0,
+                "linux-kvm-baremetal",
+                2,
+                1,
+            )
+
+            performance.write_results(source / filename, [lifecycle])
+            performance.persist_results(source, history)
+            performance.write_results(source / filename, [device])
+            performance.persist_results(source, history)
+
+            self.assertEqual(
+                performance.read_results(history / filename),
+                [lifecycle, device],
+            )
+
     def test_persist_writes_all_platform_results(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1215,6 +1252,31 @@ class PerformanceTests(unittest.TestCase):
                     for result in results
                 )
             )
+
+    def test_rejects_microvm_v3_dimensions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "platform": "linux-kvm-baremetal",
+                        "backend": "kvm",
+                        "microvm_abi_version": 3,
+                        "processors": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                "unsupported microVM ABI/processor dimensions",
+            ):
+                performance.collect_results(
+                    "linux-kvm-baremetal", "commit", logs, root / "results"
+                )
 
     def test_rejects_lifecycle_workload_processor_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:

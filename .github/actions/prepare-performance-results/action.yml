@@ -86,12 +86,16 @@ runs:
             --require-shell-snapshot \
             --require-shared-suite \
             --lifecycle-input "${run_dir}/acceptance.json"
-          device_run_dir="data/runs/${platform}/microvm-v1/1vcpu"
+          device_run_dir="${run_dir}/device-io"
+          device_results_dir="${RUNNER_TEMP}/nvx-device-results/${platform}"
           python3 scripts/nvx.py performance collect \
             --platform "${platform}" \
             --commit "${GITHUB_SHA}" \
             --input-dir "${device_run_dir}" \
-            --output-dir data/results
+            --output-dir "${device_results_dir}"
+          python3 scripts/nvx.py performance persist \
+            --source-dir "${device_results_dir}" \
+            --history-dir data/results
           for processors in 2 4 8; do
             run_dir="data/runs/${platform}/microvm-v2/${processors}vcpu"
             python3 scripts/nvx.py performance collect \

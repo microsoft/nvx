@@ -39,6 +39,7 @@ REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_VIRTIO_MMIO=y",
     "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
 )
+REQUIRED_SHARED_STATUS_KERNEL_CONFIG = ("CONFIG_VIRTIO_MMIO_SHARED_STATUS=y",)
 REQUIRED_SANDBOX_KERNEL_CONFIG = (
     "CONFIG_BPF_SYSCALL=y",
     "CONFIG_CGROUP_BPF=y",
@@ -87,6 +88,20 @@ def _assert_sandbox_kernel_config(path: Path) -> None:
     if missing:
         raise ScriptError(
             "kernel configuration cannot run sandbox filesystems: " + ", ".join(missing)
+        )
+
+
+def _assert_shared_status_kernel_config(path: Path) -> None:
+    configured = set(path.read_text(encoding="utf-8").splitlines())
+    missing = [
+        setting
+        for setting in REQUIRED_SHARED_STATUS_KERNEL_CONFIG
+        if setting not in configured
+    ]
+    if missing:
+        raise ScriptError(
+            "kernel configuration cannot consume shared virtio interrupt status: "
+            + ", ".join(missing)
         )
 
 
@@ -502,6 +517,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     run_checked([*make, "olddefconfig"])
     _assert_virtio_console_kernel_config(kernel_config)
     _assert_sandbox_kernel_config(kernel_config)
+    _assert_shared_status_kernel_config(kernel_config)
     jobs = os.cpu_count() or 1
     print(f">> building vmlinux with {jobs} jobs")
     run_checked([*make, f"-j{jobs}", "vmlinux"])

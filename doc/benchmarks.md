@@ -1,10 +1,10 @@
 # Benchmark
 
 The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites, a
-23-metric ABI-v2 non-Python workload suite, and five ABI-v1 device operation-rate metrics on
-Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI combines the ABI-v2 workloads with eight
-128 MiB shell lifecycle metrics and reports all 31 median (p50) values. The device metrics remain
-in their separate ABI-v1 dimension. At 2, 4, and 8 vCPUs, CI records only
+23-metric ABI-v2 non-Python workload suite, and five ABI-v2 device operation-rate metrics on
+Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI combines those workloads with eight
+128 MiB shell lifecycle metrics and reports all 36 median (p50) values. ABI v1 remains available
+as a matched device-operation control. At 2, 4, and 8 vCPUs, CI records only
 `shell_snapshot_restore_512_mib`. Latency and resident-memory metrics are lower-is-better;
 throughput and operation-rate metrics are higher-is-better.
 
@@ -37,8 +37,8 @@ through the supported NVX CLI.
 | `windows-whp-baremetal` | WHP | Bare metal |
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
 
-CI runs the complete acceptance and performance suites at one vCPU under microVM ABI v2, the
-five device metrics at one vCPU under ABI v1, and only the 512 MiB shell snapshot restore at `2`,
+CI runs the complete acceptance and performance suites and the five device metrics at one vCPU
+under microVM ABI v2, and only the 512 MiB shell snapshot restore at `2`,
 `4`, and `8` vCPUs. This produces 39 p50 values per series and 195 values across the five-series
 matrix. Counts run sequentially on each host so benchmark workloads never overlap on the same
 physical host.
@@ -71,13 +71,16 @@ Run the canonical device operation-rate suite with its default five warmups, 30 
 per device, ten-second operation windows, and 512 MiB backing objects:
 
 ```console
-# Linux/KVM; use --backend mshv and the matching platform on Linux/MSHV.
-python3 scripts/nvx.py benchmark --suite device-io --backend kvm --platform linux-kvm-baremetal --processors 1 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v1/1vcpu
-python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v1/1vcpu --output-dir data/results
+# Linux/KVM ABI v2; use --backend mshv and the matching platform on Linux/MSHV.
+python3 scripts/nvx.py benchmark --suite device-io --device-io-abi 2 --backend kvm --platform linux-kvm-baremetal --processors 1 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu/device-io
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu/device-io --output-dir data/results
 
-# Windows/WHP.
-python scripts\nvx.py benchmark --suite device-io --backend whp --platform windows-whp-baremetal --processors 1 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v1\1vcpu
-python scripts\nvx.py performance collect --platform windows-whp-baremetal --commit HEAD --input-dir data\runs\windows-whp-baremetal\microvm-v1\1vcpu --output-dir data\results
+# Windows/WHP ABI v2.
+python scripts\nvx.py benchmark --suite device-io --device-io-abi 2 --backend whp --platform windows-whp-baremetal --processors 1 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu\device-io
+python scripts\nvx.py performance collect --platform windows-whp-baremetal --commit HEAD --input-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu\device-io --output-dir data\results
+
+# Matched legacy control: keep all other options identical and select ABI v1.
+python3 scripts/nvx.py benchmark --suite device-io --device-io-abi 1 --backend kvm --platform linux-kvm-baremetal --processors 1 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v1/1vcpu/device-io
 ```
 
 For a smoke test, pass `--warmups 0 --runs 1 --device-io-duration-seconds 1`.
@@ -312,8 +315,10 @@ measures complete process wall time while host and guest exchange files through 
 
 ### Device operation rates
 
-The dedicated suite uses microVM ABI v1 because its fixed one-vCPU workload attaches the existing
-unroled `--virtio-blk` device. Every guest has 256 MiB RAM and runs the same static, dependency-free
+The dedicated suite defaults to microVM ABI v2 and supports ABI v1 as a matched
+control through `--device-io-abi`. ABI v2 attaches the block backing object as
+the writable `scratch` role; ABI v1 uses the legacy unroled `--virtio-blk`
+device. Every guest has 256 MiB RAM and runs the same static, dependency-free
 x86-64 helper from the reproducible initramfs. Canonical runs execute five warmups followed by 30
 retained attempts for each device. Every operation window lasts ten seconds against a 512 MiB
 backing object.
@@ -335,7 +340,8 @@ $\mathrm{ops/s}=N\times10^9/t_{ns}$ from integer operation counts and monotonic 
 duplicate, malformed, or zero-work helper output turns that attempt into an explicit failure;
 failed attempts stay in the log and never enter p50 or p95. Warmup and retained indices are fixed,
 so a failure cannot shift sampling. Re-running with identical metadata skips completed identities
-and resumes the first absent attempt. Changed controls or provenance are rejected. Temporary raw
+and resumes the first absent attempt. The selected ABI is part of metadata and
+the default output directory, so v1 and v2 records cannot mix. Changed controls or provenance are rejected. Temporary raw
 disks, shared directories, the UDP server, and each benchmark-owned VMM are cleaned on success,
 failure, or interruption.
 
@@ -432,7 +438,9 @@ successful packets.
 
 `python scripts/nvx.py performance collect --require-shared-suite` rejects a workload result
 unless it contains exactly the 23 shared metrics. Supplying `--lifecycle-input` requires and merges
-the eight lifecycle metrics, producing the 31-metric one-vCPU result used by CI. Higher-vCPU
+the eight lifecycle metrics, producing a 31-metric one-vCPU result. CI collects the five device
+operation-rate metrics from their separate raw-log directory and merges them by ABI, processor
+count, commit, and metric, producing the final 36-metric ABI-v2 one-vCPU result. Higher-vCPU
 collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 `shell_snapshot_restore_512_mib` plus canonical one-warmup/five-sample metadata for a 2-, 4-, or
 8-vCPU guest. A `device-io` directory is recognized from metadata and must contain exactly its five

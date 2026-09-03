@@ -23,8 +23,10 @@ The implemented profiles are `MachineProfile::Microvm { abi_version: 1 }`,
 selected by `--machine microvm`, and
 `MachineProfile::Microvm { abi_version: 2 }`, selected by
 `--machine microvm-v2`. ABI v2 retains the base machine while replacing the
-single optional block slot with fixed sandbox layer and scratch roles. KVM and
-MSHV are supported on Linux and WHP is supported on Windows. Hypervisor-specific
+single optional block slot with fixed sandbox layer and scratch roles, adding
+deterministic SMP topology, and using shared virtio-mmio interrupt status with
+edge-triggered delivery. KVM and MSHV are supported on Linux and WHP is
+supported on Windows. Hypervisor-specific
 code provides partition creation, vCPU execution, interrupt injection, and host
 resource integration. The machine profile owns the boot protocol, memory map,
 device topology, command line, and snapshot compatibility contract.
@@ -70,10 +72,10 @@ see [Run](run.md) for complete commands and host-specific options.
 
 Machine identity is explicit rather than inferred from a kernel, device, or
 hypervisor choice. OpenVMM carries it through CLI, worker, Petri, and snapshot
-configuration. TTRPC exposes ABI v1 and the no-block ABI v2 profile. Validation occurs before host
-resources are opened and again at the worker boundary.
+configuration. TTRPC exposes distinct ABI v1 and v2 profiles. Validation
+occurs before host resources are opened and again at the worker boundary.
 
-All ABI versions require:
+Both ABI versions require:
 
 - an x86-64 guest;
 - one NUMA node;
@@ -82,10 +84,11 @@ All ABI versions require:
 - no VTL2, isolation, nested virtualization, or Hyper-V enlightenments; and
 - the exact chipset and device inventory described below.
 
-ABI v1 requires exactly one vCPU. ABI v2 accepts exactly 1, 2, 4, or 8
-vCPUs in one socket and one die, with one core per vCPU, no SMT, xAPIC mode,
-and contiguous APIC IDs starting at zero. Its PVH layout moves the GDT to
-`0x800`; v1 retains the original one-vCPU layout.
+ABI v1 requires exactly one vCPU. ABI v2 accepts exactly 1, 2, 4, or 8 vCPUs
+in one socket and one die, with one core per vCPU, no SMT, xAPIC mode, and
+contiguous APIC IDs starting at zero. Its PVH layout moves the GDT to `0x800`
+and reserves `0x30000..0x30fff` for interrupt status; v1 retains the original
+one-vCPU layout and usable RAM at that address.
 
 ABI v1 permits its original single roleless virtio-blk cold-boot extension, but
 snapshots reject that device because it has no immutable media contract. ABI v2
@@ -321,8 +324,34 @@ role rather than option order:
 
 Roles must be unique and supplied in fixed order; omitted lower-layer roles
 leave their slots empty, and any nonempty topology ends with scratch. All four
-IRQs are level-triggered. IRQ 12 avoids the RTC's exclusive IRQ 8. ABI v1 and
-its command-line/device contract are unchanged.
+block IRQs use active-high edge delivery. IRQ 12 avoids the RTC's exclusive
+IRQ 8. ABI v1 and its command-line/device contract are unchanged.
+
+ABI v2 keeps every fixed MMIO address and IRQ number and uses active-high edge
+delivery for dedicated virtio IRQs. One little-endian, naturally aligned `u32`
+per fixed slot resides in the reserved shared-status page:
+
+| Slot | Status GPA |
+| --- | ---: |
+| virtio-net | `0x30000` |
+| virtio-fs | `0x30004` |
+| virtio-console | `0x30008` |
+| `distro` block | `0x3000c` |
+| `runtime` block | `0x30010` |
+| `custom` block | `0x30014` |
+| `scratch` block | `0x30018` |
+
+OpenVMM publishes config-change and used-buffer bits with a sequentially
+consistent compare-exchange loop. It pulses the device IRQ only when the old
+word is zero. The specialized Linux driver consumes all pending bits with a
+sequentially consistent `xchg` to zero, so steady-state handling performs no
+interrupt-status read or interrupt-acknowledgement MMIO access. A host OR that
+races the exchange is either included in the exchanged value or observes zero,
+stores the bit, and emits a new edge. Device reset and teardown clear the word.
+Snapshot quiesce saves the pending value in transport state; restore writes it
+back without replaying an edge, and the machine contract records the interrupt
+mode, page GPA, and page size. ABI v1 retains its level-triggered MMIO status
+and acknowledgement behavior byte for byte.
 
 #### Block
 

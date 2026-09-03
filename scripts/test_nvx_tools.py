@@ -88,6 +88,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.device_io_duration_seconds, 10.0)
         self.assertEqual(args.device_io_size_mib, 512)
         self.assertEqual(args.device_io_port, 5201)
+        self.assertEqual(args.device_io_abi, 2)
+
+        control = nvx.parse_args(
+            ["benchmark", "--suite", "device-io", "--device-io-abi", "1"]
+        )
+        self.assertEqual(control.device_io_abi, 1)
+
+        with self.assertRaises(SystemExit):
+            nvx.parse_args(
+                ["benchmark", "--suite", "device-io", "--device-io-abi", "3"]
+            )
 
     def test_benchmark_exposes_restore_only_shell_suite(self):
         args = nvx.parse_args(
@@ -345,6 +356,12 @@ class CliTests(unittest.TestCase):
         ):
             nvx.command_run(invalid_v1_smp)
 
+        abi_v2 = nvx.parse_args(
+            ["run", "--machine", "microvm-v2", "--processors", "4", "--dry-run"]
+        )
+        self.assertEqual(abi_v2.machine, "microvm-v2")
+        self.assertEqual(abi_v2.processors, 4)
+
         with self.assertRaises(SystemExit):
             nvx.parse_args(["run", "--machine", "microvm-v3", "--dry-run"])
 
@@ -468,6 +485,22 @@ class BuildTests(unittest.TestCase):
                 build.REQUIRED_SANDBOX_KERNEL_CONFIG[-1],
             ):
                 build._assert_sandbox_kernel_config(config)
+
+    def test_shared_status_kernel_config_is_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            config.write_text(
+                "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
+                encoding="utf-8",
+            )
+            build._assert_shared_status_kernel_config(config)
+
+            config.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG[0],
+            ):
+                build._assert_shared_status_kernel_config(config)
 
 
 class SandboxTests(unittest.TestCase):
@@ -1929,6 +1962,18 @@ class BenchmarkTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(network_commands), 2)
                 self.assertIn("192.0.2.2/24", network_commands[0])
+                self.assertIn("microvm-v2", network_commands[0])
+                block_commands = [
+                    call.args[0]
+                    for call in run_guest.call_args_list
+                    if "--microvm-sandbox-block" in call.args[0]
+                ]
+                self.assertEqual(len(block_commands), 2)
+                self.assertNotIn("--virtio-blk", block_commands[0])
+                block_argument = block_commands[0][
+                    block_commands[0].index("--microvm-sandbox-block") + 1
+                ]
+                self.assertTrue(block_argument.startswith("scratch:file:"))
 
                 benchmark.benchmark_device_io_workload(
                     args,
@@ -2193,6 +2238,55 @@ class BenchmarkTests(unittest.TestCase):
                     "network.log",
                 },
             )
+
+    def test_device_io_defaults_to_dedicated_abi_v2_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            backend = "whp" if os.name == "nt" else "kvm"
+            platform = "windows-whp" if os.name == "nt" else "linux-kvm"
+            args = nvx.parse_args(
+                [
+                    "benchmark",
+                    "--suite",
+                    "device-io",
+                    "--backend",
+                    backend,
+                    "--nvx-dir",
+                    str(repository),
+                ]
+            )
+            with (
+                patch.object(
+                    benchmark,
+                    "write_benchmark_metadata",
+                    return_value=Path("benchmark-metadata.json"),
+                ) as metadata,
+                patch.object(
+                    benchmark, "benchmark_device_io_workload", return_value=0
+                ) as device_io,
+            ):
+                benchmark.run_workload_benchmarks(
+                    args,
+                    Path("openvmm.exe"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    backend,
+                )
+
+            output = (
+                repository
+                / "data"
+                / "runs"
+                / platform
+                / "microvm-v2"
+                / "1vcpu"
+                / "device-io"
+            )
+            self.assertEqual(
+                device_io.call_args.kwargs["output_path"],
+                output / "device-io.log",
+            )
+            self.assertEqual(metadata.call_args.args[1], output)
 
     def test_package_command_forwards_parsed_options(self):
         args = nvx.parse_args(

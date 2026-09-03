@@ -204,9 +204,10 @@ runs:
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
-        run_dir="data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
         python3 scripts/nvx.py benchmark \
           --suite device-io \
+          --device-io-abi 2 \
           --backend "${{ inputs.backend }}" \
           --platform "${{ inputs.platform }}" \
           --processors 1 \
@@ -320,9 +321,10 @@ runs:
         if ($env:NVX_BENCHMARK_CPUS) {
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
-        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
         python scripts\nvx.py benchmark `
           --suite device-io `
+          --device-io-abi 2 `
           --backend "${{ inputs.backend }}" `
           --platform "${{ inputs.platform }}" `
           --processors 1 `
@@ -352,13 +354,17 @@ runs:
           --require-shared-suite \
           --lifecycle-input "${run_dir}/acceptance.json" \
           --summary "${GITHUB_STEP_SUMMARY}"
-        device_run_dir="data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        device_run_dir="${run_dir}/device-io"
+        device_results_dir="${device_run_dir}/results"
         python3 scripts/nvx.py performance collect \
           --platform "${{ inputs.platform }}" \
           --commit "${GITHUB_SHA}" \
           --input-dir "${device_run_dir}" \
-          --output-dir "${device_run_dir}" \
+          --output-dir "${device_results_dir}" \
           --summary "${GITHUB_STEP_SUMMARY}"
+        python3 scripts/nvx.py performance persist \
+          --source-dir "${device_results_dir}" \
+          --history-dir "${run_dir}"
         for processors in 2 4 8; do
           run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
           python3 scripts/nvx.py performance collect \
@@ -387,13 +393,18 @@ runs:
           --lifecycle-input "$RunDir/acceptance.json" `
           --summary $env:GITHUB_STEP_SUMMARY
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        $DeviceRunDir = "data/runs/${{ inputs.platform }}/microvm-v1/1vcpu"
+        $DeviceRunDir = "$RunDir/device-io"
+        $DeviceResultsDir = "$DeviceRunDir/results"
         python scripts\nvx.py performance collect `
           --platform "${{ inputs.platform }}" `
           --commit $env:GITHUB_SHA `
           --input-dir $DeviceRunDir `
-          --output-dir $DeviceRunDir `
+          --output-dir $DeviceResultsDir `
           --summary $env:GITHUB_STEP_SUMMARY
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python scripts\nvx.py performance persist `
+          --source-dir $DeviceResultsDir `
+          --history-dir $RunDir
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         foreach ($Processors in 2, 4, 8) {
           $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
@@ -418,22 +429,16 @@ runs:
             echo "::error::Missing benchmark result ${result}"
             exit 1
           }
-          if [[ "${processors}" != 1 ]] &&
+          if [[ "${processors}" == 1 ]] && [[ "$(wc -l < "${result}")" -ne 37 ]]; then
+            echo "::error::Expected 36 ABI-v2 one-vCPU metrics in ${result}"
+            exit 1
+          elif [[ "${processors}" != 1 ]] &&
             { [[ "$(wc -l < "${result}")" -ne 2 ]] ||
               [[ "$(awk -F, 'NR == 2 { print $5 }' "${result}")" != shell_snapshot_restore_512_mib ]]; }; then
             echo "::error::Expected only shell_snapshot_restore_512_mib in ${result}"
             exit 1
           fi
         done
-        device_result="data/runs/${{ inputs.platform }}/microvm-v1/1vcpu/${{ inputs.platform }}.csv"
-        test -s "${device_result}" || {
-          echo "::error::Missing device benchmark result ${device_result}"
-          exit 1
-        }
-        if [[ "$(wc -l < "${device_result}")" -ne 6 ]]; then
-          echo "::error::Expected five device operation-rate metrics in ${device_result}"
-          exit 1
-        fi
 
     - name: Verify complete Windows benchmark matrix
       if: runner.os == 'Windows'
@@ -445,19 +450,16 @@ runs:
           if (-not (Test-Path $Result -PathType Leaf) -or (Get-Item $Result).Length -eq 0) {
             throw "Missing benchmark result $Result"
           }
-          if ($Processors -ne 1) {
+          if ($Processors -eq 1) {
+            if (@(Import-Csv $Result).Count -ne 36) {
+              throw "Expected 36 ABI-v2 one-vCPU metrics in $Result"
+            }
+          } else {
             $Rows = @(Import-Csv $Result)
             if ($Rows.Count -ne 1 -or $Rows[0].metric -ne "shell_snapshot_restore_512_mib") {
               throw "Expected only shell_snapshot_restore_512_mib in $Result"
             }
           }
-        }
-        $DeviceResult = "data/runs/${{ inputs.platform }}/microvm-v1/1vcpu/${{ inputs.platform }}.csv"
-        if (-not (Test-Path $DeviceResult -PathType Leaf) -or (Get-Item $DeviceResult).Length -eq 0) {
-          throw "Missing device benchmark result $DeviceResult"
-        }
-        if (@(Import-Csv $DeviceResult).Count -ne 5) {
-          throw "Expected five device operation-rate metrics in $DeviceResult"
         }
 
     - name: Save benchmark results

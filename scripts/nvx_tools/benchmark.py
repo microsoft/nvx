@@ -109,7 +109,7 @@ PERFORMANCE_LOG_FILENAMES = (
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
 MICROVM_ABI_VERSION = 2
-DEVICE_IO_MICROVM_ABI_VERSION = 1
+DEVICE_IO_MICROVM_ABI_VERSION = 2
 
 
 class ProfiledResult(TypedDict, total=False):
@@ -375,6 +375,13 @@ def configure_parser(
         type=positive_float,
         default=DEVICE_IO_DURATION_SECONDS,
         help="measurement window for each device operation (default: 10)",
+    )
+    parser.add_argument(
+        "--device-io-abi",
+        type=int,
+        choices=(1, 2),
+        default=DEVICE_IO_MICROVM_ABI_VERSION,
+        help="microVM interrupt ABI for device operation rates (default: 2)",
     )
     parser.add_argument(
         "--device-io-size-mib",
@@ -1508,6 +1515,7 @@ def workload_boot_command(
     network: str | None = None,
     mount: str | None = None,
     virtio_blk: Path | None = None,
+    microvm_sandbox_block: Path | None = None,
 ) -> list[str]:
     command = [
         *command_prefix,
@@ -1534,6 +1542,13 @@ def workload_boot_command(
         command.extend(("--mount", mount))
     if virtio_blk is not None:
         command.extend(("--virtio-blk", f"file:{virtio_blk}"))
+    if microvm_sandbox_block is not None:
+        command.extend(
+            (
+                "--microvm-sandbox-block",
+                f"scratch:file:{microvm_sandbox_block}",
+            )
+        )
     return command
 
 
@@ -2703,6 +2718,10 @@ def benchmark_device_io_workload(
         raise ValueError("device-io requires exactly one processor")
     if args.device_io_size_mib < 64:
         raise ValueError("device-io backing objects must be at least 64 MiB")
+    abi_version = getattr(args, "device_io_abi", DEVICE_IO_MICROVM_ABI_VERSION)
+    if abi_version not in (1, 2):
+        raise ValueError("device-io supports only microVM ABI versions 1 and 2")
+    machine = "microvm" if abi_version == 1 else "microvm-v2"
     completed = _device_io_completed_attempts(output_path)
     total_attempts = args.warmups + args.runs
     expected_attempts = {
@@ -2749,12 +2768,17 @@ def benchmark_device_io_workload(
                 initrd,
                 DEVICE_IO_MEMORY_MIB,
                 "quiet loglevel=0",
-                machine="microvm",
+                machine=machine,
                 processors=1,
                 command_prefix=command_prefix,
                 network=network,
                 mount=mount,
-                virtio_blk=block if device == "virtio-blk" else None,
+                virtio_blk=block
+                if device == "virtio-blk" and abi_version == 1
+                else None,
+                microvm_sandbox_block=(
+                    block if device == "virtio-blk" and abi_version == 2 else None
+                ),
             )
             context = (
                 UdpEchoServer(args.device_io_port)
@@ -3645,7 +3669,9 @@ def write_benchmark_metadata(
     platform = args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
     device_io = args.suite == "device-io"
     microvm_abi_version = (
-        DEVICE_IO_MICROVM_ABI_VERSION if device_io else MICROVM_ABI_VERSION
+        getattr(args, "device_io_abi", DEVICE_IO_MICROVM_ABI_VERSION)
+        if device_io
+        else MICROVM_ABI_VERSION
     )
     processors = 1 if device_io else args.processors
     effective_network = (
@@ -3756,8 +3782,9 @@ def run_workload_benchmarks(
                 / "data"
                 / "runs"
                 / platform
-                / f"microvm-v{DEVICE_IO_MICROVM_ABI_VERSION}"
+                / f"microvm-v{getattr(args, 'device_io_abi', DEVICE_IO_MICROVM_ABI_VERSION)}"
                 / "1vcpu"
+                / "device-io"
             )
         else:
             output_dir = (

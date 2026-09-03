@@ -155,7 +155,7 @@ python3 scripts/nvx.py run
 | Option | Default | Description |
 | --- | --- | --- |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
-| `--machine {microvm,microvm-v2}` | `microvm` | Select the guest ABI explicitly. ABI v1 is a one-vCPU profile; ABI v2 supports 1, 2, 4, or 8 vCPUs. |
+| `--machine {microvm,microvm-v2}` | `microvm` | Select the guest ABI explicitly. ABI v1 is a one-vCPU legacy profile; ABI v2 supports 1, 2, 4, or 8 vCPUs and uses fixed-topology shared-status edge interrupts. |
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM ABI-v2 processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target. Active snapshot restore requires the same canonical path, target, and mode; a dormant-slot restore may attach a new mapping that the resumed guest mounts explicitly. |
@@ -234,6 +234,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--shell-memories MIB [MIB ...]` | `64 128 256 512` | Set the guest memory sizes for shell snapshot measurements. |
 | `--network-memory-mib MIB` | `256` | Set guest memory for the network snapshot workload. |
 | `--device-io-duration-seconds SECONDS` | `10` | Set each storage-operation or UDP round-trip measurement window. |
+| `--device-io-abi {1,2}` | `2` | Select shared-status ABI v2 or the matched legacy ABI-v1 control for device operation rates. |
 | `--device-io-size-mib MIB` | `512` | Set the virtio-blk and virtio-fs backing-object size. |
 | `--device-io-port PORT` | `5201` | Set the same-host UDP echo port. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
@@ -281,7 +282,8 @@ reject incomplete inputs for their respective workload sets.
 restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
 result, producing the 31-metric ABI-v2 CI result. A directory whose metadata
-selects `device-io` is collected as five ABI-v1, one-vCPU `ops/s` metrics.
+selects `device-io` is collected as five additional ABI-v2, one-vCPU `ops/s`
+metrics; CI merges them into a 36-metric one-vCPU result.
 `--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
 
 #### `performance collect-openvmm`

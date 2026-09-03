@@ -39,6 +39,16 @@ Networking requires the explicit `portable` capability profile. It uses the
 same in-process data plane on KVM, MSHV, and WHP; omitting either `--net` or
 `--network-profile portable` is rejected before OpenVMM starts.
 
+Select ABI v2 after building the matching specialized guest kernel:
+
+```bash
+python3 scripts/nvx.py run --machine microvm-v2 --processors 1
+```
+
+ABI v2 uses its fixed device topology, reserves a PVH status page, and uses
+edge-triggered virtio interrupts. ABI v1 retains the original level-triggered
+interrupt-status and acknowledgement registers.
+
 ## Snapshot restore readiness
 
 Restore an existing microVM snapshot with an optional host-readiness endpoint:
