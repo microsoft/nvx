@@ -65,10 +65,10 @@ manifest binds the complete initramfs hash; the source revision alone neither
 reproduces nor authenticates the image bytes.
 
 The broker package accepts only the reviewed ACI-04 input:
-source `8a678ffa3ff07a8d1db6ebcd1a06882ccf97632f`, SHA-256
-`cddde836bfd8bddd9e8ef6aa14c5345897365799234f4fe26ead18abf523241f`,
+source `4445d2523fcd8596de08a4459c5c7875564a2fc3`, SHA-256
+`19f01bf6de616db3b5a59d5f113b732ca26750ebd586430a6c50af3220cd1a25`,
 size `1,823,520` bytes, and build ID
-`33eab1763c1ca5f3362c6330e539eeecefc85719`. Source provenance does not
+`e72f233913651db5fe6a3b03f4d039d05b930d7e`. Source provenance does not
 imply byte identity; a same-source binary with a different digest is rejected.
 
 Create a release archive through the mode-normalizing writer, not a generic
