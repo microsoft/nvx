@@ -2,3 +2,4 @@ platform,microvm_abi_version,processors,commit,metric,unit,direction,p50
 windows-whp-virtual-machine,2,4,7441b18f18a758845ae75930f278740786a6a52b,shell_snapshot_restore_512_mib,ms,lower,1863.9
 windows-whp-virtual-machine,2,4,ced57386190384cc882e45604b28d60465a27319,shell_snapshot_restore_512_mib,ms,lower,155.6
 windows-whp-virtual-machine,2,4,a26c5f3c6cbf490b65e7cce41620465408e898ca,shell_snapshot_restore_512_mib,ms,lower,166.4
+windows-whp-virtual-machine,2,4,3be14e849151b196ddd815f985598d29641757cb,shell_snapshot_restore_512_mib,ms,lower,164.2
