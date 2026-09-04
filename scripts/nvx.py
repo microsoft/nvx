@@ -162,11 +162,7 @@ def command_run(args: argparse.Namespace) -> None:
         raise ScriptError("--restore-ready-path requires --restore-snapshot")
     if args.restore_processors is not None and args.restore_snapshot is None:
         raise ScriptError("--restore-processors requires --restore-snapshot")
-    if args.machine != "microvm-v2" and args.processors != 1:
-        raise ScriptError(f"--machine {args.machine} requires exactly one processor")
     if args.restore_processors is not None:
-        if args.machine != "microvm-v2":
-            raise ScriptError("--restore-processors requires --machine microvm-v2")
         if args.restore_processors > args.processors:
             raise ScriptError(
                 "--restore-processors cannot exceed --processors capacity"
@@ -349,7 +345,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     run.add_argument(
         "--machine",
-        choices=("microvm", "microvm-v2"),
+        choices=("microvm",),
         default="microvm",
     )
     run.add_argument("--memory-mib", type=int, default=128)

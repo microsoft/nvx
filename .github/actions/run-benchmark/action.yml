@@ -207,7 +207,6 @@ runs:
         run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
         python3 scripts/nvx.py benchmark \
           --suite device-io \
-          --device-io-abi 2 \
           --backend "${{ inputs.backend }}" \
           --platform "${{ inputs.platform }}" \
           --processors 1 \
@@ -324,7 +323,6 @@ runs:
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
         python scripts\nvx.py benchmark `
           --suite device-io `
-          --device-io-abi 2 `
           --backend "${{ inputs.backend }}" `
           --platform "${{ inputs.platform }}" `
           --processors 1 `
@@ -430,7 +428,7 @@ runs:
             exit 1
           }
           if [[ "${processors}" == 1 ]] && [[ "$(wc -l < "${result}")" -ne 37 ]]; then
-            echo "::error::Expected 36 ABI-v2 one-vCPU metrics in ${result}"
+            echo "::error::Expected 36 microVM one-vCPU metrics in ${result}"
             exit 1
           elif [[ "${processors}" != 1 ]] &&
             { [[ "$(wc -l < "${result}")" -ne 2 ]] ||
@@ -452,7 +450,7 @@ runs:
           }
           if ($Processors -eq 1) {
             if (@(Import-Csv $Result).Count -ne 36) {
-              throw "Expected 36 ABI-v2 one-vCPU metrics in $Result"
+              throw "Expected 36 microVM one-vCPU metrics in $Result"
             }
           } else {
             $Rows = @(Import-Csv $Result)

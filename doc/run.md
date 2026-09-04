@@ -39,15 +39,25 @@ Networking requires the explicit `portable` capability profile. It uses the
 same in-process data plane on KVM, MSHV, and WHP; omitting either `--net` or
 `--network-profile portable` is rejected before OpenVMM starts.
 
-Select ABI v2 after building the matching specialized guest kernel:
+Select an explicit processor count after building the matching specialized guest kernel:
 
 ```bash
-python3 scripts/nvx.py run --machine microvm-v2 --processors 1
+python3 scripts/nvx.py run --machine microvm --processors 8
 ```
 
-ABI v2 uses its fixed device topology, reserves a PVH status page, and uses
-edge-triggered virtio interrupts. ABI v1 retains the original level-triggered
-interrupt-status and acknowledgement registers.
+The microVM uses fixed device topology, reserves a PVH status page, and uses
+shared-status edge-triggered virtio interrupts with 1, 2, 4, or 8 vCPUs.
+
+## Migration from the retired profile
+
+`microvm` is now the only selector and launches the contract previously named
+`microvm-v2`. The `microvm-v2` spelling, the former one-vCPU ABI-1 behavior,
+ABI-1 device-I/O control, TTRPC numeric value 1, and ABI/PVH-layout-1 snapshot
+restore are removed. Snapshot metadata and performance series continue to use
+numeric ABI value 2 so existing ABI-2 artifacts are not reinterpreted as ABI 1.
+Use NVX commit `cb52bcd454b454cb241096c33ed42a1dcdc65347` with OpenVMM commit
+`1b70365613517a10718e00284a62bdffbd80e41c`, or an earlier compatible pair, to
+run retired ABI-1 guests or snapshots.
 
 ## Snapshot restore readiness
 
@@ -55,7 +65,7 @@ Restore an existing microVM snapshot with an optional host-readiness endpoint:
 
 ```bash
 python3 scripts/nvx.py run \
-  --machine microvm-v2 \
+  --machine microvm \
   --processors 8 \
   --restore-snapshot /var/lib/nvx/snapshot \
   --restore-processors 4 \
@@ -107,7 +117,7 @@ mount -t virtiofs microvm /mnt/host
 
 ## Experimental single-workload sandbox
 
-The `sandbox` command launches microVM ABI v2 with one to three compressed
+The `sandbox` command launches the microVM with one to three compressed
 EROFS lower layers and one preformatted ext4 scratch image:
 
 ```bash

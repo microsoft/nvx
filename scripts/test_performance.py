@@ -1362,6 +1362,49 @@ class PerformanceTests(unittest.TestCase):
                 summary.read_text(encoding="utf-8"),
             )
 
+    def test_gate_never_uses_legacy_abi_v1_as_abi_v2_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            filename = "linux-kvm-baremetal-microvm-v2-1vcpu.csv"
+            legacy = performance.Result(
+                "base",
+                "latency",
+                "ms",
+                "lower",
+                1.0,
+                "linux-kvm-baremetal",
+                1,
+                1,
+            )
+            current = performance.Result(
+                "target",
+                "latency",
+                "ms",
+                "lower",
+                100.0,
+                "linux-kvm-baremetal",
+                2,
+                1,
+            )
+            performance.write_results(baseline / filename, [legacy])
+            performance.write_results(target / filename, [current])
+            summary = root / "summary.md"
+
+            self.assertEqual(
+                performance.gate_results(
+                    baseline,
+                    target,
+                    window=1,
+                    threshold=0,
+                    minimum_history=1,
+                    summary_path=summary,
+                ),
+                0,
+            )
+            self.assertIn("Warmup", summary.read_text(encoding="utf-8"))
+
     def test_rejects_duplicate_dimensional_rows_across_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

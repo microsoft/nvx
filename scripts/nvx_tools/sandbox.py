@@ -104,7 +104,7 @@ class SandboxLaunch:
         return tuple(by_role[role] for role in LAYER_ROLES if role in by_role)
 
     def openvmm_arguments(self) -> list[str]:
-        arguments = ["--machine", "microvm-v2"]
+        arguments = ["--machine", "microvm"]
         for layer in self.ordered_layers():
             arguments.extend(
                 (

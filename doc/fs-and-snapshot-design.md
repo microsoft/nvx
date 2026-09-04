@@ -15,9 +15,8 @@
 > format v5 records the three tiers, consumed sections, and clone/resume policy;
 > tiered restore holds host input until the captured agent acknowledges repair,
 > and instance resume is claimed exactly once. The paired-scratch transaction is
-> implemented for raw-file ABI-v2 blocks; the bootstrap therefore accepts
+        implemented for raw-file microVM sandbox blocks; the bootstrap therefore accepts
 > only non-secret launch tokens and is not the production agent contract.
-
 ---
 
 ## 1. Summary

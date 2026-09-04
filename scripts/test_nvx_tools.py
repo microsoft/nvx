@@ -88,16 +88,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.device_io_duration_seconds, 10.0)
         self.assertEqual(args.device_io_size_mib, 512)
         self.assertEqual(args.device_io_port, 5201)
-        self.assertEqual(args.device_io_abi, 2)
-
-        control = nvx.parse_args(
-            ["benchmark", "--suite", "device-io", "--device-io-abi", "1"]
-        )
-        self.assertEqual(control.device_io_abi, 1)
+        self.assertFalse(hasattr(args, "device_io_abi"))
 
         with self.assertRaises(SystemExit):
             nvx.parse_args(
-                ["benchmark", "--suite", "device-io", "--device-io-abi", "3"]
+                ["benchmark", "--suite", "device-io", "--device-io-abi", "1"]
             )
 
     def test_benchmark_exposes_restore_only_shell_suite(self):
@@ -259,8 +254,6 @@ class CliTests(unittest.TestCase):
                 "run",
                 "--hypervisor",
                 "mshv",
-                "--machine",
-                "microvm-v2",
                 "--restore-snapshot",
                 "snapshot",
                 "--processors",
@@ -289,7 +282,7 @@ class CliTests(unittest.TestCase):
                 "openvmm",
                 "--single-process",
                 "--machine",
-                "microvm-v2",
+                "microvm",
                 "--processors",
                 "4",
                 "--hypervisor",
@@ -323,8 +316,6 @@ class CliTests(unittest.TestCase):
         invalid_restore_capacity = nvx.parse_args(
             [
                 "run",
-                "--machine",
-                "microvm-v2",
                 "--processors",
                 "2",
                 "--restore-snapshot",
@@ -348,19 +339,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("microvm", format_command.call_args.args[0])
         self.assertNotIn("microvm-v2", format_command.call_args.args[0])
 
-        invalid_v1_smp = nvx.parse_args(
+        smp = nvx.parse_args(
             ["run", "--machine", "microvm", "--processors", "2", "--dry-run"]
         )
-        with self.assertRaisesRegex(
-            common.ScriptError, "requires exactly one processor"
-        ):
-            nvx.command_run(invalid_v1_smp)
+        self.assertEqual(smp.machine, "microvm")
+        self.assertEqual(smp.processors, 2)
 
-        abi_v2 = nvx.parse_args(
-            ["run", "--machine", "microvm-v2", "--processors", "4", "--dry-run"]
-        )
-        self.assertEqual(abi_v2.machine, "microvm-v2")
-        self.assertEqual(abi_v2.processors, 4)
+        with self.assertRaises(SystemExit):
+            nvx.parse_args(
+                ["run", "--machine", "microvm-v2", "--processors", "4", "--dry-run"]
+            )
 
         with self.assertRaises(SystemExit):
             nvx.parse_args(["run", "--machine", "microvm-v3", "--dry-run"])
@@ -422,7 +410,7 @@ class CiTests(unittest.TestCase):
             self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
             self.assertEqual(command[-2:], ["--filter", ci.OPENVMM_MICROVM_TEST_FILTER])
             self.assertIn(
-                "test_ttrpc_microvm_v2_restore_processor_activation",
+                "test_ttrpc_microvm_restore_processor_activation",
                 ci.OPENVMM_MICROVM_TEST_FILTER,
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
@@ -540,7 +528,7 @@ class SandboxTests(unittest.TestCase):
             launch.openvmm_arguments(),
             [
                 "--machine",
-                "microvm-v2",
+                "microvm",
                 "--microvm-sandbox-block",
                 "distro:file:distro.erofs,ro",
                 "--microvm-sandbox-block",
@@ -778,7 +766,7 @@ class BenchmarkTests(unittest.TestCase):
             [
                 "--single-process",
                 "--machine",
-                "microvm-v2",
+                "microvm",
                 "--processors",
                 "8",
                 "--hypervisor",
@@ -824,7 +812,7 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(
             command[2:8],
-            ["--machine", "microvm-v2", "--processors", "4", "--hypervisor", "mshv"],
+            ["--machine", "microvm", "--processors", "4", "--hypervisor", "mshv"],
         )
 
         self.assertEqual(
@@ -872,7 +860,7 @@ class BenchmarkTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(
             command[2:8],
-            ["--machine", "microvm-v2", "--processors", "4", "--hypervisor", "kvm"],
+            ["--machine", "microvm", "--processors", "4", "--hypervisor", "kvm"],
         )
         self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
         self.assertFalse(run.call_args.kwargs["guest_exit_prequeued"])
@@ -1962,7 +1950,8 @@ class BenchmarkTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(network_commands), 2)
                 self.assertIn("192.0.2.2/24", network_commands[0])
-                self.assertIn("microvm-v2", network_commands[0])
+                self.assertIn("microvm", network_commands[0])
+                self.assertNotIn("microvm-v2", network_commands[0])
                 block_commands = [
                     call.args[0]
                     for call in run_guest.call_args_list

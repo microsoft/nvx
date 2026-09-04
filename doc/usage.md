@@ -139,7 +139,7 @@ and MSHV. Set `GH_TOKEN` when the selected repository requires authentication.
 ```text
 python3 scripts/nvx.py run
     [--hypervisor {auto,whp,kvm,mshv}]
-    [--machine {microvm,microvm-v2}]
+    [--machine {microvm}]
     [--memory-mib MIB]
     [--processors {1,2,4,8}]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
@@ -155,15 +155,15 @@ python3 scripts/nvx.py run
 | Option | Default | Description |
 | --- | --- | --- |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
-| `--machine {microvm,microvm-v2}` | `microvm` | Select the guest ABI explicitly. ABI v1 is a one-vCPU legacy profile; ABI v2 supports 1, 2, 4, or 8 vCPUs and uses fixed-topology shared-status edge interrupts. |
+| `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
-| `--processors {1,2,4,8}` | `1` | Select the microVM ABI-v2 processor count. |
+| `--processors {1,2,4,8}` | `1` | Select the microVM processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target. Active snapshot restore requires the same canonical path, target, and mode; a dormant-slot restore may attach a new mapping that the resumed guest mounts explicitly. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. |
 | `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. |
-| `--restore-processors {1,2,4,8}` | none | Bring this contiguous processor prefix online before restore readiness. Requires an opt-in ABI-v2 snapshot and cannot exceed `--processors` capacity. |
+| `--restore-processors {1,2,4,8}` | none | Bring this contiguous processor prefix online before restore readiness. Requires an opt-in microVM snapshot and cannot exceed `--processors` capacity. |
 | `--restore-ready-path PATH` | none | Publish one restore-readiness event to an existing Unix socket or Windows named pipe. |
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 
@@ -204,7 +204,7 @@ python3 scripts/nvx.py sandbox
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--cmdline TEXT` | empty | Append non-sandbox kernel parameters; `nvx_*` and `tsc=` tokens are reserved. |
-| `--dry-run` | off | Print the generated OpenVMM ABI-v2 command without running it. |
+| `--dry-run` | off | Print the generated OpenVMM microVM command without running it. |
 
 See [Run](run.md) for artifact preparation, the security boundary, and current
 snapshot/configuration limitations.
@@ -227,14 +227,13 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--warmups N` | `5` for `device-io`; `3` otherwise | Set the number of excluded warmup attempts; zero is allowed. |
 | `--runs N` | `30` for `device-io`; `11` otherwise | Set the number of retained attempts. |
 | `--memory-mib MIB` | `128` | Set guest memory for the general suites. |
-| `--processors {1,2,4,8}` | `1` | Run every cold, capture, restore, and workload launch with this ABI-v2 count. |
+| `--processors {1,2,4,8}` | `1` | Run every cold, capture, restore, and workload launch with this microVM count. |
 | `--virtfs-runs N` | `3` | Set the number of virtio-fs workload samples. |
 | `--virtfs-memory-mib MIB` | `512` | Set guest memory for the virtio-fs workload. |
 | `--payload-mib MIB` | `64` | Set the virtio-fs sequential I/O payload size. |
 | `--shell-memories MIB [MIB ...]` | `64 128 256 512` | Set the guest memory sizes for shell snapshot measurements. |
 | `--network-memory-mib MIB` | `256` | Set guest memory for the network snapshot workload. |
 | `--device-io-duration-seconds SECONDS` | `10` | Set each storage-operation or UDP round-trip measurement window. |
-| `--device-io-abi {1,2}` | `2` | Select shared-status ABI v2 or the matched legacy ABI-v1 control for device operation rates. |
 | `--device-io-size-mib MIB` | `512` | Set the virtio-blk and virtio-fs backing-object size. |
 | `--device-io-port PORT` | `5201` | Set the same-host UDP echo port. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
@@ -281,8 +280,8 @@ reject incomplete inputs for their respective workload sets.
 `--require-shell-snapshot-restore-512` accepts only the canonical 512 MiB
 restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
-result, producing the 31-metric ABI-v2 CI result. A directory whose metadata
-selects `device-io` is collected as five additional ABI-v2, one-vCPU `ops/s`
+result, producing the 31-metric microVM CI result. A directory whose metadata
+selects `device-io` is collected as five additional ABI-2, one-vCPU `ops/s`
 metrics; CI merges them into a 36-metric one-vCPU result.
 `--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
 

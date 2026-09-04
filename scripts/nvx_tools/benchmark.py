@@ -109,7 +109,6 @@ PERFORMANCE_LOG_FILENAMES = (
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
 MICROVM_ABI_VERSION = 2
-DEVICE_IO_MICROVM_ABI_VERSION = 2
 
 
 class ProfiledResult(TypedDict, total=False):
@@ -317,7 +316,7 @@ def configure_parser(
         type=int,
         choices=(1, 2, 4, 8),
         default=1,
-        help="microVM ABI-v2 processor count (default: 1)",
+        help="microVM processor count (default: 1)",
     )
     parser.add_argument(
         "--virtfs-runs",
@@ -375,13 +374,6 @@ def configure_parser(
         type=positive_float,
         default=DEVICE_IO_DURATION_SECONDS,
         help="measurement window for each device operation (default: 10)",
-    )
-    parser.add_argument(
-        "--device-io-abi",
-        type=int,
-        choices=(1, 2),
-        default=DEVICE_IO_MICROVM_ABI_VERSION,
-        help="microVM interrupt ABI for device operation rates (default: 2)",
     )
     parser.add_argument(
         "--device-io-size-mib",
@@ -1509,7 +1501,6 @@ def workload_boot_command(
     memory_mib: int,
     cmdline: str,
     *,
-    machine: str = "microvm-v2",
     processors: int = 1,
     command_prefix: Sequence[str] = (),
     network: str | None = None,
@@ -1522,7 +1513,7 @@ def workload_boot_command(
         str(executable),
         "--single-process",
         "--machine",
-        machine,
+        "microvm",
         "--processors",
         str(processors),
         "--hypervisor",
@@ -2718,10 +2709,6 @@ def benchmark_device_io_workload(
         raise ValueError("device-io requires exactly one processor")
     if args.device_io_size_mib < 64:
         raise ValueError("device-io backing objects must be at least 64 MiB")
-    abi_version = getattr(args, "device_io_abi", DEVICE_IO_MICROVM_ABI_VERSION)
-    if abi_version not in (1, 2):
-        raise ValueError("device-io supports only microVM ABI versions 1 and 2")
-    machine = "microvm" if abi_version == 1 else "microvm-v2"
     completed = _device_io_completed_attempts(output_path)
     total_attempts = args.warmups + args.runs
     expected_attempts = {
@@ -2768,17 +2755,11 @@ def benchmark_device_io_workload(
                 initrd,
                 DEVICE_IO_MEMORY_MIB,
                 "quiet loglevel=0",
-                machine=machine,
                 processors=1,
                 command_prefix=command_prefix,
                 network=network,
                 mount=mount,
-                virtio_blk=block
-                if device == "virtio-blk" and abi_version == 1
-                else None,
-                microvm_sandbox_block=(
-                    block if device == "virtio-blk" and abi_version == 2 else None
-                ),
+                microvm_sandbox_block=block if device == "virtio-blk" else None,
             )
             context = (
                 UdpEchoServer(args.device_io_port)
@@ -2856,7 +2837,7 @@ def smp_probe_script(
     ioapic_irq: int | None = None,
 ) -> str:
     if processors not in (1, 2, 4, 8):
-        raise ValueError("microVM ABI-v2 SMP probe supports 1, 2, 4, or 8 vCPUs")
+        raise ValueError("microVM SMP probe supports 1, 2, 4, or 8 vCPUs")
     if (network_gateway is None) != (ioapic_irq is None):
         raise ValueError("network gateway and IOAPIC IRQ must be specified together")
     apic_ids = ",".join(str(cpu) for cpu in range(processors))
@@ -3667,11 +3648,7 @@ def write_benchmark_metadata(
 ) -> Path:
     platform = args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
     device_io = args.suite == "device-io"
-    microvm_abi_version = (
-        getattr(args, "device_io_abi", DEVICE_IO_MICROVM_ABI_VERSION)
-        if device_io
-        else MICROVM_ABI_VERSION
-    )
+    microvm_abi_version = MICROVM_ABI_VERSION
     processors = 1 if device_io else args.processors
     effective_network = (
         args.net or "10.0.0.2/24"
@@ -3781,7 +3758,7 @@ def run_workload_benchmarks(
                 / "data"
                 / "runs"
                 / platform
-                / f"microvm-v{getattr(args, 'device_io_abi', DEVICE_IO_MICROVM_ABI_VERSION)}"
+                / "microvm-v2"
                 / "1vcpu"
                 / "device-io"
             )
@@ -4254,7 +4231,7 @@ def snapshot_restore_command(
         str(executable),
         "--single-process",
         "--machine",
-        "microvm-v2",
+        "microvm",
         "--processors",
         str(processors),
         "--hypervisor",
@@ -4766,7 +4743,7 @@ def whp_command(
         str(executable),
         "--single-process",
         "--machine",
-        "microvm-v2",
+        "microvm",
         "--processors",
         str(processors),
         "--hypervisor",
@@ -4907,7 +4884,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         str(stage / "openvmm"),
         "--single-process",
         "--machine",
-        "microvm-v2",
+        "microvm",
         "--processors",
         str(args.processors),
         "--hypervisor",
@@ -5182,7 +5159,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 str(executable),
                 "--single-process",
                 "--machine",
-                "microvm-v2",
+                "microvm",
                 "--processors",
                 str(args.processors),
                 "--hypervisor",
