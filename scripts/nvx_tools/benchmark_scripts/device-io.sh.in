@@ -1,0 +1,30 @@
+set -eu
+trap 'status=$?; if [ "$status" -ne 0 ]; then echo "NVX-DEVICE-IO-ERROR status=$status"; nvx-exit "$status"; fi' EXIT
+result_prefix=@RESULT_PREFIX
+duration_ms=@DURATION_MS
+size_bytes=@SIZE_BYTES
+network_target="@NETWORK_TARGET"
+network_port=@NETWORK_PORT
+emit_result() {
+  result="$(/sbin/nvx-device-io "$@@")"
+  printf '%s=%s\n' "$result_prefix" "$result"
+}
+case "@DEVICE" in
+  virtio-blk)
+    tries=0
+    while [ ! -b /dev/vda ] && [ "$tries" -lt 200 ]; do sleep 0.05; tries=$((tries + 1)); done
+    [ -b /dev/vda ]
+    emit_result file /dev/vda write "$duration_ms" "$size_bytes" direct existing
+    emit_result file /dev/vda read "$duration_ms" "$size_bytes" direct existing
+    ;;
+  virtio-fs)
+    emit_result file /mnt/host/device-io.bin write "$duration_ms" "$size_bytes" buffered create
+    sync
+    echo 3 > /proc/sys/vm/drop_caches
+    emit_result file /mnt/host/device-io.bin read "$duration_ms" "$size_bytes" buffered existing
+    ;;
+  virtio-net)
+    emit_result network "$network_target" "$network_port" "$duration_ms"
+    ;;
+esac
+echo @COMPLETION_MARKER

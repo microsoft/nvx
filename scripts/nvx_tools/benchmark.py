@@ -20,7 +20,6 @@ import os
 import queue
 import re
 import select
-import shlex
 import shutil
 import socket
 import statistics
@@ -31,6 +30,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
+from string import Template
 from typing import TextIO, TypedDict, cast
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
@@ -49,6 +49,7 @@ PHASE2_RESULT_PREFIX = "OPENVMM_PHASE2_RESULT="
 SNAPSHOT_PROFILE_ENV = "OPENVMM_STARTUP_PROFILE"
 SNAPSHOT_PROFILE_PREFIX = b"OPENVMM_SNAPSHOT_PROFILE_V1 "
 NVX_SCRIPT = Path(__file__).resolve().parents[1] / "nvx.py"
+BENCHMARK_SCRIPTS_DIR = Path(__file__).with_name("benchmark_scripts")
 WORKLOAD_SUITES = frozenset(
     {
         "cold-start",
@@ -530,6 +531,19 @@ def network_port(value: str) -> int:
 def run_checked(command: Sequence[str], *, cwd: Path | None = None) -> None:
     print("+", subprocess.list2cmdline(list(command)), flush=True)
     subprocess.run(command, cwd=cwd, check=True)
+
+
+def _read_benchmark_script(name: str) -> str:
+    script = (BENCHMARK_SCRIPTS_DIR / name).read_text(encoding="utf-8")
+    return script if script.endswith("\n") else script + "\n"
+
+
+class _BenchmarkScriptTemplate(Template):
+    delimiter = "@"
+
+
+def _render_benchmark_script(name: str, **values: str) -> str:
+    return _BenchmarkScriptTemplate(_read_benchmark_script(name)).substitute(values)
 
 
 def append_network_arguments(
@@ -1297,7 +1311,9 @@ def measure_once(
                 if teardown_mode != "guest-exit":
                     process.terminate()
                 elif not guest_exit_prequeued:
-                    interaction.write_input(b"nvx-exit 0\n")
+                    interaction.write_input(
+                        _read_benchmark_script("guest-exit.sh").encode("utf-8")
+                    )
                 try:
                     returncode = wait_for_process_exit(
                         process,
@@ -2361,7 +2377,9 @@ def _format_rate_summary(samples: Sequence[float]) -> str:
 
 
 def _guest_exit_script(teardown_mode: str) -> str:
-    return "nvx-exit 0\n" if teardown_mode == "guest-exit" else ""
+    return (
+        _read_benchmark_script("guest-exit.sh") if teardown_mode == "guest-exit" else ""
+    )
 
 
 def _device_io_script(
@@ -2373,48 +2391,25 @@ def _device_io_script(
     network_target: str | None = None,
     network_port: int = DEVICE_IO_PORT,
 ) -> str:
+    if device not in DEVICE_IO_OPERATIONS:
+        raise ValueError(f"unsupported device I/O device: {device}")
+    if device == "virtio-net" and network_target is None:
+        raise ValueError("virtio-net device I/O requires a network target")
     duration_ms = max(1, round(duration_seconds * 1000))
     size_bytes = size_mib * 1024 * 1024
-    lines = [
-        "set -eu",
-        'trap \'status=$?; if [ "$status" -ne 0 ]; then echo "NVX-DEVICE-IO-ERROR status=$status"; nvx-exit "$status"; fi\' EXIT',
-        f"result_prefix={DEVICE_IO_GUEST_RESULT_PREFIX.removesuffix('=')}",
-        "emit_result() {",
-        '  result="$(/sbin/nvx-device-io "$@")"',
-        '  printf \'%s=%s\\n\' "$result_prefix" "$result"',
-        "}",
-    ]
-    if device == "virtio-blk":
-        lines.extend(
-            (
-                "tries=0",
-                'while [ ! -b /dev/vda ] && [ "$tries" -lt 200 ]; do sleep 0.05; tries=$((tries + 1)); done',
-                "[ -b /dev/vda ]",
-                f"emit_result file /dev/vda write {duration_ms} {size_bytes} direct existing",
-                f"emit_result file /dev/vda read {duration_ms} {size_bytes} direct existing",
-            )
-        )
-    elif device == "virtio-fs":
-        lines.extend(
-            (
-                f"emit_result file /mnt/host/device-io.bin write {duration_ms} {size_bytes} buffered create",
-                "sync",
-                "echo 3 > /proc/sys/vm/drop_caches",
-                f"emit_result file /mnt/host/device-io.bin read {duration_ms} {size_bytes} buffered existing",
-            )
-        )
-    elif device == "virtio-net":
-        if network_target is None:
-            raise ValueError("virtio-net device I/O requires a network target")
-        lines.append(
-            f"emit_result network {network_target} {network_port} {duration_ms}"
-        )
-    else:
-        raise ValueError(f"unsupported device I/O device: {device}")
-    lines.append(f"echo {DEVICE_IO_COMPLETION_MARKER.decode()}")
-    if teardown_mode == "guest-exit":
-        lines.append("nvx-exit 0")
-    return "\n".join(lines) + "\n"
+    rendered = _render_benchmark_script(
+        "device-io.sh.in",
+        DEVICE=device,
+        DURATION_MS=str(duration_ms),
+        SIZE_BYTES=str(size_bytes),
+        NETWORK_TARGET=(
+            str(ipaddress.IPv4Address(network_target)) if network_target else ""
+        ),
+        NETWORK_PORT=str(network_port),
+        RESULT_PREFIX=DEVICE_IO_GUEST_RESULT_PREFIX.removesuffix("="),
+        COMPLETION_MARKER=DEVICE_IO_COMPLETION_MARKER.decode(),
+    )
+    return rendered + _guest_exit_script(teardown_mode)
 
 
 def _device_io_positive_int(value: object, field: str) -> int:
@@ -2841,107 +2836,21 @@ def smp_probe_script(
     if (network_gateway is None) != (ioapic_irq is None):
         raise ValueError("network gateway and IOAPIC IRQ must be specified together")
     apic_ids = ",".join(str(cpu) for cpu in range(processors))
-    lines = [
-        "set -eu",
-        'trap \'status=$?; if [ "$status" -ne 0 ]; then nvx-exit "$status"; fi\' EXIT',
-        f"expected={processors}",
-        'online="$(getconf _NPROCESSORS_ONLN)"',
-        '[ "$online" -eq "$expected" ] || { echo "SMP-ONLINE-FAIL expected=$expected actual=$online"; exit 81; }',
-        'loc_before="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"',
-        '[ "$(printf "%s\n" "$loc_before" | awk \'{ print NF }\')" -eq "$expected" ] || { echo "SMP-LAPIC-FAIL missing-local-timer-counters"; exit 87; }',
-        'worker_dir="/tmp/nvx-smp-probe-$$"',
-        'worker_script="$worker_dir/worker"',
-        'rm -rf "$worker_dir"',
-        'mkdir -p "$worker_dir"',
-        "cat >\"$worker_script\" <<'NVX_SMP_WORKER'",
-        "#!/bin/sh",
-        "set -eu",
-        'cpu="$1"',
-        'before="$2"',
-        'result="$3"',
-        'apic_id="$4"',
-        "actual=\"$(awk '{ print $39 }' /proc/self/stat)\"",
-        '[ "$actual" -eq "$cpu" ] || { echo "SMP-WORKER-FAIL requested=$cpu actual=$actual"; exit 87; }',
-        "read_loc_counter() {",
-        "  while read -r label cpu0 cpu1 cpu2 cpu3 cpu4 cpu5 cpu6 cpu7 rest; do",
-        '    if [ "$label" = "LOC:" ]; then',
-        '      case "$cpu" in',
-        "        0) current=$cpu0 ;;",
-        "        1) current=$cpu1 ;;",
-        "        2) current=$cpu2 ;;",
-        "        3) current=$cpu3 ;;",
-        "        4) current=$cpu4 ;;",
-        "        5) current=$cpu5 ;;",
-        "        6) current=$cpu6 ;;",
-        "        7) current=$cpu7 ;;",
-        "        *) return 1 ;;",
-        "      esac",
-        "      return 0",
-        "    fi",
-        "  done </proc/interrupts",
-        "  return 1",
-        "}",
-        "while :; do",
-        "  read_loc_counter",
-        '  [ "$current" -gt "$before" ] && break',
-        "done",
-        'printf \'%s %s %s\\n\' "$actual" "$current" "$apic_id" >"$result"',
-        "NVX_SMP_WORKER",
-        'chmod +x "$worker_script"',
-        "workers=0",
-        'worker_pids=""',
-        "for cpu in $(seq 0 $((expected - 1))); do",
-        '  topology="/sys/devices/system/cpu/cpu${cpu}/topology"',
-        '  [ "$(cat "$topology/physical_package_id")" -eq 0 ] || exit 82',
-        '  [ "$(cat "$topology/die_id")" -eq 0 ] || exit 83',
-        '  [ "$(cat "$topology/core_id")" -eq "$cpu" ] || exit 84',
-        '  [ "$(cat "$topology/thread_siblings_list")" = "$cpu" ] || exit 85',
-        '  apic_id="$(awk -v target="$cpu" \'$1 == "processor" { processor = $3 } $1 == "apicid" && processor == target { print $3; exit }\' /proc/cpuinfo)"',
-        '  [ "$apic_id" -eq "$cpu" ] || { echo "SMP-APIC-FAIL cpu=$cpu apic=$apic_id"; exit 86; }',
-        "  field=$((cpu + 1))",
-        '  before="$(printf "%s\\n" "$loc_before" | awk -v field="$field" \'{ print $field }\')"',
-        '  result="$worker_dir/$cpu"',
-        '  taskset -c "$cpu" "$worker_script" "$cpu" "$before" "$result" "$apic_id" &',
-        '  worker_pids="$worker_pids $!"',
-        "  workers=$((workers + 1))",
-        "done",
-        "for pid in $worker_pids; do",
-        '  wait "$pid"',
-        "done",
-        "for cpu in $(seq 0 $((expected - 1))); do",
-        '  read -r actual current apic_id <"$worker_dir/$cpu"',
-        '  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id actual=$actual loc_after=$current"',
-        "done",
-        'loc_after="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"',
-        "for cpu in $(seq 0 $((expected - 1))); do",
-        "  field=$((cpu + 1))",
-        '  before="$(printf "%s\n" "$loc_before" | awk -v field="$field" \'{ print $field }\')"',
-        '  after="$(printf "%s\n" "$loc_after" | awk -v field="$field" \'{ print $field }\')"',
-        '  [ "$after" -gt "$before" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu before=$before after=$after"; exit 88; }',
-        '  if [ "$cpu" -gt 0 ]; then',
-        "    ipi=\"$(awk -v field=$((cpu + 2)) '/^(RES|CAL):/ { total += $field } END { print total + 0 }' /proc/interrupts)\"",
-        '    [ "$ipi" -gt 0 ] || { echo "SMP-IPI-FAIL cpu=$cpu count=$ipi"; exit 89; }',
-        "  fi",
-        "done",
-        'echo "SMP-INTERRUPTS-OK loc_before=$loc_before loc_after=$loc_after"',
-        f'echo "SMP-TOPOLOGY-OK requested=$expected online=$online sockets=1 cores=$expected threads=1 apic_ids={apic_ids} bsp=0 workers=$workers"',
-        'rm -rf "$worker_dir"',
-    ]
+    network_probe = ""
     if network_gateway is not None and ioapic_irq is not None:
-        lines.extend(
-            (
-                f"ioapic_irq={ioapic_irq}",
-                'irq_before="$(awk -v irq="$ioapic_irq" -v expected="$expected" \'$1 == irq ":" { for (cpu = 0; cpu < expected; cpu++) total += $(cpu + 2) } END { print total + 0 }\' /proc/interrupts)"',
-                f'ping -c 2 -W 1 "{network_gateway}" >/dev/null',
-                'irq_after="$(awk -v irq="$ioapic_irq" -v expected="$expected" \'$1 == irq ":" { for (cpu = 0; cpu < expected; cpu++) total += $(cpu + 2) } END { print total + 0 }\' /proc/interrupts)"',
-                '[ "$irq_after" -gt "$irq_before" ] || { echo "SMP-IOAPIC-FAIL irq=$ioapic_irq before=$irq_before after=$irq_after"; exit 91; }',
-                'echo "SMP-IOAPIC-OK irq=$ioapic_irq before=$irq_before after=$irq_after"',
-            )
+        network_probe = _render_benchmark_script(
+            "smp-network-probe.sh.in",
+            IOAPIC_IRQ=str(ioapic_irq),
+            NETWORK_GATEWAY=str(ipaddress.IPv4Address(network_gateway)),
         )
-    lines.append(f"echo {SMP_PROBE_COMPLETION_MARKER.decode()}")
-    if exit_guest:
-        lines.append("nvx-exit 0")
-    return "\n".join(lines) + "\n"
+    rendered = _render_benchmark_script(
+        "smp-probe.sh.in",
+        PROCESSORS=str(processors),
+        APIC_IDS=apic_ids,
+        NETWORK_PROBE=network_probe,
+        COMPLETION_MARKER=SMP_PROBE_COMPLETION_MARKER.decode(),
+    )
+    return rendered + (_guest_exit_script("guest-exit") if exit_guest else "")
 
 
 def prepare_snapshot_capture_script(
@@ -2958,57 +2867,42 @@ def prepare_snapshot_capture_script(
         network_gateway=network_gateway,
         ioapic_irq=ioapic_irq,
     )
-    probe_delimiter = "NVX_SMP_PROBE_SCRIPT"
-    capture_delimiter = "NVX_SNAPSHOT_CAPTURE_SCRIPT"
     dispatch_marker = (
-        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n" if snapshot_profile else ""
+        _render_benchmark_script(
+            "snapshot-dispatch-marker.sh.in",
+            DISPATCH_MARKER=SNAPSHOT_GUEST_DISPATCH_MARKER.decode(),
+        )
+        if snapshot_profile
+        else ""
     )
-    capture = (
-        f"#!/bin/sh\nset -eu\n{SMP_PROBE_PATH}\n"
-        "IFS= read -r trigger\n"
-        'if [ "$trigger" != nvx-snapshot ]; then\n'
-        "  /sbin/nvx-exit 90\n"
-        "  exit 90\n"
-        "fi\n"
-        f"{dispatch_marker}"
-        "/sbin/nvx-snapshot\n"
-        f"echo {RESTORE_MARKER.decode()}\n"
+    capture = _render_benchmark_script(
+        "snapshot-capture-controller.sh.in",
+        SMP_PROBE_PATH=SMP_PROBE_PATH,
+        DISPATCH_MARKER=dispatch_marker,
+        RESTORE_MARKER=RESTORE_MARKER.decode(),
     )
-    return (
-        f"cat >{SMP_PROBE_PATH} <<'{probe_delimiter}'\n"
-        f"{probe}"
-        f"{probe_delimiter}\n"
-        f"cat >{SNAPSHOT_CAPTURE_PATH} <<'{capture_delimiter}'\n"
-        f"{capture}"
-        f"{capture_delimiter}\n"
-        f"chmod +x {SMP_PROBE_PATH} {SNAPSHOT_CAPTURE_PATH}\n"
-        f"{SNAPSHOT_CAPTURE_PATH}\n"
+    return _render_benchmark_script(
+        "prepare-snapshot-capture.sh.in",
+        SMP_PROBE_PATH=SMP_PROBE_PATH,
+        SMP_PROBE=probe,
+        SNAPSHOT_CAPTURE_PATH=SNAPSHOT_CAPTURE_PATH,
+        SNAPSHOT_CAPTURE=capture,
     )
 
 
 def _virtfs_script(payload_mib: int, teardown_mode: str) -> str:
-    return (
-        f"dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count={payload_mib} "
-        "conv=fsync 2>&1\n"
-        "sync\n"
-        "echo 3 > /proc/sys/vm/drop_caches 2>/dev/null\n"
-        "dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1\n"
-        "sync\n"
-        f"echo {VIRTFS_COMPLETION_MARKER.decode()}\n"
-        + _guest_exit_script(teardown_mode)
-    )
+    return _render_benchmark_script(
+        "virtfs.sh.in",
+        PAYLOAD_MIB=str(payload_mib),
+        COMPLETION_MARKER=VIRTFS_COMPLETION_MARKER.decode(),
+    ) + _guest_exit_script(teardown_mode)
 
 
 def _virtfs_roundtrip_script(teardown_mode: str) -> str:
-    return (
-        "printf 'guest-to-host\\n' > /mnt/host/guest-visible\n"
-        "tries=0\n"
-        'while [ "$(cat /mnt/host/host-visible 2>/dev/null)" != host-to-guest ] '
-        '&& [ "$tries" -lt 1200 ]; do sleep 0.05; tries=$((tries + 1)); done\n'
-        'if [ "$(cat /mnt/host/host-visible 2>/dev/null)" = host-to-guest ]; then\n'
-        f"  echo {VIRTFS_ROUNDTRIP_MARKER.decode()}\n"
-        "fi\n" + _guest_exit_script(teardown_mode)
-    )
+    return _render_benchmark_script(
+        "virtfs-roundtrip.sh.in",
+        ROUNDTRIP_MARKER=VIRTFS_ROUNDTRIP_MARKER.decode(),
+    ) + _guest_exit_script(teardown_mode)
 
 
 def _run_virtfs_roundtrip(
@@ -3919,11 +3813,20 @@ def snapshot_request_script(
     snapshot_profile: bool,
 ) -> str:
     if processors is not None:
-        return "nvx-snapshot\n"
+        return _read_benchmark_script("snapshot-request.sh")
     dispatch_marker = (
-        f"echo {SNAPSHOT_GUEST_DISPATCH_MARKER.decode()}\n" if snapshot_profile else ""
+        _render_benchmark_script(
+            "snapshot-dispatch-marker.sh.in",
+            DISPATCH_MARKER=SNAPSHOT_GUEST_DISPATCH_MARKER.decode(),
+        )
+        if snapshot_profile
+        else ""
     )
-    return dispatch_marker + "nvx-snapshot\n" + f"echo {RESTORE_MARKER.decode()}\n"
+    return _render_benchmark_script(
+        "snapshot-request-direct.sh.in",
+        DISPATCH_MARKER=dispatch_marker,
+        RESTORE_MARKER=RESTORE_MARKER.decode(),
+    )
 
 
 def capture_snapshot(
@@ -4647,6 +4550,7 @@ def build_whp(openvmm_dir: Path) -> Path:
 
 def build_kvm(openvmm_dir: Path) -> Path:
     openvmm_wsl = windows_to_wsl(openvmm_dir)
+    script_wsl = windows_to_wsl(BENCHMARK_SCRIPTS_DIR / "build-openvmm-kvm.sh")
     run_checked(
         [
             "wsl.exe",
@@ -4654,9 +4558,9 @@ def build_kvm(openvmm_dir: Path) -> Path:
             openvmm_wsl,
             "--exec",
             "sh",
-            "-lc",
-            "CARGO_TARGET_DIR=target/bench-linux PROTOC=/usr/bin/protoc "
-            "cargo build --release -p openvmm --bin openvmm",
+            # A login shell is required because rustup exports cargo from the profile.
+            "-l",
+            script_wsl,
         ]
     )
     return require_file(
@@ -4705,6 +4609,7 @@ def build_phase2_whp_host(openvmm_dir: Path) -> Path:
 
 def build_phase2_kvm_host(openvmm_dir: Path) -> Path:
     openvmm_wsl = windows_to_wsl(openvmm_dir)
+    script_wsl = windows_to_wsl(BENCHMARK_SCRIPTS_DIR / "build-phase2-kvm.sh")
     run_checked(
         [
             "wsl.exe",
@@ -4712,11 +4617,9 @@ def build_phase2_kvm_host(openvmm_dir: Path) -> Path:
             openvmm_wsl,
             "--exec",
             "sh",
-            "-lc",
-            "CARGO_TARGET_DIR=target/bench-linux "
-            "PROTOC=/usr/bin/protoc "
-            "cargo build --release -p openvmm_helpers "
-            "--example phase2_snapshot_bench",
+            # A login shell is required because rustup exports cargo from the profile.
+            "-l",
+            script_wsl,
         ]
     )
     return require_file(
@@ -4771,18 +4674,20 @@ def stage_kvm(
     executable_wsl = windows_to_wsl(executable)
     kernel_wsl = windows_to_wsl(kernel)
     initrd_wsl = windows_to_wsl(initrd)
-    quoted_stage = shlex.quote(stage_dir)
-    script = " && ".join(
+    script_wsl = windows_to_wsl(BENCHMARK_SCRIPTS_DIR / "stage-openvmm-kvm.sh")
+    run_checked(
         [
-            f"rm -rf {quoted_stage}",
-            f"mkdir -p {quoted_stage}",
-            f"cp {shlex.quote(executable_wsl)} {quoted_stage}/openvmm",
-            f"cp {shlex.quote(kernel_wsl)} {quoted_stage}/vmlinux",
-            f"cp {shlex.quote(initrd_wsl)} {quoted_stage}/initramfs.cpio.gz",
-            f"strip --strip-debug {quoted_stage}/openvmm",
+            "wsl.exe",
+            "--exec",
+            "sh",
+            "-l",
+            script_wsl,
+            stage_dir,
+            executable_wsl,
+            kernel_wsl,
+            initrd_wsl,
         ]
     )
-    run_checked(["wsl.exe", "--exec", "sh", "-lc", script])
 
 
 def cleanup_kvm(stage_dir: str) -> None:
@@ -4849,16 +4754,18 @@ def benchmark_phase2_kvm(
 ) -> Phase2Result:
     stage_dir = "/tmp/openvmm-phase2-benchmark"
     executable_wsl = windows_to_wsl(executable)
-    quoted_stage = shlex.quote(stage_dir)
-    script = " && ".join(
+    script_wsl = windows_to_wsl(BENCHMARK_SCRIPTS_DIR / "stage-phase2-kvm.sh")
+    run_checked(
         [
-            f"rm -rf {quoted_stage}",
-            f"mkdir -p {quoted_stage}",
-            f"cp {shlex.quote(executable_wsl)} {quoted_stage}/phase2_snapshot_bench",
-            f"strip --strip-debug {quoted_stage}/phase2_snapshot_bench",
+            "wsl.exe",
+            "--exec",
+            "sh",
+            "-l",
+            script_wsl,
+            stage_dir,
+            executable_wsl,
         ]
     )
-    run_checked(["wsl.exe", "--exec", "sh", "-lc", script])
     command = [
         "wsl.exe",
         "--exec",

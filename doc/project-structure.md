@@ -63,6 +63,7 @@ nvx/
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
 |   |   |-- benchmark.py         OpenVMM benchmark coordinator
+|   |   |-- benchmark_scripts/   Shell programs and benchmark templates
 |   |   |-- performance.py       Performance commands
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   `-- create_linux_source_archive.py Linux source packaging
@@ -135,7 +136,8 @@ made in that repository and then recorded here by updating the submodule pin.
 ### `scripts/`
 
 Host-side Python tooling. `nvx.py` is the public entry point; command
-implementations live in `nvx_tools/`.
+implementations live in `nvx_tools/`. Standalone benchmark shell programs and
+parameterized guest templates live in `nvx_tools/benchmark_scripts/`.
 Source-collection scripts assemble corresponding-source archives for Linux and
 Alpine. Performance scripts analyze benchmark outputs, with adjacent
 `test_*.py` files covering those utilities.

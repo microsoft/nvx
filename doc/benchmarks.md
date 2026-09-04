@@ -28,7 +28,8 @@ ABI-v2 one-vCPU baseline.
 New runs always emit ABI value 2 and remain stored under `microvm-v2` paths so
 they cannot collide with legacy unsuffixed ABI-1 history.
 The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
-through the supported NVX CLI.
+through the supported NVX CLI. Guest payloads live in `scripts/nvx_tools/benchmark_scripts`; the
+coordinator fills the `.sh.in` templates before use.
 
 | CI performance series | Backend | Host type |
 | --- | --- | --- |

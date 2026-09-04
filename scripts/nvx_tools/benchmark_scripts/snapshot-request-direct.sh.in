@@ -1,0 +1,2 @@
+@{DISPATCH_MARKER}nvx-snapshot
+echo @RESTORE_MARKER
