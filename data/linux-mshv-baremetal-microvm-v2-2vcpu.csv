@@ -4,3 +4,4 @@ linux-mshv-baremetal,2,2,ced57386190384cc882e45604b28d60465a27319,shell_snapshot
 linux-mshv-baremetal,2,2,a26c5f3c6cbf490b65e7cce41620465408e898ca,shell_snapshot_restore_512_mib,ms,lower,65.3
 linux-mshv-baremetal,2,2,3be14e849151b196ddd815f985598d29641757cb,shell_snapshot_restore_512_mib,ms,lower,69
 linux-mshv-baremetal,2,2,cb52bcd454b454cb241096c33ed42a1dcdc65347,shell_snapshot_restore_512_mib,ms,lower,69.1
+linux-mshv-baremetal,2,2,81189ec3af226c08396da0b6780b229106d84d97,shell_snapshot_restore_512_mib,ms,lower,66.4
