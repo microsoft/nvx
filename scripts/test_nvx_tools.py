@@ -979,6 +979,23 @@ class BuildTests(unittest.TestCase):
             )
             self.assertEqual(len(provenance["source_sha256"]), 64)
 
+    def test_apk_uses_the_extracted_alpine_trust_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            certificates = root / "etc" / "ssl" / "certs" / "ca-certificates.crt"
+            certificates.parent.mkdir(parents=True)
+            certificates.write_text("test CA", encoding="ascii")
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(build, "run_checked") as run,
+            ):
+                build._apk_add(root, "blkid")
+
+            environment = run.call_args.kwargs["env"]
+            self.assertEqual(environment["SSL_CERT_FILE"], str(certificates))
+            self.assertEqual(environment["SSL_CERT_DIR"], str(certificates.parent))
+
     def test_guest_agent_identity_is_exact_aci04_input(self):
         self.assertEqual(
             build.GUEST_AGENT_SOURCE_REVISION,
