@@ -995,20 +995,19 @@ class BuildTests(unittest.TestCase):
             environment = run.call_args.kwargs["env"]
             self.assertEqual(environment["SSL_CERT_FILE"], str(certificates))
             self.assertEqual(environment["SSL_CERT_DIR"], str(certificates.parent))
-
-    def test_guest_agent_identity_is_exact_aci04_input(self):
+    def test_guest_agent_identity_is_exact_fused_startup_input(self):
         self.assertEqual(
             build.GUEST_AGENT_SOURCE_REVISION,
-            "0866fcdc48bf8dab0251e3d5a7623305037e08fd",
+            "e18ff576734757e8665f66cff98e2cb3f25f92d4",
         )
         self.assertEqual(
             build.GUEST_AGENT_SHA256,
-            "ea21288947d0627ad5c33c4462fe0cf12b926fff6fdb7b9e74a4a9485f9ee0d5",
+            "18a2246526c57dd29067efe0a2edc756d57968890fdd9f6c79dedc6a0317f1e6",
         )
-        self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_831_776)
+        self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_852_256)
         self.assertEqual(
             build.GUEST_AGENT_BUILD_ID,
-            "a745e59ea3d2d23938f243f00325ac15ffbb6710",
+            "31a0a49b021d740e038a6c09c88f0d3d72dfb306",
         )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
