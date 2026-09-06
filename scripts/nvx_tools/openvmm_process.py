@@ -16,6 +16,25 @@ from typing import NamedTuple
 from .benchmark import InteractiveProcess, terminate
 
 
+def _line_marker_end(
+    output: bytearray,
+    marker: bytes,
+    offset: int,
+) -> int | None:
+    if offset > 0 and output[offset - 1] != ord("\n"):
+        newline = output.find(b"\n", offset)
+        if newline < 0:
+            return None
+        offset = newline + 1
+    while True:
+        newline = output.find(b"\n", offset)
+        if newline < 0:
+            return None
+        if bytes(output[offset:newline]).removesuffix(b"\r") == marker:
+            return newline + 1
+        offset = newline + 1
+
+
 class OpenvmmProcessResult(NamedTuple):
     returncode: int
     output: bytes
@@ -213,6 +232,29 @@ class TcpConsole:
                 continue
             if not chunk:
                 raise RuntimeError(f"TCP console closed before marker {marker!r}")
+            self._output.extend(chunk)
+
+    def wait_for_line(self, marker: bytes, timeout: float) -> None:
+        if not marker or b"\n" in marker or b"\r" in marker:
+            raise ValueError("TCP console line marker must be one non-empty line")
+        deadline = time.monotonic() + timeout
+        while True:
+            marker_end = _line_marker_end(self._output, marker, self._search_offset)
+            if marker_end is not None:
+                self._search_offset = marker_end
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"TCP console line marker {marker!r} was not observed"
+                )
+            self._connection.settimeout(min(remaining, 0.25))
+            try:
+                chunk = self._connection.recv(4096)
+            except TimeoutError:
+                continue
+            if not chunk:
+                raise RuntimeError(f"TCP console closed before line marker {marker!r}")
             self._output.extend(chunk)
 
     def finish(self) -> bytes:

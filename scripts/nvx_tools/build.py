@@ -484,6 +484,11 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         REPO_ROOT / "alpine" / "nvx-mmio-write.c",
         root / "sbin" / "nvx-mmio-write",
     )
+    _build_static_helper(
+        config.work,
+        REPO_ROOT / "alpine" / "nvx-console-pending.c",
+        root / "sbin" / "nvx-console-pending",
+    )
     device_io = _build_device_io_helper(config.work, root / "sbin" / "nvx-device-io")
     config.output.parent.mkdir(parents=True, exist_ok=True)
     _write_apk_manifest(

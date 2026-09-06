@@ -29,9 +29,19 @@ while [ ! -e /tmp/nvx-console-tx-started ]; do
     sleep 0.01
 done
 echo NVX-CONSOLE-RX-READY
-snapshot_now="$(dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]')"
+pending=0
+while [ "$pending" -lt @RX_COUNT@ ]; do
+    pending="$(nvx-console-pending /dev/hvc1)" || fail 56
+    [ "$pending" -le @RX_COUNT@ ] || fail 57
+    [ "$pending" -eq @RX_COUNT@ ] || sleep 0.01
+done
+echo NVX-CONSOLE-RX-QUEUED
+snapshot_now=0
+while [ "$snapshot_now" = 0 ]; do
+    snapshot_now="$(dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]')"
+    [ "$snapshot_now" = 0 ] && sleep 0.01
+done
 [ "$snapshot_now" = 1 ] || fail 54
-sleep 1
 nvx-snapshot
 @RECEIVE@
 printf 'resume\n' >/tmp/nvx-console-resume

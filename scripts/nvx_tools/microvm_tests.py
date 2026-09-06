@@ -59,6 +59,7 @@ SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
 CONSOLE_BINARY_MARKER = b"\0\r\n\x7f\xffNVX-CONSOLE-BINARY"
 CONSOLE_RX_READY_MARKER = b"NVX-CONSOLE-RX-READY"
+CONSOLE_RX_QUEUED_MARKER = b"NVX-CONSOLE-RX-QUEUED"
 CONSOLE_RX_RESTORED_MARKER = b"NVX-CONSOLE-RX-RESTORED"
 CONSOLE_TX_DONE_MARKER = b"NVX-CONSOLE-TX-DONE"
 ENDPOINT_POLICY = ("10.0.0.9:8443", "192.0.2.7:443", "10.0.0.9:443")
@@ -231,6 +232,15 @@ def _persist_console_log(
     return output
 
 
+def _send_console_rx_and_wait_until_queued(
+    console: TcpConsole,
+    data: bytes,
+    timeout: float,
+) -> None:
+    console.send_bytes(data)
+    console.wait_for_line(CONSOLE_RX_QUEUED_MARKER, timeout)
+
+
 def _console_snapshot_script(backend: str) -> tuple[str, int, bytes]:
     if backend == "mshv":
         tx_count = 100
@@ -253,6 +263,7 @@ def _console_snapshot_script(backend: str) -> tuple[str, int, bytes]:
     script = (
         _read_script("console-snapshot.sh.in")
         .replace("@TX_COUNT@", str(tx_count))
+        .replace("@RX_COUNT@", str(len(queued_rx)))
         .replace("@RECEIVE@", receive)
         .replace("@RESTORED_MARKER@", restored_marker)
         .replace("@COMPLETION@", completion)
@@ -707,8 +718,8 @@ def run_console_snapshot(
                     + script.encode()
                     + b"NVX_CONSOLE_SNAPSHOT\nsh /tmp/nvx-console-snapshot\n"
                 )
-                console.wait_for(CONSOLE_RX_READY_MARKER, timeout)
-                console.send_bytes(queued_rx)
+                console.wait_for_line(CONSOLE_RX_READY_MARKER, timeout)
+                _send_console_rx_and_wait_until_queued(console, queued_rx, timeout)
                 process.send_bytes(b"\x01")
                 source = process.wait(timeout)
                 source_console = console.finish()
@@ -748,8 +759,8 @@ def run_console_snapshot(
                 try:
                     console = TcpConsole.connect(address, timeout)
                     if backend != "mshv":
-                        console.wait_for(CONSOLE_RX_RESTORED_MARKER, timeout)
-                        console.wait_for(CONSOLE_TX_DONE_MARKER, timeout)
+                        console.wait_for_line(CONSOLE_RX_RESTORED_MARKER, timeout)
+                        console.wait_for_line(CONSOLE_TX_DONE_MARKER, timeout)
                     restored = process.wait(timeout)
                     restored_console = console.finish()
                     console = None

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -121,6 +122,19 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(log_path.read_bytes(), b"FIRST\nSECOND\n")
 
+    def test_tcp_console_line_marker_ignores_echoed_command(self):
+        connection, peer = socket.socketpair()
+        console = openvmm_process.TcpConsole(connection)
+        marker = b"NVX-CONSOLE-RX-READY"
+        output = b"> echo " + marker + b"\r\n" + marker + b"\r\n"
+        peer.sendall(output)
+
+        console.wait_for_line(marker, 1.0)
+
+        self.assertEqual(console.output, output)
+        console.close()
+        peer.close()
+
     def test_snapshot_core_script_selects_backend_clocksource(self):
         kvm = microvm_tests._snapshot_core_script("kvm")
         whp = microvm_tests._snapshot_core_script("whp")
@@ -158,6 +172,38 @@ class MicrovmTests(unittest.TestCase):
         self.assertIn("NVX-CONSOLE-RX-RESTORED", kvm)
         self.assertNotIn("NVX-CONSOLE-RX-RESTORED", mshv)
         self.assertIn("NVX-CONSOLE-TX-DONE", whp)
+        self.assertIn("stty -F /dev/hvc1 raw -echo", whp)
+        self.assertIn("nvx-console-pending /dev/hvc1", whp)
+        self.assertIn(f'[ "$pending" -lt {len(whp_rx)} ]', whp)
+        self.assertIn(f'[ "$pending" -lt {len(mshv_rx)} ]', mshv)
+        self.assertIn('while [ "$snapshot_now" = 0 ]; do', whp)
+        self.assertNotIn("sleep 1", whp)
+
+    def test_console_snapshot_waits_until_rx_is_queued_before_snapshot(self):
+        events: list[tuple[str, bytes] | tuple[str, bytes, float]] = []
+
+        class RecordingConsole:
+            def send_bytes(self, data: bytes) -> None:
+                events.append(("send", data))
+
+            def wait_for_line(self, marker: bytes, timeout: float) -> None:
+                events.append(("wait", marker, timeout))
+
+        console = cast(openvmm_process.TcpConsole, RecordingConsole())
+        queued_rx = bytes((0, 1, 2, 127, 255))
+        microvm_tests._send_console_rx_and_wait_until_queued(
+            console,
+            queued_rx,
+            3.0,
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("send", queued_rx),
+                ("wait", microvm_tests.CONSOLE_RX_QUEUED_MARKER, 3.0),
+            ],
+        )
 
     def test_endpoint_policy_arguments_are_repeatable_and_ordered(self):
         command = ["openvmm"]
