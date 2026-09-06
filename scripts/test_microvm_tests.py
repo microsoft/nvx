@@ -546,6 +546,72 @@ class MicrovmTests(unittest.TestCase):
             ],
         )
 
+    def test_restore_memory_reuses_one_base_snapshot_for_all_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_dir = root / "logs"
+            snapshot_memory = root / "snapshot" / "memory.bin"
+            snapshot_memory.parent.mkdir()
+            with snapshot_memory.open("wb") as memory:
+                memory.truncate(512 * 1024 * 1024)
+
+            def fingerprint(snapshot_path):
+                return ("manifest", "state", str(snapshot_path / "memory.bin"))
+
+            def measure(*args, **kwargs):
+                target = int(
+                    args[0][args[0].index("--restore-memory") + 1].removesuffix("M")
+                )
+                added = (target - 512) * 1024 * 1024
+                kwargs["log_path"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["log_path"].write_bytes(
+                    f"NVX-MEMORY-ONLINE-OK: added_bytes={added} "
+                    "memtotal_kib=1 elapsed_us=1\n"
+                    "NVX-RESTORE-MEMORY-WORKLOAD-OK\n".encode()
+                )
+
+            with (
+                patch.object(
+                    microvm_tests,
+                    "workload_boot_command",
+                    return_value=["openvmm", "boot"],
+                ),
+                patch.object(microvm_tests, "capture_snapshot") as capture_snapshot,
+                patch.object(microvm_tests, "measure_once", side_effect=measure) as measure_once,
+                patch.object(
+                    microvm_tests,
+                    "_snapshot_fingerprint",
+                    side_effect=fingerprint,
+                ),
+                patch.object(
+                    microvm_tests,
+                    "require_file",
+                    return_value=snapshot_memory,
+                ),
+            ):
+                microvm_tests.run_restore_memory(
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "whp",
+                    timeout=60,
+                    output_dir=output_dir,
+                )
+
+        capture_command = capture_snapshot.call_args.args[0]
+        self.assertEqual(
+            capture_command[capture_command.index("--memory-capacity") + 1],
+            "2048M",
+        )
+        self.assertEqual(measure_once.call_count, 3)
+        self.assertEqual(
+            [
+                entry.args[0][entry.args[0].index("--restore-memory") + 1]
+                for entry in measure_once.call_args_list
+            ],
+            ["512M", "1024M", "2048M"],
+        )
+
     def test_runner_dispatches_selected_scenarios_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             output_dir = Path(temporary) / "logs"

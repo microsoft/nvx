@@ -163,6 +163,15 @@ def command_run(args: argparse.Namespace) -> None:
         raise ScriptError("--restore-ready-path requires --restore-snapshot")
     if args.restore_processors is not None and args.restore_snapshot is None:
         raise ScriptError("--restore-processors requires --restore-snapshot")
+    if args.restore_memory_mib is not None and args.restore_snapshot is None:
+        raise ScriptError("--restore-memory-mib requires --restore-snapshot")
+    if args.memory_capacity_mib is not None and args.restore_snapshot is not None:
+        raise ScriptError("--memory-capacity-mib is only valid for a fresh boot")
+    if (
+        args.memory_capacity_mib is not None
+        and args.memory_capacity_mib < args.memory_mib
+    ):
+        raise ScriptError("--memory-capacity-mib cannot be below --memory-mib")
     if args.restore_processors is not None:
         if args.restore_processors > args.processors:
             raise ScriptError(
@@ -185,6 +194,8 @@ def command_run(args: argparse.Namespace) -> None:
         )
         if args.restore_processors is not None:
             command.extend(["--restore-processors", str(args.restore_processors)])
+        if args.restore_memory_mib is not None:
+            command.extend(["--restore-memory", f"{args.restore_memory_mib}M"])
         if args.restore_ready_path is not None:
             command.extend(["--restore-ready-path", str(args.restore_ready_path)])
     else:
@@ -203,6 +214,8 @@ def command_run(args: argparse.Namespace) -> None:
                 str(initrd),
             ]
         )
+        if args.memory_capacity_mib is not None:
+            command.extend(["--memory-capacity", f"{args.memory_capacity_mib}M"])
     if args.mount is not None:
         if args.mount.count(",") not in (1, 2):
             raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
@@ -356,6 +369,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="microvm",
     )
     run.add_argument("--memory-mib", type=int, default=128)
+    run.add_argument("--memory-capacity-mib", type=int)
     run.add_argument("--processors", type=int, choices=(1, 2, 4, 8), default=1)
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
     run.add_argument("--net", metavar="IPV4/PREFIX")
@@ -363,6 +377,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--cmdline", default="")
     run.add_argument("--restore-snapshot", type=Path)
     run.add_argument("--restore-processors", type=int, choices=(1, 2, 4, 8))
+    run.add_argument("--restore-memory-mib", type=int)
     run.add_argument("--restore-ready-path", type=Path)
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(handler=command_run)

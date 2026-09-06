@@ -171,6 +171,7 @@ python3 scripts/nvx.py run
     [--hypervisor {auto,whp,kvm,mshv}]
     [--machine {microvm}]
     [--memory-mib MIB]
+    [--memory-capacity-mib MIB]
     [--processors {1,2,4,8}]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
     [--net IPV4/PREFIX]
@@ -178,6 +179,7 @@ python3 scripts/nvx.py run
     [--cmdline TEXT]
     [--restore-snapshot PATH]
     [--restore-processors {1,2,4,8}]
+    [--restore-memory-mib MIB]
     [--restore-ready-path PATH]
     [--dry-run]
 ```
@@ -187,6 +189,7 @@ python3 scripts/nvx.py run
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
+| `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target. Active snapshot restore requires the same canonical path, target, and mode; a dormant-slot restore may attach a new mapping that the resumed guest mounts explicitly. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. |
@@ -194,6 +197,7 @@ python3 scripts/nvx.py run
 | `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. |
 | `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. |
 | `--restore-processors {1,2,4,8}` | none | Bring this contiguous processor prefix online before restore readiness. Requires an opt-in microVM snapshot and cannot exceed `--processors` capacity. |
+| `--restore-memory-mib MIB` | none | Select the 128 MiB-aligned RAM target for an expansion-capable snapshot restore. |
 | `--restore-ready-path PATH` | none | Publish one restore-readiness event to an existing Unix socket or Windows named pipe. |
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 

@@ -125,6 +125,84 @@ activate_restore_processors() {
     echo "NVX-CPU-ONLINE-OK: count=$target"
 }
 
+read_packet_u64() {
+    file=$1
+    offset=$2
+    value=$(od -An -tu8 -j "$offset" -N 8 "$file" | tr -d '[:space:]') ||
+        fail_closed "failed to decode restore memory range"
+    case "$value" in
+        '' | *[!0-9]*) fail_closed "restore memory range contains an invalid integer" ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+uptime_microseconds() {
+    awk '{
+        split($1, parts, ".")
+        fraction = parts[2] "000000"
+        printf "%.0f\n", parts[1] * 1000000 + substr(fraction, 1, 6)
+    }' /proc/uptime
+}
+
+activate_restore_memory() {
+    packet=$1
+    range_count=$2
+    block_size_hex=$(cat /sys/devices/system/memory/block_size_bytes) ||
+        fail_closed "failed to read the Linux memory block size"
+    case "$block_size_hex" in
+        '' | *[!0-9a-fA-F]*) fail_closed "Linux memory block size is invalid" ;;
+    esac
+    block_size=$((0x$block_size_hex))
+    [ "$block_size" -eq 134217728 ] ||
+        fail_closed "Linux memory block size $block_size does not match the snapshot ABI"
+    [ -w /sys/devices/system/memory/probe ] ||
+        fail_closed "Linux memory probe interface is unavailable"
+
+    started_us=$(uptime_microseconds)
+    added_bytes=0
+    range_index=0
+    while [ "$range_index" -lt "$range_count" ]; do
+        offset=$((21 + range_index * 16))
+        range_start=$(read_packet_u64 "$packet" "$offset")
+        range_length=$(read_packet_u64 "$packet" "$((offset + 8))")
+        [ "$range_length" -gt 0 ] ||
+            fail_closed "restore memory range $range_index is empty"
+        [ $((range_start % block_size)) -eq 0 ] &&
+            [ $((range_length % block_size)) -eq 0 ] ||
+            fail_closed "restore memory range $range_index is not memory-block aligned"
+        range_end=$((range_start + range_length))
+        [ "$range_end" -gt "$range_start" ] ||
+            fail_closed "restore memory range $range_index overflows"
+
+        address=$range_start
+        while [ "$address" -lt "$range_end" ]; do
+            block=$((address / block_size))
+            state=/sys/devices/system/memory/memory${block}/state
+            if [ ! -e "$state" ]; then
+                printf '0x%x\n' "$address" >/sys/devices/system/memory/probe ||
+                    fail_closed "failed to add memory block $block"
+            fi
+            [ -w "$state" ] ||
+                fail_closed "memory block $block cannot be onlined"
+            if [ "$(cat "$state")" != online ]; then
+                echo online >"$state" ||
+                    fail_closed "failed to online memory block $block"
+            fi
+            [ "$(cat "$state")" = online ] ||
+                fail_closed "memory block $block did not become online"
+            address=$((address + block_size))
+        done
+        added_bytes=$((added_bytes + range_length))
+        range_index=$((range_index + 1))
+    done
+    completed_us=$(uptime_microseconds)
+    memtotal_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+    case "$memtotal_kib" in
+        '' | *[!0-9]*) fail_closed "failed to read MemTotal after memory activation" ;;
+    esac
+    echo "NVX-MEMORY-ONLINE-OK: added_bytes=$added_bytes memtotal_kib=$memtotal_kib elapsed_us=$((completed_us - started_us))"
+}
+
 configured_snapshot_tier=$(cmdline_value nvx_snapshot_tier || true)
 if [ -n "$configured_snapshot_tier" ]; then
     case "$configured_snapshot_tier:$scratch_policy" in
@@ -161,9 +239,11 @@ post_restore() {
         count=$((count + 1))
     done
     restore_online_count=
+    restore_memory_range_count=
     case "$(head -c 18 "$restore_packet")" in
         OPENVMM_ENTROPY_V1) payload_size=64 ;;
         OPENVMM_ENTROPY_V2) payload_size=65 ;;
+        OPENVMM_ENTROPY_V3) payload_size=2 ;;
         *) fail_closed "restore packet has an invalid header" ;;
     esac
     count=0
@@ -171,7 +251,26 @@ post_restore() {
         dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>"$restore_packet"
         count=$((count + 1))
     done
-    if [ "$payload_size" -eq 65 ]; then
+    if [ "$(head -c 18 "$restore_packet")" = OPENVMM_ENTROPY_V3 ]; then
+        restore_online_count=$(dd if="$restore_packet" bs=1 skip=19 count=1 2>/dev/null |
+            od -An -tu1 | tr -d '[:space:]')
+        restore_memory_range_count=$(dd if="$restore_packet" bs=1 skip=20 count=1 2>/dev/null |
+            od -An -tu1 | tr -d '[:space:]')
+        case "$restore_online_count" in
+            0) restore_online_count= ;;
+            1 | 2 | 4 | 8) ;;
+            *) fail_closed "restore packet has an invalid online CPU count" ;;
+        esac
+        case "$restore_memory_range_count" in
+            '' | *[!0-9]*) fail_closed "restore packet has an invalid memory range count" ;;
+        esac
+        payload_size=$((restore_memory_range_count * 16 + 64))
+        count=0
+        while [ "$count" -lt "$payload_size" ]; do
+            dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>"$restore_packet"
+            count=$((count + 1))
+        done
+    elif [ "$payload_size" -eq 65 ]; then
         restore_online_count=$(dd if="$restore_packet" bs=1 skip=19 count=1 2>/dev/null |
             od -An -tu1 | tr -d '[:space:]')
         case "$restore_online_count" in
@@ -180,7 +279,9 @@ post_restore() {
         esac
     fi
 
-    if [ "$snapshot_tier" = legacy ] && [ -z "$restore_online_count" ]; then
+    if [ "$snapshot_tier" = legacy ] &&
+        [ -z "$restore_online_count" ] &&
+        [ -z "$restore_memory_range_count" ]; then
         rm -f "$restore_packet"
         post_restore_pending=false
         return
@@ -188,6 +289,9 @@ post_restore() {
 
     if [ -n "$restore_online_count" ]; then
         activate_restore_processors "$restore_online_count"
+    fi
+    if [ -n "$restore_memory_range_count" ]; then
+        activate_restore_memory "$restore_packet" "$restore_memory_range_count"
     fi
 
     if [ "$snapshot_tier" != instance-checkpoint ]; then
@@ -310,7 +414,7 @@ case "$restore_status" in
     '' | *[!0-9]*) fail_closed "failed to read restore status" ;;
 esac
 if [ $((restore_status & 2)) -ne 0 ] &&
-    { [ "$snapshot_tier" != legacy ] || [ $((restore_status & 4)) -ne 0 ]; }; then
+    { [ "$snapshot_tier" != legacy ] || [ $((restore_status & 12)) -ne 0 ]; }; then
     post_restore
 else
     post_restore_pending=false

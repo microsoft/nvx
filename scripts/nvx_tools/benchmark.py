@@ -57,6 +57,7 @@ WORKLOAD_SUITES = frozenset(
         "virtfs",
         "shell-snapshot",
         "shell-snapshot-restore",
+        "snapshot-restore-memory",
         "snapshot-restore-vcpu",
         "network-snapshot",
         "device-restore-profile",
@@ -101,6 +102,11 @@ SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 SHELL_SNAPSHOT_MEMORY_MIB = (64, 128, 256, 512)
 SNAPSHOT_PROFILE_MEMORY_MIB = (*SHELL_SNAPSHOT_MEMORY_MIB, 1024)
 RESTORE_VCPU_TARGETS = (1, 2, 4, 8)
+RESTORE_MEMORY_BASE_MIB = 512
+RESTORE_MEMORY_TARGETS_MIB = (512, 1024, 2048)
+RESTORE_MEMORY_MARKER_PATTERN = re.compile(
+    rb"NVX-MEMORY-ONLINE-OK: added_bytes=(\d+) memtotal_kib=(\d+) elapsed_us=(\d+)"
+)
 PERFORMANCE_LOG_FILENAMES = (
     "cold-start.log",
     "virtfs.log",
@@ -3073,6 +3079,146 @@ def benchmark_virtfs_workload(
         )
 
 
+def _memory_online_elapsed_ms(log_path: Path, expected_added_bytes: int) -> float:
+    matches = RESTORE_MEMORY_MARKER_PATTERN.findall(log_path.read_bytes())
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one memory-online marker in {log_path}, "
+            f"found {len(matches)}"
+        )
+    added_bytes, _memtotal_kib, elapsed_us = (int(value) for value in matches[0])
+    if added_bytes != expected_added_bytes:
+        raise RuntimeError(
+            f"memory-online marker reported {added_bytes} added bytes, "
+            f"expected {expected_added_bytes}"
+        )
+    return elapsed_us / 1000.0
+
+
+def benchmark_snapshot_restore_memory_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    snapshot_profile = bool(getattr(args, "snapshot_profile", False))
+    capacity_mib = RESTORE_MEMORY_TARGETS_MIB[-1]
+    environment = os.environ.copy()
+    environment["OPENVMM_LOG"] = "off"
+    environment.pop(SNAPSHOT_PROFILE_ENV, None)
+    if snapshot_profile:
+        environment[SNAPSHOT_PROFILE_ENV] = "1"
+
+    print(
+        "snapshot restore memory activation, "
+        f"median of {args.runs} runs, base {RESTORE_MEMORY_BASE_MIB} MiB, "
+        f"capacity {capacity_mib} MiB"
+    )
+    print()
+    with tempfile.TemporaryDirectory(prefix="openvmm-memory-restore-") as temporary:
+        root = Path(temporary)
+        snapshot_path = root / "snapshot"
+        capture_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            RESTORE_MEMORY_BASE_MIB,
+            "quiet loglevel=0 shellsnap",
+            processors=args.processors,
+            command_prefix=command_prefix,
+        )
+        capture_automatic_snapshot(
+            [
+                *capture_command,
+                "--memory-capacity",
+                f"{capacity_mib}M",
+                "--snapshot-destination",
+                str(snapshot_path),
+            ],
+            snapshot_path,
+            timeout=args.timeout,
+            windows_cpus=windows_cpus,
+        )
+
+        for target_mib in RESTORE_MEMORY_TARGETS_MIB:
+            launch_samples: list[float] = []
+            activation_samples: list[float] = []
+            peak_rss_samples: list[int] = []
+            profile_samples: list[dict[str, object]] = []
+            total = args.warmups + args.runs
+            for index in range(total):
+                log_path = root / f"restore-{target_mib}-{index}.log"
+                launch_ms, peak_bytes, _teardown_ms, _wall_ms = measure_once(
+                    [
+                        *command_prefix,
+                        *snapshot_restore_command(
+                            executable,
+                            backend,
+                            snapshot_path,
+                            processors=args.processors,
+                            restore_memory_mib=target_mib,
+                        ),
+                    ],
+                    environment=environment,
+                    timeout=args.timeout,
+                    marker=BOOT_MARKER,
+                    windows_cpus=windows_cpus,
+                    teardown_mode=args.teardown_mode,
+                    snapshot_profile=snapshot_profile,
+                    profile_sink=profile_samples,
+                    log_path=log_path,
+                )
+                activation_ms = _memory_online_elapsed_ms(
+                    log_path,
+                    (target_mib - RESTORE_MEMORY_BASE_MIB) * 1024 * 1024,
+                )
+                if index < args.warmups:
+                    print(
+                        f"  target {target_mib} MiB warmup "
+                        f"{index + 1}/{args.warmups}: "
+                        f"activation={activation_ms:.3f} ms, "
+                        f"ready={launch_ms:.3f} ms",
+                        flush=True,
+                    )
+                    continue
+                launch_samples.append(launch_ms)
+                activation_samples.append(activation_ms)
+                peak_rss_samples.append(peak_bytes)
+                print(
+                    f"  target {target_mib} MiB sample "
+                    f"{index - args.warmups + 1}/{args.runs}: "
+                    f"activation={activation_ms:.3f} ms, "
+                    f"ready={launch_ms:.3f} ms, "
+                    f"peak RSS={bytes_to_mib(peak_bytes):.3f} MiB",
+                    flush=True,
+                )
+
+            print(f"== restore target {target_mib} MiB ==")
+            print(
+                "  guest add+online      : "
+                + format_sample_summary(activation_samples)
+            )
+            print(
+                "  process launch->ready : "
+                + format_sample_summary(launch_samples)
+            )
+            print(
+                f"  OpenVMM peak RSS     : {format_rss_summary(peak_rss_samples)}"
+            )
+            if snapshot_profile:
+                print_lifecycle_profile_summary(
+                    f"snapshot-restore-memory/{backend}/"
+                    f"base-{RESTORE_MEMORY_BASE_MIB}/target-{target_mib}",
+                    summarize_lifecycle_profiles(profile_samples),
+                )
+            print()
+
+
 def _format_shell_snapshot_line(name: str, values: Sequence[float]) -> str:
     return (
         f"  {name:<20}: median {statistics.median(values):7.1f} ms   "
@@ -3583,6 +3729,16 @@ def write_benchmark_metadata(
             if args.suite == "snapshot-restore-vcpu"
             else None
         ),
+        "restore_memory_base_mib": (
+            RESTORE_MEMORY_BASE_MIB
+            if args.suite == "snapshot-restore-memory"
+            else None
+        ),
+        "restore_memory_targets_mib": (
+            list(RESTORE_MEMORY_TARGETS_MIB)
+            if args.suite == "snapshot-restore-memory"
+            else None
+        ),
         "network": effective_network,
         "lifecycle_network": args.net,
         "host_affinity_set": args.cpus,
@@ -3705,6 +3861,8 @@ def run_workload_benchmarks(
             (output_dir / "acceptance.json").unlink(missing_ok=True)
         if args.suite == "snapshot-restore-vcpu":
             (output_dir / "snapshot-restore-vcpu.log").unlink(missing_ok=True)
+        if args.suite == "snapshot-restore-memory":
+            (output_dir / "snapshot-restore-memory.log").unlink(missing_ok=True)
         metadata_path = write_benchmark_metadata(
             args, output_dir, executable, kernel, initrd, backend
         )
@@ -3743,6 +3901,18 @@ def run_workload_benchmarks(
         "cold-start": (
             "cold-start.log",
             lambda: benchmark_cold_start_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+        "snapshot-restore-memory": (
+            "snapshot-restore-memory.log",
+            lambda: benchmark_snapshot_restore_memory_workload(
                 args,
                 executable,
                 kernel,
@@ -4156,6 +4326,7 @@ def snapshot_restore_command(
     *,
     processors: int = 1,
     restore_processors: int | None = None,
+    restore_memory_mib: int | None = None,
     network_profile: str | None = None,
 ) -> list[str]:
     command = [
@@ -4173,6 +4344,8 @@ def snapshot_restore_command(
     ]
     if restore_processors is not None:
         command.extend(("--restore-processors", str(restore_processors)))
+    if restore_memory_mib is not None:
+        command.extend(("--restore-memory", f"{restore_memory_mib}M"))
     if network_profile is not None:
         command.extend(("--network-profile", network_profile))
     return command

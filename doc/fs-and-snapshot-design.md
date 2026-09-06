@@ -19,6 +19,23 @@
 > only non-secret launch tokens and is not the production agent contract.
 ---
 
+### Restore-time memory expansion
+
+The microVM snapshot ABI may reserve a larger RAM capacity than the base RAM
+captured in `memory.bin`. The base byte length and GPA ranges remain immutable.
+At restore, the host selects a 128 MiB-aligned target between the base and the
+capacity, maps the selected expansion ranges with fresh private backing, and
+registers them before any restored processor executes. The ranges are absent
+from the original PVH usable-memory map.
+
+The private restore packet carries the selected GPA ranges. While workload and
+external input remain gated, `nvx-snapshot` adds each Linux memory block through
+the x86 memory-probe sysfs interface, explicitly writes the `online` policy,
+verifies every block, and only then releases the restore gate. Any malformed
+range, unavailable probe interface, or add/online failure terminates the VM.
+This is one-shot restore repair, not a runtime memory-hotplug API, and requires
+neither ACPI nor PCI device enumeration.
+
 ## 1. Summary
 
 ACI Sandboxes runs **exactly one container per micro-VM**. This single constraint is the source of nearly all the simplification in this design: because the VM's lifetime, resource envelope, and network identity are the container's, we can delete essentially all of the pod/sandbox machinery that conventional VM-based container runtimes (Kata, LCOW/hcsshim) require, and we can pre-compute the guest filesystem entirely off the critical path.

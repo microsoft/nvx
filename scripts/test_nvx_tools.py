@@ -339,6 +339,48 @@ class CliTests(unittest.TestCase):
         self.assertIn("microvm", format_command.call_args.args[0])
         self.assertNotIn("microvm-v2", format_command.call_args.args[0])
 
+        capture_memory = nvx.parse_args(
+            [
+                "run",
+                "--memory-mib",
+                "512",
+                "--memory-capacity-mib",
+                "2048",
+                "--dry-run",
+            ]
+        )
+        with (
+            patch.object(nvx, "require_file", return_value=Path("artifact")),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(capture_memory)
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[command.index("--memory") + 1], "512M")
+        self.assertEqual(command[command.index("--memory-capacity") + 1], "2048M")
+
+        restore_memory = nvx.parse_args(
+            [
+                "run",
+                "--restore-snapshot",
+                "snapshot",
+                "--restore-memory-mib",
+                "1024",
+                "--dry-run",
+            ]
+        )
+        with (
+            patch.object(nvx, "require_file", return_value=Path("openvmm")),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(restore_memory)
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[command.index("--restore-memory") + 1], "1024M")
+        self.assertNotIn("--memory-capacity", command)
+
         smp = nvx.parse_args(
             ["run", "--machine", "microvm", "--processors", "2", "--dry-run"]
         )
@@ -869,6 +911,31 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("--processors") + 1], "8")
         self.assertEqual(command[command.index("--restore-processors") + 1], "4")
+
+    def test_snapshot_restore_command_sets_memory_target_separately(self):
+        command = benchmark.snapshot_restore_command(
+            Path("openvmm"),
+            "whp",
+            Path("snapshot"),
+            restore_memory_mib=2048,
+        )
+
+        self.assertNotIn("--memory", command)
+        self.assertEqual(command[command.index("--restore-memory") + 1], "2048M")
+
+    def test_memory_online_latency_parser_validates_added_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "restore.log"
+            log.write_bytes(
+                b"NVX-MEMORY-ONLINE-OK: added_bytes=536870912 "
+                b"memtotal_kib=1000000 elapsed_us=12345\n"
+            )
+            self.assertEqual(
+                benchmark._memory_online_elapsed_ms(log, 536870912),
+                12.345,
+            )
+            with self.assertRaisesRegex(RuntimeError, "expected 1"):
+                benchmark._memory_online_elapsed_ms(log, 1)
 
     def test_benchmark_snapshot_restore_propagates_processors(self):
         args = argparse.Namespace(

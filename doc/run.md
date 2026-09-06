@@ -69,6 +69,7 @@ python3 scripts/nvx.py run \
   --processors 8 \
   --restore-snapshot /var/lib/nvx/snapshot \
   --restore-processors 4 \
+  --restore-memory-mib 1024 \
   --restore-ready-path /run/nvx/restore-ready.sock
 ```
 
@@ -85,6 +86,12 @@ boot-online count or above capacity. Legacy snapshots reject the option. The
 peer must accept and read while startup is in progress; Windows flush
 completion waits for the named-pipe peer to consume the frame. Failure to
 write the complete event aborts and tears down the restore.
+
+For restore-time memory expansion, capture a fresh snapshot with
+`--memory-mib 512 --memory-capacity-mib 2048`, then select a target with
+`--restore-memory-mib 512`, `1024`, or `2048`. The snapshot's `memory.bin`
+remains exactly 512 MiB; selected expansion ranges receive fresh per-launch
+backing and are onlined before restore readiness.
 
 ## virtio-fs host mapping
 

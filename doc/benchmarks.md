@@ -121,6 +121,20 @@ guest resume behavior:
 python3 scripts/nvx.py benchmark --suite snapshot-restore-vcpu --backend mshv --processors 8 --memory-mib 128 --warmups 1 --runs 5 --snapshot-profile --skip-build --output-dir data/runs/restore-vcpu-mshv-capacity-8
 ```
 
+Measure restore-time memory activation from one immutable 512 MiB snapshot
+with 2 GiB of ABI-reserved capacity:
+
+```console
+python3 scripts/nvx.py benchmark --suite snapshot-restore-memory --backend kvm --processors 1 --warmups 1 --runs 5 --snapshot-profile --skip-build --output-dir data/runs/restore-memory-kvm
+```
+
+Use `--backend mshv` on Linux/MSHV or `--backend whp` on Windows/WHP. The
+suite restores the same base snapshot at 512 MiB, 1 GiB, and 2 GiB. It reports
+guest-observed add-and-online latency separately from process-launch-to-ready
+latency, OpenVMM peak RSS, and optional host lifecycle phases. Expansion
+ranges are registered before restored execution; the guest marker is emitted
+only after every 128 MiB memory block is online.
+
 Run the diagnostic snapshot lifecycle matrix with:
 
 ```console

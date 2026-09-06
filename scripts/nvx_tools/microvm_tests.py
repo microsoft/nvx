@@ -40,6 +40,7 @@ MICROVM_TEST_SCENARIOS = (
     "filesystem-snapshot",
     "lifecycle",
     "network-snapshot",
+    "restore-memory",
     "restore-processors",
     "sandbox-blocks",
     "scratch-snapshot",
@@ -532,6 +533,74 @@ def run_restore_processors(
             if _snapshot_fingerprint(snapshot_path) != fingerprint:
                 raise RuntimeError(
                     f"restore target {target} modified snapshot artifacts"
+                )
+
+
+def run_restore_memory(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    base_mib = 512
+    capacity_mib = 2048
+    targets_mib = (base_mib, 1024, capacity_mib)
+    with tempfile.TemporaryDirectory(prefix="nvx-restore-memory-") as temporary:
+        snapshot_path = Path(temporary) / "snapshot"
+        boot_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            base_mib,
+            "quiet loglevel=0",
+        )
+        capture_snapshot(
+            [
+                *boot_command,
+                "--memory-capacity",
+                f"{capacity_mib}M",
+                "--snapshot-destination",
+                str(snapshot_path),
+            ],
+            snapshot_path,
+            timeout=timeout,
+            processors=1,
+            post_restore_script=_read_script("restore-memory.sh"),
+            log_path=output_dir / "restore-memory-capture.log",
+        )
+        fingerprint = _snapshot_fingerprint(snapshot_path)
+        memory_path = require_file(snapshot_path / "memory.bin", "snapshot memory.bin")
+        if memory_path.stat().st_size != base_mib * 1024 * 1024:
+            raise RuntimeError("memory expansion snapshot does not retain exact base RAM")
+
+        for target_mib in targets_mib:
+            log_path = output_dir / f"restore-memory-{target_mib}.log"
+            measure_once(
+                snapshot_restore_command(
+                    executable,
+                    backend,
+                    snapshot_path,
+                    restore_memory_mib=target_mib,
+                ),
+                environment=_restore_environment(),
+                timeout=timeout,
+                marker=b"NVX-RESTORE-MEMORY-WORKLOAD-OK",
+                log_path=log_path,
+            )
+            expected_added = (target_mib - base_mib) * 1024 * 1024
+            output = log_path.read_bytes()
+            marker = f"NVX-MEMORY-ONLINE-OK: added_bytes={expected_added} ".encode()
+            if marker not in output:
+                raise RuntimeError(
+                    f"restore target {target_mib} MiB did not online the expected memory"
+                )
+            if _snapshot_fingerprint(snapshot_path) != fingerprint:
+                raise RuntimeError(
+                    f"restore memory target {target_mib} modified snapshot artifacts"
                 )
 
 
@@ -2066,6 +2135,16 @@ def run(args: argparse.Namespace) -> int:
             args.backend,
             args.processors,
             memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "restore-memory" in scenarios:
+        print(f"Running microVM restore-memory correctness on OpenVMM/{args.backend}")
+        run_restore_memory(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
             timeout=args.timeout,
             output_dir=output_dir,
         )
