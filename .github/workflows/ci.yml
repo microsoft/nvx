@@ -119,12 +119,11 @@ jobs:
 
   openvmm-tests:
     name: OpenVMM tests / ${{ matrix.name }}
-    needs: [artifacts, openvmm-changes]
+    needs: [openvmm-changes]
     if: >-
       ${{
         always() &&
         !cancelled() &&
-        needs.artifacts.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-tests == 'true'
@@ -210,54 +209,6 @@ jobs:
             openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
             openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
 
-      - name: Restore Linux kernel
-        if: matrix.backend != 'mshv'
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Linux kernel for MSHV
-        if: matrix.backend == 'mshv'
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
-        with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Alpine disk image
-        if: matrix.backend != 'mshv'
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Alpine disk image for MSHV
-        if: matrix.backend == 'mshv'
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
       - name: Run OpenVMM tests on KVM
         if: matrix.backend == 'kvm'
         shell: bash
@@ -282,9 +233,193 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
 
+  nvx-microvm-tests:
+    name: NVX microVM tests / ${{ matrix.name }}
+    needs: [artifacts, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        needs.artifacts.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / KVM
+            backend: kvm
+            runner: '["self-hosted", "linux", "kvm", "baremetal"]'
+          - name: Linux / MSHV
+            backend: mshv
+            runner: '["self-hosted", "linux", "mshv", "baremetal"]'
+          - name: Windows / WHP
+            backend: whp
+            runner: '["self-hosted", "windows", "whp", "baremetal"]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        id: openvmm
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Prepare Windows cache tools
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py setup-cross-os-cache
+
+      - name: Prepare MSHV cache tools
+        id: cache-tools-mshv
+        if: matrix.backend == 'mshv'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache NVX microVM test build
+        if: matrix.backend != 'mshv'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            openvmm/target
+          key: nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Cache NVX microVM test build for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            openvmm/target
+          key: nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Restore Linux kernel
+        if: matrix.backend != 'mshv'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Linux kernel for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Alpine initramfs
+        if: matrix.backend != 'mshv'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Restore Alpine initramfs for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Install MSHV build dependencies
+        if: matrix.backend == 'mshv'
+        shell: bash
+        run: sudo -n tdnf install -y binutils kernel-headers libarchive openssl-devel
+
+      - name: Build OpenVMM on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nvx.py build-openvmm
+
+      - name: Build OpenVMM on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts\nvx.py build-openvmm
+
+      - name: Run NVX microVM tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend "${{ matrix.backend }}"
+          --output-dir "build/test-results/microvm-${{ matrix.backend }}"
+
+      - name: Run NVX microVM tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          python scripts\nvx.py test-microvm
+          --backend "${{ matrix.backend }}"
+          --output-dir "build/test-results/microvm-${{ matrix.backend }}"
+
+      - name: Upload NVX microVM failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvx-microvm-tests-${{ matrix.backend }}
+          path: build/test-results/microvm-${{ matrix.backend }}
+          if-no-files-found: warn
+
   platform:
     name: Platform / ${{ matrix.name }}
-    needs: [artifacts, openvmm-tests]
+    needs: [artifacts, openvmm-tests, nvx-microvm-tests]
     if: >-
       ${{
         always() &&
@@ -293,6 +428,10 @@ jobs:
         (
           needs.openvmm-tests.result == 'success' ||
           needs.openvmm-tests.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-tests.result == 'success' ||
+          needs.nvx-microvm-tests.result == 'skipped'
         )
       }}
     runs-on: ${{ fromJSON(matrix.runner) }}

@@ -28,6 +28,8 @@ python3 scripts/nvx.py performance gate --help
 | `build-initramfs` | Build the Alpine initramfs natively. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
+| `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
+| `test-microvm` | Run NVX Linux and device correctness tests through OpenVMM. |
 | `build` | Build the guest artifacts and OpenVMM. |
 | `download` | Download and install the latest matching GitHub release. |
 | `run` | Run an OpenVMM microVM. |
@@ -115,6 +117,34 @@ Runs `build-guest` followed by `build-openvmm`. The two options have the same
 meaning as on those individual commands.
 
 See [Build](build.md) for dependencies, outputs, and native build details.
+
+## Test commands
+
+### `test-openvmm`
+
+```text
+python3 scripts/nvx.py test-openvmm --backend {kvm,mshv,whp}
+```
+
+Builds and runs OpenVMM's checkout-owned microVM tests. The test artifacts are
+produced by OpenVMM itself; NVX's kernel and initramfs are not required.
+
+### `test-microvm`
+
+```text
+python3 scripts/nvx.py test-microvm
+    --backend {kvm,mshv,whp}
+    [--scenario SCENARIO]...
+    [--processors {1,2,4,8} ...]
+    [--memory-mib MIB]
+    [--timeout SECONDS]
+    [--output-dir PATH]
+```
+
+Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
+against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
+it, every scenario runs. The command requires `build/vmlinux`,
+`build/initramfs.cpio.gz`, and `openvmm/target/release/openvmm[.exe]`.
 
 ## Download and run
 

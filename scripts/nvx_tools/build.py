@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -303,6 +304,9 @@ def _apk_add(root: Path, *packages: str) -> None:
     loader = root / "lib" / "ld-musl-x86_64.so.1"
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = f"{root / 'lib'}:{root / 'usr' / 'lib'}"
+    host_ca_file = ssl.get_default_verify_paths().cafile
+    if host_ca_file:
+        environment.setdefault("SSL_CERT_FILE", host_ca_file)
     run_checked(
         [
             loader,

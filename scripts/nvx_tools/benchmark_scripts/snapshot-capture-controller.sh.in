@@ -7,4 +7,4 @@ if [ "$trigger" != nvx-snapshot ]; then
   exit 90
 fi
 @{DISPATCH_MARKER}/sbin/nvx-snapshot
-echo @RESTORE_MARKER
+@{POST_RESTORE_ACTION}echo @RESTORE_MARKER

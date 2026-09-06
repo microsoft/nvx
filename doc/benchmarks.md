@@ -53,20 +53,20 @@ Run the acceptance and diagnostic suites with:
 
 ```console
 python3 scripts/nvx.py benchmark --suite boot --backend whp
-python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-baremetal --processors 8 --memory-mib 128 --output data/runs/linux-kvm-baremetal/microvm-v2/8vcpu/acceptance.json
+python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-baremetal --processors 1 --memory-mib 128 --output data/runs/linux-kvm-baremetal/microvm-v2/1vcpu/acceptance.json
 ```
 
 Run the complete performance suite with:
 
 ```console
 # Linux/KVM: run all 23 metrics and write collector-compatible logs
-python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu
+python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu
 
 # Linux/MSHV: run all 23 metrics
-python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v2/8vcpu
+python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v2/1vcpu
 
 # Windows/WHP
-python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 8 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\8vcpu
+python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu
 ```
 
 Run the canonical device operation-rate suite with its default five warmups, 30 retained attempts

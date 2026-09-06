@@ -32,17 +32,17 @@ process the current session did not start.
 ## 2. Run Acceptance
 
 Check for an existing OpenVMM process in the selected execution context, then run
-one measured `e2e` acceptance case. Continue only if it succeeds.
+the canonical `e2e` acceptance sample set. Continue only if it succeeds.
 
 ```bash
 backend=kvm # Use mshv when required.
 python3 scripts/nvx.py benchmark --suite e2e --backend "$backend" \
-    --warmups 1 --runs 1 --skip-build --output data/runs/benchmark-e2e.json
+    --warmups 1 --runs 10 --skip-build --output data/runs/benchmark-e2e.json
 ```
 
 ```powershell
 python scripts\nvx.py benchmark --suite e2e --backend whp `
-    --warmups 1 --runs 1 --skip-build --output data\runs\benchmark-e2e.json
+    --warmups 1 --runs 10 --skip-build --output data\runs\benchmark-e2e.json
 ```
 
 If acceptance fails, preserve its output and load
@@ -63,19 +63,23 @@ host_type=baremetal # Use the host type resolved by nvx-host-connect.
 platform="linux-kvm-${host_type}"
 output_dir="data/runs/manual/${run_id}-${platform}"
 python3 scripts/nvx.py benchmark --suite performance --backend kvm \
-    --platform "$platform" --processors 8 \
+    --platform "$platform" --processors 1 \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$output_dir"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
     --require-network --require-shell-snapshot --require-shared-suite \
+    --lifecycle-input data/runs/benchmark-e2e.json \
     --summary "$output_dir/summary.md"
 device_output_dir="$output_dir/device-io"
 python3 scripts/nvx.py benchmark --suite device-io --backend kvm \
     --platform "$platform" --processors 1 --skip-build \
     --output-dir "$device_output_dir"
+device_results_dir="$device_output_dir/results"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$device_output_dir" \
-    --output-dir "$output_dir/results" --summary "$output_dir/summary.md"
+    --output-dir "$device_results_dir" --summary "$output_dir/summary.md"
+python3 scripts/nvx.py performance persist --source-dir "$device_results_dir" \
+    --history-dir "$output_dir/results"
 printf 'NVX_RESULTS=%s\n' "$output_dir"
 ```
 
@@ -91,19 +95,23 @@ host_type=baremetal # Use the host type resolved by nvx-host-connect.
 platform="linux-mshv-${host_type}"
 output_dir="data/runs/manual/${run_id}-${platform}"
 python3 scripts/nvx.py benchmark --suite performance --backend mshv \
-    --platform "$platform" --processors 8 \
+    --platform "$platform" --processors 1 \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$output_dir"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$output_dir" --output-dir "$output_dir/results" \
     --require-network --require-shell-snapshot --require-shared-suite \
+    --lifecycle-input data/runs/benchmark-e2e.json \
     --summary "$output_dir/summary.md"
 device_output_dir="$output_dir/device-io"
 python3 scripts/nvx.py benchmark --suite device-io --backend mshv \
     --platform "$platform" --processors 1 --skip-build \
     --output-dir "$device_output_dir"
+device_results_dir="$device_output_dir/results"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$device_output_dir" \
-    --output-dir "$output_dir/results" --summary "$output_dir/summary.md"
+    --output-dir "$device_results_dir" --summary "$output_dir/summary.md"
+python3 scripts/nvx.py performance persist --source-dir "$device_results_dir" \
+    --history-dir "$output_dir/results"
 printf 'NVX_RESULTS=%s\n' "$output_dir"
 ```
 
@@ -119,19 +127,23 @@ $hostType = "baremetal" # Use the host type resolved by nvx-host-connect.
 $platform = "windows-whp-$hostType"
 $outputDir = "data\runs\manual\$runId-$platform"
 python scripts\nvx.py benchmark --suite performance --backend whp `
-    --platform $platform --processors 8 `
+    --platform $platform --processors 1 `
     --runs 5 --virtfs-runs 3 --skip-build --output-dir $outputDir
 python scripts\nvx.py performance collect --platform $platform `
     --commit $commit --input-dir $outputDir --output-dir "$outputDir\results" `
     --require-network --require-shell-snapshot --require-shared-suite `
+    --lifecycle-input data\runs\benchmark-e2e.json `
     --summary "$outputDir\summary.md"
 $deviceOutputDir = "$outputDir\device-io"
 python scripts\nvx.py benchmark --suite device-io --backend whp `
     --platform $platform --processors 1 --skip-build `
     --output-dir $deviceOutputDir
+$deviceResultsDir = "$deviceOutputDir\results"
 python scripts\nvx.py performance collect --platform $platform `
     --commit $commit --input-dir $deviceOutputDir `
-    --output-dir "$outputDir\results" --summary "$outputDir\summary.md"
+    --output-dir $deviceResultsDir --summary "$outputDir\summary.md"
+python scripts\nvx.py performance persist --source-dir $deviceResultsDir `
+    --history-dir "$outputDir\results"
 Write-Output "NVX_RESULTS=$outputDir"
 ```
 

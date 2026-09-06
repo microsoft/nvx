@@ -40,6 +40,7 @@ from nvx_tools.common import (
 from nvx_tools.create_linux_source_archive import (
     configure_parser as configure_linux_source_archive_parser,
 )
+from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_parser
 from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.release import (
     collect_release_sources,
@@ -323,6 +324,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         required=True,
     )
     openvmm_tests.set_defaults(handler=command_test_openvmm)
+
+    microvm_tests = subparsers.add_parser(
+        "test-microvm",
+        help="run NVX-owned OpenVMM microVM correctness tests",
+    )
+    configure_microvm_test_parser(microvm_tests)
 
     build = subparsers.add_parser("build", help="build guest artifacts and OpenVMM")
     _add_guest_options(build)

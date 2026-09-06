@@ -1,0 +1,51 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-SNAPSHOT-CORE-FAIL code=$code"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+@SELECT_CLOCKSOURCE@
+@VALIDATE_CLOCKSOURCE@
+sleep 3600 & sleeping_pid=$!
+sleep 5 & timer_pid=$!
+sleep 1
+[ -r "/proc/$sleeping_pid/stat" ] || fail 47
+wall_before="$(date +%s)"
+uptime_before_raw="$(cut -d' ' -f1 /proc/uptime)"
+uptime_before=${uptime_before_raw%%.*}
+uptime_before_cs="$(echo "$uptime_before_raw" | tr -d .)"
+process_cpu_before="$(awk '{ print $14 + $15 }' "/proc/$sleeping_pid/stat")"
+thread_cpu_before="$(awk '{ print $14 + $15 }' "/proc/$sleeping_pid/task/$sleeping_pid/stat")"
+nvx-snapshot
+wall_restored="$(date +%s)"
+uptime_restored_raw="$(cut -d' ' -f1 /proc/uptime)"
+uptime_restored=${uptime_restored_raw%%.*}
+uptime_restored_cs="$(echo "$uptime_restored_raw" | tr -d .)"
+process_cpu_restored="$(awk '{ print $14 + $15 }' "/proc/$sleeping_pid/stat")"
+thread_cpu_restored="$(awk '{ print $14 + $15 }' "/proc/$sleeping_pid/task/$sleeping_pid/stat")"
+kill "$sleeping_pid"
+timer_wait_before="$(cut -d. -f1 /proc/uptime)"
+wait "$timer_pid"
+timer_wait_after="$(cut -d. -f1 /proc/uptime)"
+echo NVX-SNAPSHOT-CORE-CONTINUED
+echo "NVX-SNAPSHOT-DOWNTIME-$((wall_restored - wall_before))-$((uptime_restored - uptime_before))"
+echo "NVX-SNAPSHOT-UPTIME-CS-$((uptime_restored_cs - uptime_before_cs))"
+echo "NVX-SNAPSHOT-CPU-$((process_cpu_restored - process_cpu_before))-$((thread_cpu_restored - thread_cpu_before))"
+echo "NVX-SNAPSHOT-TIMER-WAIT-$((timer_wait_after - timer_wait_before))"
+printf '\245' | dd of=/dev/port bs=1 seek=234 count=1 conv=notrunc 2>/dev/null
+rm -f /tmp/nvx-snapshot-packet /tmp/nvx-snapshot-entropy
+index=0
+while [ "$index" -lt 83 ]; do
+    dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>/tmp/nvx-snapshot-packet
+    index=$((index + 1))
+done
+head -c 18 /tmp/nvx-snapshot-packet | grep -q OPENVMM_ENTROPY_V1 || fail 44
+tail -c 64 /tmp/nvx-snapshot-packet >/tmp/nvx-snapshot-entropy
+/sbin/nvx-reseed /tmp/nvx-snapshot-entropy || fail 45
+rng="$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)"
+echo "NVX-SNAPSHOT-RNG-$rng"
+dd if=/dev/zero of=/tmp/nvx-snapshot-dirty bs=1M count=32 2>/dev/null
+echo NVX-SNAPSHOT-CORE-OK
+nvx-exit 0

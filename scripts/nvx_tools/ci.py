@@ -8,7 +8,6 @@ import zipfile
 from pathlib import Path
 
 from .common import (
-    BUILD_DIR,
     OPENVMM_DIR,
     ScriptError,
     download,
@@ -24,14 +23,14 @@ ZSTD_URL = (
 )
 ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
+OPENVMM_GUEST_RUST_TARGET = "x86_64-unknown-none"
 OPENVMM_MICROVM_TEST_FILTER = (
-    "test(x86_64::microvm) + test(test_ttrpc_microvm_snapshot_robustness) + "
-    "test(test_ttrpc_microvm_smp_snapshot_restore) + "
-    "test(test_ttrpc_microvm_restore_processor_activation)"
+    "test(openvmm_microvm_test_pvh_x64_phase_1_lifecycle) + "
+    "test(test_ttrpc_microvm_pvh_snapshot)"
 )
 
 
-def run_openvmm_tests(backend: str) -> None:
+def validate_openvmm_test_backend(backend: str) -> None:
     if backend not in OPENVMM_TEST_BACKENDS:
         choices = ", ".join(OPENVMM_TEST_BACKENDS)
         raise ScriptError(
@@ -52,44 +51,39 @@ def run_openvmm_tests(backend: str) -> None:
                 "/dev/mshv is present, so OpenVMM would select MSHV instead of KVM"
             )
 
-    require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
-    kernel = require_file(BUILD_DIR / "vmlinux", "microVM PVH kernel").resolve()
-    initrd = require_file(
-        BUILD_DIR / "initramfs.cpio.gz",
-        "microVM Alpine initramfs",
-    ).resolve()
-    env = os.environ.copy()
-    env["OPENVMM_MICROVM_PVH_KERNEL"] = os.fspath(kernel)
-    env["OPENVMM_MICROVM_PVH_INITRD"] = os.fspath(initrd)
-    capabilities = [
-        capability.strip()
-        for capability in env.get("PETRI_CAPABILITIES", "").split(",")
-        if capability.strip()
-    ]
-    if "microvm_pvh" not in capabilities:
-        capabilities.append("microvm_pvh")
-    env["PETRI_CAPABILITIES"] = ",".join(capabilities)
-    cargo = require_tool("cargo")
 
+def run_openvmm_tests(backend: str) -> None:
+    validate_openvmm_test_backend(backend)
+
+    require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
+    cargo = require_tool("cargo")
+    rustup = require_tool("rustup")
+
+    run_checked([rustup, "target", "add", OPENVMM_GUEST_RUST_TARGET])
     run_checked(
         [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
         cwd=OPENVMM_DIR,
-        env=env,
     )
-    run_checked(
-        [
-            cargo,
-            "xflowey",
-            "vmm-tests-run",
-            "--release",
-            "--ci-profile",
-            "--skip-vhd-prompt",
-            "--filter",
-            OPENVMM_MICROVM_TEST_FILTER,
-        ],
-        cwd=OPENVMM_DIR,
-        env=env,
-    )
+    command = [
+        cargo,
+        "xflowey",
+        "vmm-tests-run",
+        "--release",
+        "--ci-profile",
+        "--skip-vhd-prompt",
+        "--filter",
+        OPENVMM_MICROVM_TEST_FILTER,
+    ]
+    if os.name == "nt":
+        command.extend(
+            (
+                "--dir",
+                os.fspath(
+                    Path(os.environ.get("RUNNER_TEMP", "C:/ovm-tests")) / backend
+                ),
+            )
+        )
+    run_checked(command, cwd=OPENVMM_DIR)
 
 
 def setup_cross_os_cache() -> None:

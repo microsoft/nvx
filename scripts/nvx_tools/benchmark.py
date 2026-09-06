@@ -95,6 +95,7 @@ VIRTFS_HOST_TO_GUEST = b"host-to-guest\n"
 SMP_PROBE_COMPLETION_MARKER = b"NVX-SMP-PROBE-OK"
 SMP_PROBE_PATH = "/tmp/nvx-smp-probe"
 SNAPSHOT_CAPTURE_PATH = "/tmp/nvx-c"
+SNAPSHOT_POST_RESTORE_PATH = "/tmp/nvx-post-restore"
 SNAPSHOT_GUEST_DISPATCH_MARKER = b"NVX-SNAPSHOT-DISPATCHED"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 SHELL_SNAPSHOT_MEMORY_MIB = (64, 128, 256, 512)
@@ -1259,6 +1260,7 @@ def measure_once(
     cleanup_managed_network: bool = False,
     snapshot_profile: bool = False,
     profile_sink: list[dict[str, object]] | None = None,
+    log_path: Path | None = None,
 ) -> tuple[float, int, float | None, float]:
     started = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
@@ -1340,6 +1342,9 @@ def measure_once(
             raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
         raise
     finally:
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_bytes(output)
         interaction.close()
         if cleanup_managed_network:
             cleanup_managed_tap(process.pid)
@@ -1806,6 +1811,7 @@ def run_guest_script(
     timeout: float,
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
+    log_path: Path | None = None,
 ) -> GuestCommandResult:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
@@ -1875,6 +1881,9 @@ def run_guest_script(
             raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
         raise
     finally:
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_bytes(output)
         interaction.close()
 
 
@@ -2860,6 +2869,7 @@ def prepare_snapshot_capture_script(
     snapshot_profile: bool,
     network_gateway: str | None = None,
     ioapic_irq: int | None = None,
+    post_restore_script: str | None = None,
 ) -> str:
     probe = smp_probe_script(
         processors,
@@ -2879,14 +2889,26 @@ def prepare_snapshot_capture_script(
         "snapshot-capture-controller.sh.in",
         SMP_PROBE_PATH=SMP_PROBE_PATH,
         DISPATCH_MARKER=dispatch_marker,
+        POST_RESTORE_ACTION=(
+            f"{SNAPSHOT_POST_RESTORE_PATH}\n" if post_restore_script is not None else ""
+        ),
         RESTORE_MARKER=RESTORE_MARKER.decode(),
     )
+    post_restore_setup = ""
+    if post_restore_script is not None:
+        post_restore_setup = (
+            f"cat >{SNAPSHOT_POST_RESTORE_PATH} <<'NVX_POST_RESTORE_SCRIPT'\n"
+            f"{post_restore_script}"
+            "NVX_POST_RESTORE_SCRIPT\n"
+            f"chmod +x {SNAPSHOT_POST_RESTORE_PATH}\n"
+        )
     return _render_benchmark_script(
         "prepare-snapshot-capture.sh.in",
         SMP_PROBE_PATH=SMP_PROBE_PATH,
         SMP_PROBE=probe,
         SNAPSHOT_CAPTURE_PATH=SNAPSHOT_CAPTURE_PATH,
         SNAPSHOT_CAPTURE=capture,
+        POST_RESTORE_SETUP=post_restore_setup,
     )
 
 
@@ -3841,6 +3863,8 @@ def capture_snapshot(
     smp_ioapic_irq: int | None = None,
     snapshot_profile: bool = False,
     profile_sink: list[dict[str, object]] | None = None,
+    post_restore_script: str | None = None,
+    log_path: Path | None = None,
 ) -> tuple[float, float, float, int]:
     if snapshot_path.exists():
         shutil.rmtree(snapshot_path)
@@ -3942,6 +3966,7 @@ def capture_snapshot(
                             snapshot_profile=snapshot_profile,
                             network_gateway=smp_network_gateway,
                             ioapic_irq=smp_ioapic_irq,
+                            post_restore_script=post_restore_script,
                         ).encode("utf-8")
                     )
             if (
@@ -3996,6 +4021,9 @@ def capture_snapshot(
             raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
         raise
     finally:
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_bytes(output)
         interaction.close()
 
 

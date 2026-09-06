@@ -375,49 +375,57 @@ class CliTests(unittest.TestCase):
 
 
 class CiTests(unittest.TestCase):
-    def test_openvmm_tests_bind_guest_artifacts(self):
+    def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             openvmm = root / "openvmm"
-            artifacts = root / "build"
             openvmm.mkdir()
-            artifacts.mkdir()
             (openvmm / "Cargo.toml").touch()
-            kernel = artifacts / "vmlinux"
-            initrd = artifacts / "initramfs.cpio.gz"
-            kernel.touch()
-            initrd.touch()
             backend = "whp" if os.name == "nt" else "kvm"
 
             with (
                 patch.object(ci, "OPENVMM_DIR", openvmm),
-                patch.object(ci, "BUILD_DIR", artifacts),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
-                patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
                 patch.object(ci, "run_checked") as run_checked,
-                patch.dict(os.environ, {"PETRI_CAPABILITIES": "vpci"}),
+                patch.dict(
+                    os.environ,
+                    {
+                        "OPENVMM_MICROVM_PVH_KERNEL": "nvx-kernel",
+                        "OPENVMM_MICROVM_PVH_INITRD": "nvx-initrd",
+                        "PETRI_CAPABILITIES": "vpci",
+                        "RUNNER_TEMP": os.fspath(root),
+                    },
+                ),
             ):
                 ci.run_openvmm_tests(backend)
 
-            self.assertEqual(run_checked.call_count, 2)
-            restore, tests = run_checked.call_args_list
+            self.assertEqual(run_checked.call_count, 3)
+            install_target, restore, tests = run_checked.call_args_list
+            self.assertEqual(
+                install_target.args[0],
+                ["rustup", "target", "add", "x86_64-unknown-none"],
+            )
             self.assertEqual(
                 restore.args[0],
                 ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
             )
             command = tests.args[0]
             self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
-            self.assertEqual(command[-2:], ["--filter", ci.OPENVMM_MICROVM_TEST_FILTER])
+            filter_index = command.index("--filter")
+            self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
             self.assertIn(
-                "test_ttrpc_microvm_restore_processor_activation",
+                "test_ttrpc_microvm_pvh_snapshot",
                 ci.OPENVMM_MICROVM_TEST_FILTER,
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
-            env = tests.kwargs["env"]
-            self.assertEqual(env["OPENVMM_MICROVM_PVH_KERNEL"], str(kernel.resolve()))
-            self.assertEqual(env["OPENVMM_MICROVM_PVH_INITRD"], str(initrd.resolve()))
-            self.assertEqual(env["PETRI_CAPABILITIES"], "vpci,microvm_pvh")
+            self.assertNotIn("env", tests.kwargs)
+            if os.name == "nt":
+                self.assertEqual(
+                    command[command.index("--dir") + 1],
+                    os.fspath(root / backend),
+                )
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
@@ -425,6 +433,33 @@ class CiTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
+        root = Path("root")
+        with (
+            patch.object(build.ssl, "get_default_verify_paths") as verify_paths,
+            patch.object(build, "run_checked") as run,
+        ):
+            verify_paths.return_value.cafile = "/etc/host-ca.pem"
+            with patch.dict(os.environ, {}, clear=True):
+                build._apk_add(root, "example")
+
+            environment = run.call_args.kwargs["env"]
+            self.assertEqual(environment["SSL_CERT_FILE"], "/etc/host-ca.pem")
+            self.assertEqual(
+                environment["LD_LIBRARY_PATH"],
+                f"{root / 'lib'}:{root / 'usr' / 'lib'}",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"SSL_CERT_FILE": "/etc/configured-ca.pem"},
+                clear=True,
+            ):
+                build._apk_add(root, "example")
+
+            environment = run.call_args.kwargs["env"]
+            self.assertEqual(environment["SSL_CERT_FILE"], "/etc/configured-ca.pem")
+
     def test_device_io_helper_is_static_with_nonexecutable_stack(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
