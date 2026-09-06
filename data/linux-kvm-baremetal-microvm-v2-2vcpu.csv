@@ -7,3 +7,4 @@ linux-kvm-baremetal,2,2,cb52bcd454b454cb241096c33ed42a1dcdc65347,shell_snapshot_
 linux-kvm-baremetal,2,2,81189ec3af226c08396da0b6780b229106d84d97,shell_snapshot_restore_512_mib,ms,lower,44
 linux-kvm-baremetal,2,2,a6648e6b35e2095d5ff1f3cb43ea91e64a9b884e,shell_snapshot_restore_512_mib,ms,lower,18.9
 linux-kvm-baremetal,2,2,ae80f11af1957c687489cbc4659648e56116007d,shell_snapshot_restore_512_mib,ms,lower,19.6
+linux-kvm-baremetal,2,2,97eeda6d348f86c091197c8d83d2fcf44639546a,shell_snapshot_restore_512_mib,ms,lower,20.1
