@@ -3200,16 +3200,10 @@ def benchmark_snapshot_restore_memory_workload(
 
             print(f"== restore target {target_mib} MiB ==")
             print(
-                "  guest add+online      : "
-                + format_sample_summary(activation_samples)
+                "  guest add+online      : " + format_sample_summary(activation_samples)
             )
-            print(
-                "  process launch->ready : "
-                + format_sample_summary(launch_samples)
-            )
-            print(
-                f"  OpenVMM peak RSS     : {format_rss_summary(peak_rss_samples)}"
-            )
+            print("  process launch->ready : " + format_sample_summary(launch_samples))
+            print(f"  OpenVMM peak RSS     : {format_rss_summary(peak_rss_samples)}")
             if snapshot_profile:
                 print_lifecycle_profile_summary(
                     f"snapshot-restore-memory/{backend}/"
@@ -3730,9 +3724,7 @@ def write_benchmark_metadata(
             else None
         ),
         "restore_memory_base_mib": (
-            RESTORE_MEMORY_BASE_MIB
-            if args.suite == "snapshot-restore-memory"
-            else None
+            RESTORE_MEMORY_BASE_MIB if args.suite == "snapshot-restore-memory" else None
         ),
         "restore_memory_targets_mib": (
             list(RESTORE_MEMORY_TARGETS_MIB)

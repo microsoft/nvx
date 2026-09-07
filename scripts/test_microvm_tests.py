@@ -555,16 +555,17 @@ class MicrovmTests(unittest.TestCase):
             with snapshot_memory.open("wb") as memory:
                 memory.truncate(512 * 1024 * 1024)
 
-            def fingerprint(snapshot_path):
+            def fingerprint(snapshot_path: Path) -> tuple[str, str, str]:
                 return ("manifest", "state", str(snapshot_path / "memory.bin"))
 
-            def measure(*args, **kwargs):
+            def measure(command: list[str], **kwargs: object) -> None:
                 target = int(
-                    args[0][args[0].index("--restore-memory") + 1].removesuffix("M")
+                    command[command.index("--restore-memory") + 1].removesuffix("M")
                 )
                 added = (target - 512) * 1024 * 1024
-                kwargs["log_path"].parent.mkdir(parents=True, exist_ok=True)
-                kwargs["log_path"].write_bytes(
+                log_path = cast(Path, kwargs["log_path"])
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_bytes(
                     f"NVX-MEMORY-ONLINE-OK: added_bytes={added} "
                     "memtotal_kib=1 elapsed_us=1\n"
                     "NVX-RESTORE-MEMORY-WORKLOAD-OK\n".encode()
@@ -577,7 +578,9 @@ class MicrovmTests(unittest.TestCase):
                     return_value=["openvmm", "boot"],
                 ),
                 patch.object(microvm_tests, "capture_snapshot") as capture_snapshot,
-                patch.object(microvm_tests, "measure_once", side_effect=measure) as measure_once,
+                patch.object(
+                    microvm_tests, "measure_once", side_effect=measure
+                ) as measure_once,
                 patch.object(
                     microvm_tests,
                     "_snapshot_fingerprint",

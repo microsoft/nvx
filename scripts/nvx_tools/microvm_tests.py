@@ -575,7 +575,9 @@ def run_restore_memory(
         fingerprint = _snapshot_fingerprint(snapshot_path)
         memory_path = require_file(snapshot_path / "memory.bin", "snapshot memory.bin")
         if memory_path.stat().st_size != base_mib * 1024 * 1024:
-            raise RuntimeError("memory expansion snapshot does not retain exact base RAM")
+            raise RuntimeError(
+                "memory expansion snapshot does not retain exact base RAM"
+            )
 
         for target_mib in targets_mib:
             log_path = output_dir / f"restore-memory-{target_mib}.log"
