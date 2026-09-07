@@ -486,6 +486,11 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
     )
     _build_static_helper(
         config.work,
+        REPO_ROOT / "alpine" / "nvx-port-io.c",
+        root / "sbin" / "nvx-port-io",
+    )
+    _build_static_helper(
+        config.work,
         REPO_ROOT / "alpine" / "nvx-console-pending.c",
         root / "sbin" / "nvx-console-pending",
     )

@@ -36,6 +36,13 @@ range, unavailable probe interface, or add/online failure terminates the VM.
 This is one-shot restore repair, not a runtime memory-hotplug API, and requires
 neither ACPI nor PCI device enumeration.
 
+Restores that require activation read the packet with one helper process,
+verify the selected resources, consume its fresh entropy, and acknowledge the
+gate only after repair completes. The port status distinguishes a memory
+target from a nonempty expansion range, so an explicit base-size target emits
+the deterministic zero-add marker without selecting the packet or requesting
+a snapshot boundary.
+
 ## 1. Summary
 
 ACI Sandboxes runs **exactly one container per micro-VM**. This single constraint is the source of nearly all the simplification in this design: because the VM's lifetime, resource envelope, and network identity are the container's, we can delete essentially all of the pod/sandbox machinery that conventional VM-based container runtimes (Kata, LCOW/hcsshim) require, and we can pre-compute the guest filesystem entirely off the critical path.

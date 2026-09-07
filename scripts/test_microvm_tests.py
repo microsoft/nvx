@@ -50,6 +50,30 @@ class MicrovmTestParserTests(unittest.TestCase):
 
 
 class MicrovmTests(unittest.TestCase):
+    def test_snapshot_restore_uses_batched_port_io_and_zero_expansion_path(self):
+        snapshot = (Path(__file__).parents[1] / "alpine" / "nvx-snapshot").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            '/sbin/nvx-port-io read-restore-packet 233 234 "$restore_packet"',
+            snapshot,
+        )
+        self.assertNotIn("dd if=/dev/port", snapshot)
+        self.assertNotIn("dd of=/dev/port", snapshot)
+        self.assertIn('[ "$range_count" -eq 0 ]', snapshot)
+        self.assertIn("RESTORE_MEMORY_EXPANSION_AVAILABLE=16", snapshot)
+        self.assertIn(
+            '"NVX-MEMORY-ONLINE-OK: added_bytes=0 '
+            'memtotal_kib=$memtotal_kib elapsed_us=0"',
+            snapshot,
+        )
+        zero_expansion_fast_path = snapshot.index(
+            "[ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -eq 0 ]"
+        )
+        packet_restore = snapshot.index("    post_restore\n")
+        self.assertLess(zero_expansion_fast_path, packet_restore)
+
     def test_console_log_persists_buffered_and_completed_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

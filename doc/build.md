@@ -49,11 +49,12 @@ standard build outputs above and writes complete per-scenario logs under
 `build/test-results/microvm` by default.
 
 The initramfs includes the sandbox PID-1 bootstrap, its container namespace
-helpers, and the static `nvx-device-io` benchmark helper under `/sbin`. The
-matching kernel enables virtio-blk, compressed EROFS, overlayfs, ext4 scratch,
-memory cgroups, and cgroup BPF. The build fails if `olddefconfig` drops any
-required option. The APK manifest records the `blkid` and `util-linux` tools
-used by the bootstrap plus the device helper's source and binary SHA-256 values.
+helpers, the static `nvx-device-io` benchmark helper, and the static
+`nvx-port-io` restore packet helper under `/sbin`. The matching kernel enables
+virtio-blk, compressed EROFS, overlayfs, ext4 scratch, memory cgroups, and
+cgroup BPF. The build fails if `olddefconfig` drops any required option. The
+APK manifest records the `blkid` and `util-linux` tools used by the bootstrap
+plus the device helper's source and binary SHA-256 values.
 
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact

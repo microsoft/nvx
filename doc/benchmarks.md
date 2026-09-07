@@ -135,6 +135,11 @@ latency, OpenVMM peak RSS, and optional host lifecycle phases. Expansion
 ranges are registered before restored execution; the guest marker is emitted
 only after every 128 MiB memory block is online.
 
+The explicit 512 MiB target is the zero-expansion control. Its private status
+does not select the restore packet or request a snapshot boundary, so its
+launch-to-ready latency should remain within measurement noise of restoring a
+snapshot captured directly at 512 MiB.
+
 Run the diagnostic snapshot lifecycle matrix with:
 
 ```console

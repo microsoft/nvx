@@ -269,7 +269,7 @@ flowchart TB
 | Port | Device | Behavior |
 | ---: | --- | --- |
 | `0xe9` | portb data | Raw byte input and output; reads consume one pending byte and zero-fill the remaining access width. |
-| `0xea` | portb status | Bit 0 reports pending host input, bit 1 reports a fresh restore packet, and bit 2 identifies a version-2 packet carrying a processor target. Writing `0xa5` after restore selects that one-time packet. |
+| `0xea` | portb status | Bit 0 reports pending host input, bit 1 reports a fresh restore packet, bit 2 reports a processor target, bit 3 reports a version-3 memory target, and bit 4 reports one or more memory-expansion ranges. Writing `0xa5` after restore selects that one-time packet. |
 | `0x604` | shutdown | The first output byte becomes the process status carried with the VM power-off request. Reads return all ones. |
 | `0x605` | snapshot request | Reads return all ones. Writes are coalesced and routed asynchronously to the capture controller. Zero requests fresh scratch and a nonzero first byte requests paired scratch. |
 
