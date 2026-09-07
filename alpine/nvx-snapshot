@@ -278,7 +278,7 @@ generation_id=$(/sbin/nvx-port-io read-generation-id 233 234) ||
 case "$generation_id" in
     *[!0-9a-f]*) fail_closed "VM generation ID is not hexadecimal" ;;
 esac
-export NVX_VM_GENERATION_ID=$generation_id
+export NVX_VM_GENERATION_ID="$generation_id"
 
 post_restore() {
     post_restore_pending=true
@@ -355,7 +355,7 @@ post_restore() {
         generation_id=$(/sbin/nvx-reseed "$entropy" "$generation_id") ||
             fail_closed "failed to reseed the guest CRNG"
     fi
-    export NVX_VM_GENERATION_ID=$generation_id
+    export NVX_VM_GENERATION_ID="$generation_id"
 
     if [ "$snapshot_tier" != instance-checkpoint ]; then
         machine_id=$(sha256sum "$entropy" | cut -c1-32)

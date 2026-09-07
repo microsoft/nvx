@@ -749,9 +749,7 @@ def run_snapshot_core(
                     f"snapshot restore {restore_index} emitted a malformed generation ID"
                 )
             generation_ids.append(generation_id)
-            restored_uuid = _single_marker_value(
-                restored.output, b"NVX-SNAPSHOT-UUID-"
-            )
+            restored_uuid = _single_marker_value(restored.output, b"NVX-SNAPSHOT-UUID-")
             try:
                 uuid.UUID(restored_uuid.decode("ascii"))
             except (UnicodeDecodeError, ValueError) as error:
@@ -759,9 +757,7 @@ def run_snapshot_core(
                     f"snapshot restore {restore_index} emitted a malformed UUID"
                 ) from error
             uuids.append(restored_uuid)
-            temp_id = _single_marker_value(
-                restored.output, b"NVX-SNAPSHOT-TEMP-ID-"
-            )
+            temp_id = _single_marker_value(restored.output, b"NVX-SNAPSHOT-TEMP-ID-")
             if not temp_id or any(byte in b" \t\r\n/" for byte in temp_id):
                 raise RuntimeError(
                     f"snapshot restore {restore_index} emitted a malformed temp ID"

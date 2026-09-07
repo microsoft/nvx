@@ -71,7 +71,7 @@ class MicrovmTests(unittest.TestCase):
             '/sbin/nvx-reseed --generation-only "$entropy" "$generation_id"',
             snapshot,
         )
-        self.assertIn("export NVX_VM_GENERATION_ID=$generation_id", snapshot)
+        self.assertIn('export NVX_VM_GENERATION_ID="$generation_id"', snapshot)
         self.assertNotIn("dd if=/dev/port", snapshot)
         self.assertNotIn("dd of=/dev/port", snapshot)
         self.assertIn('[ "$range_count" -eq 0 ]', snapshot)
