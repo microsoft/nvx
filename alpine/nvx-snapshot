@@ -271,6 +271,15 @@ elif [ "$snapshot_tier" != legacy ]; then
     exit 1
 fi
 
+generation_id=$(/sbin/nvx-port-io read-generation-id 233 234) ||
+    fail_closed "failed to read the VM generation ID"
+[ "${#generation_id}" -eq 32 ] ||
+    fail_closed "VM generation ID is not 16 bytes"
+case "$generation_id" in
+    *[!0-9a-f]*) fail_closed "VM generation ID is not hexadecimal" ;;
+esac
+export NVX_VM_GENERATION_ID=$generation_id
+
 post_restore() {
     post_restore_pending=true
     restore_packet=$runtime/restore-packet
@@ -335,9 +344,20 @@ post_restore() {
         activate_restore_memory "$restore_memory_range_count" "$@"
     fi
 
+    tail -c 64 "$restore_packet" >"$entropy" ||
+        fail_closed "failed to extract restore entropy"
+    if [ "$snapshot_tier" = instance-checkpoint ]; then
+        generation_id=$(
+            /sbin/nvx-reseed --generation-only "$entropy" "$generation_id"
+        ) ||
+            fail_closed "failed to refresh the VM generation ID"
+    else
+        generation_id=$(/sbin/nvx-reseed "$entropy" "$generation_id") ||
+            fail_closed "failed to reseed the guest CRNG"
+    fi
+    export NVX_VM_GENERATION_ID=$generation_id
+
     if [ "$snapshot_tier" != instance-checkpoint ]; then
-        tail -c 64 "$restore_packet" >"$entropy"
-        /sbin/nvx-reseed "$entropy" || fail_closed "failed to reseed the guest CRNG"
         machine_id=$(sha256sum "$entropy" | cut -c1-32)
         printf '%s\n' "$machine_id" >/etc/machine-id ||
             fail_closed "failed to refresh machine identity"

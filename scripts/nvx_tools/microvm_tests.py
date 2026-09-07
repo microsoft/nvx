@@ -9,6 +9,7 @@ import socket
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from .benchmark import (
@@ -676,6 +677,9 @@ def run_snapshot_core(
         fingerprint = _snapshot_fingerprint(snapshot_path)
         capture_wall_time = time.time()
         rng_hashes: list[bytes] = []
+        generation_ids: list[bytes] = []
+        uuids: list[bytes] = []
+        temp_ids: list[bytes] = []
 
         for restore_index in range(2):
             time.sleep(5)
@@ -735,6 +739,34 @@ def run_snapshot_core(
                     f"snapshot restore {restore_index} emitted a malformed RNG digest"
                 )
             rng_hashes.append(rng_hash)
+            generation_id = _single_marker_value(
+                restored.output, b"NVX-SNAPSHOT-GENERATION-ID-"
+            )
+            if len(generation_id) != 32 or not all(
+                byte in b"0123456789abcdefABCDEF" for byte in generation_id
+            ):
+                raise RuntimeError(
+                    f"snapshot restore {restore_index} emitted a malformed generation ID"
+                )
+            generation_ids.append(generation_id)
+            restored_uuid = _single_marker_value(
+                restored.output, b"NVX-SNAPSHOT-UUID-"
+            )
+            try:
+                uuid.UUID(restored_uuid.decode("ascii"))
+            except (UnicodeDecodeError, ValueError) as error:
+                raise RuntimeError(
+                    f"snapshot restore {restore_index} emitted a malformed UUID"
+                ) from error
+            uuids.append(restored_uuid)
+            temp_id = _single_marker_value(
+                restored.output, b"NVX-SNAPSHOT-TEMP-ID-"
+            )
+            if not temp_id or any(byte in b" \t\r\n/" for byte in temp_id):
+                raise RuntimeError(
+                    f"snapshot restore {restore_index} emitted a malformed temp ID"
+                )
+            temp_ids.append(temp_id)
             if _snapshot_fingerprint(snapshot_path) != fingerprint:
                 raise RuntimeError(
                     f"snapshot restore {restore_index} modified snapshot artifacts"
@@ -743,6 +775,12 @@ def run_snapshot_core(
             raise RuntimeError(
                 "fresh restore entropy did not diversify guest RNG output"
             )
+        if generation_ids[0] == generation_ids[1]:
+            raise RuntimeError("restored clones reused the VM generation ID")
+        if uuids[0] == uuids[1]:
+            raise RuntimeError("restored clones reused a kernel UUID")
+        if temp_ids[0] == temp_ids[1]:
+            raise RuntimeError("restored clones reused a temporary-file ID")
 
 
 def run_console_snapshot(
@@ -1685,6 +1723,10 @@ done
         runtime_hook = f"""cat >/run/nvx/runtime-post-restore <<'NVX_TIER_HOOK'
 #!/bin/sh
 set -eu
+case "${{NVX_VM_GENERATION_ID:-}}" in
+    '' | *[!0-9a-f]*) exit 71 ;;
+esac
+[ "${{#NVX_VM_GENERATION_ID}}" -eq 32 ] || exit 71
 echo {repair_marker}
 sleep 1
 [ "$(date -u +%Y)" -ge 2025 ]
@@ -1700,6 +1742,10 @@ chmod +x /run/nvx/runtime-post-restore"""
         runtime_hook = f"""cat >/run/nvx/runtime-post-restore <<'NVX_TIER_HOOK'
 #!/bin/sh
 set -eu
+case "${{NVX_VM_GENERATION_ID:-}}" in
+    '' | *[!0-9a-f]*) exit 71 ;;
+esac
+[ "${{#NVX_VM_GENERATION_ID}}" -eq 32 ] || exit 71
 : >/run/nvx/restore-active
 echo {repair_marker}
 sleep 1

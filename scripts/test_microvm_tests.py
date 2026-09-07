@@ -59,6 +59,19 @@ class MicrovmTests(unittest.TestCase):
             '/sbin/nvx-port-io read-restore-packet 233 234 "$restore_packet"',
             snapshot,
         )
+        self.assertIn(
+            "generation_id=$(/sbin/nvx-port-io read-generation-id 233 234)",
+            snapshot,
+        )
+        self.assertIn(
+            'generation_id=$(/sbin/nvx-reseed "$entropy" "$generation_id")',
+            snapshot,
+        )
+        self.assertIn(
+            '/sbin/nvx-reseed --generation-only "$entropy" "$generation_id"',
+            snapshot,
+        )
+        self.assertIn("export NVX_VM_GENERATION_ID=$generation_id", snapshot)
         self.assertNotIn("dd if=/dev/port", snapshot)
         self.assertNotIn("dd of=/dev/port", snapshot)
         self.assertIn('[ "$range_count" -eq 0 ]', snapshot)
@@ -168,6 +181,10 @@ class MicrovmTests(unittest.TestCase):
         self.assertIn('current_clocksource)" = tsc', whp)
         self.assertNotIn("@SELECT_CLOCKSOURCE@", mshv)
         self.assertIn("/sbin/nvx-reseed", mshv)
+        self.assertIn("/sbin/nvx-reseed --sample", mshv)
+        self.assertIn("NVX-SNAPSHOT-GENERATION-ID-", mshv)
+        self.assertIn("NVX-SNAPSHOT-UUID-", mshv)
+        self.assertIn("NVX-SNAPSHOT-TEMP-ID-", mshv)
 
     def test_snapshot_marker_parsers_require_single_well_formed_values(self):
         output = b"PREFIX-12\r\nPAIR-4-5\n"

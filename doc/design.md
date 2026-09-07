@@ -269,7 +269,7 @@ flowchart TB
 | Port | Device | Behavior |
 | ---: | --- | --- |
 | `0xe9` | portb data | Raw byte input and output; reads consume one pending byte and zero-fill the remaining access width. |
-| `0xea` | portb status | Bit 0 reports pending host input, bit 1 reports a fresh restore packet, bit 2 reports a processor target, bit 3 reports a version-3 memory target, and bit 4 reports one or more memory-expansion ranges. Writing `0xa5` after restore selects that one-time packet. |
+| `0xea` | portb status | Bit 0 reports pending host input, bit 1 reports a fresh restore packet, bit 2 reports a processor target, bit 3 reports a version-3 memory target, bit 4 reports one or more memory-expansion ranges, and bit 5 reports the fixed generation-ID selector. Writing `0xa5` after restore selects the one-time restore packet. Writing `0xa6` selects the current 16-byte generation ID; it may be selected repeatedly and remains stable for the lifetime of one VM process. |
 | `0x604` | shutdown | The first output byte becomes the process status carried with the VM power-off request. Reads return all ones. |
 | `0x605` | snapshot request | Reads return all ones. Writes are coalesced and routed asynchronously to the capture controller. Zero requests fresh scratch and a nonzero first byte requests paired scratch. |
 
@@ -779,18 +779,27 @@ OpenVMM's host-side TSC correction as per-vCPU firmware adjustment skew.
 
 Replaying a snapshot also replays the guest's in-memory random-number-generator
 state. Tiered restore always creates a fresh one-time packet and exposes it
-through the portb status/data protocol. For clone policy, the Alpine restore
-path credits the seed with `RNDADDENTROPY`, forces `RNDRESEEDCRNG`, refreshes
-wall clock and machine identity, and requires the workload-start runtime hook
-to reset runtime-owned RNG state before accepting work. RTC update-in-progress
-is polled with a bounded read loop rather than a timer sleep because guest
-timers are not authoritative until this wall-clock repair completes. The
-workload's `/etc/machine-id` is a read-only bind of a runtime-tmpfs file, so the
-agent can refresh it while scratch remains frozen; the agent also updates the workload's
-UTS namespace before acknowledgement. It then
-acknowledges the VMM gate before thawing scratch and the workload cgroup. Resume
-policy preserves identity and RNG continuity and only acknowledges the gate.
-Fresh entropy is never stored in the reusable snapshot.
+through the portb status/data protocol. Every microVM process also receives a
+fresh 16-byte generation ID before vCPU entry. The ID is not serialized, and
+the VMM-owned value is not restored from device state. On restore it is the
+first 16 bytes of the existing 64-byte entropy packet, so the repair path does
+not add port reads. The Alpine agent keeps the prior ID in its captured process
+state, rejects a restored ID that did not change, and exports the refreshed
+value to the runtime hook before releasing the gate.
+
+For clone policy, the Alpine restore path credits the seed, including the
+generation ID, with `RNDADDENTROPY`, forces `RNDRESEEDCRNG`, refreshes wall
+clock and machine identity, and requires the workload-start runtime hook to
+reset runtime-owned RNG state before accepting work. RTC update-in-progress is
+polled with a bounded read loop rather than a timer sleep because guest timers
+are not authoritative until this wall-clock repair completes. The workload's
+`/etc/machine-id` is a read-only bind of a runtime-tmpfs file, so the agent can
+refresh it while scratch remains frozen; the agent also updates the workload's
+UTS namespace before acknowledgement. It then acknowledges the VMM gate before
+thawing scratch and the workload cgroup. Resume policy records the fresh
+generation ID while preserving machine identity and RNG continuity. Fresh
+post-restore entropy and the replacement generation ID are never stored in the
+reusable snapshot; only the prior ID remains as the agent's comparison token.
 
 ## Host attachment model
 
@@ -799,7 +808,7 @@ Each external resource has a stable ID and a declarative reconstruction policy.
 
 | Resource | Saved | Reconstructed or supplied on restore |
 | --- | --- | --- |
-| portb | Pending RX/TX bytes | Host serial endpoint |
+| portb | Pending RX/TX bytes | Host serial endpoint, fresh process generation ID, and optional restore packet |
 | console | Queue progress, staged RX, partial TX, policy | Listener, client connection, or supplied handle |
 | network | Static identity, queue/packet progress, profile and policy identity | Fresh in-process Consomme endpoint and matching egress policy |
 | filesystem | FUSE namespace, handles, cookies, root/object identity, access mode | Fresh host-directory attachment |
@@ -834,8 +843,9 @@ The implementation is exercised at three levels:
 
 The process-level suite boots the same PVH artifacts on the available native
 backend and covers IRQ0/RTC behavior, raw portb I/O, shutdown status, exact
-snapshot sequencing, repeated immutable restore, coherent downtime, entropy
-reseed, active console RX/TX, network policy and HTTP traffic, and live
+snapshot sequencing, repeated immutable restore, coherent downtime, fresh
+generation IDs, `getrandom()` output, kernel UUIDs, temporary-file identifiers,
+entropy reseed, active console RX/TX, network policy and HTTP traffic, and live
 virtio-fs attachment revalidation. Sandbox coverage adds deterministic active
 block-I/O drain, paired scratch publication, two private restores, fresh
 scratch replacement, and pre-entry rejection of missing, corrupt, mismatched,

@@ -433,8 +433,9 @@ publication step, publication observation, and source teardown. Restore records 
 open and preparation, COW section and mapping/view creation, prototype and final partition work,
 GPA registration, partition-unit creation, VP-thread binding, saved-state restore, state-unit time
 advance, per-VP TSC advance, backend clock advance, restored-VP stopping, input gating, device
-start, and guest resume to readiness. State and memory SHA stages are intentionally absent from
-the final capture and restore path.
+start, generation-ID creation, the cumulative gated guest-repair interval, and guest resume to
+readiness. State and memory SHA stages are intentionally absent from the final capture and restore
+path.
 
 `startup.vp_thread_bind` is the exclusive wall interval for all VP threads to bind. Nested
 `startup.vp_bind_bsp` and `startup.vp_bind_ap_<INDEX>` records are non-exclusive per-VP intervals;

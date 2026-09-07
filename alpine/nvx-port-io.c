@@ -15,6 +15,9 @@
 #define RESTORE_ENTROPY_SIZE 64
 #define RESTORE_RANGE_SIZE 16
 #define RESTORE_PACKET_SELECT 0xa5
+#define GENERATION_ID_SELECT 0xa6
+#define GENERATION_ID_SIZE 16
+#define STATUS_GENERATION_ID_AVAILABLE 32
 #define RESTORE_PACKET_MAX_SIZE                                             \
     (RESTORE_HEADER_SIZE + 2 + UINT8_MAX * RESTORE_RANGE_SIZE +            \
      RESTORE_ENTROPY_SIZE)
@@ -106,6 +109,21 @@ static int close_port(int port)
     }
     fprintf(stderr, "nvx-port-io: close /dev/port: %s\n", strerror(errno));
     return -1;
+}
+
+static int print_hex(const unsigned char *bytes, size_t size)
+{
+    for (size_t index = 0; index < size; ++index) {
+        if (printf("%02x", bytes[index]) < 0) {
+            fprintf(stderr, "nvx-port-io: write output failed\n");
+            return -1;
+        }
+    }
+    if (putchar('\n') == EOF) {
+        fprintf(stderr, "nvx-port-io: write output failed\n");
+        return -1;
+    }
+    return 0;
 }
 
 static uint64_t read_le_u64(const unsigned char *bytes)
@@ -202,6 +220,59 @@ static int read_restore_packet(uint64_t data_offset, uint64_t select_offset,
     return 0;
 }
 
+static int read_generation_id(uint64_t data_offset, uint64_t select_offset,
+                              const char *path)
+{
+    unsigned char generation_id[GENERATION_ID_SIZE];
+    unsigned char status;
+    int port = open("/dev/port", O_RDWR | O_CLOEXEC);
+    if (port < 0) {
+        fprintf(stderr, "nvx-port-io: open /dev/port: %s\n", strerror(errno));
+        return 1;
+    }
+
+    if (read_port_byte(port, select_offset, &status) != 0) {
+        close(port);
+        return 1;
+    }
+    if ((status & STATUS_GENERATION_ID_AVAILABLE) == 0) {
+        fprintf(stderr,
+                "nvx-port-io: VM generation ID is unavailable on port 0x%llx\n",
+                (unsigned long long)select_offset);
+        close(port);
+        return 1;
+    }
+    if (write_port_byte(port, select_offset, GENERATION_ID_SELECT) != 0 ||
+        read_port_bytes(port, data_offset, generation_id,
+                        sizeof(generation_id)) != 0) {
+        close(port);
+        return 1;
+    }
+    if (close_port(port) != 0) {
+        return 1;
+    }
+
+    if (path == NULL) {
+        return print_hex(generation_id, sizeof(generation_id)) == 0 ? 0 : 1;
+    }
+
+    int output = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                      S_IRUSR | S_IWUSR);
+    if (output < 0) {
+        fprintf(stderr, "nvx-port-io: open %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    if (write_all(output, generation_id, sizeof(generation_id)) != 0) {
+        close(output);
+        return 1;
+    }
+    if (close(output) != 0) {
+        fprintf(stderr, "nvx-port-io: close %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
 static int read_u8(uint64_t offset)
 {
     unsigned char value;
@@ -242,7 +313,8 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: nvx-port-io read-restore-packet DATA_PORT SELECT_PORT "
-            "OUTPUT | read-u8 PORT | write-u8 PORT VALUE\n");
+            "OUTPUT | read-generation-id DATA_PORT SELECT_PORT [OUTPUT] | "
+            "read-u8 PORT | write-u8 PORT VALUE\n");
 }
 
 int main(int argc, char **argv)
@@ -263,6 +335,13 @@ int main(int argc, char **argv)
             parse_u64(argv[3], &select_offset) &&
             select_offset <= PORT_MAX) {
             return read_restore_packet(offset, select_offset, argv[4]);
+        }
+        if ((argc == 4 || argc == 5) &&
+            strcmp(argv[1], "read-generation-id") == 0 &&
+            parse_u64(argv[3], &select_offset) &&
+            select_offset <= PORT_MAX) {
+            return read_generation_id(offset, select_offset,
+                                      argc == 5 ? argv[4] : NULL);
         }
     }
 
