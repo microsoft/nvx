@@ -10,3 +10,4 @@ linux-kvm-baremetal,2,4,ae80f11af1957c687489cbc4659648e56116007d,shell_snapshot_
 linux-kvm-baremetal,2,4,97eeda6d348f86c091197c8d83d2fcf44639546a,shell_snapshot_restore_512_mib,ms,lower,21.2
 linux-kvm-baremetal,2,4,366ce83a18f04760b2dcc7c4954b7c644120f5d7,shell_snapshot_restore_512_mib,ms,lower,20.5
 linux-kvm-baremetal,2,4,d1e4a9418740a6f18d2734103850e5b9f02fd595,shell_snapshot_restore_512_mib,ms,lower,20.5
+linux-kvm-baremetal,2,4,2c5e8f40911d29b3c2642e2e5b142e7b1541d44b,shell_snapshot_restore_512_mib,ms,lower,20.1
