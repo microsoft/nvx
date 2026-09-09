@@ -1,11 +1,10 @@
 # NVX microVM design
 
 This document describes the microVM machine profile implemented by the OpenVMM
-submodule pinned in this repository. The implementation is the source of truth.
-The proposal documents in `openvmm/design-overview.md` and
-`openvmm/design-microvm-phase-*.md` record the migration plan and rationale, but
-some of their baseline observations and deferred-work lists predate the current
-code.
+submodule in this repository. The implementation is the source of truth. The
+former phase proposal documents were removed after their deliverables were
+integrated; this document describes the resulting machine rather than a
+migration plan.
 
 ## Goals
 
@@ -23,12 +22,13 @@ The implemented runtime profile is `MachineProfile::Microvm`, selected only by
 `--machine microvm`. It uses fixed sandbox layer and scratch roles,
 deterministic SMP topology, and shared virtio-mmio interrupt status with
 edge-triggered delivery. Snapshot manifests retain microVM ABI value 2 and PVH
-layout value 2, and TTRPC uses numeric machine-profile value 2. KVM and MSHV
-are supported on Linux and WHP is
-supported on Windows. Hypervisor-specific
-code provides partition creation, vCPU execution, interrupt injection, and host
-resource integration. The machine profile owns the boot protocol, memory map,
-device topology, command line, and snapshot compatibility contract.
+layout value 2, optional restore-time RAM expansion uses machine-contract
+capability version 1, and TTRPC uses numeric machine-profile value 2. KVM and
+MSHV are supported on Linux and WHP is supported on Windows.
+Hypervisor-specific code provides partition creation, vCPU execution,
+interrupt injection, and host resource integration. The machine profile owns
+the boot protocol, memory map, device topology, command line, and snapshot
+compatibility contract.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
@@ -89,6 +89,10 @@ in one socket and one die, with one core per vCPU, no SMT, xAPIC mode, and
 contiguous APIC IDs starting at zero. Its PVH layout places the GDT at `0x800`
 and reserves `0x30000..0x30fff` for interrupt status.
 
+Snapshot capture may declare an immutable RAM capacity at least as large as the
+active base RAM. When it does, both values must be 128-MiB aligned. A snapshot
+without a declared capacity cannot select a different RAM size at restore.
+
 Only role-bearing block devices are supported; ordinary unroled `--virtio-blk`
 is rejected. Snapshot capture with blocks requires one to three
 read-only lower layers followed by writable scratch, all backed by cached,
@@ -103,10 +107,11 @@ the implementation builds a microVM directly instead of constructing a
 standard PC and removing unwanted devices.
 
 Restore is stricter than cold boot. Guest-visible configuration is read from
-the snapshot's machine contract. Restore-time input may choose a compatible
-host backend and supply required attachments, but it cannot override memory,
-CPU topology, command line, device placement, feature masks, or filesystem and
-network identity.
+the snapshot's machine contract. Restore-time input may select the same backend
+kind recorded by the snapshot, supply required attachments, and select
+processor and RAM activation targets explicitly allowed by the contract. Those
+process-local targets do not change processor capacity, RAM capacity, command
+line, device placement, feature masks, or filesystem and network identity.
 
 ## Cold boot
 
@@ -175,11 +180,18 @@ flowchart LR
    Gap -. contains .-> Slots
 ```
 
-RAM occupies `[0, min(size, 3 GiB))`. Memory displaced by the fixed one-GiB
-MMIO aperture resumes at 4 GiB. There is no high-MMIO or VTL2 aperture. The
-central OpenVMM layout engine owns this split; the profile does not maintain a
-second allocator. The resulting RAM ranges are also the authoritative PVH
-memory map and snapshot memory-range inventory.
+Active RAM occupies `[0, min(size, 3 GiB))`. Memory displaced by the fixed
+one-GiB MMIO aperture resumes at 4 GiB. There is no high-MMIO or VTL2 aperture.
+The central OpenVMM layout engine owns this split; the profile does not
+maintain a second allocator. The resulting active RAM ranges are also the
+authoritative PVH memory map and snapshot memory-range inventory.
+
+When capture uses `--memory-capacity`, the layout engine reserves addresses for
+the full capacity before publishing only the active base-size prefix as RAM.
+Consequently, selecting a larger restore target does not move the MMIO gap or
+any device. The machine contract records the canonical suffix ranges that are
+absent from the captured PVH map and `memory.bin`; a suffix that crosses the
+three-GiB boundary is represented as separate low- and high-RAM ranges.
 
 The fixed layout is implemented by
 [`vm_manifest_builder`](../openvmm/vmm_core/vm_manifest_builder/src/lib.rs) and
@@ -562,13 +574,13 @@ snapshot/
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart LR
    State["Stopped VM state"]
-   Ram["Exact guest-RAM<br/>file handle"]
+   Ram["Exact captured base-RAM<br/>file handle"]
    Scratch["Optional exact scratch<br/>file handle"]
 
    subgraph Staging["Unique private sibling staging directory"]
       direction TB
       StateFile["state.bin<br/>write and flush"]
-      MemoryFile["memory.bin<br/>exact automatic RAM file<br/>or independent supplied-RAM clone"]
+      MemoryFile["memory.bin<br/>exact captured base RAM<br/>from automatic or supplied backing"]
       ScratchFile["scratch.img<br/>copy, verify, and flush"]
       ManifestFile["manifest.bin<br/>record contract and lengths<br/>write and flush before automatic RAM link"]
    end
@@ -589,8 +601,8 @@ flowchart LR
 [`openvmm_helpers::snapshot`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs)
 implements bounded decoding, exact-length publication, artifact length checks,
 restrictive creation, flushing, unique staging paths, and same-parent
-no-replace publication. Automatic OpenVMM-owned microVM RAM is flushed, linked
-from the exact handle after its shared mappings, state, and manifest are
+no-replace publication. Automatic OpenVMM-owned microVM base RAM is flushed,
+linked from the exact handle after its shared mappings, state, and manifest are
 durable, and checked for matching identity and EOF. Linux uses
 `linkat(AT_EMPTY_PATH)` or a `/proc/self/fd` link plus device/inode proof;
 Windows uses handle-relative `FileLinkInformation` plus `FILE_ID_INFO`.
@@ -609,7 +621,8 @@ The manifest is authoritative for:
 
 - profile and ABI version;
 - source hypervisor and architecture;
-- RAM ranges and file offsets;
+- captured RAM ranges and file offsets, plus any immutable RAM capacity,
+  128-MiB block size, and canonical expansion ranges;
 - processor topology, vCPU count, and every APIC identity;
 - effective command line and digest;
 - exact device order, stable IDs, state-unit names, MMIO/PMIO ranges, IRQs,
@@ -653,19 +666,22 @@ Restore proceeds in the opposite direction from capture:
    the authoritative machine configuration;
 2. resolve console, network, filesystem, policy, and read-only layer
    attachments by stable ID or role;
-3. validate state, memory, block geometry and identities, and any paired
-   scratch artifact before worker construction;
+3. validate state, captured memory, the selected RAM target, block geometry and
+   identities, and any paired scratch artifact before worker construction;
 4. create a writable private copy-on-write mapping from the exact opened
-   `memory.bin` handle, transfer its generation guards to the worker, and use
+   `memory.bin` handle, add fresh private backing for selected expansion
+   ranges, transfer the artifact generation guards to the worker, and use
    either a verified private scratch copy or a caller-supplied fresh scratch
    file;
-5. construct the partition and exact device inventory from the manifest;
+5. construct the partition and exact device inventory with the selected active
+   RAM and the snapshot's immutable capacity;
 6. compare the destination CPU, XSAVE/MSR, TSC, topology, device, and queue
    contract with the saved contract;
 7. restore VM time, chipset and virtio state, partition state, and vCPU state;
 8. finish reconnecting host resources;
-9. for tiered microVM restore, start devices with external input gated and then
-   release the restored vCPU so the agent can repair guest state; and
+9. when tier policy, processor activation, or nonempty RAM expansion requires
+   guest repair, start devices with external input gated and then release the
+   restored vCPU; and
 10. on the agent's `0x605` acknowledgment, stop at the exact post-write
    boundary, release input, and only then let the guest continue.
 
@@ -678,8 +694,8 @@ comparison and all saved-state validation still complete before a vCPU runs.
 flowchart LR
    Manifest["Bounded manifest"]
    Config["Authoritative machine config<br/>and host attachments"]
-   Verify["Validate state, memory, and blocks<br/>types, geometry, and identities"]
-   Cow["Private memory mapping<br/>and scratch instance"]
+   Verify["Validate state, base RAM, target, and blocks<br/>types, geometry, and identities"]
+   Cow["Private base-RAM mapping,<br/>fresh expansion, and scratch"]
    Machine["Construct partition<br/>and exact devices"]
    Validate["Validate destination CPU<br/>and saved device state"]
    Restore["Restore time, devices,<br/>partition, and vCPU"]
@@ -688,18 +704,18 @@ flowchart LR
    Manifest --> Config --> Verify --> Cow --> Machine --> Validate --> Restore --> Run
 ```
 
-The memory artifact is mapped private and copy-on-write across restores. Paired
-scratch is copied into a private temporary file for each restore. Multiple
-restored VMs may therefore dirty RAM and scratch without changing reusable
-clone artifacts. An instance checkpoint is single-use: the first artifact- and
-configuration-validated restore attempt atomically creates and flushes
-`resume.claim`; duplicate and concurrent restores fail before worker
+The captured memory artifact is mapped private and copy-on-write across
+restores, while selected expansion ranges receive fresh private backing.
+Paired scratch is copied into a private temporary file for each restore.
+Multiple restored VMs may therefore dirty RAM and scratch without changing
+reusable clone artifacts. An instance checkpoint is single-use: the first
+artifact- and configuration-validated restore attempt atomically creates and
+flushes `resume.claim`; duplicate and concurrent restores fail before worker
 construction, and a later startup failure does not make the checkpoint
-reusable. Initial compatibility is
-same-backend: KVM snapshots
-restore on compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on
-compatible WHP hosts. Cross-backend conversion and standalone NVX snapshot
-import are not supported.
+reusable. Initial compatibility is same-backend: KVM snapshots restore on
+compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on compatible WHP
+hosts. Cross-backend conversion and standalone NVX snapshot import are not
+supported.
 
 ### Restore-time processor activation
 
@@ -745,13 +761,14 @@ also fails explicitly instead of indexing nonexistent runtime state. The
 original immutable snapshot remains reusable for independent restores at
 other valid targets.
 
-After host-side state restoration, the version-2 private restore packet carries
-`N` to the Alpine agent and portb status bit 2 distinguishes it without
-consuming a legacy version-1 entropy packet. While external input remains
-gated, the agent onlines CPUs from `B` through `N-1`, verifies that
-`/sys/devices/system/cpu/online` is exactly the requested prefix, and
-acknowledges through PMIO `0x605`. OpenVMM stops at that post-write boundary,
-releases host input, and then resumes the guest.
+After host-side state restoration, a processor-only activation uses the
+version-2 private restore packet to carry `N` to the Alpine agent. Portb status
+bit 2 distinguishes it from a legacy version-1 entropy packet. If the same
+restore also selects a RAM target, version 3 carries both targets. While
+external input remains gated, the agent onlines CPUs from `B` through `N-1`,
+verifies that `/sys/devices/system/cpu/online` is exactly the requested prefix,
+and acknowledges through PMIO `0x605`. OpenVMM stops at that post-write
+boundary, releases host input, and then resumes the guest.
 
 A fixed-capacity `N`-vCPU snapshot and a capacity-`C`, boot-online-`B` template
 restored to `N` therefore reach the same online prefix but do not contain the
@@ -760,6 +777,56 @@ captures only `B` online CPUs and performs CPU activation during gated repair.
 Performance comparisons should separate VP binding and worker construction
 from guest resume-to-readiness. Matching host-side phase costs do not require
 the total restore latencies or tail behavior to match.
+
+### Restore-time memory activation
+
+Restore-time memory activation separates the immutable RAM geometry recorded
+by a snapshot from the active amount selected for one restored process:
+
+- `M0` is the captured base RAM. `memory.bin`, the PVH usable-memory map, and
+  the saved RAM-range inventory contain exactly `M0`.
+- `Cmem` is the optional immutable capacity declared by `--memory-capacity` at
+  capture. The contract records capability version 1, `Cmem`, the 128-MiB Linux
+  memory-block size, and every canonical GPA range in `Cmem - M0`.
+- `M` is an explicit `--restore-memory` target. It must be 128-MiB aligned and
+  satisfy `M0 <= M <= Cmem`. Omitting it restores exactly `M0`; a snapshot
+  without the capability rejects an explicit target.
+
+TTRPC exposes the same capture capacity and per-launch target as
+`memory_capacity_bytes` and `restore_memory_bytes`.
+
+The selected expansion is always a prefix of the contract's canonical ranges
+in logical RAM order. OpenVMM maps the captured ranges privately from
+`memory.bin`, maps only the selected suffix with fresh private backing, and
+registers all selected ranges with the hypervisor before any restored vCPU
+runs. Expansion bytes are neither read from nor written back to the snapshot,
+so independent restores may choose different valid targets without changing
+the reusable artifact.
+
+An explicit RAM target selects restore-packet version 3:
+
+```text
+OPENVMM_ENTROPY_V3\0
+u8 optional_online_vp_count
+u8 expansion_range_count
+repeated { little-endian u64 gpa_start, little-endian u64 length }
+64 bytes fresh entropy
+```
+
+Portb status bit 3 identifies the memory-target packet and bit 4 indicates that
+the selected target contains at least one expansion range. Version 3 may carry
+a processor target in the same transaction. For a nonempty expansion,
+OpenVMM keeps external input gated while the Alpine agent verifies the
+128-MiB block size and each range, probes missing blocks through
+`/sys/devices/system/memory/probe`, writes and verifies the `online` state, and
+then completes entropy and generation-ID repair before acknowledging PMIO
+`0x605`. Any malformed range or add/online failure terminates the restore.
+
+An explicit base-size target has a zero range count. For an untiered blockless
+restore, the agent emits the deterministic zero-add marker without consuming
+the packet or entering a restore-gate transaction; a tiered restore still uses
+its existing gate. This mechanism is one-shot restore repair, not a general
+post-readiness memory-hotplug interface.
 
 ### Time and entropy
 
@@ -778,12 +845,14 @@ that register independently of `IA32_TSC`; Linux therefore does not interpret
 OpenVMM's host-side TSC correction as per-vCPU firmware adjustment skew.
 
 Replaying a snapshot also replays the guest's in-memory random-number-generator
-state. Tiered restore always creates a fresh one-time packet and exposes it
-through the portb status/data protocol. Every microVM process also receives a
-fresh 16-byte generation ID before vCPU entry. The ID is not serialized, and
-the VMM-owned value is not restored from device state. On restore it is the
-first 16 bytes of the existing 64-byte entropy packet, so the repair path does
-not add port reads. The Alpine agent keeps the prior ID in its captured process
+state. Tiered restore, processor activation, and an explicit RAM target each
+cause OpenVMM to create a fresh one-time packet and expose it through the portb
+status/data protocol; callers may also request that packet directly. Every
+microVM process receives a fresh 16-byte generation ID before vCPU entry. The
+ID is not serialized, and the VMM-owned value is not restored from device
+state. When a restore packet exists, the ID is its first 16 entropy bytes;
+otherwise it is generated independently. This keeps the gated repair path from
+adding port reads. The Alpine agent keeps the prior ID in its captured process
 state, rejects a restored ID that did not change, and exports the refreshed
 value to the runtime hook before releasing the gate.
 
@@ -837,11 +906,14 @@ The implementation is exercised at three levels:
 
 - loader, command-line, memory-layout, RTC, PMIO, network-policy, snapshot
   format, and device-private-state unit tests;
-- Petri construction and lifecycle tests for the profile; and
-- process-level VMM tests in
-  [`vmm_tests/tests/tests/x86_64/microvm.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/x86_64/microvm.rs).
+- self-contained OpenVMM Petri lifecycle and TTRPC tests using the
+  checkout-built [`guest_test_pvh`](../openvmm/guest_test_pvh); and
+- NVX-owned process tests in
+  [`scripts/nvx_tools/microvm_tests.py`](../scripts/nvx_tools/microvm_tests.py)
+  using this repository's Linux kernel and Alpine initramfs through the public
+  OpenVMM CLI.
 
-The process-level suite boots the same PVH artifacts on the available native
+The NVX-owned suite boots the same PVH artifacts on the available native
 backend and covers IRQ0/RTC behavior, raw portb I/O, shutdown status, exact
 snapshot sequencing, repeated immutable restore, coherent downtime, fresh
 generation IDs, `getrandom()` output, kernel UUIDs, temporary-file identifiers,
@@ -850,18 +922,21 @@ virtio-fs attachment revalidation. Sandbox coverage adds deterministic active
 block-I/O drain, paired scratch publication, two private restores, fresh
 scratch replacement, and pre-entry rejection of missing, corrupt, mismatched,
 or wrong-geometry media. The same selected native microVM suite passes on KVM,
-MSHV, and WHP. Coverage also includes 1/2/4/8-vCPU topology, APIC
-identity, pinned per-vCPU execution, timer/interrupt progress, reset,
-cancellation, count and topology mismatch rejection, and repeated immutable
-restore. Restore-time activation coverage captures one capacity-8 template
-with a boot-online count of one, restores it at 1/2/4/8 online VPs, schedules
-work on every requested CPU, and verifies that the artifact is unchanged.
-Unit coverage verifies that only an explicit MSHV target selects a runtime
-prefix, that the complete saved VP inventory is validated before filtering,
-that reduced-prefix saves are rejected, and that dormant VP access fails
-cleanly. Lifecycle profiling verifies that MSHV binds exactly the requested
-prefix while fixed-capacity comparisons retain equivalent per-prefix binding
-and worker-construction costs.
+MSHV, and WHP. Coverage also includes 1/2/4/8-vCPU topology, APIC identity,
+pinned per-vCPU execution, timer/interrupt progress, reset, cancellation,
+count and topology mismatch rejection, and repeated immutable restore.
+Restore-time processor coverage captures one capacity-8 template with a
+boot-online count of one, restores it at 1/2/4/8 online VPs, schedules work on
+every requested CPU, and verifies that the artifact is unchanged.
+Restore-time memory coverage captures 512 MiB with a 2-GiB capacity, restores
+the same artifact at 512 MiB, 1 GiB, and 2 GiB, validates the added-byte count
+and expanded allocation, and verifies artifact immutability. Unit coverage
+verifies that only an explicit MSHV processor target selects a runtime prefix,
+that the complete saved VP inventory is validated before filtering, that
+reduced-prefix saves are rejected, and that dormant VP access fails cleanly.
+Lifecycle profiling verifies that MSHV binds exactly the requested prefix while
+fixed-capacity comparisons retain equivalent per-prefix binding and
+worker-construction costs.
 Platform CI and the benchmark histories in `data/` provide the wider host
 matrix.
 
@@ -871,10 +946,12 @@ The current ABI family intentionally does not provide:
 
 - processor counts other than 1/2/4/8, SMT, multiple NUMA nodes, non-x86 guests, or nested virtualization;
 - firmware boot, caller-defined ACPI, SMBIOS, PCI, VPCI, VMBus, arbitrary
-   post-readiness CPU hotplug, or arbitrary devices;
+   post-readiness CPU or memory hotplug, or arbitrary devices;
 - cross-hypervisor snapshot restore;
 - capture-and-continue, live migration, or saving a reduced-prefix MSHV
    restore;
+- restore-time RAM shrinking, targets beyond the captured capacity,
+   non-128-MiB targets, or expansion from snapshots without an opt-in capacity;
 - ABI or PVH-layout value 1 snapshots;
 - snapshot block media other than cached regular raw files;
 - sandbox-block construction through TTRPC;
@@ -898,23 +975,23 @@ shape, time policy, or device behavior requires a new microVM ABI version. A
 backend-specific difference is valid only when it is explicitly part of that
 versioned contract, such as the virtio-net IRQ.
 
-## Status relative to the phase proposals
+## Integrated implementation status
 
-The phase documents describe the intended review sequence, not five separate
-runtime modes. The current tree integrates their main deliverables as follows:
+The former phase proposal files are no longer present in the OpenVMM tree.
+Their feature areas are integrated as follows:
 
-| Proposal | Current implementation |
+| Area | Current implementation |
 | --- | --- |
-| Phase 1: base machine | PVH boot, MP/ACPI boot metadata, chipset/PMIO devices, fixed-role sandbox blocks, and 1/2/4/8-vCPU SMP are implemented. Linux/MSHV is supported in addition to KVM and WHP. |
-| Phase 2: snapshot | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented with exact multi-VP capacity plus either no block or three-tier fixed-role layers. Opt-in contracts may record a smaller boot-online prefix and activate a requested prefix before restore readiness without changing topology or saved VP inventory. Explicit MSHV targets instantiate only that prefix and cannot be saved again; non-explicit MSHV, KVM, and WHP restores instantiate full capacity. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable only when their machine contract carries supported ABI and PVH layout value 2; they do not gain activation capability. Restore is same-backend; RAM uses private COW mappings and paired scratch is privately copied. Public sandbox orchestration remains gated on issues #158–#160. |
-| Phase 3: console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
-| Phase 4: network | Static identity, fixed transport, the portable in-process Consomme endpoint, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
-| Phase 5: filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |
+| Base machine | PVH boot, MP/ACPI boot metadata, chipset/PMIO devices, fixed-role sandbox blocks, and 1/2/4/8-vCPU SMP are implemented. Linux/MSHV is supported in addition to KVM and WHP. |
+| Snapshot and restore | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented with exact multi-VP capacity plus either no block or three-tier fixed-role layers. Opt-in contracts may record a smaller boot-online VP prefix and an immutable RAM capacity, then activate a requested VP prefix and 128-MiB-aligned RAM target before restore readiness without changing topology, capacity, or saved state. Explicit MSHV processor targets instantiate only that VP prefix and cannot be saved again; non-explicit MSHV, KVM, and WHP restores instantiate full processor capacity. Captured RAM uses private COW mappings, expansion uses fresh private backing, paired scratch is privately copied, and the reusable artifact is unchanged. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable when their machine contract carries supported ABI and PVH layout value 2; historical artifacts without boot-online or RAM-capacity fields cannot request those activations. Restore is same-backend. Public sandbox orchestration remains gated on issues #158–#160. |
+| Console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
+| Network | Static identity, fixed transport, the portable in-process Consomme endpoint, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
+| Filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |
 
 The end-to-end tests establish process-boundary behavior for the available
-native host backend. They do not turn every aspirational acceptance item in the
-proposal documents into a portability guarantee; the versioned code contract
-and the limits above remain authoritative.
+native host backend. They do not make every future extension a portability
+guarantee; the versioned code contract and the limits above remain
+authoritative.
 
 ## Code ownership map
 
@@ -924,6 +1001,7 @@ and the limits above remain authoritative.
 | CLI and host attachment construction | [`openvmm_entry/src`](../openvmm/openvmm/openvmm_entry/src) |
 | Worker composition and fixed virtio placement | [`openvmm_core/src/worker`](../openvmm/openvmm/openvmm_core/src/worker) |
 | Restore-time VP materialization and saved-state filtering | [`openvmm_core/src/worker/dispatch.rs`](../openvmm/openvmm/openvmm_core/src/worker/dispatch.rs) and [`vmm_core/src/partition_unit/vp_set.rs`](../openvmm/vmm_core/src/partition_unit/vp_set.rs) |
+| Restore-time RAM capacity, range selection, and split backing | [`openvmm_helpers/src/snapshot.rs`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs), [`openvmm_core/src/worker/memory_layout.rs`](../openvmm/openvmm/openvmm_core/src/worker/memory_layout.rs), and [`openvmm_core/src/worker/dispatch.rs`](../openvmm/openvmm/openvmm_core/src/worker/dispatch.rs) |
 | Xen PVH loading | [`vm/loader/src/pvh.rs`](../openvmm/vm/loader/src/pvh.rs) |
 | Minimal PVH ACPI construction | [`vmm_core/src/acpi_builder.rs`](../openvmm/vmm_core/src/acpi_builder.rs) |
 | Base-chipset allowlist and memory-layout defaults | [`vmm_core/vm_manifest_builder`](../openvmm/vmm_core/vm_manifest_builder) |
@@ -932,9 +1010,6 @@ and the limits above remain authoritative.
 | Virtio device-private saved state | [`vm/devices/virtio`](../openvmm/vm/devices/virtio) |
 | Snapshot format, machine contract, publication, validation | [`openvmm_helpers/src/snapshot.rs`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs) |
 | Capture orchestration | [`openvmm_entry/src/vm_controller.rs`](../openvmm/openvmm/openvmm_entry/src/vm_controller.rs) |
-| Guest workload and scratch quiesce | [`alpine/nvx-snapshot`](../alpine/nvx-snapshot) and [`alpine/nvx-init-agent`](../alpine/nvx-init-agent) |
-| End-to-end profile tests | [`vmm_tests/tests/tests/x86_64/microvm.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/x86_64/microvm.rs) |
-
-The five phase documents remain useful for design rationale and rejected
-alternatives. This document supersedes them as the description of the current
-integrated machine.
+| Guest workload, scratch quiesce, and post-restore CPU/RAM repair | [`alpine/nvx-snapshot`](../alpine/nvx-snapshot) and [`alpine/nvx-init-agent`](../alpine/nvx-init-agent) |
+| Self-contained OpenVMM control-plane tests | [`guest_test_pvh`](../openvmm/guest_test_pvh), [`vmm_tests/tests/tests/x86_64/microvm.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/x86_64/microvm.rs), and [`vmm_tests/tests/tests/ttrpc.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/ttrpc.rs) |
+| NVX Linux and device integration tests | [`scripts/nvx_tools/microvm_tests.py`](../scripts/nvx_tools/microvm_tests.py) and [`scripts/nvx_tools/microvm_test_scripts`](../scripts/nvx_tools/microvm_test_scripts) |
