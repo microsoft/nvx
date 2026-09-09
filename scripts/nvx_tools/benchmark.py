@@ -1578,6 +1578,13 @@ def whp_stable_clocksource_wait_script() -> str:
     )
 
 
+def lifecycle_tuning(backend: str, processors: int = 1) -> str:
+    backend_tuning = "clocksource=kvm-clock" if backend == "kvm" else None
+    if backend == "mshv" and processors == 1:
+        backend_tuning = "nolapic_timer"
+    return f"{backend_tuning} {BASE_TUNING}" if backend_tuning else BASE_TUNING
+
+
 def network_gateway(spec: str) -> str:
     try:
         interface = ipaddress.IPv4Interface(spec)
@@ -5073,7 +5080,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         "--initrd",
         str(stage / "initramfs.cpio.gz"),
         "--cmdline",
-        f"clocksource=kvm-clock {BASE_TUNING}",
+        lifecycle_tuning("kvm", args.processors),
     ]
     if args.net is not None:
         append_network_arguments(boot_command, args.net, args.network_profile)
@@ -5334,7 +5341,6 @@ def run_native_linux(args: argparse.Namespace) -> int:
     results = result_document(args, kernel, initrd, backend)
     if run_guest:
         assert executable is not None and kernel is not None and initrd is not None
-
         def make_boot_command(memory_mib: int) -> list[str]:
             command = [
                 *prefix,
@@ -5353,7 +5359,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 "--initrd",
                 str(initrd),
                 "--cmdline",
-                f"{'clocksource=kvm-clock ' if backend == 'kvm' else ''}{BASE_TUNING}",
+                lifecycle_tuning(backend, args.processors),
             ]
             if args.net is not None:
                 append_network_arguments(command, args.net, args.network_profile)

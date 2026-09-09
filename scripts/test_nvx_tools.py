@@ -998,16 +998,16 @@ class BuildTests(unittest.TestCase):
     def test_guest_agent_identity_is_exact_fused_startup_input(self):
         self.assertEqual(
             build.GUEST_AGENT_SOURCE_REVISION,
-            "656112a46293256fffa3fc09cb79c5875a8e56d8",
+            "9d04a1945585d921e96ffab0bf1d8485d08af055",
         )
         self.assertEqual(
             build.GUEST_AGENT_SHA256,
-            "f5bc35cf0196c6ca3f8d428974ce4bf9682af18a84c38338fc5f55f0a53f1f2b",
+            "29cbac26c4d48bae5aa73513a902a770ef829cf645be22f7d1e867cee63ea34a",
         )
-        self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_852_256)
+        self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_839_968)
         self.assertEqual(
             build.GUEST_AGENT_BUILD_ID,
-            "3692dc550ee3450c534ec00b11d1ffdd37dd8f45",
+            "aac039242d57b3a62053d3bd8311a8e7bde3f608",
         )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
@@ -2141,6 +2141,22 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.clocksource_parameter("kvm"), "clocksource=kvm-clock"
         )
         self.assertEqual(benchmark.clocksource_parameter("mshv"), "clocksource=tsc")
+        self.assertEqual(
+            benchmark.lifecycle_tuning("mshv"),
+            f"nolapic_timer {benchmark.BASE_TUNING}",
+        )
+        self.assertEqual(
+            benchmark.lifecycle_tuning("mshv", 2),
+            benchmark.BASE_TUNING,
+        )
+        self.assertEqual(
+            benchmark.lifecycle_tuning("kvm"),
+            f"clocksource=kvm-clock {benchmark.BASE_TUNING}",
+        )
+        self.assertEqual(
+            benchmark.lifecycle_tuning("whp"),
+            benchmark.BASE_TUNING,
+        )
 
     def test_smp_probe_uses_explicit_topology_and_worker_rendezvous(self):
         script = benchmark.smp_probe_script(4)
