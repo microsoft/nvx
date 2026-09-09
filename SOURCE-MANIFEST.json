@@ -42,9 +42,9 @@
     "optional": true,
     "installed_in_initramfs": false,
     "maximum_size_bytes": 16777216,
-    "source_revision": "9d04a1945585d921e96ffab0bf1d8485d08af055",
-    "build_id": "aac039242d57b3a62053d3bd8311a8e7bde3f608",
-    "external_input_sha256": "29cbac26c4d48bae5aa73513a902a770ef829cf645be22f7d1e867cee63ea34a",
+    "source_revision": "a32cf9aed9d06d02bb4b86e1da1e8cd10b3c3e5e",
+    "build_id": "9d63ff4f0a3173f509686ebcc89fb6c237c7a931",
+    "external_input_sha256": "89dd30ad03912eba9117485cbb5e729ec7ff7eb2746b8a41698850717db4545e",
     "external_input_size_bytes": 1839968,
     "protocol_schema_version": 1,
     "transport": "broker-ttrpc"

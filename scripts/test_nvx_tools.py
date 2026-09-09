@@ -1090,16 +1090,16 @@ class BuildTests(unittest.TestCase):
     def test_guest_agent_identity_is_exact_fused_startup_input(self):
         self.assertEqual(
             build.GUEST_AGENT_SOURCE_REVISION,
-            "9d04a1945585d921e96ffab0bf1d8485d08af055",
+            "a32cf9aed9d06d02bb4b86e1da1e8cd10b3c3e5e",
         )
         self.assertEqual(
             build.GUEST_AGENT_SHA256,
-            "29cbac26c4d48bae5aa73513a902a770ef829cf645be22f7d1e867cee63ea34a",
+            "89dd30ad03912eba9117485cbb5e729ec7ff7eb2746b8a41698850717db4545e",
         )
         self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_839_968)
         self.assertEqual(
             build.GUEST_AGENT_BUILD_ID,
-            "aac039242d57b3a62053d3bd8311a8e7bde3f608",
+            "9d63ff4f0a3173f509686ebcc89fb6c237c7a931",
         )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
