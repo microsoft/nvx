@@ -42,7 +42,7 @@
     "optional": true,
     "installed_in_initramfs": false,
     "maximum_size_bytes": 16777216,
-    "source_revision": "865984862aa7cfd78e97e8cd89781226c03d44dc",
+    "source_revision": "865984883584ae5569b1936981921fbe59c1f6e8",
     "build_id": "d7dd52b0b0cd298dbe69268f4347d026b117fb48",
     "external_input_sha256": "be0083fc1b7d77df7f14db705bf74ab52d173f029863643c6d3535307aa6e971",
     "external_input_size_bytes": 1901440,
