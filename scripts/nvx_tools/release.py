@@ -94,6 +94,10 @@ PROJECT_SOURCE_PATHS = (
     "pyproject.toml",
     "requirements-dev.txt",
 )
+KERNEL_PATCH_PATHS = tuple(
+    path.relative_to(REPO_ROOT).as_posix()
+    for path in sorted((REPO_ROOT / "kernel" / "patches").glob("*.patch"))
+)
 
 GUEST_RELEASE_NAMES = (
     "vmlinux",
@@ -503,6 +507,10 @@ def _package_broker_agent_contract() -> dict[str, object]:
     }
 
 
+def _kernel_patch_paths() -> list[str]:
+    return list(KERNEL_PATCH_PATHS)
+
+
 def _validate_root_broker_contract() -> dict[str, object]:
     manifest = _json_object(
         _read_limited_file(
@@ -516,6 +524,10 @@ def _validate_root_broker_contract() -> dict[str, object]:
     if not isinstance(openvmm, dict):
         raise ScriptError("root SOURCE-MANIFEST.json lacks OpenVMM identity")
     typed_openvmm = cast(dict[str, object], openvmm)
+    linux = manifest.get("linux")
+    if not isinstance(linux, dict):
+        raise ScriptError("root SOURCE-MANIFEST.json lacks Linux identity")
+    typed_linux = cast(dict[str, object], linux)
     expected_control = {
         "microvm_abi_version": MICROVM_ABI_VERSION,
         "control_session_protocol_version": CONTROL_SESSION_PROTOCOL_VERSION,
@@ -524,6 +536,7 @@ def _validate_root_broker_contract() -> dict[str, object]:
     if (
         manifest.get("format") != 1
         or manifest.get("guest_agent") != _root_broker_agent_contract()
+        or typed_linux.get("patches") != _kernel_patch_paths()
         or any(
             typed_openvmm.get(field) != value
             for field, value in expected_control.items()
@@ -2086,11 +2099,10 @@ def _validate_linux_source_archive(path: Path) -> None:
         "vmlinux.config": artifact_path("vmlinux.config").read_bytes(),
         "SOURCE-MANIFEST.json": (REPO_ROOT / "SOURCE-MANIFEST.json").read_bytes(),
     }
-    manifest = json.loads(expected_members["SOURCE-MANIFEST.json"])
     expected_members.update(
         {
-            patch: (REPO_ROOT / patch).read_bytes()
-            for patch in manifest["linux"]["patches"]
+            relative: (REPO_ROOT / relative).read_bytes()
+            for relative in _kernel_patch_paths()
         }
     )
     with tarfile.open(path, "r:gz") as archive:

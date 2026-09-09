@@ -3961,7 +3961,7 @@ class ReleaseTests(unittest.TestCase):
                     "control_session_protocol_version": 1,
                     "control_contract_revision": "nvx-microvm-v2-control-v1",
                 },
-                "linux": {},
+                "linux": {"patches": release._kernel_patch_paths()},
                 "alpine": {},
                 "guest_agent": {
                     "artifact": f"guest/{build.GUEST_AGENT_ARTIFACT_NAME}",
@@ -4734,6 +4734,7 @@ class ReleaseTests(unittest.TestCase):
                 ),
                 ("guest_agent", "protocol_schema_version", 2),
                 ("guest_agent", "transport", "legacy"),
+                ("linux", "patches", []),
                 ("openvmm", "microvm_abi_version", 3),
                 ("openvmm", "control_session_protocol_version", 2),
                 ("openvmm", "control_contract_revision", "other-control"),
