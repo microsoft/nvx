@@ -5,7 +5,7 @@
     "version": "0.1.0"
   },
   "openvmm": {
-    "source_revision": "cdb151bbf892ea7e9f2fe405ecba9c6399ef60f5",
+    "source_revision": "ce60c7d9764e55c5de334de3da7267c0de9db9b5",
     "microvm_abi_version": 2,
     "control_session_protocol_version": 1,
     "control_contract_revision": "nvx-microvm-v2-control-v1"
@@ -42,10 +42,10 @@
     "optional": true,
     "installed_in_initramfs": false,
     "maximum_size_bytes": 16777216,
-    "source_revision": "cbd276763e099aa17b3d10addcce8dc23800c9e2",
-    "build_id": "88b4367d246faed047d92a657e762f0bed55b148",
-    "external_input_sha256": "1dadf80070d7675dedeb65eba9b6b72ba3e3f009e366ba0f1db484ed2f9a67dc",
-    "external_input_size_bytes": 1844096,
+    "source_revision": "415288c9a203a0d5d57046bb0d02ff85567da055",
+    "build_id": "95146b33ab68f7466ea652cd21b318ba1a1c5d71",
+    "external_input_sha256": "40bb38f5fea68698b9cb8c44cfccd9d0ff7f580ba871e6839be0f9fbf31724b8",
+    "external_input_size_bytes": 1901440,
     "protocol_schema_version": 1,
     "transport": "broker-ttrpc"
   }
