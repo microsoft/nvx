@@ -1087,7 +1087,10 @@ def _validate_package_manifest(
         or manifest.get("architecture") != "x86_64"
         or typed_artifact != expected_artifact
         or not isinstance(manifest.get("packages"), list)
-        or not cast(list[object], manifest["packages"])
+        or (
+            transport == "legacy"
+            and not cast(list[object], manifest["packages"])
+        )
     ):
         raise ScriptError(
             f"initramfs package manifest does not describe the {transport} artifact"

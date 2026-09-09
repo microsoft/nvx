@@ -74,8 +74,7 @@ REQUIRED_SANDBOX_KERNEL_CONFIG = (
     "CONFIG_OVERLAY_FS=y",
     "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
     "CONFIG_PROC_FS=y",
-    "CONFIG_SECCOMP=y",
-    "CONFIG_SECCOMP_FILTER=y",
+    "# CONFIG_SECCOMP is not set",
     "CONFIG_SYSFS=y",
     "CONFIG_TMPFS=y",
     "CONFIG_UNIX=y",
@@ -705,6 +704,18 @@ def native_initramfs_work_directory(profile: str) -> Path:
     return (base / profile).resolve()
 
 
+def _prepare_agent_root(work: Path, agent_source: Path) -> Path:
+    root = Path(tempfile.mkdtemp(prefix="agent-root-", dir=work))
+    root.chmod(0o755)
+    sbin = root / "sbin"
+    sbin.mkdir(mode=0o755)
+    agent = sbin / GUEST_AGENT_ARTIFACT_NAME
+    shutil.copyfile(agent_source, agent)
+    agent.chmod(0o755)
+    (root / "init").symlink_to(f"sbin/{GUEST_AGENT_ARTIFACT_NAME}")
+    return root
+
+
 def _linux_filesystem_type(path: Path) -> str:
     result = run_capture(["stat", "-f", "-c", "%T", path])
     require_success(result, f"filesystem query for {path}")
@@ -872,28 +883,31 @@ def _write_apk_manifest(
     helpers: dict[str, dict[str, str]],
     agent_sha256: str | None,
 ) -> None:
-    installed = root / "lib" / "apk" / "db" / "installed"
     packages: list[ApkPackage] = []
-    for record in installed.read_text(encoding="utf-8").split("\n\n"):
-        fields: dict[str, str] = {}
-        for line in record.splitlines():
-            if len(line) >= 2 and line[1] == ":":
-                fields[line[0]] = line[2:]
-        if "P" not in fields:
-            continue
-        packages.append(
-            {
-                "name": fields["P"],
-                "version": fields.get("V"),
-                "architecture": fields.get("A"),
-                "license": fields.get("L"),
-                "origin": fields.get("o"),
-                "url": fields.get("U"),
-                "description": fields.get("T"),
-                "aports_commit": fields.get("c"),
-                "build_time": fields.get("t"),
-            }
-        )
+    installed = root / "lib" / "apk" / "db" / "installed"
+    if installed.is_file():
+        for record in installed.read_text(encoding="utf-8").split("\n\n"):
+            fields: dict[str, str] = {}
+            for line in record.splitlines():
+                if len(line) >= 2 and line[1] == ":":
+                    fields[line[0]] = line[2:]
+            if "P" not in fields:
+                continue
+            packages.append(
+                {
+                    "name": fields["P"],
+                    "version": fields.get("V"),
+                    "architecture": fields.get("A"),
+                    "license": fields.get("L"),
+                    "origin": fields.get("o"),
+                    "url": fields.get("U"),
+                    "description": fields.get("T"),
+                    "aports_commit": fields.get("c"),
+                    "build_time": fields.get("t"),
+                }
+            )
+    elif not config.agent_enabled:
+        raise ScriptError(f"legacy initramfs root lacks APK metadata: {installed}")
     packages.sort(key=lambda package: package["name"])
     manifest = output.with_name(f"{output.name}.packages.json")
     manifest.write_text(
@@ -1172,21 +1186,28 @@ def _validated_initramfs_entries(
                 raise ScriptError(f"{path} contains directory {name!r} with data")
         entries[name] = entry
 
-    critical = {
-        ".": (stat.S_IFDIR, 0o755, 0, 0),
-        "bin": (stat.S_IFDIR, 0o755, 0, 0),
-        "bin/busybox": (stat.S_IFREG, 0o755, 0, 0),
-        "etc": (stat.S_IFDIR, 0o755, 0, 0),
-        "etc/group": (stat.S_IFREG, 0o644, 0, 0),
-        "etc/passwd": (stat.S_IFREG, 0o644, 0, 0),
-        "etc/shadow": (stat.S_IFREG, 0o640, 0, 42),
-        "root": (stat.S_IFDIR, 0o700, 0, 0),
-        "sbin": (stat.S_IFDIR, 0o755, 0, 0),
-        "sbin/apk": (stat.S_IFREG, 0o755, 0, 0),
-        "tmp": (stat.S_IFDIR, 0o1777, 0, 0),
-        "var": (stat.S_IFDIR, 0o755, 0, 0),
-        "var/tmp": (stat.S_IFDIR, 0o1777, 0, 0),
-    }
+    critical = (
+        {
+            ".": (stat.S_IFDIR, 0o755, 0, 0),
+            "sbin": (stat.S_IFDIR, 0o755, 0, 0),
+        }
+        if agent_profile
+        else {
+            ".": (stat.S_IFDIR, 0o755, 0, 0),
+            "bin": (stat.S_IFDIR, 0o755, 0, 0),
+            "bin/busybox": (stat.S_IFREG, 0o755, 0, 0),
+            "etc": (stat.S_IFDIR, 0o755, 0, 0),
+            "etc/group": (stat.S_IFREG, 0o644, 0, 0),
+            "etc/passwd": (stat.S_IFREG, 0o644, 0, 0),
+            "etc/shadow": (stat.S_IFREG, 0o640, 0, 42),
+            "root": (stat.S_IFDIR, 0o700, 0, 0),
+            "sbin": (stat.S_IFDIR, 0o755, 0, 0),
+            "sbin/apk": (stat.S_IFREG, 0o755, 0, 0),
+            "tmp": (stat.S_IFDIR, 0o1777, 0, 0),
+            "var": (stat.S_IFDIR, 0o755, 0, 0),
+            "var/tmp": (stat.S_IFDIR, 0o1777, 0, 0),
+        }
+    )
     for name, (file_type, permissions, uid, gid) in critical.items():
         try:
             entry = entries[name]
@@ -1210,6 +1231,12 @@ def _validated_initramfs_entries(
 
 def verify_agent_initramfs(path: Path, expected_sha256: str) -> None:
     entries = _validated_initramfs_entries(path, agent_profile=True)
+    expected_entries = {".", "init", "sbin", "sbin/nvx-agent"}
+    if set(entries) != expected_entries:
+        raise ScriptError(
+            f"{path} agent profile contains unexpected entries: "
+            f"{sorted(set(entries) - expected_entries)}"
+        )
     try:
         agent_entry = entries["sbin/nvx-agent"]
         init_entry = entries["init"]
@@ -1281,79 +1308,87 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
     agent_sha256: str | None = None
     if config.agent_enabled:
         agent_source, agent_sha256 = verified_staged_guest_agent()
-    root = _prepare_alpine_root(config)
-    print(">> installing sandbox utilities into the rootfs")
-    _apk_add(
-        root,
-        "blkid",
-        "busybox-extras",
-        "e2fsprogs",
-        "util-linux",
-        "util-linux-misc",
-    )
-    resolver = root / "etc" / "resolv.conf"
-    resolver.unlink(missing_ok=True)
-    resolver.touch()
     if config.agent_enabled:
         assert agent_source is not None
-        shutil.copyfile(agent_source, root / "sbin" / GUEST_AGENT_ARTIFACT_NAME)
-        (root / "sbin" / GUEST_AGENT_ARTIFACT_NAME).chmod(0o755)
-        (root / "init").symlink_to(f"sbin/{GUEST_AGENT_ARTIFACT_NAME}")
+        root = _prepare_agent_root(config.work, agent_source)
+        helpers: dict[str, dict[str, str]] = {}
+        trusted_owners: dict[str, tuple[int, int]] = {}
     else:
+        root = _prepare_alpine_root(config)
+        print(">> installing sandbox utilities into the rootfs")
+        _apk_add(
+            root,
+            "blkid",
+            "busybox-extras",
+            "e2fsprogs",
+            "util-linux",
+            "util-linux-misc",
+        )
+        resolver = root / "etc" / "resolv.conf"
+        resolver.unlink(missing_ok=True)
+        resolver.touch()
         _install(REPO_ROOT / "alpine" / "init", root / "init")
-    _install(REPO_ROOT / "alpine" / "nvx-exit", root / "sbin" / "nvx-exit")
-    _install(
-        REPO_ROOT / "alpine" / "nvx-hostmount",
-        root / "sbin" / "nvx-hostmount",
-    )
-    _install(
-        REPO_ROOT / "alpine" / "nvx-container-enter",
-        root / "sbin" / "nvx-container-enter",
-    )
-    _install(
-        REPO_ROOT / "alpine" / "nvx-container-launch",
-        root / "sbin" / "nvx-container-launch",
-    )
-    _install(
-        REPO_ROOT / "alpine" / "nvx-init-agent",
-        root / "sbin" / "nvx-init-agent",
-    )
-    _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
-    _install(
-        REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",
-        root / "sbin" / "nvx-virtio-restore-probe",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-reseed.c",
-        root / "sbin" / "nvx-reseed",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-mmio-write.c",
-        root / "sbin" / "nvx-mmio-write",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-port-io.c",
-        root / "sbin" / "nvx-port-io",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-console-pending.c",
-        root / "sbin" / "nvx-console-pending",
-    )
-    device_io = _build_device_io_helper(config.work, root / "sbin" / "nvx-device-io")
+        _install(REPO_ROOT / "alpine" / "nvx-exit", root / "sbin" / "nvx-exit")
+        _install(
+            REPO_ROOT / "alpine" / "nvx-hostmount",
+            root / "sbin" / "nvx-hostmount",
+        )
+        _install(
+            REPO_ROOT / "alpine" / "nvx-container-enter",
+            root / "sbin" / "nvx-container-enter",
+        )
+        _install(
+            REPO_ROOT / "alpine" / "nvx-container-launch",
+            root / "sbin" / "nvx-container-launch",
+        )
+        _install(
+            REPO_ROOT / "alpine" / "nvx-init-agent",
+            root / "sbin" / "nvx-init-agent",
+        )
+        _install(
+            REPO_ROOT / "alpine" / "nvx-snapshot",
+            root / "sbin" / "nvx-snapshot",
+        )
+        _install(
+            REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",
+            root / "sbin" / "nvx-virtio-restore-probe",
+        )
+        _build_static_helper(
+            config.work,
+            REPO_ROOT / "alpine" / "nvx-reseed.c",
+            root / "sbin" / "nvx-reseed",
+        )
+        _build_static_helper(
+            config.work,
+            REPO_ROOT / "alpine" / "nvx-mmio-write.c",
+            root / "sbin" / "nvx-mmio-write",
+        )
+        _build_static_helper(
+            config.work,
+            REPO_ROOT / "alpine" / "nvx-port-io.c",
+            root / "sbin" / "nvx-port-io",
+        )
+        _build_static_helper(
+            config.work,
+            REPO_ROOT / "alpine" / "nvx-console-pending.c",
+            root / "sbin" / "nvx-console-pending",
+        )
+        device_io = _build_device_io_helper(
+            config.work,
+            root / "sbin" / "nvx-device-io",
+        )
+        helpers = {"nvx-device-io": device_io}
+        trusted_owners = _trusted_alpine_owners(config)
     native_output = config.work / "output" / config.output.name
     native_output.parent.mkdir(parents=True, exist_ok=True)
     _write_apk_manifest(
         root,
         native_output,
         config,
-        {"nvx-device-io": device_io},
+        helpers,
         agent_sha256,
     )
-    _pack_initramfs(root, native_output, _trusted_alpine_owners(config))
+    _pack_initramfs(root, native_output, trusted_owners)
     _bind_apk_manifest_to_initramfs(native_output)
     if agent_sha256 is not None:
         verify_agent_initramfs(native_output, agent_sha256)

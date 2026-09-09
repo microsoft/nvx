@@ -140,18 +140,7 @@ def _newc_archive(entries: list[NewcTestEntry]) -> bytes:
 def _agent_newc_entries(agent: bytes) -> list[NewcTestEntry]:
     return [
         (".", 0o040755, b""),
-        ("bin", 0o040755, b""),
-        ("bin/busybox", 0o100755, b"busybox"),
-        ("etc", 0o040755, b""),
-        ("etc/group", 0o100644, b"root:x:0:\n"),
-        ("etc/passwd", 0o100644, b"root:x:0:0:root:/root:/bin/sh\n"),
-        ("etc/shadow", 0o100640, b"root:*::0:::::\n", 0, 42),
-        ("root", 0o040700, b""),
         ("sbin", 0o040755, b""),
-        ("sbin/apk", 0o100755, b"apk"),
-        ("tmp", 0o041777, b""),
-        ("var", 0o040755, b""),
-        ("var/tmp", 0o041777, b""),
         ("init", 0o120777, b"sbin/nvx-agent"),
         ("sbin/nvx-agent", 0o100755, agent),
     ]
@@ -203,7 +192,7 @@ def _initramfs_package_manifest(
             "size": len(image),
         },
         "guest_agent": None,
-        "packages": [{"name": "busybox"}],
+        "packages": [] if profile == "broker-ttrpc" else [{"name": "busybox"}],
     }
     if agent is not None:
         value["guest_agent"] = {
@@ -1505,30 +1494,17 @@ class BuildTests(unittest.TestCase):
                 "does not select",
             ),
             (
-                mutate(
-                    "etc/shadow",
-                    ("etc/shadow", 0o100644, b"shadow", 0, 42),
-                ),
-                "incorrect metadata.*shadow",
-            ),
-            (
-                mutate("etc/passwd", ("etc/passwd", 0o100600, b"passwd")),
-                "incorrect metadata.*passwd",
-            ),
-            (
-                mutate("tmp", ("tmp", 0o040777, b"")),
+                mutate("sbin", ("sbin", 0o040777, b"")),
                 "unsafe world-writable directory",
             ),
             (
-                mutate("bin", ("bin", 0o040777, b"")),
-                "unsafe world-writable directory",
-            ),
-            (
-                mutate(
-                    "bin/busybox",
-                    ("bin/busybox", 0o100750, _static_x86_64_elf()),
+                _newc_archive(
+                    [
+                        *_agent_newc_entries(agent),
+                        ("sbin/extra", 0o100755, _static_x86_64_elf()),
+                    ]
                 ),
-                "ELF binary.*without 0755",
+                "unexpected entries",
             ),
             (
                 _newc_archive(
@@ -1585,7 +1561,10 @@ class BuildTests(unittest.TestCase):
                 broker,
                 hashlib.sha256(agent).hexdigest(),
             )
-            with self.assertRaisesRegex(common.ScriptError, "NVX PID-1 layout"):
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "NVX PID-1 layout|unexpected entries",
+            ):
                 build.verify_agent_initramfs(
                     legacy,
                     hashlib.sha256(agent).hexdigest(),
