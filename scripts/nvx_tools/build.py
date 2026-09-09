@@ -516,6 +516,9 @@ def _kernel_source_fingerprint() -> str:
     return json.dumps(
         {
             "archive_sha256": DEFAULT_KERNEL_SHA256,
+            "input_config_sha256": sha256_file(
+                REPO_ROOT / "kernel" / "config-microvm"
+            ),
             "patches": [
                 {"name": patch.name, "sha256": sha256_file(patch)}
                 for patch in _kernel_patch_files()

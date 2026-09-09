@@ -1137,6 +1137,31 @@ class BuildTests(unittest.TestCase):
             ):
                 build._assert_shared_status_kernel_config(config)
 
+    def test_kernel_source_fingerprint_covers_config_and_every_patch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "kernel" / "config-microvm"
+            first_patch = root / "kernel" / "patches" / "0001-first.patch"
+            second_patch = root / "kernel" / "patches" / "0002-second.patch"
+            for path, contents in (
+                (config, "CONFIG_TEST=y\n"),
+                (first_patch, "first\n"),
+                (second_patch, "second\n"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents, encoding="utf-8")
+
+            with patch.object(build, "REPO_ROOT", root):
+                original = build._kernel_source_fingerprint()
+                config.write_text("CONFIG_TEST=n\n", encoding="utf-8")
+                changed_config = build._kernel_source_fingerprint()
+                config.write_text("CONFIG_TEST=y\n", encoding="utf-8")
+                second_patch.write_text("changed\n", encoding="utf-8")
+                changed_patch = build._kernel_source_fingerprint()
+
+            self.assertNotEqual(original, changed_config)
+            self.assertNotEqual(original, changed_patch)
+
     def test_stage_guest_agent_requires_exact_reviewed_static_x86_64_elf(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
