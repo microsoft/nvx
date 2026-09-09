@@ -979,6 +979,98 @@ class BuildTests(unittest.TestCase):
             )
             self.assertEqual(len(provenance["source_sha256"]), 64)
 
+    def test_build_initramfs_builds_reseed_with_static_helper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            repository = temporary_root / "repo"
+            work = temporary_root / "work"
+            root = work / "root"
+            metadata_probe = work / "metadata-probe"
+            output = temporary_root / "artifacts" / "initramfs.cpio.gz"
+            for directory in (root / "etc", root / "sbin", metadata_probe):
+                directory.mkdir(parents=True)
+            config = build.AlpineBuildConfig(work=work, output=output)
+            observed_reseed: dict[str, object] = {}
+
+            def install(_source: Path, destination: Path) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"script")
+                destination.chmod(0o755)
+
+            def build_static_helper(
+                _work: Path, source: Path, destination: Path
+            ) -> None:
+                destination.write_bytes(f"static:{source.name}".encode())
+                destination.chmod(0o755)
+
+            def build_device_io(
+                _work: Path, destination: Path
+            ) -> dict[str, str]:
+                destination.write_bytes(b"device-io")
+                destination.chmod(0o755)
+                return {"source_sha256": "source", "binary_sha256": "binary"}
+
+            def pack_initramfs(
+                prepared_root: Path, native_output: Path, _owners: object
+            ) -> None:
+                reseed = prepared_root / "sbin" / "nvx-reseed"
+                observed_reseed["content"] = reseed.read_bytes()
+                native_output.write_bytes(b"initramfs")
+                native_output.with_name(
+                    f"{native_output.name}.packages.json"
+                ).write_text("{}", encoding="ascii")
+
+            with (
+                patch.object(build, "REPO_ROOT", repository),
+                patch.object(build, "_require_linux"),
+                patch.object(
+                    build,
+                    "_require_metadata_preserving_work_directory",
+                    return_value=metadata_probe,
+                ),
+                patch.object(build, "_prepare_alpine_root", return_value=root),
+                patch.object(build, "_apk_add"),
+                patch.object(build, "_install", side_effect=install),
+                patch.object(
+                    build,
+                    "_build_static_helper",
+                    side_effect=build_static_helper,
+                ) as static_helper,
+                patch.object(
+                    build,
+                    "_build_device_io_helper",
+                    side_effect=build_device_io,
+                ),
+                patch.object(build, "_write_apk_manifest"),
+                patch.object(build, "_trusted_alpine_owners", return_value={}),
+                patch.object(
+                    build, "_pack_initramfs", side_effect=pack_initramfs
+                ),
+                patch.object(build, "_bind_apk_manifest_to_initramfs"),
+                patch.object(build, "verify_legacy_initramfs") as verify,
+            ):
+                build.build_initramfs(config)
+
+            self.assertEqual(
+                static_helper.call_args_list[0],
+                call(
+                    work,
+                    repository / "alpine" / "nvx-reseed.c",
+                    root / "sbin" / "nvx-reseed",
+                ),
+            )
+            self.assertEqual(observed_reseed["content"], b"static:nvx-reseed.c")
+            self.assertEqual(output.read_bytes(), b"initramfs")
+            self.assertEqual(
+                output.with_name(f"{output.name}.packages.json").read_text(
+                    encoding="ascii"
+                ),
+                "{}",
+            )
+            verify.assert_called_once_with(work / "output" / output.name)
+            self.assertFalse(root.exists())
+            self.assertFalse(metadata_probe.exists())
+
     def test_apk_uses_the_extracted_alpine_trust_store(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

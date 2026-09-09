@@ -1319,7 +1319,11 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",
         root / "sbin" / "nvx-virtio-restore-probe",
     )
-    _build_reseed_helper(config.work, root / "sbin" / "nvx-reseed")
+    _build_static_helper(
+        config.work,
+        REPO_ROOT / "alpine" / "nvx-reseed.c",
+        root / "sbin" / "nvx-reseed",
+    )
     _build_static_helper(
         config.work,
         REPO_ROOT / "alpine" / "nvx-mmio-write.c",
