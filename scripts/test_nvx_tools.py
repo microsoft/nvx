@@ -3953,6 +3953,10 @@ class ReleaseTests(unittest.TestCase):
             (build_dir / "initramfs.cpio.gz.packages.json").write_bytes(
                 _initramfs_package_manifest("legacy", legacy_initramfs)
             )
+            (build_dir / "vmlinux.config").write_text(
+                "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
+                encoding="utf-8",
+            )
             source_manifest = {
                 "format": 1,
                 "openvmm": {
@@ -3996,6 +4000,22 @@ class ReleaseTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            kernel_source_fingerprint = build._kernel_source_fingerprint()
+            (build_dir / build.KERNEL_PROVENANCE_NAME).write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "source_fingerprint": json.loads(kernel_source_fingerprint),
+                        "kernel_sha256": hashlib.sha256(
+                            (build_dir / "vmlinux").read_bytes()
+                        ).hexdigest(),
+                        "config_sha256": hashlib.sha256(
+                            (build_dir / "vmlinux.config").read_bytes()
+                        ).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
             agent = build_dir / build.GUEST_AGENT_ARTIFACT_NAME
             agent.write_bytes(agent_bytes)
             agent_initramfs = _agent_newc_archive(agent.read_bytes())
@@ -4028,6 +4048,11 @@ class ReleaseTests(unittest.TestCase):
                     release,
                     "artifact_path",
                     side_effect=artifact_path,
+                ),
+                patch.object(
+                    release,
+                    "_kernel_source_fingerprint",
+                    return_value=kernel_source_fingerprint,
                 ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
                 patch.object(release, "GUEST_AGENT_SHA256", agent_sha256),
@@ -4697,6 +4722,46 @@ class ReleaseTests(unittest.TestCase):
                         build.BROKER_TRANSPORT,
                         True,
                     )
+
+    def test_kernel_provenance_rejects_stale_source_or_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kernel = root / "vmlinux"
+            config = root / "vmlinux.config"
+            provenance = root / build.KERNEL_PROVENANCE_NAME
+            kernel.write_bytes(b"kernel")
+            config.write_text(
+                "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
+                encoding="utf-8",
+            )
+            source_fingerprint = json.dumps(
+                {"archive_sha256": "a" * 64, "patches": []},
+                sort_keys=True,
+            )
+            provenance.write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "source_fingerprint": json.loads(source_fingerprint),
+                        "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
+                        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                release,
+                "_kernel_source_fingerprint",
+                return_value=source_fingerprint,
+            ):
+                release._validate_kernel_provenance(kernel, config, provenance)
+                kernel.write_bytes(b"stale")
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "kernel build provenance",
+                ):
+                    release._validate_kernel_provenance(kernel, config, provenance)
 
     def test_root_source_manifest_pins_every_broker_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

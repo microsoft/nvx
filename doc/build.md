@@ -32,6 +32,7 @@ The standard build produces:
 ```text
 build/vmlinux
 build/vmlinux.config
+build/vmlinux.provenance.json
 build/initramfs.cpio.gz
 build/initramfs.cpio.gz.packages.json
 openvmm/target/release/openvmm[.exe]

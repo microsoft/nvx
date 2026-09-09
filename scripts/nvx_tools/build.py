@@ -103,6 +103,7 @@ MICROVM_ABI_VERSION = 2
 CONTROL_SESSION_PROTOCOL_VERSION = 1
 CONTROL_CONTRACT_REVISION = "nvx-microvm-v2-control-v1"
 OPENVMM_PROVENANCE_NAME = "openvmm.provenance.json"
+KERNEL_PROVENANCE_NAME = "vmlinux.provenance.json"
 UNSAFE_INITRAMFS_FILESYSTEMS = frozenset(
     {
         "9p",
@@ -1405,6 +1406,17 @@ def build_kernel(config: KernelBuildConfig) -> None:
     else:
         config.output.unlink(missing_ok=True)
         raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
+
+    provenance = {
+        "format": 1,
+        "source_fingerprint": json.loads(source_fingerprint),
+        "kernel_sha256": sha256_file(config.output),
+        "config_sha256": sha256_file(kernel_config),
+    }
+    config.output.with_name(KERNEL_PROVENANCE_NAME).write_text(
+        json.dumps(provenance, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:

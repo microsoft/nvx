@@ -46,10 +46,13 @@ from .build import (
     GUEST_AGENT_SIZE_BYTES,
     GUEST_AGENT_SOURCE_REVISION,
     GUEST_AGENT_TARGET,
+    KERNEL_PROVENANCE_NAME,
     MICROVM_ABI_VERSION,
     OPENVMM_PROVENANCE_NAME,
     REQUIRED_SANDBOX_KERNEL_CONFIG,
     DockerBuildConfig,
+    _assert_shared_status_kernel_config,
+    _kernel_source_fingerprint,
     build_docker_linux_source,
     validate_static_x86_64_elf,
     verify_agent_initramfs,
@@ -2133,6 +2136,14 @@ def _guest_release_inputs(
         name: require_file(artifact_path(name), f"required guest artifact {name}")
         for name in ("vmlinux", "vmlinux.config")
     }
+    _validate_kernel_provenance(
+        common["vmlinux"],
+        common["vmlinux.config"],
+        require_file(
+            artifact_path(KERNEL_PROVENANCE_NAME),
+            "kernel build provenance",
+        ),
+    )
     if transport == "legacy":
         inputs = {
             **common,
@@ -2215,6 +2226,28 @@ def _guest_release_inputs(
         GUEST_AGENT_ARTIFACT_NAME: agent,
     }
     return inputs, [agent_packages]
+
+
+def _validate_kernel_provenance(
+    kernel: Path,
+    kernel_config: Path,
+    provenance_path: Path,
+) -> None:
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        expected_source = json.loads(_kernel_source_fingerprint())
+    except (json.JSONDecodeError, OSError) as error:
+        raise ScriptError(f"invalid kernel build provenance: {error}") from error
+    if (
+        provenance.get("format") != 1
+        or provenance.get("source_fingerprint") != expected_source
+        or provenance.get("kernel_sha256") != sha256_file(kernel)
+        or provenance.get("config_sha256") != sha256_file(kernel_config)
+    ):
+        raise ScriptError(
+            "kernel build provenance does not match the current source, config, and vmlinux"
+        )
+    _assert_shared_status_kernel_config(kernel_config)
 
 
 def _runtime_source_manifest(
