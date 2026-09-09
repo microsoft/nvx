@@ -68,7 +68,7 @@ reproduces nor authenticates the image bytes.
 The broker package accepts only the reviewed ACI-03 input:
 source `865984862aa7cfd78e97e8cd89781226c03d44dc`, SHA-256
 `be0083fc1b7d77df7f14db705bf74ab52d173f029863643c6d3535307aa6e971`,
-size `1,844,096` bytes, and build ID
+size `1,901,440` bytes, and build ID
 `d7dd52b0b0cd298dbe69268f4347d026b117fb48`. Source provenance does not
 imply byte identity; a same-source binary with a different digest is rejected.
 

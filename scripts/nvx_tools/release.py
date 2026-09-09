@@ -1081,16 +1081,15 @@ def _validate_package_manifest(
         "sha256": sha256_file(initramfs),
         "size": initramfs.stat().st_size,
     }
+    packages = manifest.get("packages")
     if (
         manifest.get("format") != 1
         or manifest.get("profile") != transport
         or manifest.get("architecture") != "x86_64"
         or typed_artifact != expected_artifact
-        or not isinstance(manifest.get("packages"), list)
-        or (
-            transport == "legacy"
-            and not cast(list[object], manifest["packages"])
-        )
+        or not isinstance(packages, list)
+        or (transport == "legacy" and not packages)
+        or (transport == "broker-ttrpc" and packages)
     ):
         raise ScriptError(
             f"initramfs package manifest does not describe the {transport} artifact"
@@ -2311,11 +2310,12 @@ def _runtime_source_manifest(
 
 def collect_release_sources(transport: str) -> None:
     _guest_inputs, package_manifests = _guest_release_inputs(transport)
-    collect_alpine_sources(
-        package_manifests,
-        SOURCE_DIR / "alpine",
-        REPO_ROOT / ".cache" / "aports",
-    )
+    if transport == "legacy":
+        collect_alpine_sources(
+            package_manifests,
+            SOURCE_DIR / "alpine",
+            REPO_ROOT / ".cache" / "aports",
+        )
     build_docker_linux_source(DockerBuildConfig(destination=SOURCE_DIR / "linux"))
     print(f">> collected release sources under {SOURCE_DIR}")
 
@@ -2334,7 +2334,8 @@ def package_release(
         SOURCE_DIR / "linux" / f"nvx-linux-source-{DEFAULT_KERNEL_VERSION}.tar.gz"
     )
     if include_source:
-        _validate_alpine_sources(package_manifests)
+        if transport == "legacy":
+            _validate_alpine_sources(package_manifests)
         require_file(linux_source_archive, "Linux corresponding-source archive")
         _validate_linux_source_archive(linux_source_archive)
     else:
@@ -2448,11 +2449,12 @@ def package_release(
             release_version,
             package_manifests,
         )
-        _alpine_source_archive(
-            source_destination / f"nvx-alpine-source-{release_version}.tar.gz",
-            release_version,
-            package_manifests,
-        )
+        if transport == "legacy":
+            _alpine_source_archive(
+                source_destination / f"nvx-alpine-source-{release_version}.tar.gz",
+                release_version,
+                package_manifests,
+            )
     runtime_manifest = json.loads(runtime_manifest_path.read_text(encoding="utf-8"))
     _verify_runtime_fingerprint(runtime_manifest)
     packaged_initramfs = release_destination / "guest" / "initramfs.cpio.gz"

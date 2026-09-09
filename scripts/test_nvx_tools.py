@@ -3719,6 +3719,22 @@ class BenchmarkTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_broker_source_collection_skips_empty_alpine_inventory(self):
+        package_manifest = Path("initramfs-agent.cpio.gz.packages.json")
+        with (
+            patch.object(
+                release,
+                "_guest_release_inputs",
+                return_value=({}, [package_manifest]),
+            ),
+            patch.object(release, "collect_alpine_sources") as collect_alpine,
+            patch.object(release, "build_docker_linux_source") as collect_linux,
+        ):
+            release.collect_release_sources("broker-ttrpc")
+
+        collect_alpine.assert_not_called()
+        collect_linux.assert_called_once()
+
     def test_transaction_rolls_back_base_exceptions_at_every_stage(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -5260,15 +5276,15 @@ class ReleaseTests(unittest.TestCase):
 
             installed_snapshot = snapshot()
             tampered_entries = _agent_newc_entries(agent.read_bytes())
-            group_index = next(
+            agent_index = next(
                 index
                 for index, entry in enumerate(tampered_entries)
-                if entry[0] == "etc/group"
+                if entry[0] == "sbin/nvx-agent"
             )
-            tampered_entries[group_index] = (
-                "etc/group",
-                0o100644,
-                b"root:x:0:\nchanged:x:1:\n",
+            tampered_entries[agent_index] = (
+                "sbin/nvx-agent",
+                0o100755,
+                b"tampered-agent",
             )
             tampered_image = _newc_archive(tampered_entries)
             agent_initramfs.write_bytes(tampered_image)
