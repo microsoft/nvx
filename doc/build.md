@@ -52,7 +52,7 @@ These are the ABI-v1/legacy artifacts. They continue to use `alpine/init` and,
 when selected by the legacy sandbox token, `nvx-init-agent`.
 
 The broker artifact uses the reviewed ACI-03 source revision
-`a32cf9aed9d06d02bb4b86e1da1e8cd10b3c3e5e`. That revision computes the
+`71cdad58d0066b07ec117c8113a25936f211637f`. That revision computes the
 running `/proc/self/exe` SHA-256 and compares it with the authenticated
 manifest, starts the fixed image from PID 1, publishes level-triggered startup
 state, and gives control traffic priority over downstream console traffic. Build
@@ -72,9 +72,9 @@ sha256sum \
 The ACI validator rejects `PT_INTERP`, forbidden CLH/runc/tonic dependencies,
 and binaries larger than 16 MiB. The release input is the persistent staged
 artifact whose SHA-256 is
-`89dd30ad03912eba9117485cbb5e729ec7ff7eb2746b8a41698850717db4545e`,
-size is `1,839,968` bytes, and ELF GNU build ID is
-`9d63ff4f0a3173f509686ebcc89fb6c237c7a931`. The source revision records
+`64c4c381daa4af1188e751e49002aaf3089e22fab0fa047cc738d45d7851dc80`,
+size is `1,844,064` bytes, and ELF GNU build ID is
+`ad2432720e08f7d925398c0e7334140434d6979c`. The source revision records
 provenance; it is not sufficient byte identity. The current linker build ID is
 affected by the Cargo target path, so a build from the same source into a
 different target directory can have another digest. Do not claim source-only
@@ -82,8 +82,8 @@ byte reproducibility. Stage only the reviewed external input:
 
 ```bash
 python3 scripts/nvx.py stage-agent \
-  --input build/nvx-agent-a32cf9a-input \
-  --sha256 89dd30ad03912eba9117485cbb5e729ec7ff7eb2746b8a41698850717db4545e
+  --input build/nvx-agent-71cdad5-input \
+  --sha256 64c4c381daa4af1188e751e49002aaf3089e22fab0fa047cc738d45d7851dc80
 ```
 
 The command requires a static x86-64 ELF and writes `build/nvx-agent` plus its
