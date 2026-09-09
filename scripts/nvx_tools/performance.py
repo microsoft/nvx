@@ -72,6 +72,7 @@ BYTES_PER_MIB = 1024 * 1024
 LIFECYCLE_MEMORY_MIB = 128
 LIFECYCLE_BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
 LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
+LIFECYCLE_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
@@ -967,6 +968,16 @@ def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
             f"{input_path} has unexpected snapshot-restore marker "
             f"{controls.get('restore_marker')!r}"
         )
+    if controls.get("snapshot_capture_timing") != LIFECYCLE_CAPTURE_TIMING:
+        raise PerformanceError(
+            f"{input_path} must use {LIFECYCLE_CAPTURE_TIMING} snapshot timing; "
+            "host console request timing is not a generation metric"
+        )
+    if controls.get("snapshot_restore_guest_exit_prequeued") is not True:
+        raise PerformanceError(
+            f"{input_path} must prequeue snapshot-restore guest exit; "
+            "host console command delivery must not be included in teardown"
+        )
 
     runs = controls.get("runs")
     if isinstance(runs, bool) or not isinstance(runs, int) or runs <= 0:
@@ -979,12 +990,7 @@ def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
         ),
         (
             "snapshot_capture",
-            (
-                "request_to_publication_p50_ms",
-                "request_to_publication_min_ms",
-                "request_to_publication_max_ms",
-                "request_to_publication_samples_ms",
-            ),
+            ("p50_ms", "min_ms", "max_ms", "samples_ms"),
         ),
         (
             "snapshot_restore",
@@ -1057,7 +1063,7 @@ def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
         (
             "openvmm_snapshot_generation",
             "snapshot_capture",
-            "request_to_publication_p50_ms",
+            "p50_ms",
             "ms",
         ),
         ("openvmm_snapshot_restore", "snapshot_restore", "p50_ms", "ms"),
@@ -1132,6 +1138,11 @@ def append_openvmm_diagnostics(
         ),
         (
             "Snapshot generation",
+            "snapshot_capture",
+            ("p50_ms", "min_ms", "max_ms", "samples_ms"),
+        ),
+        (
+            "Host snapshot request to publication (diagnostic)",
             "snapshot_capture",
             (
                 "request_to_publication_p50_ms",
@@ -1721,6 +1732,7 @@ def gate_results(
     summary_path: Path | None = None,
     absolute_tolerance_ms: float = 5.0,
     minimum_history: int = 10,
+    history_reset_dir: Path | None = None,
 ) -> int:
     if minimum_history > window:
         raise PerformanceError(
@@ -1758,6 +1770,24 @@ def gate_results(
             if baseline_path.exists()
             else []
         )
+        reset_dimensions: set[tuple[str, int, int, str]] = set()
+        if history_reset_dir is not None:
+            candidate = history_reset_dir / target_path.name
+            if candidate.is_file():
+                retained_dimensions = {
+                    _dimension_key(result, platform)
+                    for result in _compatible_baseline_results(
+                        platform, read_results(candidate)
+                    )
+                }
+                reset_dimensions = {
+                    _dimension_key(result, platform) for result in baselines
+                } - retained_dimensions
+                baselines = [
+                    result
+                    for result in baselines
+                    if _dimension_key(result, platform) not in reset_dimensions
+                ]
         history: dict[tuple[str, int, int, str], deque[Result]] = defaultdict(
             lambda: deque(maxlen=window)
         )
@@ -1768,13 +1798,17 @@ def gate_results(
             dimension = _dimension_label(target, platform)
             samples = history.get(_dimension_key(target, platform))
             if not samples:
-                message = (
-                    f"WARMUP: {dimension}/{target.metric} has no base-branch history"
+                reset = _dimension_key(target, platform) in reset_dimensions
+                reason = (
+                    "history explicitly reset in this change"
+                    if reset
+                    else "has no base-branch history"
                 )
-                print(message)
+                print(f"WARMUP: {dimension}/{target.metric} {reason}")
+                status = "Warmup (history reset)" if reset else "Warmup"
                 summary.append(
                     f"| {dimension} | `{target.metric}` | "
-                    f"{_format_value(target.p50, target.unit)} | - | - | Warmup |"
+                    f"{_format_value(target.p50, target.unit)} | - | - | {status} |"
                 )
                 continue
             if len(samples) < minimum_history:
@@ -1908,6 +1942,14 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     gate = commands.add_parser("gate", help="check current p50 values for regressions")
     gate.add_argument("--baseline-dir", type=Path, required=True)
     gate.add_argument("--target-dir", type=Path, required=True)
+    gate.add_argument(
+        "--history-reset-dir",
+        type=Path,
+        help=(
+            "tracked candidate histories; metrics removed from an existing "
+            "history file restart baseline warmup"
+        ),
+    )
     gate.add_argument("--window", type=_positive_int, default=10)
     gate.add_argument(
         "--minimum-history",
@@ -1978,6 +2020,7 @@ def command_performance(args: argparse.Namespace) -> int:
                 summary_path=args.summary,
                 absolute_tolerance_ms=args.absolute_tolerance_ms,
                 minimum_history=args.minimum_history,
+                history_reset_dir=args.history_reset_dir,
             )
         persist_results(args.source_dir, args.history_dir, args.exclude_metric)
         return 0

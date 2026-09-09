@@ -153,7 +153,8 @@ python scripts\nvx.py benchmark --suite snapshot-profile --backend whp --warmups
 The default matrix profiles 64, 128, 256, 512, and 1024 MiB snapshots with both warm and cold
 restore artifacts. Use `--shell-memories` to select sizes and `--cache-state warm`, `cold`, or
 `both` to select cache conditions. The suite enables OpenVMM profiling for these diagnostic runs;
-other benchmark paths leave it disabled unless `--snapshot-profile` is explicit.
+other paths leave full profiling disabled unless `--snapshot-profile` is explicit.
+Snapshot capture always collects the OpenVMM clock records needed for its generation metric.
 
 Run the non-canonical virtio restore diagnostic with a fresh output directory:
 
@@ -274,35 +275,40 @@ replace `console=hvc0` with `console=hvc1` when a virtio console is selected.
 
 ### Shell lifecycle
 
-CI runs one warmup and three measured samples with a 128 MiB guest. Each phase uses a fresh
+CI runs one warmup and ten measured samples with a 128 MiB guest. Each phase uses a fresh
 OpenVMM process. The final measured snapshot is retained for the restore samples.
 
 | Metric | Unit | Description |
 | --- | --- | --- |
 | `openvmm_cold_start` | ms | Immediately before OpenVMM process creation through `ALPINE-MICROVM-BOOT-OK`. |
-| `openvmm_snapshot_generation` | ms | Immediately before dispatching guest `nvx-snapshot` through the first host observation of the atomically published snapshot directory. |
+| `openvmm_snapshot_generation` | ms | OpenVMM process-clock interval from `capture.input_gate` start through `capture.publication_commit`; excludes host-to-guest console delivery and publication polling. |
 | `openvmm_snapshot_restore` | ms | Immediately before restored OpenVMM process creation through `OPENVMM-SNAPSHOT-RESTORE-OK`. |
 | `openvmm_cold_start_guest_exit_teardown` | ms | Dispatch of guest `nvx-exit 0` after the cold-start marker through successful OpenVMM process exit. |
-| `openvmm_snapshot_restore_guest_exit_teardown` | ms | Dispatch of guest `nvx-exit 0` after the restore marker through successful OpenVMM process exit. |
+| `openvmm_snapshot_restore_guest_exit_teardown` | ms | Host observation of the restore marker through successful OpenVMM process exit, with guest `nvx-exit 0` already queued in the capture controller. |
 | `openvmm_cold_start_peak_rss` | MiB | Per-process peak RSS through the cold-start marker. |
 | `openvmm_snapshot_generation_peak_rss` | MiB | Per-process peak RSS for the snapshot-generating process. |
 | `openvmm_snapshot_restore_peak_rss` | MiB | Per-process peak RSS through the restore marker. |
 
 Warmups are excluded from every aggregate. The CSV stores and gates p50 values. Lifecycle
 diagnostics additionally report timing minimum, maximum, and sample count plus peak-RSS maximum.
-Collection rejects host-termination semantics, missing samples, and any guest-exit teardown
-timeout.
+Collection rejects host-termination semantics, legacy console-timed capture results, restore
+results without prequeued guest exit, missing samples, and any guest-exit teardown timeout.
 Lifecycle capture runs a deterministic affinity-pinned worker on every vCPU
-before the snapshot request and again after restore continuation. The probe is
-outside the snapshot-generation timing interval. Each worker completes only
+before the snapshot request. Explicit correctness scenarios also stage a post-restore probe.
+The capture probe is outside the snapshot-generation timing interval. Each worker completes only
 after its CPU's LAPIC counter advances, avoiding fixed-duration guest sleeps.
 The coordinator stages the probe and a capture controller in guest memory. The
 controller runs the first probe, blocks in `read`, and invokes `nvx-snapshot` when the
-host sends the timed trigger. On restore, that same controller runs the second probe and
-prints the marker before returning to the interactive shell. After observing the marker,
-the coordinator performs the selected teardown, sending `nvx-exit 0` in guest-exit mode.
-This keeps the trigger on an active console read and avoids charging interactive-shell
-command polling to capture.
+host sends the trigger. The controller always emits `NVX-SNAPSHOT-DISPATCHED` immediately before
+`nvx-snapshot`. On restore it completes any staged validation, prints the restore marker, and
+executes the prequeued `nvx-exit 0` in guest-exit mode. Host-termination mode leaves the guest
+running until the host terminates it.
+
+The interrupt-less `hvc0` console polls even when the controller blocks in `read`. Its delivery
+delay is retained in the non-gating `request_to_publication_*` JSON fields; a profiled capture
+also separates `console_command_round_trip` and host-observed `guest_dispatch_to_publication`.
+Neither observer interval is the generation metric. The canonical `samples_ms`/`p50_ms` and
+profile phase `capture.snapshot_generation` use the same OpenVMM clock interval.
 
 ### Cold start
 
@@ -397,9 +403,11 @@ artifact under each selected cache condition. A warm run sequentially reads `man
 `POSIX_FADV_DONTNEED` to each artifact. Windows cold runs restore from a fresh unbuffered
 `robocopy /J` clone. The selected mechanism is recorded as `cache_control` alongside each result.
 
-OpenVMM profiling is opt-in through `OPENVMM_STARTUP_PROFILE=1`. The coordinator removes that
-variable from ordinary benchmark subprocesses and sets it only when `--snapshot-profile` is
-requested or the `snapshot-profile` suite is selected. OpenVMM emits one ASCII record per phase
+Snapshot capture always enables `OPENVMM_STARTUP_PROFILE=1` to measure generation on OpenVMM's
+process-relative clock. Missing, duplicate, wrong-process, or non-monotonic capture boundaries
+are errors, not a fallback to console timing. Full profile retention and host resource counters
+remain opt-in through `--snapshot-profile` or the `snapshot-profile` suite. Other benchmark
+subprocesses remove the variable unless profiling is requested. OpenVMM emits one ASCII record per phase
 with the versioned `OPENVMM_SNAPSHOT_PROFILE_V1` prefix. Each record contains:
 
 - `operation`, `phase`, and `exclusive`, where exclusive phases are disjoint intervals and
@@ -408,13 +416,14 @@ with the versioned `OPENVMM_SNAPSHOT_PROFILE_V1` prefix. Each record contains:
 - phase-specific `logical_bytes`, `allocated_bytes`, `gpa_faults`, and `populated_bytes` when
 	available.
 
-The coordinator retains every record in `profile.raw_samples`. It adds observer-defined
+With full profiling, the coordinator retains every record in `profile.raw_samples`. It derives
+`capture.snapshot_generation` from the OpenVMM clock and adds observer-defined
 `process_startup`, `console_input_dispatch`, `console_command_round_trip`,
 `guest_dispatch_to_publication`, `request_to_publication`, `source_teardown`,
 `resume_to_readiness`, and `process_launch_to_readiness` boundaries without mixing them into
 OpenVMM-exclusive intervals. `console_input_dispatch` measures the synchronous write of the
 snapshot command and prequeued restore script to the OpenVMM console and records the payload size.
-Profiled captures additionally emit a guest marker immediately before `nvx-snapshot`;
+All captures emit a guest marker immediately before `nvx-snapshot`;
 `console_command_round_trip` ends when the host observes that marker, and
 `guest_dispatch_to_publication` spans that observation through snapshot publication.
 Each observed record also includes available process counters. Linux reports RSS, peak RSS,
@@ -482,19 +491,32 @@ builds append collected results to topology-specific files in `data/`. Every
 new ABI/count series begins as a warmup baseline before its regression gate
 has enough matching history.
 
+The correction for issue #248 resets only `openvmm_snapshot_generation` and
+`openvmm_snapshot_restore_guest_exit_teardown` histories across all five host series,
+including their legacy ABI-1 rows. Those old console-contaminated measurements are removed,
+not compared with the new timing boundaries. All other history rows and gate thresholds are
+unchanged. CI passes `--history-reset-dir data` to honor metrics explicitly removed from a
+tracked candidate history file even before the reset merges into the base branch. After merge,
+the affected metrics start the normal ten-point warmup again; a missing candidate file alone
+does not reset a base-branch history.
+
 ## Lifecycle methodology
 
 The lifecycle benchmark uses the optimized 128 MiB shell-ready guest as one baseline across KVM,
 MSHV, and WHP. Host timing starts immediately before `Popen`, so cold-start and restore values
-include OpenVMM process startup and VM construction. Snapshot-generation timing starts immediately
-before the host writes `nvx-snapshot` to the guest shell and ends when the host first observes the
-atomically published snapshot directory; publication is polled every 1 ms after dispatch.
+include OpenVMM process startup and VM construction. Snapshot generation uses OpenVMM's monotonic
+process clock from the beginning of input gating, after the guest requests the snapshot, through
+atomic publication. It does not include delivery of `nvx-snapshot` over the polling console.
+Host request-to-publication and first publication observation (polled every 1 ms) remain diagnostics.
 
 After a cold-start marker, the host dispatches guest `nvx-exit 0` and measures
-until the OpenVMM process exits successfully. Snapshot capture instead queues
+until the OpenVMM process exits successfully; cold-start teardown still includes console
+delivery. Snapshot capture instead queues
 the restore marker and `nvx-exit 0` together after the capture boundary.
 Restore teardown therefore begins at the standalone marker line and does not
 depend on a second host-to-guest poll of the interrupt-less `hvc0` console.
+It is a host-observed marker-to-exit interval, including remaining guest shutdown and observer
+scheduling, not a measurement of VMM-internal teardown alone.
 CI allows up to 15 seconds for process exit before rejecting a measured
 sample. Snapshot-source exit after publication is retained in the raw JSON as
 a diagnostic but is not the guest-exit teardown metric.

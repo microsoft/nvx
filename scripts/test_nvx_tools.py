@@ -697,22 +697,180 @@ class BenchmarkTests(unittest.TestCase):
         collector = benchmark.SnapshotProfileCollector(42, 100)
 
         with patch.object(benchmark, "process_resource_counters", return_value={}):
+            collector.feed(
+                b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=capture "
+                b"phase=input_gate exclusive=1 duration_ns=20 "
+                b"process_elapsed_ns=120 pid=42\n"
+                b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=capture "
+                b"phase=publication_commit exclusive=1 duration_ns=10 "
+                b"process_elapsed_ns=310 pid=42\n"
+            )
             sample = collector.finish_capture(200, 260, 300, 400, 450, 4096)
 
         records = cast(list[dict[str, object]], sample["records"])
-        dispatch = records[0]
+        by_phase = {str(record["phase"]): record for record in records}
+        generation = by_phase["snapshot_generation"]
+        self.assertEqual(generation["duration_ns"], 210)
+        self.assertEqual(generation["source"], "openvmm_clock")
+        self.assertEqual(sample["generation_duration_ns"], 210)
+        dispatch = by_phase["console_input_dispatch"]
         self.assertEqual(dispatch["operation"], "capture")
         self.assertEqual(dispatch["phase"], "console_input_dispatch")
         self.assertEqual(dispatch["duration_ns"], 60)
         self.assertEqual(dispatch["observer_elapsed_ns"], 160)
         self.assertEqual(dispatch["logical_bytes"], 4096)
         self.assertTrue(dispatch["exclusive"])
-        round_trip = records[1]
+        round_trip = by_phase["console_command_round_trip"]
         self.assertEqual(round_trip["phase"], "console_command_round_trip")
         self.assertEqual(round_trip["duration_ns"], 100)
-        guest_to_publication = records[2]
+        guest_to_publication = by_phase["guest_dispatch_to_publication"]
         self.assertEqual(guest_to_publication["phase"], "guest_dispatch_to_publication")
         self.assertEqual(guest_to_publication["duration_ns"], 100)
+        self.assertEqual(by_phase["request_to_publication"]["duration_ns"], 200)
+
+    def test_snapshot_generation_requires_valid_process_clock_boundaries(self):
+        gate: dict[str, object] = {
+            "operation": "capture",
+            "phase": "input_gate",
+            "duration_ns": 20,
+            "process_elapsed_ns": 120,
+            "pid": 42,
+        }
+        publication: dict[str, object] = {
+            "operation": "capture",
+            "phase": "publication_commit",
+            "duration_ns": 10,
+            "process_elapsed_ns": 310,
+            "pid": 42,
+        }
+        self.assertEqual(
+            benchmark.snapshot_generation_duration_ns([gate, publication], 42), 210
+        )
+        for records, error in (
+            ([publication], "exactly one 'input_gate'"),
+            ([gate], "exactly one 'publication_commit'"),
+            ([gate, gate, publication], "exactly one 'input_gate'"),
+            ([gate, publication, publication], "exactly one 'publication_commit'"),
+            ([gate, {**publication, "pid": 43}], "different process"),
+            ([{**gate, "duration_ns": -1}, publication], "not monotonic"),
+            ([{**gate, "process_elapsed_ns": 10}, publication], "not monotonic"),
+            ([gate, {**publication, "process_elapsed_ns": 125}], "not monotonic"),
+        ):
+            with self.subTest(records=records):
+                with self.assertRaisesRegex(ValueError, error):
+                    benchmark.snapshot_generation_duration_ns(records, 42)
+
+    def test_capture_excludes_polling_input_and_matches_profile_generation(self):
+        for delay_ms in (0, 500, 2000):
+            for profiled in (False, True):
+                with self.subTest(delay_ms=delay_ms, profiled=profiled):
+                    self.check_capture_timing(delay_ms, profiled)
+
+    def check_capture_timing(self, delay_ms: int, profiled: bool) -> None:
+        clock_ns = 0
+        writes: list[bytes] = []
+
+        class FakeProcess:
+            pid = 42
+            returncode = 0
+
+            def poll(self) -> int:
+                return 0
+
+            def wait(self) -> int:
+                nonlocal clock_ns
+                clock_ns += 1_000_000
+                return 0
+
+        class FakeInteraction:
+            process = FakeProcess()
+
+            def read_output(self, _chunks: object) -> None:
+                pass
+
+            def write_input(self, data: bytes) -> None:
+                nonlocal clock_ns
+                writes.append(data)
+                if data == b"nvx-snapshot\n":
+                    clock_ns += 20_000_000
+
+            def close(self) -> None:
+                pass
+
+        chunks = iter(
+            (
+                (benchmark.BOOT_MARKER + b"\n", 0, False),
+                (benchmark.SMP_PROBE_COMPLETION_MARKER + b"\n", 1, False),
+                (benchmark.SNAPSHOT_GUEST_DISPATCH_MARKER + b"\n", delay_ms, False),
+                (
+                    b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=capture "
+                    b"phase=input_gate exclusive=1 duration_ns=500000 "
+                    b"process_elapsed_ns=500000000 pid=42\n"
+                    b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=capture "
+                    b"phase=publication_commit exclusive=1 duration_ns=100000 "
+                    b"process_elapsed_ns=502500000 pid=42\n",
+                    3,
+                    True,
+                ),
+                (None, 0, False),
+            )
+        )
+        profiles: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "snapshot"
+
+            def read_chunk(*, timeout: float) -> bytes | None:
+                nonlocal clock_ns
+                del timeout
+                chunk, advance_ms, publish = next(chunks)
+                clock_ns += advance_ms * 1_000_000
+                if publish:
+                    snapshot.mkdir()
+                return chunk
+
+            with (
+                patch.object(
+                    benchmark, "InteractiveProcess", return_value=FakeInteraction()
+                ) as interaction,
+                patch.object(benchmark.threading, "Thread"),
+                patch.object(benchmark.queue, "Queue") as queues,
+                patch.object(
+                    benchmark.time, "perf_counter_ns", side_effect=lambda: clock_ns
+                ),
+                patch.object(benchmark, "_try_peak_rss", return_value=1024),
+                patch.object(
+                    benchmark, "process_resource_counters", return_value={}
+                ) as counters,
+            ):
+                queues.return_value.get.side_effect = read_chunk
+                result = benchmark.capture_snapshot(
+                    ["openvmm"],
+                    snapshot,
+                    processors=1,
+                    timeout=5,
+                    snapshot_profile=profiled,
+                    profile_sink=profiles,
+                )
+
+        self.assertEqual(result, (3.0, delay_ms + 23.0, 1.0, 1024))
+        self.assertEqual(
+            interaction.call_args.args[1][benchmark.SNAPSHOT_PROFILE_ENV], "1"
+        )
+        self.assertEqual(writes[1:], [b"nvx-snapshot\n"])
+        self.assertIn(
+            b"echo OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n",
+            writes[0],
+        )
+        if profiled:
+            phases = benchmark.summarize_lifecycle_profiles(profiles)["phases"]
+            self.assertEqual(phases["capture.snapshot_generation"]["p50_ms"], result[0])
+            self.assertEqual(
+                phases["capture.console_command_round_trip"]["p50_ms"],
+                delay_ms + 20.0,
+            )
+        else:
+            counters.assert_not_called()
+            self.assertEqual(profiles, [])
 
     def test_warm_snapshot_cache_reads_every_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -753,6 +911,11 @@ class BenchmarkTests(unittest.TestCase):
             patch.object(benchmark, "InteractiveProcess", return_value=interaction),
             patch.object(benchmark, "peak_rss_bytes", return_value=1024),
             patch.object(benchmark, "wait_for_process_exit", return_value=0),
+            patch.object(
+                benchmark.time,
+                "perf_counter_ns",
+                side_effect=[0, 10_000_000, 17_000_000],
+            ),
         ):
             result = benchmark.measure_once(
                 ["openvmm"],
@@ -763,7 +926,7 @@ class BenchmarkTests(unittest.TestCase):
                 guest_exit_prequeued=True,
             )
 
-        self.assertEqual(result[0] >= 0, True)
+        self.assertEqual(result, (10.0, 1024, 7.0, 17.0))
         self.assertEqual(interaction.writes, [])
 
     def test_measure_once_retains_rss_when_process_exits_after_marker(self):
@@ -965,7 +1128,7 @@ class BenchmarkTests(unittest.TestCase):
             ["--machine", "microvm", "--processors", "4", "--hypervisor", "kvm"],
         )
         self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
-        self.assertFalse(run.call_args.kwargs["guest_exit_prequeued"])
+        self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
 
     def test_parses_dd_rates_and_network_gateway(self):
         output = """
@@ -1017,27 +1180,29 @@ class BenchmarkTests(unittest.TestCase):
         script = benchmark.snapshot_request_script(
             4,
             teardown_mode="guest-exit",
-            snapshot_profile=True,
         )
         self.assertEqual(script, "nvx-snapshot\n")
 
         no_controller = benchmark.snapshot_request_script(
             None,
             teardown_mode="guest-exit",
-            snapshot_profile=True,
         )
         self.assertEqual(
             no_controller,
             "echo NVX-SNAPSHOT-DISPATCHED\n"
             "nvx-snapshot\n"
-            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n",
+            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n"
+            "nvx-exit 0\n",
+        )
+        self.assertNotIn(
+            "nvx-exit",
+            benchmark.snapshot_request_script(None, teardown_mode="host-terminate"),
         )
 
     def test_prepare_snapshot_capture_stages_waiting_controller(self):
         script = benchmark.prepare_snapshot_capture_script(
             4,
             teardown_mode="guest-exit",
-            snapshot_profile=True,
             network_gateway="10.0.0.1",
             ioapic_irq=10,
         )
@@ -1056,10 +1221,13 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("IFS= read -r trigger\n", script)
         self.assertIn("echo NVX-SNAPSHOT-DISPATCHED\n", script)
         self.assertIn(
-            "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\n",
+            "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n",
             script,
         )
-        self.assertNotIn("nvx-exit 0", script)
+        host_terminated = benchmark.prepare_snapshot_capture_script(
+            4, teardown_mode="host-terminate"
+        )
+        self.assertNotIn("nvx-exit 0", host_terminated)
         self.assertTrue(
             script.endswith(
                 "NVX_SNAPSHOT_CAPTURE_SCRIPT\n"
@@ -1596,7 +1764,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs["snapshot_profile"])
         self.assertEqual(run.call_args.kwargs["marker"], benchmark.RESTORE_MARKER)
         self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
-        self.assertFalse(run.call_args.kwargs["guest_exit_prequeued"])
+        self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
         self.assertIn(
             "shell-snapshot-restore/whp/8vcpu/512-mib lifecycle phases:",
             output.getvalue(),
@@ -1770,7 +1938,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["marker"], benchmark.RESTORE_MARKER)
             self.assertTrue(run.call_args.kwargs["marker_must_be_line"])
             self.assertEqual(run.call_args.kwargs["teardown_mode"], "guest-exit")
-            self.assertFalse(run.call_args.kwargs["guest_exit_prequeued"])
+            self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
 
     def test_native_e2e_measures_and_reuses_snapshot_capture(self):
         with tempfile.TemporaryDirectory() as temporary:

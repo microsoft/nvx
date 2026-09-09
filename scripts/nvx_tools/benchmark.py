@@ -98,6 +98,7 @@ SMP_PROBE_PATH = "/tmp/nvx-smp-probe"
 SNAPSHOT_CAPTURE_PATH = "/tmp/nvx-c"
 SNAPSHOT_POST_RESTORE_PATH = "/tmp/nvx-post-restore"
 SNAPSHOT_GUEST_DISPATCH_MARKER = b"NVX-SNAPSHOT-DISPATCHED"
+SNAPSHOT_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 SHELL_SNAPSHOT_MEMORY_MIB = (64, 128, 256, 512)
 SNAPSHOT_PROFILE_MEMORY_MIB = (*SHELL_SNAPSHOT_MEMORY_MIB, 1024)
@@ -878,10 +879,53 @@ def _profile_float(record: dict[str, object], name: str) -> float:
     return float(value)
 
 
+def snapshot_generation_duration_ns(
+    records: Sequence[dict[str, object]], pid: int
+) -> int:
+    phases: dict[str, dict[str, object]] = {}
+    for phase in ("input_gate", "publication_commit"):
+        matches = [
+            record
+            for record in records
+            if record.get("operation") == "capture" and record.get("phase") == phase
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"snapshot capture requires exactly one {phase!r} profile record; "
+                f"observed {len(matches)}"
+            )
+        record = matches[0]
+        if _profile_int(record, "pid") != pid:
+            raise ValueError("snapshot capture profile came from a different process")
+        phases[phase] = record
+
+    input_gate = phases["input_gate"]
+    publication = phases["publication_commit"]
+    gate_end = _profile_int(input_gate, "process_elapsed_ns")
+    gate_duration = _profile_int(input_gate, "duration_ns")
+    publication_end = _profile_int(publication, "process_elapsed_ns")
+    publication_duration = _profile_int(publication, "duration_ns")
+    started = gate_end - gate_duration
+    if (
+        min(started, gate_duration, publication_duration) < 0
+        or publication_end - publication_duration < gate_end
+        or publication_end <= started
+    ):
+        raise ValueError("snapshot capture profile clock is not monotonic")
+    return publication_end - started
+
+
 class SnapshotProfileCollector:
-    def __init__(self, pid: int, process_started_ns: int) -> None:
+    def __init__(
+        self,
+        pid: int,
+        process_started_ns: int,
+        *,
+        collect_host_counters: bool = True,
+    ) -> None:
         self.pid = pid
         self.process_started_ns = process_started_ns
+        self.collect_host_counters = collect_host_counters
         self.pending = bytearray()
         self.records: list[dict[str, object]] = []
 
@@ -897,9 +941,10 @@ class SnapshotProfileCollector:
         if record is None:
             return
         record["observer_elapsed_ns"] = max(0, observed_ns - self.process_started_ns)
-        counters = process_resource_counters(self.pid)
-        if counters:
-            record["host_counters"] = counters
+        if self.collect_host_counters:
+            counters = process_resource_counters(self.pid)
+            if counters:
+                record["host_counters"] = counters
         self.records.append(record)
 
     def _finish_pending(self) -> None:
@@ -928,9 +973,10 @@ class SnapshotProfileCollector:
         }
         if logical_bytes is not None:
             record["logical_bytes"] = logical_bytes
-        counters = process_resource_counters(self.pid)
-        if counters:
-            record["host_counters"] = counters
+        if self.collect_host_counters:
+            counters = process_resource_counters(self.pid)
+            if counters:
+                record["host_counters"] = counters
         return record
 
     def finish_restore(self, marker_reached_ns: int) -> dict[str, object]:
@@ -988,12 +1034,30 @@ class SnapshotProfileCollector:
         self,
         snapshot_started_ns: int,
         snapshot_dispatched_ns: int,
-        snapshot_guest_dispatched_ns: int | None,
+        snapshot_guest_dispatched_ns: int,
         snapshot_published_ns: int,
         source_exited_ns: int,
         snapshot_request_bytes: int,
     ) -> dict[str, object]:
         self._finish_pending()
+        generation_ns = snapshot_generation_duration_ns(self.records, self.pid)
+        publication = next(
+            record
+            for record in self.records
+            if record.get("operation") == "capture"
+            and record.get("phase") == "publication_commit"
+        )
+        self.records.append(
+            {
+                "operation": "capture",
+                "phase": "snapshot_generation",
+                "exclusive": False,
+                "duration_ns": generation_ns,
+                "process_elapsed_ns": _profile_int(publication, "process_elapsed_ns"),
+                "pid": self.pid,
+                "source": "openvmm_clock",
+            }
+        )
         self.records.append(
             self._external_record(
                 "capture",
@@ -1004,27 +1068,22 @@ class SnapshotProfileCollector:
                 logical_bytes=snapshot_request_bytes,
             )
         )
-        if snapshot_guest_dispatched_ns is not None:
-            self.records.extend(
-                (
-                    self._external_record(
-                        "capture",
-                        "console_command_round_trip",
-                        snapshot_guest_dispatched_ns - snapshot_started_ns,
-                        snapshot_guest_dispatched_ns,
-                        exclusive=False,
-                    ),
-                    self._external_record(
-                        "capture",
-                        "guest_dispatch_to_publication",
-                        snapshot_published_ns - snapshot_guest_dispatched_ns,
-                        snapshot_published_ns,
-                        exclusive=False,
-                    ),
-                )
-            )
         self.records.extend(
             (
+                self._external_record(
+                    "capture",
+                    "console_command_round_trip",
+                    snapshot_guest_dispatched_ns - snapshot_started_ns,
+                    snapshot_guest_dispatched_ns,
+                    exclusive=False,
+                ),
+                self._external_record(
+                    "capture",
+                    "guest_dispatch_to_publication",
+                    snapshot_published_ns - snapshot_guest_dispatched_ns,
+                    snapshot_published_ns,
+                    exclusive=False,
+                ),
                 self._external_record(
                     "capture",
                     "request_to_publication",
@@ -1041,7 +1100,7 @@ class SnapshotProfileCollector:
                 ),
             )
         )
-        return {"records": self.records}
+        return {"records": self.records, "generation_duration_ns": generation_ns}
 
 
 def summarize_lifecycle_profiles(
@@ -1315,7 +1374,11 @@ def measure_once(
                 if profile is not None and profile_sink is not None:
                     profile_sink.append(profile.finish_restore(marker_reached))
                 elapsed_ms = (marker_reached - started) / 1_000_000
-                teardown_started = time.perf_counter_ns()
+                teardown_started = (
+                    marker_reached
+                    if teardown_mode == "guest-exit" and guest_exit_prequeued
+                    else time.perf_counter_ns()
+                )
                 if teardown_mode != "guest-exit":
                     process.terminate()
                 elif not guest_exit_prequeued:
@@ -2872,7 +2935,6 @@ def prepare_snapshot_capture_script(
     processors: int,
     *,
     teardown_mode: str,
-    snapshot_profile: bool,
     network_gateway: str | None = None,
     ioapic_irq: int | None = None,
     post_restore_script: str | None = None,
@@ -2883,23 +2945,15 @@ def prepare_snapshot_capture_script(
         network_gateway=network_gateway,
         ioapic_irq=ioapic_irq,
     )
-    dispatch_marker = (
-        _render_benchmark_script(
-            "snapshot-dispatch-marker.sh.in",
-            DISPATCH_MARKER=SNAPSHOT_GUEST_DISPATCH_MARKER.decode(),
-        )
-        if snapshot_profile
-        else ""
-    )
     capture = _render_benchmark_script(
         "snapshot-capture-controller.sh.in",
         SMP_PROBE_PATH=SMP_PROBE_PATH,
-        DISPATCH_MARKER=dispatch_marker,
+        DISPATCH_MARKER=SNAPSHOT_GUEST_DISPATCH_MARKER.decode(),
         POST_RESTORE_ACTION=(
             f"{SNAPSHOT_POST_RESTORE_PATH}\n" if post_restore_script is not None else ""
         ),
         RESTORE_MARKER=RESTORE_MARKER.decode(),
-    )
+    ) + _guest_exit_script(teardown_mode)
     post_restore_setup = ""
     if post_restore_script is not None:
         post_restore_setup = (
@@ -3994,23 +4048,14 @@ def snapshot_request_script(
     processors: int | None,
     *,
     teardown_mode: str,
-    snapshot_profile: bool,
 ) -> str:
     if processors is not None:
         return _read_benchmark_script("snapshot-request.sh")
-    dispatch_marker = (
-        _render_benchmark_script(
-            "snapshot-dispatch-marker.sh.in",
-            DISPATCH_MARKER=SNAPSHOT_GUEST_DISPATCH_MARKER.decode(),
-        )
-        if snapshot_profile
-        else ""
-    )
     return _render_benchmark_script(
         "snapshot-request-direct.sh.in",
-        DISPATCH_MARKER=dispatch_marker,
+        DISPATCH_MARKER=SNAPSHOT_GUEST_DISPATCH_MARKER.decode(),
         RESTORE_MARKER=RESTORE_MARKER.decode(),
-    )
+    ) + _guest_exit_script(teardown_mode)
 
 
 def capture_snapshot(
@@ -4032,16 +4077,14 @@ def capture_snapshot(
         shutil.rmtree(snapshot_path)
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off,openvmm_entry::vm_controller=info"
-    environment.pop(SNAPSHOT_PROFILE_ENV, None)
-    if snapshot_profile:
-        environment[SNAPSHOT_PROFILE_ENV] = "1"
+    environment[SNAPSHOT_PROFILE_ENV] = "1"
     process_started_ns = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
-    profile = (
-        SnapshotProfileCollector(process.pid, process_started_ns)
-        if snapshot_profile
-        else None
+    profile = SnapshotProfileCollector(
+        process.pid,
+        process_started_ns,
+        collect_host_counters=snapshot_profile,
     )
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
@@ -4076,7 +4119,6 @@ def capture_snapshot(
         payload = snapshot_request_script(
             processors,
             teardown_mode=teardown_mode,
-            snapshot_profile=snapshot_profile,
         ).encode("utf-8")
         snapshot_started_ns = time.perf_counter_ns()
         interaction.write_input(payload)
@@ -4106,8 +4148,7 @@ def capture_snapshot(
             if chunk is None:
                 observe_snapshot_publication()
                 break
-            if profile is not None:
-                profile.feed(chunk)
+            profile.feed(chunk)
             output.extend(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
             if (
@@ -4125,7 +4166,6 @@ def capture_snapshot(
                         prepare_snapshot_capture_script(
                             processors,
                             teardown_mode=teardown_mode,
-                            snapshot_profile=snapshot_profile,
                             network_gateway=smp_network_gateway,
                             ioapic_irq=smp_ioapic_irq,
                             post_restore_script=post_restore_script,
@@ -4152,26 +4192,27 @@ def capture_snapshot(
             raise RuntimeError(f"snapshot source exited with status {returncode}")
         if not snapshot_path.is_dir():
             raise RuntimeError(f"snapshot was not published at {snapshot_path}")
+        if snapshot_guest_dispatched_ns is None:
+            raise RuntimeError("snapshot guest dispatch marker was not observed")
         assert snapshot_started_ns is not None
         assert snapshot_dispatched_ns is not None
         assert snapshot_request_bytes is not None
         assert snapshot_published_ns is not None
-        if profile is not None and profile_sink is not None:
-            profile_sink.append(
-                profile.finish_capture(
-                    snapshot_started_ns,
-                    snapshot_dispatched_ns,
-                    snapshot_guest_dispatched_ns,
-                    snapshot_published_ns,
-                    source_exited_ns,
-                    snapshot_request_bytes,
-                )
-            )
+        profile_sample = profile.finish_capture(
+            snapshot_started_ns,
+            snapshot_dispatched_ns,
+            snapshot_guest_dispatched_ns,
+            snapshot_published_ns,
+            source_exited_ns,
+            snapshot_request_bytes,
+        )
+        if snapshot_profile and profile_sink is not None:
+            profile_sink.append(profile_sample)
         request_to_publication_ms = (
             snapshot_published_ns - snapshot_started_ns
         ) / 1_000_000
         return (
-            request_to_publication_ms,
+            _profile_int(profile_sample, "generation_duration_ns") / 1_000_000,
             request_to_publication_ms,
             (source_exited_ns - snapshot_published_ns) / 1_000_000,
             peak_bytes,
@@ -4373,7 +4414,7 @@ def benchmark_snapshot_restore(
             marker_must_be_line=True,
             windows_cpus=windows_cpus,
             teardown_mode=args.teardown_mode,
-            guest_exit_prequeued=False,
+            guest_exit_prequeued=args.teardown_mode == "guest-exit",
             snapshot_profile=snapshot_profile,
         )
 
@@ -4583,7 +4624,7 @@ def benchmark_snapshot_profile_matrix(
                         marker_must_be_line=True,
                         windows_cpus=windows_cpus,
                         teardown_mode=args.teardown_mode,
-                        guest_exit_prequeued=False,
+                        guest_exit_prequeued=args.teardown_mode == "guest-exit",
                         snapshot_profile=True,
                         before_each=condition_cache,
                     )
@@ -5113,17 +5154,18 @@ def result_document(
                 "OpenVMM process exits after publishing the snapshot"
             ),
             "snapshot_capture_scope": (
-                "guest nvx-snapshot command dispatch through first host "
-                "observation of atomic snapshot publication"
+                "OpenVMM snapshot input-gate start through atomic snapshot "
+                "directory publication; console command delivery excluded"
             ),
             "snapshot_capture_source": (
-                "host perf_counter around guest dispatch and snapshot "
-                "directory publication"
+                "OpenVMM process-relative monotonic profile clock from "
+                "capture.input_gate start through capture.publication_commit"
             ),
+            "snapshot_capture_timing": SNAPSHOT_CAPTURE_TIMING,
             "snapshot_publication_poll_interval_ms": 1.0,
             "snapshot_request_to_publication_scope": (
-                "guest nvx-snapshot command dispatch through first observation "
-                "of atomic snapshot publication"
+                "diagnostic host console write through first host observation "
+                "of atomic snapshot publication; includes console polling"
             ),
             "snapshot_post_publication_exit_scope": (
                 "first observation of atomic snapshot publication through "
@@ -5133,10 +5175,13 @@ def result_document(
                 "host process termination request through OpenVMM process exit; "
                 "TerminateProcess on WHP and SIGTERM on Linux"
                 if args.teardown_mode != "guest-exit"
-                else "the host dispatches nvx-exit 0 after observing the cold or "
-                "snapshot-restore readiness marker; both end at successful "
-                "OpenVMM process exit"
+                else "cold: host dispatch of nvx-exit 0 through successful "
+                "OpenVMM process exit, including console delivery; "
+                "restore: host observation of the readiness marker through "
+                "successful OpenVMM process exit, with nvx-exit 0 prequeued "
+                "in the capture controller and no new console input"
             ),
+            "snapshot_restore_guest_exit_prequeued": args.teardown_mode == "guest-exit",
             "teardown_mode": args.teardown_mode,
             "teardown_timeout_seconds": TEARDOWN_TIMEOUT_SECONDS,
             "cpus": args.cpus,

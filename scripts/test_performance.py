@@ -137,6 +137,8 @@ def lifecycle_document(
             "teardown_mode": teardown_mode,
             "marker": "ALPINE-MICROVM-BOOT-OK",
             "restore_marker": "OPENVMM-SNAPSHOT-RESTORE-OK",
+            "snapshot_capture_timing": "openvmm-input-gate-to-publication",
+            "snapshot_restore_guest_exit_prequeued": True,
         },
         "backends": {
             backend: {
@@ -161,10 +163,10 @@ def lifecycle_document(
                 "p50_ms": 31.0,
                 "min_ms": 30.0,
                 "max_ms": 32.0,
-                "request_to_publication_samples_ms": samples(30.0, 31.0, 32.0),
-                "request_to_publication_p50_ms": 31.0,
-                "request_to_publication_min_ms": 30.0,
-                "request_to_publication_max_ms": 32.0,
+                "request_to_publication_samples_ms": samples(530.0, 531.0, 532.0),
+                "request_to_publication_p50_ms": 531.0,
+                "request_to_publication_min_ms": 530.0,
+                "request_to_publication_max_ms": 532.0,
                 "post_publication_exit_samples_ms": samples(1.0, 1.1, 1.2),
                 "post_publication_exit_p50_ms": 1.1,
                 "post_publication_exit_min_ms": 1.0,
@@ -299,12 +301,39 @@ class PerformanceTests(unittest.TestCase):
                 "| Snapshot generation | 31.00 ms | 30.00 ms | 32.00 ms | 10 |",
                 markdown,
             )
+            self.assertEqual(by_metric["openvmm_snapshot_generation"].p50, 31.0)
+            self.assertIn(
+                "| Host snapshot request to publication (diagnostic) | "
+                "531.00 ms | 530.00 ms | 532.00 ms | 10 |",
+                markdown,
+            )
             self.assertIn("| Cold start | 64.00 MiB | 70.00 MiB |", markdown)
             self.assertIn(
                 "| Snapshot generation | 72.00 MiB | 75.00 MiB |",
                 markdown,
             )
             self.assertIn("| Snapshot-restore speedup | 9.90x |", markdown)
+
+    def test_openvmm_json_rejects_console_contaminated_timing_contracts(self):
+        for field in (
+            "snapshot_capture_timing",
+            "snapshot_restore_guest_exit_prequeued",
+        ):
+            for value in (None, False, "legacy"):
+                with self.subTest(field=field, value=value):
+                    document = lifecycle_document()
+                    controls = cast(dict[str, object], document["controls"])
+                    controls[field] = value
+                    with tempfile.TemporaryDirectory() as temporary:
+                        source = Path(temporary) / "acceptance.json"
+                        source.write_text(json.dumps(document), encoding="utf-8")
+                        with self.assertRaisesRegex(
+                            performance.PerformanceError,
+                            "must use openvmm-input-gate|must prequeue",
+                        ):
+                            performance.read_lifecycle_data(
+                                "linux-kvm-baremetal", source
+                            )
 
     def test_openvmm_json_requires_the_platform_backend(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1013,6 +1042,96 @@ class PerformanceTests(unittest.TestCase):
             self.assertIn(
                 "| linux-kvm | `python_pandas_restore` | 800.00 ms | - | - | Warmup |",
                 summary.read_text(encoding="utf-8"),
+            )
+
+    def test_gate_honors_selective_history_reset_without_disabling_other_metrics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline"
+            target = root / "target"
+            candidate = root / "candidate"
+            summary = root / "summary.md"
+            filename = "linux-mshv-baremetal-microvm-v2-1vcpu.csv"
+            reset_metrics = (
+                "openvmm_snapshot_generation",
+                "openvmm_snapshot_restore_guest_exit_teardown",
+            )
+            metrics = (*reset_metrics, "openvmm_snapshot_restore")
+
+            def result(commit: str, metric: str, p50: float) -> performance.Result:
+                return performance.Result(
+                    commit, metric, "ms", "lower", p50, "linux-mshv-baremetal", 2, 1
+                )
+
+            history = [
+                result(f"base-{index}", metric, 10.0)
+                for index in range(10)
+                for metric in metrics
+            ]
+            performance.write_results(baseline / filename, history)
+            performance.write_results(
+                candidate / filename,
+                [row for row in history if row.metric not in reset_metrics],
+            )
+            performance.write_results(
+                target / filename, [result("pr", metric, 100.0) for metric in metrics]
+            )
+
+            self.assertEqual(
+                nvx.main(
+                    [
+                        "performance",
+                        "gate",
+                        "--baseline-dir",
+                        str(baseline),
+                        "--target-dir",
+                        str(target),
+                        "--history-reset-dir",
+                        str(candidate),
+                        "--summary",
+                        str(summary),
+                    ]
+                ),
+                1,
+            )
+            markdown = summary.read_text(encoding="utf-8")
+            self.assertEqual(markdown.count("Warmup (history reset)"), 2)
+            self.assertIn("Checked 1 metric(s); found 1 regression(s).", markdown)
+
+            performance.persist_results(target, candidate)
+            self.assertEqual(
+                performance.gate_results(
+                    candidate, target, 10, 40, history_reset_dir=candidate
+                ),
+                1,
+            )
+            new_history = performance.read_results(candidate / filename)
+            for metric in reset_metrics:
+                self.assertEqual(
+                    [row.commit for row in new_history if row.metric == metric], ["pr"]
+                )
+
+    def test_gate_missing_candidate_history_does_not_reset_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            performance.write_results(
+                root / "baseline" / "linux-kvm.csv",
+                [performance.Result("base", "latency", "ms", "lower", 10.0)],
+            )
+            performance.write_results(
+                root / "target" / "linux-kvm.csv",
+                [performance.Result("pr", "latency", "ms", "lower", 100.0)],
+            )
+            self.assertEqual(
+                performance.gate_results(
+                    root / "baseline",
+                    root / "target",
+                    10,
+                    40,
+                    minimum_history=1,
+                    history_reset_dir=root / "missing",
+                ),
+                1,
             )
 
     def test_gate_uses_verified_windows_virtfs_reuse_history(self):

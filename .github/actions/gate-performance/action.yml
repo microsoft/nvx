@@ -71,6 +71,7 @@ runs:
         python3 scripts/nvx.py performance gate
         --baseline-dir data/baseline
         --target-dir data/results
+        --history-reset-dir data
         --window "${PERFORMANCE_BASELINE_WINDOW}"
         --minimum-history "${PERFORMANCE_BASELINE_MINIMUM_HISTORY}"
         --threshold "${PERFORMANCE_REGRESSION_THRESHOLD}"

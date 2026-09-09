@@ -475,6 +475,7 @@ def run_smp_snapshot(
                 timeout=timeout,
                 marker=RESTORE_MARKER,
                 marker_must_be_line=True,
+                guest_exit_prequeued=True,
                 log_path=output_dir / f"smp-snapshot-restore-{restore_index}.log",
             )
             if _snapshot_fingerprint(snapshot_path) != fingerprint:
@@ -529,6 +530,7 @@ def run_restore_processors(
                 timeout=timeout,
                 marker=marker,
                 marker_must_be_line=True,
+                guest_exit_prequeued=True,
                 log_path=output_dir / f"restore-processors-{target}.log",
             )
             if _snapshot_fingerprint(snapshot_path) != fingerprint:
@@ -592,6 +594,7 @@ def run_restore_memory(
                 environment=_restore_environment(),
                 timeout=timeout,
                 marker=b"NVX-RESTORE-MEMORY-WORKLOAD-OK",
+                guest_exit_prequeued=True,
                 log_path=log_path,
             )
             expected_added = (target_mib - base_mib) * 1024 * 1024

@@ -541,6 +541,12 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(measure_once.call_count, 2)
         self.assertTrue(
             all(
+                entry.kwargs["guest_exit_prequeued"]
+                for entry in measure_once.call_args_list
+            )
+        )
+        self.assertTrue(
+            all(
                 entry.kwargs["marker"] == benchmark.RESTORE_MARKER
                 for entry in measure_once.call_args_list
             )
@@ -577,6 +583,12 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(workload_boot_command.call_args.kwargs["processors"], 8)
         self.assertEqual(capture_snapshot.call_args.kwargs["processors"], 1)
         self.assertEqual(measure_once.call_count, 4)
+        self.assertTrue(
+            all(
+                entry.kwargs["guest_exit_prequeued"]
+                for entry in measure_once.call_args_list
+            )
+        )
         self.assertEqual(
             [entry.kwargs["marker"] for entry in measure_once.call_args_list],
             [
@@ -648,6 +660,12 @@ class MicrovmTests(unittest.TestCase):
             "2048M",
         )
         self.assertEqual(measure_once.call_count, 3)
+        self.assertTrue(
+            all(
+                entry.kwargs["guest_exit_prequeued"]
+                for entry in measure_once.call_args_list
+            )
+        )
         self.assertEqual(
             [
                 entry.args[0][entry.args[0].index("--restore-memory") + 1]
