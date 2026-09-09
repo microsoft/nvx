@@ -9,7 +9,7 @@ python3 scripts/nvx.py package --transport legacy --binary-only
 Binary-only mode requires an explicit acknowledgement because the matching
 Linux and Alpine source must be published separately.
 
-A broker package requires the staged agent and agent initramfs:
+A broker package requires the staged agent and its agent-only initramfs:
 
 ```bash
 python3 scripts/nvx.py package \
@@ -25,8 +25,9 @@ python3 scripts/nvx.py collect-sources --transport broker-ttrpc
 ```
 
 This produces a patched Linux corresponding-source archive under
-`build/sources/linux` and exact Alpine recipes/upstream sources under
-`build/sources/alpine` for the selected initramfs profile. Use
+`build/sources/linux`. The broker initramfs contains only the static agent and
+has no Alpine packages; the collected Alpine recipes/upstream sources apply to
+the legacy profile. Use
 `--transport legacy` when packaging only the shell image; source collection
 does not require artifacts from the other profile. Then stage the binary
 release with three separate source artifacts:

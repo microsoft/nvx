@@ -74,7 +74,7 @@ The ACI validator rejects `PT_INTERP`, forbidden CLH/runc/tonic dependencies,
 and binaries larger than 16 MiB. The release input is the persistent staged
 artifact whose SHA-256 is
 `40bb38f5fea68698b9cb8c44cfccd9d0ff7f580ba871e6839be0f9fbf31724b8`,
-size is `1,844,096` bytes, and ELF GNU build ID is
+size is `1,901,440` bytes, and ELF GNU build ID is
 `95146b33ab68f7466ea652cd21b318ba1a1c5d71`. The source revision records
 provenance; it is not sufficient byte identity. The current linker build ID is
 affected by the Cargo target path, so a build from the same source into a
@@ -83,7 +83,7 @@ byte reproducibility. Stage only the reviewed external input:
 
 ```bash
 python3 scripts/nvx.py stage-agent \
-  --input build/nvx-agent-cbd2767-input \
+  --input build/nvx-agent-415288c-input \
   --sha256 40bb38f5fea68698b9cb8c44cfccd9d0ff7f580ba871e6839be0f9fbf31724b8
 ```
 
@@ -109,29 +109,27 @@ builds use the container's native Linux filesystem.
 This produces `build/initramfs-agent.cpio.gz` and its package manifest without
 changing `build/initramfs.cpio.gz`. `/init` is a symlink to the verified
 `/sbin/nvx-agent`, so the kernel invokes the agent as PID 1 with no arguments.
-The verifier models kernel extraction in archive order. It rejects duplicate,
-case-colliding, or non-canonical paths; missing, symlink, or non-directory
-ancestors; type replacement; untrusted or escaping symlinks; repeated inode
-identities and regular-file hardlinks; unsafe entry types or modes; flattened
-directory modes; wrong ownership; incorrect Alpine password/group/shadow
-modes; and a wrong agent or PID-1 identity. The packer emits every file with
-an independent inode identity and link count one. The broker image retains the
-legacy helper files so its rootfs differs only by the intended `/init`
-replacement and `/sbin/nvx-agent` addition.
+The broker initramfs contains exactly four entries: the root directory,
+`/init`, `/sbin`, and the verified `/sbin/nvx-agent`. The verifier models
+kernel extraction in archive order and rejects additional entries, duplicate,
+case-colliding, or non-canonical paths, unsafe types or modes, wrong
+ownership, repeated inode identities, hardlinks, escaping symlinks, and a
+wrong agent or PID-1 identity. The legacy shell image remains an independent
+Alpine profile with its existing utilities and validation.
 
 The matching kernel assertions cover cgroup-v2 memory, pids, CPU weight,
-freezer and BPF; BPF and seccomp syscalls/filters; EROFS, overlay, ext4 and GPT;
-virtio block/console/MMIO; devtmpfs, PTYs, proc/sysfs/tmpfs; and mount, PID,
-UTS, and IPC namespaces. CFS bandwidth remains disabled because CPU quota is
-unused. Linux 6.18 supplies `clone3`, pidfds, `openat2`, and `close_range`
-unconditionally; their runtime availability is exercised by ACI-04 rather
-than represented by obsolete/nonexistent Kconfig switches.
+freezer and BPF; BPF and seccomp syscalls/filters; EROFS, overlay, ext4 and GPT; virtio block/console/MMIO;
+devtmpfs, PTYs, proc/sysfs/tmpfs; and mount, PID, UTS, and IPC namespaces.
+CFS bandwidth remains disabled because CPU quota is unused. Linux 6.18
+supplies `clone3`, pidfds, `openat2`, and `close_range` unconditionally; their
+runtime availability is exercised by ACI-04 rather than represented by
+obsolete/nonexistent Kconfig switches.
 
 The executable SHA-256 above is the authoritative byte identity used by the
 manifest contract; source revision and ELF build ID remain separate fields.
 The source revision does not reproduce or authenticate binary bytes by itself.
 
-Both initramfs profiles retain the sandbox helpers, including the static
+The legacy initramfs retains the sandbox helpers, including the static
 `nvx-device-io` benchmark helper and static `nvx-port-io` restore packet helper
 under `/sbin`. The APK manifest records the device helper's source and binary
 SHA-256 values.
