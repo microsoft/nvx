@@ -66,10 +66,10 @@ manifest binds the complete initramfs hash; the source revision alone neither
 reproduces nor authenticates the image bytes.
 
 The broker package accepts only the reviewed ACI-03 input:
-source `db64a592aeef3c62992da1a8e645330a983c0c89`, SHA-256
-`33d83c49581ae1a1ac96acaa35ee1444f5533c2e52deeec3b41fd8b2a3a7b785`,
-size `1,901,440` bytes, and build ID
-`3877a73f4a28b00f9c9d7edac4b5a87c52fd96cb`. Source provenance does not
+source `bebe3149c1d83120bf4e313016eb37b58d0af58c`, SHA-256
+`86e4622eb2a4e60f542d5137f0ab7f67641f42c9f1bea78a34847c625236da2d`,
+size `1,926,016` bytes, and build ID
+`aac4c8e964354ceee7f050035f811e79e33440c9`. Source provenance does not
 imply byte identity; a same-source binary with a different digest is rejected.
 The signed guest-agent contract also declares the exact supported startup modes
 (`agent-ready`, `image-entrypoint`) and runtime ABI. Hosts reject agent-ready
