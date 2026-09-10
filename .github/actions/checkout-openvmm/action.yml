@@ -45,7 +45,7 @@ runs:
         USERDOMAIN: ${{ steps.checkout-identity.outputs.domain }}
         USERNAME: ${{ steps.checkout-identity.outputs.username }}
       with:
-        repository: nanvix/openvmm-hardfork
+        repository: nanvix/openvmm
         ref: ${{ steps.revision-linux.outputs.sha || steps.revision-windows.outputs.sha }}
         path: openvmm
         persist-credentials: false
