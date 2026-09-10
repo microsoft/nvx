@@ -1094,6 +1094,56 @@ class BuildTests(unittest.TestCase):
             build.GUEST_AGENT_BUILD_ID,
             "3877a73f4a28b00f9c9d7edac4b5a87c52fd96cb",
         )
+        self.assertEqual(
+            build.GUEST_AGENT_STARTUP_MODES,
+            ("agent-ready", "image-entrypoint"),
+        )
+        self.assertEqual(
+            build.GUEST_AGENT_RUNTIME_ABI,
+            "microvm-abi-v2-startup-modes-v2",
+        )
+
+    def test_startup_modes_are_runtime_fingerprint_inputs(self):
+        manifest: dict[str, object] = {
+            "runtime": {"transport": "broker-ttrpc"},
+            "openvmm": {
+                "source_revision": "o",
+                "executable_sha256": "o",
+                "microvm_abi_version": 2,
+                "control_session_protocol_version": 1,
+                "control_contract_revision": "c",
+            },
+            "linux": {"kernel_sha256": "k", "config_sha256": "c"},
+            "alpine": {
+                "initramfs_sha256": "i",
+                "initramfs_package_manifest_sha256": "p",
+            },
+            "guest_agent": {
+                "sha256": "a",
+                "size": 1,
+                "external_input_sha256": "a",
+                "external_input_size_bytes": 1,
+                "source_revision": "s",
+                "build_id": "b",
+                "target": "t",
+                "maximum_size_bytes": 2,
+                "artifact": "a",
+                "initramfs_artifact": "i",
+                "transport": "broker-ttrpc",
+                "protocol_schema_version": 1,
+                "startup_modes": ["agent-ready", "image-entrypoint"],
+                "runtime_abi": "microvm-abi-v2-startup-modes-v2",
+            },
+        }
+        identity = release._runtime_identity(manifest)
+        fingerprint = release._runtime_fingerprint(identity)
+        cast(dict[str, object], manifest["guest_agent"])["startup_modes"] = [
+            "image-entrypoint"
+        ]
+        self.assertNotEqual(
+            release._runtime_fingerprint(release._runtime_identity(manifest)),
+            fingerprint,
+        )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
         with tempfile.TemporaryDirectory() as temporary:
