@@ -71,6 +71,9 @@ source `db64a592aeef3c62992da1a8e645330a983c0c89`, SHA-256
 size `1,901,440` bytes, and build ID
 `3877a73f4a28b00f9c9d7edac4b5a87c52fd96cb`. Source provenance does not
 imply byte identity; a same-source binary with a different digest is rejected.
+The signed guest-agent contract also declares the exact supported startup modes
+(`agent-ready`, `image-entrypoint`) and runtime ABI. Hosts reject agent-ready
+before launch when either declaration is absent or incompatible.
 
 Create a release archive through the mode-normalizing writer, not a generic
 tar/ZIP extractor:

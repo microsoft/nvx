@@ -51,6 +51,7 @@
       "agent-ready",
       "image-entrypoint"
     ],
+    "runtime_abi": "microvm-abi-v2-startup-modes-v2",
     "transport": "broker-ttrpc"
   }
 }

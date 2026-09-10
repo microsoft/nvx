@@ -46,6 +46,7 @@ from .build import (
     GUEST_AGENT_SIZE_BYTES,
     GUEST_AGENT_SOURCE_REVISION,
     GUEST_AGENT_STARTUP_MODES,
+    GUEST_AGENT_RUNTIME_ABI,
     GUEST_AGENT_TARGET,
     KERNEL_PROVENANCE_NAME,
     MICROVM_ABI_VERSION,
@@ -448,6 +449,8 @@ def _runtime_identity(manifest: dict[str, object]) -> dict[str, object]:
         "agent_initramfs_artifact": agent["initramfs_artifact"],
         "agent_transport": agent["transport"],
         "protocol_schema_version": agent["protocol_schema_version"],
+        "startup_modes": agent["startup_modes"],
+        "guest_runtime_abi": agent["runtime_abi"],
         "microvm_abi_version": openvmm["microvm_abi_version"],
         "control_session_protocol_version": openvmm["control_session_protocol_version"],
         "control_contract_revision": openvmm["control_contract_revision"],
@@ -488,6 +491,7 @@ def _root_broker_agent_contract() -> dict[str, object]:
         "external_input_size_bytes": GUEST_AGENT_SIZE_BYTES,
         "protocol_schema_version": GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
         "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
+        "runtime_abi": GUEST_AGENT_RUNTIME_ABI,
         "transport": BROKER_TRANSPORT,
     }
 
@@ -510,6 +514,7 @@ def _package_broker_agent_contract() -> dict[str, object]:
         "source_revision": GUEST_AGENT_SOURCE_REVISION,
         "build_id": GUEST_AGENT_BUILD_ID,
         "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
+        "runtime_abi": GUEST_AGENT_RUNTIME_ABI,
     }
 
 
@@ -1112,6 +1117,7 @@ def _validate_package_manifest(
             "source_revision": runtime_agent.get("source_revision"),
             "build_id": runtime_agent.get("build_id"),
             "startup_modes": runtime_agent.get("startup_modes"),
+            "runtime_abi": runtime_agent.get("runtime_abi"),
         }
         if typed_agent != expected_agent:
             raise ScriptError(
@@ -2222,6 +2228,7 @@ def _guest_release_inputs(
             "source_revision": GUEST_AGENT_SOURCE_REVISION,
             "build_id": GUEST_AGENT_BUILD_ID,
             "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
+            "runtime_abi": GUEST_AGENT_RUNTIME_ABI,
         },
     )
     inputs = {
