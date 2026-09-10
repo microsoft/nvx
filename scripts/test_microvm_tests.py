@@ -18,6 +18,16 @@ import nvx  # noqa: E402
 from nvx_tools import benchmark, microvm_tests, openvmm_process  # noqa: E402
 
 
+def _posix_shell() -> str | None:
+    shell = shutil.which("sh")
+    if shell is None:
+        git = shutil.which("git")
+        git_shell = Path(git).parent.parent / "bin" / "sh.exe" if git else None
+        if git_shell is not None and git_shell.is_file():
+            shell = str(git_shell)
+    return shell
+
+
 class MicrovmTestParserTests(unittest.TestCase):
     def test_parser_defaults_to_all_correctness_scenarios(self):
         args = nvx.parse_args(["test-microvm", "--backend", "mshv"])
@@ -350,12 +360,7 @@ class MicrovmTests(unittest.TestCase):
         )
 
     def test_lifecycle_script_exits_on_unexpected_command_failure(self):
-        shell = shutil.which("sh")
-        if shell is None:
-            git = shutil.which("git")
-            git_shell = Path(git).parent.parent / "bin" / "sh.exe" if git else None
-            if git_shell is not None and git_shell.is_file():
-                shell = str(git_shell)
+        shell = _posix_shell()
         if shell is None:
             self.skipTest("POSIX shell is unavailable")
 
@@ -598,6 +603,56 @@ class MicrovmTests(unittest.TestCase):
                 b"NVX-RESTORE-PROCESSORS-OK count=8",
             ],
         )
+
+    def test_restore_processors_rejects_unstable_tsc_after_cpu_activation(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+
+        script = microvm_tests._read_script("restore-processors.sh")
+        for kernel_log, dmesg_status, expected_status in (
+            ("clocksource: Switched to clocksource tsc", 0, 0),
+            ("Measured 10992 cycles TSC warp between CPUs", 0, 95),
+            ("tsc: Marking TSC unstable due to check_tsc_sync_source failed", 0, 95),
+            ("TSC found unstable after boot", 0, 95),
+            ("", 1, 1),
+        ):
+            with self.subTest(kernel_log=kernel_log, dmesg_status=dmesg_status):
+                result = subprocess.run(
+                    [shell],
+                    input=(
+                        "getconf() { printf '4\\n'; }\n"
+                        "cat() {\n"
+                        '  case "$1" in\n'
+                        "    */cpu/online) printf '0-3\\n' ;;\n"
+                        "    */current_clocksource) printf 'tsc\\n' ;;\n"
+                        "    *) return 99 ;;\n"
+                        "  esac\n"
+                        "}\n"
+                        'taskset() { printf "%s\\n" "$2"; }\n'
+                        f"dmesg() {{ printf '%s\\n' '{kernel_log}'; "
+                        f"return {dmesg_status}; }}\n" + script
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                self.assertIn("NVX-RESTORE-PROCESSOR-OK count=4 cpu=3", result.stdout)
+                if expected_status == 0:
+                    self.assertIn(
+                        "NVX-RESTORE-CLOCKSOURCE-OK source=tsc", result.stdout
+                    )
+                    self.assertIn("NVX-RESTORE-PROCESSORS-OK count=4", result.stdout)
+                else:
+                    self.assertNotIn("NVX-RESTORE-PROCESSORS-OK", result.stdout)
+                if expected_status == 95:
+                    self.assertIn(kernel_log, result.stdout)
+                    self.assertIn(
+                        "NVX-RESTORE-PROCESSORS-FAIL unstable-tsc", result.stdout
+                    )
 
     def test_restore_memory_reuses_one_base_snapshot_for_all_targets(self):
         with tempfile.TemporaryDirectory() as temporary:

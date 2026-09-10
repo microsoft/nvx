@@ -7,6 +7,9 @@ contracts without restoring NVX guest artifacts. `nvx-microvm-tests` consumes
 the NVX Linux kernel and Alpine initramfs and exercises Linux, SMP, virtio,
 sandbox, and snapshot behavior through the public OpenVMM CLI. Failure logs
 from the NVX layer are uploaded per backend.
+The restore-processor scenario also rejects Linux TSC instability diagnostics,
+even if the requested CPUs came online, so clock skew cannot silently pass by
+falling back to a different clocksource.
 
 Benchmarks run only after both test layers pass (or are intentionally skipped)
 on bare-metal KVM, MSHV, and WHP hosts and on nested-virtualization MSHV and WHP

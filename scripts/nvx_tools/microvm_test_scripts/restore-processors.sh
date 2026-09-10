@@ -24,4 +24,14 @@ while [ "$cpu" -lt "$online_count" ]; do
     echo "NVX-RESTORE-PROCESSOR-OK count=$online_count cpu=$cpu"
     cpu=$((cpu + 1))
 done
+kernel_log="$(dmesg)"
+case "$kernel_log" in
+    *"TSC warp"* | *"Marking TSC unstable"* | *"TSC found unstable"*)
+        printf '%s\n' "$kernel_log"
+        echo "NVX-RESTORE-PROCESSORS-FAIL unstable-tsc"
+        exit 95
+        ;;
+esac
+clocksource="$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)"
+echo "NVX-RESTORE-CLOCKSOURCE-OK source=$clocksource"
 echo "NVX-RESTORE-PROCESSORS-OK count=$online_count"
