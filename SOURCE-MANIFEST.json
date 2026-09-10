@@ -47,6 +47,10 @@
     "external_input_sha256": "33d83c49581ae1a1ac96acaa35ee1444f5533c2e52deeec3b41fd8b2a3a7b785",
     "external_input_size_bytes": 1913728,
     "protocol_schema_version": 1,
+    "startup_modes": [
+      "agent-ready",
+      "image-entrypoint"
+    ],
     "transport": "broker-ttrpc"
   }
 }

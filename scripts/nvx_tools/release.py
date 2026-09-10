@@ -45,6 +45,7 @@ from .build import (
     GUEST_AGENT_SHA256_NAME,
     GUEST_AGENT_SIZE_BYTES,
     GUEST_AGENT_SOURCE_REVISION,
+    GUEST_AGENT_STARTUP_MODES,
     GUEST_AGENT_TARGET,
     KERNEL_PROVENANCE_NAME,
     MICROVM_ABI_VERSION,
@@ -486,6 +487,7 @@ def _root_broker_agent_contract() -> dict[str, object]:
         "external_input_sha256": GUEST_AGENT_SHA256,
         "external_input_size_bytes": GUEST_AGENT_SIZE_BYTES,
         "protocol_schema_version": GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
+        "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
         "transport": BROKER_TRANSPORT,
     }
 
@@ -507,6 +509,7 @@ def _package_broker_agent_contract() -> dict[str, object]:
         "size": GUEST_AGENT_SIZE_BYTES,
         "source_revision": GUEST_AGENT_SOURCE_REVISION,
         "build_id": GUEST_AGENT_BUILD_ID,
+        "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
     }
 
 
@@ -1108,6 +1111,7 @@ def _validate_package_manifest(
             "size": runtime_agent.get("size"),
             "source_revision": runtime_agent.get("source_revision"),
             "build_id": runtime_agent.get("build_id"),
+            "startup_modes": runtime_agent.get("startup_modes"),
         }
         if typed_agent != expected_agent:
             raise ScriptError(
@@ -2217,6 +2221,7 @@ def _guest_release_inputs(
             "size": size,
             "source_revision": GUEST_AGENT_SOURCE_REVISION,
             "build_id": GUEST_AGENT_BUILD_ID,
+            "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
         },
     )
     inputs = {

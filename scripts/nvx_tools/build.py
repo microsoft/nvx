@@ -99,6 +99,7 @@ GUEST_AGENT_SIZE_BYTES = 1_913_728
 GUEST_AGENT_BUILD_ID = "3877a73f4a28b00f9c9d7edac4b5a87c52fd96cb"
 BROKER_TRANSPORT = "broker-ttrpc"
 GUEST_AGENT_PROTOCOL_SCHEMA_VERSION = 1
+GUEST_AGENT_STARTUP_MODES = ("agent-ready", "image-entrypoint")
 MICROVM_ABI_VERSION = 2
 CONTROL_SESSION_PROTOCOL_VERSION = 1
 CONTROL_CONTRACT_REVISION = "nvx-microvm-v2-control-v1"
@@ -926,6 +927,7 @@ def _write_apk_manifest(
                         "size": GUEST_AGENT_SIZE_BYTES,
                         "source_revision": GUEST_AGENT_SOURCE_REVISION,
                         "build_id": GUEST_AGENT_BUILD_ID,
+                        "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
                     }
                     if agent_sha256 is not None
                     else None

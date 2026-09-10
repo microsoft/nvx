@@ -201,6 +201,7 @@ def _initramfs_package_manifest(
             "size": len(agent),
             "source_revision": build.GUEST_AGENT_SOURCE_REVISION,
             "build_id": build.GUEST_AGENT_BUILD_ID,
+            "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
         }
     return (json.dumps(value, indent=2) + "\n").encode("utf-8")
 
@@ -339,6 +340,7 @@ def _make_test_release_package(
             "external_input_sha256": agent_sha256,
             "external_input_size_bytes": len(agent),
             "protocol_schema_version": build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
+            "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
             "transport": build.BROKER_TRANSPORT,
         },
     }
@@ -3999,6 +4001,7 @@ class ReleaseTests(unittest.TestCase):
                     "external_input_sha256": agent_sha256,
                     "external_input_size_bytes": len(agent_bytes),
                     "protocol_schema_version": 1,
+                    "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
                     "transport": "broker-ttrpc",
                 },
             }
@@ -4995,6 +4998,7 @@ class ReleaseTests(unittest.TestCase):
                     "protocol_schema_version": (
                         build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION
                     ),
+                    "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
                     "transport": build.BROKER_TRANSPORT,
                 },
             }
