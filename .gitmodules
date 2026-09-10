@@ -1,4 +1,4 @@
 [submodule "openvmm"]
 	path = openvmm
-	url = https://github.com/nanvix/openvmm.git
+	url = https://github.com/nanvix/openvmm-hardfork.git
 	branch = microvm/profile
