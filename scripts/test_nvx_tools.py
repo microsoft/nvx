@@ -1083,16 +1083,16 @@ class BuildTests(unittest.TestCase):
     def test_guest_agent_identity_is_exact_fused_startup_input(self):
         self.assertEqual(
             build.GUEST_AGENT_SOURCE_REVISION,
-            "6288f6e09c98c08af3112fa6fba56560ddbfa5ba",
+            "894fe90ddcfa0c264a6ecca32b60f94bcfd4716f",
         )
         self.assertEqual(
             build.GUEST_AGENT_SHA256,
-            "6ea35c7817a2278ae1b8b54a243dd8d0ff9faa47d3a285fc66bafca7b60f1c4d",
+            "42dcf762bd011817ac31e7fb5622f6f0b12bef226856194e35109084e9539f31",
         )
-        self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_926_016)
+        self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_938_304)
         self.assertEqual(
             build.GUEST_AGENT_BUILD_ID,
-            "4ce125e5c4a57ce085c5aeff699152aa554226fe",
+            "16b4ba797522c299132ab81b8dd1097b280224c1",
         )
         self.assertEqual(
             build.GUEST_AGENT_STARTUP_MODES,
@@ -1100,7 +1100,7 @@ class BuildTests(unittest.TestCase):
         )
         self.assertEqual(
             build.GUEST_AGENT_RUNTIME_ABI,
-            "microvm-abi-v2-startup-modes-v2",
+            "microvm-abi-v2-startup-modes-session-operations-v3",
         )
 
     def test_startup_modes_are_runtime_fingerprint_inputs(self):
@@ -1130,9 +1130,9 @@ class BuildTests(unittest.TestCase):
                 "artifact": "a",
                 "initramfs_artifact": "i",
                 "transport": "broker-ttrpc",
-                "protocol_schema_version": 1,
+                "protocol_schema_version": 2,
                 "startup_modes": ["agent-ready", "image-entrypoint"],
-                "runtime_abi": "microvm-abi-v2-startup-modes-v2",
+                "runtime_abi": "microvm-abi-v2-startup-modes-session-operations-v3",
             },
         }
         identity = release._runtime_identity(manifest)
@@ -4052,7 +4052,7 @@ class ReleaseTests(unittest.TestCase):
                     "build_id": build.GUEST_AGENT_BUILD_ID,
                     "external_input_sha256": agent_sha256,
                     "external_input_size_bytes": len(agent_bytes),
-                    "protocol_schema_version": 1,
+                    "protocol_schema_version": build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
                     "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
                     "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
                     "transport": "broker-ttrpc",
@@ -4716,7 +4716,11 @@ class ReleaseTests(unittest.TestCase):
                 ),
                 ("guest_agent", "sha256", "0" * 64),
                 ("guest_agent", "size", build.GUEST_AGENT_SIZE_BYTES - 1),
-                ("guest_agent", "protocol_schema_version", 2),
+                (
+                    "guest_agent",
+                    "protocol_schema_version",
+                    build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION + 1,
+                ),
                 ("guest_agent", "transport", "legacy"),
                 ("openvmm", "microvm_abi_version", 3),
                 ("openvmm", "control_session_protocol_version", 2),
@@ -4873,7 +4877,11 @@ class ReleaseTests(unittest.TestCase):
                     "external_input_size_bytes",
                     build.GUEST_AGENT_SIZE_BYTES - 1,
                 ),
-                ("guest_agent", "protocol_schema_version", 2),
+                (
+                    "guest_agent",
+                    "protocol_schema_version",
+                    build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION + 1,
+                ),
                 ("guest_agent", "transport", "legacy"),
                 ("linux", "patches", []),
                 ("openvmm", "microvm_abi_version", 3),

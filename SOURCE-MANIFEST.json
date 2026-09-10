@@ -42,16 +42,16 @@
     "optional": true,
     "installed_in_initramfs": false,
     "maximum_size_bytes": 16777216,
-    "source_revision": "6288f6e09c98c08af3112fa6fba56560ddbfa5ba",
-    "build_id": "4ce125e5c4a57ce085c5aeff699152aa554226fe",
-    "external_input_sha256": "6ea35c7817a2278ae1b8b54a243dd8d0ff9faa47d3a285fc66bafca7b60f1c4d",
-    "external_input_size_bytes": 1926016,
-    "protocol_schema_version": 1,
+    "source_revision": "894fe90ddcfa0c264a6ecca32b60f94bcfd4716f",
+    "build_id": "16b4ba797522c299132ab81b8dd1097b280224c1",
+    "external_input_sha256": "42dcf762bd011817ac31e7fb5622f6f0b12bef226856194e35109084e9539f31",
+    "external_input_size_bytes": 1938304,
+    "protocol_schema_version": 2,
     "startup_modes": [
       "agent-ready",
       "image-entrypoint"
     ],
-    "runtime_abi": "microvm-abi-v2-startup-modes-v2",
+    "runtime_abi": "microvm-abi-v2-startup-modes-session-operations-v3",
     "transport": "broker-ttrpc"
   }
 }
