@@ -830,6 +830,14 @@ post-readiness memory-hotplug interface.
 
 ### Time and entropy
 
+Cold PVH microVM boots receive a canonical `lapic_timer_hz` kernel parameter from
+the backend's reported LAPIC clock frequency. The NVX kernel uses this known rate
+instead of comparing LAPIC interrupts with scheduling-sensitive emulated PIT
+interrupts during boot. Without it, delayed PIT delivery can cause Linux to disable
+a working LAPIC timer. Native calibration remains available when no frequency is
+reported, and the TSC-deadline path is unchanged. A platform snapshot's saved
+command-line parameter, when present, must agree with its APIC frequency contract.
+
 Capture records a coherent processor and clock boundary. Restore advances TSC,
 VM time, RTC, PIT/LAPIC deadlines, and the KVM paravirtual clock by nonnegative
 host downtime, then reanchors them before vCPUs start. A destination that

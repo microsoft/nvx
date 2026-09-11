@@ -544,6 +544,27 @@ class MicrovmTests(unittest.TestCase):
             log_path=Path("smp-4.log"),
         )
 
+    def test_smp_lapic_exercises_counting_timer_without_weakening_probe(self):
+        with patch.object(microvm_tests, "run_guest_script") as run:
+            microvm_tests.run_smp(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                4,
+                memory_mib=128,
+                timeout=60,
+                log_path=Path("smp-lapic-4.log"),
+                force_lapic_timer=True,
+            )
+        command, script, marker = run.call_args.args
+        self.assertEqual(
+            command[command.index("--cmdline") + 1],
+            "quiet loglevel=0 lapic=notscdeadline",
+        )
+        self.assertEqual(script, benchmark.smp_probe_script(4))
+        self.assertEqual(marker, benchmark.SMP_PROBE_COMPLETION_MARKER)
+
     def test_virtio_net_uses_portable_endpoint_policy(self):
         with (
             patch.object(
@@ -848,7 +869,7 @@ class MicrovmTests(unittest.TestCase):
             output_dir = Path(temporary) / "logs"
             args = argparse.Namespace(
                 backend="whp",
-                scenario=["smp", "smp"],
+                scenario=["smp", "smp", "smp-lapic", "smp-lapic"],
                 processors=[2, 2, 8],
                 memory_mib=128,
                 timeout=60.0,
@@ -873,11 +894,15 @@ class MicrovmTests(unittest.TestCase):
         run_lifecycle.assert_not_called()
         self.assertEqual(
             [entry.args[4] for entry in run_smp.call_args_list],
-            [2, 8],
+            [2, 8, 2, 8],
         )
         self.assertEqual(
             [entry.kwargs["log_path"].name for entry in run_smp.call_args_list],
-            ["smp-2.log", "smp-8.log"],
+            ["smp-2.log", "smp-8.log", "smp-lapic-2.log", "smp-lapic-8.log"],
+        )
+        self.assertEqual(
+            [entry.kwargs["force_lapic_timer"] for entry in run_smp.call_args_list],
+            [False, False, True, True],
         )
 
     def test_guest_runner_persists_full_output_on_failure(self):

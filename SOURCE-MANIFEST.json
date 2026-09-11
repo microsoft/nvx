@@ -14,7 +14,9 @@
     "input_config": "kernel/config-microvm",
     "patches": [
       "kernel/patches/0001-microvm-xe9-earlycon.patch",
-      "kernel/patches/0002-microvm-hvc-xe9.patch"
+      "kernel/patches/0002-microvm-hvc-xe9.patch",
+      "kernel/patches/0003-microvm-virtio-mmio-shared-status.patch",
+      "kernel/patches/0004-microvm-lapic-frequency.patch"
     ]
   },
   "alpine": {

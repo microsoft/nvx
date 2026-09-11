@@ -255,7 +255,10 @@ OpenVMM owns `BASE`; each `--cmdline` value below is appended to it. Restore pha
 command line and resume the one captured in the snapshot. OpenVMM also appends device-discovery
 tokens (`virtio_mmio.device=...` for an attached mount or NIC) and may replace `console=hvc0` with
 `console=hvc1` when a virtio console is selected. Snapshot-source boots additionally receive the
-backend-derived `tsc_early_khz=...` token.
+backend-derived `tsc_early_khz=...` token. All cold microVM boots also receive
+`lapic_timer_hz=...` when the backend reports its LAPIC frequency. The NVX kernel uses
+that rate without calibrating or verifying the counting LAPIC against emulated PIT
+interrupts, whose delivery can be delayed or coalesced by host scheduling.
 
 | Benchmark | Phase | Kernel command line |
 | --- | --- | --- |
@@ -301,6 +304,13 @@ executed on its assigned vCPU and observes that CPU's local APIC counter advance
 for at most 10,000 counter reads, so a stalled timer fails without relying on guest sleeps or a
 working guest clock to bound the check. Pre/post interrupt snapshots also require every counter
 to advance and remain at least as large as the worker's observed value.
+The check remains strict even on a one-vCPU guest: falling back to the PIT after a failed
+LAPIC calibration is not success. A counter frozen at 12 can indicate Linux's
+`APIC timer disabled due to verification failure`; increasing the poll budget cannot repair it.
+CI runs `test-microvm --scenario smp-lapic --processors 1 2 4 8` before acceptance.
+This repeats the normal SMP probe with `lapic=notscdeadline`, covering the counting
+LAPIC even on hosts that normally use TSC-deadline timers. The ordinary `smp` scenario
+retains the default timer selection.
 WHP capture waits for Linux to replace the transitional `tsc-early` clocksource with
 its stable selected clocksource before starting this SMP validation.
 The coordinator stages the probe and a capture controller in guest memory. The

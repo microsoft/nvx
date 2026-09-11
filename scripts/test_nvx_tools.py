@@ -475,6 +475,31 @@ class CiTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_manifest_tracks_every_kernel_patch(self):
+        manifest = json.loads(
+            (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            manifest["linux"]["patches"],
+            [
+                path.relative_to(build.REPO_ROOT).as_posix()
+                for path in build._kernel_patch_files()
+            ],
+        )
+
+    def test_ci_kernel_cache_key_includes_patches(self):
+        action = (
+            build.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "hashFiles('kernel/config-microvm', 'kernel/patches/**')",
+            action,
+        )
+
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")
         with (

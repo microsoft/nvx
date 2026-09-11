@@ -353,13 +353,14 @@ def _validate_linux_source_archive(path: Path) -> None:
     expected_members = {
         "vmlinux.config": artifact_path("vmlinux.config").read_bytes(),
         "SOURCE-MANIFEST.json": (REPO_ROOT / "SOURCE-MANIFEST.json").read_bytes(),
-        "kernel/patches/0001-microvm-xe9-earlycon.patch": (
-            REPO_ROOT / "kernel" / "patches" / "0001-microvm-xe9-earlycon.patch"
-        ).read_bytes(),
-        "kernel/patches/0002-microvm-hvc-xe9.patch": (
-            REPO_ROOT / "kernel" / "patches" / "0002-microvm-hvc-xe9.patch"
-        ).read_bytes(),
     }
+    manifest = json.loads(expected_members["SOURCE-MANIFEST.json"])
+    expected_members.update(
+        {
+            patch: (REPO_ROOT / patch).read_bytes()
+            for patch in manifest["linux"]["patches"]
+        }
+    )
     with tarfile.open(path, "r:gz") as archive:
         members = archive.getmembers()
         names = [member.name for member in members]
@@ -497,6 +498,12 @@ def verify_source_tree() -> None:
         REPO_ROOT / "kernel" / "COPYING-LINUX": "Linux copyright notice",
         OPENVMM_DIR / "Cargo.toml": "initialized OpenVMM submodule",
     }
+    required.update(
+        {
+            REPO_ROOT / patch: f"kernel patch {patch}"
+            for patch in manifest["linux"]["patches"]
+        }
+    )
     for path, description in required.items():
         require_file(path, description)
     forbidden = (
