@@ -17,3 +17,4 @@ windows-whp-baremetal,2,4,59ced39b5afc6e1b6abcb94e9531fa58af759109,shell_snapsho
 windows-whp-baremetal,2,4,3728c2bc7227328214edd6c794feaeda75ed9500,shell_snapshot_restore_512_mib,ms,lower,114.7
 windows-whp-baremetal,2,4,dc99d7da032b23dbe36073d6b533bd5f250951a2,shell_snapshot_restore_512_mib,ms,lower,109.9
 windows-whp-baremetal,2,4,ad5fce492b0cbe208191a0b946a5e2d175c266d3,shell_snapshot_restore_512_mib,ms,lower,107.2
+windows-whp-baremetal,2,4,ef38b2e1da749511f3610355bddccc5add1c0cfb,shell_snapshot_restore_512_mib,ms,lower,107.3
