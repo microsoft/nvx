@@ -1,8 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$Workspace = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
+    [string]$Workspace,
 
     [Parameter()]
     [string]$GuestArtifactsDirectory,
@@ -11,15 +10,44 @@ param(
     [switch]$CheckOnly,
 
     [Parameter()]
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+
+    [Parameter()]
+    [switch]$RunnerOnly,
+
+    [Parameter()]
+    [string]$RunnerName,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$RepositoryUrl = "https://github.com/microsoft/nvx",
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$RunnerDirectory = "$env:SystemDrive\actions-runner",
+
+    [Parameter()]
+    [switch]$RunnerTokenStdin
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 
+if (-not $RunnerOnly) {
+    if ([string]::IsNullOrWhiteSpace($Workspace)) {
+        $Workspace = Join-Path $PSScriptRoot "..\.."
+    }
+    $Workspace = (Resolve-Path -LiteralPath $Workspace).Path
+}
+
 $RustToolchain = "stable"
 $MinimumRustVersion = [version]"1.95.0"
 $CargoNextestVersion = "0.9.133"
+$RunnerVersion = "2.337.0"
+$RunnerSha256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
+$ToolRoot = Join-Path $env:ProgramData "nvx"
+$CargoHome = Join-Path $ToolRoot "cargo"
+$RustupHome = Join-Path $ToolRoot "rustup"
 $RequiredGuestArtifacts = @(
     "vmlinux",
     "vmlinux.config",
@@ -46,7 +74,19 @@ function Invoke-Native {
 function Update-ProcessPath {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = "$machinePath;$userPath"
+    $env:Path = "$CargoHome\bin;$machinePath;$userPath"
+}
+
+function Add-MachinePathEntry {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $entries = @($machinePath -split ";" |
+        Where-Object { $_ -and $_ -ne $Path })
+    [Environment]::SetEnvironmentVariable(
+        "Path",
+        ((@($Path) + $entries) -join ";"),
+        "Machine"
+    )
 }
 
 function Get-RequiredCommand {
@@ -79,11 +119,15 @@ function Get-PythonCommand {
 }
 
 function Assert-SupportedHost {
+    param([Parameter()][switch]$SkipWorkspace)
     if ($env:OS -ne "Windows_NT") {
         throw "this script requires Windows"
     }
     if (-not [Environment]::Is64BitOperatingSystem) {
         throw "this script requires 64-bit Windows"
+    }
+    if ($SkipWorkspace) {
+        return
     }
     if (-not (Test-Path -LiteralPath "$Workspace\scripts\nvx.py" -PathType Leaf)) {
         throw "NVX checkout not found at $Workspace"
@@ -179,9 +223,17 @@ function Install-Toolchain {
     }
     Update-ProcessPath
 
-    $rustup = Get-Command rustup.exe -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-    if ($null -eq $rustup) {
+    New-Item -ItemType Directory -Path $CargoHome, $RustupHome -Force |
+    Out-Null
+    [Environment]::SetEnvironmentVariable("CARGO_HOME", $CargoHome, "Machine")
+    [Environment]::SetEnvironmentVariable("RUSTUP_HOME", $RustupHome, "Machine")
+    Add-MachinePathEntry "$CargoHome\bin"
+    $env:CARGO_HOME = $CargoHome
+    $env:RUSTUP_HOME = $RustupHome
+    Update-ProcessPath
+
+    $rustupPath = Join-Path $CargoHome "bin\rustup.exe"
+    if (-not (Test-Path -LiteralPath $rustupPath -PathType Leaf)) {
         $rustupInstaller = Join-Path $env:TEMP "rustup-init.exe"
         Invoke-WebRequest `
             -UseBasicParsing `
@@ -194,17 +246,15 @@ function Install-Toolchain {
         )
     }
     Update-ProcessPath
-    $rustupPath = Get-RequiredCommand "rustup.exe"
     Invoke-Native $rustupPath @(
         "toolchain", "install", $RustToolchain, "--profile", "minimal"
     )
 
-    $cargo = Get-RequiredCommand "cargo.exe"
-    $nextest = Get-Command cargo-nextest.exe -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-    $installNextest = $null -eq $nextest
+    $cargo = Join-Path $CargoHome "bin\cargo.exe"
+    $nextest = Join-Path $CargoHome "bin\cargo-nextest.exe"
+    $installNextest = -not (Test-Path -LiteralPath $nextest -PathType Leaf)
     if (-not $installNextest) {
-        $nextestVersion = & $nextest.Source --version
+        $nextestVersion = & $nextest --version
         Assert-LastExitCode "cargo-nextest --version"
         $installNextest = ($nextestVersion -join "`n") -notmatch `
             "cargo-nextest $([regex]::Escape($CargoNextestVersion))"
@@ -214,6 +264,96 @@ function Install-Toolchain {
             "+$RustToolchain", "install", "--locked", "--force", "cargo-nextest",
             "--version", $CargoNextestVersion
         )
+    }
+
+    Invoke-Native "icacls.exe" @(
+        $ToolRoot,
+        "/grant", "*S-1-5-20:(OI)(CI)M",
+        "/T", "/Q"
+    )
+}
+
+function Install-ActionsRunner {
+    param([Parameter()][string]$Token)
+    $archiveName = "actions-runner-win-x64-$RunnerVersion.zip"
+    $archivePath = Join-Path $env:TEMP $archiveName
+    $downloadUrl = "https://github.com/actions/runner/releases/download/v$RunnerVersion/$archiveName"
+
+    New-Item -ItemType Directory -Path $RunnerDirectory -Force | Out-Null
+    Invoke-Native "icacls.exe" @(
+        $RunnerDirectory,
+        "/grant", "*S-1-5-20:(OI)(CI)M",
+        "/T", "/Q"
+    )
+    $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
+    if (-not (Test-Path -LiteralPath $listener -PathType Leaf)) {
+        Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $archivePath
+        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+        if ($actualHash -ne $RunnerSha256) {
+            throw "Actions runner checksum mismatch: $actualHash"
+        }
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $RunnerDirectory
+        Remove-Item -LiteralPath $archivePath -Force
+    }
+
+    $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
+    if (-not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf)) {
+        if ([string]::IsNullOrWhiteSpace($Token)) {
+            throw "runner registration token is required"
+        }
+        $labels = "windows,whp,virtual-machine,$RunnerName"
+        Push-Location $RunnerDirectory
+        try {
+            Invoke-Native ".\config.cmd" @(
+                "--unattended", "--replace",
+                "--url", $RepositoryUrl,
+                "--token", $Token,
+                "--name", $RunnerName,
+                "--labels", $labels,
+                "--work", "_work",
+                "--runasservice",
+                "--windowslogonaccount", "NT AUTHORITY\NETWORK SERVICE"
+            )
+        }
+        finally {
+            Pop-Location
+        }
+    }
+
+    $service = Get-ActionsRunnerService
+    if ($service.Status -ne "Running") {
+        Start-Service -Name $service.Name
+    }
+}
+
+function Get-ActionsRunnerService {
+    $serviceFile = Join-Path $RunnerDirectory ".service"
+    if (-not (Test-Path -LiteralPath $serviceFile -PathType Leaf)) {
+        throw "Actions runner service file was not found: $serviceFile"
+    }
+    $serviceName = (Get-Content -LiteralPath $serviceFile -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($serviceName)) {
+        throw "Actions runner service file is empty: $serviceFile"
+    }
+    return Get-Service -Name $serviceName -ErrorAction Stop
+}
+
+function Assert-ActionsRunner {
+    $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
+    if (-not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf)) {
+        throw "GitHub Actions runner is not configured"
+    }
+    $configuration = Get-Content -LiteralPath $runnerConfiguration -Raw |
+    ConvertFrom-Json
+    if ($configuration.agentName -ne $RunnerName) {
+        throw "configured runner is $($configuration.agentName), expected $RunnerName"
+    }
+    $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
+    Invoke-Native $listener @("--version")
+
+    $service = Get-ActionsRunnerService
+    if ($service.Status -ne "Running") {
+        throw "Actions runner service is not running"
     }
 }
 
@@ -340,8 +480,13 @@ function Enable-Whp {
 }
 
 function Assert-Environment {
-    param([Parameter()][switch]$RequireBuild)
+    param(
+        [Parameter()][switch]$RequireBuild,
+        [Parameter()][switch]$SkipWorkspace
+    )
     Update-ProcessPath
+    $env:CARGO_HOME = $CargoHome
+    $env:RUSTUP_HOME = $RustupHome
     $python = Get-PythonCommand
     foreach ($command in @("git.exe", "rustup.exe", "cargo.exe", "cargo-nextest.exe")) {
         [void](Get-RequiredCommand $command)
@@ -372,6 +517,9 @@ function Assert-Environment {
         throw "Windows Hypervisor Platform is not enabled"
     }
 
+    if ($SkipWorkspace) {
+        return
+    }
     Push-Location $Workspace
     try {
         Invoke-Native $python @("scripts\nvx.py", "verify")
@@ -394,28 +542,60 @@ function Assert-Environment {
     }
 }
 
-Assert-SupportedHost
+if (-not $RunnerOnly -and -not [string]::IsNullOrWhiteSpace($RunnerName)) {
+    throw "-RunnerName requires -RunnerOnly"
+}
+if ($RunnerTokenStdin -and
+    (-not $RunnerOnly -or [string]::IsNullOrWhiteSpace($RunnerName))) {
+    throw "-RunnerTokenStdin requires -RunnerOnly and -RunnerName"
+}
+
+Assert-SupportedHost -SkipWorkspace:$RunnerOnly
 if ($CheckOnly) {
-    if (-not [string]::IsNullOrWhiteSpace($GuestArtifactsDirectory)) {
+    if (-not $RunnerOnly -and
+        -not [string]::IsNullOrWhiteSpace($GuestArtifactsDirectory)) {
         Assert-GuestArtifactSet $GuestArtifactsDirectory (Get-CurrentRevision)
     }
-    Assert-Environment -RequireBuild:(-not $SkipBuild)
+    Assert-Environment `
+        -RequireBuild:(-not $SkipBuild -and -not $RunnerOnly) `
+        -SkipWorkspace:$RunnerOnly
+    if ($RunnerOnly -and -not [string]::IsNullOrWhiteSpace($RunnerName)) {
+        Assert-ActionsRunner
+    }
     Write-Output "NVX_SETUP_CHECK=ok"
     exit 0
 }
 
 Assert-Administrator
 Install-Toolchain
-Copy-GuestArtifacts
-if (-not $SkipBuild) {
-    Build-Nvx
-}
 $restartNeeded = Enable-Whp
 
 if ($restartNeeded) {
     Write-Output "NVX_SETUP_REBOOT_REQUIRED=1"
     Write-Output "Restart Windows, then rerun this script with -CheckOnly."
     exit 3010
+}
+
+if ($RunnerOnly) {
+    if (-not [string]::IsNullOrWhiteSpace($RunnerName)) {
+        $runnerToken = $null
+        if ($RunnerTokenStdin) {
+            $runnerToken = [Console]::In.ReadLine().Trim()
+        }
+        Install-ActionsRunner -Token $runnerToken
+        $runnerToken = $null
+    }
+    Assert-Environment -SkipWorkspace
+    if (-not [string]::IsNullOrWhiteSpace($RunnerName)) {
+        Assert-ActionsRunner
+    }
+    Write-Output "NVX_RUNNER_SETUP_COMPLETE=1"
+    exit 0
+}
+
+Copy-GuestArtifacts
+if (-not $SkipBuild) {
+    Build-Nvx
 }
 
 if (-not $SkipBuild -and

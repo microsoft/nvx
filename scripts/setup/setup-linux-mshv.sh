@@ -60,14 +60,6 @@ install_packages() {
             docker-buildx docker.io flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
             pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils
-    elif command -v dnf >/dev/null 2>&1; then
-        run_as_root dnf install -y \
-            bc binutils bison ca-certificates cmake cpio curl elfutils-libelf-devel \
-            findutils flex gcc gcc-c++ git glibc-devel gzip iproute iptables \
-            kernel-headers libarchive libarchive-devel make moby-engine \
-            ninja-build openssl openssl-devel patch perl pkgconf \
-            pkgconf-pkg-config protobuf-compiler python3 rsync shadow-utils tar \
-            util-linux which xz docker-buildx
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
             bc binutils bison ca-certificates cmake cpio curl diffutils \
@@ -77,6 +69,15 @@ install_packages() {
             ninja-build openssl openssl-devel patch perl pkgconf \
             pkgconf-pkg-config protobuf python3 rsync shadow-utils tar \
             util-linux which xz
+        run_as_root tdnf install -y docker-cli
+    elif command -v dnf >/dev/null 2>&1; then
+        run_as_root dnf install -y \
+            bc binutils bison ca-certificates cmake cpio curl elfutils-libelf-devel \
+            findutils flex gcc gcc-c++ git glibc-devel gzip iproute iptables \
+            kernel-headers libarchive libarchive-devel make moby-engine \
+            ninja-build openssl openssl-devel patch perl pkgconf \
+            pkgconf-pkg-config protobuf-compiler python3 rsync shadow-utils tar \
+            util-linux which xz docker-buildx
     else
         die "supported package manager not found (apt-get, dnf, or tdnf)"
     fi

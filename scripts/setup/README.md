@@ -4,9 +4,52 @@ These scripts prepare an existing NVX checkout on a supported host:
 
 - `setup-linux-mshv.sh` configures Linux/MSHV build and device prerequisites.
 - `setup-windows-whp.ps1` configures Windows/WHP build prerequisites.
+- `setup-linux-runner.sh` configures a Linux/KVM or Linux/MSHV Actions runner.
 
-They do not create machines, initialize a checkout, or manage repository
-credentials. Initialize the OpenVMM submodule before running either script.
+They do not create machines or initialize a checkout. The runner modes consume
+a short-lived registration token from standard input and do not store repository
+credentials in the scripts. Initialize the OpenVMM submodule before using the
+development-host modes.
+
+## GitHub Actions runners
+
+Generate a repository runner registration token on an authenticated workstation,
+then stream it to the target without placing it in shell history. On Linux:
+
+```bash
+scp scripts/setup/setup-linux-runner.sh HOST:/tmp/setup-linux-runner.sh
+gh api --method POST repos/microsoft/nvx/actions/runners/registration-token \
+  --jq .token |
+  ssh HOST '/tmp/setup-linux-runner.sh --backend kvm --runner-name azure-kvm-3 --runner-token-stdin'
+```
+
+For Windows/WHP, stage `setup-windows-whp.ps1` and run it over SSH from
+PowerShell:
+
+```powershell
+$token = gh api --method POST `
+  repos/microsoft/nvx/actions/runners/registration-token --jq .token
+$token | ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File C:\setup-windows-whp.ps1 -RunnerOnly `
+  -RunnerName azure-windows-3 -RunnerTokenStdin
+$token = $null
+```
+
+Both scripts pin and verify the Actions runner package. Linux runner labels are
+`linux`, the selected backend, `virtual-machine`, and the runner name. Windows
+labels are `windows`, `whp`, `virtual-machine`, and the runner name.
+
+Validate an installed runner without changing the host:
+
+```bash
+sh scripts/setup/setup-linux-runner.sh \
+  --backend kvm --runner-name azure-kvm-3 --check-only
+```
+
+```powershell
+.\scripts\setup\setup-windows-whp.ps1 `
+  -RunnerOnly -RunnerName azure-windows-3 -CheckOnly
+```
 
 ## Linux / MSHV
 

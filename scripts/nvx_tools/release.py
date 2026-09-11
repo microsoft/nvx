@@ -47,6 +47,7 @@ from .common import (
 PROJECT_SOURCE_PATHS = (
     "alpine",
     "data/linux-kvm-baremetal.csv",
+    "data/linux-kvm-virtual-machine.csv",
     "data/linux-mshv-baremetal.csv",
     "data/linux-mshv-virtual-machine.csv",
     "data/windows-whp-baremetal.csv",

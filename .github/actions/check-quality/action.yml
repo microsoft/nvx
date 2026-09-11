@@ -34,7 +34,8 @@ runs:
           alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
           alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
-          scripts/setup/setup-linux-mshv.sh
+          scripts/setup/setup-linux-mshv.sh \
+          scripts/setup/setup-linux-runner.sh
         python -m pyright --pythonplatform Linux
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts
@@ -42,7 +43,8 @@ runs:
           alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
           alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
-          scripts/setup/setup-linux-mshv.sh
+          scripts/setup/setup-linux-mshv.sh \
+          scripts/setup/setup-linux-runner.sh
 
     - name: Check PowerShell syntax
       shell: pwsh
