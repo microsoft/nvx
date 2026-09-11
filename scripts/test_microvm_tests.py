@@ -188,13 +188,127 @@ class MicrovmTests(unittest.TestCase):
         mshv = microvm_tests._snapshot_core_script("mshv")
 
         self.assertIn("echo kvm-clock", kvm)
-        self.assertIn('current_clocksource)" = tsc', whp)
+        self.assertIn('current_clocksource)" != tsc-early', whp)
         self.assertNotIn("@SELECT_CLOCKSOURCE@", mshv)
         self.assertIn("/sbin/nvx-reseed", mshv)
         self.assertIn("/sbin/nvx-reseed --sample", mshv)
         self.assertIn("NVX-SNAPSHOT-GENERATION-ID-", mshv)
         self.assertIn("NVX-SNAPSHOT-UUID-", mshv)
         self.assertIn("NVX-SNAPSHOT-TEMP-ID-", mshv)
+
+    def test_smp_worker_requires_bounded_local_timer_progress(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        worker = (
+            benchmark.smp_probe_script(2)
+            .split("<<'NVX_SMP_WORKER'\n", 1)[1]
+            .split("\nNVX_SMP_WORKER", 1)[0]
+        )
+        worker = worker.replace("/proc/interrupts", "interrupts").replace(
+            "timer_attempts=10000", "timer_attempts=8"
+        )
+        for name, initial, advanced, advance_read, actual, status, reads in (
+            ("frozen", "LOC: 100 100", "LOC: 100 100", 3, 1, 88, 9),
+            ("other-cpu", "LOC: 100 100", "LOC: 101 100", 3, 1, 88, 9),
+            ("delayed", "LOC: 100 100", "LOC: 100 101", 4, 1, 0, 4),
+            ("last-attempt", "LOC: 100 100", "LOC: 100 101", 9, 1, 0, 9),
+            ("too-late", "LOC: 100 100", "LOC: 100 101", 10, 1, 88, 9),
+            ("backwards", "LOC: 100 100", "LOC: 100 99", 3, 1, 88, 9),
+            ("missing", "RES: 1 1", "RES: 1 1", 0, 1, 87, 2),
+            ("wrong-cpu", "LOC: 100 100", "LOC: 100 101", 3, 0, 87, 0),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "interrupts").write_text(initial + "\n", encoding="ascii")
+                result = subprocess.run(
+                    [shell, "-s", "--", "1", "result", "1"],
+                    cwd=root,
+                    input=(
+                        "loc_reads=0\n"
+                        "trap 'echo NVX-LAPIC-READS-$loc_reads' EXIT\n"
+                        f"awk() {{ echo {actual}; }}\n"
+                        "read() {\n"
+                        "    loc_reads=$((loc_reads + 1))\n"
+                        f'    if [ "$loc_reads" -eq {advance_read} ]; then\n'
+                        f"        printf '%s\\n' '{advanced}' >interrupts\n"
+                        "    fi\n"
+                        '    command read "$@"\n'
+                        "}\n" + worker + "\n"
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+
+                self.assertEqual(
+                    result.returncode, status, result.stdout + result.stderr
+                )
+                self.assertIn(f"NVX-LAPIC-READS-{reads}\n", result.stdout)
+                if status:
+                    self.assertFalse((root / "result").exists())
+                    self.assertIn(
+                        "SMP-WORKER-FAIL" if name == "wrong-cpu" else "SMP-LAPIC-FAIL",
+                        result.stdout,
+                    )
+                else:
+                    self.assertEqual(
+                        (root / "result").read_text(encoding="ascii").split(),
+                        ["1", "101", "1"],
+                    )
+
+    def test_snapshot_core_whp_waits_for_stable_clocksource(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        clocksource_script = microvm_tests._snapshot_core_script("whp").split(
+            "generation_id_before=", 1
+        )[0]
+        for ready_after, stable_source, expected_returncode, expected_waits in (
+            (0, "tsc", 0, 0),
+            (2, "refined-jiffies", 0, 2),
+            (101, "tsc", 46, 100),
+        ):
+            with self.subTest(
+                ready_after=ready_after,
+                stable_source=stable_source,
+            ):
+                result = subprocess.run(
+                    [shell, "-s"],
+                    input=(
+                        "clock_waits=0\n"
+                        "cat() {\n"
+                        f'    if [ "$clock_waits" -ge {ready_after} ]; then\n'
+                        f"        echo {stable_source}\n"
+                        "    else\n"
+                        "        echo tsc-early\n"
+                        "    fi\n"
+                        "}\n"
+                        "sleep() { clock_waits=$((clock_waits + 1)); }\n"
+                        "nvx_exit() {\n"
+                        '    echo "NVX-CLOCKSOURCE-WAITS-$clock_waits"\n'
+                        '    exit "$1"\n'
+                        "}\n"
+                        + clocksource_script.replace("nvx-exit", "nvx_exit")
+                        + 'echo "NVX-CLOCKSOURCE-WAITS-$clock_waits"\n'
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+
+                self.assertEqual(
+                    result.returncode,
+                    expected_returncode,
+                    result.stdout + result.stderr,
+                )
+                self.assertIn(
+                    f"NVX-CLOCKSOURCE-WAITS-{expected_waits}\n", result.stdout
+                )
+                if expected_returncode:
+                    self.assertIn("NVX-SNAPSHOT-CORE-FAIL code=46", result.stdout)
 
     def test_snapshot_marker_parsers_require_single_well_formed_values(self):
         output = b"PREFIX-12\r\nPAIR-4-5\n"

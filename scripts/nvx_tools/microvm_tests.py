@@ -23,6 +23,7 @@ from .benchmark import (
     run_guest_script,
     smp_probe_script,
     snapshot_restore_command,
+    whp_stable_clocksource_wait_script,
     workload_boot_command,
 )
 from .ci import OPENVMM_TEST_BACKENDS, validate_openvmm_test_backend
@@ -169,10 +170,10 @@ def _snapshot_core_script(backend: str) -> str:
             'current_clocksource)" = kvm-clock ] || fail 46'
         )
     elif backend == "whp":
-        select_clocksource = ":"
+        select_clocksource = whp_stable_clocksource_wait_script()
         validate_clocksource = (
             '[ "$(cat /sys/devices/system/clocksource/clocksource0/'
-            'current_clocksource)" = tsc ] || fail 46'
+            'current_clocksource)" != tsc-early ] || fail 46'
         )
     elif backend == "mshv":
         select_clocksource = ":"
@@ -457,6 +458,7 @@ def run_smp_snapshot(
         capture_snapshot(
             [*boot_command, "--snapshot-destination", str(snapshot_path)],
             snapshot_path,
+            backend=backend,
             timeout=timeout,
             processors=processors,
             post_restore_script=smp_probe_script(processors, exit_guest=False),
@@ -510,6 +512,7 @@ def run_restore_processors(
         capture_snapshot(
             [*boot_command, "--snapshot-destination", str(snapshot_path)],
             snapshot_path,
+            backend=backend,
             timeout=timeout,
             processors=1,
             post_restore_script=_read_script("restore-processors.sh"),
@@ -570,6 +573,7 @@ def run_restore_memory(
                 str(snapshot_path),
             ],
             snapshot_path,
+            backend=backend,
             timeout=timeout,
             processors=1,
             post_restore_script=_read_script("restore-memory.sh"),

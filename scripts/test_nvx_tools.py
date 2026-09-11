@@ -846,6 +846,7 @@ class BenchmarkTests(unittest.TestCase):
                 result = benchmark.capture_snapshot(
                     ["openvmm"],
                     snapshot,
+                    backend="whp",
                     processors=1,
                     timeout=5,
                     snapshot_profile=profiled,
@@ -853,6 +854,7 @@ class BenchmarkTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, (3.0, delay_ms + 23.0, 1.0, 1024))
+        self.assertEqual(interaction.call_args.args[0], ["openvmm"])
         self.assertEqual(
             interaction.call_args.args[1][benchmark.SNAPSHOT_PROFILE_ENV], "1"
         )
@@ -1157,8 +1159,10 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("SMP-LAPIC-FAIL", script)
         self.assertIn("SMP-IPI-FAIL", script)
         self.assertIn("read_loc_counter", script)
-        poll_loop = script.split("while :; do\n", 1)[1].split("\ndone", 1)[0]
-        self.assertNotIn("$(", poll_loop)
+        self.assertNotIn("while :; do", script)
+        self.assertIn("timer_attempts=10000", script)
+        self.assertIn('[ "$after" -gt "$before" ]', script)
+        self.assertIn('[ "$after" -ge "$current" ]', script)
         self.assertNotIn("sleep 0.1", script)
         self.assertIn("apic_ids=0,1,2,3 bsp=0 workers=$workers", script)
         self.assertIn("NVX-SMP-PROBE-OK", script)
@@ -1202,6 +1206,7 @@ class BenchmarkTests(unittest.TestCase):
     def test_prepare_snapshot_capture_stages_waiting_controller(self):
         script = benchmark.prepare_snapshot_capture_script(
             4,
+            backend="whp",
             teardown_mode="guest-exit",
             network_gateway="10.0.0.1",
             ioapic_irq=10,
@@ -1220,13 +1225,19 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertIn("IFS= read -r trigger\n", script)
         self.assertIn("echo NVX-SNAPSHOT-DISPATCHED\n", script)
+        self.assertIn('while [ "$(cat "$clock_path")" = tsc-early ]', script)
+        self.assertIn(
+            "SMP-CLOCKSOURCE-FAIL expected=stable actual=$current_clocksource",
+            script,
+        )
         self.assertIn(
             "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n",
             script,
         )
         host_terminated = benchmark.prepare_snapshot_capture_script(
-            4, teardown_mode="host-terminate"
+            4, backend="kvm", teardown_mode="host-terminate"
         )
+        self.assertNotIn("clock_tries", host_terminated)
         self.assertNotIn("nvx-exit 0", host_terminated)
         self.assertTrue(
             script.endswith(
@@ -1644,8 +1655,9 @@ class BenchmarkTests(unittest.TestCase):
             "capture_snapshot",
             return_value=(1.0, 1.0, 1.0, 1024),
         ) as capture:
-            benchmark.benchmark_snapshot_capture(args, ["openvmm"])
+            benchmark.benchmark_snapshot_capture(args, "whp", ["openvmm"])
 
+        self.assertEqual(capture.call_args.kwargs["backend"], "whp")
         self.assertEqual(capture.call_args.kwargs["processors"], 8)
         self.assertEqual(capture.call_args.kwargs["teardown_mode"], "guest-exit")
 
@@ -1896,6 +1908,7 @@ class BenchmarkTests(unittest.TestCase):
             with patch.object(benchmark, "capture_snapshot", side_effect=capture):
                 result = benchmark.benchmark_snapshot_capture(
                     args,
+                    "kvm",
                     ["openvmm"],
                     retained_snapshot_path=retained,
                 )

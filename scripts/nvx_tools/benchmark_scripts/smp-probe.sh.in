@@ -13,9 +13,8 @@ cat >"$worker_script" <<'NVX_SMP_WORKER'
 #!/bin/sh
 set -eu
 cpu="$1"
-before="$2"
-result="$3"
-apic_id="$4"
+result="$2"
+apic_id="$3"
 actual="$(awk '{ print $39 }' /proc/self/stat)"
 [ "$actual" -eq "$cpu" ] || { echo "SMP-WORKER-FAIL requested=$cpu actual=$actual"; exit 87; }
 read_loc_counter() {
@@ -30,17 +29,24 @@ read_loc_counter() {
         5) current=$cpu5 ;;
         6) current=$cpu6 ;;
         7) current=$cpu7 ;;
-        *) return 1 ;;
+        *) echo "SMP-WORKER-FAIL unsupported-cpu=$cpu"; exit 87 ;;
       esac
       return 0
     fi
   done </proc/interrupts
-  return 1
+  echo "SMP-LAPIC-FAIL cpu=$cpu missing-local-timer-counter"
+  exit 87
 }
-while :; do
+read_loc_counter
+before=$current
+timer_attempts=10000
+attempts=0
+while [ "$attempts" -lt "$timer_attempts" ]; do
   read_loc_counter
   [ "$current" -gt "$before" ] && break
+  attempts=$((attempts + 1))
 done
+[ "$current" -gt "$before" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu before=$before after=$current attempts=$attempts"; exit 88; }
 printf '%s %s %s\n' "$actual" "$current" "$apic_id" >"$result"
 NVX_SMP_WORKER
 chmod +x "$worker_script"
@@ -54,26 +60,24 @@ for cpu in $(seq 0 $((expected - 1))); do
   [ "$(cat "$topology/thread_siblings_list")" = "$cpu" ] || exit 85
   apic_id="$(awk -v target="$cpu" '$1 == "processor" { processor = $3 } $1 == "apicid" && processor == target { print $3; exit }' /proc/cpuinfo)"
   [ "$apic_id" -eq "$cpu" ] || { echo "SMP-APIC-FAIL cpu=$cpu apic=$apic_id"; exit 86; }
-  field=$((cpu + 1))
-  before="$(printf "%s\n" "$loc_before" | awk -v field="$field" '{ print $field }')"
   result="$worker_dir/$cpu"
-  taskset -c "$cpu" "$worker_script" "$cpu" "$before" "$result" "$apic_id" &
+  taskset -c "$cpu" "$worker_script" "$cpu" "$result" "$apic_id" &
   worker_pids="$worker_pids $!"
   workers=$((workers + 1))
 done
 for pid in $worker_pids; do
   wait "$pid"
 done
+loc_after="$(awk -v expected="$expected" '/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }' /proc/interrupts)"
+[ "$(printf "%s\n" "$loc_after" | awk '{ print NF }')" -eq "$expected" ] || { echo "SMP-LAPIC-FAIL missing-local-timer-counters"; exit 87; }
 for cpu in $(seq 0 $((expected - 1))); do
   read -r actual current apic_id <"$worker_dir/$cpu"
-  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id actual=$actual loc_after=$current"
-done
-loc_after="$(awk -v expected="$expected" '/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }' /proc/interrupts)"
-for cpu in $(seq 0 $((expected - 1))); do
   field=$((cpu + 1))
   before="$(printf "%s\n" "$loc_before" | awk -v field="$field" '{ print $field }')"
   after="$(printf "%s\n" "$loc_after" | awk -v field="$field" '{ print $field }')"
   [ "$after" -gt "$before" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu before=$before after=$after"; exit 88; }
+  [ "$after" -ge "$current" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu worker=$current after=$after"; exit 88; }
+  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id actual=$actual loc_after=$after"
   if [ "$cpu" -gt 0 ]; then
     ipi="$(awk -v field=$((cpu + 2)) '/^(RES|CAL):/ { total += $field } END { print total + 0 }' /proc/interrupts)"
     [ "$ipi" -gt 0 ] || { echo "SMP-IPI-FAIL cpu=$cpu count=$ipi"; exit 89; }

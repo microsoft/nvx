@@ -253,8 +253,9 @@ Each benchmark boots the guest with a fixed kernel command line. Two bases recur
 
 OpenVMM owns `BASE`; each `--cmdline` value below is appended to it. Restore phases do not pass a
 command line and resume the one captured in the snapshot. OpenVMM also appends device-discovery
-tokens (`virtio_mmio.device=...` for an attached mount or NIC, plus `tsc_early_khz=...`) and may
-replace `console=hvc0` with `console=hvc1` when a virtio console is selected.
+tokens (`virtio_mmio.device=...` for an attached mount or NIC) and may replace `console=hvc0` with
+`console=hvc1` when a virtio console is selected. Snapshot-source boots additionally receive the
+backend-derived `tsc_early_khz=...` token.
 
 | Benchmark | Phase | Kernel command line |
 | --- | --- | --- |
@@ -295,8 +296,13 @@ Collection rejects host-termination semantics, legacy console-timed capture resu
 results without prequeued guest exit, missing samples, and any guest-exit teardown timeout.
 Lifecycle capture runs a deterministic affinity-pinned worker on every vCPU
 before the snapshot request. Explicit correctness scenarios also stage a post-restore probe.
-The capture probe is outside the snapshot-generation timing interval. Each worker completes only
-after its CPU's LAPIC counter advances, avoiding fixed-duration guest sleeps.
+The capture probe is outside the snapshot-generation timing interval. Each worker proves that it
+executed on its assigned vCPU and observes that CPU's local APIC counter advance. Workers poll
+for at most 10,000 counter reads, so a stalled timer fails without relying on guest sleeps or a
+working guest clock to bound the check. Pre/post interrupt snapshots also require every counter
+to advance and remain at least as large as the worker's observed value.
+WHP capture waits for Linux to replace the transitional `tsc-early` clocksource with
+its stable selected clocksource before starting this SMP validation.
 The coordinator stages the probe and a capture controller in guest memory. The
 controller runs the first probe, blocks in `read`, and invokes `nvx-snapshot` when the
 host sends the trigger. The controller always emits `NVX-SNAPSHOT-DISPATCHED` immediately before
