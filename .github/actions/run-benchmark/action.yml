@@ -326,8 +326,8 @@ runs:
           --backend "${{ inputs.backend }}" `
           --platform "${{ inputs.platform }}" `
           --processors 1 `
-          --warmups 0 `
-          --runs 1 `
+          --warmups 1 `
+          --runs 5 `
           --device-io-duration-seconds 1 `
           --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
           --skip-build `

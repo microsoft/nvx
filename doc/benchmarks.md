@@ -361,6 +361,11 @@ server binds the host's primary IPv4 address, requires no TAP or firewall change
 the suite returns. The rate is derived during aggregation as
 $\mathrm{ops/s}=N\times10^9/t_{ns}$ from integer operation counts and monotonic elapsed nanoseconds.
 
+Backing objects are reused across attempts. On Windows, extending the virtio-fs file sets its
+length without initializing its contents, so the first random writes can include host filesystem
+initialization and zero-fill costs. A discarded warmup keeps those cold-file costs out of the
+steady-state operation rates; a single cold attempt is only a smoke test.
+
 `device-io.log` stores one versioned JSON record per warmup or retained attempt. Missing,
 duplicate, malformed, or zero-work helper output turns that attempt into an explicit failure;
 failed attempts stay in the log and never enter p50 or p95. Warmup and retained indices are fixed,
@@ -477,8 +482,10 @@ metrics and every configured attempt. Each backend job publishes its p50 tables 
 `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
 latest base-branch history.
 
-CI uses an explicit reduced device contract of zero warmups, one retained attempt, and one-second
-windows. Canonical baseline collection uses the full `5 + 30` contract.
+Linux CI uses a reduced device contract of zero warmups and one retained attempt. Windows CI
+discards one warmup and retains five attempts so file initialization cannot dominate its p50.
+Both CI contracts use one-second operation windows. Canonical baseline collection uses the
+full `5 + 30` contract.
 
 The current workflow collects 10 measured lifecycle samples after one warmup.
 The regression gate compares the target p50 with the median of the latest 10
@@ -499,6 +506,12 @@ unchanged. CI passes `--history-reset-dir data` to honor metrics explicitly remo
 tracked candidate history file even before the reset merges into the base branch. After merge,
 the affected metrics start the normal ten-point warmup again; a missing candidate file alone
 does not reset a base-branch history.
+
+The Windows device-sampling correction resets only `virtio_fs_random_read_iops` and
+`virtio_fs_random_write_iops` in the ABI-2 one-vCPU bare-metal and virtual-machine histories.
+The old cold-file rates are not comparable with warmed-file measurements. The same selective
+reset mechanism starts a new ten-point history for these metrics; other metrics and all gate
+thresholds remain unchanged.
 
 ## Lifecycle methodology
 
