@@ -5,7 +5,7 @@
     "version": "0.1.0"
   },
   "openvmm": {
-    "source_revision": "e9bf52aed09d2ca9f5dfad816db7f875f2a05e62",
+    "source_revision": "139109ec2a3e288e2d6b3934d6d74532d52dadc9",
     "microvm_abi_version": 2,
     "control_session_protocol_version": 1,
     "control_contract_revision": "nvx-microvm-v2-control-v1"
