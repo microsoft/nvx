@@ -33,15 +33,13 @@ coordinator fills the `.sh.in` templates before use.
 
 | CI performance series | Backend | Host type |
 | --- | --- | --- |
-| `linux-kvm-baremetal` | KVM | Bare metal |
-| `linux-mshv-baremetal` | MSHV | Bare metal |
+| `linux-kvm-virtual-machine` | KVM | Virtual machine |
 | `linux-mshv-virtual-machine` | MSHV | Virtual machine |
-| `windows-whp-baremetal` | WHP | Bare metal |
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
 
 CI runs the complete acceptance and performance suites and the five device metrics at one vCPU
 under the canonical microVM, and only the 512 MiB shell snapshot restore at `2`,
-`4`, and `8` vCPUs. This produces 39 p50 values per series and 195 values across the five-series
+`4`, and `8` vCPUs. This produces 39 p50 values per series and 117 values across the three-series
 matrix. Counts run sequentially on each host so benchmark workloads never overlap on the same
 physical host.
 
@@ -204,7 +202,7 @@ and at least `N+2` processors for an `N`-vCPU guest. The additional processors
 cover VMM and device work. The default selector follows this policy; an
 explicit undersized `--cpus` set is rejected before measurement.
 
-The two pinned virtual-machine CI runners expose four cores as eight sibling
+The three pinned virtual-machine CI runners expose four cores as eight sibling
 logical CPUs. Their virtual-machine series deliberately use the fixed `0-7`
 set with `--host-cpu-reserve 0`, including sibling CPUs and sharing capacity
 between guest, VMM, and device work. These constrained nested-host results are

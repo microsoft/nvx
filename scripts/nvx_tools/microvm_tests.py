@@ -640,9 +640,9 @@ def run_snapshot_core(
         output_dir / "snapshot-core-no-destination.log",
     ) as process:
         process.wait_for(BOOT_MARKER, timeout)
-        process.send_line(
-            "nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK; nvx-exit 0"
-        )
+        process.send_line("nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK")
+        process.wait_for(no_destination_marker, timeout)
+        process.send_line("nvx-exit 0")
         result = process.wait(timeout)
     if result.returncode != 0:
         raise RuntimeError(f"no-destination OpenVMM exited with {result.returncode}")

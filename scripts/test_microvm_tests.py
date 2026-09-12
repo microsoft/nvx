@@ -310,6 +310,68 @@ class MicrovmTests(unittest.TestCase):
                 if expected_returncode:
                     self.assertIn("NVX-SNAPSHOT-CORE-FAIL code=46", result.stdout)
 
+    def test_snapshot_core_waits_for_no_destination_marker_before_exit(self):
+        events: list[tuple[str, bytes | str | None]] = []
+        marker = b"NVX-SNAPSHOT-NO-DESTINATION-OK"
+
+        class StopAfterNoDestination(Exception):
+            pass
+
+        class FakeProcess:
+            def __enter__(self):
+                return self
+
+            def __exit__(
+                self,
+                _exception_type: type[BaseException] | None,
+                _exception: BaseException | None,
+                _traceback: object | None,
+            ) -> None:
+                return None
+
+            def wait_for(self, expected: bytes, _timeout: float) -> None:
+                events.append(("wait_for", expected))
+
+            def send_line(self, line: str) -> None:
+                events.append(("send_line", line))
+
+            def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
+                events.append(("wait", None))
+                return openvmm_process.OpenvmmProcessResult(0, marker + b"\n")
+
+        with (
+            patch.object(
+                microvm_tests, "workload_boot_command", return_value=["openvmm"]
+            ),
+            patch.object(microvm_tests, "OpenvmmProcess", return_value=FakeProcess()),
+            patch.object(
+                microvm_tests.tempfile,
+                "TemporaryDirectory",
+                side_effect=StopAfterNoDestination,
+            ),
+            self.assertRaises(StopAfterNoDestination),
+        ):
+            microvm_tests.run_snapshot_core(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs"),
+                "whp",
+                memory_mib=128,
+                timeout=1,
+                output_dir=Path("logs"),
+            )
+
+        self.assertEqual(
+            events,
+            [
+                ("wait_for", microvm_tests.BOOT_MARKER),
+                ("send_line", "nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK"),
+                ("wait_for", marker),
+                ("send_line", "nvx-exit 0"),
+                ("wait", None),
+            ],
+        )
+
     def test_snapshot_marker_parsers_require_single_well_formed_values(self):
         output = b"PREFIX-12\r\nPAIR-4-5\n"
         self.assertEqual(

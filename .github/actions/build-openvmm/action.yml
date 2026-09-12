@@ -76,8 +76,8 @@ runs:
       uses: actions/cache@v5
       with:
         path: |
-          ~/.cargo/registry
-          ~/.cargo/git
+          ${{ format('{0}/cargo-home/registry', runner.temp) }}
+          ${{ format('{0}/cargo-home/git', runner.temp) }}
           openvmm/target
         key: cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
         restore-keys: |
@@ -91,27 +91,13 @@ runs:
         PATH: ${{ steps.cache-tools-mshv.outputs.path }}
       with:
         path: |
-          ~/.cargo/registry
-          ~/.cargo/git
+          ${{ format('{0}/cargo-home/registry', runner.temp) }}
+          ${{ format('{0}/cargo-home/git', runner.temp) }}
           openvmm/target
         key: cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
         restore-keys: |
           cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
           cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-
-
-    - name: Install KVM build dependencies
-      if: inputs.backend == 'kvm' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        sudo apt-get update
-        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          git libarchive-tools
-
-    - name: Install MSHV build dependencies
-      if: inputs.backend == 'mshv' && steps.cache-openvmm-mshv.outputs.cache-hit != 'true'
-      shell: bash
-      run: sudo -n tdnf install -y binutils kernel-headers libarchive openssl-devel
 
     - name: Build native OpenVMM on Linux
       if: runner.os != 'Windows' && inputs.build-mode == 'native' && steps.cache-openvmm-native.outputs.cache-hit != 'true'

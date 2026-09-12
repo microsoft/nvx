@@ -1,80 +1,34 @@
 name: Prepare performance results
-description: Restore host-typed benchmark series and collect their p50 results
+description: Download host-typed benchmark series and collect their p50 results
 
 runs:
   using: composite
   steps:
-    - name: Prepare benchmark cache tools
-      id: benchmark-cache-tools
-      shell: bash
-      run: |
-        set -euo pipefail
-        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-        mkdir -p "${cache_tools}"
-        ln -sf "$(command -v tar)" "${cache_tools}/tar"
-        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-    - name: Restore Linux / KVM / bare metal benchmark results
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
+    - name: Download Linux / KVM / virtual machine benchmark results
+      uses: actions/download-artifact@v5
       with:
-        path: data/runs/linux-kvm-baremetal
-        key: benchmark-linux-kvm-baremetal-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-kvm-baremetal-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        path: data/runs/linux-kvm-virtual-machine
+        name: benchmark-linux-kvm-virtual-machine-${{ github.run_id }}-${{ github.run_attempt }}
 
-    - name: Restore Linux / MSHV / bare metal benchmark results
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
-      with:
-        path: data/runs/linux-mshv-baremetal
-        key: benchmark-linux-mshv-baremetal-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-mshv-baremetal-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
-
-    - name: Restore Linux / MSHV / virtual machine benchmark results
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
+    - name: Download Linux / MSHV / virtual machine benchmark results
+      uses: actions/download-artifact@v5
       with:
         path: data/runs/linux-mshv-virtual-machine
-        key: benchmark-linux-mshv-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-mshv-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        name: benchmark-linux-mshv-virtual-machine-${{ github.run_id }}-${{ github.run_attempt }}
 
-    - name: Restore Windows / WHP / bare metal benchmark results
-      uses: actions/cache/restore@v5
-      with:
-        path: data/runs/windows-whp-baremetal
-        key: benchmark-windows-whp-baremetal-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-windows-whp-baremetal-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
-
-    - name: Restore Windows / WHP / virtual machine benchmark results
-      uses: actions/cache/restore@v5
+    - name: Download Windows / WHP / virtual machine benchmark results
+      uses: actions/download-artifact@v5
       with:
         path: data/runs/windows-whp-virtual-machine
-        key: benchmark-windows-whp-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-windows-whp-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        name: benchmark-windows-whp-virtual-machine-${{ github.run_id }}-${{ github.run_attempt }}
 
     - name: Collect p50 results
       shell: bash
       run: |
         set -euo pipefail
         for platform in \
-          linux-kvm-baremetal \
-          linux-mshv-baremetal \
+          linux-kvm-virtual-machine \
           linux-mshv-virtual-machine \
-          windows-whp-baremetal \
           windows-whp-virtual-machine; do
           run_dir="data/runs/${platform}/microvm-v2/1vcpu"
           python3 scripts/nvx.py performance collect \

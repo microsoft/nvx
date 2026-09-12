@@ -5,10 +5,6 @@ inputs:
   backend:
     description: Virtualization backend expected on the runner
     required: true
-  require-docker:
-    description: Whether the job requires a working Docker daemon
-    required: false
-    default: "false"
 
 runs:
   using: composite
@@ -18,24 +14,71 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        test -n "${CARGO_HOME:-}" || {
+          echo "::error::CARGO_HOME is not configured" >&2
+          exit 1
+        }
+        mkdir -p "${CARGO_HOME}/bin"
         python3 --version
         rustc --version
         cargo --version
         cargo nextest --version
+        if sudo -n true >/dev/null 2>&1; then
+          echo "::error::Runner has passwordless sudo access" >&2
+          exit 1
+        fi
+        if getent group docker >/dev/null 2>&1; then
+          docker_gid="$(getent group docker | cut -d: -f3)"
+          case " $(id -G) " in
+            *" ${docker_gid} "*)
+              echo "::error::Runner belongs to the root-equivalent Docker group" >&2
+              exit 1
+              ;;
+          esac
+        fi
+        if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
+          echo "::error::Runner has Docker daemon access" >&2
+          exit 1
+        fi
 
     - name: Validate Windows toolchain
       if: runner.os == 'Windows'
       shell: powershell
       run: |
+        if ([string]::IsNullOrWhiteSpace($env:CARGO_HOME)) {
+            throw "CARGO_HOME is not configured"
+        }
+        New-Item -ItemType Directory -Path "$env:CARGO_HOME\bin" -Force |
+            Out-Null
         python --version
         rustc --version
         cargo --version
         cargo nextest --version
-
-    - name: Validate Docker
-      if: inputs.require-docker == 'true'
-      shell: bash
-      run: docker version
+        if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+          throw "RUNNER_TEMP is not configured"
+        }
+        $runnerRoot = Split-Path -Parent `
+          (Split-Path -Parent $env:RUNNER_TEMP)
+        $serviceName = (Get-Content `
+            -LiteralPath (Join-Path $runnerRoot ".service") `
+            -Raw).Trim()
+        $service = Get-CimInstance `
+          -ClassName Win32_Service `
+          -Filter "Name='$serviceName'"
+        if ($null -eq $service) {
+          throw "Actions runner service was not found: $serviceName"
+        }
+        $account = [Security.Principal.NTAccount]::new($service.StartName)
+        $sid = $account.Translate(
+          [Security.Principal.SecurityIdentifier]
+        ).Value
+        if ($sid -ne "S-1-5-20") {
+          throw "Actions runner service uses $($service.StartName), expected Network Service"
+        }
+        $jobSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ($jobSid -ne "S-1-5-20") {
+          throw "Actions job uses SID $jobSid, expected Network Service"
+        }
 
     - name: Validate KVM
       if: inputs.backend == 'kvm'
@@ -52,4 +95,3 @@ runs:
         set -euo pipefail
         test -r /dev/mshv
         test -w /dev/mshv
-        sudo -n true

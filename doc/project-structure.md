@@ -39,6 +39,7 @@ nvx/
 |   `-- nvx-snapshot             Snapshot preparation and restore repair helper
 |-- data/                        Benchmark data
 |   |-- linux-kvm-baremetal.csv              Rolling bare-metal Linux/KVM history
+|   |-- linux-kvm-virtual-machine.csv         Rolling virtual-machine Linux/KVM history
 |   |-- linux-mshv-baremetal.csv             Rolling bare-metal Linux/MSHV history
 |   |-- linux-mshv-virtual-machine.csv       Rolling virtual-machine Linux/MSHV history
 |   |-- windows-whp-baremetal.csv            Rolling bare-metal Windows/WHP history

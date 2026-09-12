@@ -90,10 +90,10 @@ SDK, and Docker Desktop using Linux containers.
 
 ## Automated environment bootstrap
 
-The scripts in [`scripts/setup`](../scripts/setup/README.md) prepare an existing checkout for
-Linux/MSHV or Windows/WHP development. They install the platform build prerequisites, configure
-hypervisor access, build NVX, and provide non-mutating dependency and build validation modes.
-They do not create machines, initialize checkouts, or manage repository credentials.
+The scripts in [`scripts/setup`](../scripts/setup/README.md) prepare Linux/KVM, Linux/MSHV, and
+Windows/WHP development or GitHub Actions hosts. They install the platform build prerequisites,
+configure hypervisor access, and provide non-mutating validation modes. Runner registration
+tokens are read from standard input so they do not appear in command history.
 
 Linux can also emit a revision-bound, checksummed guest artifact bundle for Windows. The Windows
 script verifies that bundle before copying it into the checkout and building OpenVMM natively.

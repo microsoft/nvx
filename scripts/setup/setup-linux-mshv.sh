@@ -4,6 +4,8 @@ set -eu
 
 RUST_TOOLCHAIN=stable
 RUST_MINIMUM_VERSION=1.95.0
+RUSTUP_VERSION=1.29.1
+RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 PYTHON_MINIMUM_VERSION=3.10.0
 CARGO_NEXTEST_VERSION=0.9.133
 
@@ -59,15 +61,8 @@ install_packages() {
             bc binutils bison build-essential ca-certificates cmake cpio curl \
             docker-buildx docker.io flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
-            pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils
-    elif command -v dnf >/dev/null 2>&1; then
-        run_as_root dnf install -y \
-            bc binutils bison ca-certificates cmake cpio curl elfutils-libelf-devel \
-            findutils flex gcc gcc-c++ git glibc-devel gzip iproute iptables \
-            kernel-headers libarchive libarchive-devel make moby-engine \
-            ninja-build openssl openssl-devel patch perl pkgconf \
-            pkgconf-pkg-config protobuf-compiler python3 rsync shadow-utils tar \
-            util-linux which xz docker-buildx
+            pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
+            zstd
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
             bc binutils bison ca-certificates cmake cpio curl diffutils \
@@ -76,7 +71,16 @@ install_packages() {
             kernel-headers libarchive libarchive-devel make moby-engine \
             ninja-build openssl openssl-devel patch perl pkgconf \
             pkgconf-pkg-config protobuf python3 rsync shadow-utils tar \
-            util-linux which xz
+            util-linux which xz zstd
+        run_as_root tdnf install -y docker-cli
+    elif command -v dnf >/dev/null 2>&1; then
+        run_as_root dnf install -y \
+            bc binutils bison ca-certificates cmake cpio curl elfutils-libelf-devel \
+            findutils flex gcc gcc-c++ git glibc-devel gzip iproute iptables \
+            kernel-headers libarchive libarchive-devel make moby-engine \
+            ninja-build openssl openssl-devel patch perl pkgconf \
+            pkgconf-pkg-config protobuf-compiler python3 rsync shadow-utils tar \
+            util-linux which xz zstd docker-buildx
     else
         die "supported package manager not found (apt-get, dnf, or tdnf)"
     fi
@@ -85,9 +89,17 @@ install_packages() {
 install_rust_tools() {
     if ! command -v rustup >/dev/null 2>&1; then
         require_command curl
+        installer=$(mktemp "${TMPDIR:-/tmp}/rustup-init-${RUSTUP_VERSION}.XXXXXX")
+        trap 'rm -f "$installer"' 0 HUP INT TERM
+        installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init
         curl --fail --proto '=https' --tlsv1.2 --silent --show-error \
-            https://sh.rustup.rs |
-            sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+            --output "$installer" "$installer_url"
+        printf '%s  %s\n' "$RUSTUP_SHA256" "$installer" | sha256sum --check -
+        chmod 0755 "$installer"
+        "$installer" -y --no-modify-path --profile minimal \
+            --default-toolchain "$RUST_TOOLCHAIN"
+        rm -f "$installer"
+        trap - 0 HUP INT TERM
         # shellcheck disable=SC1091
         . "${HOME}/.cargo/env"
     fi
@@ -154,7 +166,7 @@ check_environment() {
         die "current session cannot access /dev/mshv"
 
     for command_name in python3 git curl rustup cargo cargo-nextest gcc make ld \
-        bison flex cpio gzip tar xz; do
+        bison flex cpio gzip sha256sum tar xz zstd; do
         require_command "$command_name"
     done
     python_version=$(python3 -c \
