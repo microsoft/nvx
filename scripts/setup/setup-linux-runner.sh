@@ -172,6 +172,8 @@ protect_runner_installation() {
 migrate_legacy_runner() {
     [ "$runner_directory_is_default" = true ] || return 0
     [ -f "${legacy_runner_directory}/.runner" ] || return 0
+    [ -n "$runner_token" ] ||
+        die "runner registration token is required to migrate and refresh labels"
 
     if [ -f "${runner_directory}/.runner" ]; then
         die "both legacy and protected runner installations are configured"
@@ -188,9 +190,6 @@ migrate_legacy_runner() {
     fi
     run_as_root mkdir -p "$(dirname "$runner_directory")"
     run_as_root mv "$legacy_runner_directory" "$runner_directory"
-    if [ ! -f "${runner_directory}/.service" ]; then
-        run_runner_service install "$runner_service_account"
-    fi
 }
 
 configure_runner_service() {
@@ -342,20 +341,36 @@ install_runner() {
         run_as_root "${runner_directory}/bin/installdependencies.sh"
     fi
 
-    if ! run_as_root test -f "${runner_directory}/.runner"; then
+    registration_required=false
+    if ! run_as_root test -f "${runner_directory}/.runner" ||
+        ! run_as_root test -f "$runner_labels_file" ||
+        [ "$(run_as_root cat "$runner_labels_file" 2>/dev/null || true)" != \
+            "$expected_runner_labels" ]; then
+        registration_required=true
+    fi
+    if [ "$registration_required" = true ]; then
         [ -n "$runner_token" ] || die "runner registration token is required"
-        run_as_root chown -R "$(id -un):$(id -gn)" "$runner_directory"
-        runner_labels="linux,${backend},virtual-machine,${runner_name}"
+        if run_as_root test -f "${runner_directory}/.service"; then
+            run_runner_service uninstall
+        fi
+        run_as_root rm -f \
+            "${runner_directory}/.runner" \
+            "${runner_directory}/.credentials" \
+            "${runner_directory}/.credentials_rsaparams" \
+            "$runner_labels_file"
         (
             cd "$runner_directory"
-            ./config.sh --unattended --replace \
+            run_as_root env RUNNER_ALLOW_RUNASROOT=1 \
+                ./config.sh --unattended --replace \
                 --url "$repository_url" \
                 --token "$runner_token" \
                 --name "$runner_name" \
-                --labels "$runner_labels" \
+                --labels "$expected_runner_labels" \
                 --disableupdate \
                 --work _work
         )
+        printf '%s\n' "$expected_runner_labels" |
+            run_as_root tee "$runner_labels_file" >/dev/null
     fi
     runner_token=
 
@@ -426,6 +441,12 @@ check_environment() {
             "${runner_directory}/.runner")
         [ "$runner_disable_update" = True ] ||
             die "GitHub Actions runner automatic updates are not disabled"
+        if [ "$configure_runner" = true ]; then
+            run_as_root test -f "$runner_labels_file" &&
+                [ "$(run_as_root cat "$runner_labels_file")" = \
+                    "$expected_runner_labels" ] ||
+                die "GitHub Actions runner labels are not validated"
+        fi
         [ "$(stat -c %U "$runner_directory")" = root ] ||
             die "GitHub Actions runner installation is not root-owned"
         run_as_runner test ! -w "${runner_directory}/bin/Runner.Listener" ||
@@ -553,6 +574,8 @@ if [ "$configure_runner" = true ]; then
     [ -n "$runner_name" ] || die "--runner-name is required to configure a runner"
 fi
 runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
+runner_labels_file=${runner_directory}/.nvx-labels
+expected_runner_labels=linux,${backend},virtual-machine,${runner_name}
 
 if [ "$check_only" = false ]; then
     install_packages

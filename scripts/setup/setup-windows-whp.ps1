@@ -471,22 +471,33 @@ function Install-ActionsRunner {
 
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     $serviceFile = Join-Path $RunnerDirectory ".service"
+    $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
+    $labels = "windows,whp,virtual-machine,$RunnerName"
     $serviceInstalled = $false
     if (Test-Path -LiteralPath $serviceFile -PathType Leaf) {
         $serviceName = (Get-Content -LiteralPath $serviceFile -Raw).Trim()
         $serviceInstalled = -not [string]::IsNullOrWhiteSpace($serviceName) -and
         $null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
     }
-    if ((Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) -and
-        -not $serviceInstalled) {
+    $labelsValidated = (Test-Path -LiteralPath $labelsFile -PathType Leaf) -and
+    (Get-Content -LiteralPath $labelsFile -Raw).Trim() -eq $labels
+    $registrationRequired = `
+        -not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) -or
+    -not $serviceInstalled -or
+    -not $labelsValidated
+    if ($registrationRequired) {
         if ([string]::IsNullOrWhiteSpace($Token)) {
-            throw "runner registration token is required to repair the missing service"
+            throw "runner registration token is required to configure service and labels"
+        }
+        if ($serviceInstalled) {
+            Remove-ActionsRunnerService -ServiceName $serviceName
         }
         foreach ($name in @(
                 ".runner",
                 ".credentials",
                 ".credentials_rsaparams",
-                ".service"
+                ".service",
+                ".nvx-labels"
             )) {
             Remove-Item `
                 -LiteralPath (Join-Path $RunnerDirectory $name) `
@@ -495,10 +506,6 @@ function Install-ActionsRunner {
         }
     }
     if (-not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf)) {
-        if ([string]::IsNullOrWhiteSpace($Token)) {
-            throw "runner registration token is required"
-        }
-        $labels = "windows,whp,virtual-machine,$RunnerName"
         Push-Location $RunnerDirectory
         try {
             Invoke-Native ".\config.cmd" @(
@@ -516,6 +523,11 @@ function Install-ActionsRunner {
         finally {
             Pop-Location
         }
+        [IO.File]::WriteAllText(
+            $labelsFile,
+            $labels,
+            [Text.UTF8Encoding]::new($false)
+        )
     }
 
     $service = Get-ActionsRunnerService
@@ -539,6 +551,21 @@ function Get-ActionsRunnerService {
         throw "Actions runner service file is empty: $serviceFile"
     }
     return Get-Service -Name $serviceName -ErrorAction Stop
+}
+
+function Remove-ActionsRunnerService {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+    $service = Get-Service -Name $ServiceName -ErrorAction Stop
+    if ($service.Status -ne "Stopped") {
+        Stop-Service -Name $ServiceName -Force
+    }
+    $service = Get-CimInstance `
+        -ClassName Win32_Service `
+        -Filter "Name='$ServiceName'"
+    $result = Invoke-CimMethod -InputObject $service -MethodName Delete
+    if ($result.ReturnValue -ne 0) {
+        throw "could not remove runner service: Win32 error $($result.ReturnValue)"
+    }
 }
 
 function Set-ActionsRunnerServiceAccount {
@@ -593,6 +620,15 @@ function Assert-ActionsRunner {
     }
     if ($configuration.disableUpdate -ne $true) {
         throw "Actions runner automatic updates are not disabled"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RunnerName)) {
+        $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
+        $expectedLabels = "windows,whp,virtual-machine,$RunnerName"
+        if (-not (Test-Path -LiteralPath $labelsFile -PathType Leaf) -or
+            (Get-Content -LiteralPath $labelsFile -Raw).Trim() -ne
+            $expectedLabels) {
+            throw "Actions runner labels are not validated"
+        }
     }
     Assert-ServiceDirectoryAcl -Path $RunnerDirectory
     Assert-ServiceDirectoryAcl `

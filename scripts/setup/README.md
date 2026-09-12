@@ -38,6 +38,9 @@ $token = $null
 Both scripts pin and verify the Actions runner package. Linux runner labels are
 `linux`, the selected backend, `virtual-machine`, and the runner name. Windows
 labels are `windows`, `whp`, `virtual-machine`, and the runner name.
+Supply a fresh registration token again when migrating an existing runner or
+changing its name, backend, or labels; provisioning replaces the registration
+and records the expected label set in a protected local marker.
 Runner services receive an explicit tool PATH. On Windows, the Rust toolchain
 is read-only to the service account while Cargo registry and Git caches use the
 runner's per-job temporary directory.
