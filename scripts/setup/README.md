@@ -41,6 +41,11 @@ labels are `windows`, `whp`, `virtual-machine`, and the runner name.
 Runner services receive an explicit tool PATH. On Windows, the Rust toolchain
 is read-only to the service account while Cargo registry and Git caches use the
 runner's per-job temporary directory.
+On both platforms, runner and toolchain executables are administrator-owned and
+read-only to jobs, automatic runner updates are disabled, and writable runner
+state is confined to `_work`.
+Persistent runners do not have Docker access. Guest artifacts are built with
+Docker on a GitHub-hosted runner instead.
 
 Validate an installed runner without changing the host:
 

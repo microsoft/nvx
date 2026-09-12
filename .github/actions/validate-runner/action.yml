@@ -18,6 +18,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        test -n "${CARGO_HOME:-}" || {
+          echo "::error::CARGO_HOME is not configured" >&2
+          exit 1
+        }
+        mkdir -p "${CARGO_HOME}/bin"
         python3 --version
         rustc --version
         cargo --version

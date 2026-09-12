@@ -76,8 +76,8 @@ runs:
       uses: actions/cache@v5
       with:
         path: |
-          ${{ runner.os == 'Windows' && format('{0}/cargo-home/registry', runner.temp) || '~/.cargo/registry' }}
-          ${{ runner.os == 'Windows' && format('{0}/cargo-home/git', runner.temp) || '~/.cargo/git' }}
+          ${{ format('{0}/cargo-home/registry', runner.temp) }}
+          ${{ format('{0}/cargo-home/git', runner.temp) }}
           openvmm/target
         key: cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
         restore-keys: |
@@ -91,8 +91,8 @@ runs:
         PATH: ${{ steps.cache-tools-mshv.outputs.path }}
       with:
         path: |
-          ~/.cargo/registry
-          ~/.cargo/git
+          ${{ format('{0}/cargo-home/registry', runner.temp) }}
+          ${{ format('{0}/cargo-home/git', runner.temp) }}
           openvmm/target
         key: cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
         restore-keys: |

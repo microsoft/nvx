@@ -94,48 +94,174 @@ function Set-ServiceDirectoryAcl {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ServiceRights
     )
-    Invoke-Native "icacls.exe" @($Path, "/inheritance:r", "/Q")
-    foreach ($grant in @(
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F",
-            "*S-1-5-20:(OI)(CI)$ServiceRights"
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
+    [Security.AccessControl.InheritanceFlags]::ContainerInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    foreach ($entry in @(
+            @("S-1-5-18", "FullControl"),
+            @("S-1-5-32-544", "FullControl"),
+            @("S-1-5-20", $ServiceRights)
         )) {
-        Invoke-Native "icacls.exe" @($Path, "/grant:r", $grant, "/Q")
+        $identity = [Security.Principal.SecurityIdentifier]::new($entry[0])
+        $rights = [Security.AccessControl.FileSystemRights]$entry[1]
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            $rights,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+        [void]$acl.AddAccessRule($rule)
     }
+    Set-Acl -LiteralPath $Path -AclObject $acl
     if (@(Get-ChildItem -LiteralPath $Path -Force).Count -gt 0) {
         Invoke-Native "icacls.exe" @("$Path\*", "/reset", "/T", "/Q")
     }
 }
 
-function Assert-TrustedToolchainAcl {
-    $acl = Get-Acl -LiteralPath $ToolRoot
+function Assert-ServiceDirectoryAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter()][switch]$Writable
+    )
+    $acl = Get-Acl -LiteralPath $Path
     if (-not $acl.AreAccessRulesProtected) {
-        throw "trusted toolchain ACL inherits permissions: $ToolRoot"
+        throw "service directory ACL inherits permissions: $Path"
     }
     $networkServiceSid = "S-1-5-20"
-    $rules = @($acl.GetAccessRules(
+    $allRules = @($acl.GetAccessRules(
             $true,
             $true,
             [Security.Principal.SecurityIdentifier]
-        ) | Where-Object {
+        ))
+    $rules = @($allRules | Where-Object {
             $_.IdentityReference.Value -eq $networkServiceSid -and
             $_.AccessControlType -eq "Allow"
         })
-    $required = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $required = if ($Writable) {
+        [Security.AccessControl.FileSystemRights]::Modify
+    }
+    else {
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    }
     if (@($rules | Where-Object {
                 ($_.FileSystemRights -band $required) -eq $required
             }).Count -eq 0) {
-        throw "Network Service cannot execute the trusted toolchain"
+        throw "Network Service lacks $required on $Path"
     }
     $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor
     [Security.AccessControl.FileSystemRights]::Delete -bor
     [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
     [Security.AccessControl.FileSystemRights]::TakeOwnership
-    if (@($rules | Where-Object {
-                ($_.FileSystemRights -band $writeMask) -ne 0
-            }).Count -ne 0) {
-        throw "Network Service can modify the trusted toolchain"
+    $allowedWriters = @("S-1-5-18", "S-1-5-32-544")
+    if ($Writable) {
+        $allowedWriters += $networkServiceSid
     }
+    if (@($allRules | Where-Object {
+                $_.AccessControlType -eq "Allow" -and
+                ($_.FileSystemRights -band $writeMask) -ne 0 -and
+                $_.IdentityReference.Value -notin $allowedWriters
+            }).Count -ne 0) {
+        throw "untrusted identity can modify service directory: $Path"
+    }
+}
+
+function Assert-TrustedToolchainAcl {
+    Assert-ServiceDirectoryAcl -Path $ToolRoot
+}
+
+function Set-ActionsRunnerDisableUpdate {
+    $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
+    $configuration = Get-Content -LiteralPath $runnerConfiguration -Raw |
+    ConvertFrom-Json
+    $configuration | Add-Member `
+        -NotePropertyName disableUpdate `
+        -NotePropertyValue $true `
+        -Force
+    $encoding = [Text.UTF8Encoding]::new($true)
+    $json = $configuration | ConvertTo-Json -Depth 16
+    $bytes = $encoding.GetBytes($json)
+    $stream = [IO.File]::Open(
+        $runnerConfiguration,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::Read
+    )
+    try {
+        $stream.SetLength(0)
+        $stream.Write($bytes, 0, $bytes.Length)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Test-ActionsRunnerDiagnosticsLink {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedTarget
+    )
+    $item = Get-Item `
+        -LiteralPath $Path `
+        -Force `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+        return $false
+    }
+    if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        return $false
+    }
+    $target = @($item.Target)[0]
+    if ([string]::IsNullOrWhiteSpace($target)) {
+        return $false
+    }
+    if (-not [IO.Path]::IsPathRooted($target)) {
+        $target = Join-Path $item.Parent.FullName $target
+    }
+    $actual = [IO.Path]::GetFullPath($target).TrimEnd("\")
+    $expected = [IO.Path]::GetFullPath($ExpectedTarget).TrimEnd("\")
+    return [StringComparer]::OrdinalIgnoreCase.Equals($actual, $expected)
+}
+
+function Protect-ActionsRunner {
+    $workDirectory = Join-Path $RunnerDirectory "_work"
+    $diagnosticsDirectory = Join-Path $RunnerDirectory "_diag"
+    $diagnosticsTarget = Join-Path $workDirectory "_diag"
+    New-Item -ItemType Directory -Path $workDirectory, $diagnosticsTarget -Force |
+    Out-Null
+
+    $diagnostics = Get-Item `
+        -LiteralPath $diagnosticsDirectory `
+        -Force `
+        -ErrorAction SilentlyContinue
+    if ($null -ne $diagnostics -and
+        -not (Test-ActionsRunnerDiagnosticsLink `
+            -Path $diagnosticsDirectory `
+            -ExpectedTarget $diagnosticsTarget)) {
+        if ($diagnostics.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Remove-Item -LiteralPath $diagnosticsDirectory -Force
+        }
+        else {
+            Get-ChildItem -LiteralPath $diagnosticsDirectory -Force |
+            Move-Item -Destination $diagnosticsTarget -Force
+            Remove-Item -LiteralPath $diagnosticsDirectory -Recurse -Force
+        }
+    }
+    if (-not (Test-Path -LiteralPath $diagnosticsDirectory)) {
+        New-Item `
+            -ItemType Junction `
+            -Path $diagnosticsDirectory `
+            -Target $diagnosticsTarget |
+        Out-Null
+    }
+
+    Set-ServiceDirectoryAcl `
+        -Path $RunnerDirectory `
+        -ServiceRights "ReadAndExecute"
+    Set-ServiceDirectoryAcl -Path $workDirectory -ServiceRights "Modify"
 }
 
 function Get-RequiredCommand {
@@ -300,6 +426,9 @@ function Install-Toolchain {
     Invoke-Native $rustupPath @(
         "toolchain", "install", $RustToolchain, "--profile", "minimal"
     )
+    Invoke-Native $rustupPath @(
+        "target", "add", "x86_64-unknown-none", "--toolchain", $RustToolchain
+    )
 
     $cargo = Join-Path $TrustedCargoHome "bin\cargo.exe"
     $nextest = Join-Path $TrustedCargoHome "bin\cargo-nextest.exe"
@@ -317,8 +446,8 @@ function Install-Toolchain {
         )
     }
 
-    Set-ServiceDirectoryAcl -Path $ToolRoot -ServiceRights "RX"
-    Set-ServiceDirectoryAcl -Path $CargoHome -ServiceRights "M"
+    Set-ServiceDirectoryAcl -Path $ToolRoot -ServiceRights "ReadAndExecute"
+    Set-ServiceDirectoryAcl -Path $CargoHome -ServiceRights "Modify"
     $env:CARGO_HOME = $CargoHome
 }
 
@@ -329,11 +458,6 @@ function Install-ActionsRunner {
     $downloadUrl = "https://github.com/actions/runner/releases/download/v$RunnerVersion/$archiveName"
 
     New-Item -ItemType Directory -Path $RunnerDirectory -Force | Out-Null
-    Invoke-Native "icacls.exe" @(
-        $RunnerDirectory,
-        "/grant", "*S-1-5-20:(OI)(CI)M",
-        "/T", "/Q"
-    )
     $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
     if (-not (Test-Path -LiteralPath $listener -PathType Leaf)) {
         Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $archivePath
@@ -346,6 +470,30 @@ function Install-ActionsRunner {
     }
 
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
+    $serviceFile = Join-Path $RunnerDirectory ".service"
+    $serviceInstalled = $false
+    if (Test-Path -LiteralPath $serviceFile -PathType Leaf) {
+        $serviceName = (Get-Content -LiteralPath $serviceFile -Raw).Trim()
+        $serviceInstalled = -not [string]::IsNullOrWhiteSpace($serviceName) -and
+        $null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
+    }
+    if ((Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) -and
+        -not $serviceInstalled) {
+        if ([string]::IsNullOrWhiteSpace($Token)) {
+            throw "runner registration token is required to repair the missing service"
+        }
+        foreach ($name in @(
+                ".runner",
+                ".credentials",
+                ".credentials_rsaparams",
+                ".service"
+            )) {
+            Remove-Item `
+                -LiteralPath (Join-Path $RunnerDirectory $name) `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
     if (-not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf)) {
         if ([string]::IsNullOrWhiteSpace($Token)) {
             throw "runner registration token is required"
@@ -360,6 +508,7 @@ function Install-ActionsRunner {
                 "--name", $RunnerName,
                 "--labels", $labels,
                 "--work", "_work",
+                "--disableupdate",
                 "--runasservice",
                 "--windowslogonaccount", "NT AUTHORITY\NETWORK SERVICE"
             )
@@ -370,12 +519,12 @@ function Install-ActionsRunner {
     }
 
     $service = Get-ActionsRunnerService
-    if ($service.Status -eq "Running") {
-        Restart-Service -Name $service.Name -Force
+    if ($service.Status -ne "Stopped") {
+        Stop-Service -Name $service.Name -Force
     }
-    else {
-        Start-Service -Name $service.Name
-    }
+    Protect-ActionsRunner
+    Set-ActionsRunnerDisableUpdate
+    Start-Service -Name $service.Name
 }
 
 function Get-ActionsRunnerService {
@@ -399,6 +548,18 @@ function Assert-ActionsRunner {
     ConvertFrom-Json
     if ($configuration.agentName -ne $RunnerName) {
         throw "configured runner is $($configuration.agentName), expected $RunnerName"
+    }
+    if ($configuration.disableUpdate -ne $true) {
+        throw "Actions runner automatic updates are not disabled"
+    }
+    Assert-ServiceDirectoryAcl -Path $RunnerDirectory
+    Assert-ServiceDirectoryAcl `
+        -Path (Join-Path $RunnerDirectory "_work") `
+        -Writable
+    if (-not (Test-ActionsRunnerDiagnosticsLink `
+            -Path (Join-Path $RunnerDirectory "_diag") `
+            -ExpectedTarget (Join-Path $RunnerDirectory "_work\_diag"))) {
+        throw "Actions runner diagnostics are not stored under _work"
     }
     $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
     Invoke-Native $listener @("--version")
@@ -570,6 +731,12 @@ function Assert-Environment {
     if (($nextestVersion -join "`n") -notmatch `
             "cargo-nextest $([regex]::Escape($CargoNextestVersion))") {
         throw "cargo-nextest $CargoNextestVersion is not installed"
+    }
+    $installedTargets = & (Get-RequiredCommand "rustup.exe") `
+        target list --installed --toolchain $RustToolchain
+    Assert-LastExitCode "rustup target list"
+    if ("x86_64-unknown-none" -notin @($installedTargets)) {
+        throw "Rust target x86_64-unknown-none is not installed"
     }
     if (-not (Test-VisualStudioBuildTools)) {
         throw "Visual Studio 2022 C++ tools and Windows SDK 26100 were not found"

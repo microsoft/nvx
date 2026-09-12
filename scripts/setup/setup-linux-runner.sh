@@ -12,10 +12,16 @@ backend=
 check_only=false
 configure_runner=false
 repository_url=https://github.com/microsoft/nvx
-runner_directory=${HOME}/actions-runner
+legacy_runner_directory=${HOME}/actions-runner
+runner_directory=/opt/nvx-runner
+runner_directory_is_default=true
 runner_name=
 runner_token=
-runner_service_path=${HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+trusted_tool_root=/opt/nvx
+trusted_cargo_home=${trusted_tool_root}/cargo
+trusted_rustup_home=${trusted_tool_root}/rustup
+runner_cargo_home=
+runner_service_path=${trusted_cargo_home}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 usage() {
     cat <<EOF
@@ -66,14 +72,100 @@ runner_service_name() {
     printf '%s\n' "$service_name"
 }
 
+set_runner_disable_update() {
+    run_as_root python3 -c '
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+configuration = json.loads(path.read_text(encoding="utf-8-sig"))
+configuration["disableUpdate"] = True
+path.write_text(json.dumps(configuration, indent=2), encoding="utf-8-sig")
+' "${runner_directory}/.runner"
+}
+
+protect_runner_installation() {
+    user_name=$(id -un)
+    group_name=$(id -gn)
+    work_directory=${runner_directory}/_work
+    diagnostics_directory=${runner_directory}/_diag
+    diagnostics_target=${work_directory}/_diag
+    run_as_root mkdir -p \
+        "$work_directory" \
+        "$diagnostics_target" \
+        "${runner_cargo_home}/bin"
+
+    if [ -L "$diagnostics_directory" ] &&
+        [ "$(readlink "$diagnostics_directory")" != _work/_diag ]; then
+        run_as_root rm "$diagnostics_directory"
+    fi
+    if [ -d "$diagnostics_directory" ] && [ ! -L "$diagnostics_directory" ]; then
+        run_as_root cp -a "${diagnostics_directory}/." "$diagnostics_target"
+        run_as_root rm -rf "$diagnostics_directory"
+    fi
+    if [ ! -L "$diagnostics_directory" ]; then
+        run_as_root ln -s _work/_diag "$diagnostics_directory"
+    fi
+
+    run_as_root chown root:root "$runner_directory"
+    run_as_root chmod u=rwx,go=rx "$runner_directory"
+    run_as_root find "$runner_directory" \
+        -mindepth 1 -maxdepth 1 \
+        ! -name _work ! -name _diag \
+        -exec chown -R root:root {} +
+    run_as_root find "$runner_directory" \
+        -mindepth 1 -maxdepth 1 \
+        ! -name _work ! -name _diag \
+        -exec chmod -R u=rwX,go=rX {} +
+    run_as_root chown -h root:root "$diagnostics_directory"
+    run_as_root chown "${user_name}:${group_name}" "$work_directory"
+    run_as_root chmod u=rwx,go= "$work_directory"
+    run_as_root chown -R "${user_name}:${group_name}" "$diagnostics_target"
+    run_as_root chmod -R u=rwX,go= "$diagnostics_target"
+    run_as_root chown -R "${user_name}:${group_name}" "$runner_cargo_home"
+    run_as_root chmod -R u=rwX,go= "$runner_cargo_home"
+}
+
+migrate_legacy_runner() {
+    [ "$runner_directory_is_default" = true ] || return 0
+    [ -f "${legacy_runner_directory}/.runner" ] || return 0
+
+    if [ -f "${runner_directory}/.runner" ]; then
+        die "both legacy and protected runner installations are configured"
+    fi
+    if [ -e "$runner_directory" ] || [ -L "$runner_directory" ]; then
+        run_as_root rm -rf "$runner_directory"
+    fi
+
+    user_name=$(id -un)
+    if [ -f "${legacy_runner_directory}/.service" ]; then
+        (
+            cd "$legacy_runner_directory"
+            run_as_root ./svc.sh uninstall
+        )
+    fi
+    run_as_root mkdir -p "$(dirname "$runner_directory")"
+    run_as_root mv "$legacy_runner_directory" "$runner_directory"
+    if [ ! -f "${runner_directory}/.service" ]; then
+        run_runner_service install "$user_name"
+    fi
+}
+
 configure_runner_service() {
     service_name=$(runner_service_name)
     drop_in=/etc/systemd/system/${service_name}.d
     run_as_root mkdir -p "$drop_in"
-    printf '[Service]\nEnvironment="PATH=%s"\n' "$runner_service_path" |
+    printf '[Service]\nEnvironment="PATH=%s"\nEnvironment="CARGO_HOME=%s"\nEnvironment="RUSTUP_HOME=%s"\n' \
+        "$runner_service_path" "$runner_cargo_home" "$trusted_rustup_home" |
         run_as_root tee "${drop_in}/nvx.conf" >/dev/null
     run_as_root systemctl daemon-reload
-    run_as_root systemctl restart "$service_name"
+    run_as_root systemctl stop "$service_name"
+    protect_runner_installation
+    set_runner_disable_update
+    printf '%s\n' "$runner_service_path" |
+        run_as_root tee "${runner_directory}/.path" >/dev/null
+    run_as_root systemctl start "$service_name"
 }
 
 install_packages() {
@@ -81,57 +173,92 @@ install_packages() {
         run_as_root apt-get update
         run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc binutils bison build-essential ca-certificates cmake cpio curl \
-            docker-buildx docker.io flex git gzip iproute2 iptables \
+            flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
             pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
             bc binutils bison ca-certificates cmake cpio curl diffutils \
-            docker-buildx elfutils-libelf-devel findutils flex gcc \
+            elfutils-libelf-devel findutils flex gcc \
             gcc-c++ git glibc-devel glibc-iconv gzip icu iproute iptables \
             kernel-headers libarchive libarchive-devel lttng-ust make \
-            moby-engine ninja-build openssl openssl-devel patch perl pkgconf \
+            ninja-build openssl openssl-devel patch perl pkgconf \
             pkgconf-pkg-config protobuf python3 rsync shadow-utils tar \
             util-linux which xz
-        run_as_root tdnf install -y docker-cli
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
             bc binutils bison ca-certificates cmake cpio curl \
             elfutils-libelf-devel findutils flex gcc gcc-c++ git glibc-devel \
             gzip iproute iptables kernel-headers libarchive libarchive-devel \
-            make moby-engine ninja-build openssl openssl-devel patch perl \
+            make ninja-build openssl openssl-devel patch perl \
             pkgconf pkgconf-pkg-config protobuf-compiler python3 rsync \
-            shadow-utils tar util-linux which xz docker-buildx
+            shadow-utils tar util-linux which xz
     else
         die "supported package manager not found (apt-get, dnf, or tdnf)"
     fi
 }
 
 install_rust_tools() {
-    if ! command -v rustup >/dev/null 2>&1; then
+    rustup=${trusted_cargo_home}/bin/rustup
+    cargo=${trusted_cargo_home}/bin/cargo
+    rustc=${trusted_cargo_home}/bin/rustc
+    nextest=${trusted_cargo_home}/bin/cargo-nextest
+    run_as_root mkdir -p "$trusted_cargo_home" "$trusted_rustup_home"
+
+    if [ ! -x "$rustup" ]; then
+        installer=${RUNNER_TEMP:-/tmp}/nvx-rustup-init.sh
         curl --fail --proto '=https' --tlsv1.2 --silent --show-error \
-            https://sh.rustup.rs |
-            sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
-        # shellcheck disable=SC1091
-        . "${HOME}/.cargo/env"
+            --output "$installer" https://sh.rustup.rs
+        run_as_root env \
+            CARGO_HOME="$trusted_cargo_home" \
+            RUSTUP_HOME="$trusted_rustup_home" \
+            sh "$installer" -y --no-modify-path --profile minimal \
+            --default-toolchain "$RUST_TOOLCHAIN"
+        rm -f "$installer"
     fi
 
-    rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-    rust_version=$(RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN rustc --version | awk '{print $2}')
+    run_as_root env \
+        CARGO_HOME="$trusted_cargo_home" \
+        RUSTUP_HOME="$trusted_rustup_home" \
+        "$rustup" toolchain install "$RUST_TOOLCHAIN" --profile minimal
+    run_as_root env \
+        CARGO_HOME="$trusted_cargo_home" \
+        RUSTUP_HOME="$trusted_rustup_home" \
+        RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        "$rustup" target add x86_64-unknown-none
+    if [ "$backend" = mshv ]; then
+        run_as_root env \
+            CARGO_HOME="$trusted_cargo_home" \
+            RUSTUP_HOME="$trusted_rustup_home" \
+            RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+            "$rustup" target add x86_64-unknown-linux-musl
+    fi
+
+    rust_version=$(run_as_root env \
+        CARGO_HOME="$trusted_cargo_home" \
+        RUSTUP_HOME="$trusted_rustup_home" \
+        RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        "$rustc" --version | awk '{print $2}')
     version_at_least "$rust_version" "$RUST_MINIMUM_VERSION" ||
         die "Rust ${RUST_MINIMUM_VERSION} or newer is required"
-    if ! command -v cargo-nextest >/dev/null 2>&1 ||
-        ! cargo nextest --version | grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}"; then
-        cargo +"$RUST_TOOLCHAIN" install --locked cargo-nextest \
+    if [ ! -x "$nextest" ] ||
+        ! "$nextest" --version | grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}"; then
+        run_as_root env \
+            CARGO_HOME="$trusted_cargo_home" \
+            RUSTUP_HOME="$trusted_rustup_home" \
+            "$cargo" +"$RUST_TOOLCHAIN" install --locked --force cargo-nextest \
             --version "$CARGO_NEXTEST_VERSION"
     fi
+    run_as_root chown -R root:root "$trusted_tool_root"
+    run_as_root chmod -R go-w "$trusted_tool_root"
 }
 
-configure_docker_access() {
-    run_as_root systemctl enable --now docker
-    getent group docker >/dev/null 2>&1 ||
-        die "the Docker package did not create its access group"
-    run_as_root usermod -aG docker "$(id -un)"
+restrict_docker_access() {
+    user_name=$(id -un)
+    if getent group docker >/dev/null 2>&1 &&
+        id -nG "$user_name" | tr ' ' '\n' | grep -Fxq docker; then
+        run_as_root gpasswd -d "$user_name" docker
+    fi
 }
 
 configure_backend_access() {
@@ -161,12 +288,14 @@ install_runner() {
     archive="${RUNNER_TEMP:-/tmp}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
     download_url="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/$(basename "$archive")"
 
-    mkdir -p "$runner_directory"
+    migrate_legacy_runner
+    run_as_root mkdir -p "$runner_directory"
     if [ ! -x "${runner_directory}/bin/Runner.Listener" ]; then
         curl --fail --location --proto '=https' --tlsv1.2 \
             --output "$archive" "$download_url"
         printf '%s  %s\n' "$RUNNER_SHA256" "$archive" | sha256sum --check -
-        tar --extract --gzip --file "$archive" --directory "$runner_directory"
+        run_as_root tar --extract --gzip --file "$archive" \
+            --directory "$runner_directory"
         rm -f "$archive"
     fi
     if ! grep -Eq '^ID=(azurelinux|mariner)$' /etc/os-release; then
@@ -175,6 +304,7 @@ install_runner() {
 
     if [ ! -f "${runner_directory}/.runner" ]; then
         [ -n "$runner_token" ] || die "runner registration token is required"
+        run_as_root chown -R "$(id -un):$(id -gn)" "$runner_directory"
         runner_labels="linux,${backend},virtual-machine,${runner_name}"
         (
             cd "$runner_directory"
@@ -183,6 +313,7 @@ install_runner() {
                 --token "$runner_token" \
                 --name "$runner_name" \
                 --labels "$runner_labels" \
+                --disableupdate \
                 --work _work
         )
     fi
@@ -198,7 +329,7 @@ check_environment() {
     [ "$(uname -s)" = Linux ] || die "this script requires Linux"
     [ "$(uname -m)" = x86_64 ] || die "this script requires x86_64"
     for command_name in python3 git curl rustup cargo cargo-nextest gcc make ld \
-        bison flex cpio gzip tar xz docker systemctl; do
+        bison flex cpio gzip tar xz systemctl; do
         require_command "$command_name"
     done
 
@@ -211,12 +342,14 @@ check_environment() {
         die "Rust ${RUST_MINIMUM_VERSION} or newer is required"
     cargo nextest --version | grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
         die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
+    [ "$(stat -c %U "$trusted_tool_root")" = root ] ||
+        die "trusted Rust toolchain is not root-owned"
+    [ ! -w "${trusted_cargo_home}/bin/cargo" ] ||
+        die "runner service account can modify trusted Cargo"
+    [ ! -w "$trusted_rustup_home" ] ||
+        die "runner service account can modify trusted Rustup state"
 
     user_name=$(id -un)
-    run_as_root -u "$user_name" docker version >/dev/null 2>&1 ||
-        die "Docker is not available to ${user_name}"
-    run_as_root -u "$user_name" docker buildx version >/dev/null 2>&1 ||
-        die "Docker Buildx is not available to ${user_name}"
     run_as_root -u "$user_name" sh -c \
         "test -r /dev/${backend} && test -w /dev/${backend}" ||
         die "${user_name} cannot access /dev/${backend}"
@@ -229,6 +362,24 @@ check_environment() {
             [ "$configured_runner_name" = "$runner_name" ] ||
                 die "configured runner is ${configured_runner_name}, expected ${runner_name}"
         fi
+        runner_disable_update=$(python3 -c \
+            'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("disableUpdate"))' \
+            "${runner_directory}/.runner")
+        [ "$runner_disable_update" = True ] ||
+            die "GitHub Actions runner automatic updates are not disabled"
+        [ "$(stat -c %U "$runner_directory")" = root ] ||
+            die "GitHub Actions runner installation is not root-owned"
+        [ ! -w "${runner_directory}/bin/Runner.Listener" ] ||
+            die "runner service account can modify Runner.Listener"
+        [ ! -w "$(dirname "$runner_directory")" ] ||
+            die "runner service account can replace the runner installation"
+        [ -w "${runner_directory}/_work" ] ||
+            die "runner service account cannot modify its work directory"
+        [ -L "${runner_directory}/_diag" ] &&
+            [ "$(readlink "${runner_directory}/_diag")" = _work/_diag ] ||
+            die "GitHub Actions runner diagnostics are not stored under _work"
+        [ "$(cat "${runner_directory}/.path")" = "$runner_service_path" ] ||
+            die "GitHub Actions runner persisted PATH is not configured"
         "${runner_directory}/bin/Runner.Listener" --version
         run_runner_service status >/dev/null
         service_name=$(runner_service_name)
@@ -237,10 +388,40 @@ check_environment() {
         case "$service_pid" in
             '' | 0 | *[!0-9]*) die "GitHub Actions runner service has no main process" ;;
         esac
-        run_as_root cat "/proc/${service_pid}/environ" |
-            tr '\0' '\n' |
-            grep -Fxq "PATH=${runner_service_path}" ||
-            die "GitHub Actions runner service PATH is not configured"
+        service_environment=$(run_as_root cat "/proc/${service_pid}/environ" |
+            tr '\0' '\n')
+        for expected_environment in \
+            "PATH=${runner_service_path}" \
+            "CARGO_HOME=${runner_cargo_home}" \
+            "RUSTUP_HOME=${trusted_rustup_home}"; do
+            printf '%s\n' "$service_environment" |
+                grep -Fxq "$expected_environment" ||
+                die "GitHub Actions runner service environment is not configured: ${expected_environment}"
+        done
+        listener_pid=$(run_as_root pgrep -f \
+            "^${runner_directory}/bin/Runner.Listener run --startuptype service$")
+        [ -n "$listener_pid" ] ||
+            die "GitHub Actions runner listener process was not found"
+        listener_environment=$(run_as_root cat "/proc/${listener_pid}/environ" |
+            tr '\0' '\n')
+        for expected_environment in \
+            "PATH=${runner_service_path}" \
+            "CARGO_HOME=${runner_cargo_home}" \
+            "RUSTUP_HOME=${trusted_rustup_home}"; do
+            printf '%s\n' "$listener_environment" |
+                grep -Fxq "$expected_environment" ||
+                die "GitHub Actions runner listener environment is not configured: ${expected_environment}"
+        done
+        if getent group docker >/dev/null 2>&1; then
+            docker_gid=$(getent group docker | cut -d: -f3)
+            listener_groups=$(run_as_root sed -n \
+                's/^Groups:[[:space:]]*//p' "/proc/${listener_pid}/status")
+            case " $listener_groups " in
+                *" ${docker_gid} "*)
+                    die "GitHub Actions runner listener has root-equivalent Docker access"
+                    ;;
+            esac
+        fi
     elif [ "$configure_runner" = true ]; then
         die "GitHub Actions runner is not configured"
     fi
@@ -267,6 +448,7 @@ while [ "$#" -gt 0 ]; do
         --runner-directory)
             [ "$#" -ge 2 ] || die "--runner-directory requires a value"
             runner_directory=$2
+            runner_directory_is_default=false
             shift 2
             ;;
         --runner-token-stdin)
@@ -299,18 +481,20 @@ sudo -n true || die "passwordless sudo is required"
 if [ "$configure_runner" = true ]; then
     [ -n "$runner_name" ] || die "--runner-name is required to configure a runner"
 fi
+runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
 
 if [ "$check_only" = false ]; then
     install_packages
-    export PATH="${HOME}/.cargo/bin:${PATH}"
     install_rust_tools
-    configure_docker_access
+    restrict_docker_access
     configure_backend_access
     if [ "$configure_runner" = true ]; then
         install_runner
     fi
 fi
 
-export PATH="${HOME}/.cargo/bin:${PATH}"
+export PATH="$runner_service_path"
+export CARGO_HOME="$runner_cargo_home"
+export RUSTUP_HOME="$trusted_rustup_home"
 check_environment
 printf 'NVX_RUNNER_SETUP_COMPLETE=1\n'
