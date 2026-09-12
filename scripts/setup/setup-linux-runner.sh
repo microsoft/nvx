@@ -85,8 +85,53 @@ run_runner_service() {
     )
 }
 
+validate_runner_state_paths() {
+    target_directory=${1:-$runner_directory}
+    if run_as_root test -L "$target_directory"; then
+        die "runner directory must not be a symlink: ${target_directory}"
+    fi
+    if run_as_root test -e "$target_directory" &&
+        ! run_as_root test -d "$target_directory"; then
+        die "runner path is not a directory: ${target_directory}"
+    fi
+    for entry in \
+        .credentials .credentials_rsaparams .env .nvx-labels .path \
+        .runner .service runsvc.sh svc.sh; do
+        state_path=${target_directory}/${entry}
+        if run_as_root test -L "$state_path"; then
+            die "runner state path must not be a symlink: ${state_path}"
+        fi
+        if run_as_root test -e "$state_path" &&
+            ! run_as_root test -f "$state_path"; then
+            die "runner state path is not a regular file: ${state_path}"
+        fi
+        if run_as_root test -f "$state_path" &&
+            [ "$(run_as_root stat -c %h "$state_path")" -ne 1 ]; then
+            die "runner state file must not have multiple links: ${state_path}"
+        fi
+    done
+}
+
+validate_runner_work_paths() {
+    target_directory=${1:-$runner_directory}
+    target_work_directory=${target_directory}/_work
+    for path in \
+        "$target_work_directory" \
+        "${target_work_directory}/_temp" \
+        "${target_work_directory}/_diag" \
+        "${target_work_directory}/_temp/cargo-home"; do
+        if run_as_root test -L "$path"; then
+            die "runner writable path must not be a symlink: ${path}"
+        fi
+        if run_as_root test -e "$path" && ! run_as_root test -d "$path"; then
+            die "runner writable path is not a directory: ${path}"
+        fi
+    done
+}
+
 runner_service_name() {
     target_directory=${1:-$runner_directory}
+    validate_runner_state_paths "$target_directory"
     service_file=${target_directory}/.service
     run_as_root test -f "$service_file" ||
         die "GitHub Actions runner service is not installed"
@@ -171,6 +216,10 @@ install_or_verify_runner_package() {
             "${runner_package_root}/${entry}" \
             "${runner_directory}/${entry}" >/dev/null ||
             die "installed runner package does not match ${RUNNER_VERSION}: ${entry}"
+        package_hardlink=$(run_as_root find "${runner_directory}/${entry}" \
+            -type f -links +1 -print -quit)
+        [ -z "$package_hardlink" ] ||
+            die "installed runner package contains a hard link: ${package_hardlink}"
     done
     for entry in $(run_as_root find "$runner_directory" \
         -mindepth 1 -maxdepth 1 -printf '%f\n'); do
@@ -183,6 +232,7 @@ install_or_verify_runner_package() {
                 ;;
         esac
     done
+    validate_runner_state_paths
     run_as_root rm -rf "$runner_package_directory"
     runner_package_directory=
     trap - 0 HUP INT TERM
@@ -232,6 +282,7 @@ configure_runner_account() {
 }
 
 set_runner_disable_update() {
+    validate_runner_state_paths
     run_as_root python3 -c '
 import json
 import pathlib
@@ -246,31 +297,15 @@ path.write_text(json.dumps(configuration, indent=2), encoding="utf-8-sig")
 
 protect_runner_installation() {
     work_directory=${runner_directory}/_work
+    temporary_directory=${work_directory}/_temp
     diagnostics_directory=${runner_directory}/_diag
     diagnostics_target=${work_directory}/_diag
-    if run_as_root test -L "$work_directory"; then
-        die "runner work directory must not be a symlink: ${work_directory}"
-    fi
-    if run_as_root test -e "$work_directory" &&
-        ! run_as_root test -d "$work_directory"; then
-        die "runner work path is not a directory: ${work_directory}"
-    fi
-    for component in _temp _diag; do
-        component_path=${work_directory}/${component}
-        if run_as_root test -L "$component_path"; then
-            die "runner work component must not be a symlink: ${component_path}"
-        fi
-        if run_as_root test -e "$component_path" &&
-            ! run_as_root test -d "$component_path"; then
-            die "runner work component is not a directory: ${component_path}"
-        fi
-    done
-    if run_as_root test -L "$runner_cargo_home"; then
-        die "runner Cargo home must not be a symlink: ${runner_cargo_home}"
-    fi
-    if run_as_root test -e "$runner_cargo_home" &&
-        ! run_as_root test -d "$runner_cargo_home"; then
-        die "runner Cargo home is not a directory: ${runner_cargo_home}"
+    validate_runner_state_paths
+    validate_runner_work_paths
+    if run_as_root test -d "$work_directory" &&
+        [ "$(run_as_root stat -c %U "$work_directory")" != \
+            "$runner_service_account" ]; then
+        run_as_root rm -rf "$work_directory"
     fi
     run_as_root mkdir -p \
         "$work_directory" \
@@ -300,30 +335,26 @@ protect_runner_installation() {
         ! -name _work ! -name _diag \
         -exec chmod -R u=rwX,g=rX,o= {} +
     run_as_root chown -h "root:${runner_service_account}" "$diagnostics_directory"
-    if [ "$(run_as_root stat -c %U "$work_directory")" != \
-        "$runner_service_account" ]; then
-        run_as_root chown -R \
-            "${runner_service_account}:${runner_service_account}" \
-            "$work_directory"
-    else
-        run_as_root chown "${runner_service_account}:${runner_service_account}" \
-            "$work_directory"
-    fi
-    run_as_root chmod u=rwx,go= "$work_directory"
-    run_as_root chown -R "${runner_service_account}:${runner_service_account}" \
-        "$diagnostics_target"
-    run_as_root chmod -R u=rwX,go= "$diagnostics_target"
-    run_as_root chown -R "${runner_service_account}:${runner_service_account}" \
-        "$runner_cargo_home"
-    run_as_root chmod -R u=rwX,go= "$runner_cargo_home"
+    for path in \
+        "$work_directory" \
+        "$temporary_directory" \
+        "$diagnostics_target" \
+        "$runner_cargo_home"; do
+        run_as_root chown \
+            "${runner_service_account}:${runner_service_account}" "$path"
+        run_as_root chmod u=rwx,go= "$path"
+    done
 }
 
 migrate_legacy_runner() {
     [ "$runner_directory_is_default" = true ] || return 0
+    validate_runner_state_paths "$legacy_runner_directory"
+    validate_runner_work_paths "$legacy_runner_directory"
     [ -f "${legacy_runner_directory}/.runner" ] || return 0
     [ -n "$runner_token" ] ||
         die "runner registration token is required to migrate and refresh labels"
 
+    validate_runner_state_paths
     if [ -f "${runner_directory}/.runner" ]; then
         die "both legacy and protected runner installations are configured"
     fi
@@ -475,6 +506,8 @@ configure_backend_access() {
 }
 
 install_runner() {
+    validate_runner_state_paths
+    validate_runner_work_paths
     migrate_legacy_runner
     run_as_root mkdir -p "$runner_directory"
     prepare_runner_package
@@ -571,6 +604,8 @@ check_environment() {
         esac
     done
 
+    validate_runner_state_paths
+    validate_runner_work_paths
     if run_as_root test -f "${runner_directory}/.runner"; then
         if [ "$configure_runner" = true ]; then
             configured_runner_name=$(run_as_root python3 -c \

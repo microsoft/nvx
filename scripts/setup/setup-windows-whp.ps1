@@ -94,8 +94,31 @@ function Add-MachinePathEntry {
 function Set-ServiceDirectoryAcl {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$ServiceRights
+        [Parameter(Mandatory = $true)][string]$ServiceRights,
+        [Parameter()][string[]]$ExcludeChildren = @(),
+        [Parameter()][switch]$AllowInternalLinks,
+        [Parameter()][switch]$SkipChildren
     )
+    $rootItem = Get-Item -LiteralPath $Path -Force
+    if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "directory tree must not contain a reparse point: $($rootItem.FullName)"
+    }
+    $entries = @()
+    if (-not $SkipChildren) {
+        $entries = @(Get-ChildItem -LiteralPath $Path -Force)
+        foreach ($entry in $entries) {
+            if ($entry.Name -notin $ExcludeChildren) {
+                if ($AllowInternalLinks) {
+                    Assert-TreeLinksAreInternal `
+                        -Root $entry.FullName `
+                        -Boundary $Path
+                }
+                else {
+                    Assert-NoTreeLinks -Root $entry.FullName
+                }
+            }
+        }
+    }
     $acl = New-Object Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
     $inheritance = [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
@@ -119,8 +142,15 @@ function Set-ServiceDirectoryAcl {
         [void]$acl.AddAccessRule($rule)
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
-    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -gt 0) {
-        Invoke-Native "icacls.exe" @("$Path\*", "/reset", "/T", "/Q")
+    foreach ($entry in $entries) {
+        if ($entry.Name -in $ExcludeChildren) {
+            continue
+        }
+        $arguments = @($entry.FullName, "/reset", "/L", "/Q")
+        if ($entry.PSIsContainer) {
+            $arguments += "/T"
+        }
+        Invoke-Native "icacls.exe" $arguments
     }
 }
 
@@ -189,6 +219,114 @@ function Get-TreeItemsWithoutFollowingLinks {
     }
 }
 
+function Assert-NoTreeLinks {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "directory tree must not contain a reparse point: $($rootItem.FullName)"
+    }
+    $linkedItems = @(Get-TreeItemsWithoutFollowingLinks -Root $Root |
+        Where-Object {
+            $_.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+            $_.LinkType -eq "HardLink"
+        })
+    if ($linkedItems.Count -ne 0) {
+        throw "directory tree must not contain a link: $($linkedItems[0].FullName)"
+    }
+}
+
+function Assert-TreeLinksAreInternal {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Boundary
+    )
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    $items = @($rootItem)
+    if (-not ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+        $rootItem.PSIsContainer) {
+        $items += @(Get-TreeItemsWithoutFollowingLinks -Root $Root)
+    }
+    $hardLinks = @($items | Where-Object { $_.LinkType -eq "HardLink" })
+    if ($hardLinks.Count -ne 0) {
+        throw "trusted tree must not contain a hard link: $($hardLinks[0].FullName)"
+    }
+    $boundaryPath = [IO.Path]::GetFullPath($Boundary).TrimEnd("\")
+    $boundaryPrefix = "$boundaryPath\"
+    foreach ($item in $items | Where-Object {
+            $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+        }) {
+        $target = @($item.Target)[0]
+        if ([string]::IsNullOrWhiteSpace($target)) {
+            throw "reparse point has no target: $($item.FullName)"
+        }
+        if (-not [IO.Path]::IsPathRooted($target)) {
+            $target = Join-Path `
+                ([IO.Path]::GetDirectoryName($item.FullName)) `
+                $target
+        }
+        $targetPath = [IO.Path]::GetFullPath($target)
+        $insideBoundary = [StringComparer]::OrdinalIgnoreCase.Equals(
+            $targetPath,
+            $boundaryPath
+        ) -or $targetPath.StartsWith(
+            $boundaryPrefix,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+        $targetItem = Get-Item `
+            -LiteralPath $targetPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+        if (-not $insideBoundary -or $null -eq $targetItem -or
+            $targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "trusted tree link has unsafe target: $($item.FullName)"
+        }
+    }
+}
+
+function Assert-ActionsRunnerWritablePaths {
+    $workDirectory = Join-Path $RunnerDirectory "_work"
+    foreach ($path in @(
+            $RunnerDirectory,
+            $workDirectory,
+            (Join-Path $RunnerDirectory "_work\_temp"),
+            (Join-Path $RunnerDirectory "_work\_diag"),
+            $CargoHome
+        )) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "runner writable path must not be a reparse point: $path"
+        }
+        if (-not $item.PSIsContainer) {
+            throw "runner writable path is not a directory: $path"
+        }
+    }
+}
+
+function Assert-ActionsRunnerStatePaths {
+    Assert-ActionsRunnerWritablePaths
+    foreach ($name in @(
+            ".credentials",
+            ".credentials_rsaparams",
+            ".nvx-labels",
+            ".runner",
+            ".service"
+        )) {
+        $path = Join-Path $RunnerDirectory $name
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+        if ($item.PSIsContainer -or
+            $item.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+            $item.LinkType -eq "HardLink") {
+            throw "runner state path is not a regular file: $path"
+        }
+    }
+}
+
 function Get-ProtectedActionsRunnerItems {
     Get-Item -LiteralPath $RunnerDirectory -Force
     foreach ($entry in Get-ChildItem -LiteralPath $RunnerDirectory -Force) {
@@ -204,11 +342,12 @@ function Get-ProtectedActionsRunnerItems {
 }
 
 function Assert-NoProtectedActionsRunnerLinks {
-    $reparsePoints = @(Get-ProtectedActionsRunnerItems | Where-Object {
-            $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+    $linkedItems = @(Get-ProtectedActionsRunnerItems | Where-Object {
+            $_.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+            $_.LinkType -eq "HardLink"
         })
-    if ($reparsePoints.Count -ne 0) {
-        throw "protected runner path must not be a reparse point: $($reparsePoints[0].FullName)"
+    if ($linkedItems.Count -ne 0) {
+        throw "protected runner path must not be a link: $($linkedItems[0].FullName)"
     }
 }
 
@@ -240,10 +379,12 @@ function Assert-ActionsRunnerOwners {
 }
 
 function Assert-TrustedToolchainAcl {
+    Assert-TreeLinksAreInternal -Root $ToolRoot -Boundary $ToolRoot
     Assert-ServiceDirectoryAcl -Path $ToolRoot
 }
 
 function Set-ActionsRunnerDisableUpdate {
+    Assert-ActionsRunnerStatePaths
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     $configuration = Get-Content -LiteralPath $runnerConfiguration -Raw |
     ConvertFrom-Json
@@ -298,9 +439,14 @@ function Test-ActionsRunnerDiagnosticsLink {
 
 function Protect-ActionsRunner {
     $workDirectory = Join-Path $RunnerDirectory "_work"
+    $temporaryDirectory = Join-Path $workDirectory "_temp"
     $diagnosticsDirectory = Join-Path $RunnerDirectory "_diag"
     $diagnosticsTarget = Join-Path $workDirectory "_diag"
-    New-Item -ItemType Directory -Path $workDirectory, $diagnosticsTarget -Force |
+    Assert-ActionsRunnerWritablePaths
+    New-Item `
+        -ItemType Directory `
+        -Path $workDirectory, $temporaryDirectory, $diagnosticsTarget, $CargoHome `
+        -Force |
     Out-Null
 
     $diagnostics = Get-Item `
@@ -331,8 +477,22 @@ function Protect-ActionsRunner {
     Set-ActionsRunnerOwners
     Set-ServiceDirectoryAcl `
         -Path $RunnerDirectory `
-        -ServiceRights "ReadAndExecute"
-    Set-ServiceDirectoryAcl -Path $workDirectory -ServiceRights "Modify"
+        -ServiceRights "ReadAndExecute" `
+        -ExcludeChildren @("_work", "_diag")
+    foreach ($path in @(
+            $workDirectory,
+            $temporaryDirectory,
+            $diagnosticsTarget,
+            $CargoHome
+        )) {
+        Set-ServiceDirectoryAcl `
+            -Path $path `
+            -ServiceRights "Modify" `
+            -SkipChildren
+    }
+    Invoke-Native "icacls.exe" @(
+        $diagnosticsDirectory, "/reset", "/L", "/Q"
+    )
 }
 
 function Get-RequiredCommand {
@@ -449,6 +609,7 @@ function Test-VisualStudioBuildTools {
 }
 
 function Install-Toolchain {
+    Assert-ActionsRunnerWritablePaths
     $script:WinGet = Install-WinGet
     Update-ProcessPath
     if ($null -eq (Get-Command git.exe -ErrorAction SilentlyContinue |
@@ -470,10 +631,13 @@ function Install-Toolchain {
     Update-ProcessPath
 
     New-Item -ItemType Directory `
-        -Path $TrustedCargoHome, $CargoHome, $RustupHome `
+        -Path $TrustedCargoHome, $RustupHome `
         -Force |
     Out-Null
-    Set-ServiceDirectoryAcl -Path $ToolRoot -ServiceRights "ReadAndExecute"
+    Set-ServiceDirectoryAcl `
+        -Path $ToolRoot `
+        -ServiceRights "ReadAndExecute" `
+        -AllowInternalLinks
     [Environment]::SetEnvironmentVariable("CARGO_HOME", $CargoHome, "Machine")
     [Environment]::SetEnvironmentVariable("RUSTUP_HOME", $RustupHome, "Machine")
     Add-MachinePathEntry "$TrustedCargoHome\bin"
@@ -533,8 +697,10 @@ function Install-Toolchain {
         )
     }
 
-    Set-ServiceDirectoryAcl -Path $ToolRoot -ServiceRights "ReadAndExecute"
-    Set-ServiceDirectoryAcl -Path $CargoHome -ServiceRights "Modify"
+    Set-ServiceDirectoryAcl `
+        -Path $ToolRoot `
+        -ServiceRights "ReadAndExecute" `
+        -AllowInternalLinks
     $env:CARGO_HOME = $CargoHome
 }
 
@@ -579,17 +745,19 @@ function Assert-RunnerPackage {
         if ($null -eq $actualItem) {
             throw "installed runner package is missing entry: $($entry.Name)"
         }
-        $reparsePoints = @($actualItem | Where-Object {
-                $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+        $linkedItems = @($actualItem | Where-Object {
+                $_.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+                $_.LinkType -eq "HardLink"
             })
-        if ($actualItem.PSIsContainer -and $reparsePoints.Count -eq 0) {
-            $reparsePoints += @(Get-TreeItemsWithoutFollowingLinks `
+        if ($actualItem.PSIsContainer -and $linkedItems.Count -eq 0) {
+            $linkedItems += @(Get-TreeItemsWithoutFollowingLinks `
                     -Root $actualEntry | Where-Object {
-                        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+                        $_.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+                        $_.LinkType -eq "HardLink"
                     })
         }
-        if ($reparsePoints.Count -ne 0) {
-            throw "installed runner package contains reparse point: $($reparsePoints[0].FullName)"
+        if ($linkedItems.Count -ne 0) {
+            throw "installed runner package contains a link: $($linkedItems[0].FullName)"
         }
         if ($entry.PSIsContainer) {
             if (-not (Test-Path -LiteralPath $actualEntry -PathType Container)) {
@@ -649,6 +817,7 @@ function Install-ActionsRunner {
         Assert-RunnerPackage `
             -ExpectedRoot $packageRoot `
             -ActualRoot $RunnerDirectory
+        Assert-ActionsRunnerStatePaths
     }
     finally {
         Remove-Item `
@@ -825,6 +994,7 @@ function Assert-ActionsRunnerServiceAccount {
 }
 
 function Assert-ActionsRunner {
+    Assert-ActionsRunnerStatePaths
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     if (-not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf)) {
         throw "GitHub Actions runner is not configured"
@@ -1079,6 +1249,7 @@ if ($RunnerTokenStdin -and
 }
 
 Assert-SupportedHost -SkipWorkspace:$RunnerOnly
+Assert-ActionsRunnerWritablePaths
 if ($CheckOnly) {
     if (-not $RunnerOnly -and
         -not [string]::IsNullOrWhiteSpace($GuestArtifactsDirectory)) {
