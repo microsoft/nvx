@@ -271,6 +271,11 @@ function Install-Toolchain {
         "/grant", "*S-1-5-20:(OI)(CI)M",
         "/T", "/Q"
     )
+    Invoke-Native "icacls.exe" @(
+        $nextest,
+        "/grant", "*S-1-5-20:RX",
+        "/Q"
+    )
 }
 
 function Install-ActionsRunner {
