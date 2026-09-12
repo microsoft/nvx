@@ -85,8 +85,18 @@ runner_service_name() {
     service_name=$(run_as_root cat "$service_file")
     [ -n "$service_name" ] || die "GitHub Actions runner service name is empty"
     case "$service_name" in
-        actions.runner.*.service) ;;
-        *) die "invalid GitHub Actions runner service name: ${service_name}" ;;
+        actions.runner.*.service)
+            service_stem=${service_name#actions.runner.}
+            service_stem=${service_stem%.service}
+            case "$service_stem" in
+                '' | .* | *..* | *[!A-Za-z0-9_.-]*)
+                    die "invalid GitHub Actions runner service name: ${service_name}"
+                    ;;
+            esac
+            ;;
+        *)
+            die "invalid GitHub Actions runner service name: ${service_name}"
+            ;;
     esac
     load_state=$(run_as_root systemctl show "$service_name" \
         --property=LoadState --value 2>/dev/null || true)
@@ -227,6 +237,30 @@ protect_runner_installation() {
     work_directory=${runner_directory}/_work
     diagnostics_directory=${runner_directory}/_diag
     diagnostics_target=${work_directory}/_diag
+    if run_as_root test -L "$work_directory"; then
+        die "runner work directory must not be a symlink: ${work_directory}"
+    fi
+    if run_as_root test -e "$work_directory" &&
+        ! run_as_root test -d "$work_directory"; then
+        die "runner work path is not a directory: ${work_directory}"
+    fi
+    for component in _temp _diag; do
+        component_path=${work_directory}/${component}
+        if run_as_root test -L "$component_path"; then
+            die "runner work component must not be a symlink: ${component_path}"
+        fi
+        if run_as_root test -e "$component_path" &&
+            ! run_as_root test -d "$component_path"; then
+            die "runner work component is not a directory: ${component_path}"
+        fi
+    done
+    if run_as_root test -L "$runner_cargo_home"; then
+        die "runner Cargo home must not be a symlink: ${runner_cargo_home}"
+    fi
+    if run_as_root test -e "$runner_cargo_home" &&
+        ! run_as_root test -d "$runner_cargo_home"; then
+        die "runner Cargo home is not a directory: ${runner_cargo_home}"
+    fi
     run_as_root mkdir -p \
         "$work_directory" \
         "$diagnostics_target" \
