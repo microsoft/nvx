@@ -15,6 +15,7 @@ repository_url=https://github.com/microsoft/nvx
 runner_directory=${HOME}/actions-runner
 runner_name=
 runner_token=
+runner_service_path=${HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 usage() {
     cat <<EOF
@@ -55,6 +56,24 @@ run_runner_service() {
         cd "$runner_directory"
         run_as_root ./svc.sh "$@"
     )
+}
+
+runner_service_name() {
+    service_file=${runner_directory}/.service
+    [ -f "$service_file" ] || die "GitHub Actions runner service is not installed"
+    service_name=$(cat "$service_file")
+    [ -n "$service_name" ] || die "GitHub Actions runner service name is empty"
+    printf '%s\n' "$service_name"
+}
+
+configure_runner_service() {
+    service_name=$(runner_service_name)
+    drop_in=/etc/systemd/system/${service_name}.d
+    run_as_root mkdir -p "$drop_in"
+    printf '[Service]\nEnvironment="PATH=%s"\n' "$runner_service_path" |
+        run_as_root tee "${drop_in}/nvx.conf" >/dev/null
+    run_as_root systemctl daemon-reload
+    run_as_root systemctl restart "$service_name"
 }
 
 install_packages() {
@@ -169,10 +188,10 @@ install_runner() {
     fi
     runner_token=
 
-    if ! run_runner_service status >/dev/null 2>&1; then
+    if [ ! -f "${runner_directory}/.service" ]; then
         run_runner_service install "$(id -un)"
     fi
-    run_runner_service start
+    configure_runner_service
 }
 
 check_environment() {
@@ -203,8 +222,25 @@ check_environment() {
         die "${user_name} cannot access /dev/${backend}"
 
     if [ -f "${runner_directory}/.runner" ]; then
+        if [ "$configure_runner" = true ]; then
+            configured_runner_name=$(python3 -c \
+                'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
+                "${runner_directory}/.runner")
+            [ "$configured_runner_name" = "$runner_name" ] ||
+                die "configured runner is ${configured_runner_name}, expected ${runner_name}"
+        fi
         "${runner_directory}/bin/Runner.Listener" --version
         run_runner_service status >/dev/null
+        service_name=$(runner_service_name)
+        service_pid=$(run_as_root systemctl show "$service_name" \
+            --property=MainPID --value)
+        case "$service_pid" in
+            '' | 0 | *[!0-9]*) die "GitHub Actions runner service has no main process" ;;
+        esac
+        run_as_root cat "/proc/${service_pid}/environ" |
+            tr '\0' '\n' |
+            grep -Fxq "PATH=${runner_service_path}" ||
+            die "GitHub Actions runner service PATH is not configured"
     elif [ "$configure_runner" = true ]; then
         die "GitHub Actions runner is not configured"
     fi

@@ -93,7 +93,7 @@ jobs:
 
   artifacts:
     name: Build shared artifacts
-    runs-on: [self-hosted, linux, kvm, virtual-machine]
+    runs-on: [self-hosted, linux, kvm, virtual-machine, azure-kvm-3]
     timeout-minutes: 60
     outputs:
       kernel-cache-key: ${{ steps.guest-artifacts.outputs.kernel-cache-key }}
@@ -186,8 +186,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ${{ runner.os == 'Windows' && format('{0}/cargo-home/registry', runner.temp) || '~/.cargo/registry' }}
+            ${{ runner.os == 'Windows' && format('{0}/cargo-home/git', runner.temp) || '~/.cargo/git' }}
             openvmm/target
           key: openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
@@ -303,8 +303,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ${{ runner.os == 'Windows' && format('{0}/cargo-home/registry', runner.temp) || '~/.cargo/registry' }}
+            ${{ runner.os == 'Windows' && format('{0}/cargo-home/git', runner.temp) || '~/.cargo/git' }}
             openvmm/target
           key: nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
           restore-keys: |

@@ -46,7 +46,8 @@ $CargoNextestVersion = "0.9.133"
 $RunnerVersion = "2.337.0"
 $RunnerSha256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 $ToolRoot = Join-Path $env:ProgramData "nvx"
-$CargoHome = Join-Path $ToolRoot "cargo"
+$TrustedCargoHome = Join-Path $ToolRoot "cargo"
+$CargoHome = Join-Path $RunnerDirectory "_work\_temp\cargo-home"
 $RustupHome = Join-Path $ToolRoot "rustup"
 $RequiredGuestArtifacts = @(
     "vmlinux",
@@ -73,8 +74,7 @@ function Invoke-Native {
 
 function Update-ProcessPath {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = "$CargoHome\bin;$machinePath;$userPath"
+    $env:Path = "$TrustedCargoHome\bin;$machinePath"
 }
 
 function Add-MachinePathEntry {
@@ -87,6 +87,55 @@ function Add-MachinePathEntry {
         ((@($Path) + $entries) -join ";"),
         "Machine"
     )
+}
+
+function Set-ServiceDirectoryAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ServiceRights
+    )
+    Invoke-Native "icacls.exe" @($Path, "/inheritance:r", "/Q")
+    foreach ($grant in @(
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "*S-1-5-20:(OI)(CI)$ServiceRights"
+        )) {
+        Invoke-Native "icacls.exe" @($Path, "/grant:r", $grant, "/Q")
+    }
+    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -gt 0) {
+        Invoke-Native "icacls.exe" @("$Path\*", "/reset", "/T", "/Q")
+    }
+}
+
+function Assert-TrustedToolchainAcl {
+    $acl = Get-Acl -LiteralPath $ToolRoot
+    if (-not $acl.AreAccessRulesProtected) {
+        throw "trusted toolchain ACL inherits permissions: $ToolRoot"
+    }
+    $networkServiceSid = "S-1-5-20"
+    $rules = @($acl.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ) | Where-Object {
+            $_.IdentityReference.Value -eq $networkServiceSid -and
+            $_.AccessControlType -eq "Allow"
+        })
+    $required = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    if (@($rules | Where-Object {
+                ($_.FileSystemRights -band $required) -eq $required
+            }).Count -eq 0) {
+        throw "Network Service cannot execute the trusted toolchain"
+    }
+    $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor
+    [Security.AccessControl.FileSystemRights]::Delete -bor
+    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [Security.AccessControl.FileSystemRights]::TakeOwnership
+    if (@($rules | Where-Object {
+                ($_.FileSystemRights -band $writeMask) -ne 0
+            }).Count -ne 0) {
+        throw "Network Service can modify the trusted toolchain"
+    }
 }
 
 function Get-RequiredCommand {
@@ -223,16 +272,18 @@ function Install-Toolchain {
     }
     Update-ProcessPath
 
-    New-Item -ItemType Directory -Path $CargoHome, $RustupHome -Force |
+    New-Item -ItemType Directory `
+        -Path $TrustedCargoHome, $CargoHome, $RustupHome `
+        -Force |
     Out-Null
     [Environment]::SetEnvironmentVariable("CARGO_HOME", $CargoHome, "Machine")
     [Environment]::SetEnvironmentVariable("RUSTUP_HOME", $RustupHome, "Machine")
-    Add-MachinePathEntry "$CargoHome\bin"
-    $env:CARGO_HOME = $CargoHome
+    Add-MachinePathEntry "$TrustedCargoHome\bin"
+    $env:CARGO_HOME = $TrustedCargoHome
     $env:RUSTUP_HOME = $RustupHome
     Update-ProcessPath
 
-    $rustupPath = Join-Path $CargoHome "bin\rustup.exe"
+    $rustupPath = Join-Path $TrustedCargoHome "bin\rustup.exe"
     if (-not (Test-Path -LiteralPath $rustupPath -PathType Leaf)) {
         $rustupInstaller = Join-Path $env:TEMP "rustup-init.exe"
         Invoke-WebRequest `
@@ -250,8 +301,8 @@ function Install-Toolchain {
         "toolchain", "install", $RustToolchain, "--profile", "minimal"
     )
 
-    $cargo = Join-Path $CargoHome "bin\cargo.exe"
-    $nextest = Join-Path $CargoHome "bin\cargo-nextest.exe"
+    $cargo = Join-Path $TrustedCargoHome "bin\cargo.exe"
+    $nextest = Join-Path $TrustedCargoHome "bin\cargo-nextest.exe"
     $installNextest = -not (Test-Path -LiteralPath $nextest -PathType Leaf)
     if (-not $installNextest) {
         $nextestVersion = & $nextest --version
@@ -266,16 +317,9 @@ function Install-Toolchain {
         )
     }
 
-    Invoke-Native "icacls.exe" @(
-        $ToolRoot,
-        "/grant", "*S-1-5-20:(OI)(CI)M",
-        "/T", "/Q"
-    )
-    Invoke-Native "icacls.exe" @(
-        $nextest,
-        "/grant", "*S-1-5-20:RX",
-        "/Q"
-    )
+    Set-ServiceDirectoryAcl -Path $ToolRoot -ServiceRights "RX"
+    Set-ServiceDirectoryAcl -Path $CargoHome -ServiceRights "M"
+    $env:CARGO_HOME = $CargoHome
 }
 
 function Install-ActionsRunner {
@@ -326,7 +370,10 @@ function Install-ActionsRunner {
     }
 
     $service = Get-ActionsRunnerService
-    if ($service.Status -ne "Running") {
+    if ($service.Status -eq "Running") {
+        Restart-Service -Name $service.Name -Force
+    }
+    else {
         Start-Service -Name $service.Name
     }
 }
@@ -492,6 +539,19 @@ function Assert-Environment {
     Update-ProcessPath
     $env:CARGO_HOME = $CargoHome
     $env:RUSTUP_HOME = $RustupHome
+    if ([Environment]::GetEnvironmentVariable("CARGO_HOME", "Machine") -ne
+        $CargoHome) {
+        throw "machine CARGO_HOME does not use the per-job Cargo cache"
+    }
+    if ([Environment]::GetEnvironmentVariable("RUSTUP_HOME", "Machine") -ne
+        $RustupHome) {
+        throw "machine RUSTUP_HOME does not use the trusted Rust toolchain"
+    }
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($TrustedCargoHome + "\bin" -notin @($machinePath -split ";")) {
+        throw "trusted Cargo bin directory is missing from the machine PATH"
+    }
+    Assert-TrustedToolchainAcl
     $python = Get-PythonCommand
     foreach ($command in @("git.exe", "rustup.exe", "cargo.exe", "cargo-nextest.exe")) {
         [void](Get-RequiredCommand $command)
