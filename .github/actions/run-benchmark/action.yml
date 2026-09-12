@@ -485,11 +485,10 @@ runs:
           }
         }
 
-    - name: Save benchmark results
-      uses: actions/cache/save@v5
-      env:
-        PATH: ${{ steps.cache-tools-linux.outputs.path || steps.cache-tools-windows.outputs.path }}
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
       with:
         path: data/runs/${{ inputs.platform }}
-        key: benchmark-${{ inputs.platform }}-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        enableCrossOsArchive: true
+        name: benchmark-${{ inputs.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+        if-no-files-found: error
+        retention-days: 1

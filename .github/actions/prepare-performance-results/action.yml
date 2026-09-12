@@ -1,50 +1,26 @@
 name: Prepare performance results
-description: Restore host-typed benchmark series and collect their p50 results
+description: Download host-typed benchmark series and collect their p50 results
 
 runs:
   using: composite
   steps:
-    - name: Prepare benchmark cache tools
-      id: benchmark-cache-tools
-      shell: bash
-      run: |
-        set -euo pipefail
-        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-        mkdir -p "${cache_tools}"
-        ln -sf "$(command -v tar)" "${cache_tools}/tar"
-        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-    - name: Restore Linux / KVM / virtual machine benchmark results
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
+    - name: Download Linux / KVM / virtual machine benchmark results
+      uses: actions/download-artifact@v5
       with:
         path: data/runs/linux-kvm-virtual-machine
-        key: benchmark-linux-kvm-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-kvm-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        name: benchmark-linux-kvm-virtual-machine-${{ github.run_id }}-${{ github.run_attempt }}
 
-    - name: Restore Linux / MSHV / virtual machine benchmark results
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.benchmark-cache-tools.outputs.path }}
+    - name: Download Linux / MSHV / virtual machine benchmark results
+      uses: actions/download-artifact@v5
       with:
         path: data/runs/linux-mshv-virtual-machine
-        key: benchmark-linux-mshv-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-linux-mshv-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        name: benchmark-linux-mshv-virtual-machine-${{ github.run_id }}-${{ github.run_attempt }}
 
-    - name: Restore Windows / WHP / virtual machine benchmark results
-      uses: actions/cache/restore@v5
+    - name: Download Windows / WHP / virtual machine benchmark results
+      uses: actions/download-artifact@v5
       with:
         path: data/runs/windows-whp-virtual-machine
-        key: benchmark-windows-whp-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: benchmark-windows-whp-virtual-machine-microvm-v2-1-full-2-4-8-shell-restore-512-device-io-${{ github.run_id }}-
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        name: benchmark-windows-whp-virtual-machine-${{ github.run_id }}-${{ github.run_attempt }}
 
     - name: Collect p50 results
       shell: bash
