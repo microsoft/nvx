@@ -20,6 +20,8 @@ runner_directory_is_default=true
 runner_name=
 runner_service_account=nvx-runner
 runner_token=
+runner_package_directory=
+removed_service_name=
 trusted_tool_root=/opt/nvx
 trusted_cargo_home=${trusted_tool_root}/cargo
 trusted_rustup_home=${trusted_tool_root}/rustup
@@ -76,12 +78,112 @@ run_runner_service() {
 }
 
 runner_service_name() {
-    service_file=${runner_directory}/.service
+    target_directory=${1:-$runner_directory}
+    service_file=${target_directory}/.service
     run_as_root test -f "$service_file" ||
         die "GitHub Actions runner service is not installed"
     service_name=$(run_as_root cat "$service_file")
     [ -n "$service_name" ] || die "GitHub Actions runner service name is empty"
+    case "$service_name" in
+        actions.runner.*.service) ;;
+        *) die "invalid GitHub Actions runner service name: ${service_name}" ;;
+    esac
+    load_state=$(run_as_root systemctl show "$service_name" \
+        --property=LoadState --value 2>/dev/null || true)
+    if [ "$load_state" = loaded ]; then
+        service_command=$(run_as_root systemctl show "$service_name" \
+            --property=ExecStart --value)
+        printf '%s\n' "$service_command" |
+            grep -Fq "path=${target_directory}/runsvc.sh ;" ||
+            die "GitHub Actions service does not belong to ${target_directory}"
+    elif [ -n "$load_state" ] && [ "$load_state" != not-found ]; then
+        die "GitHub Actions runner service has unexpected state: ${load_state}"
+    fi
     printf '%s\n' "$service_name"
+}
+
+remove_runner_service() {
+    target_directory=${1:-$runner_directory}
+    service_name=$(runner_service_name "$target_directory")
+    load_state=$(run_as_root systemctl show "$service_name" \
+        --property=LoadState --value 2>/dev/null || true)
+    if [ "$load_state" != loaded ]; then
+        run_as_root rm -f "${target_directory}/.service"
+        return 0
+    fi
+    removed_service_name=$service_name
+    run_as_root systemctl stop "$service_name" || true
+    run_as_root systemctl disable "$service_name" || true
+    run_as_root rm -f "/etc/systemd/system/${service_name}"
+    run_as_root rm -rf "/etc/systemd/system/${service_name}.d"
+    run_as_root rm -f "${target_directory}/.service"
+    run_as_root systemctl daemon-reload
+}
+
+prepare_runner_package() {
+    runner_package_directory=$(run_as_root mktemp -d \
+        "${trusted_tool_root}/runner-package.XXXXXX")
+    runner_package_archive=${runner_package_directory}/runner.tar.gz
+    runner_package_root=${runner_package_directory}/root
+    runner_package_url=https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz
+    trap 'if [ -n "$runner_package_directory" ]; then run_as_root rm -rf "$runner_package_directory"; fi' \
+        0 HUP INT TERM
+    run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
+        --silent --show-error \
+        --output "$runner_package_archive" "$runner_package_url"
+    printf '%s  %s\n' "$RUNNER_SHA256" "$runner_package_archive" |
+        run_as_root sha256sum --check -
+    run_as_root mkdir -p "$runner_package_root"
+    run_as_root tar --extract --gzip \
+        --file "$runner_package_archive" \
+        --directory "$runner_package_root"
+}
+
+install_or_verify_runner_package() {
+    if run_as_root test -x "${runner_directory}/bin/Runner.Listener"; then
+        for entry in $(run_as_root find "$runner_package_root" \
+            -mindepth 1 -maxdepth 1 -printf '%f\n'); do
+            run_as_root diff --brief --recursive --no-dereference \
+                "${runner_package_root}/${entry}" \
+                "${runner_directory}/${entry}" >/dev/null ||
+                die "installed runner package does not match ${RUNNER_VERSION}: ${entry}"
+        done
+        for entry in $(run_as_root find "$runner_directory" \
+            -mindepth 1 -maxdepth 1 -printf '%f\n'); do
+            case "$entry" in
+                .credentials | .credentials_rsaparams | .env | .nvx-labels | \
+                    .path | .runner | .service | _diag | _work | runsvc.sh | svc.sh) ;;
+                *)
+                    run_as_root test -e "${runner_package_root}/${entry}" ||
+                        die "installed runner package has unexpected entry: ${entry}"
+                    ;;
+            esac
+        done
+    else
+        run_as_root cp -a "${runner_package_root}/." "$runner_directory"
+    fi
+    run_as_root rm -rf "$runner_package_directory"
+    runner_package_directory=
+    trap - 0 HUP INT TERM
+}
+
+refresh_runner_service_script() {
+    [ -n "$removed_service_name" ] || return 0
+    run_as_root python3 - "$runner_directory" "$removed_service_name" "$runner_name" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+service_name = sys.argv[2]
+runner_name = sys.argv[3]
+template = (root / "bin" / "systemd.svc.sh.template").read_text(encoding="utf-8")
+script = template.replace("{{SvcNameVar}}", service_name).replace(
+    "{{SvcDescription}}", f"GitHub Actions Runner ({runner_name})"
+)
+(root / "svc.sh").write_text(script, encoding="utf-8")
+PY
+    run_as_root chown "root:${runner_service_account}" "${runner_directory}/svc.sh"
+    run_as_root chmod 0750 "${runner_directory}/svc.sh"
 }
 
 configure_runner_account() {
@@ -185,10 +287,7 @@ migrate_legacy_runner() {
     fi
 
     if [ -f "${legacy_runner_directory}/.service" ]; then
-        (
-            cd "$legacy_runner_directory"
-            run_as_root ./svc.sh uninstall
-        )
+        remove_runner_service "$legacy_runner_directory"
     fi
     run_as_root mkdir -p "$(dirname "$runner_directory")"
     run_as_root mv "$legacy_runner_directory" "$runner_directory"
@@ -214,7 +313,7 @@ install_packages() {
     if command -v apt-get >/dev/null 2>&1; then
         run_as_root apt-get update
         run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc binutils bison build-essential ca-certificates cmake cpio curl \
+            bc binutils bison build-essential ca-certificates cmake cpio curl diffutils \
             flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
             pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
@@ -230,7 +329,7 @@ install_packages() {
             util-linux which xz zstd
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
-            bc binutils bison ca-certificates cmake cpio curl \
+            bc binutils bison ca-certificates cmake cpio curl diffutils \
             elfutils-libelf-devel findutils flex gcc gcc-c++ git glibc-devel \
             gzip iproute iptables kernel-headers libarchive libarchive-devel \
             make ninja-build openssl openssl-devel patch perl \
@@ -331,19 +430,10 @@ configure_backend_access() {
 }
 
 install_runner() {
-    archive="${RUNNER_TEMP:-/tmp}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
-    download_url="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/$(basename "$archive")"
-
     migrate_legacy_runner
     run_as_root mkdir -p "$runner_directory"
-    if ! run_as_root test -x "${runner_directory}/bin/Runner.Listener"; then
-        curl --fail --location --proto '=https' --tlsv1.2 \
-            --output "$archive" "$download_url"
-        printf '%s  %s\n' "$RUNNER_SHA256" "$archive" | sha256sum --check -
-        run_as_root tar --extract --gzip --file "$archive" \
-            --directory "$runner_directory"
-        rm -f "$archive"
-    fi
+    prepare_runner_package
+    install_or_verify_runner_package
     if ! grep -Eq '^ID=(azurelinux|mariner)$' /etc/os-release; then
         run_as_root "${runner_directory}/bin/installdependencies.sh"
     fi
@@ -358,7 +448,7 @@ install_runner() {
     if [ "$registration_required" = true ]; then
         [ -n "$runner_token" ] || die "runner registration token is required"
         if run_as_root test -f "${runner_directory}/.service"; then
-            run_runner_service uninstall
+            remove_runner_service
         fi
         run_as_root rm -f \
             "${runner_directory}/.runner" \
@@ -386,10 +476,11 @@ install_runner() {
         service_user=$(run_as_root systemctl show "$service_name" \
             --property=User --value)
         if [ "$service_user" != "$runner_service_account" ]; then
-            run_runner_service uninstall
+            remove_runner_service
         fi
     fi
     if ! run_as_root test -f "${runner_directory}/.service"; then
+        refresh_runner_service_script
         run_runner_service install "$runner_service_account"
     fi
     configure_runner_service
@@ -398,7 +489,7 @@ install_runner() {
 check_environment() {
     [ "$(uname -s)" = Linux ] || die "this script requires Linux"
     [ "$(uname -m)" = x86_64 ] || die "this script requires x86_64"
-    for command_name in python3 git curl rustup cargo cargo-nextest gcc make ld \
+    for command_name in python3 git curl diff rustup cargo cargo-nextest gcc make ld \
         bison flex cpio gzip sha256sum tar xz zstd systemctl; do
         require_command "$command_name"
     done

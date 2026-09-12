@@ -469,23 +469,105 @@ function Install-Toolchain {
     $env:CARGO_HOME = $CargoHome
 }
 
+function Get-RelativePackageFiles {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $prefixLength = $Root.TrimEnd("\").Length + 1
+    return @(Get-ChildItem -LiteralPath $Root -Recurse -File | ForEach-Object {
+            $_.FullName.Substring($prefixLength)
+        })
+}
+
+function Assert-RunnerPackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedRoot,
+        [Parameter(Mandatory = $true)][string]$ActualRoot
+    )
+    $expectedEntries = @(Get-ChildItem -LiteralPath $ExpectedRoot -Force |
+        Select-Object -ExpandProperty Name)
+    $allowedState = @(
+        ".credentials",
+        ".credentials_rsaparams",
+        ".nvx-labels",
+        ".runner",
+        ".service",
+        "_diag",
+        "_work"
+    )
+    $unexpectedEntries = @(Get-ChildItem -LiteralPath $ActualRoot -Force |
+        Where-Object {
+            $_.Name -notin $expectedEntries -and $_.Name -notin $allowedState
+        })
+    if ($unexpectedEntries.Count -ne 0) {
+        throw "installed runner package has unexpected entries: $($unexpectedEntries.Name -join ', ')"
+    }
+    foreach ($entry in Get-ChildItem -LiteralPath $ExpectedRoot -Force) {
+        $actualEntry = Join-Path $ActualRoot $entry.Name
+        if ($entry.PSIsContainer) {
+            if (-not (Test-Path -LiteralPath $actualEntry -PathType Container)) {
+                throw "installed runner package is missing directory: $($entry.Name)"
+            }
+            $expectedFiles = @(Get-RelativePackageFiles $entry.FullName | Sort-Object)
+            $actualFiles = @(Get-RelativePackageFiles $actualEntry | Sort-Object)
+            if (@(Compare-Object $expectedFiles $actualFiles).Count -ne 0) {
+                throw "installed runner package has unexpected files: $($entry.Name)"
+            }
+        }
+    }
+    foreach ($expected in Get-ChildItem -LiteralPath $ExpectedRoot -Recurse -File) {
+        $relative = $expected.FullName.Substring($ExpectedRoot.TrimEnd("\").Length + 1)
+        $actual = Join-Path $ActualRoot $relative
+        if (-not (Test-Path -LiteralPath $actual -PathType Leaf)) {
+            throw "installed runner package is missing file: $relative"
+        }
+        if ($expected.Length -ne (Get-Item -LiteralPath $actual).Length -or
+            (Get-FileHash -LiteralPath $expected.FullName -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $actual -Algorithm SHA256).Hash) {
+            throw "installed runner package does not match ${RunnerVersion}: $relative"
+        }
+    }
+}
+
 function Install-ActionsRunner {
     param([Parameter()][string]$Token)
     $archiveName = "actions-runner-win-x64-$RunnerVersion.zip"
-    $archivePath = Join-Path $env:TEMP $archiveName
     $downloadUrl = "https://github.com/actions/runner/releases/download/v$RunnerVersion/$archiveName"
 
     New-Item -ItemType Directory -Path $RunnerDirectory -Force | Out-Null
-    $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
-    if (-not (Test-Path -LiteralPath $listener -PathType Leaf)) {
+    $packageDirectory = Join-Path $ToolRoot `
+        "runner-package-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $packageDirectory | Out-Null
+    try {
+        $archivePath = Join-Path $packageDirectory $archiveName
+        $packageRoot = Join-Path $packageDirectory "root"
         Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $archivePath
         $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
         if ($actualHash -ne $RunnerSha256) {
             throw "Actions runner checksum mismatch: $actualHash"
         }
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $RunnerDirectory
-        Remove-Item -LiteralPath $archivePath -Force
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $packageRoot
+
+        $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
+        if (Test-Path -LiteralPath $listener -PathType Leaf) {
+            Assert-RunnerPackage `
+                -ExpectedRoot $packageRoot `
+                -ActualRoot $RunnerDirectory
+        }
+        else {
+            Copy-Item `
+                -Path (Join-Path $packageRoot "*") `
+                -Destination $RunnerDirectory `
+                -Recurse `
+                -Force
+        }
     }
+    finally {
+        Remove-Item `
+            -LiteralPath $packageDirectory `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+    $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
 
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     $serviceFile = Join-Path $RunnerDirectory ".service"
@@ -496,6 +578,9 @@ function Install-ActionsRunner {
         $serviceName = (Get-Content -LiteralPath $serviceFile -Raw).Trim()
         $serviceInstalled = -not [string]::IsNullOrWhiteSpace($serviceName) -and
         $null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
+        if ($serviceInstalled) {
+            Assert-ActionsRunnerServicePath -ServiceName $serviceName
+        }
     }
     $labelsValidated = (Test-Path -LiteralPath $labelsFile -PathType Leaf) -and
     (Get-Content -LiteralPath $labelsFile -Raw).Trim() -eq $labels
@@ -568,11 +653,34 @@ function Get-ActionsRunnerService {
     if ([string]::IsNullOrWhiteSpace($serviceName)) {
         throw "Actions runner service file is empty: $serviceFile"
     }
+    Assert-ActionsRunnerServicePath -ServiceName $serviceName
     return Get-Service -Name $serviceName -ErrorAction Stop
+}
+
+function Assert-ActionsRunnerServicePath {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+    if ($ServiceName -notmatch '^actions\.runner\.[A-Za-z0-9_.-]+$') {
+        throw "invalid Actions runner service name: $ServiceName"
+    }
+    $service = Get-CimInstance `
+        -ClassName Win32_Service `
+        -Filter "Name='$ServiceName'"
+    if ($null -eq $service) {
+        throw "Actions runner service was not found: $ServiceName"
+    }
+    $expectedPath = Join-Path $RunnerDirectory "bin\RunnerService.exe"
+    $actualPath = $service.PathName.Trim().Trim('"')
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+            $actualPath,
+            $expectedPath
+        )) {
+        throw "Actions runner service does not belong to $RunnerDirectory"
+    }
 }
 
 function Remove-ActionsRunnerService {
     param([Parameter(Mandatory = $true)][string]$ServiceName)
+    Assert-ActionsRunnerServicePath -ServiceName $ServiceName
     $service = Get-Service -Name $ServiceName -ErrorAction Stop
     if ($service.Status -ne "Stopped") {
         Stop-Service -Name $ServiceName -Force
