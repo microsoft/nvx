@@ -8,12 +8,6 @@ inputs:
   platform:
     description: Host-typed performance series name used for results and artifacts
     required: true
-  kernel-cache-key:
-    description: Exact Linux kernel cache key produced by the build job
-    required: true
-  alpine-cache-key:
-    description: Exact Alpine cache key produced by the build job
-    required: true
   teardown-mode:
     description: How to stop OpenVMM after each guest readiness marker
     required: false
@@ -33,78 +27,11 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Prepare Linux cache tools
-      id: cache-tools-linux
-      if: runner.os != 'Windows'
-      shell: bash
-      run: |
-        set -euo pipefail
-        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-        mkdir -p "${cache_tools}"
-        ln -sf "$(command -v tar)" "${cache_tools}/tar"
-        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-    - name: Prepare Windows cache tools
-      id: cache-tools-windows
-      if: runner.os == 'Windows'
-      shell: powershell
-      run: |
-        $Tar = (Get-Command tar.exe -ErrorAction Stop).Source
-        $Gzip = Join-Path (Split-Path -Parent $Tar) "gzip.exe"
-        if (-not (Test-Path $Gzip -PathType Leaf)) {
-            throw "gzip.exe not found beside GNU tar: $Gzip"
-        }
-        "path=$(Split-Path -Parent $Tar)" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-    - name: Restore Linux kernel
-      if: inputs.backend != 'mshv'
-      uses: actions/cache/restore@v5
+    - name: Download guest artifacts
+      uses: actions/download-artifact@v5
       with:
-        path: |
-          build/vmlinux
-          build/vmlinux.config
-        key: ${{ inputs.kernel-cache-key }}
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
-
-    - name: Restore Linux kernel for MSHV
-      if: inputs.backend == 'mshv'
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.cache-tools-linux.outputs.path }}
-      with:
-        path: |
-          build/vmlinux
-          build/vmlinux.config
-        key: ${{ inputs.kernel-cache-key }}
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
-
-    - name: Restore Alpine disk image
-      if: inputs.backend != 'mshv'
-      uses: actions/cache/restore@v5
-      with:
-        path: |
-          build/initramfs.cpio.gz
-          build/initramfs.cpio.gz.packages.json
-        key: ${{ inputs.alpine-cache-key }}
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
-
-    - name: Restore Alpine disk image for MSHV
-      if: inputs.backend == 'mshv'
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.cache-tools-linux.outputs.path }}
-      with:
-        path: |
-          build/initramfs.cpio.gz
-          build/initramfs.cpio.gz.packages.json
-        key: ${{ inputs.alpine-cache-key }}
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        name: guest-artifacts
+        path: build
 
     - name: Check Linux counting-LAPIC timers
       if: runner.os != 'Windows'
