@@ -27,6 +27,11 @@ runs:
       if: runner.os == 'Windows'
       shell: powershell
       run: |
+        if ([string]::IsNullOrWhiteSpace($env:CARGO_HOME)) {
+            throw "CARGO_HOME is not configured"
+        }
+        New-Item -ItemType Directory -Path "$env:CARGO_HOME\bin" -Force |
+            Out-Null
         python --version
         rustc --version
         cargo --version
