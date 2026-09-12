@@ -171,6 +171,74 @@ function Assert-ServiceDirectoryAcl {
     }
 }
 
+function Get-TreeItemsWithoutFollowingLinks {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $pending = [Collections.Generic.Stack[IO.FileSystemInfo]]::new()
+    foreach ($entry in Get-ChildItem -LiteralPath $Root -Force) {
+        $pending.Push($entry)
+    }
+    while ($pending.Count -ne 0) {
+        $entry = $pending.Pop()
+        $entry
+        if ($entry.PSIsContainer -and
+            -not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            foreach ($child in Get-ChildItem -LiteralPath $entry.FullName -Force) {
+                $pending.Push($child)
+            }
+        }
+    }
+}
+
+function Get-ProtectedActionsRunnerItems {
+    Get-Item -LiteralPath $RunnerDirectory -Force
+    foreach ($entry in Get-ChildItem -LiteralPath $RunnerDirectory -Force) {
+        if ($entry.Name -in @("_work", "_diag")) {
+            continue
+        }
+        $entry
+        if ($entry.PSIsContainer -and
+            -not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Get-TreeItemsWithoutFollowingLinks -Root $entry.FullName
+        }
+    }
+}
+
+function Assert-NoProtectedActionsRunnerLinks {
+    $reparsePoints = @(Get-ProtectedActionsRunnerItems | Where-Object {
+            $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+        })
+    if ($reparsePoints.Count -ne 0) {
+        throw "protected runner path must not be a reparse point: $($reparsePoints[0].FullName)"
+    }
+}
+
+function Set-ActionsRunnerOwners {
+    Assert-NoProtectedActionsRunnerLinks
+    Invoke-Native "icacls.exe" @(
+        $RunnerDirectory, "/setowner", "*S-1-5-18", "/L", "/Q"
+    )
+    foreach ($entry in Get-ChildItem -LiteralPath $RunnerDirectory -Force) {
+        if ($entry.Name -in @("_work", "_diag")) {
+            continue
+        }
+        Invoke-Native "icacls.exe" @(
+            $entry.FullName, "/setowner", "*S-1-5-18", "/T", "/L", "/Q"
+        )
+    }
+}
+
+function Assert-ActionsRunnerOwners {
+    Assert-NoProtectedActionsRunnerLinks
+    foreach ($item in Get-ProtectedActionsRunnerItems) {
+        $owner = (Get-Acl -LiteralPath $item.FullName).GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+        if ($owner -ne "S-1-5-18") {
+            throw "protected runner path is owned by ${owner}: $($item.FullName)"
+        }
+    }
+}
+
 function Assert-TrustedToolchainAcl {
     Assert-ServiceDirectoryAcl -Path $ToolRoot
 }
@@ -260,6 +328,7 @@ function Protect-ActionsRunner {
         Out-Null
     }
 
+    Set-ActionsRunnerOwners
     Set-ServiceDirectoryAcl `
         -Path $RunnerDirectory `
         -ServiceRights "ReadAndExecute"
@@ -472,7 +541,8 @@ function Install-Toolchain {
 function Get-RelativePackageFiles {
     param([Parameter(Mandatory = $true)][string]$Root)
     $prefixLength = $Root.TrimEnd("\").Length + 1
-    return @(Get-ChildItem -LiteralPath $Root -Recurse -File | ForEach-Object {
+    return @(Get-TreeItemsWithoutFollowingLinks -Root $Root |
+        Where-Object { -not $_.PSIsContainer } | ForEach-Object {
             $_.FullName.Substring($prefixLength)
         })
 }
@@ -502,6 +572,25 @@ function Assert-RunnerPackage {
     }
     foreach ($entry in Get-ChildItem -LiteralPath $ExpectedRoot -Force) {
         $actualEntry = Join-Path $ActualRoot $entry.Name
+        $actualItem = Get-Item `
+            -LiteralPath $actualEntry `
+            -Force `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $actualItem) {
+            throw "installed runner package is missing entry: $($entry.Name)"
+        }
+        $reparsePoints = @($actualItem | Where-Object {
+                $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+            })
+        if ($actualItem.PSIsContainer -and $reparsePoints.Count -eq 0) {
+            $reparsePoints += @(Get-TreeItemsWithoutFollowingLinks `
+                    -Root $actualEntry | Where-Object {
+                        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+                    })
+        }
+        if ($reparsePoints.Count -ne 0) {
+            throw "installed runner package contains reparse point: $($reparsePoints[0].FullName)"
+        }
         if ($entry.PSIsContainer) {
             if (-not (Test-Path -LiteralPath $actualEntry -PathType Container)) {
                 throw "installed runner package is missing directory: $($entry.Name)"
@@ -547,18 +636,19 @@ function Install-ActionsRunner {
         Expand-Archive -LiteralPath $archivePath -DestinationPath $packageRoot
 
         $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
-        if (Test-Path -LiteralPath $listener -PathType Leaf) {
-            Assert-RunnerPackage `
-                -ExpectedRoot $packageRoot `
-                -ActualRoot $RunnerDirectory
-        }
-        else {
+        if (-not (Test-Path -LiteralPath $listener -PathType Leaf)) {
+            if (@(Get-ChildItem -LiteralPath $RunnerDirectory -Force).Count -ne 0) {
+                throw "refusing to install into partial runner directory: $RunnerDirectory"
+            }
             Copy-Item `
                 -Path (Join-Path $packageRoot "*") `
                 -Destination $RunnerDirectory `
                 -Recurse `
                 -Force
         }
+        Assert-RunnerPackage `
+            -ExpectedRoot $packageRoot `
+            -ActualRoot $RunnerDirectory
     }
     finally {
         Remove-Item `
@@ -757,6 +847,7 @@ function Assert-ActionsRunner {
         }
     }
     Assert-ServiceDirectoryAcl -Path $RunnerDirectory
+    Assert-ActionsRunnerOwners
     Assert-ServiceDirectoryAcl `
         -Path (Join-Path $RunnerDirectory "_work") `
         -Writable

@@ -58,6 +58,14 @@ version_at_least() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
 }
 
+validate_runner_name() {
+    case "$1" in
+        '' | .* | *..* | *[!A-Za-z0-9_.-]*)
+            die "invalid runner name: $1"
+            ;;
+    esac
+}
+
 run_as_root() {
     sudo -n "$@"
 }
@@ -150,28 +158,31 @@ prepare_runner_package() {
 }
 
 install_or_verify_runner_package() {
-    if run_as_root test -x "${runner_directory}/bin/Runner.Listener"; then
-        for entry in $(run_as_root find "$runner_package_root" \
-            -mindepth 1 -maxdepth 1 -printf '%f\n'); do
-            run_as_root diff --brief --recursive --no-dereference \
-                "${runner_package_root}/${entry}" \
-                "${runner_directory}/${entry}" >/dev/null ||
-                die "installed runner package does not match ${RUNNER_VERSION}: ${entry}"
-        done
-        for entry in $(run_as_root find "$runner_directory" \
-            -mindepth 1 -maxdepth 1 -printf '%f\n'); do
-            case "$entry" in
-                .credentials | .credentials_rsaparams | .env | .nvx-labels | \
-                    .path | .runner | .service | _diag | _work | runsvc.sh | svc.sh) ;;
-                *)
-                    run_as_root test -e "${runner_package_root}/${entry}" ||
-                        die "installed runner package has unexpected entry: ${entry}"
-                    ;;
-            esac
-        done
-    else
+    if ! run_as_root test -x "${runner_directory}/bin/Runner.Listener"; then
+        if [ -n "$(run_as_root find "$runner_directory" \
+            -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+            die "refusing to install into partial runner directory: ${runner_directory}"
+        fi
         run_as_root cp -a "${runner_package_root}/." "$runner_directory"
     fi
+    for entry in $(run_as_root find "$runner_package_root" \
+        -mindepth 1 -maxdepth 1 -printf '%f\n'); do
+        run_as_root diff --brief --recursive --no-dereference \
+            "${runner_package_root}/${entry}" \
+            "${runner_directory}/${entry}" >/dev/null ||
+            die "installed runner package does not match ${RUNNER_VERSION}: ${entry}"
+    done
+    for entry in $(run_as_root find "$runner_directory" \
+        -mindepth 1 -maxdepth 1 -printf '%f\n'); do
+        case "$entry" in
+            .credentials | .credentials_rsaparams | .env | .nvx-labels | \
+                .path | .runner | .service | _diag | _work | runsvc.sh | svc.sh) ;;
+            *)
+                run_as_root test -e "${runner_package_root}/${entry}" ||
+                    die "installed runner package has unexpected entry: ${entry}"
+                ;;
+        esac
+    done
     run_as_root rm -rf "$runner_package_directory"
     runner_package_directory=
     trap - 0 HUP INT TERM
@@ -704,6 +715,7 @@ require_command sudo
 sudo -n true || die "passwordless sudo is required"
 if [ "$configure_runner" = true ]; then
     [ -n "$runner_name" ] || die "--runner-name is required to configure a runner"
+    validate_runner_name "$runner_name"
 fi
 runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
 runner_labels_file=${runner_directory}/.nvx-labels
