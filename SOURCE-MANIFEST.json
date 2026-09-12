@@ -5,7 +5,7 @@
     "version": "0.1.0"
   },
   "openvmm": {
-    "source_revision": "139109ec2a3e288e2d6b3934d6d74532d52dadc9",
+    "source_revision": "dccdcacf1aad2653137508437526eb415f7f3086",
     "microvm_abi_version": 2,
     "control_session_protocol_version": 1,
     "control_contract_revision": "nvx-microvm-v2-control-v1"
@@ -42,7 +42,7 @@
     "optional": true,
     "installed_in_initramfs": false,
     "maximum_size_bytes": 16777216,
-    "source_revision": "a6ef47cfe67eefe8c80dc5e53aed1fd588577291",
+    "source_revision": "13c34dbbfb4e8251c0a8c45ab34688d42aae3c8a",
     "build_id": "7097a9dab9c5e4fbc7ef36b93a4ba897996bd052",
     "external_input_sha256": "5d4d5de68871bddaa46c823218bd80b45f03315c0617e81226243ea6c23f4325",
     "external_input_size_bytes": 1938304,
