@@ -1,0 +1,2 @@
+platform,microvm_abi_version,processors,commit,metric,unit,direction,p50
+linux-kvm-virtual-machine,2,4,a4d9f9e46a8a6e933316e5f6799d79fa4f17d9dc,shell_snapshot_restore_512_mib,ms,lower,57.2
