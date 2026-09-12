@@ -522,6 +522,8 @@ function Install-ActionsRunner {
     if ($service.Status -ne "Stopped") {
         Stop-Service -Name $service.Name -Force
     }
+    Set-ActionsRunnerServiceAccount -ServiceName $service.Name
+    Assert-ActionsRunnerServiceAccount -ServiceName $service.Name
     Protect-ActionsRunner
     Set-ActionsRunnerDisableUpdate
     Start-Service -Name $service.Name
@@ -537,6 +539,46 @@ function Get-ActionsRunnerService {
         throw "Actions runner service file is empty: $serviceFile"
     }
     return Get-Service -Name $serviceName -ErrorAction Stop
+}
+
+function Set-ActionsRunnerServiceAccount {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+    $service = Get-CimInstance `
+        -ClassName Win32_Service `
+        -Filter "Name='$ServiceName'"
+    if ($null -eq $service) {
+        throw "Actions runner service was not found: $ServiceName"
+    }
+    $account = [Security.Principal.NTAccount]::new($service.StartName)
+    $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($sid -eq "S-1-5-20") {
+        return
+    }
+    $result = Invoke-CimMethod `
+        -InputObject $service `
+        -MethodName Change `
+        -Arguments @{
+            StartName     = "NT AUTHORITY\NetworkService"
+            StartPassword = $null
+        }
+    if ($result.ReturnValue -ne 0) {
+        throw "could not set runner service account: Win32 error $($result.ReturnValue)"
+    }
+}
+
+function Assert-ActionsRunnerServiceAccount {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+    $service = Get-CimInstance `
+        -ClassName Win32_Service `
+        -Filter "Name='$ServiceName'"
+    if ($null -eq $service) {
+        throw "Actions runner service was not found: $ServiceName"
+    }
+    $account = [Security.Principal.NTAccount]::new($service.StartName)
+    $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($sid -ne "S-1-5-20") {
+        throw "Actions runner service uses $($service.StartName), expected Network Service"
+    }
 }
 
 function Assert-ActionsRunner {
@@ -565,6 +607,7 @@ function Assert-ActionsRunner {
     Invoke-Native $listener @("--version")
 
     $service = Get-ActionsRunnerService
+    Assert-ActionsRunnerServiceAccount -ServiceName $service.Name
     if ($service.Status -ne "Running") {
         throw "Actions runner service is not running"
     }

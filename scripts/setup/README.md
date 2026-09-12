@@ -46,6 +46,12 @@ read-only to jobs, automatic runner updates are disabled, and writable runner
 state is confined to `_work`.
 Persistent runners do not have Docker access. Guest artifacts are built with
 Docker on a GitHub-hosted runner instead.
+Linux provisioning runs through the SSH administrator, but the listener and
+workflow jobs run as the dedicated `nvx-runner` account, which has neither sudo
+nor Docker access.
+Persistent runners execute pushes and same-repository pull requests only. Fork
+pull requests remain on GitHub-hosted jobs until a maintainer stages the change
+on a trusted repository branch.
 
 Validate an installed runner without changing the host:
 

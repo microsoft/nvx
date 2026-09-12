@@ -99,29 +99,6 @@ runs:
           cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
           cargo-v2-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-
 
-    - name: Install KVM build dependencies
-      if: inputs.backend == 'kvm' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        if command -v apt-get >/dev/null 2>&1; then
-          sudo apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            git libarchive-tools
-        elif command -v tdnf >/dev/null 2>&1; then
-          sudo -n tdnf install -y git libarchive
-        elif command -v dnf >/dev/null 2>&1; then
-          sudo -n dnf install -y git libarchive
-        else
-          echo "::error::Supported package manager not found" >&2
-          exit 1
-        fi
-
-    - name: Install MSHV build dependencies
-      if: inputs.backend == 'mshv' && steps.cache-openvmm-mshv.outputs.cache-hit != 'true'
-      shell: bash
-      run: sudo -n tdnf install -y binutils kernel-headers libarchive openssl-devel
-
     - name: Build native OpenVMM on Linux
       if: runner.os != 'Windows' && inputs.build-mode == 'native' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
       shell: bash

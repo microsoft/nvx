@@ -116,6 +116,10 @@ jobs:
         always() &&
         !cancelled() &&
         (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-tests == 'true'
         )
@@ -212,10 +216,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          sudo -n tdnf install -y binutils kernel-headers libarchive openssl-devel
-          python3 scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"
+        run: python3 scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"
 
       - name: Run OpenVMM tests on Windows
         if: runner.os == 'Windows'
@@ -231,6 +232,10 @@ jobs:
       ${{
         always() &&
         !cancelled() &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
         needs.artifacts.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
@@ -365,11 +370,6 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      - name: Install MSHV build dependencies
-        if: matrix.backend == 'mshv'
-        shell: bash
-        run: sudo -n tdnf install -y binutils kernel-headers libarchive openssl-devel
-
       - name: Build OpenVMM on Linux
         if: runner.os != 'Windows'
         shell: bash
@@ -415,6 +415,10 @@ jobs:
       ${{
         always() &&
         !cancelled() &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
         needs.artifacts.result == 'success'
       }}
     runs-on: ${{ fromJSON(matrix.runner) }}

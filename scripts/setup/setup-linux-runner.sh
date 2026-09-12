@@ -16,6 +16,7 @@ legacy_runner_directory=${HOME}/actions-runner
 runner_directory=/opt/nvx-runner
 runner_directory_is_default=true
 runner_name=
+runner_service_account=nvx-runner
 runner_token=
 trusted_tool_root=/opt/nvx
 trusted_cargo_home=${trusted_tool_root}/cargo
@@ -57,6 +58,14 @@ run_as_root() {
     sudo -n "$@"
 }
 
+run_as_runner() {
+    run_as_root -u "$runner_service_account" env \
+        PATH="$runner_service_path" \
+        CARGO_HOME="$runner_cargo_home" \
+        RUSTUP_HOME="$trusted_rustup_home" \
+        "$@"
+}
+
 run_runner_service() {
     (
         cd "$runner_directory"
@@ -66,10 +75,35 @@ run_runner_service() {
 
 runner_service_name() {
     service_file=${runner_directory}/.service
-    [ -f "$service_file" ] || die "GitHub Actions runner service is not installed"
-    service_name=$(cat "$service_file")
+    run_as_root test -f "$service_file" ||
+        die "GitHub Actions runner service is not installed"
+    service_name=$(run_as_root cat "$service_file")
     [ -n "$service_name" ] || die "GitHub Actions runner service name is empty"
     printf '%s\n' "$service_name"
+}
+
+configure_runner_account() {
+    if ! getent passwd "$runner_service_account" >/dev/null 2>&1; then
+        run_as_root useradd \
+            --system \
+            --user-group \
+            --home-dir /nonexistent \
+            --no-create-home \
+            --shell /usr/sbin/nologin \
+            "$runner_service_account"
+    fi
+    [ "$(id -u "$runner_service_account")" -ne 0 ] ||
+        die "runner service account must not be root"
+    primary_group=$(id -gn "$runner_service_account")
+    for group_name in $(id -nG "$runner_service_account"); do
+        case "$group_name" in
+            "$primary_group" | "$backend") ;;
+            *) run_as_root gpasswd -d "$runner_service_account" "$group_name" ;;
+        esac
+    done
+    if run_as_runner sudo -n true >/dev/null 2>&1; then
+        die "runner service account has passwordless sudo access"
+    fi
 }
 
 set_runner_disable_update() {
@@ -86,8 +120,6 @@ path.write_text(json.dumps(configuration, indent=2), encoding="utf-8-sig")
 }
 
 protect_runner_installation() {
-    user_name=$(id -un)
-    group_name=$(id -gn)
     work_directory=${runner_directory}/_work
     diagnostics_directory=${runner_directory}/_diag
     diagnostics_target=${work_directory}/_diag
@@ -108,22 +140,32 @@ protect_runner_installation() {
         run_as_root ln -s _work/_diag "$diagnostics_directory"
     fi
 
-    run_as_root chown root:root "$runner_directory"
-    run_as_root chmod u=rwx,go=rx "$runner_directory"
+    run_as_root chown "root:${runner_service_account}" "$runner_directory"
+    run_as_root chmod u=rwx,g=rx,o=x "$runner_directory"
     run_as_root find "$runner_directory" \
         -mindepth 1 -maxdepth 1 \
         ! -name _work ! -name _diag \
-        -exec chown -R root:root {} +
+        -exec chown -R "root:${runner_service_account}" {} +
     run_as_root find "$runner_directory" \
         -mindepth 1 -maxdepth 1 \
         ! -name _work ! -name _diag \
-        -exec chmod -R u=rwX,go=rX {} +
-    run_as_root chown -h root:root "$diagnostics_directory"
-    run_as_root chown "${user_name}:${group_name}" "$work_directory"
+        -exec chmod -R u=rwX,g=rX,o= {} +
+    run_as_root chown -h "root:${runner_service_account}" "$diagnostics_directory"
+    if [ "$(run_as_root stat -c %U "$work_directory")" != \
+        "$runner_service_account" ]; then
+        run_as_root chown -R \
+            "${runner_service_account}:${runner_service_account}" \
+            "$work_directory"
+    else
+        run_as_root chown "${runner_service_account}:${runner_service_account}" \
+            "$work_directory"
+    fi
     run_as_root chmod u=rwx,go= "$work_directory"
-    run_as_root chown -R "${user_name}:${group_name}" "$diagnostics_target"
+    run_as_root chown -R "${runner_service_account}:${runner_service_account}" \
+        "$diagnostics_target"
     run_as_root chmod -R u=rwX,go= "$diagnostics_target"
-    run_as_root chown -R "${user_name}:${group_name}" "$runner_cargo_home"
+    run_as_root chown -R "${runner_service_account}:${runner_service_account}" \
+        "$runner_cargo_home"
     run_as_root chmod -R u=rwX,go= "$runner_cargo_home"
 }
 
@@ -138,7 +180,6 @@ migrate_legacy_runner() {
         run_as_root rm -rf "$runner_directory"
     fi
 
-    user_name=$(id -un)
     if [ -f "${legacy_runner_directory}/.service" ]; then
         (
             cd "$legacy_runner_directory"
@@ -148,7 +189,7 @@ migrate_legacy_runner() {
     run_as_root mkdir -p "$(dirname "$runner_directory")"
     run_as_root mv "$legacy_runner_directory" "$runner_directory"
     if [ ! -f "${runner_directory}/.service" ]; then
-        run_runner_service install "$user_name"
+        run_runner_service install "$runner_service_account"
     fi
 }
 
@@ -156,7 +197,7 @@ configure_runner_service() {
     service_name=$(runner_service_name)
     drop_in=/etc/systemd/system/${service_name}.d
     run_as_root mkdir -p "$drop_in"
-    printf '[Service]\nEnvironment="PATH=%s"\nEnvironment="CARGO_HOME=%s"\nEnvironment="RUSTUP_HOME=%s"\n' \
+    printf '[Service]\nEnvironment="PATH=%s"\nEnvironment="CARGO_HOME=%s"\nEnvironment="RUSTUP_HOME=%s"\nLimitCORE=infinity\n' \
         "$runner_service_path" "$runner_cargo_home" "$trusted_rustup_home" |
         run_as_root tee "${drop_in}/nvx.conf" >/dev/null
     run_as_root systemctl daemon-reload
@@ -254,10 +295,9 @@ install_rust_tools() {
 }
 
 restrict_docker_access() {
-    user_name=$(id -un)
     if getent group docker >/dev/null 2>&1 &&
-        id -nG "$user_name" | tr ' ' '\n' | grep -Fxq docker; then
-        run_as_root gpasswd -d "$user_name" docker
+        id -nG "$runner_service_account" | tr ' ' '\n' | grep -Fxq docker; then
+        run_as_root gpasswd -d "$runner_service_account" docker
     fi
 }
 
@@ -281,7 +321,7 @@ configure_backend_access() {
     run_as_root udevadm trigger --name-match="$backend"
     run_as_root chgrp "$backend" "$device"
     run_as_root chmod 0660 "$device"
-    run_as_root usermod -aG "$backend" "$(id -un)"
+    run_as_root usermod -G "$backend" "$runner_service_account"
 }
 
 install_runner() {
@@ -290,7 +330,7 @@ install_runner() {
 
     migrate_legacy_runner
     run_as_root mkdir -p "$runner_directory"
-    if [ ! -x "${runner_directory}/bin/Runner.Listener" ]; then
+    if ! run_as_root test -x "${runner_directory}/bin/Runner.Listener"; then
         curl --fail --location --proto '=https' --tlsv1.2 \
             --output "$archive" "$download_url"
         printf '%s  %s\n' "$RUNNER_SHA256" "$archive" | sha256sum --check -
@@ -302,7 +342,7 @@ install_runner() {
         run_as_root "${runner_directory}/bin/installdependencies.sh"
     fi
 
-    if [ ! -f "${runner_directory}/.runner" ]; then
+    if ! run_as_root test -f "${runner_directory}/.runner"; then
         [ -n "$runner_token" ] || die "runner registration token is required"
         run_as_root chown -R "$(id -un):$(id -gn)" "$runner_directory"
         runner_labels="linux,${backend},virtual-machine,${runner_name}"
@@ -319,8 +359,16 @@ install_runner() {
     fi
     runner_token=
 
-    if [ ! -f "${runner_directory}/.service" ]; then
-        run_runner_service install "$(id -un)"
+    if run_as_root test -f "${runner_directory}/.service"; then
+        service_name=$(runner_service_name)
+        service_user=$(run_as_root systemctl show "$service_name" \
+            --property=User --value)
+        if [ "$service_user" != "$runner_service_account" ]; then
+            run_runner_service uninstall
+        fi
+    fi
+    if ! run_as_root test -f "${runner_directory}/.service"; then
+        run_runner_service install "$runner_service_account"
     fi
     configure_runner_service
 }
@@ -337,52 +385,67 @@ check_environment() {
         'import sys; print(".".join(map(str, sys.version_info[:3])))')
     version_at_least "$python_version" 3.10.0 ||
         die "Python 3.10.0 or newer is required"
-    rust_version=$(RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN rustc --version | awk '{print $2}')
+    rust_version=$(run_as_runner env RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN \
+        rustc --version | awk '{print $2}')
     version_at_least "$rust_version" "$RUST_MINIMUM_VERSION" ||
         die "Rust ${RUST_MINIMUM_VERSION} or newer is required"
-    cargo nextest --version | grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
+    run_as_runner cargo nextest --version |
+        grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
         die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
     [ "$(stat -c %U "$trusted_tool_root")" = root ] ||
         die "trusted Rust toolchain is not root-owned"
-    [ ! -w "${trusted_cargo_home}/bin/cargo" ] ||
+    run_as_runner test ! -w "${trusted_cargo_home}/bin/cargo" ||
         die "runner service account can modify trusted Cargo"
-    [ ! -w "$trusted_rustup_home" ] ||
+    run_as_runner test ! -w "$trusted_rustup_home" ||
         die "runner service account can modify trusted Rustup state"
 
-    user_name=$(id -un)
-    run_as_root -u "$user_name" sh -c \
+    run_as_runner sh -c \
         "test -r /dev/${backend} && test -w /dev/${backend}" ||
-        die "${user_name} cannot access /dev/${backend}"
+        die "${runner_service_account} cannot access /dev/${backend}"
+    if run_as_runner sudo -n true >/dev/null 2>&1; then
+        die "runner service account has passwordless sudo access"
+    fi
+    runner_primary_group=$(id -gn "$runner_service_account")
+    for group_name in $(id -nG "$runner_service_account"); do
+        case "$group_name" in
+            "$runner_primary_group" | "$backend") ;;
+            *) die "runner service account has unexpected group: ${group_name}" ;;
+        esac
+    done
 
-    if [ -f "${runner_directory}/.runner" ]; then
+    if run_as_root test -f "${runner_directory}/.runner"; then
         if [ "$configure_runner" = true ]; then
-            configured_runner_name=$(python3 -c \
+            configured_runner_name=$(run_as_root python3 -c \
                 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
                 "${runner_directory}/.runner")
             [ "$configured_runner_name" = "$runner_name" ] ||
                 die "configured runner is ${configured_runner_name}, expected ${runner_name}"
         fi
-        runner_disable_update=$(python3 -c \
+        runner_disable_update=$(run_as_root python3 -c \
             'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("disableUpdate"))' \
             "${runner_directory}/.runner")
         [ "$runner_disable_update" = True ] ||
             die "GitHub Actions runner automatic updates are not disabled"
         [ "$(stat -c %U "$runner_directory")" = root ] ||
             die "GitHub Actions runner installation is not root-owned"
-        [ ! -w "${runner_directory}/bin/Runner.Listener" ] ||
+        run_as_runner test ! -w "${runner_directory}/bin/Runner.Listener" ||
             die "runner service account can modify Runner.Listener"
-        [ ! -w "$(dirname "$runner_directory")" ] ||
+        run_as_runner test ! -w "$(dirname "$runner_directory")" ||
             die "runner service account can replace the runner installation"
-        [ -w "${runner_directory}/_work" ] ||
+        run_as_runner test -w "${runner_directory}/_work" ||
             die "runner service account cannot modify its work directory"
-        [ -L "${runner_directory}/_diag" ] &&
-            [ "$(readlink "${runner_directory}/_diag")" = _work/_diag ] ||
+        run_as_root test -L "${runner_directory}/_diag" &&
+            [ "$(run_as_root readlink "${runner_directory}/_diag")" = _work/_diag ] ||
             die "GitHub Actions runner diagnostics are not stored under _work"
-        [ "$(cat "${runner_directory}/.path")" = "$runner_service_path" ] ||
+        [ "$(run_as_root cat "${runner_directory}/.path")" = "$runner_service_path" ] ||
             die "GitHub Actions runner persisted PATH is not configured"
-        "${runner_directory}/bin/Runner.Listener" --version
+        run_as_runner "${runner_directory}/bin/Runner.Listener" --version
         run_runner_service status >/dev/null
         service_name=$(runner_service_name)
+        service_user=$(run_as_root systemctl show "$service_name" \
+            --property=User --value)
+        [ "$service_user" = "$runner_service_account" ] ||
+            die "GitHub Actions runner service uses ${service_user}, expected ${runner_service_account}"
         service_pid=$(run_as_root systemctl show "$service_name" \
             --property=MainPID --value)
         case "$service_pid" in
@@ -402,6 +465,14 @@ check_environment() {
             "^${runner_directory}/bin/Runner.Listener run --startuptype service$")
         [ -n "$listener_pid" ] ||
             die "GitHub Actions runner listener process was not found"
+        listener_uid=$(run_as_root sed -n \
+            's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' \
+            "/proc/${listener_pid}/status")
+        [ "$listener_uid" = "$(id -u "$runner_service_account")" ] ||
+            die "GitHub Actions runner listener uses unexpected uid ${listener_uid}"
+        run_as_root grep -Eq '^Max core file size[[:space:]]+unlimited[[:space:]]+unlimited' \
+            "/proc/${listener_pid}/limits" ||
+            die "GitHub Actions runner listener core limit is not unlimited"
         listener_environment=$(run_as_root cat "/proc/${listener_pid}/environ" |
             tr '\0' '\n')
         for expected_environment in \
@@ -475,7 +546,7 @@ case "$backend" in
     kvm | mshv) ;;
     *) die "--backend must be kvm or mshv" ;;
 esac
-[ "$(id -u)" -ne 0 ] || die "run this script as the runner service account, not root"
+[ "$(id -u)" -ne 0 ] || die "run this script as the SSH administrator, not root"
 require_command sudo
 sudo -n true || die "passwordless sudo is required"
 if [ "$configure_runner" = true ]; then
@@ -485,12 +556,15 @@ runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
 
 if [ "$check_only" = false ]; then
     install_packages
+    configure_runner_account
     install_rust_tools
     restrict_docker_access
     configure_backend_access
     if [ "$configure_runner" = true ]; then
         install_runner
     fi
+elif ! getent passwd "$runner_service_account" >/dev/null 2>&1; then
+    die "runner service account is not configured: ${runner_service_account}"
 fi
 
 export PATH="$runner_service_path"
