@@ -42,6 +42,8 @@ if (-not $RunnerOnly) {
 
 $RustToolchain = "stable"
 $MinimumRustVersion = [version]"1.95.0"
+$RustupVersion = "1.29.1"
+$RustupSha256 = "6f4bef66261261fcb43131be8720bab817d403a09edec7455c371974b90bdb7e"
 $CargoNextestVersion = "0.9.133"
 $RunnerVersion = "2.337.0"
 $RunnerSha256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
@@ -402,6 +404,7 @@ function Install-Toolchain {
         -Path $TrustedCargoHome, $CargoHome, $RustupHome `
         -Force |
     Out-Null
+    Set-ServiceDirectoryAcl -Path $ToolRoot -ServiceRights "ReadAndExecute"
     [Environment]::SetEnvironmentVariable("CARGO_HOME", $CargoHome, "Machine")
     [Environment]::SetEnvironmentVariable("RUSTUP_HOME", $RustupHome, "Machine")
     Add-MachinePathEntry "$TrustedCargoHome\bin"
@@ -411,16 +414,31 @@ function Install-Toolchain {
 
     $rustupPath = Join-Path $TrustedCargoHome "bin\rustup.exe"
     if (-not (Test-Path -LiteralPath $rustupPath -PathType Leaf)) {
-        $rustupInstaller = Join-Path $env:TEMP "rustup-init.exe"
-        Invoke-WebRequest `
-            -UseBasicParsing `
-            -Uri "https://win.rustup.rs/x86_64" `
-            -OutFile $rustupInstaller
-        Invoke-Native $rustupInstaller @(
-            "-y",
-            "--profile", "minimal",
-            "--default-toolchain", $RustToolchain
-        )
+        $rustupInstaller = Join-Path $ToolRoot `
+            "rustup-init-$RustupVersion-$([guid]::NewGuid().ToString('N')).exe"
+        try {
+            Invoke-WebRequest `
+                -UseBasicParsing `
+                -Uri "https://static.rust-lang.org/rustup/archive/$RustupVersion/x86_64-pc-windows-msvc/rustup-init.exe" `
+                -OutFile $rustupInstaller
+            $actualHash = (Get-FileHash `
+                    -LiteralPath $rustupInstaller `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $RustupSha256) {
+                throw "Rustup installer checksum mismatch: $actualHash"
+            }
+            Invoke-Native $rustupInstaller @(
+                "-y",
+                "--profile", "minimal",
+                "--default-toolchain", $RustToolchain
+            )
+        }
+        finally {
+            Remove-Item `
+                -LiteralPath $rustupInstaller `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
     }
     Update-ProcessPath
     Invoke-Native $rustupPath @(

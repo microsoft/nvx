@@ -4,6 +4,8 @@ set -eu
 
 RUST_TOOLCHAIN=stable
 RUST_MINIMUM_VERSION=1.95.0
+RUSTUP_VERSION=1.29.1
+RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 CARGO_NEXTEST_VERSION=0.9.133
 RUNNER_VERSION=2.337.0
 RUNNER_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
@@ -215,7 +217,8 @@ install_packages() {
             bc binutils bison build-essential ca-certificates cmake cpio curl \
             flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
-            pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils
+            pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
+            zstd
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
             bc binutils bison ca-certificates cmake cpio curl diffutils \
@@ -224,7 +227,7 @@ install_packages() {
             kernel-headers libarchive libarchive-devel lttng-ust make \
             ninja-build openssl openssl-devel patch perl pkgconf \
             pkgconf-pkg-config protobuf python3 rsync shadow-utils tar \
-            util-linux which xz
+            util-linux which xz zstd
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
             bc binutils bison ca-certificates cmake cpio curl \
@@ -232,7 +235,7 @@ install_packages() {
             gzip iproute iptables kernel-headers libarchive libarchive-devel \
             make ninja-build openssl openssl-devel patch perl \
             pkgconf pkgconf-pkg-config protobuf-compiler python3 rsync \
-            shadow-utils tar util-linux which xz
+            shadow-utils tar util-linux which xz zstd
     else
         die "supported package manager not found (apt-get, dnf, or tdnf)"
     fi
@@ -246,15 +249,19 @@ install_rust_tools() {
     run_as_root mkdir -p "$trusted_cargo_home" "$trusted_rustup_home"
 
     if [ ! -x "$rustup" ]; then
-        installer=${RUNNER_TEMP:-/tmp}/nvx-rustup-init.sh
-        curl --fail --proto '=https' --tlsv1.2 --silent --show-error \
-            --output "$installer" https://sh.rustup.rs
+        installer=${trusted_tool_root}/rustup-init-${RUSTUP_VERSION}
+        installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init
+        run_as_root curl --fail --proto '=https' --tlsv1.2 \
+            --silent --show-error --output "$installer" "$installer_url"
+        printf '%s  %s\n' "$RUSTUP_SHA256" "$installer" |
+            run_as_root sha256sum --check -
+        run_as_root chmod 0755 "$installer"
         run_as_root env \
             CARGO_HOME="$trusted_cargo_home" \
             RUSTUP_HOME="$trusted_rustup_home" \
-            sh "$installer" -y --no-modify-path --profile minimal \
+            "$installer" -y --no-modify-path --profile minimal \
             --default-toolchain "$RUST_TOOLCHAIN"
-        rm -f "$installer"
+        run_as_root rm -f "$installer"
     fi
 
     run_as_root env \
@@ -392,7 +399,7 @@ check_environment() {
     [ "$(uname -s)" = Linux ] || die "this script requires Linux"
     [ "$(uname -m)" = x86_64 ] || die "this script requires x86_64"
     for command_name in python3 git curl rustup cargo cargo-nextest gcc make ld \
-        bison flex cpio gzip tar xz systemctl; do
+        bison flex cpio gzip sha256sum tar xz zstd systemctl; do
         require_command "$command_name"
     done
 
