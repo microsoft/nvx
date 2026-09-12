@@ -1083,7 +1083,7 @@ class BuildTests(unittest.TestCase):
     def test_guest_agent_identity_is_exact_fused_startup_input(self):
         self.assertEqual(
             build.GUEST_AGENT_SOURCE_REVISION,
-            "13c34dbbfb4e8251c0a8c45ab34688d42aae3c8a",
+            "60aebc65b138725fa6fc30ab1f677603c78a489d",
         )
         self.assertEqual(
             build.GUEST_AGENT_SHA256,
