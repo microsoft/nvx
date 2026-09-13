@@ -47,7 +47,10 @@ class OpenvmmProcess:
         log_path: Path,
         *,
         environment: Mapping[str, str] | None = None,
+        output_read_delay: float = 0.0,
     ) -> None:
+        if output_read_delay < 0:
+            raise ValueError("OpenVMM output read delay cannot be negative")
         process_environment = os.environ.copy()
         process_environment["OPENVMM_LOG"] = "off"
         if environment is not None:
@@ -59,7 +62,14 @@ class OpenvmmProcess:
             args=(self._chunks,),
             daemon=True,
         )
-        self._reader.start()
+        try:
+            if output_read_delay:
+                time.sleep(output_read_delay)
+            self._reader.start()
+        except BaseException:
+            terminate(self._interaction.process)
+            self._interaction.close()
+            raise
         self._output = bytearray()
         self._search_offset = 0
         self._log_path = log_path
