@@ -8,7 +8,7 @@ import shutil
 import ssl
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
@@ -17,6 +17,7 @@ from .common import (
     ScriptError,
     download,
     format_size,
+    host_architecture,
     require_tool,
     run_capture,
     run_checked,
@@ -30,15 +31,35 @@ DEFAULT_KERNEL_SHA256 = (
 )
 DEFAULT_ALPINE_VERSION = "3.24.1"
 DEFAULT_ALPINE_BRANCH = "v3.24"
-DEFAULT_ALPINE_MINIROOTFS_SHA256 = (
-    "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081"
-)
+DEFAULT_ALPINE_MINIROOTFS_SHA256 = {
+    "x86_64": "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+    "aarch64": "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
+}
+ALPINE_LOADERS = {
+    "x86_64": "ld-musl-x86_64.so.1",
+    "aarch64": "ld-musl-aarch64.so.1",
+}
+KERNEL_CONFIGS = {
+    "x86_64": "config-microvm",
+    "aarch64": "config-microvm-arm64",
+}
+KERNEL_MAKE_ARCHITECTURES = {
+    "x86_64": "x86",
+    "aarch64": "arm64",
+}
+KERNEL_MAKE_TARGETS = {
+    "x86_64": "vmlinux",
+    "aarch64": "Image",
+}
+KERNEL_BUILD_OUTPUTS = {
+    "x86_64": Path("vmlinux"),
+    "aarch64": Path("arch") / "arm64" / "boot" / "Image",
+}
 REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_HVC_DRIVER=y",
     "CONFIG_VIRTIO=y",
     "CONFIG_VIRTIO_CONSOLE=y",
     "CONFIG_VIRTIO_MMIO=y",
-    "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
 )
 REQUIRED_SHARED_STATUS_KERNEL_CONFIG = ("CONFIG_VIRTIO_MMIO_SHARED_STATUS=y",)
 REQUIRED_SANDBOX_KERNEL_CONFIG = (
@@ -66,11 +87,26 @@ class ApkPackage(TypedDict):
     build_time: str | None
 
 
-def _assert_virtio_console_kernel_config(path: Path) -> None:
+def _assert_virtio_console_kernel_config(
+    path: Path,
+    architecture: str | None = None,
+) -> None:
+    architecture = architecture or host_architecture()
     configured = set(path.read_text(encoding="utf-8").splitlines())
+    required = [
+        *REQUIRED_VIRTIO_CONSOLE_CONFIG,
+        *(
+            ("CONFIG_HVC_XE9=y",)
+            if architecture == "x86_64"
+            else (
+                "CONFIG_SERIAL_AMBA_PL011=y",
+                "CONFIG_SERIAL_AMBA_PL011_CONSOLE=y",
+            )
+        ),
+    ]
     missing = [
         setting
-        for setting in REQUIRED_VIRTIO_CONSOLE_CONFIG
+        for setting in required
         if setting not in configured
     ]
     if missing:
@@ -112,6 +148,7 @@ class AlpineBuildConfig:
     branch: str = DEFAULT_ALPINE_BRANCH
     work: Path = Path.home() / "build" / "initramfs"
     output: Path = Path.home() / "build" / "initramfs.cpio.gz"
+    architecture: str = field(default_factory=host_architecture)
 
 
 @dataclass(frozen=True)
@@ -119,6 +156,7 @@ class KernelBuildConfig:
     version: str = DEFAULT_KERNEL_VERSION
     work: Path = Path.home() / "build" / "kernel"
     output: Path = Path.home() / "build" / "vmlinux"
+    architecture: str = field(default_factory=host_architecture)
 
 
 @dataclass(frozen=True)
@@ -136,8 +174,20 @@ def _require_linux(workflow: str) -> None:
         )
 
 
+def _validate_architecture(architecture: str) -> None:
+    if architecture not in DEFAULT_ALPINE_MINIROOTFS_SHA256:
+        choices = ", ".join(DEFAULT_ALPINE_MINIROOTFS_SHA256)
+        raise ScriptError(
+            f"unsupported artifact architecture {architecture!r}; choose {choices}"
+        )
+
+
 def _alpine_tarball(config: AlpineBuildConfig) -> Path:
-    return config.work / f"alpine-minirootfs-{config.version}-x86_64.tar.gz"
+    _validate_architecture(config.architecture)
+    return (
+        config.work
+        / f"alpine-minirootfs-{config.version}-{config.architecture}.tar.gz"
+    )
 
 
 def _download_verified(url: str, destination: Path, expected_sha256: str) -> None:
@@ -232,9 +282,9 @@ def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
     tarball = _alpine_tarball(config)
     _download_verified(
         "https://dl-cdn.alpinelinux.org/alpine/"
-        f"{config.branch}/releases/x86_64/{tarball.name}",
+        f"{config.branch}/releases/{config.architecture}/{tarball.name}",
         tarball,
-        DEFAULT_ALPINE_MINIROOTFS_SHA256,
+        DEFAULT_ALPINE_MINIROOTFS_SHA256[config.architecture],
     )
     root = config.work / "root"
     shutil.rmtree(root, ignore_errors=True)
@@ -300,26 +350,30 @@ def _build_device_io_helper(work: Path, destination: Path) -> dict[str, str]:
     }
 
 
-def _apk_add(root: Path, *packages: str) -> None:
-    loader = root / "lib" / "ld-musl-x86_64.so.1"
+def _apk_add(
+    root: Path,
+    *packages: str,
+    architecture: str | None = None,
+) -> None:
+    architecture = architecture or host_architecture()
+    _validate_architecture(architecture)
+    loader = root / "lib" / ALPINE_LOADERS[architecture]
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = f"{root / 'lib'}:{root / 'usr' / 'lib'}"
     host_ca_file = ssl.get_default_verify_paths().cafile
     if host_ca_file:
         environment.setdefault("SSL_CERT_FILE", host_ca_file)
-    run_checked(
-        [
-            loader,
-            root / "sbin" / "apk",
-            "--root",
-            root,
-            "--no-cache",
-            "--no-interactive",
-            "add",
-            *packages,
-        ],
-        env=environment,
-    )
+    command: list[str | Path] = [
+        loader,
+        root / "sbin" / "apk",
+        "--root",
+        root,
+        "--no-cache",
+        "--no-interactive",
+        "--no-scripts",
+    ]
+    command.extend(("add", *packages))
+    run_checked(command, env=environment)
 
 
 def _normalize_initramfs_metadata(root: Path) -> None:
@@ -425,7 +479,7 @@ def _write_apk_manifest(
                 "format": 1,
                 "alpine_version": config.version,
                 "alpine_branch": config.branch,
-                "architecture": "x86_64",
+                "architecture": config.architecture,
                 "packages": packages,
                 "helpers": helpers,
             },
@@ -447,6 +501,7 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         "e2fsprogs",
         "util-linux",
         "util-linux-misc",
+        architecture=config.architecture,
     )
     resolver = root / "etc" / "resolv.conf"
     resolver.unlink(missing_ok=True)
@@ -508,11 +563,16 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
 
 def build_kernel(config: KernelBuildConfig) -> None:
     _require_linux("build-kernel")
-    for tool in ("make", "readelf"):
+    _validate_architecture(config.architecture)
+    tools = ("make", "readelf") if config.architecture == "x86_64" else ("make",)
+    for tool in tools:
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config.version)
+    input_config = REPO_ROOT / "kernel" / KERNEL_CONFIGS[config.architecture]
     build_fingerprint = json.dumps(
         {
+            "architecture": config.architecture,
+            "config_sha256": sha256_file(input_config),
             "source": source_fingerprint,
         },
         sort_keys=True,
@@ -526,26 +586,35 @@ def build_kernel(config: KernelBuildConfig) -> None:
     config.work.mkdir(parents=True, exist_ok=True)
     build_stamp.write_text(build_fingerprint, encoding="utf-8")
     kernel_config = config.work / ".config"
-    shutil.copy2(REPO_ROOT / "kernel" / "config-microvm", kernel_config)
-    make = ["make", "-C", source, f"O={config.work}"]
+    shutil.copy2(input_config, kernel_config)
+    make = [
+        "make",
+        "-C",
+        source,
+        f"O={config.work}",
+        f"ARCH={KERNEL_MAKE_ARCHITECTURES[config.architecture]}",
+    ]
     run_checked([*make, "olddefconfig"])
-    _assert_virtio_console_kernel_config(kernel_config)
+    _assert_virtio_console_kernel_config(kernel_config, config.architecture)
     _assert_sandbox_kernel_config(kernel_config)
     _assert_shared_status_kernel_config(kernel_config)
     jobs = os.cpu_count() or 1
-    print(f">> building vmlinux with {jobs} jobs")
-    run_checked([*make, f"-j{jobs}", "vmlinux"])
+    make_target = KERNEL_MAKE_TARGETS[config.architecture]
+    build_output = KERNEL_BUILD_OUTPUTS[config.architecture]
+    print(f">> building {build_output.as_posix()} with {jobs} jobs")
+    run_checked([*make, f"-j{jobs}", make_target])
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config.work / "vmlinux", config.output)
+    shutil.copy2(config.work / build_output, config.output)
     shutil.copy2(kernel_config, config.output.with_name(f"{config.output.name}.config"))
     print(f">> built {config.output}")
 
-    notes = run_capture(["readelf", "-n", config.output])
-    if "Xen" in notes.text and "0x00000012" in notes.text:
-        print(">> PVH entry note present")
-    else:
-        config.output.unlink(missing_ok=True)
-        raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
+    if config.architecture == "x86_64":
+        notes = run_capture(["readelf", "-n", config.output])
+        if "Xen" in notes.text and "0x00000012" in notes.text:
+            print(">> PVH entry note present")
+        else:
+            config.output.unlink(missing_ok=True)
+            raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
 
 
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:

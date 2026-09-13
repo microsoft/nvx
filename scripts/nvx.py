@@ -34,6 +34,7 @@ from nvx_tools.common import (
     REPO_ROOT,
     ScriptError,
     artifact_path,
+    host_architecture,
     openvmm_binary_path,
     require_file,
 )
@@ -108,10 +109,16 @@ def command_build_openvmm(args: argparse.Namespace) -> None:
             ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
             cwd=OPENVMM_DIR,
         )
-    _run(
-        ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
-        cwd=OPENVMM_DIR,
-    )
+    command = ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"]
+    if host_architecture() == "aarch64":
+        command.extend(
+            [
+                "--no-default-features",
+                "--features",
+                "gdb,virt_kvm,net_consomme,net_tap,disk_blob,disklayer_sqlite",
+            ]
+        )
+    _run(command, cwd=OPENVMM_DIR)
 
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
@@ -135,17 +142,19 @@ def _hypervisor(selected: str) -> str:
 
 def _release_platform(hypervisor: str) -> str:
     selected = _hypervisor(hypervisor)
+    architecture = host_architecture()
     if sys.platform == "win32":
         host = "windows"
         supported = ("whp",)
     elif sys.platform.startswith("linux"):
         host = "linux"
-        supported = ("kvm", "mshv")
+        supported = ("kvm",) if architecture == "aarch64" else ("kvm", "mshv")
     else:
         raise ScriptError(f"release downloads are unsupported on {sys.platform}")
     if selected not in supported:
-        raise ScriptError(f"{selected} is not supported on {host}")
-    return f"{host}-{selected}"
+        raise ScriptError(f"{selected} is not supported on {host}/{architecture}")
+    suffix = "-arm64" if architecture == "aarch64" else ""
+    return f"{host}-{selected}{suffix}"
 
 
 def command_download(args: argparse.Namespace) -> None:

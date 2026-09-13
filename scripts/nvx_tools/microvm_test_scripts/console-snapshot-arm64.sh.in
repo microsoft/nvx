@@ -1,0 +1,42 @@
+set -eu
+console=/dev/hvc0
+fail() {
+    code="$1"
+    echo "NVX-CONSOLE-SNAPSHOT-FAIL code=$code" >"$console"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+grep -q 'console=ttyAMA0' /proc/cmdline || fail 50
+[ -e /sys/class/tty/hvc0 ] || fail 52
+stty raw -echo
+stty -F "$console" -echo
+exec 3<>"$console"
+printf '\000\015\012\177\377NVX-CONSOLE-BINARY\n' >&3
+rm -f /tmp/nvx-console-tx-started /tmp/nvx-console-resume
+mkfifo /tmp/nvx-console-resume
+(
+    index=0
+    while [ "$index" -lt @TX_COUNT@ ]; do
+        printf 'NVX-CONSOLE-TX-%05d\n' "$index" >&3
+        index=$((index + 1))
+        if [ "$index" -eq 100 ]; then
+            touch /tmp/nvx-console-tx-started
+            IFS= read -r resume </tmp/nvx-console-resume
+            [ "$resume" = resume ] || fail 55
+        fi
+    done
+) & tx_pid=$!
+while [ ! -e /tmp/nvx-console-tx-started ]; do
+    sleep 0.01
+done
+echo NVX-CONSOLE-RX-READY >&3
+sleep 0.1
+echo NVX-CONSOLE-RX-QUEUED >&3
+snapshot_now="$(dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]')"
+[ "$snapshot_now" = 1 ] || fail 54
+nvx-snapshot
+@RECEIVE@
+printf 'resume\n' >/tmp/nvx-console-resume
+@RESTORED_MARKER@
+@COMPLETION@

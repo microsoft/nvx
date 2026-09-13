@@ -1,29 +1,30 @@
 From: NVX maintainers
-Subject: [PATCH] tty: hvc: add OpenVMM microVM xe9 console
+Subject: [PATCH] tty: hvc: add OpenVMM microVM console
 
-Add a bidirectional hypervisor console for the OpenVMM microVM profile.
-Output uses I/O port 0xe9 and input availability is polled through 0xea.
+Add the bidirectional microVM console over x86 port I/O and arm64 MMIO.
 
 --- a/drivers/tty/hvc/Kconfig
 +++ b/drivers/tty/hvc/Kconfig
-@@ -62,5 +62,14 @@ config HVC_XEN_FRONTEND
+@@ -68,6 +68,15 @@
+ 	help
  	  Xen driver for secondary virtual consoles
  
 +config HVC_XE9
-+	bool "microVM portb (0xE9/0xEA) hypervisor console"
-+	depends on X86
++	bool "OpenVMM microVM hypervisor console"
++	depends on X86 || ARM64
 +	select HVC_DRIVER
 +	help
-+	  Bidirectional hypervisor console for the OpenVMM microVM profile.
-+	  Output uses I/O port 0xE9 and input availability is polled through
-+	  port 0xEA. It registers as hvc0 and replaces the 16550 UART.
++	  Bidirectional hypervisor console for the OpenVMM microVM profile. x86
++	  uses I/O ports 0xE9 and 0xEA; arm64 uses the fixed MMIO control page.
++	  It registers as hvc0 and replaces an emulated UART.
 +
  config HVC_UDBG
  	bool "udbg based fake hypervisor console"
  	depends on PPC
 --- a/drivers/tty/hvc/Makefile
 +++ b/drivers/tty/hvc/Makefile
-@@ -8,5 +8,6 @@ obj-$(CONFIG_HVC_DRIVER)	+= hvc_console.o
+@@ -7,6 +7,7 @@
+ obj-$(CONFIG_HVC_DRIVER)	+= hvc_console.o
  obj-$(CONFIG_HVC_IRQ)		+= hvc_irq.o
  obj-$(CONFIG_HVC_XEN)		+= hvc_xen.o
 +obj-$(CONFIG_HVC_XE9)		+= hvc_xe9.o
@@ -32,41 +33,71 @@ Output uses I/O port 0xe9 and input availability is polled through 0xea.
  obj-$(CONFIG_HVC_RISCV_SBI)	+= hvc_riscv_sbi.o
 --- /dev/null
 +++ b/drivers/tty/hvc/hvc_xe9.c
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,117 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * microvm: bidirectional "portb" hypervisor console over I/O ports.
++ * Bidirectional console for the OpenVMM microVM profile.
 + *
-+ * Replaces the 16550 UART as the guest console. It registers with the hvc_console
-+ * framework as hvc0, which gives a full interactive tty (input included) while keeping the
-+ * cheap one-outb-per-byte output path of the earlycon=xe9 console.
-+ *
-+ * Wire protocol with the microvm VMM:
-+ *   - outb(byte, 0xE9)  : transmit one byte to the host console (one VM exit per byte);
-+ *   - inb(0xEA) & 1     : receive status, set when a host->guest byte is available;
-+ *   - inb(0xE9)         : read (consume) the next received byte.
-+ *
-+ * There is no interrupt line: hvc polls via its own timer thread, which is fine for a
-+ * console. Select it with "console=hvc0" (add_preferred_console also makes it the default).
++ * x86 uses I/O ports 0xe9 and 0xea. arm64 uses the fixed MMIO control page at
++ * 0xd0007000. There is no interrupt line; hvc polls through its timer thread.
 + */
 +#include <linux/console.h>
 +#include <linux/err.h>
 +#include <linux/init.h>
++#include <linux/io.h>
 +#include <linux/types.h>
 +
++#ifdef CONFIG_X86
 +#include <asm/io.h>
++#endif
 +
 +#include "hvc_console.h"
 +
-+#define XE9_DATA	0xe9	/* out: TX byte;  in: RX byte	*/
-+#define XE9_STATUS	0xea	/* in: bit0 = RX data available	*/
++#define XE9_DATA 0xe9
++#define XE9_STATUS 0xea
++#define XE9_MMIO_BASE 0xd0007000
++#define XE9_MMIO_SIZE 0x1000
++
++#ifdef CONFIG_ARM64
++static void __iomem *xe9_mmio;
++#endif
++
++static int hvc_xe9_prepare(void)
++{
++#ifdef CONFIG_ARM64
++	if (!xe9_mmio) {
++		xe9_mmio = ioremap(XE9_MMIO_BASE, XE9_MMIO_SIZE);
++		if (!xe9_mmio)
++			return -ENOMEM;
++	}
++#endif
++	return 0;
++}
++
++static void hvc_xe9_writeb(u8 value)
++{
++#ifdef CONFIG_X86
++	outb(value, XE9_DATA);
++#else
++	writeb(value, xe9_mmio);
++#endif
++}
++
++static u8 hvc_xe9_readb(unsigned int offset)
++{
++#ifdef CONFIG_X86
++	return inb(offset == 0 ? XE9_DATA : XE9_STATUS);
++#else
++	return readb(xe9_mmio + offset);
++#endif
++}
 +
 +static ssize_t hvc_xe9_put(uint32_t vtermno, const u8 *buf, size_t count)
 +{
 +	size_t i;
 +
 +	for (i = 0; i < count; i++)
-+		outb(buf[i], XE9_DATA);
++		hvc_xe9_writeb(buf[i]);
 +
 +	return count;
 +}
@@ -76,9 +107,9 @@ Output uses I/O port 0xe9 and input availability is polled through 0xea.
 +	size_t i;
 +
 +	for (i = 0; i < count; i++) {
-+		if (!(inb(XE9_STATUS) & 1))
++		if (!(hvc_xe9_readb(1) & 1))
 +			break;
-+		buf[i] = inb(XE9_DATA);
++		buf[i] = hvc_xe9_readb(0);
 +	}
 +
 +	return i;
@@ -92,6 +123,11 @@ Output uses I/O port 0xe9 and input availability is polled through 0xea.
 +static int __init hvc_xe9_init(void)
 +{
 +	struct hvc_struct *hp;
++	int err;
++
++	err = hvc_xe9_prepare();
++	if (err)
++		return err;
 +
 +	hp = hvc_alloc(0, 0, &hvc_xe9_ops, 128);
 +	if (IS_ERR(hp))
@@ -103,6 +139,12 @@ Output uses I/O port 0xe9 and input availability is polled through 0xea.
 +
 +static int __init hvc_xe9_console_init(void)
 +{
++	int err;
++
++	err = hvc_xe9_prepare();
++	if (err)
++		return err;
++
 +	hvc_instantiate(0, 0, &hvc_xe9_ops);
 +	add_preferred_console("hvc", 0, NULL);
 +

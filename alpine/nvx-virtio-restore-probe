@@ -41,28 +41,25 @@ cmdline_value() {
 
 resolve_virtio_device() {
     address_decimal=$(printf '%d' "$mmio_address") || return 1
-    platform=
-    while IFS=' ' read -r range separator candidate _; do
-        [ "$separator" = : ] || continue
-        case "$candidate" in virtio-mmio.*) ;; *) continue ;; esac
-        start=${range%%-*}
-        start_decimal=$(printf '%d' "0x$start") || continue
+    for platform_path in \
+        /sys/bus/platform/devices/* \
+        /sys/devices/virtio-mmio-cmdline/*; do
+        [ -d "$platform_path" ] || continue
+        [ -r "$platform_path/resource" ] || continue
+        IFS=' ' read -r start _ <"$platform_path/resource" || continue
+        start_decimal=$(printf '%d' "$start") || continue
         if [ "$start_decimal" -eq "$address_decimal" ]; then
-            platform=$candidate
-            break
-        fi
-    done </proc/iomem
-    [ -n "$platform" ] || return 1
-
-    for candidate_path in "/sys/devices/virtio-mmio-cmdline/$platform"/virtio*; do
-        [ -d "$candidate_path" ] || continue
-        [ -r "$candidate_path/device" ] || continue
-        actual_id=$(cat "$candidate_path/device")
-        actual_id=$(printf '%d' "$actual_id") || continue
-        if [ "$actual_id" -eq "$expected_device_id" ]; then
-            device_path=$candidate_path
-            device_name=${candidate_path##*/}
-            return 0
+            for candidate_path in "$platform_path"/virtio*; do
+                [ -d "$candidate_path" ] || continue
+                [ -r "$candidate_path/device" ] || continue
+                actual_id=$(cat "$candidate_path/device")
+                actual_id=$(printf '%d' "$actual_id") || continue
+                if [ "$actual_id" -eq "$expected_device_id" ]; then
+                    device_path=$candidate_path
+                    device_name=${candidate_path##*/}
+                    return 0
+                fi
+            done
         fi
     done
     return 1
@@ -117,13 +114,15 @@ configure_network() {
 }
 
 perform_console_io() {
+    console=/dev/hvc1
+    [ "$(uname -m)" = aarch64 ] && console=/dev/hvc0
     attempts=0
-    while [ "$attempts" -lt 500 ] && [ ! -c /dev/hvc1 ]; do
+    while [ "$attempts" -lt 500 ] && [ ! -c "$console" ]; do
         attempts=$((attempts + 1))
         sleep 0.01
     done
-    [ -c /dev/hvc1 ] || fatal console-port-missing
-    printf 'NVX-VIRTIO-CONSOLE-IO-OK\n' >/dev/hvc1 || fatal console-write-failed
+    [ -c "$console" ] || fatal console-port-missing
+    printf 'NVX-VIRTIO-CONSOLE-IO-OK\n' >"$console" || fatal console-write-failed
 }
 
 perform_virtiofs_io() {

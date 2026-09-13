@@ -49,7 +49,7 @@ class OpenvmmProcess:
         environment: Mapping[str, str] | None = None,
     ) -> None:
         process_environment = os.environ.copy()
-        process_environment["OPENVMM_LOG"] = "off"
+        process_environment["OPENVMM_LOG"] = os.environ.get("NVX_OPENVMM_LOG", "off")
         if environment is not None:
             process_environment.update(environment)
         self._interaction = InteractiveProcess(command, process_environment)

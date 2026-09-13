@@ -128,6 +128,8 @@ python3 scripts/nvx.py test-openvmm --backend {kvm,mshv,whp}
 
 Builds and runs OpenVMM's checkout-owned microVM tests. The test artifacts are
 produced by OpenVMM itself; NVX's kernel and initramfs are not required.
+x86-64 selects the PVH lifecycle and TTRPC snapshot probes. ARM64/KVM selects
+the native Linux-direct MPIDR rollover and topology tests.
 
 ### `test-microvm`
 
@@ -187,7 +189,7 @@ python3 scripts/nvx.py run
 | Option | Default | Description |
 | --- | --- | --- |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
-| `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
+| `--machine {microvm}` | `microvm` | Select the fixed-topology microVM. x86-64 uses PVH plus shared-status edge interrupts; ARM64/KVM uses device-tree direct boot plus level-triggered GIC SPIs. |
 | `--memory-mib MIB` | `128` | Set guest memory in MiB. |
 | `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count. |
@@ -314,9 +316,10 @@ reject incomplete inputs for their respective workload sets.
 `--require-shell-snapshot-restore-512` accepts only the canonical 512 MiB
 restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
-result, producing the 31-metric microVM CI result. A directory whose metadata
-selects `device-io` is collected as five additional ABI-2, one-vCPU `ops/s`
-metrics; CI merges them into a 36-metric one-vCPU result.
+result. The x86-64 shared suite produces 31 metrics before device I/O and 36
+after its five operation-rate metrics. ARM64 omits the x86-only
+`tsc=reliable` and `no_timer_check` cold-start variants, producing 29 and 34
+metrics respectively.
 `--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
 
 #### `performance collect-openvmm`

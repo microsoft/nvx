@@ -40,8 +40,9 @@ sudo apt-get install -y \
 
 ### Linux / KVM
 
-Enable Intel VT-x or AMD-V in the host firmware. Linux normally loads the matching KVM kernel
-module automatically; `/dev/kvm` should exist after boot. Add the current user to the `kvm` group:
+Enable Intel VT-x, AMD-V, or ARM virtualization extensions in the host firmware.
+Linux normally loads the matching KVM support automatically; `/dev/kvm` should
+exist after boot. Add the current user to the `kvm` group:
 
 ```bash
 sudo usermod -aG kvm "$USER"

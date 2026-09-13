@@ -1,9 +1,11 @@
 # Benchmark
 
 The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites, a
-23-metric microVM non-Python workload suite, and five device operation-rate metrics on
-Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI combines those workloads with eight
-128 MiB shell lifecycle metrics and reports all 36 median (p50) values. At 2, 4, and 8 vCPUs, CI records only
+23-metric x86-64 or 21-metric ARM64 microVM non-Python workload suite, and five device
+operation-rate metrics on Linux/KVM, Linux/MSHV, and Windows/WHP. ARM64 omits the x86-only
+`tsc=reliable` and `no_timer_check` variants. At one vCPU, collection combines those workloads
+with eight 128 MiB shell lifecycle metrics and reports 36 x86-64 or 34 ARM64 median (p50)
+values. At 2, 4, and 8 vCPUs, CI records only
 `shell_snapshot_restore_512_mib`. Latency and resident-memory metrics are lower-is-better;
 throughput and operation-rate metrics are higher-is-better.
 
@@ -33,6 +35,8 @@ coordinator fills the `.sh.in` templates before use.
 
 | CI performance series | Backend | Host type |
 | --- | --- | --- |
+| `linux-kvm-arm64-baremetal` | KVM / ARM64 | Bare metal |
+| `linux-kvm-arm64-virtual-machine` | KVM / ARM64 | Virtual machine |
 | `linux-kvm-virtual-machine` | KVM | Virtual machine |
 | `linux-mshv-virtual-machine` | MSHV | Virtual machine |
 | `windows-whp-virtual-machine` | WHP | Virtual machine |
@@ -57,8 +61,11 @@ python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-
 Run the complete performance suite with:
 
 ```console
-# Linux/KVM: run all 23 metrics and write collector-compatible logs
+# Linux/KVM x86-64: run all 23 metrics and write collector-compatible logs
 python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu
+
+# Linux/KVM ARM64: run all 21 architecture-applicable metrics
+python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-arm64-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-arm64-baremetal/microvm-v2/1vcpu
 
 # Linux/MSHV: run all 23 metrics
 python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v2/1vcpu
@@ -79,6 +86,8 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 python scripts\nvx.py benchmark --suite device-io --backend whp --platform windows-whp-baremetal --processors 1 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu\device-io
 python scripts\nvx.py performance collect --platform windows-whp-baremetal --commit HEAD --input-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu\device-io --output-dir data\results
 ```
+
+Use `linux-kvm-arm64-baremetal` for both Linux commands on an ARM64/KVM host.
 
 For a smoke test, pass `--warmups 0 --runs 1 --device-io-duration-seconds 1`.
 

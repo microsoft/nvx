@@ -89,6 +89,37 @@ write_port_byte() {
     /sbin/nvx-port-io write-u8 "$1" "$2"
 }
 
+refresh_wall_clock() {
+    wall_clock=$(/sbin/nvx-port-io read-wall-clock 233 234) ||
+        fail_closed "failed to read the host wall clock"
+    case "$wall_clock" in
+        '' | *[!0-9]*) fail_closed "host wall clock is invalid" ;;
+    esac
+    date -u -s "@$wall_clock" >/dev/null 2>&1 ||
+        fail_closed "failed to refresh the wall clock"
+}
+
+virtio_mmio_device_present() {
+    expected_address=$(printf '%d' "$1") || return 1
+    expected_id=$2
+    for platform_path in \
+        /sys/bus/platform/devices/* \
+        /sys/devices/virtio-mmio-cmdline/*; do
+        [ -d "$platform_path" ] || continue
+        [ -r "$platform_path/resource" ] || continue
+        IFS=' ' read -r start _ <"$platform_path/resource" || continue
+        start=$(printf '%d' "$start") || continue
+        [ "$start" -eq "$expected_address" ] || continue
+        for candidate in "$platform_path"/virtio*/device; do
+            [ -r "$candidate" ] || continue
+            actual_id=$(cat "$candidate")
+            actual_id=$(printf '%d' "$actual_id") || continue
+            [ "$actual_id" -eq "$expected_id" ] && return 0
+        done
+    done
+    return 1
+}
+
 read_memtotal_kib() {
     while IFS=' ' read -r key value _; do
         if [ "$key" = MemTotal: ]; then
@@ -346,6 +377,7 @@ post_restore() {
 
     tail -c 64 "$restore_packet" >"$entropy" ||
         fail_closed "failed to extract restore entropy"
+    refresh_wall_clock
     if [ "$snapshot_tier" = instance-checkpoint ]; then
         generation_id=$(
             /sbin/nvx-reseed --generation-only "$entropy" "$generation_id"
@@ -408,6 +440,15 @@ has_scratch=false
 case " $(cat /proc/cmdline) " in
     *" virtio_mmio.device=0x1000@0xd0006000:11 "*) has_scratch=true ;;
 esac
+if [ "$has_scratch" = false ] &&
+    virtio_mmio_device_present 0xd0006000 2; then
+    has_scratch=true
+fi
+if [ "$has_scratch" = false ] &&
+    [ "$(uname -m)" = aarch64 ] &&
+    [ -d /sys/bus/platform/devices/d0006000.virtio_mmio ]; then
+    has_scratch=true
+fi
 scratch_mounted=false
 mountpoint -q "$scratch_mount" && scratch_mounted=true
 

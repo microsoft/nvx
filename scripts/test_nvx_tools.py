@@ -430,6 +430,7 @@ class CiTests(unittest.TestCase):
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
+                patch.object(ci, "host_architecture", return_value="x86_64"),
                 patch.object(ci, "run_checked") as run_checked,
                 patch.dict(
                     os.environ,
@@ -456,10 +457,10 @@ class CiTests(unittest.TestCase):
             command = tests.args[0]
             self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
             filter_index = command.index("--filter")
-            self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
+            self.assertEqual(command[filter_index + 1], ci.OPENVMM_TEST_FILTERS["x86_64"])
             self.assertIn(
                 "test_ttrpc_microvm_pvh_snapshot",
-                ci.OPENVMM_MICROVM_TEST_FILTER,
+                ci.OPENVMM_TEST_FILTERS["x86_64"],
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
             self.assertNotIn("env", tests.kwargs)
@@ -468,6 +469,20 @@ class CiTests(unittest.TestCase):
                     command[command.index("--dir") + 1],
                     os.fspath(root / backend),
                 )
+
+    def test_openvmm_arm64_tests_use_native_topology_coverage(self):
+        self.assertEqual(
+            ci.OPENVMM_GUEST_RUST_TARGETS["aarch64"],
+            ("aarch64-unknown-linux-musl",),
+        )
+        self.assertIn(
+            "mpidr_affinity_rollover_aarch64_tcg",
+            ci.OPENVMM_TEST_FILTERS["aarch64"],
+        )
+        self.assertIn(
+            "smt_topology_aarch64_tcg",
+            ci.OPENVMM_TEST_FILTERS["aarch64"],
+        )
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
@@ -496,7 +511,7 @@ class BuildTests(unittest.TestCase):
             / "action.yml"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "hashFiles('kernel/config-microvm', 'kernel/patches/**')",
+            "hashFiles('kernel/config-microvm', 'kernel/config-microvm-arm64', 'kernel/patches/**')",
             action,
         )
 
@@ -516,6 +531,7 @@ class BuildTests(unittest.TestCase):
                 environment["LD_LIBRARY_PATH"],
                 f"{root / 'lib'}:{root / 'usr' / 'lib'}",
             )
+            self.assertIn("--no-scripts", run.call_args.args[0])
 
             with patch.dict(
                 os.environ,

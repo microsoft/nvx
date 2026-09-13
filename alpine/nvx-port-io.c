@@ -7,16 +7,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #define PORT_MAX UINT16_MAX
+#define CONTROL_MMIO_BASE UINT64_C(0xd0007000)
+#define SHUTDOWN_MMIO_BASE UINT64_C(0xd0008000)
+#define SNAPSHOT_MMIO_BASE UINT64_C(0xd0009000)
 #define RESTORE_HEADER_SIZE 19
 #define RESTORE_ENTROPY_SIZE 64
 #define RESTORE_RANGE_SIZE 16
 #define RESTORE_PACKET_SELECT 0xa5
 #define GENERATION_ID_SELECT 0xa6
 #define GENERATION_ID_SIZE 16
+#define WALL_CLOCK_SELECT 0xa7
+#define WALL_CLOCK_SIZE 8
 #define STATUS_GENERATION_ID_AVAILABLE 32
 #define RESTORE_PACKET_MAX_SIZE                                             \
     (RESTORE_HEADER_SIZE + 2 + UINT8_MAX * RESTORE_RANGE_SIZE +            \
@@ -29,6 +35,69 @@ static const unsigned char RESTORE_HEADER_V2[RESTORE_HEADER_SIZE] =
 static const unsigned char RESTORE_HEADER_V3[RESTORE_HEADER_SIZE] =
     "OPENVMM_ENTROPY_V3";
 
+#ifdef __aarch64__
+static void *mmio_mapping;
+static uint64_t mmio_page_base = UINT64_MAX;
+static size_t mmio_page_size;
+
+static int port_mmio_address(uint64_t offset, uint64_t *address)
+{
+    switch (offset) {
+    case 0xe9:
+        *address = CONTROL_MMIO_BASE;
+        return 0;
+    case 0xea:
+        *address = CONTROL_MMIO_BASE + 1;
+        return 0;
+    case 0x604:
+        *address = SHUTDOWN_MMIO_BASE;
+        return 0;
+    case 0x605:
+        *address = SNAPSHOT_MMIO_BASE;
+        return 0;
+    default:
+        fprintf(stderr, "nvx-port-io: unsupported arm64 control port 0x%llx\n",
+                (unsigned long long)offset);
+        return -1;
+    }
+}
+
+static volatile unsigned char *map_port_byte(int memory, uint64_t offset)
+{
+    uint64_t address;
+    if (port_mmio_address(offset, &address) != 0) {
+        return NULL;
+    }
+    if (mmio_page_size == 0) {
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0 || (page_size & (page_size - 1)) != 0) {
+            fprintf(stderr, "nvx-port-io: invalid page size\n");
+            return NULL;
+        }
+        mmio_page_size = (size_t)page_size;
+    }
+    uint64_t page_base = address & ~((uint64_t)mmio_page_size - 1);
+    if (mmio_mapping == NULL || mmio_page_base != page_base) {
+        if (mmio_mapping != NULL &&
+            munmap(mmio_mapping, mmio_page_size) != 0) {
+            fprintf(stderr, "nvx-port-io: unmap control MMIO: %s\n",
+                    strerror(errno));
+            return NULL;
+        }
+        mmio_mapping = mmap(NULL, mmio_page_size, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, memory, (off_t)page_base);
+        if (mmio_mapping == MAP_FAILED) {
+            mmio_mapping = NULL;
+            fprintf(stderr, "nvx-port-io: map control MMIO 0x%llx: %s\n",
+                    (unsigned long long)page_base, strerror(errno));
+            return NULL;
+        }
+        mmio_page_base = page_base;
+    }
+    return (volatile unsigned char *)mmio_mapping + (address - page_base);
+}
+#endif
+
 static int parse_u64(const char *text, uint64_t *value)
 {
     char *end;
@@ -40,6 +109,14 @@ static int parse_u64(const char *text, uint64_t *value)
 
 static int read_port_byte(int port, uint64_t offset, unsigned char *value)
 {
+#ifdef __aarch64__
+    volatile unsigned char *mapped = map_port_byte(port, offset);
+    if (mapped == NULL) {
+        return -1;
+    }
+    *value = *mapped;
+    return 0;
+#else
     for (;;) {
         ssize_t count = pread(port, value, 1, (off_t)offset);
         if (count == 1) {
@@ -53,10 +130,19 @@ static int read_port_byte(int port, uint64_t offset, unsigned char *value)
                 count == 0 ? "unexpected end of file" : strerror(errno));
         return -1;
     }
+#endif
 }
 
 static int write_port_byte(int port, uint64_t offset, unsigned char value)
 {
+#ifdef __aarch64__
+    volatile unsigned char *mapped = map_port_byte(port, offset);
+    if (mapped == NULL) {
+        return -1;
+    }
+    *mapped = value;
+    return 0;
+#else
     for (;;) {
         ssize_t count = pwrite(port, &value, 1, (off_t)offset);
         if (count == 1) {
@@ -70,6 +156,7 @@ static int write_port_byte(int port, uint64_t offset, unsigned char value)
                 count == 0 ? "no byte written" : strerror(errno));
         return -1;
     }
+#endif
 }
 
 static int write_all(int output, const unsigned char *buffer, size_t size)
@@ -104,11 +191,32 @@ static int read_port_bytes(int port, uint64_t offset, unsigned char *buffer,
 
 static int close_port(int port)
 {
+#ifdef __aarch64__
+    if (mmio_mapping != NULL) {
+        if (munmap(mmio_mapping, mmio_page_size) != 0) {
+            fprintf(stderr, "nvx-port-io: unmap control MMIO: %s\n",
+                    strerror(errno));
+            close(port);
+            return -1;
+        }
+        mmio_mapping = NULL;
+        mmio_page_base = UINT64_MAX;
+    }
+#endif
     if (close(port) == 0) {
         return 0;
     }
     fprintf(stderr, "nvx-port-io: close /dev/port: %s\n", strerror(errno));
     return -1;
+}
+
+static int open_port(int flags)
+{
+#ifdef __aarch64__
+    return open("/dev/mem", O_RDWR | O_SYNC | (flags & O_CLOEXEC));
+#else
+    return open("/dev/port", flags);
+#endif
 }
 
 static int print_hex(const unsigned char *bytes, size_t size)
@@ -144,7 +252,7 @@ static int read_restore_packet(uint64_t data_offset, uint64_t select_offset,
     unsigned int range_count = 0;
     size_t packet_size = RESTORE_HEADER_SIZE;
     size_t payload_size;
-    int port = open("/dev/port", O_RDWR | O_CLOEXEC);
+    int port = open_port(O_RDWR | O_CLOEXEC);
     if (port < 0) {
         fprintf(stderr, "nvx-port-io: open /dev/port: %s\n", strerror(errno));
         return 1;
@@ -225,7 +333,7 @@ static int read_generation_id(uint64_t data_offset, uint64_t select_offset,
 {
     unsigned char generation_id[GENERATION_ID_SIZE];
     unsigned char status;
-    int port = open("/dev/port", O_RDWR | O_CLOEXEC);
+    int port = open_port(O_RDWR | O_CLOEXEC);
     if (port < 0) {
         fprintf(stderr, "nvx-port-io: open /dev/port: %s\n", strerror(errno));
         return 1;
@@ -276,7 +384,7 @@ static int read_generation_id(uint64_t data_offset, uint64_t select_offset,
 static int read_u8(uint64_t offset)
 {
     unsigned char value;
-    int port = open("/dev/port", O_RDONLY | O_CLOEXEC);
+    int port = open_port(O_RDONLY | O_CLOEXEC);
     if (port < 0) {
         fprintf(stderr, "nvx-port-io: open /dev/port: %s\n", strerror(errno));
         return 1;
@@ -294,7 +402,7 @@ static int read_u8(uint64_t offset)
 
 static int write_u8(uint64_t offset, uint64_t value)
 {
-    int port = open("/dev/port", O_WRONLY | O_CLOEXEC);
+    int port = open_port(O_WRONLY | O_CLOEXEC);
     if (port < 0) {
         fprintf(stderr, "nvx-port-io: open /dev/port: %s\n", strerror(errno));
         return 1;
@@ -309,12 +417,34 @@ static int write_u8(uint64_t offset, uint64_t value)
     return 0;
 }
 
+static int read_wall_clock(uint64_t data_offset, uint64_t select_offset)
+{
+    unsigned char bytes[WALL_CLOCK_SIZE];
+    int port = open_port(O_RDWR | O_CLOEXEC);
+    if (port < 0) {
+        fprintf(stderr, "nvx-port-io: open control device: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    if (write_port_byte(port, select_offset, WALL_CLOCK_SELECT) != 0 ||
+        read_port_bytes(port, data_offset, bytes, sizeof(bytes)) != 0) {
+        close_port(port);
+        return 1;
+    }
+    if (close_port(port) != 0) {
+        return 1;
+    }
+    printf("%" PRIu64 "\n", read_le_u64(bytes));
+    return 0;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
             "usage: nvx-port-io read-restore-packet DATA_PORT SELECT_PORT "
             "OUTPUT | read-generation-id DATA_PORT SELECT_PORT [OUTPUT] | "
-            "read-u8 PORT | write-u8 PORT VALUE\n");
+            "read-wall-clock DATA_PORT SELECT_PORT | read-u8 PORT | "
+            "write-u8 PORT VALUE\n");
 }
 
 int main(int argc, char **argv)
@@ -342,6 +472,11 @@ int main(int argc, char **argv)
             select_offset <= PORT_MAX) {
             return read_generation_id(offset, select_offset,
                                       argc == 5 ? argv[4] : NULL);
+        }
+        if (argc == 4 && strcmp(argv[1], "read-wall-clock") == 0 &&
+            parse_u64(argv[3], &select_offset) &&
+            select_offset <= PORT_MAX) {
+            return read_wall_clock(offset, select_offset);
         }
     }
 

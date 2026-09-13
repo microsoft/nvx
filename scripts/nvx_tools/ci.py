@@ -11,6 +11,7 @@ from .common import (
     OPENVMM_DIR,
     ScriptError,
     download,
+    host_architecture,
     require_file,
     require_tool,
     run_checked,
@@ -23,11 +24,20 @@ ZSTD_URL = (
 )
 ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
-OPENVMM_GUEST_RUST_TARGET = "x86_64-unknown-none"
-OPENVMM_MICROVM_TEST_FILTER = (
-    "test(openvmm_microvm_test_pvh_x64_phase_1_lifecycle) + "
-    "test(test_ttrpc_microvm_pvh_snapshot)"
-)
+OPENVMM_GUEST_RUST_TARGETS = {
+    "x86_64": ("x86_64-unknown-none",),
+    "aarch64": ("aarch64-unknown-linux-musl",),
+}
+OPENVMM_TEST_FILTERS = {
+    "x86_64": (
+        "test(openvmm_microvm_test_pvh_x64_phase_1_lifecycle) + "
+        "test(test_ttrpc_microvm_pvh_snapshot)"
+    ),
+    "aarch64": (
+        "test(mpidr_affinity_rollover_aarch64_tcg) + "
+        "test(smt_topology_aarch64_tcg)"
+    ),
+}
 
 
 def validate_openvmm_test_backend(backend: str) -> None:
@@ -58,12 +68,15 @@ def run_openvmm_tests(backend: str) -> None:
     require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
     cargo = require_tool("cargo")
     rustup = require_tool("rustup")
+    architecture = host_architecture()
 
-    run_checked([rustup, "target", "add", OPENVMM_GUEST_RUST_TARGET])
-    run_checked(
-        [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
-        cwd=OPENVMM_DIR,
-    )
+    for target in OPENVMM_GUEST_RUST_TARGETS[architecture]:
+        run_checked([rustup, "target", "add", target])
+    if architecture == "x86_64" or shutil.which("cargo-nextest") is None:
+        run_checked(
+            [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
+            cwd=OPENVMM_DIR,
+        )
     command = [
         cargo,
         "xflowey",
@@ -72,7 +85,7 @@ def run_openvmm_tests(backend: str) -> None:
         "--ci-profile",
         "--skip-vhd-prompt",
         "--filter",
-        OPENVMM_MICROVM_TEST_FILTER,
+        OPENVMM_TEST_FILTERS[architecture],
     ]
     if os.name == "nt":
         command.extend(

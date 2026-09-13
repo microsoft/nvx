@@ -40,13 +40,11 @@ echo "NVX-SNAPSHOT-TIMER-WAIT-$((timer_wait_after - timer_wait_before))"
 generation_id_after="$(/sbin/nvx-port-io read-generation-id 233 234)" ||
     fail 50
 [ "$generation_id_before" != "$generation_id_after" ] || fail 51
-printf '\245' | dd of=/dev/port bs=1 seek=234 count=1 conv=notrunc 2>/dev/null
 rm -f /tmp/nvx-snapshot-packet /tmp/nvx-snapshot-entropy
-index=0
-while [ "$index" -lt 83 ]; do
-    dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>/tmp/nvx-snapshot-packet
-    index=$((index + 1))
-done
+packet_metadata="$(
+    /sbin/nvx-port-io read-restore-packet 233 234 /tmp/nvx-snapshot-packet
+)" || fail 44
+[ "$packet_metadata" = "1 0 0" ] || fail 44
 head -c 18 /tmp/nvx-snapshot-packet | grep -q OPENVMM_ENTROPY_V1 || fail 44
 tail -c 64 /tmp/nvx-snapshot-packet >/tmp/nvx-snapshot-entropy
 generation_id_packet="$(

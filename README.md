@@ -25,6 +25,7 @@ Exit cleanly from the guest with `/sbin/nvx-exit 0`. See the [setup](doc/setup.m
 ### Linux / KVM
 
 Requires [KVM configured with read/write access to `/dev/kvm`](doc/setup.md#linux--kvm).
+Both x86-64 and ARM64 hosts are supported.
 
 ```bash
 git clone https://github.com/nanvix/nvx.git && cd nvx

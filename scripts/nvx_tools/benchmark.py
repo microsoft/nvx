@@ -33,13 +33,23 @@ from pathlib import Path
 from string import Template
 from typing import TextIO, TypedDict, cast
 
+from .common import host_architecture
+
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
 TEARDOWN_TIMEOUT_SECONDS = 15.0
-BASE_TUNING = (
-    "tsc=reliable no_timer_check random.trust_cpu=on "
-    "rcupdate.rcu_expedited=1 nokaslr mitigations=off "
-    "cryptomgr.notests quiet loglevel=0"
+ARCHITECTURE = host_architecture()
+BASE_TUNING = " ".join(
+    (
+        *(("tsc=reliable", "no_timer_check") if ARCHITECTURE == "x86_64" else ()),
+        "random.trust_cpu=on",
+        "rcupdate.rcu_expedited=1",
+        "nokaslr",
+        "mitigations=off",
+        "cryptomgr.notests",
+        "quiet",
+        "loglevel=0",
+    )
 )
 CLOCKSOURCE_CURRENT_PATH = (
     "/sys/devices/system/clocksource/clocksource0/current_clocksource"
@@ -1561,7 +1571,15 @@ def format_sample_summary(samples: Sequence[float], *, unit: str = "ms") -> str:
 
 
 def clocksource_parameter(backend: str) -> str:
+    if ARCHITECTURE == "aarch64":
+        if backend != "kvm":
+            raise ValueError("aarch64 microVM benchmarks require KVM")
+        return "clocksource=arch_sys_counter"
     return "clocksource=kvm-clock" if backend == "kvm" else "clocksource=tsc"
+
+
+def tuned_command_line(backend: str) -> str:
+    return f"{clocksource_parameter(backend)} {BASE_TUNING}"
 
 
 def whp_stable_clocksource_wait_script() -> str:
@@ -2421,16 +2439,25 @@ def benchmark_cold_start_workload(
     windows_cpus: set[int] | None = None,
 ) -> None:
     clocksource = clocksource_parameter(backend)
-    scenarios = (
+    scenarios = [
         ("base", None),
         (clocksource, clocksource),
-        ("tsc=reliable", "tsc=reliable"),
-        ("no_timer_check", "no_timer_check"),
-        ("random.trust_cpu=on", "random.trust_cpu=on"),
-        ("rcupdate.rcu_expedited=1", "rcupdate.rcu_expedited=1"),
-        ("nokaslr", "nokaslr"),
-        ("mitigations=off", "mitigations=off"),
-        ("cryptomgr.notests", "cryptomgr.notests"),
+    ]
+    if ARCHITECTURE == "x86_64":
+        scenarios.extend(
+            (
+                ("tsc=reliable", "tsc=reliable"),
+                ("no_timer_check", "no_timer_check"),
+            )
+        )
+    scenarios.extend(
+        (
+            ("random.trust_cpu=on", "random.trust_cpu=on"),
+            ("rcupdate.rcu_expedited=1", "rcupdate.rcu_expedited=1"),
+            ("nokaslr", "nokaslr"),
+            ("mitigations=off", "mitigations=off"),
+            ("cryptomgr.notests", "cryptomgr.notests"),
+        )
     )
     print(
         "cold-start (OpenVMM process launch -> shell marker), "
@@ -2934,12 +2961,16 @@ def smp_probe_script(
     network_probe = ""
     if network_gateway is not None and ioapic_irq is not None:
         network_probe = _render_benchmark_script(
-            "smp-network-probe.sh.in",
+            (
+                "smp-network-probe-arm64.sh.in"
+                if ARCHITECTURE == "aarch64"
+                else "smp-network-probe.sh.in"
+            ),
             IOAPIC_IRQ=str(ioapic_irq),
             NETWORK_GATEWAY=str(ipaddress.IPv4Address(network_gateway)),
         )
     rendered = _render_benchmark_script(
-        "smp-probe.sh.in",
+        "smp-probe-arm64.sh.in" if ARCHITECTURE == "aarch64" else "smp-probe.sh.in",
         PROCESSORS=str(processors),
         APIC_IDS=apic_ids,
         NETWORK_PROBE=network_probe,
@@ -3602,7 +3633,11 @@ def benchmark_network_snapshot_workload(
         command_prefix=command_prefix,
         network=network,
     )
-    ioapic_irq = 5 if backend == "whp" else 10
+    ioapic_irq = (
+        3
+        if ARCHITECTURE == "aarch64"
+        else (5 if backend == "whp" else 10)
+    )
     run_guest_script(
         cold_command,
         smp_probe_script(
@@ -5073,7 +5108,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         "--initrd",
         str(stage / "initramfs.cpio.gz"),
         "--cmdline",
-        f"clocksource=kvm-clock {BASE_TUNING}",
+        tuned_command_line("kvm"),
     ]
     if args.net is not None:
         append_network_arguments(boot_command, args.net, args.network_profile)
@@ -5353,7 +5388,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 "--initrd",
                 str(initrd),
                 "--cmdline",
-                f"{'clocksource=kvm-clock ' if backend == 'kvm' else ''}{BASE_TUNING}",
+                tuned_command_line(backend),
             ]
             if args.net is not None:
                 append_network_arguments(command, args.net, args.network_profile)

@@ -16,10 +16,11 @@ The OpenVMM restore step excludes the compatibility IGVM artifact, which NVX
 does not build or package, so builds do not depend on unrelated upstream
 workflow artifacts.
 
-OpenVMM's microVM tests build their own minimal Xen PVH guest from source in
-the OpenVMM checkout. They do not consume `build/vmlinux` or
-`build/initramfs.cpio.gz`. NVX uses those two artifacts only for its Linux and
-device correctness tests, benchmarks, and packaged runtime.
+OpenVMM's checkout-owned tests are selected by host architecture. x86-64 runs
+the minimal Xen PVH lifecycle and TTRPC snapshot probes; ARM64 runs native
+Linux-direct MPIDR and topology coverage. They do not consume
+`build/vmlinux` or `build/initramfs.cpio.gz`. NVX uses those artifacts for its
+Linux and device correctness tests, benchmarks, and packaged runtime.
 
 On a Linux host, build the guest directly:
 
@@ -58,9 +59,11 @@ plus the device helper's source and binary SHA-256 values.
 
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
-generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
-absent. Changing an archive hash or patch invalidates both source and object
-caches.
+generated config as `build/vmlinux.config`, and copies either the x86-64
+`vmlinux` or ARM64 `arch/arm64/boot/Image` to `build/vmlinux`. The x86-64
+build fails if the Xen PVH note is absent. The ARM64 build validates PL011,
+virtio-mmio, sandbox, and restore-time memory-probe support. Changing an
+archive hash or patch invalidates both source and object caches.
 
 ## Building the packaged Linux source
 
@@ -77,6 +80,9 @@ cp vmlinux.config build/.config
 make -C linux-6.18.38 O="$PWD/build" olddefconfig
 make -C linux-6.18.38 O="$PWD/build" -j"$(nproc)" vmlinux
 ```
+
+For an ARM64 config, pass `ARCH=arm64` to both `make` commands and build
+`Image` instead of `vmlinux`.
 
 The normal repository workflow performs the same build through
 `scripts/nvx.py build-kernel` or the Docker artifact target.

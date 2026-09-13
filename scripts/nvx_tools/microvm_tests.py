@@ -30,6 +30,7 @@ from .ci import OPENVMM_TEST_BACKENDS, validate_openvmm_test_backend
 from .common import (
     BUILD_DIR,
     artifact_path,
+    host_architecture,
     openvmm_binary_path,
     require_file,
     sha256_file,
@@ -152,23 +153,28 @@ def _stage_script(
 
 def _snapshot_core_script(backend: str) -> str:
     if backend == "kvm":
+        clocksource = (
+            "arch_sys_counter"
+            if host_architecture() == "aarch64"
+            else "kvm-clock"
+        )
         select_clocksource = (
             "clock_tries=0\n"
-            "while ! grep -qw kvm-clock "
+            f"while ! grep -qw {clocksource} "
             "/sys/devices/system/clocksource/clocksource0/available_clocksource "
             "&& [ $clock_tries -lt 100 ]; do\n"
             "    sleep 0.05\n"
             "    clock_tries=$((clock_tries + 1))\n"
             "done\n"
-            "grep -qw kvm-clock "
+            f"grep -qw {clocksource} "
             "/sys/devices/system/clocksource/clocksource0/available_clocksource "
             "|| fail 46\n"
-            "echo kvm-clock >"
+            f"echo {clocksource} >"
             "/sys/devices/system/clocksource/clocksource0/current_clocksource"
         )
         validate_clocksource = (
             '[ "$(cat /sys/devices/system/clocksource/clocksource0/'
-            'current_clocksource)" = kvm-clock ] || fail 46'
+            f'current_clocksource)" = {clocksource} ] || fail 46'
         )
     elif backend == "whp":
         select_clocksource = whp_stable_clocksource_wait_script()
@@ -242,11 +248,23 @@ def _send_console_rx_and_wait_until_queued(
     timeout: float,
 ) -> None:
     console.send_bytes(data)
-    console.wait_for_line(CONSOLE_RX_QUEUED_MARKER, timeout)
+    if host_architecture() == "aarch64":
+        console.wait_for(CONSOLE_RX_QUEUED_MARKER, timeout)
+    else:
+        console.wait_for_line(CONSOLE_RX_QUEUED_MARKER, timeout)
 
 
 def _console_snapshot_script(backend: str) -> tuple[str, int, bytes]:
-    if backend == "mshv":
+    if host_architecture() == "aarch64":
+        tx_count = 10_000
+        receive = (
+            'IFS= read -r console_rx </dev/hvc0\n'
+            '[ "$console_rx" = NVX-CONSOLE-RX ] || fail 53'
+        )
+        restored_marker = "echo NVX-CONSOLE-RX-RESTORED >&3"
+        completion = "wait $tx_pid\necho NVX-CONSOLE-TX-DONE >&3\nnvx-exit 0"
+        queued_rx = b"NVX-CONSOLE-RX\n"
+    elif backend == "mshv":
         tx_count = 100
         receive = (
             'IFS= read -r console_rx\n[ "$console_rx" = NVX-CONSOLE-RX ] || fail 53'
@@ -264,8 +282,13 @@ def _console_snapshot_script(backend: str) -> tuple[str, int, bytes]:
         restored_marker = "echo NVX-CONSOLE-RX-RESTORED"
         completion = "wait $tx_pid\necho NVX-CONSOLE-TX-DONE\nnvx-exit 0"
         queued_rx = bytes((0, 1, 2, 127, 255))
+    template = (
+        "console-snapshot-arm64.sh.in"
+        if host_architecture() == "aarch64"
+        else "console-snapshot.sh.in"
+    )
     script = (
-        _read_script("console-snapshot.sh.in")
+        _read_script(template)
         .replace("@TX_COUNT@", str(tx_count))
         .replace("@RX_COUNT@", str(len(queued_rx)))
         .replace("@RECEIVE@", receive)
@@ -357,7 +380,12 @@ def run_smp(
         kernel,
         initrd,
         memory_mib,
-        "quiet loglevel=0" + (" lapic=notscdeadline" if force_lapic_timer else ""),
+        "quiet loglevel=0"
+        + (
+            " lapic=notscdeadline"
+            if force_lapic_timer and host_architecture() == "x86_64"
+            else ""
+        ),
         processors=processors,
     )
     run_guest_script(
@@ -825,13 +853,19 @@ def run_console_snapshot(
         ) as process:
             try:
                 console = TcpConsole.connect(address, timeout)
-                console.wait_for(BOOT_MARKER, timeout)
-                console.wait_for(b"/ # ", timeout)
-                console.send_bytes(
+                script_command = (
                     b"cat >/tmp/nvx-console-snapshot <<'NVX_CONSOLE_SNAPSHOT'\n"
                     + script.encode()
                     + b"NVX_CONSOLE_SNAPSHOT\nsh /tmp/nvx-console-snapshot\n"
                 )
+                if host_architecture() == "aarch64":
+                    process.wait_for(BOOT_MARKER, timeout)
+                    process.wait_for(b"/ # ", timeout)
+                    process.send_bytes(script_command)
+                else:
+                    console.wait_for(BOOT_MARKER, timeout)
+                    console.wait_for(b"/ # ", timeout)
+                    console.send_bytes(script_command)
                 console.wait_for_line(CONSOLE_RX_READY_MARKER, timeout)
                 _send_console_rx_and_wait_until_queued(console, queued_rx, timeout)
                 process.send_bytes(b"\x01")
@@ -873,8 +907,12 @@ def run_console_snapshot(
                 try:
                     console = TcpConsole.connect(address, timeout)
                     if backend != "mshv":
-                        console.wait_for_line(CONSOLE_RX_RESTORED_MARKER, timeout)
-                        console.wait_for_line(CONSOLE_TX_DONE_MARKER, timeout)
+                        if host_architecture() == "aarch64":
+                            console.wait_for(CONSOLE_RX_RESTORED_MARKER, timeout)
+                            console.wait_for(CONSOLE_TX_DONE_MARKER, timeout)
+                        else:
+                            console.wait_for_line(CONSOLE_RX_RESTORED_MARKER, timeout)
+                            console.wait_for_line(CONSOLE_TX_DONE_MARKER, timeout)
                     restored = process.wait(timeout)
                     restored_console = console.finish()
                     console = None
@@ -889,7 +927,12 @@ def run_console_snapshot(
                     f"console restore {restore_index} exited with {restored.returncode}"
                 )
             combined = source_console + restored_console
-            if CONSOLE_BINARY_MARKER not in combined:
+            binary_marker = (
+                b"NVX-CONSOLE-BINARY"
+                if host_architecture() == "aarch64"
+                else CONSOLE_BINARY_MARKER
+            )
+            if binary_marker not in combined:
                 raise RuntimeError(
                     f"console restore {restore_index} lost the binary TX marker"
                 )
@@ -899,9 +942,12 @@ def run_console_snapshot(
                     raise RuntimeError(
                         f"console restore {restore_index} lost or duplicated TX record {index}"
                     )
-            if backend != "mshv" and (
-                _output_lines(restored_console).count(CONSOLE_RX_RESTORED_MARKER) != 1
-            ):
+            restored_rx_count = (
+                restored_console.count(CONSOLE_RX_RESTORED_MARKER)
+                if host_architecture() == "aarch64"
+                else _output_lines(restored_console).count(CONSOLE_RX_RESTORED_MARKER)
+            )
+            if backend != "mshv" and restored_rx_count != 1:
                 raise RuntimeError(
                     f"console restore {restore_index} did not consume queued binary RX once"
                 )
@@ -1495,7 +1541,11 @@ def run_scratch_snapshot(
                 process,
                 "/tmp/nvx-scratch-paired",
                 "NVX_SCRATCH_PAIRED",
-                _read_script("scratch-paired.sh"),
+                _read_script(
+                    "scratch-paired-arm64.sh"
+                    if host_architecture() == "aarch64"
+                    else "scratch-paired.sh"
+                ),
             )
             paired_source = process.wait(timeout)
         if paired_source.returncode != 0:
@@ -1800,6 +1850,9 @@ echo {repair_marker}"""
         RUNTIME_HOOK=runtime_hook,
         HOOK_MARKER=f"{prefix}-HOOK-READY",
         PRE_CAPTURE_ACTION=pre_capture_action,
+        CONSOLE_DEVICE=(
+            "/dev/hvc0" if host_architecture() == "aarch64" else "/dev/hvc1"
+        ),
         INPUT_MARKER=f"{prefix}-INPUT",
         CAPTURE_MARKER=f"{prefix}-CAPTURE",
         CAPTURE_ACTION=capture_action,
@@ -1835,6 +1888,8 @@ def _run_snapshot_tier(
     mismatch_marker = f"{prefix}-MISMATCH-REJECTED".encode()
     workload_marker = f"{prefix}-WORKLOAD-RAN".encode()
     layer_marker = f"{prefix}-LAYER-".encode()
+    arm_serial_console = host_architecture() == "aarch64"
+    gated_input = b"Z\n" if arm_serial_console else b"Z"
 
     with tempfile.TemporaryDirectory(prefix=f"nvx-snapshot-tier-{tier}-") as temporary:
         root = Path(temporary)
@@ -1884,14 +1939,20 @@ def _run_snapshot_tier(
         ) as process:
             try:
                 console = TcpConsole.connect(address, timeout)
-                console.wait_for(BOOT_MARKER, timeout)
-                script = _snapshot_tier_script(tier)
-                console.send_bytes(
+                script_command = (
                     b"cat >/tmp/nvx-snapshot-tier <<'NVX_SNAPSHOT_TIER'\n"
-                    + script.encode()
+                    + _snapshot_tier_script(tier).encode()
                     + b"NVX_SNAPSHOT_TIER\nsh /tmp/nvx-snapshot-tier\n"
                 )
-                console.wait_for(capture_marker, timeout)
+                if arm_serial_console:
+                    process.wait_for(BOOT_MARKER, timeout)
+                    process.wait_for(b"/ # ", timeout)
+                    process.send_bytes(script_command)
+                    process.wait_for(capture_marker, timeout)
+                else:
+                    console.wait_for(BOOT_MARKER, timeout)
+                    console.send_bytes(script_command)
+                    console.wait_for(capture_marker, timeout)
                 source = process.wait(timeout)
                 source_console = console.finish()
                 console = None
@@ -1905,7 +1966,7 @@ def _run_snapshot_tier(
             raise RuntimeError(
                 f"{tier} snapshot capture exited with {source.returncode}"
             )
-        source_lines = _output_lines(source_console)
+        source_lines = _output_lines(source.output if arm_serial_console else source_console)
         if source_lines.count(mismatch_marker) != 1 or any(
             marker in source_lines
             for marker in (repair_marker, input_marker, released_marker)
@@ -1964,12 +2025,13 @@ def _run_snapshot_tier(
         ) as process:
             try:
                 console = TcpConsole.connect(address, timeout)
-                console.send_bytes(b"Z")
-                console.wait_for(repair_marker, timeout)
+                console.send_bytes(gated_input)
+                marker_source = process if arm_serial_console else console
+                marker_source.wait_for(repair_marker, timeout)
                 if workload_start:
-                    console.wait_for(workload_marker, timeout)
-                console.wait_for(released_marker, timeout)
-                console.wait_for(expected_layer, timeout)
+                    marker_source.wait_for(workload_marker, timeout)
+                marker_source.wait_for(released_marker, timeout)
+                marker_source.wait_for(expected_layer, timeout)
                 restored = process.wait(timeout)
                 restore_console = console.finish()
                 console = None
@@ -1981,7 +2043,9 @@ def _run_snapshot_tier(
                 )
         if restored.returncode != 0:
             raise RuntimeError(f"{tier} restore exited with {restored.returncode}")
-        restore_lines = _output_lines(restore_console)
+        restore_lines = _output_lines(
+            restored.output if arm_serial_console else restore_console
+        )
         if restore_lines.count(input_marker) != 1 or premature_marker in restore_lines:
             raise RuntimeError(f"{tier} input crossed the restore gate")
         if restore_lines.count(expected_layer) != 1:
@@ -2006,7 +2070,7 @@ def _run_snapshot_tier(
             ) as process:
                 try:
                     timeout_console = TcpConsole.connect(address, timeout)
-                    timeout_console.send_bytes(b"Z")
+                    timeout_console.send_bytes(gated_input)
                     timed_out = process.wait(timeout)
                     timeout_output = timeout_console.finish()
                     timeout_console = None
@@ -2016,7 +2080,9 @@ def _run_snapshot_tier(
                         timeout_output,
                         timeout_console_path,
                     )
-            timeout_lines = _output_lines(timeout_output)
+            timeout_lines = _output_lines(
+                timed_out.output if arm_serial_console else timeout_output
+            )
             if timed_out.returncode == 0 or any(
                 marker in timeout_lines
                 for marker in (input_marker, released_marker, workload_marker)

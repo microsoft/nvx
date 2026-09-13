@@ -38,6 +38,8 @@ nvx/
 |   |-- nvx-reseed.c             Static clone-restore CRNG reseed helper
 |   `-- nvx-snapshot             Snapshot preparation and restore repair helper
 |-- data/                        Benchmark data
+|   |-- linux-kvm-arm64-baremetal.csv        Rolling bare-metal ARM64 Linux/KVM history
+|   |-- linux-kvm-arm64-virtual-machine.csv  Rolling virtual ARM64 Linux/KVM history
 |   |-- linux-kvm-baremetal.csv              Rolling bare-metal Linux/KVM history
 |   |-- linux-kvm-virtual-machine.csv         Rolling virtual-machine Linux/KVM history
 |   |-- linux-mshv-baremetal.csv             Rolling bare-metal Linux/MSHV history
@@ -60,7 +62,8 @@ nvx/
 |-- kernel/                      Linux configuration and NVX patch set
 |   |-- patches/                 Ordered patches applied to Linux
 |   |-- COPYING-LINUX            Linux copyright and license notice
-|   `-- config-microvm           MicroVM kernel configuration
+|   |-- config-microvm           x86-64 microVM kernel configuration
+|   `-- config-microvm-arm64     ARM64 microVM kernel configuration
 |-- openvmm/                     Private OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI

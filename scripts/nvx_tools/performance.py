@@ -56,6 +56,12 @@ SHARED_METRICS = frozenset(
         "network_snapshot_restore_wall",
     }
 )
+X86_ONLY_SHARED_METRICS = frozenset(
+    {
+        "cold_start_tsc_reliable",
+        "cold_start_no_timer_check",
+    }
+)
 LIFECYCLE_METRICS = frozenset(
     {
         "openvmm_cold_start",
@@ -166,7 +172,9 @@ def _parse_fixed(
     return metrics
 
 
-def _parse_cold_start(text: str) -> dict[str, MetricValue]:
+def _parse_cold_start(
+    text: str, *, include_x86_tuning: bool = True
+) -> dict[str, MetricValue]:
     patterns = [
         (
             "cold_start_base",
@@ -179,18 +187,6 @@ def _parse_cold_start(text: str) -> dict[str, MetricValue]:
             "ms",
             "lower",
             rf"^\s*clocksource=[^\s:]+\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-        ),
-        (
-            "cold_start_tsc_reliable",
-            "ms",
-            "lower",
-            rf"^\s*tsc=reliable\s*:\s*(?P<value>{NUMBER})\s*ms\b",
-        ),
-        (
-            "cold_start_no_timer_check",
-            "ms",
-            "lower",
-            rf"^\s*no_timer_check\s*:\s*(?P<value>{NUMBER})\s*ms\b",
         ),
         (
             "cold_start_random_trust_cpu",
@@ -223,7 +219,32 @@ def _parse_cold_start(text: str) -> dict[str, MetricValue]:
             rf"^\s*cryptomgr\.notests\s*:\s*(?P<value>{NUMBER})\s*ms\b",
         ),
     ]
+    if include_x86_tuning:
+        patterns[2:2] = [
+            (
+                "cold_start_tsc_reliable",
+                "ms",
+                "lower",
+                rf"^\s*tsc=reliable\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            ),
+            (
+                "cold_start_no_timer_check",
+                "ms",
+                "lower",
+                rf"^\s*no_timer_check\s*:\s*(?P<value>{NUMBER})\s*ms\b",
+            ),
+        ]
     return _parse_fixed(text, "cold-start.log", patterns)
+
+
+def _is_arm64_platform(platform: str) -> bool:
+    return "arm64" in platform.split("-")
+
+
+def _shared_metrics_for_platform(platform: str) -> frozenset[str]:
+    if _is_arm64_platform(platform):
+        return SHARED_METRICS - X86_ONLY_SHARED_METRICS
+    return SHARED_METRICS
 
 
 def _parse_snapshot(text: str) -> dict[str, MetricValue]:
@@ -596,6 +617,8 @@ LOG_PARSERS: dict[str, tuple[Parser, bool]] = {
 
 PLATFORM_NAMES = {
     "linux-kvm": "Linux / KVM",
+    "linux-kvm-arm64-baremetal": "Linux / KVM / ARM64 / Bare metal",
+    "linux-kvm-arm64-virtual-machine": "Linux / KVM / ARM64 / Virtual machine",
     "linux-kvm-baremetal": "Linux / KVM / Bare metal",
     "linux-kvm-virtual-machine": "Linux / KVM / Virtual machine",
     "linux-mshv": "Linux / MSHV",
@@ -607,6 +630,8 @@ PLATFORM_NAMES = {
 }
 OPENVMM_BACKENDS = {
     "linux-kvm": "kvm",
+    "linux-kvm-arm64-baremetal": "kvm",
+    "linux-kvm-arm64-virtual-machine": "kvm",
     "linux-kvm-baremetal": "kvm",
     "linux-kvm-virtual-machine": "kvm",
     "linux-mshv": "mshv",
@@ -1353,6 +1378,11 @@ def collect_results(
                 expected_warmups=warmups,
                 expected_runs=runs,
             )
+        elif filename == "cold-start.log":
+            parsed_metrics = _parse_cold_start(
+                _read_log(path),
+                include_x86_tuning=not _is_arm64_platform(platform),
+            )
         else:
             parsed_metrics = parser(_read_log(path))
         for metric, value in parsed_metrics.items():
@@ -1409,10 +1439,6 @@ def collect_results(
                     lifecycle_controls.get("artifact_revisions"),
                     workload_metadata.get("artifact_revisions"),
                 ),
-                "warmups": (
-                    lifecycle_controls.get("warmups"),
-                    workload_metadata.get("warmups"),
-                ),
                 "network": (
                     lifecycle_controls.get("network"),
                     workload_metadata.get("lifecycle_network"),
@@ -1437,7 +1463,7 @@ def collect_results(
                 expected_sampling = {
                     "lifecycle warmups": 1,
                     "lifecycle measured runs": 10,
-                    "workload warmups": 1,
+                    "workload warmups": 3,
                     "workload measured runs": 5,
                     "virtio-fs measured runs": 3,
                 }
@@ -1508,8 +1534,9 @@ def collect_results(
                     f"noncanonical 512 MiB shell restore control {field}: "
                     f"{workload_metadata.get(field)!r}, expected {expected!r}"
                 )
+    shared_metrics = _shared_metrics_for_platform(platform)
     expected_metrics = (
-        SHARED_METRICS | LIFECYCLE_METRICS if lifecycle is not None else SHARED_METRICS
+        shared_metrics | LIFECYCLE_METRICS if lifecycle is not None else shared_metrics
     )
     if require_shared_suite and collected.keys() != expected_metrics:
         missing = sorted(expected_metrics - collected.keys())

@@ -128,6 +128,7 @@ static int print_random_sample(void)
     return print_hex(sample, sizeof(sample));
 }
 
+#ifndef __aarch64__
 static int read_cmos_register(int fd, uint8_t index, uint8_t *value)
 {
     if (pwrite(fd, &index, 1, CMOS_INDEX_PORT) != 1 ||
@@ -246,6 +247,12 @@ static int refresh_wall_clock(void)
     }
     return 0;
 }
+#else
+static int refresh_wall_clock(void)
+{
+    return 0;
+}
+#endif
 
 int main(int argc, char **argv)
 {

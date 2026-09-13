@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stop the VM through control port 0x604, carrying an 8-bit process exit code.
+# Stop the VM through the architecture-specific control register.
 code=${1:-1}
 case "$code" in
     '' | *[!0-9]*) code=1 ;;
@@ -7,5 +7,12 @@ esac
 if [ "$code" -lt 0 ] || [ "$code" -gt 255 ]; then
     code=1
 fi
-octal=$(printf '%03o' "$code")
-printf '%b' "\\0$octal" | dd of=/dev/port bs=1 seek=1540 count=1 conv=notrunc 2>/dev/null
+if [ "$(uname -m)" = aarch64 ]; then
+    attempts=0
+    while [ "$attempts" -lt 1000 ]; do
+        status=$(/sbin/nvx-mmio-write 0xeffec018 2>/dev/null) || break
+        [ $((status & 128)) -ne 0 ] && break
+        attempts=$((attempts + 1))
+    done
+fi
+/sbin/nvx-port-io write-u8 1540 "$code"

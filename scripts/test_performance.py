@@ -198,6 +198,27 @@ def lifecycle_document(
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_arm64_cold_start_omits_x86_only_tuning_metrics(self):
+        arm64_log = "\n".join(
+            line
+            for line in COLD_START_LOG.splitlines()
+            if "tsc=reliable" not in line and "no_timer_check" not in line
+        )
+
+        metrics = performance._parse_cold_start(
+            arm64_log,
+            include_x86_tuning=False,
+        )
+
+        self.assertNotIn("cold_start_tsc_reliable", metrics)
+        self.assertNotIn("cold_start_no_timer_check", metrics)
+        self.assertEqual(
+            performance._shared_metrics_for_platform(
+                "linux-kvm-arm64-baremetal"
+            ),
+            performance.SHARED_METRICS - performance.X86_ONLY_SHARED_METRICS,
+        )
+
     def test_collect_cli_accepts_lifecycle_input(self):
         args = nvx.parse_args(
             [
@@ -515,7 +536,7 @@ class PerformanceTests(unittest.TestCase):
                         "backend": "mshv",
                         "microvm_abi_version": 1,
                         "processors": 1,
-                        "warmups": 1,
+                        "warmups": 3,
                         "measured_runs": 2,
                     }
                 ),

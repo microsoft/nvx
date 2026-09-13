@@ -6,6 +6,11 @@ mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 mount -t tmpfs none /tmp
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
+wall_clock=$(/sbin/nvx-port-io read-wall-clock 233 234 2>/dev/null || true)
+case "$wall_clock" in
+    '' | *[!0-9]*) ;;
+    *) date -u -s "@$wall_clock" >/dev/null 2>&1 || true ;;
+esac
 ifconfig lo 127.0.0.1 up
 cmdline=" $(cat /proc/cmdline) "
 case "$cmdline" in

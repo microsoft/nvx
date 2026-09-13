@@ -36,19 +36,21 @@ resolve_block_device() {
     address=$(printf '%d' "$1") || return 1
     attempts=0
     while [ "$attempts" -lt 600 ]; do
-        while IFS=' ' read -r range separator platform _; do
-            [ "$separator" = : ] || continue
-            case "$platform" in virtio-mmio.*) ;; *) continue ;; esac
-            start=${range%%-*}
-            start=$(printf '%d' "0x$start") || continue
+        for platform_path in \
+            /sys/bus/platform/devices/* \
+            /sys/devices/virtio-mmio-cmdline/*; do
+            [ -d "$platform_path" ] || continue
+            [ -r "$platform_path/resource" ] || continue
+            IFS=' ' read -r start _ <"$platform_path/resource" || continue
+            start=$(printf '%d' "$start") || continue
             if [ "$start" -eq "$address" ]; then
-                for block in "/sys/devices/virtio-mmio-cmdline/$platform"/virtio*/block/*; do
+                for block in "$platform_path"/virtio*/block/*; do
                     [ -e "$block" ] || continue
                     printf '/dev/%s\n' "${block##*/}"
                     return 0
                 done
             fi
-        done </proc/iomem
+        done
         attempts=$((attempts + 1))
         sleep 0.05
     done

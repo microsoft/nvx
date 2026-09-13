@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,16 +19,16 @@ static int parse_u64(const char *text, uint64_t *value)
 int main(int argc, char **argv)
 {
     uint64_t address;
-    uint64_t value;
+    uint64_t value = 0;
     long page_size;
     uint64_t page_base;
     size_t page_offset;
     void *mapping;
     int memory;
 
-    if (argc != 3 || !parse_u64(argv[1], &address) ||
-        !parse_u64(argv[2], &value) || value > UINT32_MAX) {
-        fprintf(stderr, "usage: nvx-mmio-write ADDRESS VALUE\n");
+    if ((argc != 2 && argc != 3) || !parse_u64(argv[1], &address) ||
+        (argc == 3 && (!parse_u64(argv[2], &value) || value > UINT32_MAX))) {
+        fprintf(stderr, "usage: nvx-mmio-write ADDRESS [VALUE]\n");
         return 2;
     }
 
@@ -56,8 +57,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    *(volatile uint32_t *)((unsigned char *)mapping + page_offset) =
-        (uint32_t)value;
+    volatile uint32_t *target =
+        (volatile uint32_t *)((unsigned char *)mapping + page_offset);
+    if (argc == 2) {
+        printf("%" PRIu32 "\n", *target);
+    } else {
+        *target = (uint32_t)value;
+    }
 
     if (munmap(mapping, (size_t)page_size) != 0) {
         perror("munmap /dev/mem");

@@ -14,8 +14,8 @@ echo @SETUP_MARKER@
 @RUNTIME_HOOK@
 echo @HOOK_MARKER@
 @PRE_CAPTURE_ACTION@
-stty -F /dev/hvc1 raw -echo
-(dd if=/dev/hvc1 bs=1 count=1 >/dev/null 2>&1; echo @INPUT_MARKER@) &
+stty -F @CONSOLE_DEVICE@ raw -echo
+(dd if=@CONSOLE_DEVICE@ bs=1 count=1 >/dev/null 2>&1; echo @INPUT_MARKER@) &
 gate_reader=$!
 mkdir -p /run/nvx
 echo "$gate_reader" >/run/nvx/gate-reader.pid

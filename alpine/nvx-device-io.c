@@ -1,5 +1,6 @@
 typedef unsigned long u64;
 
+#ifdef __x86_64__
 #define SYS_READ 0
 #define SYS_WRITE 1
 #define SYS_CLOSE 3
@@ -13,12 +14,32 @@ typedef unsigned long u64;
 #define SYS_CLOCK_GETTIME 228
 #define SYS_OPENAT 257
 #define SYS_EXIT_GROUP 231
+#define O_DIRECT 16384
+#define O_LARGEFILE 0
+#elif defined(__aarch64__)
+#define SYS_FTRUNCATE 46
+#define SYS_OPENAT 56
+#define SYS_CLOSE 57
+#define SYS_READ 63
+#define SYS_WRITE 64
+#define SYS_PREAD64 67
+#define SYS_PWRITE64 68
+#define SYS_PPOLL 73
+#define SYS_FSYNC 82
+#define SYS_EXIT_GROUP 94
+#define SYS_CLOCK_GETTIME 113
+#define SYS_SOCKET 198
+#define SYS_CONNECT 203
+#define O_DIRECT 65536
+#define O_LARGEFILE 131072
+#else
+#error unsupported architecture
+#endif
 
 #define AT_FDCWD -100
 #define O_RDONLY 0
 #define O_RDWR 2
 #define O_CREAT 64
-#define O_DIRECT 16384
 #define O_CLOEXEC 524288
 #define AF_INET 2
 #define SOCK_DGRAM 2
@@ -57,6 +78,7 @@ static long syscall6(
     long argument5,
     long argument6
 ) {
+#ifdef __x86_64__
     register long register10 __asm__("r10") = argument4;
     register long register8 __asm__("r8") = argument5;
     register long register9 __asm__("r9") = argument6;
@@ -69,6 +91,23 @@ static long syscall6(
         : "rcx", "r11", "memory"
     );
     return result;
+#else
+    register long register0 __asm__("x0") = argument1;
+    register long register1 __asm__("x1") = argument2;
+    register long register2 __asm__("x2") = argument3;
+    register long register3 __asm__("x3") = argument4;
+    register long register4 __asm__("x4") = argument5;
+    register long register5 __asm__("x5") = argument6;
+    register long register8 __asm__("x8") = number;
+    __asm__ volatile(
+        "svc 0"
+        : "+r"(register0)
+        : "r"(register1), "r"(register2), "r"(register3), "r"(register4),
+          "r"(register5), "r"(register8)
+        : "memory"
+    );
+    return register0;
+#endif
 }
 
 static long syscall4(long number, long a1, long a2, long a3, long a4) {
@@ -85,6 +124,18 @@ static long syscall2(long number, long a1, long a2) {
 
 static long syscall1(long number, long a1) {
     return syscall6(number, a1, 0, 0, 0, 0, 0);
+}
+
+static long poll_one(struct pollfd *descriptor, long timeout_ms) {
+#ifdef __x86_64__
+    return syscall3(SYS_POLL, (long)descriptor, 1, timeout_ms);
+#else
+    struct timespec timeout = {
+        .seconds = timeout_ms / 1000,
+        .nanoseconds = (timeout_ms % 1000) * 1000000,
+    };
+    return syscall6(SYS_PPOLL, (long)descriptor, 1, (long)&timeout, 0, 0, 0);
+#endif
 }
 
 static int strings_equal(const char *left, const char *right) {
@@ -239,7 +290,7 @@ static int run_file(int argc, char **argv) {
         (!create && !strings_equal(argv[7], "existing"))) {
         return 2;
     }
-    flags = (writing ? O_RDWR : O_RDONLY) | O_CLOEXEC;
+    flags = (writing ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_LARGEFILE;
     if (direct) {
         flags |= O_DIRECT;
     }
@@ -335,7 +386,7 @@ static int run_network(int argc, char **argv) {
             return 4;
         }
         poll_descriptor.returned_events = 0;
-        if (syscall3(SYS_POLL, (long)&poll_descriptor, 1, 100) > 0 &&
+        if (poll_one(&poll_descriptor, 100) > 0 &&
             (poll_descriptor.returned_events & POLLIN)) {
             received = syscall3(SYS_READ, descriptor, (long)io_buffer, 64);
             if (received == 64) {
@@ -365,6 +416,7 @@ void nvx_device_io_start(long *stack) {
     }
 }
 
+#ifdef __x86_64__
 __asm__(
     ".global _start\n"
     ".type _start,@function\n"
@@ -374,3 +426,13 @@ __asm__(
     "call nvx_device_io_start\n"
     "ud2\n"
 );
+#else
+__asm__(
+    ".global _start\n"
+    ".type _start,%function\n"
+    "_start:\n"
+    "mov x0, sp\n"
+    "bl nvx_device_io_start\n"
+    "brk #0\n"
+);
+#endif

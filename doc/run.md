@@ -12,7 +12,8 @@ under `openvmm/target/release/`, so no local build is required. Set `GH_TOKEN`
 to a token with contents read access when downloading from a private repository.
 On Linux, pass `--hypervisor mshv` to both commands to use the MSHV package.
 
-The CLI chooses WHP on Windows and KVM on Linux:
+The CLI chooses WHP on Windows and KVM on Linux. x86-64 supports KVM, MSHV,
+and WHP; ARM64 currently supports Linux/KVM:
 
 ```bash
 python3 scripts/nvx.py run
@@ -45,8 +46,12 @@ Select an explicit processor count after building the matching specialized guest
 python3 scripts/nvx.py run --machine microvm --processors 8
 ```
 
-The microVM uses fixed device topology, reserves a PVH status page, and uses
-shared-status edge-triggered virtio interrupts with 1, 2, 4, or 8 vCPUs.
+The microVM uses the same fixed MMIO device addresses with 1, 2, 4, or 8
+vCPUs on both architectures. x86-64 boots through Xen PVH and uses the
+reserved shared-status page with edge-triggered virtio interrupts. ARM64
+boots a Linux `Image` through a generated device tree, uses PL011 `ttyAMA0`
+as the control console, and delivers fixed virtio-mmio interrupts as
+active-high GICv3 SPIs.
 
 ## Migration from the retired profile
 

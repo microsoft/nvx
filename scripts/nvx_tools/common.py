@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import urllib.error
@@ -20,6 +21,26 @@ OPENVMM_DIR = REPO_ROOT / "openvmm"
 
 class ScriptError(RuntimeError):
     """Raised for an actionable command-line workflow failure."""
+
+
+SUPPORTED_ARCHITECTURES = ("x86_64", "aarch64")
+
+
+def host_architecture(machine: str | None = None) -> str:
+    """Return the normalized native architecture used by NVX artifacts."""
+    value = (machine or platform.machine()).lower()
+    normalized = {
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+        "arm64": "aarch64",
+        "aarch64": "aarch64",
+    }.get(value)
+    if normalized is None:
+        choices = ", ".join(SUPPORTED_ARCHITECTURES)
+        raise ScriptError(
+            f"unsupported host architecture {value!r}; expected one of {choices}"
+        )
+    return normalized
 
 
 def artifact_path(name: str) -> Path:

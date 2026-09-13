@@ -28,6 +28,7 @@ from .build import (
     DEFAULT_KERNEL_URL,
     DEFAULT_KERNEL_VERSION,
     DockerBuildConfig,
+    KERNEL_CONFIGS,
     build_docker_linux_source,
 )
 from .collect_alpine_sources import collect_alpine_sources
@@ -38,6 +39,7 @@ from .common import (
     ScriptError,
     artifact_path,
     download,
+    host_architecture,
     openvmm_binary_path,
     require_file,
     verify_sha256_sums,
@@ -490,6 +492,9 @@ def verify_source_tree() -> None:
         REPO_ROOT / "kernel" / "config-microvm": "kernel build configuration",
         REPO_ROOT
         / "kernel"
+        / "config-microvm-arm64": "ARM64 kernel build configuration",
+        REPO_ROOT
+        / "kernel"
         / "patches"
         / "0001-microvm-xe9-earlycon.patch": "xe9 early console patch",
         REPO_ROOT
@@ -532,21 +537,24 @@ def verify_source_tree() -> None:
     expected_alpine = {
         "version": DEFAULT_ALPINE_VERSION,
         "branch": DEFAULT_ALPINE_BRANCH,
-        "minirootfs_sha256": DEFAULT_ALPINE_MINIROOTFS_SHA256,
+        "minirootfs_sha256": DEFAULT_ALPINE_MINIROOTFS_SHA256["x86_64"],
     }
     for field, expected in expected_alpine.items():
         if alpine_manifest.get(field) != expected:
             raise ScriptError(
                 f"SOURCE-MANIFEST.json Alpine {field} does not match the build pin"
             )
-    config_path = REPO_ROOT / "kernel" / "config-microvm"
+    architecture = host_architecture()
+    config_path = REPO_ROOT / "kernel" / KERNEL_CONFIGS[architecture]
     config = config_path.read_text(encoding="utf-8")
-    for setting in (
-        "CONFIG_PVH=y",
-        "CONFIG_HVC_XE9=y",
-        "CONFIG_VIRTIO_FS=y",
-        "CONFIG_FUSE_FS=y",
-    ):
+    required_config = ["CONFIG_VIRTIO_FS=y", "CONFIG_FUSE_FS=y"]
+    if architecture == "x86_64":
+        required_config.extend(("CONFIG_PVH=y", "CONFIG_HVC_XE9=y"))
+    else:
+        required_config.extend(
+            ("CONFIG_SERIAL_AMBA_PL011=y", "CONFIG_SERIAL_AMBA_PL011_CONSOLE=y")
+        )
+    for setting in required_config:
         if setting not in config.splitlines():
             raise ScriptError(f"{config_path} is missing {setting}")
     hvc_patch_text = (
@@ -558,7 +566,14 @@ def verify_source_tree() -> None:
     generated_config = artifact_path("vmlinux.config")
     if generated_config.is_file():
         generated = generated_config.read_text(encoding="utf-8").splitlines()
-        for setting in ("CONFIG_PVH=y", "CONFIG_HVC_XE9=y"):
+        generated_required = []
+        if architecture == "x86_64":
+            generated_required.extend(("CONFIG_PVH=y", "CONFIG_HVC_XE9=y"))
+        else:
+            generated_required.extend(
+                ("CONFIG_SERIAL_AMBA_PL011=y", "CONFIG_SERIAL_AMBA_PL011_CONSOLE=y")
+            )
+        for setting in generated_required:
             if setting not in generated:
                 raise ScriptError(f"{generated_config} is missing {setting}")
     head = subprocess.run(
