@@ -4,6 +4,11 @@ on:
   pull_request:
     branches:
       - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
   push:
     branches:
       - dev
@@ -24,6 +29,7 @@ env:
 jobs:
   quality:
     name: Lint, typing, and formatting
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,6 +43,7 @@ jobs:
 
   openvmm-changes:
     name: Detect OpenVMM test inputs
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -93,6 +100,7 @@ jobs:
 
   artifacts:
     name: Build shared artifacts
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -124,6 +132,10 @@ jobs:
       ${{
         always() &&
         !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
         (
           github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository
@@ -241,6 +253,10 @@ jobs:
       ${{
         always() &&
         !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
         (
           github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository
@@ -383,6 +399,10 @@ jobs:
         always() &&
         !cancelled() &&
         (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
           github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository
         ) &&
@@ -511,6 +531,7 @@ jobs:
     if: >-
       ${{
         github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
         !cancelled() &&
         needs.platform.result == 'success'
       }}
