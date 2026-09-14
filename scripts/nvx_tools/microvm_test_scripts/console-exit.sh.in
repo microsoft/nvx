@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+head -c @PAYLOAD_BYTES@ /dev/zero | tr '\000' x
+printf '\n@COMPLETION_MARKER@\n'
+/sbin/nvx-exit @EXIT_CODE@
