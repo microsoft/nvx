@@ -405,7 +405,6 @@ jobs:
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
             marker-timeout: 40
-            cache-compression: zstd
             package-release: true
           - name: Linux / MSHV / Virtual machine
             runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-3"]'
@@ -418,7 +417,6 @@ jobs:
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
             marker-timeout: 40
-            cache-compression: gzip
             package-release: true
           - name: Windows / WHP / Virtual machine
             runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-3"]'
@@ -431,7 +429,6 @@ jobs:
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
             marker-timeout: 40
-            cache-compression: zstd
             package-release: true
     steps:
       - name: Checkout
@@ -473,7 +470,6 @@ jobs:
         uses: ./.github/actions/package-release
         with:
           platform: ${{ matrix.release-platform }}
-          cache-compression: ${{ matrix.cache-compression }}
 
   release:
     name: Publish development release
@@ -498,7 +494,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      actions: write
+      actions: read
       contents: write
     steps:
       - name: Checkout
