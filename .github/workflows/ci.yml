@@ -95,9 +95,6 @@ jobs:
     name: Build shared artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    outputs:
-      kernel-cache-key: ${{ steps.guest-artifacts.outputs.kernel-cache-key }}
-      alpine-cache-key: ${{ steps.guest-artifacts.outputs.alpine-cache-key }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -107,6 +104,18 @@ jobs:
       - name: Build guest artifacts
         id: guest-artifacts
         uses: ./.github/actions/build-guest-artifacts
+
+      - name: Upload guest artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-artifacts
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          if-no-files-found: error
+          retention-days: 1
 
   openvmm-tests:
     name: OpenVMM tests / ${{ matrix.name }}
@@ -322,53 +331,11 @@ jobs:
             nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
             nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
 
-      - name: Restore Linux kernel
-        if: matrix.backend != 'mshv'
-        uses: actions/cache/restore@v5
+      - name: Download guest artifacts
+        uses: actions/download-artifact@v5
         with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Linux kernel for MSHV
-        if: matrix.backend == 'mshv'
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
-        with:
-          path: |
-            build/vmlinux
-            build/vmlinux.config
-          key: ${{ needs.artifacts.outputs.kernel-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Alpine initramfs
-        if: matrix.backend != 'mshv'
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Restore Alpine initramfs for MSHV
-        if: matrix.backend == 'mshv'
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
-        with:
-          path: |
-            build/initramfs.cpio.gz
-            build/initramfs.cpio.gz.packages.json
-          key: ${{ needs.artifacts.outputs.alpine-cache-key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          name: guest-artifacts
+          path: build
 
       - name: Build OpenVMM on Linux
         if: runner.os != 'Windows'
@@ -497,8 +464,6 @@ jobs:
           cpus: ${{ matrix.benchmark-cpus }}
           host-cpu-reserve: ${{ matrix.host-cpu-reserve }}
           marker-timeout: ${{ matrix.marker-timeout }}
-          kernel-cache-key: ${{ needs.artifacts.outputs.kernel-cache-key }}
-          alpine-cache-key: ${{ needs.artifacts.outputs.alpine-cache-key }}
 
       - name: Package release
         if: >-
