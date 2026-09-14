@@ -45,32 +45,9 @@ runs:
           echo "alpine=alpine-image-v1-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}"
         } >> "${GITHUB_OUTPUT}"
 
-    - name: Prepare gzip cache tools
-      id: gzip-cache-tools
-      shell: bash
-      run: |
-        set -euo pipefail
-        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-        mkdir -p "${cache_tools}"
-        ln -sf "$(command -v tar)" "${cache_tools}/tar"
-        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
     - name: Restore Linux kernel (zstd)
       id: cache-linux-kernel-zstd
       uses: actions/cache/restore@v5
-      with:
-        path: |
-          build/vmlinux
-          build/vmlinux.config
-        key: ${{ steps.guest-cache-keys.outputs.kernel }}
-        enableCrossOsArchive: true
-
-    - name: Restore Linux kernel (gzip)
-      id: cache-linux-kernel-gzip
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.gzip-cache-tools.outputs.path }}
       with:
         path: |
           build/vmlinux
@@ -88,20 +65,8 @@ runs:
         key: ${{ steps.guest-cache-keys.outputs.alpine }}
         enableCrossOsArchive: true
 
-    - name: Restore Alpine disk image (gzip)
-      id: cache-alpine-image-gzip
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-      with:
-        path: |
-          build/initramfs.cpio.gz
-          build/initramfs.cpio.gz.packages.json
-        key: ${{ steps.guest-cache-keys.outputs.alpine }}
-        enableCrossOsArchive: true
-
     - name: Build Linux kernel (Docker)
-      if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true' && steps.cache-linux-kernel-gzip.outputs.cache-hit != 'true'
+      if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: >-
         docker build
@@ -120,20 +85,8 @@ runs:
         key: ${{ steps.guest-cache-keys.outputs.kernel }}
         enableCrossOsArchive: true
 
-    - name: Save Linux kernel (gzip)
-      if: steps.cache-linux-kernel-gzip.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
-      env:
-        PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-      with:
-        path: |
-          build/vmlinux
-          build/vmlinux.config
-        key: ${{ steps.guest-cache-keys.outputs.kernel }}
-        enableCrossOsArchive: true
-
     - name: Build Alpine disk image (Docker)
-      if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true' && steps.cache-alpine-image-gzip.outputs.cache-hit != 'true'
+      if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: >-
         docker build
@@ -145,18 +98,6 @@ runs:
     - name: Save Alpine disk image (zstd)
       if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
-      with:
-        path: |
-          build/initramfs.cpio.gz
-          build/initramfs.cpio.gz.packages.json
-        key: ${{ steps.guest-cache-keys.outputs.alpine }}
-        enableCrossOsArchive: true
-
-    - name: Save Alpine disk image (gzip)
-      if: steps.cache-alpine-image-gzip.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
-      env:
-        PATH: ${{ steps.gzip-cache-tools.outputs.path }}
       with:
         path: |
           build/initramfs.cpio.gz
