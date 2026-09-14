@@ -44,6 +44,7 @@ MICROVM_TEST_SCENARIOS = (
     "network-snapshot",
     "restore-memory",
     "restore-processors",
+    "restore-tsc-sync",
     "sandbox-blocks",
     "scratch-snapshot",
     "smp",
@@ -498,8 +499,14 @@ def run_restore_processors(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    check_tsc_sync: bool = False,
 ) -> None:
     capacity = 8
+    cmdline = "quiet loglevel=0 maxcpus=1"
+    script = _read_script("restore-processors.sh")
+    if check_tsc_sync:
+        cmdline += " clearcpuid=tsc_adjust"
+        script = _read_script("restore-tsc-sync.sh") + script
     with tempfile.TemporaryDirectory(prefix="nvx-restore-processors-") as temporary:
         snapshot_path = Path(temporary) / "snapshot"
         boot_command = workload_boot_command(
@@ -508,7 +515,7 @@ def run_restore_processors(
             kernel,
             initrd,
             memory_mib,
-            "quiet loglevel=0 maxcpus=1",
+            cmdline,
             processors=capacity,
         )
         capture_snapshot(
@@ -517,7 +524,7 @@ def run_restore_processors(
             backend=backend,
             timeout=timeout,
             processors=1,
-            post_restore_script=_read_script("restore-processors.sh"),
+            post_restore_script=script,
             log_path=output_dir / "restore-processors-capture.log",
         )
         fingerprint = _snapshot_fingerprint(snapshot_path)
@@ -2193,6 +2200,21 @@ def run(args: argparse.Namespace) -> int:
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+        )
+    if "restore-tsc-sync" in scenarios:
+        print(f"Running microVM restore TSC synchronization on OpenVMM/{args.backend}")
+        tsc_output_dir = output_dir / "restore-tsc-sync"
+        tsc_output_dir.mkdir(parents=True, exist_ok=True)
+        run_restore_processors(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            args.processors,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=tsc_output_dir,
+            check_tsc_sync=True,
         )
     if "restore-memory" in scenarios:
         print(f"Running microVM restore-memory correctness on OpenVMM/{args.backend}")
