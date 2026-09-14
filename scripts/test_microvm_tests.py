@@ -60,6 +60,139 @@ class MicrovmTestParserTests(unittest.TestCase):
 
 
 class MicrovmTests(unittest.TestCase):
+    def test_console_exit_preserves_full_output_and_guest_status(self):
+        expected = (
+            b"x" * microvm_tests.CONSOLE_EXIT_PAYLOAD_BYTES
+            + b"\n"
+            + microvm_tests.CONSOLE_EXIT_COMPLETION_MARKER
+            + b"\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests, "capture_snapshot") as capture,
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+            ):
+                process.return_value.__enter__.return_value.wait.side_effect = [
+                    openvmm_process.OpenvmmProcessResult(
+                        code, expected.replace(b"\n", b"\r\n")
+                    )
+                    for code in (0, 37)
+                ]
+                microvm_tests.run_console_exit(
+                    Path("openvmm"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    "mshv",
+                    2,
+                    memory_mib=512,
+                    timeout=40,
+                    output_dir=Path(temporary),
+                )
+
+        self.assertEqual(capture.call_count, 2)
+        self.assertEqual(process.call_count, 2)
+        for call, code in zip(capture.call_args_list, (0, 37), strict=True):
+            self.assertEqual(call.kwargs["processors"], 2)
+            self.assertIn("head -c 65536", call.kwargs["post_restore_script"])
+            self.assertIn(
+                f"/sbin/nvx-exit {code}\n", call.kwargs["post_restore_script"]
+            )
+        for call in process.call_args_list:
+            self.assertEqual(call.kwargs["output_read_delay"], 2.0)
+            self.assertIn("--restore-snapshot", call.args[0])
+            self.assertEqual(call.args[0][call.args[0].index("--processors") + 1], "2")
+
+    def test_console_exit_rejects_truncation_even_if_marker_survives(self):
+        marker = b"\n" + microvm_tests.CONSOLE_EXIT_COMPLETION_MARKER + b"\n"
+        for output in (
+            marker,
+            b"x" * (microvm_tests.CONSOLE_EXIT_PAYLOAD_BYTES - 1) + marker,
+            b"y" * microvm_tests.CONSOLE_EXIT_PAYLOAD_BYTES + marker,
+            b"x" * microvm_tests.CONSOLE_EXIT_PAYLOAD_BYTES,
+        ):
+            with self.subTest(length=len(output)):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with (
+                        patch.object(microvm_tests, "capture_snapshot"),
+                        patch.object(microvm_tests, "OpenvmmProcess") as process,
+                    ):
+                        process.return_value.__enter__.return_value.wait.return_value = openvmm_process.OpenvmmProcessResult(
+                            0, output
+                        )
+                        with self.assertRaisesRegex(
+                            RuntimeError, "truncated or corrupt console output"
+                        ):
+                            microvm_tests.run_console_exit(
+                                Path("openvmm"),
+                                Path("kernel"),
+                                Path("initrd"),
+                                "kvm",
+                                2,
+                                memory_mib=128,
+                                timeout=40,
+                                output_dir=Path(temporary),
+                            )
+
+    def test_console_exit_rejects_wrong_guest_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests, "capture_snapshot"),
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+            ):
+                process.return_value.__enter__.return_value.wait.return_value = (
+                    openvmm_process.OpenvmmProcessResult(1, b"")
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "expected exit status 0, got 1"
+                ):
+                    microvm_tests.run_console_exit(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        2,
+                        memory_mib=128,
+                        timeout=40,
+                        output_dir=Path(temporary),
+                    )
+
+    def test_output_read_delay_precedes_reader_start(self):
+        events: list[tuple[str, float | None]] = []
+
+        def record_delay(delay: float) -> None:
+            events.append(("delay", delay))
+
+        def record_reader_start() -> None:
+            events.append(("reader", None))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread") as thread,
+                patch.object(
+                    openvmm_process.time,
+                    "sleep",
+                    side_effect=record_delay,
+                ),
+            ):
+                interaction.return_value.process.poll.return_value = 0
+                thread.return_value.start.side_effect = record_reader_start
+                with openvmm_process.OpenvmmProcess(
+                    ["openvmm"],
+                    Path(temporary) / "output.log",
+                    output_read_delay=2,
+                ):
+                    pass
+        self.assertEqual(events, [("delay", 2), ("reader", None)])
+
+    def test_negative_output_read_delay_does_not_start_process(self):
+        with patch.object(openvmm_process, "InteractiveProcess") as interaction:
+            with self.assertRaisesRegex(ValueError, "cannot be negative"):
+                openvmm_process.OpenvmmProcess(
+                    ["openvmm"], Path("unused.log"), output_read_delay=-1
+                )
+        interaction.assert_not_called()
+
     def test_snapshot_restore_uses_batched_port_io_and_zero_expansion_path(self):
         snapshot = (Path(__file__).parents[1] / "alpine" / "nvx-snapshot").read_text(
             encoding="utf-8"
@@ -127,6 +260,71 @@ class MicrovmTests(unittest.TestCase):
             )
             self.assertEqual(output, b"")
             self.assertEqual(connection_failure_log.read_bytes(), b"")
+
+    def test_process_wait_reads_final_chunks_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = 0
+                interaction.return_value.process.wait.return_value = 0
+                queues.return_value.get.side_effect = [
+                    b"BEGIN-",
+                    queue.Empty,
+                    b"END\n",
+                    None,
+                ]
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
+                    result = process.wait(1)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.output, b"BEGIN-END\n")
+                self.assertEqual(log_path.read_bytes(), result.output)
+                self.assertEqual(queues.return_value.get.call_count, 4)
+
+    def test_process_wait_for_accepts_marker_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = 0
+                queues.return_value.get.side_effect = [
+                    b"MAR",
+                    queue.Empty,
+                    b"KER\n",
+                ]
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
+                    process.wait_for(b"MARKER", 1)
+                self.assertEqual(log_path.read_bytes(), b"MARKER\n")
+
+    def test_process_wait_bounds_missing_output_eof_after_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+                patch.object(
+                    openvmm_process.time,
+                    "monotonic",
+                    side_effect=[0.0, 0.0, 1.0],
+                ),
+            ):
+                interaction.return_value.process.poll.return_value = 0
+                interaction.return_value.process.wait.return_value = 0
+                queues.return_value.get.side_effect = queue.Empty
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(
+                    ["openvmm"], Path(temporary) / "output.log"
+                ) as process:
+                    with self.assertRaisesRegex(TimeoutError, "did not reach EOF"):
+                        process.wait(0.5)
 
     def test_openvmm_process_preserves_buffered_sequential_markers(self):
         class FakeProcess:
@@ -1081,6 +1279,27 @@ class MicrovmTests(unittest.TestCase):
             output_dir / "restore-tsc-sync",
         )
         self.assertTrue(run.call_args_list[1].kwargs["check_tsc_sync"])
+
+    def test_runner_dispatches_console_exit_for_each_requested_cpu_count(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args = argparse.Namespace(
+                backend="kvm",
+                scenario=["console-exit", "console-exit"],
+                processors=[1, 2, 2, 4, 8],
+                memory_mib=128,
+                timeout=40.0,
+                output_dir=Path(temporary),
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_console_exit") as run,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+        self.assertEqual([call.args[4] for call in run.call_args_list], [1, 2, 4, 8])
 
     def test_guest_runner_persists_full_output_on_failure(self):
         class FakeProcess:
