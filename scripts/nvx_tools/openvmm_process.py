@@ -108,17 +108,6 @@ class OpenvmmProcess:
             try:
                 chunk = self._chunks.get(timeout=min(remaining, 0.1))
             except queue.Empty:
-                if self.process.poll() is not None:
-                    self._drain_available()
-                    index = self._output.find(marker, self._search_offset)
-                    if index >= 0:
-                        self._search_offset = index + len(marker)
-                        return
-                    self._fail(
-                        RuntimeError(
-                            f"OpenVMM exited with status {self.process.returncode} before {marker!r}"
-                        )
-                    )
                 continue
             if chunk is None:
                 self._fail(
@@ -133,13 +122,14 @@ class OpenvmmProcess:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._fail(TimeoutError(f"OpenVMM did not exit within {timeout:g}s"))
+                self._fail(
+                    TimeoutError(
+                        f"OpenVMM output did not reach EOF within {timeout:g}s"
+                    )
+                )
             try:
                 chunk = self._chunks.get(timeout=min(remaining, 0.1))
             except queue.Empty:
-                if self.process.poll() is not None:
-                    self._drain_available()
-                    break
                 continue
             if chunk is None:
                 break

@@ -261,6 +261,71 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(output, b"")
             self.assertEqual(connection_failure_log.read_bytes(), b"")
 
+    def test_process_wait_reads_final_chunks_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = 0
+                interaction.return_value.process.wait.return_value = 0
+                queues.return_value.get.side_effect = [
+                    b"BEGIN-",
+                    queue.Empty,
+                    b"END\n",
+                    None,
+                ]
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
+                    result = process.wait(1)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.output, b"BEGIN-END\n")
+                self.assertEqual(log_path.read_bytes(), result.output)
+                self.assertEqual(queues.return_value.get.call_count, 4)
+
+    def test_process_wait_for_accepts_marker_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = 0
+                queues.return_value.get.side_effect = [
+                    b"MAR",
+                    queue.Empty,
+                    b"KER\n",
+                ]
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
+                    process.wait_for(b"MARKER", 1)
+                self.assertEqual(log_path.read_bytes(), b"MARKER\n")
+
+    def test_process_wait_bounds_missing_output_eof_after_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+                patch.object(
+                    openvmm_process.time,
+                    "monotonic",
+                    side_effect=[0.0, 0.0, 1.0],
+                ),
+            ):
+                interaction.return_value.process.poll.return_value = 0
+                interaction.return_value.process.wait.return_value = 0
+                queues.return_value.get.side_effect = queue.Empty
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(
+                    ["openvmm"], Path(temporary) / "output.log"
+                ) as process:
+                    with self.assertRaisesRegex(TimeoutError, "did not reach EOF"):
+                        process.wait(0.5)
+
     def test_openvmm_process_preserves_buffered_sequential_markers(self):
         class FakeProcess:
             pid = 123

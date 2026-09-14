@@ -36,6 +36,8 @@ snapshot restore to exercise output backpressure. For each requested processor
 count it requires byte-exact delivery of a 64 KiB payload and the final marker,
 and preserves guest exit statuses 0 and 37. This checks both device and host-relay
 draining without adding sleeps to the measured benchmark workloads.
+The harness waits for the output reader's EOF notification even after the
+process exits, so delayed final output chunks cannot create a false failure.
 
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 Once they are ready, benchmarks run in parallel with the NVX test layer and
