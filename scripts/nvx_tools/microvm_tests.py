@@ -37,6 +37,7 @@ from .common import (
 from .openvmm_process import OpenvmmProcess, TcpConsole
 
 MICROVM_TEST_SCENARIOS = (
+    "console-exit",
     "console-snapshot",
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
@@ -44,6 +45,7 @@ MICROVM_TEST_SCENARIOS = (
     "network-snapshot",
     "restore-memory",
     "restore-processors",
+    "restore-tsc-sync",
     "sandbox-blocks",
     "scratch-snapshot",
     "smp",
@@ -66,6 +68,9 @@ CONSOLE_RX_READY_MARKER = b"NVX-CONSOLE-RX-READY"
 CONSOLE_RX_QUEUED_MARKER = b"NVX-CONSOLE-RX-QUEUED"
 CONSOLE_RX_RESTORED_MARKER = b"NVX-CONSOLE-RX-RESTORED"
 CONSOLE_TX_DONE_MARKER = b"NVX-CONSOLE-TX-DONE"
+CONSOLE_EXIT_COMPLETION_MARKER = b"NVX-CONSOLE-EXIT-OK"
+CONSOLE_EXIT_PAYLOAD_BYTES = 64 * 1024
+CONSOLE_EXIT_READ_DELAY_SECONDS = 2.0
 ENDPOINT_POLICY = ("10.0.0.9:8443", "192.0.2.7:443", "10.0.0.9:443")
 ENDPOINT_POLICY_BEFORE_MARKER = b"NVX-ENDPOINT-POLICY-BEFORE"
 ENDPOINT_POLICY_AFTER_MARKER = b"NVX-ENDPOINT-POLICY-AFTER"
@@ -339,6 +344,70 @@ def run_lifecycle(
     )
 
 
+def run_console_exit(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    processors: int,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    expected = (
+        b"x" * CONSOLE_EXIT_PAYLOAD_BYTES
+        + b"\n"
+        + CONSOLE_EXIT_COMPLETION_MARKER
+        + b"\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="nvx-console-exit-") as temporary:
+        for exit_code in (0, 37):
+            name = f"console-exit-{processors}vcpu-status-{exit_code}"
+            snapshot_path = Path(temporary) / f"snapshot-{exit_code}"
+            boot_command = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                processors=processors,
+            )
+            capture_snapshot(
+                [*boot_command, "--snapshot-destination", str(snapshot_path)],
+                snapshot_path,
+                backend=backend,
+                timeout=timeout,
+                processors=processors,
+                post_restore_script=_render_script(
+                    "console-exit.sh.in",
+                    PAYLOAD_BYTES=str(CONSOLE_EXIT_PAYLOAD_BYTES),
+                    COMPLETION_MARKER=CONSOLE_EXIT_COMPLETION_MARKER.decode(),
+                    EXIT_CODE=str(exit_code),
+                ),
+                log_path=output_dir / f"{name}-capture.log",
+            )
+            with OpenvmmProcess(
+                snapshot_restore_command(
+                    executable, backend, snapshot_path, processors=processors
+                ),
+                output_dir / f"{name}-restore.log",
+                output_read_delay=CONSOLE_EXIT_READ_DELAY_SECONDS,
+            ) as process:
+                result = process.wait(timeout)
+            if result.returncode != exit_code:
+                raise RuntimeError(
+                    f"{name}: expected exit status {exit_code}, got {result.returncode}"
+                )
+            output = result.output.replace(b"\r\n", b"\n")
+            if output != expected:
+                raise RuntimeError(
+                    f"{name}: truncated or corrupt console output; "
+                    f"expected {len(expected)} bytes, got {len(output)}"
+                )
+
+
 def run_smp(
     executable: Path,
     kernel: Path,
@@ -498,8 +567,14 @@ def run_restore_processors(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    check_tsc_sync: bool = False,
 ) -> None:
     capacity = 8
+    cmdline = "quiet loglevel=0 maxcpus=1"
+    script = _read_script("restore-processors.sh")
+    if check_tsc_sync:
+        cmdline += " clearcpuid=tsc_adjust"
+        script = _read_script("restore-tsc-sync.sh") + script
     with tempfile.TemporaryDirectory(prefix="nvx-restore-processors-") as temporary:
         snapshot_path = Path(temporary) / "snapshot"
         boot_command = workload_boot_command(
@@ -508,7 +583,7 @@ def run_restore_processors(
             kernel,
             initrd,
             memory_mib,
-            "quiet loglevel=0 maxcpus=1",
+            cmdline,
             processors=capacity,
         )
         capture_snapshot(
@@ -517,7 +592,7 @@ def run_restore_processors(
             backend=backend,
             timeout=timeout,
             processors=1,
-            post_restore_script=_read_script("restore-processors.sh"),
+            post_restore_script=script,
             log_path=output_dir / "restore-processors-capture.log",
         )
         fingerprint = _snapshot_fingerprint(snapshot_path)
@@ -2068,6 +2143,22 @@ def run(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     scenarios = tuple(dict.fromkeys(args.scenario or MICROVM_TEST_SCENARIOS))
 
+    if "console-exit" in scenarios:
+        for processors in dict.fromkeys(args.processors):
+            print(
+                f"Running microVM console exit correctness ({processors} vCPU) "
+                f"on OpenVMM/{args.backend}"
+            )
+            run_console_exit(
+                executable,
+                kernel,
+                initrd,
+                args.backend,
+                processors,
+                memory_mib=args.memory_mib,
+                timeout=args.timeout,
+                output_dir=output_dir,
+            )
     if "console-snapshot" in scenarios:
         print(f"Running microVM console snapshot correctness on OpenVMM/{args.backend}")
         run_console_snapshot(
@@ -2193,6 +2284,21 @@ def run(args: argparse.Namespace) -> int:
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+        )
+    if "restore-tsc-sync" in scenarios:
+        print(f"Running microVM restore TSC synchronization on OpenVMM/{args.backend}")
+        tsc_output_dir = output_dir / "restore-tsc-sync"
+        tsc_output_dir.mkdir(parents=True, exist_ok=True)
+        run_restore_processors(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            args.processors,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=tsc_output_dir,
+            check_tsc_sync=True,
         )
     if "restore-memory" in scenarios:
         print(f"Running microVM restore-memory correctness on OpenVMM/{args.backend}")
