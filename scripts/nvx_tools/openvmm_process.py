@@ -47,7 +47,10 @@ class OpenvmmProcess:
         log_path: Path,
         *,
         environment: Mapping[str, str] | None = None,
+        output_read_delay: float = 0.0,
     ) -> None:
+        if output_read_delay < 0:
+            raise ValueError("OpenVMM output read delay cannot be negative")
         process_environment = os.environ.copy()
         process_environment["OPENVMM_LOG"] = "off"
         if environment is not None:
@@ -59,7 +62,14 @@ class OpenvmmProcess:
             args=(self._chunks,),
             daemon=True,
         )
-        self._reader.start()
+        try:
+            if output_read_delay:
+                time.sleep(output_read_delay)
+            self._reader.start()
+        except BaseException:
+            terminate(self._interaction.process)
+            self._interaction.close()
+            raise
         self._output = bytearray()
         self._search_offset = 0
         self._log_path = log_path
@@ -98,17 +108,6 @@ class OpenvmmProcess:
             try:
                 chunk = self._chunks.get(timeout=min(remaining, 0.1))
             except queue.Empty:
-                if self.process.poll() is not None:
-                    self._drain_available()
-                    index = self._output.find(marker, self._search_offset)
-                    if index >= 0:
-                        self._search_offset = index + len(marker)
-                        return
-                    self._fail(
-                        RuntimeError(
-                            f"OpenVMM exited with status {self.process.returncode} before {marker!r}"
-                        )
-                    )
                 continue
             if chunk is None:
                 self._fail(
@@ -123,13 +122,14 @@ class OpenvmmProcess:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._fail(TimeoutError(f"OpenVMM did not exit within {timeout:g}s"))
+                self._fail(
+                    TimeoutError(
+                        f"OpenVMM output did not reach EOF within {timeout:g}s"
+                    )
+                )
             try:
                 chunk = self._chunks.get(timeout=min(remaining, 0.1))
             except queue.Empty:
-                if self.process.poll() is not None:
-                    self._drain_available()
-                    break
                 continue
             if chunk is None:
                 break
