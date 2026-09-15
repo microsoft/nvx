@@ -516,6 +516,8 @@ jobs:
         with:
           backend: ${{ matrix.backend }}
           platform: ${{ matrix.benchmark-platform }}
+          runs: 10
+          warmups: 1
           teardown-mode: ${{ matrix.teardown-mode }}
           cpus: ${{ matrix.benchmark-cpus }}
           host-cpu-reserve: ${{ matrix.host-cpu-reserve }}
