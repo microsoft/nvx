@@ -1,10 +1,18 @@
 # NVX microVM design
 
 This document describes the microVM machine profile implemented by the OpenVMM
-submodule in this repository. The implementation is the source of truth. The
-former phase proposal documents were removed after their deliverables were
-integrated; this document describes the resulting machine rather than a
-migration plan.
+submodule and the single-container sandbox filesystem and agent architecture
+built on it. The implementation is the source of truth. Sections explicitly
+marked **Proposed** retain production architecture and rationale that are not
+yet implemented; they are not part of the current machine contract. The former
+filesystem and snapshot proposal is consolidated here rather than maintained
+as a second, conflicting description of the runtime.
+
+The main areas are [the machine ABI](#machine-and-device-abi),
+[sandbox filesystems and the agent](#sandbox-filesystem-and-agent-architecture),
+[snapshot and restore](#snapshot-and-restore),
+[snapshot sharing](#snapshot-sharing-and-host-storage), and
+[remaining production work](#remaining-production-work).
 
 ## Goals
 
@@ -156,6 +164,7 @@ The fixed boot reservations are:
 | `0x8000..0x8fff` | ACPI RSDP page |
 | `0x9000..0x1ffff` | Bounded ACPI table region |
 | `0x20000` | NUL-terminated kernel command line |
+| `0x30000..0x30fff` | Shared virtio interrupt-status page |
 | `0x100000` and above | Kernel load segments and ordinary RAM |
 
 The initial state has `RIP` set to the Xen physical entry, `RBX=0x6000`,
@@ -173,7 +182,7 @@ flowchart LR
    Low["Low RAM<br/>0x00000000 through 0xbfffffff<br/>up to 3 GiB"]
    Gap["Fixed MMIO gap<br/>0xc0000000 through 0xffffffff<br/>1 GiB"]
    High["High RAM<br/>0x100000000 and above"]
-   Slots["Reserved virtio-mmio slots<br/>0xd0000000 through 0xd0006fff"]
+   Slots["Reserved virtio-mmio slots<br/>0xd0000000 through 0xd0007fff"]
 
    Low --- Gap
    Gap --- High
@@ -210,14 +219,17 @@ earlycon=xe9 console=hvc0 reboot=t panic=-1
 
 When virtio-console is present, `console=hvc0` becomes `console=hvc1`; the raw
 portb console remains the early console. User arguments are inserted after the
-base tokens. Device and guest-bootstrap tokens are then appended in fixed
-address order: network, filesystem, console, block.
+base tokens. Device-discovery tokens follow in fixed address order: network,
+filesystem, boot console, sandbox blocks, and the control console when present
+in an internally constructed configuration. Network and filesystem bootstrap
+tokens follow device discovery.
 
 Callers may not supply `earlycon=`, `console=`, `virtio_mmio.device=`,
 `virtnet_ip=`, `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`, `virtfs_dir=`,
-`virtfs_tag=`, or `virtfs_mode=` tokens. Embedded NULs are rejected, and the
-complete NUL-terminated command line must fit in 64 KiB. The same effective
-string and its SHA-256 digest become part of the snapshot machine contract.
+`virtfs_tag=`, `virtfs_mode=`, or `nvx_snapshot_tier=` tokens. Embedded NULs are
+rejected, and the complete NUL-terminated command line must fit in 64 KiB. The
+same effective string and its SHA-256 digest become part of the snapshot
+machine contract.
 
 ## Machine and device ABI
 
@@ -292,6 +304,17 @@ drops the newest bytes and emits a rate-limited warning; input applies
 backpressure by stopping host reads when its buffer is full. Pending bytes are
 saved so capture does not silently lose VMM-owned I/O.
 
+Guest-requested process exit drains the portb endpoint and, when present, its
+host stdout relay before reporting completion. The combined drain has a
+five-second deadline. Success preserves the guest's exit status; endpoint,
+relay, or timeout failures become process-exit errors instead of silently
+discarding final output. This is a portb/host-relay guarantee, not a general
+drain of every virtio-console endpoint. The controller and relay implementation
+are in
+[`openvmm_entry/src/vm_controller.rs`](../openvmm/openvmm/openvmm_entry/src/vm_controller.rs)
+and
+[`openvmm_entry/src/microvm_output.rs`](../openvmm/openvmm/openvmm_entry/src/microvm_output.rs).
+
 A snapshot-port write with no configured destination completes normally and
 the guest continues. With a destination, the device permits at most one pending
 transaction and defers completion long enough for the controller to establish
@@ -301,13 +324,16 @@ The scratch policy travels with the deferred boundary request.
 
 ### Fixed virtio-mmio transport
 
-All seven fixed address slots are reserved. Snapshot-capable builds instantiate
-the virtio-fs transport even without a host attachment so it is discoverable
-before capture; the other optional devices are instantiated only when active.
+All eight fixed address slots are reserved, including the dedicated control
+console at `0xd0007000..0xd0007fff` on IRQ 3 (shared status at `0x3001c`).
+Snapshot-capable builds instantiate the virtio-fs transport even without a host
+attachment so it is discoverable before capture. Other optional devices are
+instantiated only when active; the control slot is reserved but activation is
+currently rejected by the public entry points.
 Every device uses virtio-mmio, is omitted from ACPI, and has packed-ring support
 masked.
 
-| Device | Stable identity | MMIO range | IRQ | Delivery |
+| Device | Stable identity | MMIO range | IRQ | Availability |
 | --- | --- | ---: | ---: | --- |
 | virtio-net | `net:microvm0` | `0xd0000000..0xd0000fff` | KVM/MSHV 10, WHP 5 | Optional |
 | virtio-fs | `fs:microvm0` | `0xd0001000..0xd0001fff` | 6 | Reserved dormant slot; HostFs optional |
@@ -316,6 +342,7 @@ masked.
 | `runtime` virtio-blk | `blk:sandbox:runtime` | `0xd0004000..0xd0004fff` | 12 | Optional read-only role |
 | `custom` virtio-blk | `blk:sandbox:custom` | `0xd0005000..0xd0005fff` | 9 | Optional read-only role |
 | `scratch` virtio-blk | `blk:sandbox:scratch` | `0xd0006000..0xd0006fff` | 11 | Required writable final role when blocks are present |
+| Control virtio-console | `console:microvm-control0` | `0xd0007000..0xd0007fff` | 3 | Reserved; authenticated activation not yet available |
 
 Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and
@@ -349,6 +376,7 @@ per fixed slot resides in the reserved shared-status page:
 | `runtime` block | `0x30010` |
 | `custom` block | `0x30014` |
 | `scratch` block | `0x30018` |
+| Control virtio-console | `0x3001c` |
 
 OpenVMM publishes config-change and used-buffer bits with a sequentially
 consistent compare-exchange loop. It pulses the device IRQ only when the old
@@ -388,8 +416,40 @@ The optional console is the standard single-port virtio-console device with
 two split queues. Host RX accepted by the device and partial guest TX progress
 are device-private saved state, so a descriptor is not replayed from byte zero
 after restore. Native sockets and handles are not serialized. A listener is
-recreated, a client reconnect uses the bounded five-second timeout, or the restore
-caller supplies the required attachment according to the recorded policy.
+recreated according to its recorded policy. Client reconnects require an
+explicitly approved restore-time attachment and have a five-second timeout;
+inherited attachments must also be supplied again rather than serialized.
+
+#### Control console reservation
+
+The dedicated control console reuses the single-port virtio-console device but
+has a distinct resource ID (`virtio-control-console`), stable attachment ID
+(`console:microvm-control0`), MMIO slot, IRQ, shared-status word, and saved-state
+inventory. The configuration and snapshot helpers support this second console
+without changing the boot console's identity or placement. A control console
+requires the boot virtio-console, making its guest tty `hvc2`; the profile owns
+the identifying `nvx_control_tty=hvc2` token.
+
+The internal control-console command-line builder rejects caller-supplied
+control-tty and driver-probe-order tokens, including kernel-equivalent
+hyphenated spellings, as well as quotes and the `--` delimiter. These rules
+prevent guest tty discovery from being redirected by command-line parsing.
+Boot-only command lines retain their existing behavior.
+
+The internal control attachment helper accepts only local `listen=...`,
+`connect=...`, or disconnected `none` endpoints, not TCP or inherited stdio.
+Linux uses Unix sockets and Windows uses named pipes. Reconstruction checks
+the exact saved identity and reconnect policy; client connections require
+explicit restore-time approval. These restrictions are groundwork for the
+broker, not a substitute for its authentication.
+
+This is transport and lifecycle groundwork, not an enabled agent protocol.
+The CLI has no public activation option, and CLI and TTRPC restore reject a
+manifest carrying a control-console device or attachment before authenticated
+broker activation exists. Reservation alone does not expose a host endpoint.
+See the checks in
+[`openvmm_entry/src/lib.rs`](../openvmm/openvmm/openvmm_entry/src/lib.rs) and
+[`openvmm_entry/src/ttrpc/mod.rs`](../openvmm/openvmm/openvmm_entry/src/ttrpc/mod.rs).
 
 #### Network
 
@@ -445,7 +505,340 @@ the cold-boot mount hook has already run. Snapshots without this capability
 cannot add an attachment. Native file descriptors and Windows handles are not
 serialized.
 
+## Sandbox filesystem and agent architecture
+
+The sandbox specialization runs exactly one workload container per microVM.
+Its lifetime, resource envelope, and network identity belong to that workload,
+so it does not need pod infrastructure, a pause container, dynamic rootfs
+injection, or a sequence of host RPCs to create additional containers. The
+agent remains outside the workload's namespaces and supervises it from the
+initramfs. This specialization is for non-confidential ACI Sandboxes, not
+multi-container ACI container groups; the host is trusted with image content
+and guest memory.
+
+The implemented foundation is a cold-filesystem bootstrap and low-level
+snapshot primitives. The production conversion service, replaceable launch
+configuration, Rust agent, and authenticated runtime protocol described below
+are **Proposed**. They must not be inferred from the presence of block devices
+or snapshot-tier metadata alone.
+
+### Implemented filesystem bootstrap
+
+The public `nvx sandbox` command accepts one to three role-bearing EROFS lower
+images, a preformatted ext4 scratch image, an absolute entrypoint, and
+individual argument tokens. It supplies non-secret kernel-command-line
+configuration; environment variables, secrets, arguments containing
+whitespace, and sandbox snapshot orchestration are not supported by this
+command. Lower-level OpenVMM capture and restore do support sandbox blocks.
+See [Run](run.md#experimental-single-workload-sandbox) and
+[`scripts/nvx_tools/sandbox.py`](../scripts/nvx_tools/sandbox.py).
+
+The required kernel facilities are already enabled in
+[`kernel/config-microvm`](../kernel/config-microvm): virtio-blk, EROFS with
+compression and xattrs, overlayfs, cgroup v2, memory and process controllers,
+namespaces, `CONFIG_BPF_SYSCALL`, and `CONFIG_CGROUP_BPF`. Kernel support for a
+device filter does not mean the current agent installs one.
+
+[`alpine/nvx-init-agent`](../alpine/nvx-init-agent) performs the assembly:
+
+1. mount runtime tmpfs and cgroup2, create sibling `agent` and `container`
+   cgroups, and move the supervisor into the agent cgroup;
+2. resolve each role's MMIO address through the platform resources in
+   `/proc/iomem` and the virtio block-device sysfs tree, rather than assuming
+   a `/dev/vdX` name or `virtioN` enumeration order;
+3. check an optional expected sector count, flush cached block-device buffers,
+   mount each lower layer read-only as EROFS, and check its supplied UUID;
+4. resolve and flush scratch, mount it as ext4 with `rw,nosuid,nodev`, and
+   create its `upper` and `work` directories;
+5. mount overlayfs with top-first lower layers and `metacopy=on,xino=on`;
+6. start a child behind a FIFO barrier, place that child in the workload
+   cgroup before releasing it, and retain a runtime-tmpfs machine-ID file;
+7. wait for the child, unmount the overlay, layers, and scratch, and return its
+   status through the guest exit helper.
+
+The assembled view is:
+
+```text
+/run/nvx/layers/custom   (optional EROFS) --+
+/run/nvx/layers/runtime  (optional EROFS) --+--> lowerdir, top first
+/run/nvx/layers/distro   (optional EROFS) --+
+/run/nvx/scratch/upper   (ext4) -----------> upperdir
+/run/nvx/scratch/work    (same ext4) ------> workdir
+                                          overlay --> /run/nvx/rootfs
+```
+
+At least one lower role is required by the bootstrap; distro plus runtime is
+the intended curated-image shape, not a requirement that all three lower
+slots be populated. The initramfs remains the supervisor's root and is not
+another container lower layer.
+
+[`alpine/nvx-container-launch`](../alpine/nvx-container-launch) releases the
+barrier into private mount, PID, and UTS namespaces.
+[`alpine/nvx-container-enter`](../alpine/nvx-container-enter) makes mounts
+private, creates private proc, read-only sysfs, `/dev`, devpts, and shared-memory
+mounts, binds the workload machine ID read-only, and enters the overlay with
+`chroot`. It clears supplementary groups and all capability sets and enables
+`no_new_privs`. It does not `pivot_root` away from the initramfs `rootfs`, and
+the outer supervisor does not replace itself with the workload.
+
+The current agent sets `memory.low` to 16 MiB by default and accepts optional
+workload `memory.max` and `pids.max`. This is not the stronger production
+resource-reservation contract below. FIFO-gated cgroup placement is also not
+`clone3(CLONE_INTO_CGROUP)`. The shell supervisor, textual errors, fixed root
+user, and capability-stripped launch are an experimental bootstrap, not a
+complete OCI runtime, typed RPC service, or systemd-container profile.
+
+### Image preparation and distribution (Proposed)
+
+Image conversion belongs off the sandbox start path, in a Linux control-plane
+service that can run `mkfs.erofs`. Registry credentials stay in that service,
+not on the node's launch path or inside the guest. The host resolves image
+defaults and sandbox overrides once; the agent should not implement OCI image
+configuration merge semantics or read configuration from a mounted layer.
+
+The intended artifact ownership is:
+
+| Artifact | Contents | Delivery and lifetime |
+| --- | --- | --- |
+| Kernel and initramfs | Platform kernel, agent, and minimal userland | Versioned node deployment, present before sandbox creation |
+| `distro` | Curated base OS | Immutable content-addressed node blob cache |
+| `runtime` | Language runtime and common libraries | Immutable cache, shared across images using that runtime |
+| `custom` | Customer-specific additions, replacements, and deletions | Optional immutable cache entry, scoped to its image |
+| Scratch | Writable ext4 upper and work directories | Private node-local file, drawn from a prepared pool or template |
+
+Curated bases can be recognized by exact OCI layer-digest prefix matching.
+The deepest matching base determines the reusable distro/runtime split. An
+unrecognized image can be flattened into one custom lower layer; it loses
+curated-layer sharing but can still use a compatible image-independent
+platform template. Identical file contents with different layer digests do not
+establish a prefix match.
+
+Separate blobs preserve reuse of the common distro and runtime across many
+customer images. Pre-merging all combinations, or packaging every combination
+as one partitioned disk, would make each combination a separate cache object.
+Compressed EROFS reduces distribution size and the host's cached image bytes;
+decompression is performed by the guest kernel as blocks are read. A FUSE
+daemon and guest-side lazy-pull agent are not required for these rootfs layers.
+The optional HostFs device remains useful for a live host export and is a
+separate feature, not the container image-delivery path.
+
+The converter must synthesize OCI deletions as overlay whiteouts and opaque
+directory markers. It must apply a deny-by-default metadata policy to every
+layer: never copy arbitrary `trusted.overlay.*` or `user.overlay.*` attributes,
+and allow and normalize file capabilities, SELinux labels, and ACLs only under
+an explicit policy. Device inodes, including whiteouts, need the same treatment.
+The current bootstrap mounts supplied EROFS images; it is not this sanitizing
+conversion service.
+
+This trust requirement matters because `metacopy=on` interprets overlay
+metadata from lower layers. Metadata-only changes can avoid copying file
+contents, but a data write can still copy an entire lower file into scratch.
+Scratch capacity must account for that amplification. `xino=on` improves inode
+identity but can fall back when the underlying inode encoding overflows; the
+chosen filesystem and kernel combination needs validation.
+
+Scratch should be prepared off the launch path and acquired without `mkfs`
+during startup. For the current snapshot-capable microVM it must be a regular
+raw file containing ext4, not a VHD/VHDX attachment. A pool or a filesystem
+clone can accelerate acquisition, but the VMM also supports independent copies;
+block-clone support is not a prerequisite for running NVX. Scratch consumes
+host storage rather than guest RAM and can fail with `ENOSPC` independently of
+guest memory pressure. Runtime tmpfs is still appropriate for small agent
+state, not the workload's general writable layer.
+
+Blob garbage collection must retain references from both live sandboxes and
+snapshots. Paired scratch, state, and RAM need snapshot-scoped retention and
+placement. Kernel/agent rollout must rebuild or explicitly recertify templates:
+restoring guest RAM restores the captured agent build, not the node's newly
+installed initramfs. These cache, pool, and rollout services are host
+orchestration responsibilities, not implemented VMM artifact management.
+
+### Replaceable configuration region (Proposed)
+
+The production launch contract should use one bounded, versioned,
+VMM-populated memory region. Only its location and ordinary invariant kernel
+parameters belong on the command line. The command line is size-limited,
+readable through `/proc/cmdline`, and captured in RAM; it cannot safely carry
+secrets or values that change between clones.
+
+The configuration is fully resolved by the host and separated by consumption:
+
+| Section | Contents | First consumed |
+| --- | --- | --- |
+| Invariants | Role/MMIO mapping, layer geometry, and platform-owned guest network identity such as MAC, address, prefix, and MTU | Before the platform snapshot point |
+| Image binding | Expected EROFS UUID for each attached lower role | After the platform snapshot point, before workload launch |
+| Sandbox | Entrypoint, arguments, environment and secrets, workdir, identity, capability policy, and tenant resolver/routing settings | After the platform snapshot point |
+
+Only unconsumed configuration may be replaced. Platform clones may receive
+new image binding and sandbox values; workload-start and instance-checkpoint
+restores have already consumed them and must not pretend that rewriting a
+region changes mounted filesystems or process state. Those later tiers accept
+new work through a runtime protocol, not replacement OCI configuration.
+
+The host must validate the independent launch configuration against the saved
+contract before entering a vCPU, including canonical digests for consumed
+sections. The agent must validate the header, version, bounds, and invariants
+again before using the payload. An EROFS UUID is only an attachment mix-up
+check, not a content-integrity proof. Current OpenVMM restore verifies SHA-256
+for consumed read-only layers; a future cache-admission optimization needs an
+explicit trusted artifact contract rather than replacing that check with UUIDs.
+
+The region must be separate from both captured RAM and restore-time expansion
+backing, omitted from the PVH usable-memory map and `memory.bin`, and populated
+before every launch. Its placement must not overlap any capacity reservation
+or device. Restoring RAM must never overwrite newly supplied configuration.
+A header with magic, version, bounded length, and corruption detection does not
+by itself provide authenticity or secrecy.
+
+The current platform command-line validator recognizes the exact prospective
+token `nvx_config=0xd0010000,65536`; that allowlist entry does not allocate a
+region or implement the payload protocol. The current bootstrap still reads
+non-secret command-line tokens. The former standalone `phram` mechanism is not
+an alternative configuration or layer carrier in this microVM profile.
+
+Launch metadata must remain fresh even when all configuration sections have
+been consumed. A future channel epoch, entropy seed, and clock sample therefore
+cannot be frozen by an OCI-section digest. Today restore detection and entropy
+repair use the process generation ID and portb restore packet described below,
+not an implemented configuration-region epoch. Zeroing a region after use is
+defense in depth: it does not erase copies in agent buffers or workload memory.
+The region and raw-memory devices must never be exposed in the workload's
+mount namespace or `/dev`.
+
+The proposed network split also needs an explicit compatibility contract.
+Current portable networking saves the guest identity, bootstrap command line,
+and egress policy; it does not implement per-launch tenant DNS/routing swaps or
+the old HCN L2Bridge/AF_XDP endpoint translation and readiness handshake.
+
+### Production agent and launch sequence (Proposed)
+
+The intended production agent is a small static Rust binary running as PID 1
+from the initramfs. It owns pseudo-filesystem setup, filesystem assembly,
+network programming, workload construction, orphan reaping, stdio, and runtime
+control. It remains alive after starting the workload; `exec` of the workload
+from the supervisor would destroy those responsibilities.
+
+The cold launch should require no configuration RPC round trip:
+
+1. the host stages layers and private scratch, constructs all devices, prepares
+   the network backend, and writes the launch configuration;
+2. the VMM PVH-boots the kernel and initramfs;
+3. the agent sets up pseudo-filesystems and sibling cgroups, consumes only
+   invariants, and configures the platform-owned guest network;
+4. a trusted platform-template build captures here, before image binding,
+   tenant configuration, or scratch mounts;
+5. a cold launch or restored template validates the applicable configuration,
+   performs required restore repair, discards stale block buffers, and mounts
+   EROFS, ext4, and the overlay;
+6. the agent creates the workload directly in its cgroup and private namespaces,
+   applies its resolved runtime policy, and starts it under supervision.
+
+The platform build must attach deterministic non-tenant placeholder layers.
+Linux can probe block contents before PID 1 runs, so merely avoiding mounts
+does not prove a snapshot contains no image bytes. Restored layers must have
+the captured geometry, and cached placeholder blocks must be invalidated
+before mounting replacements. Current host validation records platform layers
+as unbound but cannot prove which bytes arbitrary guest code read before capture.
+
+A complete runtime must implement more than the current bootstrap: atomic
+`clone3(CLONE_INTO_CGROUP)` placement, the required namespace and mount policy,
+masked/read-only paths, user/group and supplementary-group handling, capability
+sets, seccomp, rlimits, terminal allocation, signals, and reliable child/orphan
+supervision. The root transition must preserve the outer agent's initramfs
+view; it cannot assume `pivot_root` works directly from initramfs `rootfs`.
+
+Production resource policy should give the agent a measured memory reserve
+and CPU weight in a sibling cgroup, with workload `memory.max`,
+`memory.oom.group=1`, and appropriate process limits. `memory.min` protection
+and workload limits must be sized together with VM RAM; the current
+`memory.low` setting alone is not a hard survival guarantee. A cgroup device
+filter is needed for profiles that retain `CAP_MKNOD`. The workload must not
+be able to escape the agent-owned cgroup or undo its freeze; any delegated
+subtree must remain below that boundary.
+
+### Control protocol and checkpoint handoff (Proposed)
+
+The runtime protocol should use the dedicated control virtio-console once its
+authenticated broker is implemented. Boot diagnostics and kernel `printk`
+stay on the existing consoles; framed control traffic must not share an
+unstructured byte stream with them. The reservation reuses a proven transport
+but does not implement framing, authorization, guest RPC, or host-side broker
+isolation. A VMM-owned endpoint still needs an authenticated, access-controlled
+host attachment and must not be exposed to the workload.
+
+The proposed operation families are:
+
+| Operation | Purpose |
+| --- | --- |
+| `Ready`, `RestoreHello` | Establish readiness, protocol version, and the current launch identity |
+| `Bootstrap` | Explicit configuration when a workflow cannot use the launch region |
+| `ExecuteCommand`, `InteractiveShell` | One-shot execution or PTY-backed interactive sessions, including cancellation and resize |
+| `StreamLogs` | Bounded stdout/stderr streaming with continuation semantics |
+| `Signal`, `Wait`, `ContainerExited` | Lifecycle control, exit status, and OOM reporting |
+| `Probe` | Execute health checks |
+| `PrepareSnapshot`, `PostRestore`, `Checkpoint` | Agent-coordinated capture and restore hooks |
+| `Shutdown` | Graceful workload and VM termination |
+
+Messages need bounded framing, stream and request identifiers, stable typed
+errors, backpressure, and launch-scoped identity. On restore the agent must
+discard partial decoder state and requests from the old host connection,
+reestablish the session with `RestoreHello`, and fail non-replayable operations
+rather than silently executing them twice. Protocol versioning is tied to the
+node-deployed agent; transport compatibility alone is not RPC compatibility.
+
+The proposed workload-facing checkpoint interface is an opt-in, bind-mounted
+`SOCK_SEQPACKET` socket, such as `/dev/aci/checkpoint`, with per-message
+`SCM_CREDENTIALS`. The agent owns the PMIO write; the workload does not receive
+`CAP_SYS_RAWIO`, `/dev/port`, or unrestricted port-I/O access. Capture requests
+and retained artifacts need agent and host rate limits.
+
+A warm shim requests capture after runtime initialization and receives its
+next work item after restore. Python, Node, and Java need runtime-specific
+hooks; kernel CRNG reseeding cannot reset their userspace RNGs, caches, or
+external connections. Blocking the requesting thread on a socket is not a
+barrier for its peers. A cloneable warm point must be single-threaded or hold
+all peers behind a runtime-owned barrier until repair is complete. The current
+workload-start helper requires a `runtime-post-restore` hook, but there is no
+production shim or work-item handoff protocol yet.
+
+The replay contract is explicit: do not capture live external connections or
+state that cannot be safely reused, do not repeat irreversible side effects,
+and repair runtime randomness before accepting work. An instance checkpoint
+is a single continuation; a workload-start snapshot is a cloneable starting
+point, not transparent checkpointing of arbitrary requests.
+
 ## Snapshot and restore
+
+### Tier contract
+
+Version-5 sandbox snapshots encode the tier, restore policy, and a consumed
+configuration-section bitmask. The validator accepts only these combinations:
+
+| Tier | Restore policy | Scratch | Consumed sections | Intended author and sharing scope |
+| --- | --- | --- | --- | --- |
+| `platform` | `clone` | Fresh | Invariants only | Trusted platform build; cross-tenant only with the pre-image-binding guarantees above |
+| `workload-start` | `clone` | Paired | Invariants, image binding, sandbox | Warm workload or runtime shim; tenant-scoped |
+| `instance-checkpoint` | `resume` | Paired | Invariants, image binding, sandbox | One live instance; one claimed continuation |
+
+Tier metadata requires sandbox blocks; blockless snapshots do not declare it.
+The saved host-owned `nvx_snapshot_tier=` token must agree with the manifest.
+Platform lower layers have empty, unbound identities, whereas later tiers bind
+consumed layers to their hashes. The bitmask establishes when configuration
+is considered consumed; it is not an implementation of replaceable payloads
+or per-section configuration-region validation.
+
+The platform point removes kernel and agent initialization from subsequent
+launches. Workload-start removes runtime initialization as well, but contains
+workload memory and often cached image data and secrets. Read-only layer files
+remain external attachments; bytes read from them into guest RAM can still
+appear in `memory.bin`. Paired scratch is an artifact in the snapshot directory,
+not just a reference to the caller's original writable file.
+
+Sharing scope is a deployment requirement, not a tenant authorization feature
+of the VMM. The snapshot controller enforces tier combinations, layer binding,
+scratch pairing, and the single-use resume claim. Host artifact access control,
+template provenance, and a trustworthy pre-capture guest determine whether
+cross-tenant publication is permissible.
 
 ### Capture boundary
 
@@ -557,6 +950,25 @@ final snapshot and resumes only when rollback is known to be valid. After it,
 the source never resumes. This gives the guest an observable boundary: code
 after the snapshot `out` runs once in each restored process and never in the
 successfully captured source process.
+
+While the worker holds the snapshot stop guard, its central RPC dispatcher
+rejects management operations that could disturb the boundary, including
+memory writes, resume/reset, device changes, and state dumps. Rejections are
+immediate, not queued until capture finishes; infallible RPC forms report a
+channel failure. Snapshot quiesce, rollback, boundary release, and memory reads
+remain available. The exclusion applies at the worker boundary shared by the
+management frontends, in
+[`dispatch/snapshot_rpc.rs`](../openvmm/openvmm/openvmm_core/src/worker/dispatch/snapshot_rpc.rs).
+
+Guest and host barriers have separate jobs. The workload cgroup is frozen in
+captured guest state, the VMM gates external input, and a future multithreaded
+agent must park its own RPC/log workers at a capture-safe point. None of these
+substitutes for the others. Device workers and guest kernel execution needed
+for CPU/RAM repair must run during gated restore; the gate is not a promise
+that all interrupts remain disabled. After repair, the helper acknowledges the
+VMM gate before thawing scratch and then the workload. The current helper
+polls cgroup freeze completion with a bounded loop; an event-driven production
+agent and typed capture-failure reporting remain future work.
 
 ### Artifact format and publication
 
@@ -717,6 +1129,32 @@ compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on compatible WHP
 hosts. Cross-backend conversion and standalone NVX snapshot import are not
 supported.
 
+### Template compatibility and placement
+
+A template represents a compatibility class, not an arbitrary fleet image.
+The class includes the backend, CPU/XSAVE/MSR and TSC contract, guest kernel and
+agent build, effective command line, device roles and geometry, network
+identity/policy, and consumed layer identities. Deployment must rebuild or
+recertify templates on relevant rollouts; the VMM's actual compatibility and
+saved-state checks, not a promise about every build with the same version
+string, remain authoritative.
+
+Processor capacity and captured RAM geometry are immutable, but the opt-in
+activation contracts below allow one template to serve several online CPU
+counts and RAM targets. The template matrix is therefore keyed by capacities,
+base state, and supported activation ranges, not necessarily by one artifact
+for every final CPU/RAM size. Layer-role presence and device geometry remain
+fixed regardless of these activations.
+
+For a platform template, substituting a layer requires the same recorded
+logical length and block sizes. The current contract does not promise a
+uniform virtual capacity over arbitrary shorter backing files. Builders may
+standardize actual raw-file geometry or maintain separate geometry classes;
+larger layers need a compatible template. Guest unbind/rebind cannot bypass
+the host's pre-entry geometry checks. The bootstrap's buffer invalidation and
+UUID check address stale cached bytes and attachment mix-ups, not permission
+to alter the saved machine topology.
+
 ### Restore-time processor activation
 
 The microVM separates the immutable processor capacity recorded by a snapshot from
@@ -852,6 +1290,17 @@ contracts do not expose `IA32_TSC_ADJUST` because snapshot state cannot preserve
 that register independently of `IA32_TSC`; Linux therefore does not interpret
 OpenVMM's host-side TSC correction as per-vCPU firmware adjustment skew.
 
+KVM preserves the subsecond part of the downtime when advancing TSC, rather
+than rounding the correction to whole seconds. For restored SMP on MSHV and
+WHP, partition time is frozen while VP counters are aligned before execution,
+avoiding skew introduced by sequential host register writes. WHP additionally
+uses a partition-reference-time-based TSC model for restored SMP timestamp
+reads, including `RDTSC`/`RDTSCP` and TSC MSR reads. An intentional guest TSC
+adjustment returns that VP to its guest-programmed hardware counter. This
+backend repair is not general cross-host TSC-frequency conversion; see
+[`virt_kvm`](../openvmm/vmm_core/virt_kvm) and
+[`virt_whp::tsc`](../openvmm/vmm_core/virt_whp/src/tsc.rs).
+
 Replaying a snapshot also replays the guest's in-memory random-number-generator
 state. Tiered restore, processor activation, and an explicit RAM target each
 cause OpenVMM to create a fresh one-time packet and expose it through the portb
@@ -878,6 +1327,79 @@ generation ID while preserving machine identity and RNG continuity. Fresh
 post-restore entropy and the replacement generation ID are never stored in the
 reusable snapshot; only the prior ID remains as the agent's comparison token.
 
+## Snapshot sharing and host storage
+
+Private COW restore prevents a VM's writes from modifying the reusable
+artifact. It does not guarantee that clean physical pages are unshared across
+VMs mapping the same file. Guest kernel, agent, and cached workload pages can
+all originate in `memory.bin`; dropping the guest page cache before capture
+does not by itself eliminate shared host physical pages or cache side channels.
+
+### Trust-domain policy (Proposed)
+
+Production artifact policy must distinguish write isolation from page-sharing
+isolation. A workload-start image contains pages addressable by the workload;
+sharing those pages across mutually untrusted tenants creates an avoidable
+shared-page timing surface. Use tenant-scoped artifacts or independently
+instantiated backing files instead of treating COW as tenant isolation.
+
+A fleet-shared platform template requires a narrower, verified argument: it
+contains no tenant image bytes, configuration, secrets, or workload state, and
+the workload cannot map the captured agent/kernel memory or configuration
+region. Namespace/device policy and agent handling of secrets are part of that
+argument. It is not enough to assert that PID 1 had not mounted a layer, or
+that a template carries the `platform` label. The current VMM does not prove
+these guest provenance and addressability properties. Security review must
+also consider agent secret-dependent accesses and host memory deduplication.
+
+An instance checkpoint has one claimed continuation. Its single-use rule
+prevents accidental forks but does not replace artifact confidentiality,
+retention policy, or protection against host-side copying.
+
+### Independent backing files (Proposed)
+
+Per-tenant instantiation can separate file-backed page caches while retaining
+shared disk extents on suitable filesystems:
+
+| Reference or copy | File identity | Isolation implication |
+| --- | --- | --- |
+| Hard link or symlink | Same backing file | Does not separate the file-backed page cache |
+| Linux reflink (`FICLONE`) | Distinct inode, initially shared extents | Distinct file page caches, subject to host deduplication policy |
+| Windows ReFS block clone | Distinct file streams, initially shared extents | Physical-frame separation under COW mappings requires validation on the deployed Windows build |
+| Independent full copy | Distinct backing file | Avoids same-file sharing, subject to host deduplication policy |
+
+XFS/btrfs reflinks and ReFS block clones are optimization options, not mandatory
+snapshot storage formats. NTFS and filesystems without cloning can use copies.
+The current Windows snapshot fallback is a dense copy, not an implemented
+ReFS per-tenant artifact service. KSM/page combining or other memory merging
+must not recreate sharing where the deployment relies on separate files;
+ReFS on-disk clone semantics alone are not proof of separate physical frames.
+
+Automatic RAM hard-link publication during capture is a different optimization:
+it transfers the exact stopped source backing into one immutable generation.
+It must not be confused with creating separate tenant backing files. Placement,
+instantiation, access control, and garbage collection remain host-service work.
+
+Capacity planning must measure clean resident pages per backing generation,
+dirty private pages per restored VM, and Windows COW commit charge separately.
+A newly instantiated file may have a cold page cache even when the source
+template is warm. Measure first restore and steady-state restore separately;
+do not assume a near-zero on-disk clone cost means a free memory working set.
+
+### DAX and other memory-backed layers (Proposed)
+
+The current profile exposes neither virtio-pmem/DAX layers nor `phram` image
+carriers. Retaining virtio-blk keeps read-only enforcement in the device I/O
+path and avoids mapping shared image pages directly into the guest. DAX would
+need host-enforced write protection, a restricted device surface, and an
+explicit trust-domain sharing policy. It would also require suitable
+uncompressed EROFS images, giving up the chosen compression benefits.
+
+Directly mapping an entire image also has guest-physical-address and kernel
+metadata costs even when little of it is used. A future small-image carrier
+or DAX profile should be justified by measured working sets and security
+analysis, not presented as an existing size-based automatic fallback.
+
 ## Host attachment model
 
 Snapshot state contains guest-visible progress, not process-local resources.
@@ -887,6 +1409,7 @@ Each external resource has a stable ID and a declarative reconstruction policy.
 | --- | --- | --- |
 | portb | Pending RX/TX bytes | Host serial endpoint, fresh process generation ID, and optional restore packet |
 | console | Queue progress, staged RX, partial TX, policy | Listener, client connection, or supplied handle |
+| Reserved control console | Distinct console attachment and transport inventory supported by internal helpers | Public launch/restore activation remains unavailable pending authenticated broker support |
 | network | Static identity, queue/packet progress, profile and policy identity | Fresh in-process Consomme endpoint and matching egress policy |
 | filesystem | FUSE namespace, handles, cookies, root/object identity, access mode | Fresh host-directory attachment |
 | sandbox block | Queue/device state, fixed roles, access, geometry, read-only layer identities, and scratch policy | Matching read-only layers plus a verified private paired scratch copy, or a new same-geometry scratch file |
@@ -929,8 +1452,9 @@ entropy reseed, active console RX/TX, network policy and HTTP traffic, and live
 virtio-fs attachment revalidation. Sandbox coverage adds deterministic active
 block-I/O drain, paired scratch publication, two private restores, fresh
 scratch replacement, and pre-entry rejection of missing, corrupt, mismatched,
-or wrong-geometry media. The same selected native microVM suite passes on KVM,
-MSHV, and WHP. Coverage also includes 1/2/4/8-vCPU topology, APIC identity,
+or wrong-geometry media. The native suite targets KVM, MSHV, and WHP; a passing
+run on one backend is not a fresh result for the others. Coverage also includes
+1/2/4/8-vCPU topology, APIC identity,
 pinned per-vCPU execution, timer/interrupt progress, reset, cancellation,
 count and topology mismatch rejection, and repeated immutable restore.
 Restore-time processor coverage captures one capacity-8 template with a
@@ -945,6 +1469,10 @@ reduced-prefix saves are rejected, and that dormant VP access fails cleanly.
 Lifecycle profiling verifies that MSHV binds exactly the requested prefix while
 fixed-capacity comparisons retain equivalent per-prefix binding and
 worker-construction costs.
+Additional unit coverage exercises the control-console reservation and
+attachment inventory, command-line spoofing rejection, management exclusion
+at the snapshot boundary, output-drain completion and failures, and backend
+TSC repair. Hardware-dependent clock tests still require their native backend.
 Platform CI and the benchmark histories in `data/` provide the wider host
 matrix.
 
@@ -963,6 +1491,8 @@ The current ABI family intentionally does not provide:
 - ABI or PVH-layout value 1 snapshots;
 - snapshot block media other than cached regular raw files;
 - sandbox-block construction through TTRPC;
+- public activation of the reserved control console or an authenticated guest RPC broker;
+- replaceable sandbox configuration, a production OCI agent, or a public sandbox snapshot workflow;
 - serialization of live network flows or native host handles;
 - snapshotting of the contents of a live virtio-fs export; or
 - compatibility with standalone NVX `MVMSNAP*` or `WHPSNAP*` files.
@@ -978,23 +1508,94 @@ current host validation rejects tenant command-line configuration and records
 layer identities as unbound, but cannot prove that arbitrary guest code did
 not read an attached layer before requesting capture.
 
+The control-console reservation, attachment serialization, and snapshot RPC
+exclusion are foundations for that protocol, not completion of it. The shell
+bootstrap does not implement a fleet-safe platform build point, warm-runtime
+handoff, arbitrary OCI policy, or production agent resource guarantees.
+
 Changing a guest-visible address, IRQ, command-line token, feature mask, queue
 shape, time policy, or device behavior requires a new microVM ABI version. A
 backend-specific difference is valid only when it is explicitly part of that
 versioned contract, such as the virtio-net IRQ.
 
+## Remaining production work
+
+The following items are **Proposed**, beyond the low-level implementation:
+
+| Area | Remaining design or delivery work |
+| --- | --- |
+| Launch configuration and control | Implement the replaceable region, consumed-section validation, authenticated broker, bounded framed protocol, reconnect/cancellation semantics, and node-version compatibility policy. |
+| Production agent | Complete OCI policy, atomic workload placement, orphan supervision, typed errors, PTY/log handling, and capture-safe worker rendezvous. Measure agent CPU/memory reserves. |
+| Image conversion | Build the curated-base converter, metadata allowlist, geometry classes, admission validation, and tests for crafted overlay/security attributes. |
+| Snapshot orchestration | Integrate trusted placeholder-based platform builds, per-runtime warm shims, checkpoint requests, private scratch acquisition, and capture failure reporting with the public sandbox workflow. |
+| Artifact lifecycle | Define tenant-aware placement, retention, refcounts, quotas, distribution, and GC for layers, RAM, state, and paired scratch; invalidate or recertify templates on rollout. |
+| Sharing isolation | Validate platform-template provenance and workload memory/device restrictions, per-tenant memory budgets, host deduplication policy, and ReFS physical-frame separation. |
+| Metrics and performance | Define readiness and billing metrics; measure launch-to-workload-runnable latency, conversion/cache misses, scratch copy cost, cold versus warm page caches, and activation costs independently. |
+| Networking | Design any external endpoint rebinding or tenant resolver/routing extension without silently changing the current portable profile or saved policy. Live flows must reconnect. |
+
+The sandbox proposal's roughly 10-ms restore goal is a performance target, not
+a guarantee established by this document. Report the precise readiness
+boundary and backend for every measurement; see [Benchmarks](benchmarks.md).
+
+### Workload compatibility and volumes (Proposed)
+
+Systemd-as-entrypoint images need an explicit, slower compatibility profile:
+appropriate container environment, read-only system views, private devices,
+mount propagation, an agent-owned parent cgroup with a delegated subtree, and
+the required stop signal. Such images may need `CAP_MKNOD` together with a
+cgroup device filter. They are not covered by the current drop-all-capabilities
+bootstrap, and its private mount policy must not be described as that profile.
+
+Azure Files, secret/content volumes, and other optional mounts remain undesigned.
+Guest-side CIFS, a scratch-backed temporary directory, or an explicit small
+content attachment are possible directions, not supported extra device slots
+in the fixed ABI. Secure environment delivery through the proposed launch
+region is distinct from secret-volume delivery. Scratch cannot currently grow
+online; capacity exhaustion and whole-file copy-up remain workload concerns.
+
+### Distribution extensions (Proposed)
+
+P2P distribution can populate the same immutable node blob cache without
+changing the guest's filesystem view. Demand fetching missing blob ranges
+behind virtio-blk is another possible extension for large images, but it must
+define bounded I/O failure, integrity, and snapshot eligibility before replacing
+the current cached regular-file backend. Neither facility is implemented.
+Adopt them based on measured cache misses and first-run latency, not merely
+because a format permits them.
+
+### Alternatives considered
+
+| Alternative | Design tradeoff |
+| --- | --- |
+| Rootfs over virtio-fs/virtiofsd or 9p | Unnecessary per-operation filesystem transport for fixed cold-plugged layers. The existing optional HostFs export serves a different purpose. |
+| Nydus/RAFS and an in-guest fetcher | Lazy distribution may be valuable, but an extra fetcher/daemon is not needed for fully staged EROFS blobs. Host-side distribution can evolve independently. |
+| virtio-pmem/DAX or general-purpose phram layers | Requires a new memory/device and sharing contract; direct shared-page mappings and image-sized metadata costs need explicit justification. |
+| tmpfs scratch | Competes with workload RAM and turns storage growth into memory pressure instead of an independent storage limit. |
+| One merged blob or partitioned disk per image combination | Loses independent caching and reuse of distro/runtime layers; adds layout parsing without a need for arbitrary device discovery. |
+| Guest device-mapper snapshots | Adds a second copy-on-write mechanism when overlayfs already supplies the writable filesystem view. |
+| SquashFS or uncompressed EROFS | EROFS is the selected compressed read-only and overlay-metadata contract. Another format needs a concrete benefit; uncompressed images are primarily relevant to a future DAX path. |
+| A general init system in the outer guest | Adds services and boot work that a single workload's supervisor does not need. A systemd workload inside its own namespace is a separate compatibility question. |
+| Another vsock or multiport control device | The reserved single-port control console reuses existing queue and saved-state machinery; authentication and RPC still have to be built. |
+| Configuration in the kernel command line | Size and secrecy limits, and no per-restore replacement of the captured effective command line. |
+| Configuration baked into layers, scratch, or initramfs | Forces filesystem access or per-launch image writes and can leave stale configuration in captured RAM. The launch region keeps configuration separate from reusable artifacts. |
+| Full layer hashing inside the guest | Reads whole images on the launch path. Current integrity checks belong to host restore; UUID checks in the guest detect attachment mistakes only. |
+| Sharing one warm-workload memory file across tenants | COW protects artifact contents, not physical-page isolation. Tenant-scoped instantiation and its memory cost need explicit policy. |
+| Replacing the agent with the workload via `exec` | Removes supervision, orphan reaping, and control service. The workload must be a child. |
+
 ## Integrated implementation status
 
-The former phase proposal files are no longer present in the OpenVMM tree.
-Their feature areas are integrated as follows:
+The implementation and remaining proposals separate as follows:
 
 | Area | Current implementation |
 | --- | --- |
-| Base machine | PVH boot, MP/ACPI boot metadata, chipset/PMIO devices, fixed-role sandbox blocks, and 1/2/4/8-vCPU SMP are implemented. Linux/MSHV is supported in addition to KVM and WHP. |
-| Snapshot and restore | Guest-requested capture with staged version-5 artifacts and structurally validated new-process restore is implemented with exact multi-VP capacity plus either no block or three-tier fixed-role layers. Opt-in contracts may record a smaller boot-online VP prefix and an immutable RAM capacity, then activate a requested VP prefix and 128-MiB-aligned RAM target before restore readiness without changing topology, capacity, or saved state. Explicit MSHV processor targets instantiate only that VP prefix and cannot be saved again; non-explicit MSHV, KVM, and WHP restores instantiate full processor capacity. Captured RAM uses private COW mappings, expansion uses fresh private backing, paired scratch is privately copied, and the reusable artifact is unchanged. Paired or fresh scratch, a post-restore input gate, and single-use resume claims are supported. Versions 2 through 4 remain readable when their machine contract carries supported ABI and PVH layout value 2; historical artifacts without boot-online or RAM-capacity fields cannot request those activations. Restore is same-backend. Public sandbox orchestration remains gated on issues #158–#160. |
-| Console | Fixed virtio-console, private RX/TX state, and declarative endpoint reconstruction are implemented. |
+| Base machine | PVH, MP/minimal ACPI, allowlisted chipset/PMIO, fixed-role sandbox blocks, eight reserved virtio-mmio slots, and 1/2/4/8-vCPU SMP on KVM, MSHV, and WHP. Persisted ABI and PVH layout remain value 2. |
+| Snapshot and restore | Guest-requested version-5 publication, same-backend restore, exact saved inventory, private COW RAM, optional fresh RAM expansion, fresh/paired scratch, three sandbox tiers, input gating, single-use resume claims, and management exclusion at the capture boundary. Older supported manifests remain readable subject to their recorded capabilities. |
+| Resource activation | Opt-in CPU-prefix and 128-MiB-aligned RAM targets within immutable capacity. Explicit MSHV targets materialize only that VP prefix and cannot be saved again; KVM, WHP, and untargeted MSHV retain full VP capacity. |
+| Console | Boot virtio-console with private RX/TX state and reconnect policies; bounded portb/host-relay drain at process exit. The separate control console has reservation and snapshot lifecycle support but no public authenticated activation. |
 | Network | Static identity, fixed transport, the portable in-process Consomme endpoint, egress policy, and quiesced restore are implemented. Capture drains packet ownership instead of serializing arbitrary pending packets or host flow state. |
-| Filesystem | Fixed no-DAX HostFs and live attachment revalidation are implemented. Provider-backed immutable filesystem generations remain outside the current profile. |
+| Guest filesystem | Kernel features and shell bootstrap for EROFS over ext4 scratch, overlayfs, namespace/cgroup isolation, capability stripping, supervision, and low-level snapshot hooks. Not a complete OCI agent or public sandbox restore workflow. |
+| Host filesystem | Fixed no-DAX HostFs and live attachment revalidation. Provider-backed immutable filesystem generations remain outside the current profile. |
+| Production services | Replaceable configuration, Rust agent, authenticated RPC, image conversion/distribution, artifact lifecycle, and tenant-aware snapshot instantiation remain proposals, not completed VMM features. |
 
 The end-to-end tests establish process-boundary behavior for the available
 native host backend. They do not make every future extension a portability
@@ -1018,6 +1619,11 @@ authoritative.
 | Virtio device-private saved state | [`vm/devices/virtio`](../openvmm/vm/devices/virtio) |
 | Snapshot format, machine contract, publication, validation | [`openvmm_helpers/src/snapshot.rs`](../openvmm/openvmm/openvmm_helpers/src/snapshot.rs) |
 | Capture orchestration | [`openvmm_entry/src/vm_controller.rs`](../openvmm/openvmm/openvmm_entry/src/vm_controller.rs) |
+| Snapshot management exclusion | [`openvmm_core/src/worker/dispatch/snapshot_rpc.rs`](../openvmm/openvmm/openvmm_core/src/worker/dispatch/snapshot_rpc.rs) |
+| Portb process-exit output drain | [`openvmm_entry/src/microvm_output.rs`](../openvmm/openvmm/openvmm_entry/src/microvm_output.rs) |
+| Backend snapshot clocks | [`virt_kvm`](../openvmm/vmm_core/virt_kvm), [`virt_mshv`](../openvmm/vmm_core/virt_mshv), and [`virt_whp`](../openvmm/vmm_core/virt_whp) |
+| Sandbox launch and kernel features | [`scripts/nvx_tools/sandbox.py`](../scripts/nvx_tools/sandbox.py) and [`kernel/config-microvm`](../kernel/config-microvm) |
+| Workload namespace and root construction | [`alpine/nvx-container-launch`](../alpine/nvx-container-launch) and [`alpine/nvx-container-enter`](../alpine/nvx-container-enter) |
 | Guest workload, scratch quiesce, and post-restore CPU/RAM repair | [`alpine/nvx-snapshot`](../alpine/nvx-snapshot) and [`alpine/nvx-init-agent`](../alpine/nvx-init-agent) |
 | Self-contained OpenVMM control-plane tests | [`guest_test_pvh`](../openvmm/guest_test_pvh), [`vmm_tests/tests/tests/x86_64/microvm.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/x86_64/microvm.rs), and [`vmm_tests/tests/tests/ttrpc.rs`](../openvmm/vmm_tests/vmm_tests/tests/tests/ttrpc.rs) |
 | NVX Linux and device integration tests | [`scripts/nvx_tools/microvm_tests.py`](../scripts/nvx_tools/microvm_tests.py) and [`scripts/nvx_tools/microvm_test_scripts`](../scripts/nvx_tools/microvm_test_scripts) |

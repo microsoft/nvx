@@ -143,9 +143,9 @@ Conversion and scratch formatting stay off the start path; prepare those
 artifacts on Linux with `mkfs.erofs` and `mkfs.ext4`.
 
 This is the cold-filesystem bootstrap described in
-[the sandbox design](fs-and-snapshot-design.md), not the final production
-agent. It accepts no environment variables or secrets, does not support block
-snapshots, and deliberately omits the configuration region and runtime RPC.
+[the sandbox design](design.md#implemented-filesystem-bootstrap), not the final
+production agent. It accepts no environment variables or secrets and does not
+expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
 Arguments are individual kernel-command-line tokens and therefore cannot
 contain whitespace. The workload enters private mount/PID/UTS namespaces with
 a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
