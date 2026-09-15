@@ -143,7 +143,7 @@ Conversion and scratch formatting stay off the start path; prepare those
 artifacts on Linux with `mkfs.erofs` and `mkfs.ext4`.
 
 This is the cold-filesystem bootstrap described in
-[the sandbox design](design.md#implemented-filesystem-bootstrap), not the final
+[the sandbox design](design/sandbox-filesystem-and-agent-architecture.md#implemented-filesystem-bootstrap), not the final
 production agent. It accepts no environment variables or secrets and does not
 expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
 Arguments are individual kernel-command-line tokens and therefore cannot
