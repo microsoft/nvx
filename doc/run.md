@@ -48,6 +48,72 @@ python3 scripts/nvx.py run --machine microvm --processors 8
 The microVM uses fixed device topology, reserves a PVH status page, and uses
 shared-status edge-triggered virtio interrupts with 1, 2, 4, or 8 vCPUs.
 
+## Run OpenVMM directly
+
+The platform release archives are self-contained; `scripts/nvx.py` is a
+convenience wrapper and is not required at runtime. Extract the archive that
+matches the host and run the following command from its
+`nvx-VERSION-PLATFORM` directory. For Linux/KVM:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --processors 1 \
+  --hypervisor kvm \
+  --memory 128M \
+  --kernel guest/vmlinux \
+  --initrd guest/initramfs.cpio.gz
+```
+
+For Windows/WHP in PowerShell:
+
+```powershell
+.\bin\openvmm.exe `
+  --single-process `
+  --machine microvm `
+  --processors 1 `
+  --hypervisor whp `
+  --memory 128M `
+  --kernel guest\vmlinux `
+  --initrd guest\initramfs.cpio.gz
+```
+
+For Linux/MSHV, use the `linux-mshv` archive and replace `kvm` with `mshv`.
+If the artifacts are already installed in the repository layout, use
+`openvmm/target/release/openvmm[.exe]`, `build/vmlinux`, and
+`build/initramfs.cpio.gz` instead of the paths above.
+
+Most `nvx.py run` options pass through unchanged: `--machine`, `--processors`,
+`--mount`, `--net`, `--network-profile`, `--cmdline`, `--restore-snapshot`,
+`--restore-processors`, and `--restore-ready-path`. The wrapper performs these
+translations and additions:
+
+| `nvx.py run` | Direct OpenVMM option |
+| --- | --- |
+| `--hypervisor auto` | `--hypervisor kvm` on Linux or `--hypervisor whp` on Windows |
+| `--memory-mib N` | `--memory NM` |
+| `--memory-capacity-mib N` | `--memory-capacity NM` on a fresh boot |
+| `--restore-memory-mib N` | `--restore-memory NM` |
+| `--dry-run` | No equivalent; this only prints the generated command |
+
+Always include `--single-process`. When restoring, omit `--memory`, `--kernel`,
+and `--initrd`, and add `--restore-entropy`; the wrapper adds this option
+automatically. For example:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --processors 8 \
+  --hypervisor kvm \
+  --restore-snapshot /var/lib/nvx/snapshot \
+  --restore-entropy \
+  --restore-processors 4 \
+  --restore-memory 1024M \
+  --restore-ready-path /run/nvx/restore-ready.sock
+```
+
 ## Migration from the retired profile
 
 `microvm` is now the only selector and launches the contract previously named

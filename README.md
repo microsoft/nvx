@@ -22,6 +22,9 @@ selected platform, so no local build is required. A successful boot prints
 Exit cleanly from the guest with `/sbin/nvx-exit 0`. See the [setup](doc/setup.md) and
 [run](doc/run.md) guides for detailed prerequisites and runtime options.
 
+> ℹ️ For direct OpenVMM integration without the `scripts/nvx.py` runtime harness,
+see [Run OpenVMM directly](doc/run.md#run-openvmm-directly).
+
 ### Linux / KVM
 
 Requires [KVM configured with read/write access to `/dev/kvm`](doc/setup.md#linux--kvm).
