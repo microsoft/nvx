@@ -52,7 +52,8 @@ nvx/
 |   |-- benchmarks.md            Benchmark commands and measurement methodology
 |   |-- build.md                 Guest and OpenVMM build workflows
 |   |-- ci.md                    Continuous integration overview
-|   |-- design.md                Current microVM architecture and ABI
+|   |-- design.md                Design index
+|   |-- design/                  MicroVM, sandbox, and snapshot design chapters
 |   |-- distribution.md          Packaging and source delivery
 |   |-- project-structure.md     This guide
 |   |-- run.md                   Guest launch and host mapping
