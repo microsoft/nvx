@@ -1,0 +1,54 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-DIRECTIONAL-NETWORK-FAIL code=$code"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+tries=0
+device=
+while [ -z "$device" ] && [ "$tries" -lt 200 ]; do
+    for path in /sys/class/net/*; do
+        [ -e "$path" ] || continue
+        candidate=${path##*/}
+        [ "$candidate" = lo ] && continue
+        device=$candidate
+        break
+    done
+    [ -n "$device" ] || sleep 0.05
+    tries=$((tries + 1))
+done
+[ -n "$device" ] || fail 20
+ifconfig "$device" @GUEST_IPV4@ netmask 255.255.255.0 up || fail 21
+route add default gw @GATEWAY_IPV4@ dev "$device" 2>/dev/null || true
+
+case "@EGRESS@" in
+allow)
+    grep -q 'virtnet_dns=@GATEWAY_IPV4@' /proc/cmdline || fail 22
+    response=$(wget -T 5 -qO- http://@GATEWAY_IPV4@:@HTTP_PORT@/directional) || fail 23
+    [ "$response" = NVX-DIRECTIONAL-RESPONSE-OK ] || fail 24
+    nc -l -p @INGRESS_PORT@ >/dev/null 2>&1 & ingress_pid=$!
+    sleep 0.1
+    kill -0 "$ingress_pid" 2>/dev/null || fail 25
+    echo NVX-DIRECTIONAL-INGRESS-"READY"
+    read -r ingress_release || fail 26
+    [ "$ingress_release" = NVX-DIRECTIONAL-INGRESS-CHECKED ] || fail 27
+    kill "$ingress_pid" 2>/dev/null || true
+    wait "$ingress_pid" 2>/dev/null || true
+    ;;
+deny)
+    if grep -q 'virtnet_dns=' /proc/cmdline; then
+        fail 28
+    fi
+    if wget -T 2 -qO /dev/null http://@GATEWAY_IPV4@:@HTTP_PORT@/directional; then
+        fail 29
+    fi
+    ;;
+*)
+    fail 30
+    ;;
+esac
+
+echo @COMPLETION_MARKER@
+nvx-exit 0
