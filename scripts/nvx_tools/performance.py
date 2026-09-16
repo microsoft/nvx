@@ -73,6 +73,8 @@ LIFECYCLE_MEMORY_MIB = 128
 LIFECYCLE_BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
 LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 LIFECYCLE_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
+LIFECYCLE_STABILITY_MINIMUM_SAMPLES = 10
+LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 = 1.25
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
@@ -922,6 +924,29 @@ def _openvmm_statistics(
     return p50, minimum, maximum, len(samples)
 
 
+def _validate_snapshot_generation_stability(
+    document: dict[str, object], backend: str, source: Path
+) -> None:
+    samples = _openvmm_samples(
+        document, "snapshot_capture", backend, "samples_ms", source
+    )
+    if len(samples) < LIFECYCLE_STABILITY_MINIMUM_SAMPLES:
+        return
+
+    ordered = sorted(samples)
+    p25 = ordered[math.ceil(len(ordered) * 0.25) - 1]
+    p50 = statistics.median(ordered)
+    ratio = p50 / p25
+    if ratio > LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25:
+        raise PerformanceError(
+            f"unstable snapshot generation at {source}:snapshot_capture."
+            f"{backend}.samples_ms: p50 {p50:.3f} ms is "
+            f"{(ratio - 1) * 100:.1f}% above p25 {p25:.3f} ms "
+            f"(limit {(LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 - 1) * 100:.1f}%); "
+            "rerun on an idle host"
+        )
+
+
 def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
     backend = OPENVMM_BACKENDS.get(platform)
     if backend is None:
@@ -1022,6 +1047,7 @@ def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
                 f"{input_path}:{section}.{backend}.{fields[3]} contains "
                 f"{count} samples, expected {runs}"
             )
+    _validate_snapshot_generation_stability(document, backend, input_path)
 
     for section in ("backends", "snapshot_restore"):
         timeouts = _openvmm_non_negative_int(

@@ -91,6 +91,7 @@ runs:
           --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
           --skip-build \
           --teardown-mode "${{ inputs.teardown-mode }}" \
+          --snapshot-profile \
           --output "${run_dir}/acceptance.json"
 
     - name: Run Linux performance suite
@@ -203,6 +204,7 @@ runs:
           --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
           --skip-build `
           --teardown-mode "${{ inputs.teardown-mode }}" `
+          --snapshot-profile `
           --output "$RunDir/acceptance.json" `
           @CpuArgs
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -421,6 +423,7 @@ runs:
         }
 
     - name: Upload benchmark results
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         path: data/runs/${{ inputs.platform }}
