@@ -25,10 +25,46 @@ workload_fatal() {
         sleep 3600
     done
 }
+resolve_workload_identity() {
+    case "$workload_uid" in
+        '' | 0 | *[!0-9]*) workload_fatal "workload UID is unavailable" ;;
+    esac
+    case "$workload_gid" in
+        '' | 0 | *[!0-9]*) workload_fatal "workload GID is unavailable" ;;
+    esac
+    workload_record=$(
+        awk -F: -v uid="$workload_uid" '
+            $3 == uid { count++; record = $1 ":" $3 ":" $4 ":" $6 }
+            END { if (count == 1) print record; else exit 1 }
+        ' /etc/passwd
+    ) || workload_fatal "configured workload UID is unavailable"
+    workload_name=${workload_record%%:*}
+    workload_remainder=${workload_record#*:}
+    resolved_uid=${workload_remainder%%:*}
+    workload_remainder=${workload_remainder#*:}
+    resolved_gid=${workload_remainder%%:*}
+    workload_home=${workload_remainder#*:}
+    [ -n "$workload_name" ] && [ "$workload_home" != "$workload_remainder" ] ||
+        workload_fatal "configured workload user record is invalid"
+    [ "$resolved_uid" = "$workload_uid" ] &&
+        [ "$resolved_gid" = "$workload_gid" ] ||
+        workload_fatal "configured workload identity does not match the user database"
+    awk -F: -v gid="$workload_gid" \
+        '$3 == gid { found = 1 } END { exit !found }' /etc/group ||
+        workload_fatal "configured workload GID is unavailable"
+    case "$workload_home" in
+        /*) ;;
+        *) workload_fatal "configured workload home is invalid" ;;
+    esac
+    [ -d "$workload_home" ] && [ ! -L "$workload_home" ] ||
+        workload_fatal "configured workload home is unavailable"
+}
 nvx_exec=
 nvx_exec_seen=false
 workload_uid=
 workload_gid=
+workload_lifecycle=one-shot
+control_tty=
 # Kernel command-line tokens are deliberately split on spaces.
 # shellcheck disable=SC2086
 set -f
@@ -42,6 +78,8 @@ for token in $cmdline; do
             ;;
         nvx_workload_uid=*) workload_uid=${token#*=} ;;
         nvx_workload_gid=*) workload_gid=${token#*=} ;;
+        nvx_lifecycle=*) workload_lifecycle=${token#*=} ;;
+        nvx_control_tty=*) control_tty=${token#*=} ;;
     esac
 done
 set +f
@@ -51,38 +89,7 @@ if [ -n "$nvx_exec" ]; then
         *) fatal "nvx_exec must be an absolute initramfs path" ;;
     esac
     if [ -n "$workload_uid$workload_gid" ]; then
-        case "$workload_uid" in
-            '' | 0 | *[!0-9]*) workload_fatal "workload UID is unavailable" ;;
-        esac
-        case "$workload_gid" in
-            '' | 0 | *[!0-9]*) workload_fatal "workload GID is unavailable" ;;
-        esac
-        workload_record=$(
-            awk -F: -v uid="$workload_uid" '
-                $3 == uid { count++; record = $1 ":" $3 ":" $4 ":" $6 }
-                END { if (count == 1) print record; else exit 1 }
-            ' /etc/passwd
-        ) || workload_fatal "configured workload UID is unavailable"
-        workload_name=${workload_record%%:*}
-        workload_remainder=${workload_record#*:}
-        resolved_uid=${workload_remainder%%:*}
-        workload_remainder=${workload_remainder#*:}
-        resolved_gid=${workload_remainder%%:*}
-        workload_home=${workload_remainder#*:}
-        [ -n "$workload_name" ] && [ "$workload_home" != "$workload_remainder" ] ||
-            workload_fatal "configured workload user record is invalid"
-        [ "$resolved_uid" = "$workload_uid" ] &&
-            [ "$resolved_gid" = "$workload_gid" ] ||
-            workload_fatal "configured workload identity does not match the user database"
-        awk -F: -v gid="$workload_gid" \
-            '$3 == gid { found = 1 } END { exit !found }' /etc/group ||
-            workload_fatal "configured workload GID is unavailable"
-        case "$workload_home" in
-            /*) ;;
-            *) workload_fatal "configured workload home is invalid" ;;
-        esac
-        [ -d "$workload_home" ] && [ ! -L "$workload_home" ] ||
-            workload_fatal "configured workload home is unavailable"
+        resolve_workload_identity
         status=0
         HOME="$workload_home" USER="$workload_name" LOGNAME="$workload_name" \
             setpriv \
@@ -176,6 +183,18 @@ fi
 if [ "$sandbox_mode" = true ]; then
     exec /sbin/nvx-init-agent
 fi
+case "$workload_lifecycle" in
+    one-shot) ;;
+    managed)
+        resolve_workload_identity
+        [ "$control_tty" = hvc2 ] ||
+            workload_fatal "managed lifecycle requires the dedicated control tty"
+        exec /sbin/nvx-managed-agent \
+            "/dev/$control_tty" - nvx-managed \
+            "$workload_uid" "$workload_gid" "$workload_name" "$workload_home"
+        ;;
+    *) workload_fatal "unsupported workload lifecycle" ;;
+esac
 # netsnap: optional snapshot self-test/benchmark for --net (see `scripts/nvx.py bench-net-snapshot`).
 # When the kernel command line contains "netsnap", check the link, then ask the VMM to take a
 # snapshot through /sbin/nvx-snapshot. On the snapshot run the VMM captures here

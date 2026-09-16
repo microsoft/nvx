@@ -97,8 +97,8 @@ All eight fixed address slots are reserved, including the dedicated control
 console at `0xd0007000..0xd0007fff` on IRQ 3 (shared status at `0x3001c`).
 Snapshot-capable builds instantiate the virtio-fs transport even without a host
 attachment so it is discoverable before capture. Other optional devices are
-instantiated only when active; the control slot is reserved but activation is
-currently rejected by the public entry points.
+instantiated only when active. The control slot is activated by an
+authenticated local endpoint on Linux or Windows.
 Every device uses virtio-mmio, is omitted from ACPI, and has packed-ring support
 masked.
 
@@ -111,7 +111,7 @@ masked.
 | `runtime` virtio-blk | `blk:sandbox:runtime` | `0xd0004000..0xd0004fff` | 12 | Optional read-only role |
 | `custom` virtio-blk | `blk:sandbox:custom` | `0xd0005000..0xd0005fff` | 9 | Optional read-only role |
 | `scratch` virtio-blk | `blk:sandbox:scratch` | `0xd0006000..0xd0006fff` | 11 | Required writable final role when blocks are present |
-| Control virtio-console | `console:microvm-control0` | `0xd0007000..0xd0007fff` | 3 | Reserved; authenticated activation not yet available |
+| Control virtio-console | `console:microvm-control0` | `0xd0007000..0xd0007fff` | 3 | Optional authenticated local endpoint |
 
 Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and

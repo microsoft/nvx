@@ -243,6 +243,21 @@ awk -F: -v gid="$workload_gid" '$3 == gid { found = 1 } END { exit !found }' \
 case "$workload_home" in /*) ;; *) fatal "configured workload home is invalid" ;; esac
 [ -d "$rootfs$workload_home" ] && [ ! -L "$rootfs$workload_home" ] ||
     fatal "configured workload home is unavailable"
+workload_lifecycle=$(cmdline_value nvx_lifecycle || true)
+[ -n "$workload_lifecycle" ] || workload_lifecycle=one-shot
+case "$workload_lifecycle" in
+    one-shot) ;;
+    managed)
+        control_tty=$(cmdline_value nvx_control_tty || true)
+        [ "$control_tty" = hvc2 ] ||
+            fatal "managed lifecycle requires the dedicated control tty"
+        echo "NVX-SANDBOX-READY: managed layers=$layer_count"
+        exec /sbin/nvx-managed-agent \
+            "/dev/$control_tty" "$rootfs" "$hostname_value" \
+            "$workload_uid" "$workload_gid" "$workload_name" "$workload_home"
+        ;;
+    *) fatal "unsupported workload lifecycle: $workload_lifecycle" ;;
+esac
 
 set -- "$entrypoint"
 # Kernel command-line tokens are deliberately split on spaces.

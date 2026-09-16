@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import secrets
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -34,6 +36,7 @@ from .common import (
     require_file,
     sha256_file,
 )
+from .control_session import ControlSession
 from .openvmm_process import OpenvmmProcess, TcpConsole
 
 MICROVM_TEST_SCENARIOS = (
@@ -43,6 +46,7 @@ MICROVM_TEST_SCENARIOS = (
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
     "lifecycle",
+    "managed-lifecycle",
     "network-snapshot",
     "restore-memory",
     "restore-processors",
@@ -404,6 +408,162 @@ def run_workload_identity(
         result = process.wait(timeout)
     if result.returncode == 0 or BOOT_MARKER in result.output:
         raise RuntimeError("root workload identity was not rejected before boot")
+
+
+def run_managed_lifecycle(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-managed-lifecycle-") as temporary:
+        root = Path(temporary)
+        endpoint_value = (
+            str(root / "control.sock"),
+            f"//./pipe/openvmm-microvm-{uuid.uuid4().hex}",
+        )[os.name == "nt"]
+        boot_console_address = _available_tcp_address()
+        capability = secrets.token_bytes(32)
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+        )
+        command.extend(
+            (
+                "--microvm-workload-identity",
+                "65534:65534",
+                "--microvm-lifecycle",
+                "managed",
+                "--virtio-console",
+                f"listen=tcp:{boot_console_address[0]}:{boot_console_address[1]}",
+                "--microvm-control-console",
+                f"listen={endpoint_value}",
+                "--microvm-control-auth-stdin",
+            )
+        )
+        log_path = output_dir / "managed-lifecycle.log"
+        process: subprocess.Popen[bytes] | None = None
+        boot_console: TcpConsole | None = None
+        with log_path.open("wb") as log:
+            try:
+                environment = os.environ.copy()
+                environment["OPENVMM_LOG"] = "off"
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=environment,
+                )
+                if process.stdin is None:
+                    raise RuntimeError("failed to create control capability pipe")
+                process.stdin.write(capability)
+                process.stdin.close()
+                boot_console = TcpConsole.connect(boot_console_address, timeout)
+                with ControlSession.connect(
+                    Path(endpoint_value), capability, timeout
+                ) as session:
+                    session.ping(timeout)
+                    first = session.exec(
+                        (
+                            "/bin/sh",
+                            "-c",
+                            "printf managed-state >/tmp/nvx-managed-state; "
+                            "printf first-exec",
+                        ),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                    )
+                if (
+                    first.returncode != 0
+                    or first.category != "exit"
+                    or first.stdout != b"first-exec"
+                    or first.stderr
+                ):
+                    raise RuntimeError(
+                        "first managed workload returned an invalid result"
+                    )
+
+                with ControlSession.connect(
+                    Path(endpoint_value), capability, timeout
+                ) as session:
+                    second = session.exec(
+                        (
+                            "/bin/sh",
+                            "-c",
+                            "cat /tmp/nvx-managed-state; printf second-exec",
+                        ),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                    )
+                    timed_out = session.exec(
+                        ("/bin/sleep", "5"),
+                        timeout_ms=100,
+                        response_timeout=timeout,
+                    )
+                    session.stop(timeout)
+                if (
+                    second.returncode != 0
+                    or second.category != "exit"
+                    or second.stdout != b"managed-statesecond-exec"
+                    or second.stderr
+                ):
+                    raise RuntimeError(
+                        "managed workload state did not survive across exec requests"
+                    )
+                if timed_out.returncode != 124 or timed_out.category != "timeout":
+                    raise RuntimeError("managed workload timeout was not reported")
+                result = process.wait(timeout=timeout)
+                if result != 0:
+                    raise RuntimeError(
+                        f"managed OpenVMM process exited with status {result}"
+                    )
+            finally:
+                if boot_console is not None:
+                    (output_dir / "managed-lifecycle-guest.log").write_bytes(
+                        boot_console.finish()
+                    )
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+
+        invalid = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+        )
+        invalid.extend(
+            (
+                "--microvm-workload-identity",
+                "65534:65534",
+                "--microvm-lifecycle",
+                "managed",
+            )
+        )
+        with OpenvmmProcess(
+            invalid,
+            output_dir / "managed-lifecycle-invalid-transition.log",
+        ) as rejected:
+            result = rejected.wait(timeout)
+        if result.returncode == 0 or BOOT_MARKER in result.output:
+            raise RuntimeError(
+                "managed lifecycle without a control endpoint was not rejected before boot"
+            )
 
 
 def run_console_exit(
@@ -2458,6 +2618,17 @@ def run(args: argparse.Namespace) -> int:
             f"Running microVM workload identity correctness on OpenVMM/{args.backend}"
         )
         run_workload_identity(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "managed-lifecycle" in scenarios:
+        print(f"Running managed microVM lifecycle on OpenVMM/{args.backend}")
+        run_managed_lifecycle(
             executable,
             kernel,
             initrd,

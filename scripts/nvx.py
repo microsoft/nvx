@@ -11,6 +11,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from nvx_tools import sandbox_lifecycle
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
     AlpineBuildConfig,
@@ -230,18 +231,74 @@ def command_run(args: argparse.Namespace) -> None:
 
 
 def command_sandbox(args: argparse.Namespace) -> None:
-    if (args.net is None) != (args.network_profile is None):
-        raise ScriptError("--net and --network-profile must be specified together")
-    launch = SandboxLaunch(
-        layers=tuple(args.layer),
-        scratch=args.scratch,
-        entrypoint=args.entrypoint,
-        args=tuple(args.sandbox_arg),
-        hostname=args.hostname,
-        workload_identity=args.workload_user,
-        memory_max=args.memory_max,
-        pids_max=args.pids_max,
-    ).validated()
+    operation = args.sandbox_operation
+    if operation in ("run", "provision"):
+        if (args.net is None) != (args.network_profile is None):
+            raise ScriptError("--net and --network-profile must be specified together")
+        if not args.layer or args.scratch is None:
+            raise ScriptError(f"sandbox {operation} requires --layer and --scratch")
+        launch = SandboxLaunch(
+            layers=tuple(args.layer),
+            scratch=args.scratch,
+            entrypoint=args.entrypoint,
+            args=tuple(args.sandbox_arg),
+            hostname=args.hostname,
+            workload_identity=args.workload_user,
+            memory_max=args.memory_max,
+            pids_max=args.pids_max,
+        ).validated()
+    else:
+        launch = None
+
+    if operation == "provision":
+        if args.state_dir is None:
+            raise ScriptError("sandbox provision requires --state-dir")
+        assert launch is not None
+        sandbox_lifecycle.provision(
+            args.state_dir,
+            launch,
+            hypervisor=_hypervisor(args.hypervisor),
+            memory_mib=args.memory_mib,
+            net=args.net,
+            network_profile=args.network_profile,
+            cmdline=args.cmdline,
+        )
+        return
+    if operation == "start":
+        if args.state_dir is None:
+            raise ScriptError("sandbox start requires --state-dir")
+        sandbox_lifecycle.start(args.state_dir, args.timeout)
+        return
+    if operation == "exec":
+        if args.state_dir is None:
+            raise ScriptError("sandbox exec requires --state-dir")
+        result = sandbox_lifecycle.exec_workload(
+            args.state_dir,
+            (args.entrypoint, *args.sandbox_arg),
+            timeout_ms=args.exec_timeout_ms,
+            response_timeout=args.timeout,
+        )
+        sys.stdout.buffer.write(result.stdout)
+        sys.stdout.buffer.flush()
+        sys.stderr.buffer.write(result.stderr)
+        sys.stderr.buffer.flush()
+        raise SystemExit(result.returncode)
+    if operation == "stop":
+        if args.state_dir is None:
+            raise ScriptError("sandbox stop requires --state-dir")
+        sandbox_lifecycle.stop(args.state_dir, args.timeout)
+        return
+    if operation == "deprovision":
+        if args.state_dir is None:
+            raise ScriptError("sandbox deprovision requires --state-dir")
+        sandbox_lifecycle.deprovision(args.state_dir)
+        return
+    if args.state_dir is not None:
+        raise ScriptError(
+            "one-shot sandbox execution rejects persistent --state-dir settings"
+        )
+    assert operation == "run"
+    assert launch is not None
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
     initrd = require_file(
@@ -251,6 +308,8 @@ def command_sandbox(args: argparse.Namespace) -> None:
     command = [
         str(executable),
         *launch.openvmm_arguments(),
+        "--microvm-lifecycle",
+        "one-shot",
         "--single-process",
         "--hypervisor",
         _hypervisor(args.hypervisor),
@@ -385,7 +444,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     sandbox = subparsers.add_parser(
         "sandbox",
-        help="run one workload over EROFS layers and private ext4 scratch",
+        help="run or manage workloads over EROFS layers and private ext4 scratch",
     )
 
     def sandbox_layer(value: str) -> SandboxLayer:
@@ -401,13 +460,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             raise argparse.ArgumentTypeError(str(error)) from error
 
     sandbox.add_argument(
+        "sandbox_operation",
+        nargs="?",
+        choices=("run", "provision", "start", "exec", "stop", "deprovision"),
+        default="run",
+    )
+    sandbox.add_argument(
         "--layer",
         action="append",
-        required=True,
+        default=[],
         type=sandbox_layer,
         metavar="ROLE,PATH,EROFS_UUID",
     )
-    sandbox.add_argument("--scratch", required=True, type=Path)
+    sandbox.add_argument("--scratch", type=Path)
+    sandbox.add_argument("--state-dir", type=Path)
     sandbox.add_argument("--entrypoint", default="/bin/sh")
     sandbox.add_argument("--arg", action="append", default=[], dest="sandbox_arg")
     sandbox.add_argument("--hostname", default="nvx-sandbox")
@@ -421,6 +487,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sandbox.add_argument("--memory-max", type=int)
     sandbox.add_argument("--pids-max", type=int)
     sandbox.add_argument("--memory-mib", type=int, default=256)
+    sandbox.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="control operation timeout in seconds (default: 60)",
+    )
+    sandbox.add_argument(
+        "--exec-timeout-ms",
+        type=int,
+        default=0,
+        help="guest workload timeout in milliseconds; zero disables it",
+    )
     sandbox.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     sandbox.add_argument("--net", metavar="IPV4/PREFIX")
     sandbox.add_argument("--network-profile", choices=NETWORK_PROFILES)

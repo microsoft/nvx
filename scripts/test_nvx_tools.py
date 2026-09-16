@@ -27,6 +27,7 @@ from nvx_tools import (  # noqa: E402
     common,
     release,
     sandbox,
+    sandbox_lifecycle,
 )
 
 
@@ -230,6 +231,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.pids_max, 64)
         self.assertEqual(args.workload_user, (1000, 1001))
         self.assertIs(args.handler, nvx.command_sandbox)
+
+    def test_sandbox_command_parses_state_aware_operations(self):
+        provision = nvx.parse_args(
+            [
+                "sandbox",
+                "provision",
+                "--state-dir",
+                "state",
+                "--layer",
+                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+                "--scratch",
+                "scratch.ext4",
+            ]
+        )
+        self.assertEqual(provision.sandbox_operation, "provision")
+        self.assertEqual(provision.state_dir, Path("state"))
+
+        execute = nvx.parse_args(
+            [
+                "sandbox",
+                "exec",
+                "--state-dir",
+                "state",
+                "--entrypoint",
+                "/bin/sh",
+                "--arg=-c",
+                "--arg=echo managed",
+                "--exec-timeout-ms",
+                "5000",
+            ]
+        )
+        self.assertEqual(execute.sandbox_operation, "exec")
+        self.assertEqual(execute.sandbox_arg, ["-c", "echo managed"])
+        self.assertEqual(execute.exec_timeout_ms, 5000)
 
     def test_network_requires_explicit_portable_profile(self):
         args = nvx.parse_args(
@@ -676,6 +711,55 @@ class SandboxTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(common.ScriptError, "UUID is invalid"):
             sandbox.SandboxLayer.parse("distro,layer.erofs,not-a-uuid")
+
+    def test_managed_lifecycle_provisions_and_deprovisions_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer_path = root / "distro.erofs"
+            scratch_path = root / "scratch.ext4"
+            layer_path.write_bytes(b"layer")
+            scratch_path.write_bytes(b"scratch")
+            launch = sandbox.SandboxLaunch(
+                layers=(
+                    sandbox.SandboxLayer(
+                        role="distro",
+                        path=layer_path,
+                        uuid="11111111-1111-1111-1111-111111111111",
+                    ),
+                ),
+                scratch=scratch_path,
+            )
+            state = root / "state"
+
+            sandbox_lifecycle.provision(
+                state,
+                launch,
+                hypervisor="whp",
+                memory_mib=256,
+                net=None,
+                network_profile=None,
+                cmdline="quiet",
+            )
+
+            config = json.loads(
+                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(config["workload_uid"], 65534)
+            self.assertEqual(config["hypervisor"], "whp")
+            self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
+            with self.assertRaisesRegex(common.ScriptError, "already provisioned"):
+                sandbox_lifecycle.provision(
+                    state,
+                    launch,
+                    hypervisor="whp",
+                    memory_mib=256,
+                    net=None,
+                    network_profile=None,
+                    cmdline="quiet",
+                )
+
+            sandbox_lifecycle.deprovision(state)
+            self.assertFalse(state.exists())
 
     def test_launch_contract_rejects_disk_option_delimiters(self):
         with tempfile.TemporaryDirectory() as temporary:

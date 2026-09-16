@@ -244,3 +244,34 @@ root; otherwise the workload is never started.
 The outer agent retains the initramfs root; the capability-stripped child
 enters only the assembled root with `chroot`, because Linux cannot
 `pivot_root` away from an initramfs `rootfs`.
+
+For a state-aware sandbox, provision configuration without starting a VM,
+start it once, run multiple workloads in the same warm guest, stop it while
+retaining configuration, and finally deprovision it:
+
+```bash
+python3 scripts/nvx.py sandbox provision \
+  --state-dir /run/user/1000/nvx-example \
+  --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
+  --scratch /var/lib/nvx/scratch.ext4
+python3 scripts/nvx.py sandbox start \
+  --state-dir /run/user/1000/nvx-example
+python3 scripts/nvx.py sandbox exec \
+  --state-dir /run/user/1000/nvx-example \
+  --entrypoint /usr/bin/python3 --arg=/work/agent.py
+python3 scripts/nvx.py sandbox exec \
+  --state-dir /run/user/1000/nvx-example \
+  --entrypoint /bin/sh --arg=-c --arg='cat /tmp/previous-result'
+python3 scripts/nvx.py sandbox stop \
+  --state-dir /run/user/1000/nvx-example
+python3 scripts/nvx.py sandbox deprovision \
+  --state-dir /run/user/1000/nvx-example
+```
+
+Lifecycle transitions fail closed: `start` rejects an already-running or stale
+runtime record, `exec` and `stop` require a live OpenVMM process, and
+`deprovision` refuses to remove a running sandbox or unknown files. Managed
+workload arguments use the bounded control protocol rather than the kernel
+command line and may contain whitespace. The legacy operation-less `sandbox`
+form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
+request to retain VM state.
