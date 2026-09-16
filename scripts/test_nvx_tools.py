@@ -649,15 +649,30 @@ class BuildTests(unittest.TestCase):
             )
             build._assert_sandbox_kernel_config(config)
 
-            config.write_text(
-                "\n".join(build.REQUIRED_SANDBOX_KERNEL_CONFIG[:-1]) + "\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(
-                common.ScriptError,
-                build.REQUIRED_SANDBOX_KERNEL_CONFIG[-1],
-            ):
-                build._assert_sandbox_kernel_config(config)
+            for missing in build.REQUIRED_SANDBOX_KERNEL_CONFIG:
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(
+                            setting
+                            for setting in build.REQUIRED_SANDBOX_KERNEL_CONFIG
+                            if setting != missing
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(common.ScriptError, missing):
+                        build._assert_sandbox_kernel_config(config)
+
+    def test_checked_in_config_preserves_generic_sandbox_capabilities(self):
+        config = build.REPO_ROOT / "kernel" / "config-microvm"
+        build._assert_sandbox_kernel_config(config)
+        configured = config.read_text(encoding="utf-8").splitlines()
+        for setting in (
+            "CONFIG_SECCOMP_FILTER=y",
+            "CONFIG_UNIX=y",
+            "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
+        ):
+            self.assertIn(setting, configured)
 
     def test_shared_status_kernel_config_is_required(self):
         with tempfile.TemporaryDirectory() as temporary:
