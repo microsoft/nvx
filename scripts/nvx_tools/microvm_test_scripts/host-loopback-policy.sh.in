@@ -7,6 +7,13 @@ fail() {
 }
 
 case "@MODE@" in
+udp-control)
+    printf 'NVX-HOST-LOOPBACK-UDP-CONTROL' |
+        nc -u -w 1 @GATEWAY_IPV4@ @PROXY_PORT@ || fail 99
+    printf 'NVX-HOST-LOOPBACK-UDP-CONTROL' |
+        nc -u -w 1 @GATEWAY_IPV4@ @GENERAL_PORT@ || fail 99
+    echo NVX-HOST-LOOPBACK-UDP-CONTROL-OK
+    ;;
 deny)
     if wget -T 2 -qO /dev/null http://@GATEWAY_IPV4@:@GENERAL_PORT@/general; then
         fail 90
@@ -14,6 +21,13 @@ deny)
     proxy=$(wget -T 5 -qO- http://@GATEWAY_IPV4@:@PROXY_PORT@/proxy) ||
         fail 91
     [ "$proxy" = NVX-HOST-LOOPBACK-PROXY ] || fail 92
+    # A denied flow may return 1; sender execution failures must not pass.
+    printf 'NVX-HOST-LOOPBACK-UDP-PROXY-DENIED' |
+        nc -u -w 1 @GATEWAY_IPV4@ @PROXY_PORT@ ||
+        { [ "$?" -eq 1 ] || fail 99; }
+    printf 'NVX-HOST-LOOPBACK-UDP-GENERAL-DENIED' |
+        nc -u -w 1 @GATEWAY_IPV4@ @GENERAL_PORT@ ||
+        { [ "$?" -eq 1 ] || fail 99; }
     echo NVX-HOST-LOOPBACK-DENY-OK
     ;;
 allow)
