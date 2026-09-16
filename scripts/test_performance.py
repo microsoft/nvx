@@ -675,7 +675,7 @@ class PerformanceTests(unittest.TestCase):
                         "microvm_abi_version": 2,
                         "processors": 8,
                         "warmups": 1,
-                        "measured_runs": 5,
+                        "measured_runs": 10,
                         "shell_memories_mib": [512],
                     }
                 ),
@@ -723,7 +723,7 @@ class PerformanceTests(unittest.TestCase):
                         "microvm_abi_version": 2,
                         "processors": 8,
                         "warmups": 1,
-                        "measured_runs": 5,
+                        "measured_runs": 10,
                         "shell_memories_mib": [512],
                     }
                 ),
@@ -1557,6 +1557,10 @@ class PerformanceTests(unittest.TestCase):
             logs.mkdir()
             (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
             (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / "shell-snapshot.log").write_text(
+                SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            (logs / "network.log").write_text(NETWORK_LOG, encoding="utf-8")
             metadata = {
                 "platform": "linux-kvm-baremetal",
                 "backend": "kvm",
@@ -1569,8 +1573,8 @@ class PerformanceTests(unittest.TestCase):
                 "memory_mib": {"lifecycle": 128},
                 "artifact_revisions": {"nvx": "a", "openvmm": "b"},
                 "warmups": 1,
-                "measured_runs": 5,
-                "virtfs_measured_runs": 3,
+                "measured_runs": 10,
+                "virtfs_measured_runs": 10,
                 "payload_mib": 64,
                 "virtfs_memory_mib": 512,
                 "shell_memories_mib": [64, 128, 256, 512],
@@ -1602,6 +1606,9 @@ class PerformanceTests(unittest.TestCase):
                 "commit",
                 logs,
                 root / "results",
+                require_network=True,
+                require_shell_snapshot=True,
+                require_shared_suite=True,
                 lifecycle_input=lifecycle_path,
             )
             self.assertTrue(result.is_file())
