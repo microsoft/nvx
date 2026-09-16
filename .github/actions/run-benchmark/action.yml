@@ -24,6 +24,14 @@ inputs:
     description: Seconds allowed for each guest benchmark marker
     required: false
     default: "10"
+  runs:
+    description: Measured iterations for every benchmark
+    required: false
+    default: "10"
+  warmups:
+    description: Excluded warmup iterations for every benchmark
+    required: false
+    default: "1"
 runs:
   using: composite
   steps:
@@ -78,8 +86,8 @@ runs:
           --platform "${{ inputs.platform }}" \
           --processors 1 \
           "${cpu_args[@]}" \
-          --warmups 1 \
-          --runs 10 \
+          --warmups "${{ inputs.warmups }}" \
+          --runs "${{ inputs.runs }}" \
           --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
           --skip-build \
           --teardown-mode "${{ inputs.teardown-mode }}" \
@@ -105,9 +113,9 @@ runs:
           --platform "${{ inputs.platform }}" \
           --processors 1 \
           "${cpu_args[@]}" \
-          --warmups 1 \
-          --runs 5 \
-          --virtfs-runs 3 \
+          --warmups "${{ inputs.warmups }}" \
+          --runs "${{ inputs.runs }}" \
+          --virtfs-runs "${{ inputs.runs }}" \
           --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
           --skip-build \
           --teardown-mode "${{ inputs.teardown-mode }}" \
@@ -134,8 +142,8 @@ runs:
             --platform "${{ inputs.platform }}" \
             --processors "${processors}" \
             "${cpu_args[@]}" \
-            --warmups 1 \
-            --runs 5 \
+            --warmups "${{ inputs.warmups }}" \
+            --runs "${{ inputs.runs }}" \
             --shell-memories 512 \
             --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
             --skip-build \
@@ -163,8 +171,8 @@ runs:
           --platform "${{ inputs.platform }}" \
           --processors 1 \
           "${cpu_args[@]}" \
-          --warmups 0 \
-          --runs 1 \
+          --warmups "${{ inputs.warmups }}" \
+          --runs "${{ inputs.runs }}" \
           --device-io-duration-seconds 1 \
           --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
           --skip-build \
@@ -190,8 +198,8 @@ runs:
           --backend "${{ inputs.backend }}" `
           --platform "${{ inputs.platform }}" `
           --processors 1 `
-          --warmups 1 `
-          --runs 10 `
+          --warmups "${{ inputs.warmups }}" `
+          --runs "${{ inputs.runs }}" `
           --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
           --skip-build `
           --teardown-mode "${{ inputs.teardown-mode }}" `
@@ -218,9 +226,9 @@ runs:
           --backend "${{ inputs.backend }}" `
           --platform "${{ inputs.platform }}" `
           --processors 1 `
-          --warmups 1 `
-          --runs 5 `
-          --virtfs-runs 3 `
+          --warmups "${{ inputs.warmups }}" `
+          --runs "${{ inputs.runs }}" `
+          --virtfs-runs "${{ inputs.runs }}" `
           --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
           --skip-build `
           --teardown-mode "${{ inputs.teardown-mode }}" `
@@ -248,8 +256,8 @@ runs:
             --backend "${{ inputs.backend }}" `
             --platform "${{ inputs.platform }}" `
             --processors $Processors `
-            --warmups 1 `
-            --runs 5 `
+            --warmups "${{ inputs.warmups }}" `
+            --runs "${{ inputs.runs }}" `
             --shell-memories 512 `
             --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
             --skip-build `
@@ -278,8 +286,8 @@ runs:
           --backend "${{ inputs.backend }}" `
           --platform "${{ inputs.platform }}" `
           --processors 1 `
-          --warmups 1 `
-          --runs 5 `
+          --warmups "${{ inputs.warmups }}" `
+          --runs "${{ inputs.runs }}" `
           --device-io-duration-seconds 1 `
           --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
           --skip-build `

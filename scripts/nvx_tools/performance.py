@@ -1438,8 +1438,8 @@ def collect_results(
                     "lifecycle warmups": 1,
                     "lifecycle measured runs": 10,
                     "workload warmups": 1,
-                    "workload measured runs": 5,
-                    "virtio-fs measured runs": 3,
+                    "workload measured runs": 10,
+                    "virtio-fs measured runs": 10,
                 }
                 for field, expected in expected_sampling.items():
                     if sampling[field] != expected:
@@ -1499,7 +1499,7 @@ def collect_results(
             )
         expected_controls: dict[str, object] = {
             "warmups": 1,
-            "measured_runs": 5,
+            "measured_runs": 10,
             "shell_memories_mib": [512],
         }
         for field, expected in expected_controls.items():
