@@ -37,6 +37,7 @@ RUN python3 scripts/nvx.py build-initramfs
 FROM scratch AS kernel-artifacts
 COPY --from=kernel /repo/build/vmlinux /vmlinux
 COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
+COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
 
 FROM scratch AS initramfs-artifacts
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
@@ -51,6 +52,7 @@ RUN mkdir -p /out \
 FROM scratch AS artifacts
 COPY --from=kernel /repo/build/vmlinux /vmlinux
 COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
+COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
 COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
 

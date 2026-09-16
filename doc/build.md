@@ -32,10 +32,17 @@ The standard build produces:
 ```text
 build/vmlinux
 build/vmlinux.config
+build/vmlinux.provenance.json
 build/initramfs.cpio.gz
 build/initramfs.cpio.gz.packages.json
+build/openvmm.provenance.json
 openvmm/target/release/openvmm[.exe]
 ```
+
+The provenance sidecars bind the kernel to its pinned archive, patch set,
+input configuration, generated configuration, and output hash, and bind
+OpenVMM to the exact clean gitlink revision and executable hash. Packaging
+rejects missing, dirty, stale, or mismatched provenance.
 
 Run the two test layers separately:
 
@@ -66,7 +73,15 @@ The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
 generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
 absent. Changing an archive hash or patch invalidates both source and object
-caches.
+caches; changing the input configuration invalidates the object cache.
+
+Release packaging stages and verifies a complete output before replacing an
+existing `dist/` version. Its `SOURCE-MANIFEST.json` records the package
+version and exact hashes for OpenVMM, Linux, the generated kernel config, and
+the unchanged Alpine initramfs. The OpenVMM section advertises microVM ABI 2,
+control-session protocol 1, and contract
+`nvx-microvm-v2-control-v1`; product guest-agent metadata is intentionally not
+part of this platform manifest.
 
 ## Building the packaged Linux source
 
