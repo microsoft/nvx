@@ -1,5 +1,5 @@
 name: Publish development release
-description: Restore platform packages and publish an NVX development prerelease
+description: Download platform packages and publish an NVX development prerelease
 
 inputs:
   broker-live-gate-contracts:
@@ -12,43 +12,23 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Prepare release cache tools
-      id: release-cache-tools
-      shell: bash
-      run: |
-        set -euo pipefail
-        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-        mkdir -p "${cache_tools}"
-        ln -sf "$(command -v tar)" "${cache_tools}/tar"
-        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+    - name: Download Linux / KVM release
+      uses: actions/download-artifact@v5
+      with:
+        name: release-linux-kvm
+        path: dist
 
-    - name: Restore Linux / KVM release
-      uses: actions/cache/restore@v5
+    - name: Download Linux / MSHV release
+      uses: actions/download-artifact@v5
       with:
-        path: |
-          dist/*-simple.tar.gz
-        key: release-linux-kvm-${{ github.run_id }}
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
-    - name: Restore Linux / MSHV release
-      uses: actions/cache/restore@v5
-      env:
-        PATH: ${{ steps.release-cache-tools.outputs.path }}
+        name: release-linux-mshv
+        path: dist
+
+    - name: Download Windows / WHP release
+      uses: actions/download-artifact@v5
       with:
-        path: |
-          dist/*-simple.tar.gz
-        key: release-linux-mshv-${{ github.run_id }}
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
-    - name: Restore Windows / WHP release
-      uses: actions/cache/restore@v5
-      with:
-        path: |
-          dist/*-simple.zip
-        key: release-windows-whp-${{ github.run_id }}
-        enableCrossOsArchive: true
-        fail-on-cache-miss: true
+        name: release-windows-whp
+        path: dist
 
     - name: Publish GitHub prerelease
       shell: bash

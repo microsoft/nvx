@@ -604,6 +604,28 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.shell_memories, [64, 128, 256, 512])
 
+    def test_transport_defaults_to_simple_and_broker_is_opt_in(self):
+        commands = (
+            ["download"],
+            ["collect-sources"],
+            ["package", "--binary-only"],
+            ["sandbox"],
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(nvx.parse_args(command).transport, "simple")
+                for transport in ("simple", "broker-ttrpc"):
+                    self.assertEqual(
+                        nvx.parse_args([*command, "--transport", transport]).transport,
+                        transport,
+                    )
+
+    def test_collect_sources_defaults_to_simple(self):
+        args = nvx.parse_args(["collect-sources"])
+        with patch.object(nvx, "collect_release_sources") as collect:
+            args.handler(args)
+        collect.assert_called_once_with("simple")
+
     def test_release_commands_keep_their_cli_contract(self):
         download = nvx.parse_args(
             [
@@ -1155,6 +1177,43 @@ class CliTests(unittest.TestCase):
 
 
 class CiTests(unittest.TestCase):
+    def test_release_packages_use_workflow_artifacts_not_caches(self):
+        github = Path(__file__).parents[1] / ".github"
+        package = (github / "actions" / "package-release" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = (
+            github / "actions" / "publish-development-release" / "action.yml"
+        ).read_text(encoding="utf-8")
+        workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("cache-compression", workflow)
+        for action in (package, publish):
+            self.assertNotIn("actions/cache", action)
+            self.assertNotIn("cache-compression", action)
+            self.assertNotIn("cache-tools", action)
+        for name, suffix in (("Linux", "tar.gz"), ("Windows", "zip")):
+            upload = package.split(f"- name: Upload {name} release", 1)[1].split(
+                "\n    - name:", 1
+            )[0]
+            self.assertIn("uses: actions/upload-artifact@v4", upload)
+            self.assertIn("name: release-${{ inputs.platform }}", upload)
+            self.assertIn(f"path: dist/*-simple.{suffix}", upload)
+            self.assertIn("if-no-files-found: error", upload)
+            self.assertIn("compression-level: 0", upload)
+            self.assertIn("retention-days: 1", upload)
+        for name, platform in (
+            ("Linux / KVM", "linux-kvm"),
+            ("Linux / MSHV", "linux-mshv"),
+            ("Windows / WHP", "windows-whp"),
+        ):
+            download = publish.split(f"- name: Download {name} release", 1)[1].split(
+                "\n    - name:", 1
+            )[0]
+            self.assertIn("uses: actions/download-artifact@v5", download)
+            self.assertIn(f"name: release-{platform}", download)
+            self.assertIn("path: dist", download)
+
     def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -4648,8 +4707,6 @@ class BenchmarkTests(unittest.TestCase):
                 "--destination",
                 "dist/custom",
                 "--binary-only",
-                "--transport",
-                "simple",
                 "--force",
             ]
         )
@@ -4672,8 +4729,6 @@ class BenchmarkTests(unittest.TestCase):
                 "download",
                 "--repository",
                 "example/nvx",
-                "--transport",
-                "simple",
             ]
         )
         expected_platform = "windows-whp" if os.name == "nt" else "linux-kvm"

@@ -56,8 +56,8 @@ workflow uses the read-only OpenVMM deploy key stored in the
 `OPENVMM_DEPLOY_KEY` Actions secret to fetch the private submodule at its pinned
 commit. Shared guest binaries, including kernel build provenance, move through
 short-lived workflow artifacts after the guest build's cache restore or build.
-Development release packages use runner-compatible Actions caches, with gzip
-for MSHV and zstd for KVM/WHP; benchmark results use short-lived workflow artifacts.
+Development release packages and benchmark results also use short-lived
+workflow artifacts.
 Pull requests gate regressions against recent matching-host history, and
 successful pushes to `dev` append their p50 values under `data/`. Metadata-only
 performance jobs use GitHub-hosted Ubuntu runners. Provisioning instructions

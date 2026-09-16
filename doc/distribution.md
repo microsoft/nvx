@@ -1,15 +1,17 @@
 # Package and source delivery
 
-Package selection is explicit. A simple shell package is:
+The `simple` profile is the default for packaging, downloading, source
+collection, and sandbox commands. A simple shell package is:
 
 ```bash
-python3 scripts/nvx.py package --transport simple --binary-only
+python3 scripts/nvx.py package --binary-only
 ```
 
 Binary-only mode requires an explicit acknowledgement because the matching
 Linux and Alpine source must be published separately.
 
-A broker package requires the staged agent and its agent-only initramfs:
+A broker package requires explicit `--transport broker-ttrpc`, the staged
+agent, and its agent-only initramfs:
 
 ```bash
 python3 scripts/nvx.py package \

@@ -532,7 +532,6 @@ jobs:
         uses: ./.github/actions/package-release
         with:
           platform: ${{ matrix.release-platform }}
-          cache-compression: ${{ matrix.backend == 'mshv' && 'gzip' || 'zstd' }}
 
   release:
     name: Publish development release

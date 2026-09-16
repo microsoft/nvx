@@ -1,14 +1,10 @@
 name: Package release
-description: Build and cache a simple NVX binary release for one platform
+description: Build and upload a simple NVX binary release for one platform
 
 inputs:
   platform:
-    description: Platform suffix used in the package name and cache key
+    description: Platform suffix used in the package and artifact names
     required: true
-  cache-compression:
-    description: Compression tool used by the cross-OS Actions cache
-    required: false
-    default: zstd
 
 runs:
   using: composite
@@ -50,42 +46,22 @@ runs:
           --output "dist\$SimplePackage.zip"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    - name: Prepare gzip cache tools
-      id: gzip-cache-tools
-      if: runner.os != 'Windows' && inputs.cache-compression == 'gzip'
-      shell: bash
-      run: |
-        set -euo pipefail
-        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-        mkdir -p "${cache_tools}"
-        ln -sf "$(command -v tar)" "${cache_tools}/tar"
-        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-    - name: Save Linux release (zstd)
-      if: runner.os != 'Windows' && inputs.cache-compression != 'gzip'
-      uses: actions/cache/save@v5
+    - name: Upload Linux release
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v4
       with:
-        path: |
-          dist/*-simple.tar.gz
-        key: release-${{ inputs.platform }}-${{ github.run_id }}
-        enableCrossOsArchive: true
+        name: release-${{ inputs.platform }}
+        path: dist/*-simple.tar.gz
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1
 
-    - name: Save Linux release (gzip)
-      if: runner.os != 'Windows' && inputs.cache-compression == 'gzip'
-      uses: actions/cache/save@v5
-      env:
-        PATH: ${{ steps.gzip-cache-tools.outputs.path }}
-      with:
-        path: |
-          dist/*-simple.tar.gz
-        key: release-${{ inputs.platform }}-${{ github.run_id }}
-        enableCrossOsArchive: true
-    - name: Save Windows release
+    - name: Upload Windows release
       if: runner.os == 'Windows'
-      uses: actions/cache/save@v5
+      uses: actions/upload-artifact@v4
       with:
-        path: |
-          dist/*-simple.zip
-        key: release-${{ inputs.platform }}-${{ github.run_id }}
-        enableCrossOsArchive: true
+        name: release-${{ inputs.platform }}
+        path: dist/*-simple.zip
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1

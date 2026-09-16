@@ -172,7 +172,7 @@ it, every scenario runs. The command requires `build/vmlinux`,
 python3 scripts/nvx.py download
     [--repository OWNER/REPOSITORY]
     [--hypervisor {auto,whp,kvm,mshv}]
-    --transport {simple,broker-ttrpc}
+    [--transport {simple,broker-ttrpc}]
     [--manifest-sha256 SHA256]
 ```
 
@@ -180,7 +180,7 @@ python3 scripts/nvx.py download
 | --- | --- | --- |
 | `--repository OWNER/REPOSITORY` | `nanvix/nvx` | GitHub repository from which to download the latest release. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the release platform. `auto` chooses WHP on Windows and KVM on Linux. |
-| `--transport {simple,broker-ttrpc}` | required | Select an explicit package profile. |
+| `--transport {simple,broker-ttrpc}` | `simple` | Select the package profile; broker-ttrpc is opt-in. |
 | `--manifest-sha256 SHA256` | none | Independently trusted runtime-manifest digest; required for broker-ttrpc. |
 
 Windows release downloads support WHP. Linux release downloads support KVM
@@ -432,11 +432,11 @@ more than one metric.
 ### `collect-sources`
 
 ```text
-python3 scripts/nvx.py collect-sources --transport {simple,broker-ttrpc}
+python3 scripts/nvx.py collect-sources [--transport {simple,broker-ttrpc}]
 ```
 
 Materializes the verified Linux and Alpine source artifacts needed for a
-source-inclusive release for the selected profile.
+source-inclusive release for the selected profile (default: `simple`).
 
 ### `collect-alpine-sources`
 
@@ -471,7 +471,7 @@ configuration and output paths.
 python3 scripts/nvx.py package
     [--version VERSION]
     [--destination PATH]
-    --transport {simple,broker-ttrpc}
+    [--transport {simple,broker-ttrpc}]
     (--include-source | --binary-only)
     [--manifest-digest-output PATH]
     [--force]
@@ -481,7 +481,7 @@ python3 scripts/nvx.py package
 | --- | --- |
 | `--version VERSION` | Override the packaged version. |
 | `--destination PATH` | Override the staging destination. |
-| `--transport {simple,broker-ttrpc}` | Select the explicit release profile. |
+| `--transport {simple,broker-ttrpc}` | Select the release profile (default: `simple`); broker-ttrpc is opt-in. |
 | `--include-source` | Include the corresponding source artifacts in the package. |
 | `--binary-only` | Stage binaries only; publish corresponding source separately. |
 | `--manifest-digest-output PATH` | Write the broker manifest digest outside the bundle for independently trusted delivery. |

@@ -648,7 +648,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     download.add_argument(
         "--transport",
         choices=RELEASE_TRANSPORTS,
-        required=True,
+        default=SIMPLE_TRANSPORT,
+        help="runtime profile (default: simple; broker-ttrpc is opt-in)",
     )
     download.add_argument(
         "--manifest-sha256",
@@ -767,6 +768,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--transport",
         choices=RELEASE_TRANSPORTS,
         default=SIMPLE_TRANSPORT,
+        help="runtime profile (default: simple; broker-ttrpc is opt-in)",
     )
     sandbox.add_argument("--control-socket", type=Path)
     sandbox.add_argument("--boot-console-socket", type=Path)
@@ -793,7 +795,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sources.add_argument(
         "--transport",
         choices=RELEASE_TRANSPORTS,
-        required=True,
+        default=SIMPLE_TRANSPORT,
+        help="runtime profile (default: simple; broker-ttrpc is opt-in)",
     )
     sources.set_defaults(handler=command_collect_sources)
 
@@ -823,7 +826,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     package.add_argument(
         "--transport",
         choices=RELEASE_TRANSPORTS,
-        required=True,
+        default=SIMPLE_TRANSPORT,
+        help="runtime profile (default: simple; broker-ttrpc is opt-in)",
     )
     package.add_argument(
         "--manifest-digest-output",
