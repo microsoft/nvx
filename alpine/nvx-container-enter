@@ -3,7 +3,11 @@ set -eu
 
 rootfs=$1
 hostname_value=$2
-shift 2
+workload_uid=$3
+workload_gid=$4
+workload_name=$5
+workload_home=$6
+shift 6
 tools=$rootfs/.nvx-agent
 
 mount --make-rprivate /
@@ -52,11 +56,12 @@ ln -s /proc/self/fd/1 "$rootfs/dev/stdout"
 ln -s /proc/self/fd/2 "$rootfs/dev/stderr"
 
 hostname "$hostname_value"
+export HOME="$workload_home" USER="$workload_name" LOGNAME="$workload_name"
 exec chroot "$rootfs" /.nvx-agent/ld-musl-x86_64.so.1 \
     --library-path /.nvx-agent \
     /.nvx-agent/setpriv \
-    --reuid 0 \
-    --regid 0 \
+    --reuid "$workload_uid" \
+    --regid "$workload_gid" \
     --clear-groups \
     --no-new-privs \
     --bounding-set=-all \

@@ -60,6 +60,47 @@ class MicrovmTestParserTests(unittest.TestCase):
 
 
 class MicrovmTests(unittest.TestCase):
+    def test_workload_identity_scenario_checks_enforcement_and_rejection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(microvm_tests, "OpenvmmProcess") as process:
+                process.return_value.__enter__.return_value.wait.side_effect = [
+                    openvmm_process.OpenvmmProcessResult(
+                        0, microvm_tests.WORKLOAD_IDENTITY_MARKER + b"\n"
+                    ),
+                    openvmm_process.OpenvmmProcessResult(
+                        125, b"configured workload UID is unavailable\n"
+                    ),
+                    openvmm_process.OpenvmmProcessResult(
+                        2, b"microVM workload UID must be nonzero\n"
+                    ),
+                ]
+                microvm_tests.run_workload_identity(
+                    Path("openvmm"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=40,
+                    output_dir=Path(temporary),
+                )
+
+        self.assertEqual(process.call_count, 3)
+        commands = [call.args[0] for call in process.call_args_list]
+        self.assertEqual(
+            [
+                command[command.index("--microvm-workload-identity") + 1]
+                for command in commands
+            ],
+            ["65534:65534", "12345:12345", "0:0"],
+        )
+        self.assertTrue(
+            all(
+                "nvx_exec=/sbin/nvx-identity-probe"
+                in command[command.index("--cmdline") + 1]
+                for command in commands
+            )
+        )
+
     def test_console_exit_preserves_full_output_and_guest_status(self):
         expected = (
             b"x" * microvm_tests.CONSOLE_EXIT_PAYLOAD_BYTES

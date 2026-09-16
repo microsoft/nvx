@@ -55,6 +55,7 @@ MICROVM_TEST_SCENARIOS = (
     "snapshot-core",
     "snapshot-tiers",
     "virtio-net",
+    "workload-identity",
 )
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -93,6 +94,7 @@ NETWORK_AFTER_MARKER = b"NVX-NETWORK-AFTER"
 SCRATCH_PAIRED_POST_MARKER = b"NVX-SCRATCH-PAIRED-POST-OUT"
 SCRATCH_PAIRED_RESTORED_MARKER = b"NVX-SCRATCH-PAIRED-RESTORED"
 SCRATCH_FRESH_POST_MARKER = b"NVX-SCRATCH-FRESH-POST-OUT"
+WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> None:
@@ -350,6 +352,58 @@ def run_lifecycle(
         timeout=timeout,
         log_path=log_path,
     )
+
+
+def run_workload_identity(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    base = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0 nvx_exec=/sbin/nvx-identity-probe",
+    )
+    accepted = [*base, "--microvm-workload-identity", "65534:65534"]
+    with OpenvmmProcess(
+        accepted,
+        output_dir / "workload-identity.log",
+    ) as process:
+        result = process.wait(timeout)
+    if result.returncode != 0 or WORKLOAD_IDENTITY_MARKER not in _output_lines(
+        result.output
+    ):
+        raise RuntimeError("fixed non-root workload identity was not enforced")
+
+    unavailable = [*base, "--microvm-workload-identity", "12345:12345"]
+    with OpenvmmProcess(
+        unavailable,
+        output_dir / "workload-identity-unavailable.log",
+    ) as process:
+        result = process.wait(timeout)
+    if (
+        result.returncode == 0
+        or WORKLOAD_IDENTITY_MARKER in result.output
+        or b"configured workload UID is unavailable" not in result.output
+    ):
+        raise RuntimeError("unavailable workload identity did not fail closed")
+
+    root = [*base, "--microvm-workload-identity", "0:0"]
+    with OpenvmmProcess(
+        root,
+        output_dir / "workload-identity-root.log",
+    ) as process:
+        result = process.wait(timeout)
+    if result.returncode == 0 or BOOT_MARKER in result.output:
+        raise RuntimeError("root workload identity was not rejected before boot")
 
 
 def run_console_exit(
@@ -2398,6 +2452,19 @@ def run(args: argparse.Namespace) -> int:
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "lifecycle.log",
+        )
+    if "workload-identity" in scenarios:
+        print(
+            f"Running microVM workload identity correctness on OpenVMM/{args.backend}"
+        )
+        run_workload_identity(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
         )
     if "network-snapshot" in scenarios:
         print(f"Running microVM network snapshot correctness on OpenVMM/{args.backend}")

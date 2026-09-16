@@ -48,7 +48,7 @@ from nvx_tools.release import (
     package_release,
     verify_source_tree,
 )
-from nvx_tools.sandbox import SandboxLaunch, SandboxLayer
+from nvx_tools.sandbox import SandboxLaunch, SandboxLayer, parse_workload_identity
 
 DEFAULT_RELEASE_REPOSITORY = "nanvix/nvx"
 HYPERVISORS = ("auto", "whp", "kvm", "mshv")
@@ -238,6 +238,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
         entrypoint=args.entrypoint,
         args=tuple(args.sandbox_arg),
         hostname=args.hostname,
+        workload_identity=args.workload_user,
         memory_max=args.memory_max,
         pids_max=args.pids_max,
     ).validated()
@@ -393,6 +394,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         except ScriptError as error:
             raise argparse.ArgumentTypeError(str(error)) from error
 
+    def sandbox_identity(value: str) -> tuple[int, int]:
+        try:
+            return parse_workload_identity(value)
+        except ScriptError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+
     sandbox.add_argument(
         "--layer",
         action="append",
@@ -404,6 +411,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sandbox.add_argument("--entrypoint", default="/bin/sh")
     sandbox.add_argument("--arg", action="append", default=[], dest="sandbox_arg")
     sandbox.add_argument("--hostname", default="nvx-sandbox")
+    sandbox.add_argument(
+        "--workload-user",
+        type=sandbox_identity,
+        default=parse_workload_identity("65534:65534"),
+        metavar="UID:GID",
+        help="fixed non-root workload identity (default: 65534:65534)",
+    )
     sandbox.add_argument("--memory-max", type=int)
     sandbox.add_argument("--pids-max", type=int)
     sandbox.add_argument("--memory-mib", type=int, default=256)

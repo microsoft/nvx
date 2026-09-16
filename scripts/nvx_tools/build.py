@@ -469,6 +469,10 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         REPO_ROOT / "alpine" / "nvx-init-agent",
         root / "sbin" / "nvx-init-agent",
     )
+    _install(
+        REPO_ROOT / "alpine" / "nvx-identity-probe",
+        root / "sbin" / "nvx-identity-probe",
+    )
     _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
     _install(
         REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",

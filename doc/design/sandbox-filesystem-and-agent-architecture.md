@@ -79,9 +79,13 @@ the outer supervisor does not replace itself with the workload.
 The current agent sets `memory.low` to 16 MiB by default and accepts optional
 workload `memory.max` and `pids.max`. This is not the stronger production
 resource-reservation contract below. FIFO-gated cgroup placement is also not
-`clone3(CLONE_INTO_CGROUP)`. The shell supervisor, textual errors, fixed root
-user, and capability-stripped launch are an experimental bootstrap, not a
-complete OCI runtime, typed RPC service, or systemd-container profile.
+`clone3(CLONE_INTO_CGROUP)`. The shell supervisor and textual errors remain an
+experimental bootstrap, not a complete OCI runtime, typed RPC service, or
+systemd-container profile. Workloads do run under one host-owned non-root
+numeric identity fixed at initial boot. The agent requires an exact user and
+primary-group match in the assembled root, clears supplementary groups and all
+capability sets, and rejects an unavailable identity before starting the
+workload.
 
 ## Image preparation and distribution (Proposed)
 

@@ -218,6 +218,8 @@ class CliTests(unittest.TestCase):
                 "268435456",
                 "--pids-max",
                 "64",
+                "--workload-user",
+                "1000:1001",
             ]
         )
 
@@ -226,6 +228,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.sandbox_arg, ["--serve"])
         self.assertEqual(args.memory_max, 268435456)
         self.assertEqual(args.pids_max, 64)
+        self.assertEqual(args.workload_user, (1000, 1001))
         self.assertIs(args.handler, nvx.command_sandbox)
 
     def test_network_requires_explicit_portable_profile(self):
@@ -607,6 +610,7 @@ class SandboxTests(unittest.TestCase):
             entrypoint="/bin/workload",
             args=("--serve",),
             hostname="example",
+            workload_identity=(1000, 1001),
             memory_max=268435456,
             pids_max=64,
         )
@@ -637,6 +641,8 @@ class SandboxTests(unittest.TestCase):
                 "custom:file:custom.erofs,ro",
                 "--microvm-sandbox-block",
                 "scratch:file:scratch.ext4",
+                "--microvm-workload-identity",
+                "1000:1001",
             ],
         )
 
@@ -660,6 +666,8 @@ class SandboxTests(unittest.TestCase):
             launch.kernel_command_line(r"foo=bar\ nvx_memory_max=max")
         with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
             launch.kernel_command_line("x" * sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE)
+        with self.assertRaisesRegex(common.ScriptError, "between 1"):
+            sandbox.parse_workload_identity("0:0")
 
     def test_layer_parser_rejects_invalid_role_and_uuid(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):

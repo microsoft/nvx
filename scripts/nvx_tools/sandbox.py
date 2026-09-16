@@ -23,6 +23,22 @@ SANDBOX_COMMAND_LINE_MAX_SIZE = (
     KERNEL_COMMAND_LINE_MAX_SIZE - OPENVMM_COMMAND_LINE_RESERVE
 )
 _HOSTNAME = re.compile(r"(?=^.{1,63}$)(?!-)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+DEFAULT_WORKLOAD_IDENTITY = (65534, 65534)
+
+
+def parse_workload_identity(value: str) -> tuple[int, int]:
+    fields = value.split(":")
+    if len(fields) != 2:
+        raise ScriptError("--workload-user must be UID:GID")
+    try:
+        uid, gid = (int(field, 10) for field in fields)
+    except ValueError as error:
+        raise ScriptError("--workload-user must contain numeric UID and GID") from error
+    if not 1 <= uid <= 0xFFFF_FFFF:
+        raise ScriptError("--workload-user UID must be between 1 and 4294967295")
+    if not 1 <= gid <= 0xFFFF_FFFF:
+        raise ScriptError("--workload-user GID must be between 1 and 4294967295")
+    return uid, gid
 
 
 @dataclass(frozen=True)
@@ -57,6 +73,7 @@ class SandboxLaunch:
     entrypoint: str = "/bin/sh"
     args: tuple[str, ...] = ()
     hostname: str = "nvx-sandbox"
+    workload_identity: tuple[int, int] = DEFAULT_WORKLOAD_IDENTITY
     memory_max: int | None = None
     pids_max: int | None = None
 
@@ -84,6 +101,9 @@ class SandboxLaunch:
             raise ScriptError(
                 "sandbox hostname must be a lowercase RFC 1123 label up to 63 characters"
             )
+        uid, gid = self.workload_identity
+        if not 1 <= uid <= 0xFFFF_FFFF or not 1 <= gid <= 0xFFFF_FFFF:
+            raise ScriptError("sandbox workload identity must be a non-root UID:GID")
         for name, value in (
             ("memory-max", self.memory_max),
             ("pids-max", self.pids_max),
@@ -116,6 +136,8 @@ class SandboxLaunch:
             (
                 "--microvm-sandbox-block",
                 f"scratch:file:{os.fspath(self.scratch)}",
+                "--microvm-workload-identity",
+                f"{self.workload_identity[0]}:{self.workload_identity[1]}",
             )
         )
         return arguments

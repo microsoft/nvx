@@ -220,6 +220,7 @@ python3 scripts/nvx.py sandbox \
   --layer runtime,/var/lib/nvx/runtime.erofs,22222222-2222-2222-2222-222222222222 \
   --scratch /var/lib/nvx/scratch.ext4 \
   --entrypoint /bin/workload \
+  --workload-user 65534:65534 \
   --arg=--serve
 ```
 
@@ -236,6 +237,10 @@ expose sandbox snapshot capture or restore, the configuration region, or runtime
 Arguments are individual kernel-command-line tokens and therefore cannot
 contain whitespace. The workload enters private mount/PID/UTS namespaces with
 a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
+It always runs as the fixed non-root `UID:GID` selected at VM creation
+(`65534:65534` by default). The guest verifies that exactly one matching user,
+its primary group, and its absolute home directory exist in the assembled
+root; otherwise the workload is never started.
 The outer agent retains the initramfs root; the capability-stripped child
 enters only the assembled root with `chroot`, because Linux cannot
 `pivot_root` away from an initramfs `rootfs`.
