@@ -85,12 +85,28 @@ def _write_release_fixture(
         },
         "linux": {
             "version": "6.18.38",
+            "upstream_url": (
+                "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz"
+            ),
+            "upstream_archive_sha256": build.DEFAULT_KERNEL_SHA256,
+            "source_cache": ".cache/linux/linux-6.18.38",
+            "source_archive": ("build/sources/linux/nvx-linux-source-6.18.38.tar.gz"),
+            "generated_final_config": "build/vmlinux.config",
             "input_config": "kernel/config-microvm",
             "patches": ["kernel/patches/example.patch"],
         },
         "alpine": {
             "version": "3.24.1",
+            "branch": "v3.24",
+            "architecture": "x86_64",
+            "minirootfs_url": (
+                "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/"
+                "x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz"
+            ),
+            "minirootfs_sha256": build.DEFAULT_ALPINE_MINIROOTFS_SHA256,
             "guest_sources": "alpine",
+            "package_manifests": "build/*.packages.json",
+            "source_output": "build/sources/alpine",
         },
     }
     (root / "SOURCE-MANIFEST.json").write_text(
@@ -98,7 +114,15 @@ def _write_release_fixture(
         encoding="utf-8",
     )
     kernel_inputs: dict[str, object] = {
-        "source": {"version": "6.18.38", "patches": []},
+        "source": {
+            "version": "6.18.38",
+            "patches": [
+                {
+                    "path": "kernel/patches/example.patch",
+                    "sha256": "2" * 64,
+                }
+            ],
+        },
         "input_config": {
             "path": "kernel/config-microvm",
             "sha256": "1" * 64,
@@ -877,6 +901,74 @@ class BuildTests(unittest.TestCase):
                 hashlib.sha256(b"openvmm").hexdigest(),
             )
 
+    def test_kernel_build_rejects_input_config_mutation_during_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_config = root / "kernel" / "config-microvm"
+            input_config.parent.mkdir(parents=True)
+            input_config.write_text(
+                "\n".join(
+                    (
+                        *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                        *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                        *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            patch_path = root / "kernel" / "patches" / "example.patch"
+            patch_path.parent.mkdir()
+            patch_path.write_text("patch", encoding="utf-8")
+            source = root / "source"
+            source.mkdir()
+            work = root / "work"
+            output = root / "output" / "vmlinux"
+            prior_provenance = output.with_name(build.KERNEL_PROVENANCE_NAME)
+            prior_provenance.parent.mkdir()
+            prior_provenance.write_text("stale", encoding="utf-8")
+
+            with patch.object(build, "REPO_ROOT", root):
+                source_fingerprint = build._kernel_source_fingerprint()
+
+            def run_build(command: object, **_kwargs: object) -> None:
+                if isinstance(command, list) and command[-1] == "vmlinux":
+                    (work / "vmlinux").write_bytes(b"kernel")
+                    input_config.write_text("CONFIG_CHANGED=y\n", encoding="utf-8")
+
+            notes = common.CommandResult(
+                ("readelf",),
+                0,
+                b"Xen 0x00000012",
+                b"",
+            )
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "_require_linux"),
+                patch.object(build, "require_tool", return_value="tool"),
+                patch.object(
+                    build,
+                    "prepare_kernel_source",
+                    return_value=(source, source_fingerprint),
+                ),
+                patch.object(build, "run_checked", side_effect=run_build),
+                patch.object(build, "run_capture", return_value=notes),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "inputs changed during the build",
+                ),
+            ):
+                build.build_kernel(
+                    build.KernelBuildConfig(
+                        work=work,
+                        output=output,
+                    )
+                )
+
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_name("vmlinux.config").exists())
+            self.assertFalse(prior_provenance.exists())
+
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
             (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
@@ -913,7 +1005,7 @@ class BuildTests(unittest.TestCase):
             "scripts/nvx_tools/build.py",
         ):
             self.assertIn(cache_input, action)
-        self.assertIn("linux-kernel-v4-", action)
+        self.assertIn("linux-kernel-v2-", action)
         self.assertEqual(action.count("build/vmlinux.provenance.json"), 2)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
@@ -3713,6 +3805,93 @@ class ReleaseTests(unittest.TestCase):
                     paths["build"] / build.KERNEL_PROVENANCE_NAME,
                 )
 
+    def test_package_rejects_tampered_source_metadata_without_replacing_output(self):
+        cases: tuple[tuple[str, str, object, str], ...] = (
+            ("root", "format", 2, "format must be 1"),
+            ("linux", "version", "6.18.37", "Linux version"),
+            (
+                "linux",
+                "upstream_archive_sha256",
+                "0" * 64,
+                "Linux upstream_archive_sha256",
+            ),
+            ("linux", "patches", [], "Linux patches"),
+            (
+                "alpine",
+                "minirootfs_sha256",
+                "0" * 64,
+                "Alpine minirootfs_sha256",
+            ),
+        )
+        for section, field, invalid_value, error in cases:
+            with (
+                self.subTest(section=section, field=field),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                paths, kernel_inputs, revision = _write_release_fixture(root)
+                fixture_build_dir = paths["build"]
+                manifest_path = root / "SOURCE-MANIFEST.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if section == "root":
+                    manifest[field] = invalid_value
+                else:
+                    manifest_section = cast(dict[str, object], manifest[section])
+                    manifest_section[field] = invalid_value
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                destination = root / "dist" / "1.0.0"
+                destination.mkdir(parents=True)
+                marker = destination / "prior.txt"
+                marker.write_text("prior release", encoding="utf-8")
+
+                def artifact_path(
+                    name: str,
+                    build_dir: Path = fixture_build_dir,
+                ) -> Path:
+                    return build_dir / name
+
+                with (
+                    patch.object(release, "REPO_ROOT", root),
+                    patch.object(release, "SOURCE_DIR", paths["source"]),
+                    patch.object(release, "OPENVMM_DIR", paths["openvmm"]),
+                    patch.object(
+                        release,
+                        "artifact_path",
+                        side_effect=artifact_path,
+                    ),
+                    patch.object(
+                        release,
+                        "openvmm_binary_path",
+                        return_value=paths["binary"],
+                    ),
+                    patch.object(
+                        release,
+                        "kernel_provenance_inputs",
+                        return_value=kernel_inputs,
+                    ),
+                    patch.object(
+                        release,
+                        "_openvmm_git_state",
+                        return_value=(revision, True),
+                    ),
+                    patch("sys.stderr", io.StringIO()),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        error,
+                    ),
+                ):
+                    release.package_release(
+                        version="1.0.0",
+                        destination=destination,
+                        include_source=False,
+                        force=True,
+                    )
+
+                self.assertEqual(
+                    marker.read_text(encoding="utf-8"),
+                    "prior release",
+                )
+
     def test_failed_staged_verification_preserves_existing_release(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3779,8 +3958,8 @@ class ReleaseTests(unittest.TestCase):
     def test_publication_failure_restores_existing_release(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            destination = root / "release"
-            destination.mkdir()
+            destination = root / "dist" / "release"
+            destination.mkdir(parents=True)
             (destination / "prior.txt").write_text("prior", encoding="utf-8")
             staging = root / "staging"
             staging.mkdir()
@@ -3793,13 +3972,18 @@ class ReleaseTests(unittest.TestCase):
                 return original_replace(source, target)
 
             with (
+                patch.object(release, "REPO_ROOT", root),
                 patch.object(Path, "replace", new=fail_staging_replace),
                 self.assertRaisesRegex(
                     common.ScriptError,
                     "failed to publish staged release",
                 ),
             ):
-                release._publish_release_directory(staging, destination)
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=True,
+                )
 
             self.assertEqual(
                 (destination / "prior.txt").read_text(encoding="utf-8"),
@@ -3810,8 +3994,8 @@ class ReleaseTests(unittest.TestCase):
     def test_failed_rollback_preserves_prior_backup_and_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            destination = root / "release"
-            destination.mkdir()
+            destination = root / "dist" / "release"
+            destination.mkdir(parents=True)
             (destination / "prior.txt").write_text("prior", encoding="utf-8")
             staging = root / "staging"
             staging.mkdir()
@@ -3824,15 +4008,20 @@ class ReleaseTests(unittest.TestCase):
                 return original_replace(source, target)
 
             with (
+                patch.object(release, "REPO_ROOT", root),
                 patch.object(Path, "replace", new=fail_publication_and_restore),
                 self.assertRaisesRegex(
                     common.ScriptError,
                     "prior release remains",
                 ),
             ):
-                release._publish_release_directory(staging, destination)
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=True,
+                )
 
-            backups = list(root.glob(".release.backup-*"))
+            backups = list(destination.parent.glob(".release.backup-*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(
                 (backups[0] / "prior.txt").read_text(encoding="utf-8"),
@@ -3842,6 +4031,61 @@ class ReleaseTests(unittest.TestCase):
                 (staging / "new.txt").read_text(encoding="utf-8"),
                 "new",
             )
+
+    def test_publication_rechecks_no_force_after_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "release"
+            destination.mkdir()
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "pass --force",
+            ):
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=False,
+                )
+
+            self.assertEqual(
+                (destination / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertFalse(staging.exists())
+
+    def test_publication_rechecks_force_destination_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "outside-dist"
+            destination.mkdir()
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "below dist",
+                ),
+            ):
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=True,
+                )
+
+            self.assertEqual(
+                (destination / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertFalse(staging.exists())
 
     def test_release_archive_installs_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -207,15 +207,25 @@ def _kernel_source_fingerprint() -> str:
     )
 
 
-def kernel_provenance_inputs() -> dict[str, object]:
-    """Return the source and input-config identity required for a kernel build."""
+def _kernel_provenance_inputs(
+    source_fingerprint: str,
+    input_config_sha256: str,
+) -> dict[str, object]:
     return {
-        "source": json.loads(_kernel_source_fingerprint()),
+        "source": json.loads(source_fingerprint),
         "input_config": {
             "path": "kernel/config-microvm",
-            "sha256": sha256_file(REPO_ROOT / "kernel" / "config-microvm"),
+            "sha256": input_config_sha256,
         },
     }
+
+
+def kernel_provenance_inputs() -> dict[str, object]:
+    """Return the current source and input-config identity for a kernel build."""
+    return _kernel_provenance_inputs(
+        _kernel_source_fingerprint(),
+        sha256_file(REPO_ROOT / "kernel" / "config-microvm"),
+    )
 
 
 def record_openvmm_provenance(executable: Path) -> None:
@@ -581,10 +591,16 @@ def build_kernel(config: KernelBuildConfig) -> None:
     for tool in ("make", "readelf"):
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config.version)
+    input_config = REPO_ROOT / "kernel" / "config-microvm"
+    input_config_sha256 = sha256_file(input_config)
+    provenance_inputs = _kernel_provenance_inputs(
+        source_fingerprint,
+        input_config_sha256,
+    )
     build_fingerprint = json.dumps(
         {
             "source": source_fingerprint,
-            "input_config_sha256": sha256_file(REPO_ROOT / "kernel" / "config-microvm"),
+            "input_config_sha256": input_config_sha256,
         },
         sort_keys=True,
     )
@@ -597,7 +613,11 @@ def build_kernel(config: KernelBuildConfig) -> None:
     config.work.mkdir(parents=True, exist_ok=True)
     build_stamp.write_text(build_fingerprint, encoding="utf-8")
     kernel_config = config.work / ".config"
-    shutil.copy2(REPO_ROOT / "kernel" / "config-microvm", kernel_config)
+    provenance_path = config.output.with_name(KERNEL_PROVENANCE_NAME)
+    provenance_path.unlink(missing_ok=True)
+    shutil.copy2(input_config, kernel_config)
+    if sha256_file(kernel_config) != input_config_sha256:
+        raise ScriptError("kernel input config changed while it was being copied")
     make = ["make", "-C", source, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
     assert_required_kernel_config(kernel_config)
@@ -606,7 +626,8 @@ def build_kernel(config: KernelBuildConfig) -> None:
     run_checked([*make, f"-j{jobs}", "vmlinux"])
     config.output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(config.work / "vmlinux", config.output)
-    shutil.copy2(kernel_config, config.output.with_name(f"{config.output.name}.config"))
+    generated_config = config.output.with_name(f"{config.output.name}.config")
+    shutil.copy2(kernel_config, generated_config)
     print(f">> built {config.output}")
 
     notes = run_capture(["readelf", "-n", config.output])
@@ -616,13 +637,20 @@ def build_kernel(config: KernelBuildConfig) -> None:
         config.output.unlink(missing_ok=True)
         raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
 
+    if (
+        _kernel_source_fingerprint() != source_fingerprint
+        or sha256_file(input_config) != input_config_sha256
+    ):
+        config.output.unlink(missing_ok=True)
+        generated_config.unlink(missing_ok=True)
+        raise ScriptError("kernel source inputs changed during the build")
     provenance = {
         "format": 1,
-        **kernel_provenance_inputs(),
+        **provenance_inputs,
         "kernel_sha256": sha256_file(config.output),
-        "config_sha256": sha256_file(kernel_config),
+        "config_sha256": sha256_file(generated_config),
     }
-    config.output.with_name(KERNEL_PROVENANCE_NAME).write_text(
+    provenance_path.write_text(
         json.dumps(provenance, indent=2) + "\n",
         encoding="utf-8",
     )
