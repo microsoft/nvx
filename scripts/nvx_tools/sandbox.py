@@ -164,6 +164,24 @@ class SandboxLaunch:
                 "broker-ttrpc sandbox layers must not include EROFS UUIDs: "
                 + ", ".join(unexpected)
             )
+        workload_options = [
+            name
+            for name, value, default in (
+                ("--entrypoint", self.entrypoint, "/bin/sh"),
+                ("--arg", self.args, ()),
+                ("--hostname", self.hostname, "nvx-sandbox"),
+                ("--workload-user", self.workload_identity, DEFAULT_WORKLOAD_IDENTITY),
+                ("--memory-max", self.memory_max, None),
+                ("--pids-max", self.pids_max, None),
+            )
+            if value != default
+        ]
+        if workload_options:
+            raise ScriptError(
+                "broker-ttrpc workload settings must be supplied through "
+                "authenticated Bootstrap by the control plane, not "
+                + ", ".join(workload_options)
+            )
         return self
 
     def openvmm_arguments(self) -> list[str]:
@@ -191,6 +209,7 @@ class SandboxLaunch:
         boot_console_socket: Path,
         control_auth_handle: int,
     ) -> list[str]:
+        self.validate_broker()
         for label, path in (
             ("control", control_socket),
             ("boot console", boot_console_socket),
@@ -199,6 +218,8 @@ class SandboxLaunch:
                 raise ScriptError(f"{label} socket path must be absolute")
             if any(character in os.fspath(path) for character in ",;\0\r\n"):
                 raise ScriptError(f"{label} socket path contains a reserved character")
+        if control_socket.resolve() == boot_console_socket.resolve():
+            raise ScriptError("control and boot console socket paths must be distinct")
         if control_auth_handle < MINIMUM_CONTROL_AUTH_FD:
             raise ScriptError(
                 "control authentication handle must be an inherited pipe FD"

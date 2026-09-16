@@ -278,9 +278,12 @@ mount -t virtiofs microvm /mnt/host
 
 ## Experimental single-workload sandbox
 
-The `sandbox` command supports the generic `simple` profile and the reviewed
-`broker-ttrpc` guest-agent profile. Both launch a microVM with one to three
-compressed EROFS lower layers and one preformatted ext4 scratch image.
+The `sandbox` command supports the generic `simple` profile and the
+`broker-ttrpc` guest-agent profile. The simple profile uses one to three
+compressed EROFS lower layers over preformatted ext4 scratch. The broker
+profile attaches control-plane-prepared ext4 filesystems with GPT identities;
+their authenticated identity and workload configuration arrive later through
+Bootstrap.
 
 The default `simple` profile keeps the generic one-shot and managed lifecycle:
 
@@ -294,8 +297,8 @@ python3 scripts/nvx.py sandbox \
   --arg=--serve
 ```
 
-Select the broker profile explicitly when ACI-04 supplies the protected
-control endpoints and an inherited capability pipe:
+Select the broker profile explicitly when the sandbox control plane client
+supplies protected control endpoints and an inherited capability pipe:
 
 ```bash
 python3 scripts/nvx.py sandbox \
@@ -303,8 +306,8 @@ python3 scripts/nvx.py sandbox \
   --control-socket /run/nvx/control.sock \
   --boot-console-socket /run/nvx/boot.sock \
   --control-auth-handle 9 \
-  --layer distro,/var/lib/nvx/distro.erofs \
-  --layer runtime,/var/lib/nvx/runtime.erofs \
+  --layer distro,/var/lib/nvx/distro.gpt \
+  --layer runtime,/var/lib/nvx/runtime.gpt \
   --scratch /var/lib/nvx/scratch.ext4
 ```
 
@@ -313,19 +316,21 @@ the ordinary boot console, and a separate authenticated control console.
 OpenVMM owns console enumeration and adds the single reserved
 `nvx_control_tty=hvc2` token; the agent package does not hardcode an HVC device.
 The authentication handle must be the already-open, readable end of an inherited
-one-way pipe created by the ACI-04 launcher. NVX redirects that descriptor to the
-child's standard input and passes the boolean `--microvm-control-auth-stdin`
-option to OpenVMM. Capability bytes never enter arguments, environment variables,
-or logs. Live broker launch is Linux-only; `--dry-run` works on other hosts.
-Layer UUID/GPT identities belong to the authenticated ACI-04 Bootstrap request,
-not this boot-only CLI. The command validates files before launch, orders roles independently of option order,
-attaches layers read-only, and reserves the writable slot for scratch.
-Conversion and scratch formatting stay off the start path; prepare those
-artifacts on Linux with `mkfs.erofs` and `mkfs.ext4`.
+one-way pipe created by the sandbox control plane client. NVX redirects that
+descriptor to the child's standard input and passes the boolean
+`--microvm-control-auth-stdin` option to OpenVMM. Capability bytes never enter
+arguments, environment variables, or logs. The boot and control socket paths
+must be absolute and resolve to different paths, including through aliases.
+Live broker launch is Linux-only; `--dry-run` works on other hosts. Filesystem
+and GPT identities belong to the authenticated Bootstrap request, not this
+boot-only CLI. The command validates files before launch, orders roles
+independently of option order, attaches image files read-only, and reserves the
+writable slot for scratch. Image conversion and ext4/GPT preparation stay off
+the start path.
 
 The simple form is the cold-filesystem bootstrap described in
-[the sandbox design](design/sandbox-filesystem-and-agent-architecture.md#implemented-filesystem-bootstrap), not the final
-production agent. It accepts no environment variables or secrets and does not
+[the sandbox design](design/sandbox-filesystem-and-agent-architecture.md#implemented-filesystem-bootstrap).
+It accepts no environment variables or secrets and does not
 expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
 Arguments are individual kernel-command-line tokens and therefore cannot
 contain whitespace. The workload enters private mount/PID/UTS namespaces with
@@ -366,7 +371,7 @@ Lifecycle transitions fail closed: `start` rejects an already-running or stale
 runtime record, `exec` and `stop` require a live OpenVMM process, and
 `deprovision` refuses to remove a running sandbox or unknown files. Managed
 workload arguments use the bounded control protocol rather than the kernel
-command line and may contain whitespace. The legacy operation-less `sandbox`
+command line and may contain whitespace. The operation-less `sandbox`
 form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
 request to retain VM state.
 
@@ -378,20 +383,23 @@ credentials remain excluded. `sandbox stop` waits for OpenVMM teardown and
 retains the latest VM-level report as `outcome.json` in the state directory.
 Neither OpenVMM nor NVX uploads these files.
 
-The broker form starts the reviewed PID-1 package but is not an ACI control-plane
-client; production Bootstrap and workload lifecycle RPCs come from ACI-04 over
-the broker socket. Do not place capabilities, secrets, or workload
-configuration on the kernel command line. Broker launch rejects `init`,
-`rdinit`, every `nvx_*` parameter (including duplicate `nvx_control_tty` or
-`nvx_sandbox` tokens), and console, virtio discovery, virtfs, network, and
-other host-owned parameters. The generated command supplies no init override
-and relies on the verified `/init -> /sbin/nvx-agent` image layout.
+The broker form starts the pinned PID-1 package but is not a sandbox control
+plane client. Authenticated Bootstrap and workload lifecycle RPCs arrive from
+the control plane over the broker socket. Do not place capabilities, secrets,
+or workload configuration on the kernel command line. Broker launch rejects
+non-default `--entrypoint`, `--arg`, `--hostname`, `--workload-user`,
+`--memory-max`, and `--pids-max`; supply those settings through authenticated
+Bootstrap instead. It also rejects `init`, `rdinit`, every `nvx_*` parameter
+(including duplicate `nvx_control_tty` or `nvx_sandbox` tokens), and console,
+virtio discovery, virtfs, network, and other control-plane-owned parameters.
+The generated command supplies no init override and relies on the verified
+`/init -> /sbin/nvx-agent` image layout.
 
 The source-level ttrpc writer priority/FIFO blocker is resolved. Remaining
-cross-repository gates are live host-observed stress proving bounded downstream
-HVC latency under contention; real privileged MMIO/HVC E2E from broker READY
+integration gates are live host-observed stress proving bounded downstream HVC
+latency under contention; real privileged MMIO/HVC E2E from broker READY
 through authenticated GetGuestInfo self-hash, Bootstrap, WaitReady, Shutdown,
-and failure cases; tenant-safe snapshot freeze/restore lifecycle; and external
-live-gate proof delivery. Local packaging or initramfs inspection does not
-satisfy those gates, and broker release publication remains disabled without
-an independently authenticated live-gate proof.
+and failure cases; tenant-safe snapshot freeze/restore lifecycle; and
+independently trusted live-gate proof delivery. Local packaging or initramfs
+inspection does not satisfy those gates, and broker release publication
+remains disabled without an independently authenticated live-gate proof.

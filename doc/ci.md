@@ -70,8 +70,11 @@ trusted repository branch before running the backend matrices.
 
 CI caches only the pinned kernel and simple initramfs. It does not restore or
 save a broker initramfs cache, and the benchmark action does not claim to run
-the broker profile. Development release jobs build and publish only explicit
-`-simple` packages.
+the broker profile. Development release jobs build and publish the default
+simple profile with the established unsuffixed names
+`nvx-VERSION-PLATFORM.tar.gz` and `nvx-VERSION-PLATFORM.zip`. They do not add
+`-simple`. Any future opt-in broker assets use the `-broker` suffix while
+retaining `broker-ttrpc` as their metadata profile.
 
 Broker publication fails closed. A future privileged smoke/E2E job must build
 the agent image afresh, boot that exact bundle, and supply an independently

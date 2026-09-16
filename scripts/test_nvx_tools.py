@@ -21,7 +21,7 @@ import zipfile
 import zlib
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, call, patch
@@ -161,7 +161,9 @@ def _agent_newc_archive(agent: bytes) -> bytes:
     return _newc_archive(_agent_newc_entries(agent))
 
 
-def _simple_newc_archive(init_script: bytes) -> bytes:
+def _simple_newc_archive(
+    init_script: bytes, extra_entries: tuple[NewcTestEntry, ...] = ()
+) -> bytes:
     return _newc_archive(
         [
             (".", 0o040755, b""),
@@ -178,6 +180,7 @@ def _simple_newc_archive(init_script: bytes) -> bytes:
             ("var", 0o040755, b""),
             ("var/tmp", 0o041777, b""),
             ("init", 0o100755, init_script.replace(b"\r\n", b"\n")),
+            *extra_entries,
         ]
     )
 
@@ -213,7 +216,7 @@ def _initramfs_package_manifest(
             "source_revision": build.GUEST_AGENT_SOURCE_REVISION,
             "build_id": build.GUEST_AGENT_BUILD_ID,
             "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
-            "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+            "runtime_contract": build.GUEST_AGENT_RUNTIME_CONTRACT,
         }
     return (json.dumps(value, indent=2) + "\n").encode("utf-8")
 
@@ -415,7 +418,7 @@ def _make_test_release_package(
             "external_input_size_bytes": len(agent),
             "protocol_schema_version": build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
             "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
-            "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+            "runtime_contract": build.GUEST_AGENT_RUNTIME_CONTRACT,
             "transport": build.BROKER_TRANSPORT,
         },
     }
@@ -1192,13 +1195,22 @@ class CiTests(unittest.TestCase):
             self.assertNotIn("actions/cache", action)
             self.assertNotIn("cache-compression", action)
             self.assertNotIn("cache-tools", action)
+            self.assertNotIn("-simple", action)
+            self.assertNotIn("-broker-ttrpc", action)
+        self.assertIn('package="nvx-${version}-${PLATFORM}"', package)
+        self.assertIn('$Package = "nvx-$Version-$env:PLATFORM"', package)
+        self.assertIn('broker_base="dist/nvx-${version}-${platform}-broker"', publish)
+        self.assertIn("dist/*-broker.tar.gz dist/*-broker.zip", publish)
         for name, suffix in (("Linux", "tar.gz"), ("Windows", "zip")):
             upload = package.split(f"- name: Upload {name} release", 1)[1].split(
                 "\n    - name:", 1
             )[0]
             self.assertIn("uses: actions/upload-artifact@v4", upload)
             self.assertIn("name: release-${{ inputs.platform }}", upload)
-            self.assertIn(f"path: dist/*-simple.{suffix}", upload)
+            self.assertIn(
+                "path: dist/nvx-*-${{ inputs.platform }}." + suffix,
+                upload,
+            )
             self.assertIn("if-no-files-found: error", upload)
             self.assertIn("compression-level: 0", upload)
             self.assertIn("retention-days: 1", upload)
@@ -1509,8 +1521,8 @@ class BuildTests(unittest.TestCase):
             ("agent-ready", "image-entrypoint"),
         )
         self.assertEqual(
-            build.GUEST_AGENT_RUNTIME_ABI,
-            "microvm-abi-v2-startup-modes-session-operations-v3",
+            build.GUEST_AGENT_RUNTIME_CONTRACT,
+            "startup-modes-session-operations",
         )
 
     def test_startup_modes_are_runtime_fingerprint_inputs(self):
@@ -1542,7 +1554,7 @@ class BuildTests(unittest.TestCase):
                 "transport": "broker-ttrpc",
                 "protocol_schema_version": 2,
                 "startup_modes": ["agent-ready", "image-entrypoint"],
-                "runtime_abi": "microvm-abi-v2-startup-modes-session-operations-v3",
+                "runtime_contract": "startup-modes-session-operations",
             },
         }
         identity = release._runtime_identity(manifest)
@@ -1766,7 +1778,7 @@ class BuildTests(unittest.TestCase):
                 patch.object(build, "GUEST_AGENT_SHA256", oversized_sha256),
                 patch.object(build, "GUEST_AGENT_SIZE_BYTES", source.stat().st_size),
                 patch.object(build, "GUEST_AGENT_MAXIMUM_BYTES", 64),
-                self.assertRaisesRegex(common.ScriptError, "16-MiB"),
+                self.assertRaisesRegex(common.ScriptError, "release limit"),
             ):
                 build.stage_guest_agent(source, oversized_sha256)
 
@@ -1777,19 +1789,53 @@ class BuildTests(unittest.TestCase):
             source.write_bytes(_static_x86_64_elf())
             expected = hashlib.sha256(source.read_bytes()).hexdigest()
 
+            input_file = MagicMock()
+            input_file.__enter__.return_value = input_file
+            input_file.read.side_effect = [b"partial", OSError("injected copy failure")]
             with (
                 patch.object(build, "REPO_ROOT", root),
                 patch.object(build, "GUEST_AGENT_SHA256", expected),
-                patch.object(
-                    build.shutil,
-                    "copyfileobj",
-                    side_effect=OSError("injected copy failure"),
-                ),
+                patch.object(build.Path, "open", return_value=input_file),
                 self.assertRaisesRegex(OSError, "injected"),
             ):
                 build.stage_guest_agent(source, expected)
 
             self.assertEqual(list((root / "build").glob("*.part")), [])
+
+    def test_stage_guest_agent_bounds_growing_input_before_hashing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "input-agent"
+            source.write_bytes(b"initial")
+            destination = root / "build" / build.GUEST_AGENT_ARTIFACT_NAME
+            destination.parent.mkdir()
+            destination.write_bytes(b"previous agent")
+            pin = destination.parent / build.GUEST_AGENT_SHA256_NAME
+            pin.write_bytes(b"previous pin")
+            input_file = MagicMock()
+            input_file.__enter__.return_value = input_file
+
+            # Simulate a file that keeps growing after the initial is_file check.
+            def growing_read(count: int) -> bytes:
+                return b"x" * count
+
+            input_file.read.side_effect = growing_read
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "GUEST_AGENT_MAXIMUM_BYTES", 16),
+                patch.object(build, "GUEST_AGENT_COPY_CHUNK_BYTES", 8),
+                patch.object(build.Path, "open", return_value=input_file),
+                patch.object(build, "sha256_file") as hash_file,
+                self.assertRaisesRegex(common.ScriptError, "release limit"),
+            ):
+                build.stage_guest_agent(source, build.GUEST_AGENT_SHA256)
+            hash_file.assert_not_called()
+            self.assertEqual(
+                input_file.read.call_args_list, [call(8), call(8), call(1)]
+            )
+            self.assertEqual(destination.read_bytes(), b"previous agent")
+            self.assertEqual(pin.read_bytes(), b"previous pin")
+            self.assertEqual(list(destination.parent.glob("*.part")), [])
 
     def test_agent_initramfs_inspection_requires_exact_embedded_pid1(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2157,6 +2203,41 @@ class BuildTests(unittest.TestCase):
                     with self.assertRaisesRegex(common.ScriptError, error):
                         build.verify_agent_initramfs(path, expected)
 
+    def test_simple_initramfs_preserves_only_expected_privileged_helper_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "initramfs.cpio.gz"
+            init_script = (common.REPO_ROOT / "alpine" / "init").read_bytes()
+            parents: tuple[NewcTestEntry, ...] = (
+                ("usr", 0o040755, b""),
+                ("usr/bin", 0o040755, b""),
+                ("usr/sbin", 0o040755, b""),
+            )
+            helpers = (
+                ("bin/mount", 0o104755),
+                ("bin/umount", 0o104755),
+                ("usr/bin/wall", 0o102755),
+                ("usr/sbin/unix_chkpwd", 0o102755),
+            )
+            for name, mode in helpers:
+                entry: NewcTestEntry = (name, mode, _static_x86_64_elf())
+                path.write_bytes(_simple_newc_archive(init_script, (*parents, entry)))
+                build.verify_simple_initramfs(path)
+                with self.assertRaisesRegex(common.ScriptError, "unsafe.*mode"):
+                    build.verify_agent_initramfs(path, build.GUEST_AGENT_SHA256)
+                for invalid in (
+                    (name, mode | 0o002, _static_x86_64_elf()),
+                    (name, mode, _static_x86_64_elf(), 1, 0),
+                    (name, mode, _static_x86_64_elf(), 0, 1),
+                    (name, mode, b"#!/bin/sh\n"),
+                    (name + "-untrusted", mode, _static_x86_64_elf()),
+                ):
+                    with self.subTest(name=name, invalid=invalid[:2]):
+                        path.write_bytes(
+                            _simple_newc_archive(init_script, (*parents, invalid))
+                        )
+                        with self.assertRaisesRegex(common.ScriptError, "unsafe.*mode"):
+                            build.verify_simple_initramfs(path)
+
     def test_simple_and_broker_initramfs_profiles_are_structurally_distinct(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2470,6 +2551,46 @@ class SandboxTests(unittest.TestCase):
                 "1000:1001",
             ],
         )
+
+    def test_broker_launch_rejects_aliased_console_sockets(self):
+        launch = sandbox.SandboxLaunch(
+            layers=(sandbox.SandboxLayer.parse("distro,distro.gpt"),),
+            scratch=Path("scratch.ext4"),
+        )
+        root = Path.cwd()
+        control = root / "control.sock"
+        for boot in (control, root / "nested" / ".." / "control.sock"):
+            with (
+                self.subTest(boot=boot),
+                self.assertRaisesRegex(common.ScriptError, "must be distinct"),
+            ):
+                launch.broker_openvmm_arguments(control, boot, 9)
+
+    def test_broker_launch_rejects_workload_options_reserved_for_bootstrap(self):
+        launch = sandbox.SandboxLaunch(
+            layers=(sandbox.SandboxLayer.parse("distro,distro.gpt"),),
+            scratch=Path("scratch.ext4"),
+        )
+        self.assertIs(launch.validate_broker(), launch)
+        for option, changed in (
+            ("--entrypoint", replace(launch, entrypoint="/bin/workload")),
+            ("--arg", replace(launch, args=("--serve",))),
+            ("--hostname", replace(launch, hostname="custom")),
+            ("--workload-user", replace(launch, workload_identity=(1000, 1000))),
+            ("--memory-max", replace(launch, memory_max=1024)),
+            ("--pids-max", replace(launch, pids_max=4)),
+        ):
+            with (
+                self.subTest(option=option),
+                self.assertRaisesRegex(
+                    common.ScriptError, "authenticated Bootstrap.*" + option
+                ),
+            ):
+                changed.validate_broker()
+            with self.assertRaisesRegex(common.ScriptError, "authenticated Bootstrap"):
+                changed.broker_openvmm_arguments(
+                    Path.cwd() / "control.sock", Path.cwd() / "boot.sock", 9
+                )
 
     def test_broker_launch_keeps_bootstrap_config_off_command_line(self):
         custom = sandbox.SandboxLayer.parse("custom,custom.erofs")
@@ -4917,7 +5038,7 @@ class ReleaseTests(unittest.TestCase):
                 "tag_name": "v1.2.4-draft",
                 "assets": [
                     {
-                        "name": "nvx-1.2.4-linux-kvm-simple.tar.gz",
+                        "name": "nvx-1.2.4-linux-kvm.tar.gz",
                         "url": "https://api.example.invalid/draft",
                         "size": 100,
                     }
@@ -4929,12 +5050,12 @@ class ReleaseTests(unittest.TestCase):
                 "tag_name": "v1.2.3-dev.abc123",
                 "assets": [
                     {
-                        "name": "nvx-1.2.3-windows-whp-simple.zip",
+                        "name": "nvx-1.2.3-windows-whp.zip",
                         "url": "https://api.example.invalid/windows",
                         "size": 200,
                     },
                     {
-                        "name": "nvx-1.2.3-linux-kvm-simple.tar.gz",
+                        "name": "nvx-1.2.3-linux-kvm.tar.gz",
                         "url": "https://api.example.invalid/linux",
                         "size": 300,
                     },
@@ -4955,9 +5076,48 @@ class ReleaseTests(unittest.TestCase):
             )
 
         self.assertEqual(asset.tag, "v1.2.3-dev.abc123")
-        self.assertEqual(asset.name, "nvx-1.2.3-linux-kvm-simple.tar.gz")
+        self.assertEqual(asset.name, "nvx-1.2.3-linux-kvm.tar.gz")
         self.assertEqual(asset.url, "https://api.example.invalid/linux")
         self.assertEqual(asset.size, 300)
+
+    def test_release_asset_names_preserve_defaults_and_isolate_broker(self):
+        for platform, extension in (
+            ("linux-kvm", ".tar.gz"),
+            ("windows-whp", ".zip"),
+        ):
+            names = [
+                f"nvx-1.2.3-{platform}-broker{extension}",
+                f"nvx-1.2.3-{platform}{extension}",
+            ]
+            releases = [
+                {
+                    "tag_name": "v1.2.3",
+                    "assets": [
+                        {
+                            "name": name,
+                            "url": f"https://api.example.invalid/{index}",
+                            "size": 100,
+                        }
+                        for index, name in enumerate(names)
+                    ],
+                }
+            ]
+            for transport, expected in (
+                ("broker-ttrpc", names[0]),
+                ("simple", names[1]),
+            ):
+                with (
+                    self.subTest(platform=platform, transport=transport),
+                    patch.object(
+                        release.urllib.request,
+                        "urlopen",
+                        return_value=io.BytesIO(json.dumps(releases).encode("utf-8")),
+                    ),
+                ):
+                    asset = release._latest_release_asset(
+                        "example/nvx", platform, transport, None
+                    )
+                self.assertEqual(asset.name, expected)
 
     def test_binary_package_stages_files_and_checksums(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -5024,7 +5184,7 @@ class ReleaseTests(unittest.TestCase):
                     "external_input_size_bytes": len(agent_bytes),
                     "protocol_schema_version": build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
                     "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
-                    "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+                    "runtime_contract": build.GUEST_AGENT_RUNTIME_CONTRACT,
                     "transport": "broker-ttrpc",
                 },
             }
@@ -5077,8 +5237,8 @@ class ReleaseTests(unittest.TestCase):
                 f"{agent_sha256}\n",
                 encoding="ascii",
             )
-            destination = root / "dist" / "staged"
-            simple_destination = root / "dist" / "simple"
+            destination = root / "dist" / "1.0.0-broker"
+            simple_destination = root / "dist" / "1.0.0"
             digest_output = root / "trusted" / "manifest.sha256"
             stderr = io.StringIO()
 
@@ -5107,7 +5267,7 @@ class ReleaseTests(unittest.TestCase):
             ):
                 release.package_release(
                     version="1.0.0",
-                    destination=destination,
+                    destination=None,
                     include_source=False,
                     force=False,
                     transport="broker-ttrpc",
@@ -5115,7 +5275,7 @@ class ReleaseTests(unittest.TestCase):
                 )
                 release.package_release(
                     version="1.0.0",
-                    destination=simple_destination,
+                    destination=None,
                     include_source=False,
                     force=False,
                     transport="simple",
@@ -5354,6 +5514,38 @@ class ReleaseTests(unittest.TestCase):
                     self.assertEqual(marker.read_bytes(), b"keep the prior release")
                     self.assertEqual(list(destination.iterdir()), [marker])
                     self.assertEqual(list((root / "dist").glob(".*.staging-*")), [])
+
+    def test_release_archive_rejects_outputs_inside_source_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = _make_test_release_package(root, build.SIMPLE_TRANSPORT)
+            before = {
+                path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                for path in bundle.rglob("*")
+                if path.is_file()
+            }
+            for output in (
+                bundle,
+                bundle / "SHA256SUMS",
+                bundle / "release.zip",
+                bundle / "nested" / "release.tar.gz",
+                root / "alias" / ".." / bundle.name / "release.zip",
+            ):
+                with (
+                    self.subTest(output=output),
+                    self.assertRaisesRegex(common.ScriptError, "outside.*bundle"),
+                ):
+                    release.create_release_archive(bundle, output)
+                self.assertEqual(
+                    {
+                        path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                        for path in bundle.rglob("*")
+                        if path.is_file()
+                    },
+                    before,
+                )
+                self.assertFalse((bundle / "nested").exists())
+            self.assertEqual(list(root.rglob("*.staging-*")), [])
 
     def test_release_archive_preserves_previous_output_on_validation_failure(self):
         original_validate = release.validate_release_archive
@@ -6795,7 +6987,7 @@ class ReleaseTests(unittest.TestCase):
                         build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION
                     ),
                     "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
-                    "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+                    "runtime_contract": build.GUEST_AGENT_RUNTIME_CONTRACT,
                     "transport": build.BROKER_TRANSPORT,
                 },
             }

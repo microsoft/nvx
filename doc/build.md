@@ -52,51 +52,41 @@ standard build outputs above and writes complete per-scenario logs under
 These are the simple-profile artifacts. They continue to use `alpine/init` and,
 when selected by the `nvx_sandbox` token, `nvx-init-agent`.
 
-The broker artifact uses the reviewed ACI-03 source revision
-`534ffd518dda6b13451d03644191a02f0c53ea33`. That revision computes the
-running `/proc/self/exe` SHA-256 and compares it with the authenticated
-manifest, starts the fixed image from PID 1, publishes level-triggered startup
-state, and gives control traffic priority over downstream console traffic. Build
-`guestagent-nvx` from a clean checkout at that revision with locked
-dependencies, an external target directory, and static musl:
+The broker initramfs uses the pinned agent identity and runtime contract in
+`SOURCE-MANIFEST.json`. Obtain the supplied executable through a trusted
+artifact channel, then authenticate the checkout and derive the expected
+executable digest from the manifest:
 
 ```bash
-cd ACI.Sandbox.GuestAgent.Rust
-export CARGO_TARGET_DIR=/outside/source/nvx-agent-target
-export NVX_VALIDATION_OUT=/outside/source/nvx-agent-validation
-rustup target add x86_64-unknown-linux-musl
-sh scripts/validate-nvx-agent.sh
-sha256sum \
-  "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/nvx-agent"
-```
-
-The ACI validator rejects `PT_INTERP`, forbidden CLH/runc/tonic dependencies,
-and binaries larger than 16 MiB. The release input is the persistent staged
-artifact whose SHA-256 is
-`5d4d5de68871bddaa46c823218bd80b45f03315c0617e81226243ea6c23f4325`,
-size is `1,938,304` bytes, and ELF GNU build ID is
-`7097a9dab9c5e4fbc7ef36b93a4ba897996bd052`. The source revision records
-provenance; it is not sufficient byte identity. The current linker build ID is
-affected by the Cargo target path, so a build from the same source into a
-different target directory can have another digest. Do not claim source-only
-byte reproducibility. Stage only the reviewed external input:
-
-```bash
+AGENT_INPUT=/path/to/supplied/nvx-agent
+AGENT_SHA256="$(
+  python3 -c 'import json; print(json.load(open("SOURCE-MANIFEST.json", encoding="utf-8"))["guest_agent"]["external_input_sha256"])'
+)"
 python3 scripts/nvx.py stage-agent \
-  --input build/nvx-agent-input \
-  --sha256 5d4d5de68871bddaa46c823218bd80b45f03315c0617e81226243ea6c23f4325
+  --input "$AGENT_INPUT" \
+  --sha256 "$AGENT_SHA256"
 ```
 
-The command requires a static x86-64 ELF and writes `build/nvx-agent` plus its
-pin. It rejects missing inputs, any digest or size other than the reviewed
-external input, a dynamic or wrong-arch ELF, and the size limit. Build the
-distinct broker image explicitly:
+This command does not accept an arbitrary executable. The supplied file must
+match the manifest's pinned SHA-256 and size, be a static compatible x86-64 ELF
+without `PT_INTERP` or dynamic dependencies, and satisfy the unchanged source
+revision, build ID, target, startup-mode, protocol-schema, and runtime-contract
+pins used during packaging. The source revision records provenance but does
+not establish byte identity. `stage-agent` copies the input with a bounded
+size check before hashing and writes `build/nvx-agent` plus its digest pin.
+Build the distinct broker image explicitly:
 
 ```bash
 python3 scripts/nvx.py build-agent-initramfs       # Docker
 # or on Linux:
 python3 scripts/nvx.py build-agent-initramfs --native
 ```
+
+The `guest_agent.runtime_contract` value
+`startup-modes-session-operations` is descriptive, unversioned agent-capability
+metadata. It is not a new ABI or protocol version. The separately versioned
+microVM ABI remains 2, the OpenVMM control-session protocol remains 1, and the
+guest-agent protocol schema remains 2.
 
 Native initramfs construction automatically uses
 `~/.cache/nvx/native-work/<profile>` rather than the repository filesystem.
@@ -117,17 +107,19 @@ ownership, repeated inode identities, hardlinks, escaping symlinks, and a
 wrong agent or PID-1 identity. The simple shell image remains an independent
 Alpine profile with its existing utilities and validation.
 
-The matching kernel assertions cover cgroup-v2 memory, pids, CPU weight,
-freezer and BPF; BPF and seccomp syscalls/filters; EROFS, overlay, ext4 and GPT; virtio block/console/MMIO;
+The broker's matching kernel assertions cover cgroup-v2 memory, pids, CPU weight,
+freezer and BPF; BPF and seccomp syscalls/filters; overlay, ext4 and GPT;
+virtio block/console/MMIO;
 devtmpfs, PTYs, proc/sysfs/tmpfs; and mount, PID, UTS, and IPC namespaces.
 CFS bandwidth remains disabled because CPU quota is unused. Linux 6.18
 supplies `clone3`, pidfds, `openat2`, and `close_range` unconditionally; their
-runtime availability is exercised by ACI-04 rather than represented by
-obsolete/nonexistent Kconfig switches.
+runtime availability belongs to broker integration validation rather than
+obsolete or nonexistent Kconfig switches.
 
-The executable SHA-256 above is the authoritative byte identity used by the
-manifest contract; source revision and ELF build ID remain separate fields.
-The source revision does not reproduce or authenticate binary bytes by itself.
+The executable SHA-256 recorded in `SOURCE-MANIFEST.json` is the authoritative
+byte identity used by the manifest contract; source revision and ELF build ID
+remain separate fields. The source revision does not reproduce or authenticate
+binary bytes by itself.
 
 The simple initramfs retains the sandbox helpers, including the static
 `nvx-device-io` benchmark helper and static `nvx-port-io` restore packet helper

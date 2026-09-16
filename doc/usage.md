@@ -265,8 +265,8 @@ python3 scripts/nvx.py sandbox [run|provision|start|exec|stop|deprovision]
 | Option | Default | Description |
 | --- | --- | --- |
 | operation | `run` | Run once, or provision/start/exec/stop/deprovision a managed simple-profile sandbox. |
-| `--transport {simple,broker-ttrpc}` | `simple` | Select the generic simple profile or the authenticated reviewed guest agent. Broker transport supports only one-shot `run`. |
-| `--layer ROLE,PATH,EROFS_UUID` | required for simple run/provision | Attach a `distro`, `runtime`, or `custom` EROFS layer with its authenticated filesystem identity. |
+| `--transport {simple,broker-ttrpc}` | `simple` | Select the generic simple profile or the authenticated pinned guest agent. Broker transport supports only one-shot `run`. |
+| `--layer ROLE,PATH,EROFS_UUID` | required for simple run/provision | Attach a `distro`, `runtime`, or `custom` EROFS layer with its authenticated filesystem identity. Broker paths instead identify control-plane-prepared ext4/GPT images and omit this UUID field. |
 | `--scratch PATH` | required for run/provision | Attach a preformatted ext4 scratch image as the writable overlay. |
 | `--state-dir PATH` | none | Persist managed simple-profile configuration and runtime state. |
 | `--entrypoint PATH` | `/bin/sh` | Select the simple-profile workload entrypoint, or the managed `exec` program. |
@@ -281,16 +281,16 @@ python3 scripts/nvx.py sandbox [run|provision|start|exec|stop|deprovision]
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | policy options | none | Apply the generic network egress/ingress, host-loopback, proxy, and forwarding policy controls. |
 | `--outcome-report PATH` | none | Write the bounded one-shot or managed-exec outcome report. |
-| `--cmdline TEXT` | empty | Append kernel parameters. Simple reserves `nvx_*`; broker also rejects init, console, virtio discovery, virtfs, and network parameters owned by the host profile. |
+| `--cmdline TEXT` | empty | Append kernel parameters. Simple reserves `nvx_*`; broker also rejects init, console, virtio discovery, virtfs, and network parameters owned by the control plane. |
 | `--dry-run` | off | Print the generated OpenVMM microVM command without running it. |
 
-The broker form omits layer UUIDs because authenticated UUID/GPT identity is
-supplied later through ACI-04 Bootstrap:
+The broker form omits layer UUIDs because authenticated ext4/GPT identity is
+supplied later through Bootstrap by the sandbox control plane client:
 
 ```text
 python3 scripts/nvx.py sandbox run
     --transport broker-ttrpc
-    --layer ROLE,PATH [--layer ...]
+    --layer ROLE,EXT4_OR_GPT_PATH [--layer ...]
     --scratch PATH
     --control-socket PATH
     --boot-console-socket PATH
@@ -299,12 +299,19 @@ python3 scripts/nvx.py sandbox run
 ```
 
 `--control-socket`, `--boot-console-socket`, and `--control-auth-handle` are
-required for broker launch. The handle is the readable inherited ACI-04
-capability pipe redirected to OpenVMM stdin with
+required for broker launch. The socket paths must be absolute and resolve to
+different paths, including through aliases. The handle is the readable
+inherited capability pipe created by the sandbox control plane client and
+redirected to OpenVMM stdin with
 `--microvm-control-auth-stdin`; its bytes never enter arguments, environment
 variables, or logs. See [Run](run.md) for artifact preparation and security
 boundaries. Live broker launch is Linux-only; `--dry-run` is available on
 other hosts.
+
+Broker launch accepts only the default values for `--entrypoint`, `--arg`,
+`--hostname`, `--workload-user`, `--memory-max`, and `--pids-max`. Supply
+workload settings through authenticated Bootstrap from the control plane
+instead.
 
 ## Benchmarking
 
@@ -480,7 +487,7 @@ python3 scripts/nvx.py package
 | Option | Description |
 | --- | --- |
 | `--version VERSION` | Override the packaged version. |
-| `--destination PATH` | Override the staging destination. |
+| `--destination PATH` | Override the staging destination. Without it, simple uses `dist/VERSION` and broker-ttrpc uses `dist/VERSION-broker`. |
 | `--transport {simple,broker-ttrpc}` | Select the release profile (default: `simple`); broker-ttrpc is opt-in. |
 | `--include-source` | Include the corresponding source artifacts in the package. |
 | `--binary-only` | Stage binaries only; publish corresponding source separately. |
@@ -499,7 +506,8 @@ python3 scripts/nvx.py archive-release --bundle PATH --output PATH
 
 Creates a `.tar.gz` or `.zip` with one package root and canonical `0755`
 executable/directory or `0644` data modes. It rejects special files and
-verifies `SHA256SUMS` before writing.
+verifies `SHA256SUMS` before writing. The output must be outside the source
+bundle and all of its descendants, including after path alias resolution.
 
 ### `verify-broker-live-gate`
 

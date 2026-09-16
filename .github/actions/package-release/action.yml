@@ -17,15 +17,14 @@ runs:
       run: |
         set -euo pipefail
         version="$(cat VERSION)"
-        simple_package="nvx-${version}-${PLATFORM}-simple"
+        package="nvx-${version}-${PLATFORM}"
         python3 scripts/nvx.py package \
           --version "${version}" \
-          --destination "dist/${simple_package}" \
-          --transport simple \
+          --destination "dist/${package}" \
           --binary-only
         python3 scripts/nvx.py archive-release \
-          --bundle "dist/${simple_package}" \
-          --output "dist/${simple_package}.tar.gz"
+          --bundle "dist/${package}" \
+          --output "dist/${package}.tar.gz"
 
     - name: Package Windows release
       if: runner.os == 'Windows'
@@ -34,16 +33,15 @@ runs:
         PLATFORM: ${{ inputs.platform }}
       run: |
         $Version = (Get-Content VERSION -Raw).Trim()
-        $SimplePackage = "nvx-$Version-$env:PLATFORM-simple"
+        $Package = "nvx-$Version-$env:PLATFORM"
         python scripts\nvx.py package `
           --version $Version `
-          --destination "dist\$SimplePackage" `
-          --transport simple `
+          --destination "dist\$Package" `
           --binary-only
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py archive-release `
-          --bundle "dist\$SimplePackage" `
-          --output "dist\$SimplePackage.zip"
+          --bundle "dist\$Package" `
+          --output "dist\$Package.zip"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Upload Linux release
@@ -51,7 +49,7 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: release-${{ inputs.platform }}
-        path: dist/*-simple.tar.gz
+        path: dist/nvx-*-${{ inputs.platform }}.tar.gz
         if-no-files-found: error
         compression-level: 0
         retention-days: 1
@@ -61,7 +59,7 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: release-${{ inputs.platform }}
-        path: dist/*-simple.zip
+        path: dist/nvx-*-${{ inputs.platform }}.zip
         if-no-files-found: error
         compression-level: 0
         retention-days: 1

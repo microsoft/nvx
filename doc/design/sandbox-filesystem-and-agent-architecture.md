@@ -7,8 +7,8 @@ Its lifetime, resource envelope, and network identity belong to that workload,
 so it does not need pod infrastructure, a pause container, dynamic rootfs
 injection, or a sequence of host RPCs to create additional containers. The
 agent remains outside the workload's namespaces and supervises it from the
-initramfs. This specialization is for non-confidential ACI Sandboxes, not
-multi-container ACI container groups; the host is trusted with image content
+initramfs. This specialization is for non-confidential single-workload
+sandboxes, not multi-container groups; the host is trusted with image content
 and guest memory.
 
 The implemented foundation is a cold-filesystem bootstrap and low-level
@@ -288,7 +288,7 @@ rather than silently executing them twice. Protocol versioning is tied to the
 node-deployed agent; transport compatibility alone is not RPC compatibility.
 
 The proposed workload-facing checkpoint interface is an opt-in, bind-mounted
-`SOCK_SEQPACKET` socket, such as `/dev/aci/checkpoint`, with per-message
+`SOCK_SEQPACKET` socket, such as `/dev/nvx/checkpoint`, with per-message
 `SCM_CREDENTIALS`. The agent owns the PMIO write; the workload does not receive
 `CAP_SYS_RAWIO`, `/dev/port`, or unrestricted port-I/O access. Capture requests
 and retained artifacts need agent and host rate limits.

@@ -46,7 +46,7 @@ from .build import (
     GUEST_AGENT_INSTALLED_PATH,
     GUEST_AGENT_MAXIMUM_BYTES,
     GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
-    GUEST_AGENT_RUNTIME_ABI,
+    GUEST_AGENT_RUNTIME_CONTRACT,
     GUEST_AGENT_SHA256,
     GUEST_AGENT_SHA256_NAME,
     GUEST_AGENT_SIZE_BYTES,
@@ -498,7 +498,7 @@ def _runtime_identity(manifest: dict[str, object]) -> dict[str, object]:
         "agent_transport": agent["transport"],
         "protocol_schema_version": agent["protocol_schema_version"],
         "startup_modes": agent["startup_modes"],
-        "guest_runtime_abi": agent["runtime_abi"],
+        "guest_runtime_contract": agent["runtime_contract"],
         "microvm_abi_version": openvmm["microvm_abi_version"],
         "control_session_protocol_version": openvmm["control_session_protocol_version"],
         "control_contract_revision": openvmm["control_contract_revision"],
@@ -539,7 +539,7 @@ def _root_broker_agent_contract() -> dict[str, object]:
         "external_input_size_bytes": GUEST_AGENT_SIZE_BYTES,
         "protocol_schema_version": GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
         "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
-        "runtime_abi": GUEST_AGENT_RUNTIME_ABI,
+        "runtime_contract": GUEST_AGENT_RUNTIME_CONTRACT,
         "transport": BROKER_TRANSPORT,
     }
 
@@ -562,7 +562,7 @@ def _package_broker_agent_contract() -> dict[str, object]:
         "source_revision": GUEST_AGENT_SOURCE_REVISION,
         "build_id": GUEST_AGENT_BUILD_ID,
         "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
-        "runtime_abi": GUEST_AGENT_RUNTIME_ABI,
+        "runtime_contract": GUEST_AGENT_RUNTIME_CONTRACT,
     }
 
 
@@ -654,9 +654,9 @@ def _latest_release_asset(
         raise ScriptError("GitHub release query returned an invalid response")
 
     extension = ".zip" if platform.startswith("windows-") else ".tar.gz"
+    suffix = "-broker" if transport == BROKER_TRANSPORT else ""
     asset_pattern = re.compile(
-        rf"^nvx-.+-{re.escape(platform)}-{re.escape(transport)}"
-        rf"{re.escape(extension)}$"
+        rf"^nvx-.+-{re.escape(platform)}{suffix}{re.escape(extension)}$"
     )
     for release_value in cast(list[object], releases):
         if not isinstance(release_value, dict):
@@ -1445,7 +1445,7 @@ def _validate_package_manifest(
             "source_revision": runtime_agent.get("source_revision"),
             "build_id": runtime_agent.get("build_id"),
             "startup_modes": runtime_agent.get("startup_modes"),
-            "runtime_abi": runtime_agent.get("runtime_abi"),
+            "runtime_contract": runtime_agent.get("runtime_contract"),
         }
         if typed_agent != expected_agent:
             raise ScriptError(
@@ -2041,6 +2041,10 @@ def _normalize_release_tree_modes(bundle: Path) -> None:
 
 
 def create_release_archive(bundle: Path, output: Path) -> None:
+    bundle = bundle.expanduser().resolve()
+    output = output.expanduser().resolve()
+    if output == bundle or bundle in output.parents:
+        raise ScriptError("release archive output must be outside the source bundle")
     bundle = require_file(bundle / "SHA256SUMS", "release bundle checksums").parent
     _normalize_release_tree_modes(bundle)
     _validate_release_package_tree(bundle)
@@ -2785,7 +2789,7 @@ def _guest_release_inputs(
             "source_revision": GUEST_AGENT_SOURCE_REVISION,
             "build_id": GUEST_AGENT_BUILD_ID,
             "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
-            "runtime_abi": GUEST_AGENT_RUNTIME_ABI,
+            "runtime_contract": GUEST_AGENT_RUNTIME_CONTRACT,
         },
     )
     inputs = {
@@ -2922,8 +2926,9 @@ def package_release(
     release_version = (
         version or (REPO_ROOT / "VERSION").read_text(encoding="ascii").strip()
     )
+    suffix = "-broker" if transport == BROKER_TRANSPORT else ""
     release_destination = (
-        destination or REPO_ROOT / "dist" / release_version
+        destination or REPO_ROOT / "dist" / f"{release_version}{suffix}"
     ).resolve()
     digest_output: Path | None = None
     if transport == "broker-ttrpc":

@@ -95,6 +95,7 @@ GUEST_AGENT_INITRAMFS_ARTIFACT_PATH = f"guest/{AGENT_INITRAMFS_NAME}"
 GUEST_AGENT_INSTALLED_PATH = f"/sbin/{GUEST_AGENT_ARTIFACT_NAME}"
 GUEST_AGENT_TARGET = "x86_64-unknown-linux-musl"
 GUEST_AGENT_MAXIMUM_BYTES = 16 * 1024 * 1024
+GUEST_AGENT_COPY_CHUNK_BYTES = 1024 * 1024
 GUEST_AGENT_SOURCE_REVISION = "534ffd518dda6b13451d03644191a02f0c53ea33"
 GUEST_AGENT_SHA256 = "5d4d5de68871bddaa46c823218bd80b45f03315c0617e81226243ea6c23f4325"
 GUEST_AGENT_SIZE_BYTES = 1_938_304
@@ -103,7 +104,7 @@ SIMPLE_TRANSPORT = "simple"
 BROKER_TRANSPORT = "broker-ttrpc"
 GUEST_AGENT_PROTOCOL_SCHEMA_VERSION = 2
 GUEST_AGENT_STARTUP_MODES = ("agent-ready", "image-entrypoint")
-GUEST_AGENT_RUNTIME_ABI = "microvm-abi-v2-startup-modes-session-operations-v3"
+GUEST_AGENT_RUNTIME_CONTRACT = "startup-modes-session-operations"
 MICROVM_ABI_VERSION = 2
 CONTROL_SESSION_PROTOCOL_VERSION = 1
 CONTROL_CONTRACT_REVISION = "nvx-microvm-v2-control-v1"
@@ -148,6 +149,14 @@ _NEWC_HEADER_BYTES = len(_NEWC_MAGIC) + _NEWC_FIELDS_BYTES
 _NEWC_ALIGNMENT = 4
 _NEWC_BLOCK_BYTES = 512
 _ALPINE_SHADOW_GID = 42  # shadow group in the pinned Alpine rootfs.
+# Alpine v3.24 mount/umount, util-linux-misc, and linux-pam helper modes.
+# Simple images retain these modes with NVX's normalized root ownership.
+_TRUSTED_SIMPLE_PRIVILEGED_MODES = {
+    "bin/mount": 0o4755,
+    "bin/umount": 0o4755,
+    "usr/bin/wall": 0o2755,
+    "usr/sbin/unix_chkpwd": 0o2755,
+}
 # Exact path/target pairs from the pinned Alpine rootfs after required APK installs.
 _TRUSTED_INITRAMFS_SYMLINK_COUNT = 341
 _TRUSTED_INITRAMFS_SYMLINKS_SHA256 = (
@@ -381,7 +390,17 @@ def stage_guest_agent(source: Path, expected_sha256: str) -> Path:
             ) as output_file,
         ):
             temporary_path = Path(output_file.name)
-            shutil.copyfileobj(input_file, output_file)
+            size = 0
+            while chunk := input_file.read(
+                min(GUEST_AGENT_COPY_CHUNK_BYTES, GUEST_AGENT_MAXIMUM_BYTES - size + 1)
+            ):
+                size += len(chunk)
+                if size > GUEST_AGENT_MAXIMUM_BYTES:
+                    raise ScriptError(
+                        "NVX guest agent exceeds the "
+                        f"{GUEST_AGENT_MAXIMUM_BYTES}-byte release limit"
+                    )
+                output_file.write(chunk)
         actual_sha256 = sha256_file(temporary_path)
         if actual_sha256 != expected_sha256:
             raise ScriptError(
@@ -392,10 +411,6 @@ def stage_guest_agent(source: Path, expected_sha256: str) -> Path:
             raise ScriptError(
                 f"NVX guest-agent size is {size} bytes, "
                 f"expected {GUEST_AGENT_SIZE_BYTES} bytes"
-            )
-        if size > GUEST_AGENT_MAXIMUM_BYTES:
-            raise ScriptError(
-                f"NVX guest agent exceeds the 16-MiB release limit: {size} bytes"
             )
         validate_static_x86_64_elf(temporary_path)
         temporary_path.chmod(0o755)
@@ -963,7 +978,7 @@ def _write_apk_manifest(
                         "source_revision": GUEST_AGENT_SOURCE_REVISION,
                         "build_id": GUEST_AGENT_BUILD_ID,
                         "startup_modes": list(GUEST_AGENT_STARTUP_MODES),
-                        "runtime_abi": GUEST_AGENT_RUNTIME_ABI,
+                        "runtime_contract": GUEST_AGENT_RUNTIME_CONTRACT,
                     }
                     if agent_sha256 is not None
                     else None
@@ -1223,11 +1238,24 @@ def _validated_initramfs_entries(
                 raise ScriptError(
                     f"{path} contains regular file {name!r} with unsafe link count"
                 )
-            if permissions & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX | 0o002):
+            trusted_helper = (
+                not agent_profile
+                and permissions == _TRUSTED_SIMPLE_PRIVILEGED_MODES.get(name)
+                and (entry.uid, entry.gid) == (0, 0)
+                and entry.data.startswith(b"\x7fELF")
+            )
+            if (
+                permissions & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX | 0o002)
+                and not trusted_helper
+            ):
                 raise ScriptError(
                     f"{path} contains unsafe regular-file mode for {name!r}"
                 )
-            if entry.data.startswith(b"\x7fELF") and permissions != 0o755:
+            if (
+                entry.data.startswith(b"\x7fELF")
+                and permissions != 0o755
+                and not trusted_helper
+            ):
                 raise ScriptError(f"{path} contains ELF binary {name!r} without 0755")
         else:
             if permissions & (stat.S_ISUID | stat.S_ISGID):

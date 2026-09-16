@@ -42,16 +42,16 @@ runs:
         short_sha="${GITHUB_SHA:0:12}"
         tag="v${version}-dev.${short_sha}"
         packages=(
-          "dist/nvx-${version}-linux-kvm-simple.tar.gz"
-          "dist/nvx-${version}-linux-mshv-simple.tar.gz"
-          "dist/nvx-${version}-windows-whp-simple.zip"
+          "dist/nvx-${version}-linux-kvm.tar.gz"
+          "dist/nvx-${version}-linux-mshv.tar.gz"
+          "dist/nvx-${version}-windows-whp.zip"
         )
         for package in "${packages[@]}"; do
           test -f "${package}"
         done
 
         shopt -s nullglob
-        broker_archives=(dist/*-broker-ttrpc.tar.gz dist/*-broker-ttrpc.zip)
+        broker_archives=(dist/*-broker.tar.gz dist/*-broker.zip)
         shopt -u nullglob
         if [[ -z "${BROKER_LIVE_GATE_CONTRACTS}" ]]; then
           if (( ${#broker_archives[@]} != 0 )); then
@@ -66,7 +66,7 @@ runs:
               echo "::error::invalid broker-live-gate-contracts record"
               exit 1
             }
-            broker_base="dist/nvx-${version}-${platform}-broker-ttrpc"
+            broker_base="dist/nvx-${version}-${platform}-broker"
             [[ "${archive}" == "${broker_base}.tar.gz" ||
                "${archive}" == "${broker_base}.zip" ]] &&
               [[ "${manifest_digest}" == "${broker_base}.SOURCE-MANIFEST.sha256" ]] &&

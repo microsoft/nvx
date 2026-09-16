@@ -107,7 +107,7 @@ path.
 +		offset = 0x18;
 +		break;
 +	case MICROVM_VIRTIO_CONTROL_CONSOLE_MMIO_BASE:
-+		offset = 0x1c; /* Eighth u32 in the ABI-v2 shared-status page. */
++		offset = 0x1c;
 +		break;
 +	default:
 +		dev_err(&pdev->dev,

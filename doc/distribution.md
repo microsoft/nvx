@@ -10,13 +10,25 @@ python3 scripts/nvx.py package --binary-only
 Binary-only mode requires an explicit acknowledgement because the matching
 Linux and Alpine source must be published separately.
 
+Without `--destination`, `package` stages the default simple profile under
+`dist/VERSION` and the opt-in broker profile under `dist/VERSION-broker`.
+These staging defaults are separate from the platform-qualified published
+archive names.
+
+Release archives for the default profile keep the established names
+`nvx-VERSION-PLATFORM.tar.gz` and `nvx-VERSION-PLATFORM.zip`; they do not add a
+`-simple` suffix. Opt-in broker archives use
+`nvx-VERSION-PLATFORM-broker.tar.gz` or
+`nvx-VERSION-PLATFORM-broker.zip`. The package metadata value remains
+`broker-ttrpc`.
+
 A broker package requires explicit `--transport broker-ttrpc`, the staged
 agent, and its agent-only initramfs:
 
 ```bash
 python3 scripts/nvx.py package \
   --transport broker-ttrpc \
-  --manifest-digest-output dist/nvx-broker.SOURCE-MANIFEST.sha256 \
+  --manifest-digest-output dist/0.1.0-broker.SOURCE-MANIFEST.sha256 \
   --binary-only
 ```
 
@@ -41,7 +53,7 @@ python3 scripts/nvx.py package --transport broker-ttrpc --include-source
 The release contains:
 
 ```text
-guest/initramfs.cpio.gz            # broker package: agent image for ACI-04
+guest/initramfs.cpio.gz            # broker package: agent image
 guest/initramfs-agent.cpio.gz      # same bytes under the explicit NVX name
 guest/nvx-agent                    # exact embedded agent identity
 SOURCE-MANIFEST.json               # canonical runtime manifest
@@ -54,37 +66,39 @@ when `--include-source` is selected.
 
 The broker manifest records explicit `broker-ttrpc` transport, OpenVMM source
 and executable identities, kernel/agent-initramfs/agent hashes, guest-agent source
-revision, external agent input digest and size, ELF build ID, protocol schema
-v2, microVM ABI v2, broker protocol v1, and control-contract revision. It also
-records a canonical fingerprint of those inputs. `guest/initramfs.cpio.gz` is
-the ACI-04 installer name; its bytes must equal the separately named agent
-image. Simple packages contain the unchanged shell `guest/initramfs.cpio.gz`
-and no active agent.
+revision, supplied executable digest and size, ELF build ID, protocol schema
+v2, microVM ABI v2, control-session protocol v1, control-contract revision, and
+the descriptive unversioned agent capability
+`runtime_contract: startup-modes-session-operations`. The runtime contract is
+not an additional ABI or protocol version. The manifest also records a
+canonical fingerprint of those inputs. In a broker package,
+`guest/initramfs.cpio.gz` must equal the separately named agent image. Simple
+packages contain the unchanged shell `guest/initramfs.cpio.gz` and no active
+agent.
 
 The `.SOURCE-MANIFEST.sha256` output is deliberately outside the bundle and is
 intended for independently authenticated deployment configuration. It is a
 digest, not a signature, and merely generating it beside a package does not
-establish trust. ACI-04 must receive the digest over an independently trusted
-path before installing the digest-addressed immutable bundle. The canonical
-manifest binds the complete initramfs hash; the source revision alone neither
-reproduces nor authenticates the image bytes.
+establish trust. The sandbox control plane client must receive the digest over
+an independently trusted path before installing the digest-addressed immutable
+bundle. The canonical manifest binds the complete initramfs hash; the source
+revision alone neither reproduces nor authenticates the image bytes.
 
-The broker package accepts only the reviewed ACI-03 input:
-source `534ffd518dda6b13451d03644191a02f0c53ea33`, SHA-256
-`5d4d5de68871bddaa46c823218bd80b45f03315c0617e81226243ea6c23f4325`,
-size `1,938,304` bytes, and build ID
-`7097a9dab9c5e4fbc7ef36b93a4ba897996bd052`. Source provenance does not
-imply byte identity; a same-source binary with a different digest is rejected.
-The authenticated guest-agent contract also declares the exact supported startup modes
-(`agent-ready`, `image-entrypoint`) and runtime ABI. Hosts reject agent-ready
-before launch when either declaration is absent or incompatible.
+The broker package accepts only the supplied executable matching the
+`guest_agent` pins in `SOURCE-MANIFEST.json`, including its source revision,
+SHA-256, size, build ID, static target, protocol schema, startup modes, and
+descriptive runtime contract. Source provenance does not imply byte identity;
+a same-source binary with a different digest is rejected. The authenticated
+guest-agent contract declares the exact supported startup modes
+(`agent-ready`, `image-entrypoint`), and the control plane rejects an
+incompatible declaration before launch.
 
 Package creation copies all selected artifacts into a separate staging directory,
 then verifies provenance, runtime identities, initramfs contents, and checksums
 before publishing. The staged kernel and config must match the hashes admitted
 by kernel build provenance before copying, even if the build outputs change
 during packaging. `--force` retains the previous release until validation
-succeeds. Directory publication and the external broker manifest digest are
+succeeds. Directory publication and the separate broker manifest digest are
 protected by exclusive interprocess locks on both destination paths, acquired in
 path order. Destination preflight, backup, promotion, rollback, and cleanup all
 run while holding both locks, including the final `--force` check. Publishers
@@ -103,8 +117,8 @@ tar/ZIP extractor:
 
 ```bash
 python3 scripts/nvx.py archive-release \
-  --bundle dist/nvx-0.1.0-linux-kvm-broker-ttrpc \
-  --output dist/nvx-0.1.0-linux-kvm-broker-ttrpc.tar.gz
+  --bundle dist/nvx-0.1.0-linux-kvm-broker \
+  --output dist/nvx-0.1.0-linux-kvm-broker.tar.gz
 ```
 
 The archive records directories as `0755`, OpenVMM and `nvx-agent` as `0755`,
@@ -121,9 +135,11 @@ The same validator is used for archive creation, installation, and the publicati
 gate. It checks every required alias, config, package manifest, trust sidecar,
 checksum relationship, and the selected initramfs structure. Newc verification
 requires every numeric header field to be exactly eight ASCII hexadecimal digits,
-matching the kernel parser. Archive creation validates a temporary `.zip` or
-`.tar.gz` completely before atomically replacing the output,
-so validation failure preserves any previous archive. Downloaded manifests must
+matching the kernel parser. Archive creation requires the output to be outside
+the bundle and all of its descendants, including paths that become descendants
+after alias resolution. It validates a temporary `.zip` or `.tar.gz` completely
+before atomically replacing the output, so validation failure preserves any
+previous archive. Downloaded manifests must
 declare the unchanged microVM ABI 2 and control-session protocol 1 with strict
 integer types and match the local control contract before any runtime mutation.
 Installation holds an exclusive per-runtime interprocess lock across recovery,
