@@ -2203,7 +2203,7 @@ class BuildTests(unittest.TestCase):
                     with self.assertRaisesRegex(common.ScriptError, error):
                         build.verify_agent_initramfs(path, expected)
 
-    def test_simple_initramfs_preserves_only_expected_privileged_helper_modes(self):
+    def test_simple_initramfs_pins_privileged_helper_modes_and_contents(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "initramfs.cpio.gz"
             init_script = (common.REPO_ROOT / "alpine" / "init").read_bytes()
@@ -2219,24 +2219,42 @@ class BuildTests(unittest.TestCase):
                 ("usr/sbin/unix_chkpwd", 0o102755),
             )
             for name, mode in helpers:
-                entry: NewcTestEntry = (name, mode, _static_x86_64_elf())
+                payload = _static_x86_64_elf() + name.encode("ascii")
+                entry: NewcTestEntry = (name, mode, payload)
                 path.write_bytes(_simple_newc_archive(init_script, (*parents, entry)))
-                build.verify_simple_initramfs(path)
                 with self.assertRaisesRegex(common.ScriptError, "unsafe.*mode"):
-                    build.verify_agent_initramfs(path, build.GUEST_AGENT_SHA256)
-                for invalid in (
-                    (name, mode | 0o002, _static_x86_64_elf()),
-                    (name, mode, _static_x86_64_elf(), 1, 0),
-                    (name, mode, _static_x86_64_elf(), 0, 1),
-                    (name, mode, b"#!/bin/sh\n"),
-                    (name + "-untrusted", mode, _static_x86_64_elf()),
-                ):
-                    with self.subTest(name=name, invalid=invalid[:2]):
-                        path.write_bytes(
-                            _simple_newc_archive(init_script, (*parents, invalid))
-                        )
-                        with self.assertRaisesRegex(common.ScriptError, "unsafe.*mode"):
-                            build.verify_simple_initramfs(path)
+                    build.verify_simple_initramfs(path)
+                policy = {
+                    helper_name: (
+                        stat.S_IMODE(helper_mode),
+                        hashlib.sha256(
+                            _static_x86_64_elf() + helper_name.encode("ascii")
+                        ).hexdigest(),
+                    )
+                    for helper_name, helper_mode in helpers
+                }
+                with patch.object(build, "_TRUSTED_SIMPLE_PRIVILEGED_HELPERS", policy):
+                    build.verify_simple_initramfs(path)
+                    with self.assertRaisesRegex(common.ScriptError, "unsafe.*mode"):
+                        build.verify_agent_initramfs(path, build.GUEST_AGENT_SHA256)
+                    other_name = next(helper for helper, _ in helpers if helper != name)
+                    for invalid in (
+                        (name, mode | 0o002, payload),
+                        (name, mode, payload, 1, 0),
+                        (name, mode, payload, 0, 1),
+                        (name, mode, b"#!/bin/sh\n"),
+                        (name + "-untrusted", mode, payload),
+                        (name, mode, payload[:-1] + bytes([payload[-1] ^ 1])),
+                        (name, mode, _static_x86_64_elf() + other_name.encode("ascii")),
+                    ):
+                        with self.subTest(name=name, invalid=invalid[:2]):
+                            path.write_bytes(
+                                _simple_newc_archive(init_script, (*parents, invalid))
+                            )
+                            with self.assertRaisesRegex(
+                                common.ScriptError, "unsafe.*mode"
+                            ):
+                                build.verify_simple_initramfs(path)
 
     def test_simple_and_broker_initramfs_profiles_are_structurally_distinct(self):
         with tempfile.TemporaryDirectory() as temporary:

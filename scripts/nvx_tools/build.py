@@ -149,13 +149,25 @@ _NEWC_HEADER_BYTES = len(_NEWC_MAGIC) + _NEWC_FIELDS_BYTES
 _NEWC_ALIGNMENT = 4
 _NEWC_BLOCK_BYTES = 512
 _ALPINE_SHADOW_GID = 42  # shadow group in the pinned Alpine rootfs.
-# Alpine v3.24 mount/umount, util-linux-misc, and linux-pam helper modes.
-# Simple images retain these modes with NVX's normalized root ownership.
-_TRUSTED_SIMPLE_PRIVILEGED_MODES = {
-    "bin/mount": 0o4755,
-    "bin/umount": 0o4755,
-    "usr/bin/wall": 0o2755,
-    "usr/sbin/unix_chkpwd": 0o2755,
+# Alpine v3.24 x86_64: mount/umount/util-linux-misc 2.42.3-r1, linux-pam 1.7.1-r2.
+# Privileged exceptions bind both mode and SHA-256, with normalized root ownership.
+_TRUSTED_SIMPLE_PRIVILEGED_HELPERS = {
+    "bin/mount": (
+        0o4755,
+        "89dae83444ef4d1bf3c0667b7bdf94a531735158fd1e2bbc127236aecfaa7014",
+    ),
+    "bin/umount": (
+        0o4755,
+        "35811b946dc38de6be55acc3b61a533881c3198124aceffb82d680b95109375d",
+    ),
+    "usr/bin/wall": (
+        0o2755,
+        "2b05d5256f5d8c4a0618a13bced01dc2b917d75a6a0e6054acecb25aaa419b58",
+    ),
+    "usr/sbin/unix_chkpwd": (
+        0o2755,
+        "c14473711fab7a51bab40f073a5bb45371e878763c43fc33ea31d4187870f15c",
+    ),
 }
 # Exact path/target pairs from the pinned Alpine rootfs after required APK installs.
 _TRUSTED_INITRAMFS_SYMLINK_COUNT = 341
@@ -1240,9 +1252,9 @@ def _validated_initramfs_entries(
                 )
             trusted_helper = (
                 not agent_profile
-                and permissions == _TRUSTED_SIMPLE_PRIVILEGED_MODES.get(name)
+                and (permissions, entry.data_sha256)
+                == _TRUSTED_SIMPLE_PRIVILEGED_HELPERS.get(name)
                 and (entry.uid, entry.gid) == (0, 0)
-                and entry.data.startswith(b"\x7fELF")
             )
             if (
                 permissions & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX | 0o002)

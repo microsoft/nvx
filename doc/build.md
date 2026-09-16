@@ -107,6 +107,11 @@ ownership, repeated inode identities, hardlinks, escaping symlinks, and a
 wrong agent or PID-1 identity. The simple shell image remains an independent
 Alpine profile with its existing utilities and validation.
 
+The simple profile permits privileged helper modes only for the exact executable
+SHA-256 pins and modes in `scripts/nvx_tools/build.py`, with normalized root
+ownership. Updating these Alpine helpers requires an explicit pin update;
+substituted binaries are rejected. The broker profile has no such exceptions.
+
 The broker's matching kernel assertions cover cgroup-v2 memory, pids, CPU weight,
 freezer and BPF; BPF and seccomp syscalls/filters; overlay, ext4 and GPT;
 virtio block/console/MMIO;
