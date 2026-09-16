@@ -20,6 +20,8 @@ from nvx_tools.build import (
     build_docker_artifacts,
     build_initramfs,
     build_kernel,
+    record_openvmm_provenance,
+    stage_guest_agent,
 )
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
@@ -102,6 +104,10 @@ def command_build_initramfs(_: argparse.Namespace) -> None:
     _native_initramfs()
 
 
+def command_stage_agent(args: argparse.Namespace) -> None:
+    stage_guest_agent(args.input, args.sha256)
+
+
 def command_build_openvmm(args: argparse.Namespace) -> None:
     require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
     if not args.skip_restore:
@@ -113,6 +119,11 @@ def command_build_openvmm(args: argparse.Namespace) -> None:
         ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
         cwd=OPENVMM_DIR,
     )
+    record_openvmm_provenance(openvmm_binary_path())
+
+
+def command_record_openvmm_provenance(_: argparse.Namespace) -> None:
+    record_openvmm_provenance(openvmm_binary_path())
 
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
@@ -426,9 +437,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     initramfs.set_defaults(handler=command_build_initramfs)
 
+    agent = subparsers.add_parser(
+        "stage-agent",
+        help="stage a pinned static NVX guest-agent build input",
+    )
+    agent.add_argument("--input", type=Path, required=True)
+    agent.add_argument("--sha256", required=True)
+    agent.set_defaults(handler=command_stage_agent)
+
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")
     openvmm.add_argument("--skip-restore", action="store_true")
     openvmm.set_defaults(handler=command_build_openvmm)
+
+    provenance = subparsers.add_parser(
+        "record-openvmm-provenance",
+        help="bind an existing OpenVMM binary to the pinned source revision",
+    )
+    provenance.set_defaults(handler=command_record_openvmm_provenance)
 
     cache = subparsers.add_parser(
         "setup-cross-os-cache",

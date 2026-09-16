@@ -4,6 +4,12 @@
     "name": "nvx",
     "version": "0.1.0"
   },
+  "openvmm": {
+    "source_revision": "489d4c90a721a1318167b8140d30a318aac6dcc8",
+    "microvm_abi_version": 2,
+    "control_session_protocol_version": 1,
+    "control_contract_revision": "nvx-microvm-v2-control-v1"
+  },
   "linux": {
     "version": "6.18.38",
     "upstream_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz",
@@ -28,5 +34,12 @@
     "guest_sources": "alpine",
     "package_manifests": "build/*.packages.json",
     "source_output": "build/sources/alpine"
+  },
+  "guest_agent": {
+    "artifact": "guest/nvx-agent",
+    "target": "x86_64-unknown-linux-musl",
+    "optional": true,
+    "installed_in_initramfs": false,
+    "protocol_schema_version": 1
   }
 }

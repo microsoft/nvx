@@ -27,10 +27,15 @@ python3 scripts/nvx.py package --include-source
 The release contains:
 
 ```text
+guest/nvx-agent                    # only when staged
 source/nvx-project-source-0.1.0.tar.gz
 source/nvx-linux-source-6.18.38.tar.gz
 source/nvx-alpine-source-0.1.0.tar.gz
 ```
+
+The packaged `SOURCE-MANIFEST.json` records SHA-256 identities for OpenVMM,
+the kernel, the initramfs, and the optional agent. The agent remains a staged
+input and is not installed in the initramfs until the explicit cutover.
 
 Linux is GPL-2.0-only, so a distributor of `vmlinux` must make its complete
 corresponding source available. Alpine packages retain their individual
