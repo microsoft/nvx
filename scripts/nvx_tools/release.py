@@ -553,14 +553,107 @@ def _validate_root_manifest_contract(manifest: dict[str, object]) -> None:
         )
 
 
-def _publish_release_directory(staging: Path, destination: Path) -> None:
+def _validate_source_manifest_metadata(
+    manifest: dict[str, object],
+    kernel_inputs: dict[str, object],
+) -> list[str]:
+    _validate_root_manifest_contract(manifest)
+    if manifest.get("format") != 1:
+        raise ScriptError("SOURCE-MANIFEST.json format must be 1")
+    linux_value = manifest.get("linux")
+    alpine_value = manifest.get("alpine")
+    source_value = kernel_inputs.get("source")
+    config_value = kernel_inputs.get("input_config")
+    if not all(
+        isinstance(section, dict)
+        for section in (linux_value, alpine_value, source_value, config_value)
+    ):
+        raise ScriptError("SOURCE-MANIFEST.json is missing source metadata")
+    linux = cast(dict[str, object], linux_value)
+    alpine = cast(dict[str, object], alpine_value)
+    source = cast(dict[str, object], source_value)
+    input_config = cast(dict[str, object], config_value)
+    source_patches = source.get("patches")
+    if not isinstance(source_patches, list):
+        raise ScriptError("kernel provenance source patches must be a list")
+    patch_paths: list[str] = []
+    for patch_value in cast(list[object], source_patches):
+        if not isinstance(patch_value, dict):
+            raise ScriptError("kernel provenance source patch must be an object")
+        patch = cast(dict[str, object], patch_value)
+        path = patch.get("path")
+        if not isinstance(path, str):
+            raise ScriptError("kernel provenance source patch path must be a string")
+        patch_paths.append(path)
+    expected_linux: dict[str, object] = {
+        "version": DEFAULT_KERNEL_VERSION,
+        "upstream_url": DEFAULT_KERNEL_URL,
+        "upstream_archive_sha256": DEFAULT_KERNEL_SHA256,
+        "source_cache": f".cache/linux/linux-{DEFAULT_KERNEL_VERSION}",
+        "source_archive": (
+            f"build/sources/linux/nvx-linux-source-{DEFAULT_KERNEL_VERSION}.tar.gz"
+        ),
+        "generated_final_config": "build/vmlinux.config",
+        "input_config": input_config.get("path"),
+        "patches": patch_paths,
+    }
+    for field, expected in expected_linux.items():
+        if linux.get(field) != expected:
+            raise ScriptError(
+                f"SOURCE-MANIFEST.json Linux {field} does not match the build pin"
+            )
+    expected_alpine: dict[str, object] = {
+        "version": DEFAULT_ALPINE_VERSION,
+        "branch": DEFAULT_ALPINE_BRANCH,
+        "architecture": "x86_64",
+        "minirootfs_url": (
+            "https://dl-cdn.alpinelinux.org/alpine/"
+            f"{DEFAULT_ALPINE_BRANCH}/releases/x86_64/"
+            f"alpine-minirootfs-{DEFAULT_ALPINE_VERSION}-x86_64.tar.gz"
+        ),
+        "minirootfs_sha256": DEFAULT_ALPINE_MINIROOTFS_SHA256,
+        "guest_sources": "alpine",
+        "package_manifests": "build/*.packages.json",
+        "source_output": "build/sources/alpine",
+    }
+    for field, expected in expected_alpine.items():
+        if alpine.get(field) != expected:
+            raise ScriptError(
+                f"SOURCE-MANIFEST.json Alpine {field} does not match the build pin"
+            )
+    return patch_paths
+
+
+def _validate_release_replacement(destination: Path, force: bool) -> None:
+    if not destination.exists():
+        return
+    if not force:
+        raise ScriptError(
+            f"release directory already exists: {destination}; "
+            "pass --force to replace it"
+        )
+    release_root = (REPO_ROOT / "dist").resolve()
+    if destination == release_root or release_root not in destination.parents:
+        raise ScriptError("--force may only replace a version directory below dist/")
+
+
+def _publish_release_directory(
+    staging: Path,
+    destination: Path,
+    *,
+    force: bool,
+) -> None:
     backup = destination.with_name(f".{destination.name}.backup-{uuid.uuid4().hex}")
     moved_prior = False
     try:
+        _validate_release_replacement(destination, force)
         if destination.exists():
             destination.replace(backup)
             moved_prior = True
         staging.replace(destination)
+    except ScriptError:
+        shutil.rmtree(staging)
+        raise
     except OSError as publish_error:
         if moved_prior:
             try:
@@ -618,20 +711,7 @@ def package_release(
     release_destination = (
         destination or REPO_ROOT / "dist" / release_version
     ).resolve()
-    if release_destination.exists():
-        if not force:
-            raise ScriptError(
-                f"release directory already exists: {release_destination}; "
-                "pass --force to replace it"
-            )
-        release_root = (REPO_ROOT / "dist").resolve()
-        if (
-            release_destination == release_root
-            or release_root not in release_destination.parents
-        ):
-            raise ScriptError(
-                "--force may only replace a version directory below dist/"
-            )
+    _validate_release_replacement(release_destination, force)
     binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(artifact_path("vmlinux"), "required guest artifact vmlinux")
     kernel_config = require_file(
@@ -660,7 +740,7 @@ def package_release(
         "source manifest",
     )
     root_manifest = _read_json_object(root_manifest_path, "source manifest")
-    _validate_root_manifest_contract(root_manifest)
+    _validate_source_manifest_metadata(root_manifest, kernel_provenance)
     for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
         require_file(REPO_ROOT / name, name)
     require_file(OPENVMM_DIR / "LICENSE", "OpenVMM license")
@@ -754,7 +834,7 @@ def package_release(
         )
         write_sha256_sums(staging)
         verify_sha256_sums(staging)
-        _publish_release_directory(staging, release_destination)
+        _publish_release_directory(staging, release_destination, force=force)
     except _ReleaseRestoreError:
         preserve_staging = True
         raise
@@ -769,20 +849,10 @@ def verify_source_tree() -> None:
         REPO_ROOT / "SOURCE-MANIFEST.json",
         "source manifest",
     )
-    _validate_root_manifest_contract(manifest)
-    linux_value = manifest.get("linux")
-    alpine_value = manifest.get("alpine")
-    if not isinstance(linux_value, dict) or not isinstance(alpine_value, dict):
-        raise ScriptError("SOURCE-MANIFEST.json is missing Linux or Alpine metadata")
-    linux_manifest = cast(dict[str, object], linux_value)
-    alpine_manifest = cast(dict[str, object], alpine_value)
-    patches = linux_manifest.get("patches")
-    if not isinstance(patches, list):
-        raise ScriptError("SOURCE-MANIFEST.json Linux patches must be strings")
-    patch_values = cast(list[object], patches)
-    if not all(isinstance(patch, str) for patch in patch_values):
-        raise ScriptError("SOURCE-MANIFEST.json Linux patches must be strings")
-    patch_paths = cast(list[str], patch_values)
+    patch_paths = _validate_source_manifest_metadata(
+        manifest,
+        kernel_provenance_inputs(),
+    )
     required = {
         REPO_ROOT / "kernel" / "config-microvm": "kernel build configuration",
         REPO_ROOT
@@ -811,26 +881,6 @@ def verify_source_tree() -> None:
             "generated third-party sources must not be checked out here: "
             + ", ".join(present)
         )
-    expected_linux = {
-        "version": DEFAULT_KERNEL_VERSION,
-        "upstream_url": DEFAULT_KERNEL_URL,
-        "upstream_archive_sha256": DEFAULT_KERNEL_SHA256,
-    }
-    for field, expected in expected_linux.items():
-        if linux_manifest.get(field) != expected:
-            raise ScriptError(
-                f"SOURCE-MANIFEST.json Linux {field} does not match the build pin"
-            )
-    expected_alpine = {
-        "version": DEFAULT_ALPINE_VERSION,
-        "branch": DEFAULT_ALPINE_BRANCH,
-        "minirootfs_sha256": DEFAULT_ALPINE_MINIROOTFS_SHA256,
-    }
-    for field, expected in expected_alpine.items():
-        if alpine_manifest.get(field) != expected:
-            raise ScriptError(
-                f"SOURCE-MANIFEST.json Alpine {field} does not match the build pin"
-            )
     config_path = REPO_ROOT / "kernel" / "config-microvm"
     config = config_path.read_text(encoding="utf-8")
     for setting in (
