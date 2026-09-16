@@ -39,6 +39,7 @@ from .openvmm_process import OpenvmmProcess, TcpConsole
 MICROVM_TEST_SCENARIOS = (
     "console-exit",
     "console-snapshot",
+    "directional-network-policy",
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
     "lifecycle",
@@ -60,6 +61,13 @@ MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
 SANDBOX_BLOCKS_COMPLETION_MARKER = b"NVX-SANDBOX-BLOCKS-OK"
 VIRTIO_NET_COMPLETION_MARKER = b"NVX-VIRTIO-NET-OK"
+DIRECTIONAL_NETWORK_ALLOW_MARKER = b"NVX-DIRECTIONAL-NETWORK-ALLOW-OK"
+DIRECTIONAL_NETWORK_DENY_MARKER = b"NVX-DIRECTIONAL-NETWORK-DENY-OK"
+DIRECTIONAL_NETWORK_INGRESS_READY_MARKER = b"NVX-DIRECTIONAL-INGRESS-READY"
+DIRECTIONAL_NETWORK_GUEST_IPV4 = "192.0.2.2"
+DIRECTIONAL_NETWORK_GATEWAY_IPV4 = "192.0.2.1"
+DIRECTIONAL_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/24"
+DIRECTIONAL_NETWORK_INGRESS_PORT = 18080
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -465,6 +473,189 @@ def run_virtio_net(
         timeout=timeout,
         log_path=log_path,
     )
+
+
+def _directional_network_command(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    memory_mib: int,
+    *,
+    egress: str,
+    ingress: str,
+) -> list[str]:
+    if egress not in ("allow", "deny") or ingress not in ("allow", "deny"):
+        raise ValueError("directional network actions must be 'allow' or 'deny'")
+    command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0",
+        network=DIRECTIONAL_NETWORK_CIDR,
+    )
+    command.extend(("--network-egress", egress, "--network-ingress", ingress))
+    return command
+
+
+def run_directional_network_policy(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("0.0.0.0", 0))
+    listener.listen(2)
+    listener.settimeout(timeout)
+    http_port = int(listener.getsockname()[1])
+    server_errors: list[Exception] = []
+
+    def serve_allowed_request() -> None:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(timeout)
+                request = connection.recv(4096)
+                if not request.startswith(b"GET /directional HTTP/1."):
+                    raise RuntimeError(
+                        f"unexpected directional-policy HTTP request: {request!r}"
+                    )
+                body = b"NVX-DIRECTIONAL-RESPONSE-OK"
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: "
+                    + str(len(body)).encode("ascii")
+                    + b"\r\nConnection: close\r\n\r\n"
+                    + body
+                )
+        except Exception as error:
+            server_errors.append(error)
+
+    server = threading.Thread(
+        target=serve_allowed_request,
+        name="nvx-directional-network-test",
+        daemon=True,
+    )
+    server.start()
+    try:
+        allow_command = _directional_network_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            egress="allow",
+            ingress="deny",
+        )
+        with OpenvmmProcess(
+            allow_command,
+            output_dir / "directional-network-allow.log",
+        ) as process:
+            process.wait_for(BOOT_MARKER, timeout)
+            _stage_script(
+                process,
+                "/tmp/nvx-directional-network-policy",
+                "NVX_DIRECTIONAL_NETWORK_POLICY",
+                _render_script(
+                    "directional-network-policy.sh.in",
+                    EGRESS="allow",
+                    GUEST_IPV4=DIRECTIONAL_NETWORK_GUEST_IPV4,
+                    GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                    HTTP_PORT=str(http_port),
+                    INGRESS_PORT=str(DIRECTIONAL_NETWORK_INGRESS_PORT),
+                    COMPLETION_MARKER=DIRECTIONAL_NETWORK_ALLOW_MARKER.decode(),
+                ),
+            )
+            process.wait_for(DIRECTIONAL_NETWORK_INGRESS_READY_MARKER, timeout)
+            try:
+                inbound = socket.create_connection(
+                    (DIRECTIONAL_NETWORK_GUEST_IPV4, DIRECTIONAL_NETWORK_INGRESS_PORT),
+                    timeout=min(timeout, 2.0),
+                )
+            except OSError:
+                pass
+            else:
+                inbound.close()
+                raise RuntimeError("host initiated a new connection toward the guest")
+            process.send_line("NVX-DIRECTIONAL-INGRESS-CHECKED")
+            process.wait_for(DIRECTIONAL_NETWORK_ALLOW_MARKER, timeout)
+            allowed = process.wait(timeout)
+        if allowed.returncode != 0:
+            raise RuntimeError(
+                f"directional-policy allow guest exited with {allowed.returncode}"
+            )
+        server.join(timeout)
+        if server.is_alive():
+            raise TimeoutError("directional-policy HTTP server did not finish")
+        if server_errors:
+            raise RuntimeError(
+                "directional-policy HTTP server failed"
+            ) from server_errors[0]
+
+        deny_command = _directional_network_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            egress="deny",
+            ingress="deny",
+        )
+        run_guest_script(
+            deny_command,
+            _render_script(
+                "directional-network-policy.sh.in",
+                EGRESS="deny",
+                GUEST_IPV4=DIRECTIONAL_NETWORK_GUEST_IPV4,
+                GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                HTTP_PORT=str(http_port),
+                INGRESS_PORT=str(DIRECTIONAL_NETWORK_INGRESS_PORT),
+                COMPLETION_MARKER=DIRECTIONAL_NETWORK_DENY_MARKER.decode(),
+            ),
+            DIRECTIONAL_NETWORK_DENY_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "directional-network-deny.log",
+        )
+        listener.settimeout(0.25)
+        try:
+            unexpected, _ = listener.accept()
+        except TimeoutError:
+            pass
+        else:
+            unexpected.close()
+            raise RuntimeError("deny-all egress reached the host TCP listener")
+
+        unsupported_command = _directional_network_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            egress="allow",
+            ingress="allow",
+        )
+        with OpenvmmProcess(
+            unsupported_command,
+            output_dir / "directional-network-unsupported-ingress.log",
+        ) as process:
+            unsupported = process.wait(timeout)
+        if (
+            unsupported.returncode == 0
+            or b"--network-ingress allow is unsupported" not in unsupported.output
+            or BOOT_MARKER in unsupported.output
+        ):
+            raise RuntimeError(
+                "unsupported ingress policy was not rejected before boot"
+            )
+    finally:
+        listener.close()
+        server.join(timeout=1)
 
 
 def run_sandbox_blocks(
@@ -2324,6 +2515,17 @@ def run(args: argparse.Namespace) -> int:
     if "snapshot-tiers" in scenarios:
         print(f"Running microVM snapshot-tier correctness on OpenVMM/{args.backend}")
         run_snapshot_tiers(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "directional-network-policy" in scenarios:
+        print(f"Running microVM directional network policy on OpenVMM/{args.backend}")
+        run_directional_network_policy(
             executable,
             kernel,
             initrd,

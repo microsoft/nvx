@@ -864,6 +864,51 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests.VIRTIO_NET_COMPLETION_MARKER,
         )
 
+    def test_directional_network_commands_map_mxc_default_actions(self):
+        with patch.object(
+            microvm_tests,
+            "workload_boot_command",
+            side_effect=[["openvmm", "boot"], ["openvmm", "boot"]],
+        ) as boot_command:
+            allow = microvm_tests._directional_network_command(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                128,
+                egress="allow",
+                ingress="deny",
+            )
+            deny = microvm_tests._directional_network_command(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                128,
+                egress="deny",
+                ingress="deny",
+            )
+
+        self.assertEqual(boot_command.call_count, 2)
+        self.assertEqual(
+            allow[-4:],
+            ["--network-egress", "allow", "--network-ingress", "deny"],
+        )
+        self.assertEqual(
+            deny[-4:],
+            ["--network-egress", "deny", "--network-ingress", "deny"],
+        )
+        with self.assertRaisesRegex(ValueError, "actions must be"):
+            microvm_tests._directional_network_command(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                128,
+                egress="block",
+                ingress="deny",
+            )
+
     def test_sandbox_blocks_use_fixed_roles_and_access(self):
         with (
             patch.object(
