@@ -286,6 +286,23 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "--net and --network-profile"):
             nvx.command_run(missing_network)
 
+    def test_run_parses_denied_filesystem_paths(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--mount",
+                "/mnt/share,share,rw",
+                "--mount-deny",
+                "share/secrets",
+                "--mount-deny",
+                "share/private",
+            ]
+        )
+        self.assertEqual(
+            args.mount_deny,
+            [Path("share/secrets"), Path("share/private")],
+        )
+
     def test_run_exposes_restore_readiness(self):
         args = nvx.parse_args(
             [

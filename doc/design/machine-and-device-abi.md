@@ -270,12 +270,16 @@ transport.
 Read-only mode rejects mutation in the host device before invoking host
 filesystem operations; read-write mode exposes only the supported common host
 contract.
+Denied host paths are canonicalized into a bounded, non-overlapping relative
+set and enforced before HostFs operations. Prefix checks hide complete
+subtrees, while denied root device/inode identities block hard-link, junction,
+and bind-mount aliases. The policy is unchanged by a second guest mount.
 
 The exported directory is external live state, not part of the VM snapshot.
-An active capture saves its exact canonical host path, FUSE negotiation, node
+An active capture saves its exact canonical host path, denied-path set, FUSE negotiation, node
 and handle allocation, aliases, lookup counts, directory snapshots and cookies,
 and the identities needed to reopen objects. Restore requires the same path,
-target, mode, root identity, and reopenable objects. A dormant capture instead
+target, mode, denied-path set, root identity, and reopenable objects. A dormant capture instead
 saves explicit unattached state and may restore with no attachment or bind a
 new HostFs backend. The resumed guest then mounts tag `microvm` explicitly;
 the cold-boot mount hook has already run. Snapshots without this capability

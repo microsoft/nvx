@@ -243,6 +243,11 @@ Use `ro` for read-only access. The guest target must be an absolute Linux path.
 Host paths containing commas are unsupported. To expose multiple directories,
 place them under one exported host root. A snapshot captured with a mapping
 requires the same canonical host path, target, mode, and filesystem identity.
+A repeatable `--mount-deny HOST_PATH` hides an existing file or directory
+inside that root. Denied names are omitted from directory listings and remain
+inaccessible through `..`, a symlink/junction, or another mount of the same
+virtio-fs device. Unsafe, external, duplicate, overlapping, and nested-mount
+rules are rejected before boot.
 A snapshot captured without a mapping may restore with a new `--mount`; after
 resume, mount it explicitly inside the guest because the initramfs hook has
 already completed:

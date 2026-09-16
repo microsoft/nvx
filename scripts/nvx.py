@@ -221,6 +221,8 @@ def command_run(args: argparse.Namespace) -> None:
         if args.mount.count(",") not in (1, 2):
             raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
         command.extend(["--mount", args.mount])
+    for denied_path in args.mount_deny:
+        command.extend(["--mount-deny", str(denied_path)])
     if args.net is not None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
     if args.network_egress is not None:
@@ -467,6 +469,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--memory-capacity-mib", type=int)
     run.add_argument("--processors", type=int, choices=(1, 2, 4, 8), default=1)
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
+    run.add_argument("--mount-deny", action="append", type=Path, default=[])
     run.add_argument("--net", metavar="IPV4/PREFIX")
     run.add_argument("--network-profile", choices=NETWORK_PROFILES)
     run.add_argument("--network-egress", choices=("allow", "deny"))

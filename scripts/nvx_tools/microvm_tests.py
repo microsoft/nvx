@@ -43,6 +43,7 @@ MICROVM_TEST_SCENARIOS = (
     "console-exit",
     "console-snapshot",
     "directional-network-policy",
+    "denied-filesystem-paths",
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
     "host-loopback-policy",
@@ -94,6 +95,7 @@ ENDPOINT_POLICY = ("10.0.0.9:8443", "192.0.2.7:443", "10.0.0.9:443")
 ENDPOINT_POLICY_BEFORE_MARKER = b"NVX-ENDPOINT-POLICY-BEFORE"
 ENDPOINT_POLICY_AFTER_MARKER = b"NVX-ENDPOINT-POLICY-AFTER"
 FILESYSTEM_READ_ONLY_MARKER = b"NVX-FILESYSTEM-READ-ONLY-OK"
+FILESYSTEM_DENIED_MARKER = b"NVX-DENIED-PATHS-OK"
 FILESYSTEM_DORMANT_BEFORE_MARKER = b"NVX-FILESYSTEM-DORMANT-BEFORE"
 FILESYSTEM_DORMANT_ATTACHED_MARKER = b"NVX-FILESYSTEM-DORMANT-ATTACHED"
 FILESYSTEM_LIVE_BEFORE_MARKER = b"NVX-FILESYSTEM-LIVE-BEFORE"
@@ -1276,6 +1278,96 @@ def run_host_loopback_policy(
             raise RuntimeError(
                 f"invalid host-loopback policy {name} was not rejected before boot"
             )
+
+
+def run_denied_filesystem_paths(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-denied-paths-") as temporary:
+        root = Path(temporary) / "share"
+        allowed = root / "allowed"
+        secrets = root / "secrets"
+        allowed.mkdir(parents=True)
+        secrets.mkdir()
+        (allowed / "seed").write_bytes(b"NVX-ALLOWED\n")
+        secret = secrets / "token"
+        secret.write_bytes(b"NVX-SECRET\n")
+        alias = root / "alias"
+        try:
+            os.symlink("secrets", alias, target_is_directory=True)
+        except OSError as error:
+            if os.name != "nt":
+                raise
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(alias), str(secrets)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"failed to create denied-path junction: {result.stderr.strip()}"
+                ) from error
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            mount=f"/mnt/share,{root},rw",
+        )
+        command.extend(("--mount-deny", str(secrets)))
+        run_guest_script(
+            command,
+            _read_script("denied-filesystem-paths.sh"),
+            FILESYSTEM_DENIED_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "denied-filesystem-paths.log",
+        )
+        if (allowed / "from-guest").read_bytes() != b"NVX-GUEST-WRITE\n":
+            raise RuntimeError("allowed filesystem path did not remain writable")
+        if secret.read_bytes() != b"NVX-SECRET\n":
+            raise RuntimeError("denied filesystem path was modified")
+
+        outside = Path(temporary) / "outside"
+        outside.mkdir()
+        for name, denied_paths, expected in (
+            ("outside", (outside,), b"outside the filesystem export root"),
+            ("duplicate", (secrets, secrets), b"unique and non-overlapping"),
+            ("root", (root,), b"cannot hide the complete filesystem export"),
+        ):
+            invalid = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                mount=f"/mnt/share,{root},rw",
+            )
+            for path in denied_paths:
+                invalid.extend(("--mount-deny", str(path)))
+            with OpenvmmProcess(
+                invalid,
+                output_dir / f"denied-filesystem-{name}.log",
+            ) as process:
+                result = process.wait(timeout)
+            if (
+                result.returncode == 0
+                or expected not in result.output
+                or BOOT_MARKER in result.output
+            ):
+                raise RuntimeError(
+                    f"unsafe denied filesystem policy {name} was not rejected before boot"
+                )
 
 
 def run_sandbox_blocks(
@@ -3057,6 +3149,17 @@ def run(args: argparse.Namespace) -> int:
     if "host-loopback-policy" in scenarios:
         print(f"Running microVM host-loopback policy on OpenVMM/{args.backend}")
         run_host_loopback_policy(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "denied-filesystem-paths" in scenarios:
+        print(f"Running microVM denied filesystem paths on OpenVMM/{args.backend}")
+        run_denied_filesystem_paths(
             executable,
             kernel,
             initrd,

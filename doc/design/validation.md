@@ -32,6 +32,9 @@ reconnects, preserves guest state, reports execution timeout, and stops the VM
 cleanly. Sandbox coverage adds deterministic active block-I/O drain, paired
 scratch publication, two private restores, fresh scratch replacement, and
 pre-entry rejection of missing, corrupt, mismatched, or wrong-geometry media.
+Denied-filesystem coverage verifies listing suppression, allowed writes,
+direct and parent-relative denial, symlink/junction alias denial, a second
+virtio-fs mount, and pre-boot rejection of unsafe path policies.
 The native suite targets KVM, MSHV, and WHP; a passing run on one backend is
 not a fresh result for the others.
 Coverage also includes
