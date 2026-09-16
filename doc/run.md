@@ -126,6 +126,28 @@ allow/deny options:
 Rules match IPv4 addresses or CIDRs and may add one TCP or UDP destination
 port. Deny matches take precedence over allow matches.
 
+Host loopback is separately controlled in both directions:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --hypervisor kvm \
+  --memory 128M \
+  --kernel guest/vmlinux \
+  --initrd guest/initramfs.cpio.gz \
+  --net 10.0.0.2/24 \
+  --network-profile portable \
+  --host-loopback deny \
+  --network-proxy 10.0.0.1:3128
+```
+
+With `deny`, general guest-to-host loopback and every host-to-guest forward are
+blocked, while the exact proxy endpoint remains available. With explicit
+`--host-loopback allow`, repeat
+`--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form to expose
+only selected localhost ports toward the guest.
+
 Most `nvx.py run` options pass through unchanged: `--machine`, `--processors`,
 `--mount`, `--net`, `--network-profile`, `--cmdline`, `--restore-snapshot`,
 `--restore-processors`, and `--restore-ready-path`. The wrapper performs these

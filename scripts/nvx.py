@@ -223,6 +223,20 @@ def command_run(args: argparse.Namespace) -> None:
         command.extend(["--mount", args.mount])
     if args.net is not None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
+    if args.network_egress is not None:
+        command.extend(["--network-egress", args.network_egress])
+    if args.network_ingress is not None:
+        command.extend(["--network-ingress", args.network_ingress])
+    for rule in args.network_egress_allow:
+        command.extend(["--network-egress-allow", rule])
+    for rule in args.network_egress_deny:
+        command.extend(["--network-egress-deny", rule])
+    if args.host_loopback is not None:
+        command.extend(["--host-loopback", args.host_loopback])
+    if args.network_proxy is not None:
+        command.extend(["--network-proxy", args.network_proxy])
+    for forward in args.host_loopback_forward:
+        command.extend(["--host-loopback-forward", forward])
     if args.cmdline:
         command.extend(["--cmdline", args.cmdline])
     print(f">> {_format_command(command)}")
@@ -261,6 +275,13 @@ def command_sandbox(args: argparse.Namespace) -> None:
             memory_mib=args.memory_mib,
             net=args.net,
             network_profile=args.network_profile,
+            network_egress=args.network_egress,
+            network_ingress=args.network_ingress,
+            network_egress_allow=tuple(args.network_egress_allow),
+            network_egress_deny=tuple(args.network_egress_deny),
+            host_loopback=args.host_loopback,
+            network_proxy=args.network_proxy,
+            host_loopback_forward=tuple(args.host_loopback_forward),
             cmdline=args.cmdline,
         )
         return
@@ -324,6 +345,20 @@ def command_sandbox(args: argparse.Namespace) -> None:
     ]
     if args.net is not None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
+    if args.network_egress is not None:
+        command.extend(["--network-egress", args.network_egress])
+    if args.network_ingress is not None:
+        command.extend(["--network-ingress", args.network_ingress])
+    for rule in args.network_egress_allow:
+        command.extend(["--network-egress-allow", rule])
+    for rule in args.network_egress_deny:
+        command.extend(["--network-egress-deny", rule])
+    if args.host_loopback is not None:
+        command.extend(["--host-loopback", args.host_loopback])
+    if args.network_proxy is not None:
+        command.extend(["--network-proxy", args.network_proxy])
+    for forward in args.host_loopback_forward:
+        command.extend(["--host-loopback-forward", forward])
     print(f">> {_format_command(command)}")
     if not args.dry_run:
         raise SystemExit(subprocess.run(command).returncode)
@@ -434,6 +469,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
     run.add_argument("--net", metavar="IPV4/PREFIX")
     run.add_argument("--network-profile", choices=NETWORK_PROFILES)
+    run.add_argument("--network-egress", choices=("allow", "deny"))
+    run.add_argument("--network-ingress", choices=("allow", "deny"))
+    run.add_argument("--network-egress-allow", action="append", default=[])
+    run.add_argument("--network-egress-deny", action="append", default=[])
+    run.add_argument("--host-loopback", choices=("allow", "deny"))
+    run.add_argument("--network-proxy", metavar="IPV4:TCP-PORT")
+    run.add_argument("--host-loopback-forward", action="append", default=[])
     run.add_argument("--cmdline", default="")
     run.add_argument("--restore-snapshot", type=Path)
     run.add_argument("--restore-processors", type=int, choices=(1, 2, 4, 8))
@@ -502,6 +544,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sandbox.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     sandbox.add_argument("--net", metavar="IPV4/PREFIX")
     sandbox.add_argument("--network-profile", choices=NETWORK_PROFILES)
+    sandbox.add_argument("--network-egress", choices=("allow", "deny"))
+    sandbox.add_argument("--network-ingress", choices=("allow", "deny"))
+    sandbox.add_argument("--network-egress-allow", action="append", default=[])
+    sandbox.add_argument("--network-egress-deny", action="append", default=[])
+    sandbox.add_argument("--host-loopback", choices=("allow", "deny"))
+    sandbox.add_argument("--network-proxy", metavar="IPV4:TCP-PORT")
+    sandbox.add_argument("--host-loopback-forward", action="append", default=[])
     sandbox.add_argument("--cmdline", default="")
     sandbox.add_argument("--dry-run", action="store_true")
     sandbox.set_defaults(handler=command_sandbox)

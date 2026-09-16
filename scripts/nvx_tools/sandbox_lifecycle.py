@@ -71,6 +71,13 @@ def _serialize_launch(
     memory_mib: int,
     net: str | None,
     network_profile: str | None,
+    network_egress: str | None,
+    network_ingress: str | None,
+    network_egress_allow: tuple[str, ...],
+    network_egress_deny: tuple[str, ...],
+    host_loopback: str | None,
+    network_proxy: str | None,
+    host_loopback_forward: tuple[str, ...],
     cmdline: str,
 ) -> dict[str, Any]:
     return {
@@ -93,6 +100,13 @@ def _serialize_launch(
         "memory_mib": memory_mib,
         "net": net,
         "network_profile": network_profile,
+        "network_egress": network_egress,
+        "network_ingress": network_ingress,
+        "network_egress_allow": list(network_egress_allow),
+        "network_egress_deny": list(network_egress_deny),
+        "host_loopback": host_loopback,
+        "network_proxy": network_proxy,
+        "host_loopback_forward": list(host_loopback_forward),
         "cmdline": cmdline,
     }
 
@@ -188,6 +202,13 @@ def provision(
     memory_mib: int,
     net: str | None,
     network_profile: str | None,
+    network_egress: str | None,
+    network_ingress: str | None,
+    network_egress_allow: tuple[str, ...],
+    network_egress_deny: tuple[str, ...],
+    host_loopback: str | None,
+    network_proxy: str | None,
+    host_loopback_forward: tuple[str, ...],
     cmdline: str,
 ) -> None:
     state_dir = _prepare_state_directory(state_path, create=True)
@@ -203,6 +224,13 @@ def provision(
             memory_mib=memory_mib,
             net=net,
             network_profile=network_profile,
+            network_egress=network_egress,
+            network_ingress=network_ingress,
+            network_egress_allow=network_egress_allow,
+            network_egress_deny=network_egress_deny,
+            host_loopback=host_loopback,
+            network_proxy=network_proxy,
+            host_loopback_forward=host_loopback_forward,
             cmdline=cmdline,
         ),
     )
@@ -254,6 +282,20 @@ def start(state_path: Path, timeout: float) -> None:
     network_profile = config.get("network_profile")
     if net is not None:
         command.extend(["--net", str(net), "--network-profile", str(network_profile)])
+    for name in ("network_egress", "network_ingress", "host_loopback"):
+        value = config.get(name)
+        if value is not None:
+            command.extend([f"--{name.replace('_', '-')}", str(value)])
+    for name in (
+        "network_egress_allow",
+        "network_egress_deny",
+        "host_loopback_forward",
+    ):
+        for value in config.get(name, []):
+            command.extend([f"--{name.replace('_', '-')}", str(value)])
+    network_proxy = config.get("network_proxy")
+    if network_proxy is not None:
+        command.extend(["--network-proxy", str(network_proxy)])
 
     capability_path = state_dir / CAPABILITY_NAME
     capability_path.write_bytes(capability)

@@ -117,6 +117,35 @@ class OpenvmmProcess:
                 )
             self._output.extend(chunk)
 
+    def wait_for_line(self, marker: bytes, timeout: float) -> None:
+        if not marker or b"\n" in marker or b"\r" in marker:
+            raise ValueError("OpenVMM process line marker must be one non-empty line")
+        deadline = time.monotonic() + timeout
+        while True:
+            marker_end = _line_marker_end(self._output, marker, self._search_offset)
+            if marker_end is not None:
+                self._search_offset = marker_end
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._fail(
+                    TimeoutError(
+                        f"line marker {marker!r} was not observed within {timeout:g}s"
+                    )
+                )
+            try:
+                chunk = self._chunks.get(timeout=min(remaining, 0.1))
+            except queue.Empty:
+                continue
+            if chunk is None:
+                self._fail(
+                    RuntimeError(
+                        "OpenVMM exited with status "
+                        f"{self.process.poll()} before line marker {marker!r}"
+                    )
+                )
+            self._output.extend(chunk)
+
     def wait(self, timeout: float) -> OpenvmmProcessResult:
         deadline = time.monotonic() + timeout
         while True:

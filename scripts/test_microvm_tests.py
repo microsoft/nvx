@@ -345,6 +345,27 @@ class MicrovmTests(unittest.TestCase):
                     process.wait_for(b"MARKER", 1)
                 self.assertEqual(log_path.read_bytes(), b"MARKER\n")
 
+    def test_process_wait_for_line_ignores_marker_inside_echoed_script(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                queues.return_value.get.side_effect = [
+                    b"echo NVX-READY\n",
+                    b"NVX-READY\n",
+                ]
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
+                    process.wait_for_line(b"NVX-READY", 1)
+                self.assertEqual(
+                    log_path.read_bytes(),
+                    b"echo NVX-READY\nNVX-READY\n",
+                )
+
     def test_process_wait_bounds_missing_output_eof_after_exit(self):
         with tempfile.TemporaryDirectory() as temporary:
             with (

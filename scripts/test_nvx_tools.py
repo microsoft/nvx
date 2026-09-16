@@ -738,6 +738,13 @@ class SandboxTests(unittest.TestCase):
                 memory_mib=256,
                 net=None,
                 network_profile=None,
+                network_egress=None,
+                network_ingress=None,
+                network_egress_allow=(),
+                network_egress_deny=(),
+                host_loopback=None,
+                network_proxy=None,
+                host_loopback_forward=(),
                 cmdline="quiet",
             )
 
@@ -755,6 +762,13 @@ class SandboxTests(unittest.TestCase):
                     memory_mib=256,
                     net=None,
                     network_profile=None,
+                    network_egress=None,
+                    network_ingress=None,
+                    network_egress_allow=(),
+                    network_egress_deny=(),
+                    host_loopback=None,
+                    network_proxy=None,
+                    host_loopback_forward=(),
                     cmdline="quiet",
                 )
 

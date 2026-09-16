@@ -45,6 +45,7 @@ MICROVM_TEST_SCENARIOS = (
     "directional-network-policy",
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
+    "host-loopback-policy",
     "lifecycle",
     "l3-l4-egress-policy",
     "managed-lifecycle",
@@ -75,6 +76,9 @@ DIRECTIONAL_NETWORK_GATEWAY_IPV4 = "192.0.2.1"
 DIRECTIONAL_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/24"
 DIRECTIONAL_NETWORK_INGRESS_PORT = 18080
 L3_L4_EGRESS_COMPLETION_MARKER = b"NVX-L3-L4-EGRESS-OK"
+HOST_LOOPBACK_DENY_MARKER = b"NVX-HOST-LOOPBACK-DENY-OK"
+HOST_LOOPBACK_ALLOW_MARKER = b"NVX-HOST-LOOPBACK-ALLOW-OK"
+HOST_LOOPBACK_INGRESS_READY_MARKER = b"NVX-HOST-LOOPBACK-INGRESS-READY"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -1036,6 +1040,242 @@ def run_l3_l4_egress_policy(
         for endpoint in (allowed_tcp, denied_tcp, allowed_udp, denied_udp):
             endpoint.close()
         server.join(timeout=1)
+
+
+def _http_server(
+    listener: socket.socket,
+    expected_path: bytes,
+    body: bytes,
+    timeout: float,
+    errors: list[Exception],
+) -> None:
+    try:
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(timeout)
+            request = connection.recv(4096)
+            if not request.startswith(b"GET " + expected_path + b" HTTP/1."):
+                raise RuntimeError(
+                    f"unexpected host-loopback HTTP request: {request!r}"
+                )
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: "
+                + str(len(body)).encode("ascii")
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+    except Exception as error:
+        errors.append(error)
+
+
+def run_host_loopback_policy(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    denied_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    for listener in (denied_general, proxy):
+        listener.bind(("0.0.0.0", 0))
+        listener.listen(1)
+        listener.settimeout(timeout)
+    denied_general_port = int(denied_general.getsockname()[1])
+    proxy_port = int(proxy.getsockname()[1])
+    proxy_errors: list[Exception] = []
+    proxy_server = threading.Thread(
+        target=_http_server,
+        args=(
+            proxy,
+            b"/proxy",
+            b"NVX-HOST-LOOPBACK-PROXY",
+            timeout,
+            proxy_errors,
+        ),
+        name="nvx-host-loopback-proxy",
+        daemon=True,
+    )
+    proxy_server.start()
+    try:
+        deny_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        deny_command.extend(
+            (
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:{proxy_port}",
+            )
+        )
+        run_guest_script(
+            deny_command,
+            _render_script(
+                "host-loopback-policy.sh.in",
+                MODE="deny",
+                GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                GENERAL_PORT=str(denied_general_port),
+                PROXY_PORT=str(proxy_port),
+                GUEST_PORT="0",
+            ),
+            HOST_LOOPBACK_DENY_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "host-loopback-deny.log",
+        )
+        proxy_server.join(timeout)
+        if proxy_server.is_alive():
+            raise TimeoutError("host-loopback proxy endpoint was not reached")
+        if proxy_errors:
+            raise RuntimeError("host-loopback proxy server failed") from proxy_errors[0]
+        denied_general.settimeout(0.25)
+        try:
+            unexpected, _ = denied_general.accept()
+        except TimeoutError:
+            pass
+        else:
+            unexpected.close()
+            raise RuntimeError("host-loopback deny reached a general host service")
+    finally:
+        denied_general.close()
+        proxy.close()
+        proxy_server.join(timeout=1)
+
+    allowed_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    allowed_general.bind(("0.0.0.0", 0))
+    allowed_general.listen(1)
+    allowed_general.settimeout(timeout)
+    allowed_general_port = int(allowed_general.getsockname()[1])
+    _, host_forward_port = _available_tcp_address()
+    guest_forward_port = 18081
+    allow_errors: list[Exception] = []
+    allow_server = threading.Thread(
+        target=_http_server,
+        args=(
+            allowed_general,
+            b"/general",
+            b"NVX-HOST-LOOPBACK-GENERAL",
+            timeout,
+            allow_errors,
+        ),
+        name="nvx-host-loopback-general",
+        daemon=True,
+    )
+    allow_server.start()
+    try:
+        allow_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        allow_command.extend(
+            (
+                "--host-loopback",
+                "allow",
+                "--host-loopback-forward",
+                f"tcp:{host_forward_port}:{guest_forward_port}",
+            )
+        )
+        with OpenvmmProcess(
+            allow_command,
+            output_dir / "host-loopback-allow.log",
+        ) as process:
+            process.wait_for(BOOT_MARKER, timeout)
+            _stage_script(
+                process,
+                "/tmp/nvx-host-loopback-policy",
+                "NVX_HOST_LOOPBACK_POLICY",
+                _render_script(
+                    "host-loopback-policy.sh.in",
+                    MODE="allow",
+                    GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                    GENERAL_PORT=str(allowed_general_port),
+                    PROXY_PORT="0",
+                    GUEST_PORT=str(guest_forward_port),
+                ),
+            )
+            process.wait_for_line(HOST_LOOPBACK_INGRESS_READY_MARKER, timeout)
+            with socket.create_connection(
+                ("127.0.0.1", host_forward_port), timeout=min(timeout, 5)
+            ) as inbound:
+                inbound.sendall(b"NVX-HOST-LOOPBACK-INBOUND\n")
+                time.sleep(1)
+                inbound.shutdown(socket.SHUT_WR)
+            process.wait_for_line(HOST_LOOPBACK_ALLOW_MARKER, timeout)
+            allowed = process.wait(timeout)
+        if allowed.returncode != 0:
+            raise RuntimeError(
+                f"host-loopback allow guest exited with {allowed.returncode}"
+            )
+        allow_server.join(timeout)
+        if allow_server.is_alive():
+            raise TimeoutError("general host-loopback service was not reached")
+        if allow_errors:
+            raise RuntimeError("general host-loopback server failed") from allow_errors[
+                0
+            ]
+    finally:
+        allowed_general.close()
+        allow_server.join(timeout=1)
+
+    for name, extra, expected in (
+        (
+            "deny-forward",
+            (
+                "--host-loopback",
+                "deny",
+                "--host-loopback-forward",
+                f"tcp:{host_forward_port}:{guest_forward_port}",
+            ),
+            b"--host-loopback-forward requires explicit --host-loopback allow",
+        ),
+        (
+            "wrong-proxy-address",
+            (
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                f"198.51.100.1:{proxy_port}",
+            ),
+            b"must match the guest gateway",
+        ),
+    ):
+        invalid = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        invalid.extend(extra)
+        with OpenvmmProcess(
+            invalid,
+            output_dir / f"host-loopback-{name}.log",
+        ) as process:
+            result = process.wait(timeout)
+        if (
+            result.returncode == 0
+            or expected not in result.output
+            or BOOT_MARKER in result.output
+        ):
+            raise RuntimeError(
+                f"invalid host-loopback policy {name} was not rejected before boot"
+            )
 
 
 def run_sandbox_blocks(
@@ -2806,6 +3046,17 @@ def run(args: argparse.Namespace) -> int:
     if "l3-l4-egress-policy" in scenarios:
         print(f"Running microVM L3/L4 egress policy on OpenVMM/{args.backend}")
         run_l3_l4_egress_policy(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "host-loopback-policy" in scenarios:
+        print(f"Running microVM host-loopback policy on OpenVMM/{args.backend}")
+        run_host_loopback_policy(
             executable,
             kernel,
             initrd,

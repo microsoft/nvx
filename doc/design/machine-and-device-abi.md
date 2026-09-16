@@ -247,6 +247,11 @@ port-specific traffic. The snapshot records the profile, network identity, and
 policy digest. Restore reconstructs a fresh endpoint and requires the profile
 and policy again; native sockets, DNS requests, and flow objects are never
 serialized.
+Host-loopback allow maps the guest gateway to host loopback and may bind
+explicit localhost TCP/UDP forwards into the guest. Deny blocks both general
+gateway socket access and all forwards. One exact gateway TCP proxy endpoint
+may remain available and is bound into the policy digest; live forward sockets
+are not snapshot attachments.
 Capture quiesces the endpoint, drains completion ownership, and requires the
 saved queues to contain no unrepresented RX or TX packets. It then saves the
 queue lifecycle, negotiated features, link state, and endpoint generation.
