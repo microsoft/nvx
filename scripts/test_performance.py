@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import json
+import statistics
 import sys
 import tempfile
 import unittest
@@ -402,6 +403,65 @@ class PerformanceTests(unittest.TestCase):
                 performance.collect_openvmm_results(
                     "linux-kvm", "abc123", source, root / "results"
                 )
+
+    def test_openvmm_json_rejects_unstable_snapshot_generation(self):
+        unstable = [
+            739.1318,
+            782.923,
+            1240.3951,
+            1249.8728,
+            1268.4783,
+            1275.3067,
+            1280.3929,
+            933.864,
+            769.0158,
+            744.6426,
+        ]
+        uniformly_slow = [1200.0 + index for index in range(10)]
+        fast_outliers = [
+            3.975,
+            3.823,
+            3.531,
+            4.051,
+            3.416,
+            3.760,
+            2.489,
+            2.777,
+            3.741,
+            3.919,
+        ]
+        for name, samples, rejected in (
+            ("host-stall", unstable, True),
+            ("uniform-slowdown", uniformly_slow, False),
+            ("two-fast-outliers", fast_outliers, False),
+        ):
+            with self.subTest(name=name):
+                document = lifecycle_document("whp")
+                capture = cast(
+                    dict[str, object],
+                    cast(dict[str, object], document["snapshot_capture"])["whp"],
+                )
+                capture.update(
+                    samples_ms=samples,
+                    p50_ms=statistics.median(samples),
+                    min_ms=min(samples),
+                    max_ms=max(samples),
+                )
+                with tempfile.TemporaryDirectory() as temporary:
+                    source = Path(temporary) / "acceptance.json"
+                    source.write_text(json.dumps(document), encoding="utf-8")
+                    if rejected:
+                        with self.assertRaisesRegex(
+                            performance.PerformanceError,
+                            r"unstable snapshot generation.*p25.*idle host",
+                        ):
+                            performance.read_lifecycle_data(
+                                "windows-whp-virtual-machine", source
+                            )
+                    else:
+                        performance.read_lifecycle_data(
+                            "windows-whp-virtual-machine", source
+                        )
 
     def test_collect_appends_ci_benchmark_table(self):
         with tempfile.TemporaryDirectory() as temporary:

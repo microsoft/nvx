@@ -291,10 +291,13 @@ OpenVMM process. The final measured snapshot is retained for the restore samples
 | `openvmm_snapshot_generation_peak_rss` | MiB | Per-process peak RSS for the snapshot-generating process. |
 | `openvmm_snapshot_restore_peak_rss` | MiB | Per-process peak RSS through the restore marker. |
 
-Warmups are excluded from every aggregate. The CSV stores and gates p50 values. Lifecycle
-diagnostics additionally report timing minimum, maximum, and sample count plus peak-RSS maximum.
-Collection rejects host-termination semantics, legacy console-timed capture results, restore
-results without prequeued guest exit, missing samples, and any guest-exit teardown timeout.
+Warmups are excluded from every aggregate. The CSV stores and gates p50 values. CI retains the
+per-phase lifecycle profile, and diagnostics additionally report timing minimum, maximum, and
+sample count plus peak-RSS maximum. Collection rejects host-termination semantics, legacy
+console-timed capture results, restore results without prequeued guest exit, missing samples, and
+any guest-exit teardown timeout. With at least ten samples, it also rejects snapshot-generation
+series whose p50 is more than 25% above p25; this prevents a transient host stall from entering
+performance history without hiding a uniformly slower product result.
 Lifecycle capture runs a deterministic affinity-pinned worker on every vCPU
 before the snapshot request. Explicit correctness scenarios also stage a post-restore probe.
 The capture probe is outside the snapshot-generation timing interval. Each worker proves that it
