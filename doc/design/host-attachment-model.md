@@ -9,7 +9,7 @@ Each external resource has a stable ID and a declarative reconstruction policy.
 | --- | --- | --- |
 | portb | Pending RX/TX bytes | Host serial endpoint, fresh process generation ID, and optional restore packet |
 | console | Queue progress, staged RX, partial TX, policy | Listener, client connection, or supplied handle |
-| Reserved control console | Distinct console attachment and transport inventory supported by internal helpers | Public launch/restore activation remains unavailable pending authenticated broker support |
+| Control console | Distinct console attachment, authenticated broker state, and reconnect epoch | Same-user Unix socket or Windows named pipe plus a fresh capability |
 | network | Static identity, queue/packet progress, profile and policy identity | Fresh in-process Consomme endpoint and matching egress policy |
 | filesystem | FUSE namespace, handles, cookies, root/object identity, access mode | Fresh host-directory attachment |
 | sandbox block | Queue/device state, fixed roles, access, geometry, read-only layer identities, and scratch policy | Matching read-only layers plus a verified private paired scratch copy, or a new same-geometry scratch file |

@@ -237,10 +237,13 @@ egress policy before externally visible transmission:
 
 - allow only listed IPv4 hosts or CIDRs;
 - allow IPv4 except listed hosts or CIDRs; or
-- allow only exact IPv4 TCP endpoints.
+- allow only exact IPv4 TCP endpoints; or
+- combine canonical IPv4/CIDR allow and deny rules with optional TCP or UDP
+  destination ports and deny precedence.
 
-The modes are mutually exclusive and fail closed for traffic outside the
-selected policy. The snapshot records the profile, network identity, and
+The legacy modes are mutually exclusive. The generic rule mode requires an
+explicit default action and fails closed for malformed or fragmented
+port-specific traffic. The snapshot records the profile, network identity, and
 policy digest. Restore reconstructs a fresh endpoint and requires the profile
 and policy again; native sockets, DNS requests, and flow objects are never
 serialized.

@@ -21,11 +21,17 @@ entropy reseed, active console RX/TX, network policy and HTTP traffic, and live
 virtio-fs attachment revalidation. Directional network coverage verifies an
 egress request and response with ingress denied, denial of a host connection
 to an active guest listener, complete egress denial, and pre-boot rejection of
-unsupported ingress on KVM, MSHV, and WHP. Sandbox coverage adds deterministic
-active block-I/O drain, paired scratch publication, two private restores,
-fresh scratch replacement, and pre-entry rejection of missing, corrupt,
-mismatched, or wrong-geometry media. The native suite targets KVM, MSHV, and
-WHP; a passing run on one backend is not a fresh result for the others.
+unsupported ingress on KVM, MSHV, and WHP. L3/L4 coverage verifies TCP and UDP
+port rules, overlapping deny precedence,
+default-deny behavior, and pre-boot rejection of malformed or incomplete
+rules. Managed lifecycle coverage authenticates the dedicated control channel,
+runs multiple workloads in one warm VM across reconnects, preserves guest
+state, reports execution timeout, and stops the VM cleanly. Sandbox coverage
+adds deterministic active block-I/O drain, paired scratch publication, two
+private restores, fresh scratch replacement, and pre-entry rejection of
+missing, corrupt, mismatched, or wrong-geometry media. The native suite targets
+KVM, MSHV, and WHP; a passing run on one backend is not a fresh result for the
+others.
 Coverage also includes
 1/2/4/8-vCPU topology, APIC identity,
 pinned per-vCPU execution, timer/interrupt progress, reset, cancellation,

@@ -84,7 +84,7 @@ If the artifacts are already installed in the repository layout, use
 `openvmm/target/release/openvmm[.exe]`, `build/vmlinux`, and
 `build/initramfs.cpio.gz` instead of the paths above.
 
-Direct OpenVMM launches accept MXC directional network defaults:
+Direct OpenVMM launches accept generic directional network defaults:
 
 ```bash
 ./bin/openvmm \
@@ -104,6 +104,27 @@ Egress defaults to `allow` and ingress defaults to `deny`. With ingress denied,
 responses to guest-initiated connections remain available, while new inbound
 connections do not. The portable profile supports egress `allow` or `deny` but
 rejects ingress `allow` before the workload starts.
+
+For destination and port rules, select an explicit default and repeat generic
+allow/deny options:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --hypervisor kvm \
+  --memory 128M \
+  --kernel guest/vmlinux \
+  --initrd guest/initramfs.cpio.gz \
+  --net 10.0.0.2/24 \
+  --network-profile portable \
+  --network-egress deny \
+  --network-egress-allow 140.82.112.0/20:tcp:443 \
+  --network-egress-deny 140.82.114.0/24:tcp:443
+```
+
+Rules match IPv4 addresses or CIDRs and may add one TCP or UDP destination
+port. Deny matches take precedence over allow matches.
 
 Most `nvx.py run` options pass through unchanged: `--machine`, `--processors`,
 `--mount`, `--net`, `--network-profile`, `--cmdline`, `--restore-snapshot`,

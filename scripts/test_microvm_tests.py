@@ -905,7 +905,7 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests.VIRTIO_NET_COMPLETION_MARKER,
         )
 
-    def test_directional_network_commands_map_mxc_default_actions(self):
+    def test_directional_network_commands_map_generic_default_actions(self):
         with patch.object(
             microvm_tests,
             "workload_boot_command",

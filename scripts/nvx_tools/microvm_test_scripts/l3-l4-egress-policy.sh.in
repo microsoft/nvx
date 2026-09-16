@@ -1,0 +1,24 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-L3-L4-EGRESS-FAIL code=$code"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+allowed=$(wget -T 5 -qO- http://@GATEWAY_IPV4@:@ALLOWED_TCP_PORT@/allowed) ||
+    fail 80
+[ "$allowed" = NVX-L3-L4-TCP-ALLOW ] || fail 81
+
+if wget -T 2 -qO /dev/null http://@GATEWAY_IPV4@:@DENIED_TCP_PORT@/denied; then
+    fail 82
+fi
+
+printf 'NVX-L3-L4-UDP-ALLOW' |
+    nc -u -w 1 @GATEWAY_IPV4@ @ALLOWED_UDP_PORT@ || fail 83
+printf 'NVX-L3-L4-UDP-DENY' |
+    nc -u -w 1 @GATEWAY_IPV4@ @DENIED_UDP_PORT@ || true
+sleep 1
+
+echo NVX-L3-L4-EGRESS-OK
+nvx-exit 0

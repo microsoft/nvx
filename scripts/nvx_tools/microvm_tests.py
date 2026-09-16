@@ -46,6 +46,7 @@ MICROVM_TEST_SCENARIOS = (
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
     "lifecycle",
+    "l3-l4-egress-policy",
     "managed-lifecycle",
     "network-snapshot",
     "restore-memory",
@@ -73,6 +74,7 @@ DIRECTIONAL_NETWORK_GUEST_IPV4 = "192.0.2.2"
 DIRECTIONAL_NETWORK_GATEWAY_IPV4 = "192.0.2.1"
 DIRECTIONAL_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/24"
 DIRECTIONAL_NETWORK_INGRESS_PORT = 18080
+L3_L4_EGRESS_COMPLETION_MARKER = b"NVX-L3-L4-EGRESS-OK"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -869,6 +871,170 @@ def run_directional_network_policy(
             )
     finally:
         listener.close()
+        server.join(timeout=1)
+
+
+def run_l3_l4_egress_policy(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    allowed_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    denied_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    allowed_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    denied_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for listener in (allowed_tcp, denied_tcp):
+        listener.bind(("0.0.0.0", 0))
+        listener.listen(1)
+        listener.settimeout(timeout)
+    for endpoint in (allowed_udp, denied_udp):
+        endpoint.bind(("127.0.0.1", 0))
+        endpoint.settimeout(timeout)
+    allowed_tcp_port = int(allowed_tcp.getsockname()[1])
+    denied_tcp_port = int(denied_tcp.getsockname()[1])
+    allowed_udp_port = int(allowed_udp.getsockname()[1])
+    denied_udp_port = int(denied_udp.getsockname()[1])
+    server_errors: list[Exception] = []
+
+    def serve_allowed() -> None:
+        try:
+            connection, _ = allowed_tcp.accept()
+            with connection:
+                connection.settimeout(timeout)
+                request = connection.recv(4096)
+                if not request.startswith(b"GET /allowed HTTP/1."):
+                    raise RuntimeError(f"unexpected L3/L4 HTTP request: {request!r}")
+                body = b"NVX-L3-L4-TCP-ALLOW"
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: "
+                    + str(len(body)).encode("ascii")
+                    + b"\r\nConnection: close\r\n\r\n"
+                    + body
+                )
+            payload, _ = allowed_udp.recvfrom(128)
+            if payload != b"NVX-L3-L4-UDP-ALLOW":
+                raise RuntimeError(f"unexpected allowed UDP payload: {payload!r}")
+        except Exception as error:
+            server_errors.append(error)
+
+    server = threading.Thread(
+        target=serve_allowed,
+        name="nvx-l3-l4-egress-test",
+        daemon=True,
+    )
+    server.start()
+    try:
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        command.extend(("--network-egress", "deny"))
+        for rule in (
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:{allowed_tcp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:{allowed_udp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:{denied_tcp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:{denied_udp_port}",
+        ):
+            command.extend(("--network-egress-allow", rule))
+        for rule in (
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:{denied_tcp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:{denied_udp_port}",
+        ):
+            command.extend(("--network-egress-deny", rule))
+
+        run_guest_script(
+            command,
+            _render_script(
+                "l3-l4-egress-policy.sh.in",
+                GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                ALLOWED_TCP_PORT=str(allowed_tcp_port),
+                DENIED_TCP_PORT=str(denied_tcp_port),
+                ALLOWED_UDP_PORT=str(allowed_udp_port),
+                DENIED_UDP_PORT=str(denied_udp_port),
+            ),
+            L3_L4_EGRESS_COMPLETION_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "l3-l4-egress-policy.log",
+        )
+        server.join(timeout)
+        if server.is_alive():
+            raise TimeoutError("L3/L4 allowed endpoints were not reached")
+        if server_errors:
+            raise RuntimeError(
+                "L3/L4 allowed endpoint server failed"
+            ) from server_errors[0]
+
+        denied_tcp.settimeout(0.25)
+        try:
+            unexpected, _ = denied_tcp.accept()
+        except TimeoutError:
+            pass
+        else:
+            unexpected.close()
+            raise RuntimeError("deny rule did not override the TCP allow rule")
+        denied_udp.settimeout(0.25)
+        try:
+            unexpected, _ = denied_udp.recvfrom(128)
+        except TimeoutError:
+            pass
+        else:
+            raise RuntimeError(
+                f"deny rule did not override the UDP allow rule: {unexpected!r}"
+            )
+
+        for name, extra, expected in (
+            (
+                "missing-default",
+                ("--network-egress-allow", "192.0.2.1:tcp:443"),
+                b"--network-egress is required",
+            ),
+            (
+                "invalid-protocol",
+                (
+                    "--network-egress",
+                    "deny",
+                    "--network-egress-allow",
+                    "192.0.2.1:icmp:443",
+                ),
+                b"invalid egress transport",
+            ),
+        ):
+            invalid = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                network=DIRECTIONAL_NETWORK_CIDR,
+            )
+            invalid.extend(extra)
+            with OpenvmmProcess(
+                invalid,
+                output_dir / f"l3-l4-egress-{name}.log",
+            ) as process:
+                result = process.wait(timeout)
+            if (
+                result.returncode == 0
+                or expected not in result.output
+                or BOOT_MARKER in result.output
+            ):
+                raise RuntimeError(
+                    f"invalid L3/L4 policy {name} was not rejected before boot"
+                )
+    finally:
+        for endpoint in (allowed_tcp, denied_tcp, allowed_udp, denied_udp):
+            endpoint.close()
         server.join(timeout=1)
 
 
@@ -2629,6 +2795,17 @@ def run(args: argparse.Namespace) -> int:
     if "managed-lifecycle" in scenarios:
         print(f"Running managed microVM lifecycle on OpenVMM/{args.backend}")
         run_managed_lifecycle(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "l3-l4-egress-policy" in scenarios:
+        print(f"Running microVM L3/L4 egress policy on OpenVMM/{args.backend}")
+        run_l3_l4_egress_policy(
             executable,
             kernel,
             initrd,
