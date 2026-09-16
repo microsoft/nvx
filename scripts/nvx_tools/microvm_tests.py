@@ -81,6 +81,7 @@ DIRECTIONAL_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/24"
 DIRECTIONAL_NETWORK_INGRESS_PORT = 18080
 L3_L4_EGRESS_COMPLETION_MARKER = b"NVX-L3-L4-EGRESS-OK"
 HOST_LOOPBACK_DENY_MARKER = b"NVX-HOST-LOOPBACK-DENY-OK"
+HOST_LOOPBACK_UDP_CONTROL_MARKER = b"NVX-HOST-LOOPBACK-UDP-CONTROL-OK"
 HOST_LOOPBACK_ALLOW_MARKER = b"NVX-HOST-LOOPBACK-ALLOW-OK"
 HOST_LOOPBACK_INGRESS_READY_MARKER = b"NVX-HOST-LOOPBACK-INGRESS-READY"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
@@ -1327,9 +1328,14 @@ def run_host_loopback_policy(
         name="nvx-host-loopback-proxy",
         daemon=True,
     )
-    proxy_server.start()
+    denied_udp: list[socket.socket] = []
     try:
-        deny_command = workload_boot_command(
+        for port in (proxy_port, denied_general_port):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            denied_udp.append(listener)
+            listener.bind(("127.0.0.1", port))
+            listener.settimeout(0.25)
+        control_command = workload_boot_command(
             executable,
             backend,
             kernel,
@@ -1338,14 +1344,43 @@ def run_host_loopback_policy(
             "quiet loglevel=0",
             network=DIRECTIONAL_NETWORK_CIDR,
         )
-        deny_command.extend(
-            (
-                "--host-loopback",
-                "deny",
-                "--network-proxy",
-                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:{proxy_port}",
-            )
+        control_command.extend(
+            ("--network-egress", "allow", "--network-ingress", "deny")
         )
+        # Prove the guest sender and both host UDP observers work before testing silence.
+        run_guest_script(
+            control_command,
+            _render_script(
+                "host-loopback-policy.sh.in",
+                MODE="udp-control",
+                GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                GENERAL_PORT=str(denied_general_port),
+                PROXY_PORT=str(proxy_port),
+                GUEST_PORT="0",
+            ),
+            HOST_LOOPBACK_UDP_CONTROL_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "host-loopback-udp-control.log",
+        )
+        for listener in denied_udp:
+            try:
+                payload = listener.recv(4096)
+            except TimeoutError as error:
+                raise RuntimeError(
+                    "host-loopback UDP positive control was not observed "
+                    f"on port {listener.getsockname()[1]}"
+                ) from error
+            if payload != b"NVX-HOST-LOOPBACK-UDP-CONTROL":
+                raise RuntimeError(
+                    f"unexpected host-loopback UDP positive control: {payload!r}"
+                )
+        proxy_server.start()
+        deny_command = control_command + [
+            "--host-loopback",
+            "deny",
+            "--network-proxy",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:{proxy_port}",
+        ]
         run_guest_script(
             deny_command,
             _render_script(
@@ -1373,10 +1408,22 @@ def run_host_loopback_policy(
         else:
             unexpected.close()
             raise RuntimeError("host-loopback deny reached a general host service")
+        for listener in denied_udp:
+            try:
+                unexpected_udp = listener.recv(4096)
+            except TimeoutError:
+                continue
+            raise RuntimeError(
+                "host-loopback deny reached a host UDP service "
+                f"on port {listener.getsockname()[1]}: {unexpected_udp!r}"
+            )
     finally:
+        for listener in denied_udp:
+            listener.close()
         denied_general.close()
         proxy.close()
-        proxy_server.join(timeout=1)
+        if proxy_server.ident is not None:
+            proxy_server.join(timeout=1)
 
     allowed_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     allowed_general.bind(("0.0.0.0", 0))
@@ -1413,6 +1460,8 @@ def run_host_loopback_policy(
             (
                 "--host-loopback",
                 "allow",
+                "--network-ingress",
+                "deny",
                 "--host-loopback-forward",
                 f"tcp:{host_forward_port}:{guest_forward_port}",
             )
@@ -1459,14 +1508,50 @@ def run_host_loopback_policy(
         allowed_general.close()
         allow_server.join(timeout=1)
 
+    run_host_loopback_rejections(
+        executable,
+        kernel,
+        initrd,
+        backend,
+        memory_mib=memory_mib,
+        timeout=timeout,
+        output_dir=output_dir,
+    )
+
+
+def run_host_loopback_rejections(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
     for name, extra, expected in (
+        (
+            "generic-allow",
+            ("--host-loopback", "allow"),
+            b"does not support generic host-loopback connectivity",
+        ),
+        (
+            "generic-allow-with-proxy",
+            (
+                "--host-loopback",
+                "allow",
+                "--network-proxy",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:3128",
+            ),
+            b"does not support generic host-loopback connectivity",
+        ),
         (
             "deny-forward",
             (
                 "--host-loopback",
                 "deny",
                 "--host-loopback-forward",
-                f"tcp:{host_forward_port}:{guest_forward_port}",
+                "tcp:3000:8080",
             ),
             b"--host-loopback-forward requires explicit --host-loopback allow",
         ),
@@ -1476,7 +1561,7 @@ def run_host_loopback_policy(
                 "--host-loopback",
                 "deny",
                 "--network-proxy",
-                f"198.51.100.1:{proxy_port}",
+                "198.51.100.1:3128",
             ),
             b"must match the guest gateway",
         ),
@@ -1491,11 +1576,19 @@ def run_host_loopback_policy(
             network=DIRECTIONAL_NETWORK_CIDR,
         )
         invalid.extend(extra)
-        with OpenvmmProcess(
-            invalid,
-            output_dir / f"host-loopback-{name}.log",
-        ) as process:
-            result = process.wait(timeout)
+        with tempfile.TemporaryDirectory(prefix="nvx-loopback-rejection-") as temporary:
+            pidfile = Path(temporary) / "absent" / "openvmm.pid"
+            if name.startswith("generic-allow"):
+                invalid.extend(("--pidfile", str(pidfile)))
+            with OpenvmmProcess(
+                invalid,
+                output_dir / f"host-loopback-{name}.log",
+            ) as process:
+                result = process.wait(timeout)
+            if pidfile.parent.exists():
+                raise RuntimeError(
+                    "rejected host-loopback policy created host resources"
+                )
         if (
             result.returncode == 0
             or expected not in result.output

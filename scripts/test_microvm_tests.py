@@ -60,6 +60,187 @@ class MicrovmTestParserTests(unittest.TestCase):
 
 
 class MicrovmTests(unittest.TestCase):
+    def test_host_loopback_rejections_cover_generic_allow_and_explicit_denial(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(microvm_tests, "OpenvmmProcess") as process:
+                process.return_value.__enter__.return_value.wait.side_effect = [
+                    openvmm_process.OpenvmmProcessResult(2, message)
+                    for message in (
+                        b"does not support generic host-loopback connectivity",
+                        b"does not support generic host-loopback connectivity",
+                        b"--host-loopback-forward requires explicit --host-loopback allow",
+                        b"must match the guest gateway",
+                    )
+                ]
+                microvm_tests.run_host_loopback_rejections(
+                    Path("openvmm"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=40,
+                    output_dir=Path(temporary),
+                )
+        commands = [call.args[0] for call in process.call_args_list]
+        self.assertEqual(len(commands), 4)
+        self.assertEqual(
+            [command[command.index("--host-loopback") + 1] for command in commands],
+            ["allow", "allow", "deny", "deny"],
+        )
+        for command in commands[:2]:
+            self.assertNotIn("--host-loopback-forward", command)
+            self.assertIn("--pidfile", command)
+        self.assertIn("--network-proxy", commands[1])
+        self.assertIn("--host-loopback-forward", commands[2])
+
+    def test_host_loopback_rejection_requires_diagnostic_and_no_boot(self):
+        diagnostic = b"does not support generic host-loopback connectivity"
+        for result in (
+            openvmm_process.OpenvmmProcessResult(0, diagnostic),
+            openvmm_process.OpenvmmProcessResult(2, b"failed to create pidfile"),
+            openvmm_process.OpenvmmProcessResult(
+                2, diagnostic + b"\n" + microvm_tests.BOOT_MARKER
+            ),
+        ):
+            with self.subTest(result=result):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with patch.object(microvm_tests, "OpenvmmProcess") as process:
+                        process.return_value.__enter__.return_value.wait.return_value = result
+                        with self.assertRaisesRegex(RuntimeError, "before boot"):
+                            microvm_tests.run_host_loopback_rejections(
+                                Path("openvmm"),
+                                Path("kernel"),
+                                Path("initrd"),
+                                "whp",
+                                memory_mib=128,
+                                timeout=40,
+                                output_dir=Path(temporary),
+                            )
+
+    def test_host_loopback_scenario_detects_udp_proxy_leak(self):
+        def send_forbidden_udp(
+            command: list[str], script: str, *_args: object, **_kwargs: object
+        ):
+            if "--host-loopback" not in command:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                    ports = {
+                        int(line.split()[5])
+                        for line in script.splitlines()
+                        if line.strip().startswith("nc -u")
+                    }
+                    for port in ports:
+                        sender.sendto(
+                            b"NVX-HOST-LOOPBACK-UDP-CONTROL",
+                            ("127.0.0.1", port),
+                        )
+                return
+            self.assertEqual(command[command.index("--network-egress") + 1], "allow")
+            self.assertEqual(command[command.index("--host-loopback") + 1], "deny")
+            proxy = command[command.index("--network-proxy") + 1]
+            port = int(proxy.rsplit(":", 1)[1])
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                sender.sendto(b"forbidden-proxy-udp", ("127.0.0.1", port))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests, "_http_server"),
+                patch.object(
+                    microvm_tests, "run_guest_script", side_effect=send_forbidden_udp
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "reached a host UDP service"):
+                    microvm_tests.run_host_loopback_policy(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=40,
+                        output_dir=Path(temporary),
+                    )
+
+    def test_host_loopback_scenario_requires_observed_udp_control(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests, "_http_server"),
+                patch.object(microvm_tests, "run_guest_script") as guest,
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(microvm_tests.socket, "create_connection"),
+                patch.object(microvm_tests.time, "sleep"),
+                patch.object(microvm_tests, "run_host_loopback_rejections"),
+            ):
+                process.return_value.__enter__.return_value.wait.return_value = (
+                    openvmm_process.OpenvmmProcessResult(0, b"")
+                )
+                with self.assertRaisesRegex(RuntimeError, "UDP positive control"):
+                    microvm_tests.run_host_loopback_policy(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=5,
+                        output_dir=Path(temporary),
+                    )
+                self.assertEqual(guest.call_count, 1)
+                self.assertNotIn("--host-loopback", guest.call_args.args[0])
+                process.assert_not_called()
+
+    def test_host_loopback_udp_probes_reject_failed_sender(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        for mode, status, expected in (
+            ("udp-control", 1, 99),
+            ("udp-control", 127, 99),
+            ("deny", 126, 99),
+            ("deny", 127, 99),
+            ("deny", 1, 0),
+        ):
+            with self.subTest(mode=mode, status=status):
+                script = microvm_tests._render_script(
+                    "host-loopback-policy.sh.in",
+                    MODE=mode,
+                    GATEWAY_IPV4="10.0.0.1",
+                    GENERAL_PORT="8444",
+                    PROXY_PORT="8443",
+                    GUEST_PORT="0",
+                ).replace("nvx-exit", "nvx_exit")
+                result = subprocess.run(
+                    [shell, "-s"],
+                    input=(
+                        f"nc() {{ return {status}; }}\n"
+                        'wget() { case "$*" in\n'
+                        "*/general) return 1 ;;\n"
+                        "*/proxy) echo NVX-HOST-LOOPBACK-PROXY ;;\n"
+                        "esac; }\n"
+                        'nvx_exit() { exit "$1"; }\n' + script
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode, expected, result.stdout + result.stderr
+                )
+                self.assertNotIn("UDP-CONTROL-OK", result.stdout)
+                if expected:
+                    self.assertNotIn("DENY-OK", result.stdout)
+
+    def test_host_loopback_script_probes_udp_on_proxy_and_general_ports(self):
+        script = microvm_tests._render_script(
+            "host-loopback-policy.sh.in",
+            MODE="deny",
+            GATEWAY_IPV4="10.0.0.1",
+            GENERAL_PORT="8444",
+            PROXY_PORT="8443",
+            GUEST_PORT="0",
+        )
+        self.assertIn("nc -u -w 1 10.0.0.1 8443", script)
+        self.assertIn("nc -u -w 1 10.0.0.1 8444", script)
+        self.assertIn("http://10.0.0.1:8443/proxy", script)
+
     @staticmethod
     def _outcome_report(
         backend: str,

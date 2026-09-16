@@ -126,7 +126,8 @@ allow/deny options:
 Rules match IPv4 addresses or CIDRs and may add one TCP or UDP destination
 port. Deny matches take precedence over allow matches.
 
-Host loopback is separately controlled in both directions:
+Host-loopback denial and deliberate localhost port publishing are separately
+controlled from ordinary egress:
 
 ```bash
 ./bin/openvmm \
@@ -143,10 +144,19 @@ Host loopback is separately controlled in both directions:
 ```
 
 With `deny`, general guest-to-host loopback and every host-to-guest forward are
-blocked, while the exact proxy endpoint remains available. With explicit
-`--host-loopback allow`, repeat
+blocked, while the exact TCP proxy endpoint remains available. UDP on that
+same port and other host service ports remain blocked even with ordinary
+egress allowed.
+
+The portable profile does **not** support generic bidirectional host-loopback
+allow. Explicit `--host-loopback allow` without any forward is rejected before
+VM resources are opened. For deliberate port publishing, repeat
 `--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form to expose
-only selected localhost ports toward the guest.
+only selected localhost ports toward the guest, with explicit
+`--host-loopback allow`. These forwards do not satisfy a generic allow policy
+that provides no port list. Omitting `--host-loopback` preserves existing
+guest-to-host mapping without publishing guest ports. Guest-originated traffic
+remains subject to egress policy.
 
 Most `nvx.py run` options pass through unchanged: `--machine`, `--processors`,
 `--mount`, `--net`, `--network-profile`, `--cmdline`, `--restore-snapshot`,
