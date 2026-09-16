@@ -37,9 +37,21 @@
   },
   "guest_agent": {
     "artifact": "guest/nvx-agent",
+    "initramfs_artifact": "guest/initramfs-agent.cpio.gz",
     "target": "x86_64-unknown-linux-musl",
     "optional": true,
     "installed_in_initramfs": false,
-    "protocol_schema_version": 1
+    "maximum_size_bytes": 16777216,
+    "source_revision": "534ffd518dda6b13451d03644191a02f0c53ea33",
+    "build_id": "7097a9dab9c5e4fbc7ef36b93a4ba897996bd052",
+    "external_input_sha256": "5d4d5de68871bddaa46c823218bd80b45f03315c0617e81226243ea6c23f4325",
+    "external_input_size_bytes": 1938304,
+    "protocol_schema_version": 2,
+    "startup_modes": [
+      "agent-ready",
+      "image-entrypoint"
+    ],
+    "runtime_abi": "microvm-abi-v2-startup-modes-session-operations-v3",
+    "transport": "broker-ttrpc"
   }
 }

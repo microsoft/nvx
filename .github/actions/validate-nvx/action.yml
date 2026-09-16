@@ -10,7 +10,7 @@ runs:
       run: |
         set -euo pipefail
         python3 -m compileall -q scripts
-        python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py -v
+        python3 -m unittest discover -s scripts -v
         python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
         python3 scripts/nvx.py --help
         python3 scripts/nvx.py test-openvmm --help
@@ -22,7 +22,7 @@ runs:
       shell: powershell
       run: |
         python -m compileall -q scripts
-        python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py -v
+        python -m unittest discover -s scripts -v
         python .github\skills\nvx-host-connect\scripts\test_hosts.py -v
         python scripts\nvx.py --help
         python scripts\nvx.py test-openvmm --help

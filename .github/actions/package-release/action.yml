@@ -1,10 +1,14 @@
 name: Package release
-description: Build and upload an NVX binary release for one platform
+description: Build and cache a simple NVX binary release for one platform
 
 inputs:
   platform:
-    description: Platform suffix used in the package and artifact names
+    description: Platform suffix used in the package name and cache key
     required: true
+  cache-compression:
+    description: Compression tool used by the cross-OS Actions cache
+    required: false
+    default: zstd
 
 runs:
   using: composite
@@ -17,12 +21,15 @@ runs:
       run: |
         set -euo pipefail
         version="$(cat VERSION)"
-        package="nvx-${version}-${PLATFORM}"
+        simple_package="nvx-${version}-${PLATFORM}-simple"
         python3 scripts/nvx.py package \
           --version "${version}" \
-          --destination "dist/${package}" \
+          --destination "dist/${simple_package}" \
+          --transport simple \
           --binary-only
-        tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+        python3 scripts/nvx.py archive-release \
+          --bundle "dist/${simple_package}" \
+          --output "dist/${simple_package}.tar.gz"
 
     - name: Package Windows release
       if: runner.os == 'Windows'
@@ -31,32 +38,54 @@ runs:
         PLATFORM: ${{ inputs.platform }}
       run: |
         $Version = (Get-Content VERSION -Raw).Trim()
-        $Package = "nvx-$Version-$env:PLATFORM"
+        $SimplePackage = "nvx-$Version-$env:PLATFORM-simple"
         python scripts\nvx.py package `
           --version $Version `
-          --destination "dist\$Package" `
+          --destination "dist\$SimplePackage" `
+          --transport simple `
           --binary-only
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        Compress-Archive `
-          -Path "dist\$Package" `
-          -DestinationPath "dist\$Package.zip"
+        python scripts\nvx.py archive-release `
+          --bundle "dist\$SimplePackage" `
+          --output "dist\$SimplePackage.zip"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    - name: Upload Linux release
-      if: runner.os != 'Windows'
-      uses: actions/upload-artifact@v4
+    - name: Prepare gzip cache tools
+      id: gzip-cache-tools
+      if: runner.os != 'Windows' && inputs.cache-compression == 'gzip'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+        mkdir -p "${cache_tools}"
+        ln -sf "$(command -v tar)" "${cache_tools}/tar"
+        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+    - name: Save Linux release (zstd)
+      if: runner.os != 'Windows' && inputs.cache-compression != 'gzip'
+      uses: actions/cache/save@v5
       with:
-        name: release-${{ inputs.platform }}
-        path: dist/*.tar.gz
-        if-no-files-found: error
-        compression-level: 0
-        retention-days: 1
+        path: |
+          dist/*-simple.tar.gz
+        key: release-${{ inputs.platform }}-${{ github.run_id }}
+        enableCrossOsArchive: true
 
-    - name: Upload Windows release
+    - name: Save Linux release (gzip)
+      if: runner.os != 'Windows' && inputs.cache-compression == 'gzip'
+      uses: actions/cache/save@v5
+      env:
+        PATH: ${{ steps.gzip-cache-tools.outputs.path }}
+      with:
+        path: |
+          dist/*-simple.tar.gz
+        key: release-${{ inputs.platform }}-${{ github.run_id }}
+        enableCrossOsArchive: true
+    - name: Save Windows release
       if: runner.os == 'Windows'
-      uses: actions/upload-artifact@v4
+      uses: actions/cache/save@v5
       with:
-        name: release-${{ inputs.platform }}
-        path: dist/*.zip
-        if-no-files-found: error
-        compression-level: 0
-        retention-days: 1
+        path: |
+          dist/*-simple.zip
+        key: release-${{ inputs.platform }}-${{ github.run_id }}
+        enableCrossOsArchive: true

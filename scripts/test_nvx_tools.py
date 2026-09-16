@@ -2,17 +2,26 @@
 # pyright: reportPrivateUsage=false
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
 import os
 import queue
+import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+import warnings
 import zipfile
+import zlib
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from unittest.mock import call, patch
@@ -34,6 +43,7 @@ TEST_CONTROL_CONTRACT = {
     "control_session_protocol_version": 1,
     "control_contract_revision": "nvx-microvm-v2-control-v1",
 }
+TEST_SUBPROCESS_TIMEOUT_SECONDS = 30
 
 
 def _static_x86_64_elf() -> bytes:
@@ -51,6 +61,413 @@ def _static_x86_64_elf() -> bytes:
     image[96:104] = len(image).to_bytes(8, "little")
     image[104:112] = len(image).to_bytes(8, "little")
     return bytes(image)
+
+
+@dataclass(frozen=True)
+class NewcTestMetadata:
+    inode: int
+    uid: int = 0
+    gid: int = 0
+    nlink: int = 1
+    devmajor: int = 0
+    devminor: int = 0
+    rdevmajor: int = 0
+    rdevminor: int = 0
+
+
+NewcTestEntry = (
+    tuple[str, int, bytes]
+    | tuple[str, int, bytes, int, int]
+    | tuple[str, int, bytes, NewcTestMetadata]
+)
+
+
+def _newc_archive(entries: list[NewcTestEntry]) -> bytes:
+    archive = bytearray()
+
+    def add(
+        name: str,
+        mode: int,
+        content: bytes,
+        inode: int,
+        uid: int = 0,
+        gid: int = 0,
+        nlink: int = 1,
+        devmajor: int = 0,
+        devminor: int = 0,
+        rdevmajor: int = 0,
+        rdevminor: int = 0,
+    ) -> None:
+        name_bytes = name.encode("utf-8") + b"\0"
+        fields = (
+            inode,
+            mode,
+            uid,
+            gid,
+            nlink,
+            0,
+            len(content),
+            devmajor,
+            devminor,
+            rdevmajor,
+            rdevminor,
+            len(name_bytes),
+            0,
+        )
+        archive.extend(
+            b"070701" + b"".join(f"{field:08x}".encode() for field in fields)
+        )
+        archive.extend(name_bytes)
+        archive.extend(b"\0" * (-len(archive) % 4))
+        archive.extend(content)
+        archive.extend(b"\0" * (-len(archive) % 4))
+
+    for default_inode, entry in enumerate(entries, start=1):
+        name, mode, content = entry[:3]
+        if len(entry) == 4:
+            metadata = entry[3]
+        elif len(entry) == 5:
+            metadata = NewcTestMetadata(default_inode, entry[3], entry[4])
+        else:
+            metadata = NewcTestMetadata(default_inode)
+        add(
+            name,
+            mode,
+            content,
+            metadata.inode,
+            metadata.uid,
+            metadata.gid,
+            metadata.nlink,
+            metadata.devmajor,
+            metadata.devminor,
+            metadata.rdevmajor,
+            metadata.rdevminor,
+        )
+    add("TRAILER!!!", 0, b"", len(entries) + 1)
+    return gzip.compress(bytes(archive), compresslevel=9, mtime=0)
+
+
+def _agent_newc_entries(agent: bytes) -> list[NewcTestEntry]:
+    return [
+        (".", 0o040755, b""),
+        ("sbin", 0o040755, b""),
+        ("init", 0o120777, b"sbin/nvx-agent"),
+        ("sbin/nvx-agent", 0o100755, agent),
+    ]
+
+
+def _agent_newc_archive(agent: bytes) -> bytes:
+    return _newc_archive(_agent_newc_entries(agent))
+
+
+def _simple_newc_archive(init_script: bytes) -> bytes:
+    return _newc_archive(
+        [
+            (".", 0o040755, b""),
+            ("bin", 0o040755, b""),
+            ("bin/busybox", 0o100755, b"busybox"),
+            ("etc", 0o040755, b""),
+            ("etc/group", 0o100644, b"root:x:0:\n"),
+            ("etc/passwd", 0o100644, b"root:x:0:0:root:/root:/bin/sh\n"),
+            ("etc/shadow", 0o100640, b"root:*::0:::::\n", 0, 42),
+            ("root", 0o040700, b""),
+            ("sbin", 0o040755, b""),
+            ("sbin/apk", 0o100755, b"apk"),
+            ("tmp", 0o041777, b""),
+            ("var", 0o040755, b""),
+            ("var/tmp", 0o041777, b""),
+            ("init", 0o100755, init_script.replace(b"\r\n", b"\n")),
+        ]
+    )
+
+
+def _initramfs_package_manifest(
+    profile: str,
+    image: bytes,
+    agent: bytes | None = None,
+) -> bytes:
+    value: dict[str, object] = {
+        "format": 1,
+        "alpine_version": "3.24.1",
+        "alpine_branch": "v3.24",
+        "architecture": "x86_64",
+        "profile": profile,
+        "artifact": {
+            "name": (
+                build.AGENT_INITRAMFS_NAME
+                if profile == "broker-ttrpc"
+                else "initramfs.cpio.gz"
+            ),
+            "sha256": hashlib.sha256(image).hexdigest(),
+            "size": len(image),
+        },
+        "guest_agent": None,
+        "packages": [] if profile == "broker-ttrpc" else [{"name": "busybox"}],
+    }
+    if agent is not None:
+        value["guest_agent"] = {
+            "path": "/sbin/nvx-agent",
+            "sha256": hashlib.sha256(agent).hexdigest(),
+            "size": len(agent),
+            "source_revision": build.GUEST_AGENT_SOURCE_REVISION,
+            "build_id": build.GUEST_AGENT_BUILD_ID,
+            "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
+            "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+        }
+    return (json.dumps(value, indent=2) + "\n").encode("utf-8")
+
+
+def _write_test_zip(
+    path: Path,
+    entries: list[tuple[str, bytes, int]],
+    *,
+    compression: int = zipfile.ZIP_DEFLATED,
+    member_comment: bytes = b"",
+    member_extra: bytes = b"",
+    archive_comment: bytes = b"",
+) -> None:
+    with zipfile.ZipFile(
+        path,
+        "w",
+        compression=compression,
+        compresslevel=9,
+    ) as archive:
+        for name, data, file_type in entries:
+            member = zipfile.ZipInfo(name)
+            member.create_system = 3
+            member.compress_type = compression
+            member.comment = member_comment
+            member.extra = member_extra
+            mode = 0o755 if file_type == stat.S_IFDIR else 0o644
+            member.external_attr = (file_type | mode) << 16
+            archive.writestr(member, data)
+        archive.comment = archive_comment
+
+
+def _zip_member_metadata(
+    contents: bytes,
+    *,
+    size: int,
+    checksum: int,
+    compression: int | None = None,
+) -> bytes:
+    data = bytearray(contents)
+    end = data.rfind(b"PK\x05\x06")
+    directory = struct.unpack_from("<L", data, end + 16)[0]
+    local = struct.unpack_from("<L", data, directory + 42)[0]
+    # APPNOTE offsets in the first classic ZIP member's local and central headers.
+    for value, local_offset, directory_offset in (
+        (checksum, 14, 16),
+        (size, 22, 24),
+    ):
+        struct.pack_into("<L", data, local + local_offset, value)
+        struct.pack_into("<L", data, directory + directory_offset, value)
+    if compression is not None:
+        struct.pack_into("<H", data, local + 8, compression)
+        struct.pack_into("<H", data, directory + 10, compression)
+    return bytes(data)
+
+
+def _zip_directory_metadata(
+    contents: bytes,
+    *,
+    members: int | None = None,
+    directory_size: int | None = None,
+    directory_offset: int | None = None,
+) -> bytes:
+    data = bytearray(contents)
+    end = data.rfind(b"PK\x05\x06")
+    zip64_end = (
+        end - 20 - 56 if contents[end - 20 : end - 16] == b"PK\x06\x07" else None
+    )
+    # APPNOTE offsets of disk/total counts, directory size, and directory offset.
+    if members is not None:
+        struct.pack_into(
+            "<HH", data, end + 8, min(members, 0xFFFF), min(members, 0xFFFF)
+        )
+        if zip64_end is not None:
+            struct.pack_into("<QQ", data, zip64_end + 24, members, members)
+    for value, offset, zip64_offset in (
+        (directory_size, 12, 40),
+        (directory_offset, 16, 48),
+    ):
+        if value is not None:
+            struct.pack_into("<L", data, end + offset, min(value, 0xFFFFFFFF))
+            if zip64_end is not None:
+                struct.pack_into("<Q", data, zip64_end + zip64_offset, value)
+    return bytes(data)
+
+
+def _ustar_header(
+    name: str,
+    typeflag: bytes,
+    size: int,
+) -> bytes:
+    member = tarfile.TarInfo(name)
+    member.type = typeflag
+    member.mode = 0o755 if typeflag == tarfile.DIRTYPE else 0o644
+    member.uid = 0
+    member.gid = 0
+    member.uname = ""
+    member.gname = ""
+    member.mtime = 0
+    member.size = size
+    return member.tobuf(format=tarfile.USTAR_FORMAT)
+
+
+def _canonical_ustar(entries: list[tuple[str, bytes, bytes]]) -> bytes:
+    output = bytearray()
+    for name, typeflag, content in entries:
+        output.extend(_ustar_header(name, typeflag, len(content)))
+        output.extend(content)
+        output.extend(b"\0" * (-len(content) % tarfile.BLOCKSIZE))
+    output.extend(bytes(2 * tarfile.BLOCKSIZE))
+    output.extend(bytes(-len(output) % tarfile.RECORDSIZE))
+    return bytes(output)
+
+
+def _replace_tar_checksum(header: bytearray) -> None:
+    header[148:156] = b" " * 8
+    checksum = sum(header)
+    header[148:156] = f"{checksum:06o}\0 ".encode("ascii")
+
+
+def _make_test_release_package(
+    root: Path,
+    transport: str,
+    agent_bytes: bytes | None = None,
+) -> Path:
+    package = root / f"nvx-test-{transport}"
+    binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+    binary = package / "bin" / binary_name
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"openvmm")
+    guest = package / "guest"
+    guest.mkdir()
+    (guest / "vmlinux").write_bytes(b"vmlinux")
+    (guest / "vmlinux.config").write_bytes(b"vmlinux.config")
+    agent = agent_bytes if agent_bytes is not None else _static_x86_64_elf()
+    if transport == "broker-ttrpc":
+        image = _agent_newc_archive(agent)
+        package_manifest = _initramfs_package_manifest(transport, image, agent)
+    else:
+        image = _simple_newc_archive(
+            (common.REPO_ROOT / "alpine" / "init").read_bytes()
+        )
+        package_manifest = _initramfs_package_manifest(transport, image)
+    (guest / "initramfs.cpio.gz").write_bytes(image)
+    (guest / "initramfs.cpio.gz.packages.json").write_bytes(package_manifest)
+    if transport == "broker-ttrpc":
+        (guest / build.AGENT_INITRAMFS_NAME).write_bytes(image)
+        (guest / f"{build.AGENT_INITRAMFS_NAME}.packages.json").write_bytes(
+            package_manifest
+        )
+        (guest / build.GUEST_AGENT_ARTIFACT_NAME).write_bytes(agent)
+    for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
+        (package / name).write_text(name, encoding="ascii")
+    for name in ("COPYING-LINUX", "LICENSE-OPENVMM"):
+        license_path = package / "licenses" / name
+        license_path.parent.mkdir(parents=True, exist_ok=True)
+        license_path.write_text(name, encoding="ascii")
+    agent_sha256 = hashlib.sha256(agent).hexdigest()
+    agent_enabled = transport == "broker-ttrpc"
+    manifest: dict[str, object] = {
+        "format": 1,
+        "runtime": {
+            "transport": transport,
+            "artifact_profile": transport,
+            "immutable_bundle": True,
+        },
+        "openvmm": {
+            "source_revision": json.loads(
+                (common.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            )["openvmm"]["source_revision"],
+            "executable_sha256": hashlib.sha256(b"openvmm").hexdigest(),
+            "microvm_abi_version": 2,
+            "control_session_protocol_version": 1,
+            "control_contract_revision": "nvx-microvm-v2-control-v1",
+        },
+        "linux": {
+            "kernel_sha256": hashlib.sha256(b"vmlinux").hexdigest(),
+            "config_sha256": hashlib.sha256(b"vmlinux.config").hexdigest(),
+        },
+        "alpine": {
+            "initramfs_sha256": hashlib.sha256(image).hexdigest(),
+            "initramfs_package_manifest_sha256": hashlib.sha256(
+                package_manifest
+            ).hexdigest(),
+            "profile": transport,
+            "initramfs_artifact": "guest/initramfs.cpio.gz",
+        },
+        "guest_agent": {
+            "artifact": build.GUEST_AGENT_ARTIFACT_PATH,
+            "initramfs_artifact": build.GUEST_AGENT_INITRAMFS_ARTIFACT_PATH,
+            "target": build.GUEST_AGENT_TARGET,
+            "optional": not agent_enabled,
+            "sha256": agent_sha256 if agent_enabled else None,
+            "size": len(agent) if agent_enabled else None,
+            "installed_in_initramfs": agent_enabled,
+            "maximum_size_bytes": build.GUEST_AGENT_MAXIMUM_BYTES,
+            "source_revision": build.GUEST_AGENT_SOURCE_REVISION,
+            "build_id": build.GUEST_AGENT_BUILD_ID,
+            "external_input_sha256": agent_sha256,
+            "external_input_size_bytes": len(agent),
+            "protocol_schema_version": build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
+            "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
+            "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+            "transport": build.BROKER_TRANSPORT,
+        },
+    }
+    runtime = cast(dict[str, object], manifest["runtime"])
+    identity = release._runtime_identity(manifest)
+    runtime["fingerprint_inputs"] = identity
+    runtime["guest_fingerprint_sha256"] = release._runtime_fingerprint(identity)
+    (package / "SOURCE-MANIFEST.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    release._normalize_release_tree_modes(package)
+    common.write_sha256_sums(package)
+    (package / "SHA256SUMS").chmod(0o644)
+    return package
+
+
+def _write_test_source_manifest(root: Path, agent_bytes: bytes) -> None:
+    manifest = json.loads(
+        (common.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+    )
+    manifest["guest_agent"]["external_input_sha256"] = hashlib.sha256(
+        agent_bytes
+    ).hexdigest()
+    manifest["guest_agent"]["external_input_size_bytes"] = len(agent_bytes)
+    (root / "SOURCE-MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _existing_test_file(path: Path, _description: str) -> Path:
+    return path
+
+
+def _sandbox_test_args(control_auth_handle: int) -> argparse.Namespace:
+    root = Path.cwd()
+    return nvx.parse_args(
+        [
+            "sandbox",
+            "--layer",
+            f"distro,{root / 'distro.erofs'}",
+            "--scratch",
+            str(root / "scratch.ext4"),
+            "--transport",
+            "broker-ttrpc",
+            "--control-socket",
+            str(root / "control.sock"),
+            "--boot-console-socket",
+            str(root / "boot.sock"),
+            "--control-auth-handle",
+            str(control_auth_handle),
+            "--hypervisor",
+            "kvm",
+        ]
+    )
 
 
 class CliTests(unittest.TestCase):
@@ -188,15 +605,24 @@ class CliTests(unittest.TestCase):
 
     def test_release_commands_keep_their_cli_contract(self):
         download = nvx.parse_args(
-            ["download", "--repository", "example/nvx", "--hypervisor", "auto"]
+            [
+                "download",
+                "--repository",
+                "example/nvx",
+                "--hypervisor",
+                "auto",
+                "--transport",
+                "simple",
+            ]
         )
         self.assertEqual(download.command, "download")
         self.assertEqual(download.repository, "example/nvx")
         self.assertEqual(download.hypervisor, "auto")
         self.assertIs(download.handler, nvx.command_download)
 
-        collect = nvx.parse_args(["collect-sources"])
+        collect = nvx.parse_args(["collect-sources", "--transport", "simple"])
         self.assertEqual(collect.command, "collect-sources")
+        self.assertEqual(collect.transport, "simple")
         self.assertIs(collect.handler, nvx.command_collect_sources)
 
         package = nvx.parse_args(
@@ -207,6 +633,8 @@ class CliTests(unittest.TestCase):
                 "--destination",
                 "output",
                 "--include-source",
+                "--transport",
+                "broker-ttrpc",
                 "--force",
             ]
         )
@@ -214,6 +642,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(package.version, "1.2.3")
         self.assertEqual(package.destination, Path("output"))
         self.assertTrue(package.include_source)
+        self.assertEqual(package.transport, "broker-ttrpc")
         self.assertFalse(package.binary_only)
         self.assertTrue(package.force)
         self.assertIs(package.handler, nvx.command_package)
@@ -231,25 +660,164 @@ class CliTests(unittest.TestCase):
             [
                 "sandbox",
                 "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+                "distro,distro.erofs",
                 "--scratch",
                 "scratch.ext4",
-                "--entrypoint",
-                "/bin/workload",
-                "--arg=--serve",
-                "--memory-max",
-                "268435456",
-                "--pids-max",
-                "64",
+                "--transport",
+                "broker-ttrpc",
+                "--control-socket",
+                str(Path.cwd() / "control.sock"),
+                "--boot-console-socket",
+                str(Path.cwd() / "boot.sock"),
+                "--control-auth-handle",
+                "9",
             ]
         )
 
         self.assertEqual(args.layer[0].role, "distro")
         self.assertEqual(args.scratch, Path("scratch.ext4"))
-        self.assertEqual(args.sandbox_arg, ["--serve"])
-        self.assertEqual(args.memory_max, 268435456)
-        self.assertEqual(args.pids_max, 64)
+        self.assertEqual(args.control_auth_handle, 9)
         self.assertIs(args.handler, nvx.command_sandbox)
+
+    def test_sandbox_selects_agent_initramfs_and_dual_consoles(self):
+        root = Path.cwd()
+        args = nvx.parse_args(
+            [
+                "sandbox",
+                "--layer",
+                f"distro,{root / 'distro.erofs'}",
+                "--scratch",
+                str(root / "scratch.ext4"),
+                "--transport",
+                "broker-ttrpc",
+                "--control-socket",
+                str(root / "control.sock"),
+                "--boot-console-socket",
+                str(root / "boot.sock"),
+                "--control-auth-handle",
+                "9",
+                "--dry-run",
+            ]
+        )
+
+        def existing(path: Path, _label: str) -> Path:
+            return path
+
+        with (
+            patch.object(sandbox, "require_file"),
+            patch.object(nvx, "require_file", side_effect=existing),
+            patch.object(nvx, "_format_command", return_value="formatted") as formatted,
+        ):
+            nvx.command_sandbox(args)
+
+        command = [str(value) for value in formatted.call_args.args[0]]
+        self.assertIn(str(common.BUILD_DIR / build.AGENT_INITRAMFS_NAME), command)
+        self.assertIn("--virtio-console", command)
+        self.assertIn(f"listen={root / 'boot.sock'}", command)
+        self.assertIn("--microvm-control-console", command)
+        self.assertIn(f"listen={root / 'control.sock'}", command)
+        self.assertIn("--microvm-control-auth-stdin", command)
+        self.assertNotIn("--microvm-control-auth-handle", command)
+        self.assertNotIn("9", command)
+
+    def test_sandbox_redirects_capability_pipe_to_child_stdin(self):
+        capability = b"synthetic-capability\x00\xff\n"
+        read_fd, write_fd = os.pipe()
+        original_run = subprocess.run
+        output = io.StringIO()
+
+        def launch_child(
+            command: list[str], *, stdin: int
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertIn("--microvm-control-auth-stdin", command)
+            self.assertNotIn("--microvm-control-auth-handle", command)
+            self.assertNotIn("synthetic-capability", repr(command))
+            child = original_run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+                ],
+                stdin=stdin,
+                capture_output=True,
+                check=True,
+                timeout=TEST_SUBPROCESS_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(child.stdout, capability)
+            return child
+
+        with os.fdopen(read_fd, "rb") as capability_pipe:
+            with os.fdopen(write_fd, "wb") as writer:
+                writer.write(capability)
+            args = _sandbox_test_args(capability_pipe.fileno())
+            with (
+                patch.object(sandbox, "require_file"),
+                patch.object(nvx, "require_file", side_effect=_existing_test_file),
+                patch.object(nvx.sys, "platform", "linux"),
+                patch.object(nvx, "fcntl", create=True) as descriptor_flags,
+                patch.object(nvx.os, "O_ACCMODE", os.O_WRONLY | os.O_RDWR, create=True),
+                patch.object(nvx.subprocess, "run", side_effect=launch_child) as run,
+                patch("sys.stdout", output),
+                self.assertRaises(SystemExit) as exited,
+            ):
+                descriptor_flags.fcntl.return_value = os.O_RDONLY
+                nvx.command_sandbox(args)
+            self.assertEqual(exited.exception.code, 0)
+            self.assertEqual(run.call_args.kwargs, {"stdin": capability_pipe.fileno()})
+            self.assertEqual(capability_pipe.read(), b"")
+        self.assertNotIn("synthetic-capability", output.getvalue())
+
+    def test_sandbox_rejects_unreadable_or_non_pipe_capability(self):
+        read_fd, write_fd = os.pipe()
+        with (
+            os.fdopen(read_fd, "rb") as reader,
+            os.fdopen(write_fd, "wb") as writer,
+            tempfile.TemporaryFile() as regular_file,
+        ):
+            cases = (
+                ("write-only pipe", writer.fileno(), os.O_WRONLY),
+                ("regular file", regular_file.fileno(), os.O_RDONLY),
+            )
+            for label, descriptor, flags in cases:
+                with (
+                    self.subTest(handle=label),
+                    patch.object(sandbox, "require_file"),
+                    patch.object(nvx, "require_file", side_effect=_existing_test_file),
+                    patch.object(nvx.sys, "platform", "linux"),
+                    patch.object(nvx, "fcntl", create=True) as descriptor_flags,
+                    patch.object(
+                        nvx.os, "O_ACCMODE", os.O_WRONLY | os.O_RDWR, create=True
+                    ),
+                    patch.object(nvx.subprocess, "run") as run,
+                    self.assertRaisesRegex(common.ScriptError, "readable pipe"),
+                ):
+                    descriptor_flags.fcntl.return_value = flags
+                    nvx.command_sandbox(_sandbox_test_args(descriptor))
+                run.assert_not_called()
+            closed_descriptor = reader.fileno()
+        with (
+            patch.object(sandbox, "require_file"),
+            patch.object(nvx, "require_file", side_effect=_existing_test_file),
+            patch.object(nvx.sys, "platform", "linux"),
+            patch.object(nvx, "fcntl", create=True),
+            patch.object(nvx.subprocess, "run") as run,
+            self.assertRaisesRegex(common.ScriptError, "not open"),
+        ):
+            nvx.command_sandbox(_sandbox_test_args(closed_descriptor))
+        run.assert_not_called()
+
+    def test_sandbox_live_launch_requires_linux(self):
+        for platform in ("win32", "darwin"):
+            with (
+                self.subTest(platform=platform),
+                patch.object(sandbox, "require_file"),
+                patch.object(nvx, "require_file", side_effect=_existing_test_file),
+                patch.object(nvx.sys, "platform", platform),
+                patch.object(nvx.subprocess, "run") as run,
+                self.assertRaisesRegex(common.ScriptError, "requires Linux"),
+            ):
+                nvx.command_sandbox(_sandbox_test_args(sandbox.MINIMUM_CONTROL_AUTH_FD))
+            run.assert_not_called()
 
     def test_network_requires_explicit_portable_profile(self):
         args = nvx.parse_args(
@@ -351,14 +919,14 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "cannot exceed"):
             nvx.command_run(invalid_restore_capacity)
 
-        legacy = nvx.parse_args(["run", "--restore-snapshot", "snapshot", "--dry-run"])
+        simple = nvx.parse_args(["run", "--restore-snapshot", "snapshot", "--dry-run"])
         with (
             patch.object(nvx, "require_file", return_value=Path("openvmm")),
             patch.object(
                 nvx, "_format_command", return_value="formatted"
             ) as format_command,
         ):
-            nvx.command_run(legacy)
+            nvx.command_run(simple)
         self.assertIn("microvm", format_command.call_args.args[0])
         self.assertNotIn("microvm-v2", format_command.call_args.args[0])
 
@@ -460,6 +1028,17 @@ class CliTests(unittest.TestCase):
             provenance.handler,
             nvx.command_record_openvmm_provenance,
         )
+        verify_agent = nvx.parse_args(
+            [
+                "verify-agent-initramfs",
+                "--input",
+                "initramfs-agent.cpio.gz",
+                "--sha256",
+                "a" * 64,
+            ]
+        )
+        self.assertEqual(verify_agent.input, Path("initramfs-agent.cpio.gz"))
+        self.assertIs(verify_agent.handler, nvx.command_verify_agent_initramfs)
 
 
 class CiTests(unittest.TestCase):
@@ -521,6 +1100,23 @@ class CiTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    @contextmanager
+    def _cleanup_directory(self, path: Path) -> Generator[Path, None, None]:
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            yield path
+        finally:
+            shutil.rmtree(path)
+
+    def _extract_test_alpine_root(
+        self,
+        command: list[str | os.PathLike[str]],
+        **_kwargs: object,
+    ) -> None:
+        root = Path(command[command.index("--directory") + 1])
+        (root / "etc").mkdir()
+        (root / "sbin").mkdir()
+
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
             (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
@@ -533,7 +1129,7 @@ class BuildTests(unittest.TestCase):
             ],
         )
 
-    def test_ci_kernel_cache_key_includes_patches(self):
+    def test_ci_kernel_cache_tracks_build_inputs_and_transfers_provenance(self):
         action = (
             build.REPO_ROOT
             / ".github"
@@ -542,9 +1138,19 @@ class BuildTests(unittest.TestCase):
             / "action.yml"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "hashFiles('kernel/config-microvm', 'kernel/patches/**')",
+            "hashFiles('kernel/config-microvm', 'kernel/patches/**', "
+            "'docker/Dockerfile', 'scripts/nvx_tools/build.py')",
             action,
         )
+        for operation in ("Restore", "Save"):
+            cache_step = action.split(
+                f"    - name: {operation} Linux kernel (zstd)\n", maxsplit=1
+            )[1].split("    - name:", maxsplit=1)[0]
+            self.assertIn(f"build/{build.KERNEL_PROVENANCE_NAME}", cache_step)
+        workflow = (build.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"build/{build.KERNEL_PROVENANCE_NAME}", workflow)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")
@@ -603,6 +1209,180 @@ class BuildTests(unittest.TestCase):
             )
             self.assertEqual(len(provenance["source_sha256"]), 64)
 
+    def test_build_initramfs_builds_reseed_with_static_helper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            repository = temporary_root / "repo"
+            work = temporary_root / "work"
+            root = work / "root"
+            metadata_probe = work / "metadata-probe"
+            output = temporary_root / "artifacts" / "initramfs.cpio.gz"
+            for directory in (root / "etc", root / "sbin", metadata_probe):
+                directory.mkdir(parents=True)
+            config = build.AlpineBuildConfig(work=work, output=output)
+            observed_reseed: dict[str, object] = {}
+
+            def install(_source: Path, destination: Path) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"script")
+                destination.chmod(0o755)
+
+            def build_static_helper(
+                _work: Path, source: Path, destination: Path
+            ) -> None:
+                destination.write_bytes(f"static:{source.name}".encode())
+                destination.chmod(0o755)
+
+            def build_device_io(_work: Path, destination: Path) -> dict[str, str]:
+                destination.write_bytes(b"device-io")
+                destination.chmod(0o755)
+                return {"source_sha256": "source", "binary_sha256": "binary"}
+
+            def pack_initramfs(
+                prepared_root: Path, native_output: Path, _owners: object
+            ) -> None:
+                reseed = prepared_root / "sbin" / "nvx-reseed"
+                observed_reseed["content"] = reseed.read_bytes()
+                native_output.write_bytes(b"initramfs")
+                native_output.with_name(
+                    f"{native_output.name}.packages.json"
+                ).write_text("{}", encoding="ascii")
+
+            with (
+                patch.object(build, "REPO_ROOT", repository),
+                patch.object(build, "_require_linux"),
+                patch.object(
+                    build,
+                    "_require_metadata_preserving_work_directory",
+                    return_value=self._cleanup_directory(metadata_probe),
+                ),
+                patch.object(
+                    build,
+                    "_prepare_alpine_root",
+                    return_value=self._cleanup_directory(root),
+                ),
+                patch.object(build, "_apk_add"),
+                patch.object(build, "_install", side_effect=install),
+                patch.object(
+                    build,
+                    "_build_static_helper",
+                    side_effect=build_static_helper,
+                ) as static_helper,
+                patch.object(
+                    build,
+                    "_build_device_io_helper",
+                    side_effect=build_device_io,
+                ),
+                patch.object(build, "_write_apk_manifest"),
+                patch.object(build, "_trusted_alpine_owners", return_value={}),
+                patch.object(build, "_pack_initramfs", side_effect=pack_initramfs),
+                patch.object(build, "_bind_apk_manifest_to_initramfs"),
+                patch.object(build, "verify_simple_initramfs") as verify,
+            ):
+                build.build_initramfs(config)
+
+            self.assertEqual(
+                static_helper.call_args_list[0],
+                call(
+                    work,
+                    repository / "alpine" / "nvx-reseed.c",
+                    root / "sbin" / "nvx-reseed",
+                ),
+            )
+            self.assertEqual(observed_reseed["content"], b"static:nvx-reseed.c")
+            self.assertEqual(output.read_bytes(), b"initramfs")
+            self.assertEqual(
+                output.with_name(f"{output.name}.packages.json").read_text(
+                    encoding="ascii"
+                ),
+                "{}",
+            )
+            verify.assert_called_once_with(work / "output" / output.name)
+            self.assertFalse(root.exists())
+            self.assertFalse(metadata_probe.exists())
+
+    def test_apk_uses_the_extracted_alpine_trust_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            certificates = root / "etc" / "ssl" / "certs" / "ca-certificates.crt"
+            certificates.parent.mkdir(parents=True)
+            certificates.write_text("test CA", encoding="ascii")
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(build, "run_checked") as run,
+            ):
+                build._apk_add(root, "blkid")
+
+            environment = run.call_args.kwargs["env"]
+            self.assertEqual(environment["SSL_CERT_FILE"], str(certificates))
+            self.assertEqual(environment["SSL_CERT_DIR"], str(certificates.parent))
+
+    def test_guest_agent_identity_is_exact_fused_startup_input(self):
+        self.assertEqual(
+            build.GUEST_AGENT_SOURCE_REVISION,
+            "534ffd518dda6b13451d03644191a02f0c53ea33",
+        )
+        self.assertEqual(
+            build.GUEST_AGENT_SHA256,
+            "5d4d5de68871bddaa46c823218bd80b45f03315c0617e81226243ea6c23f4325",
+        )
+        self.assertEqual(build.GUEST_AGENT_SIZE_BYTES, 1_938_304)
+        self.assertEqual(
+            build.GUEST_AGENT_BUILD_ID,
+            "7097a9dab9c5e4fbc7ef36b93a4ba897996bd052",
+        )
+        self.assertEqual(
+            build.GUEST_AGENT_STARTUP_MODES,
+            ("agent-ready", "image-entrypoint"),
+        )
+        self.assertEqual(
+            build.GUEST_AGENT_RUNTIME_ABI,
+            "microvm-abi-v2-startup-modes-session-operations-v3",
+        )
+
+    def test_startup_modes_are_runtime_fingerprint_inputs(self):
+        manifest: dict[str, object] = {
+            "runtime": {"transport": "broker-ttrpc"},
+            "openvmm": {
+                "source_revision": "o",
+                "executable_sha256": "o",
+                "microvm_abi_version": 2,
+                "control_session_protocol_version": 1,
+                "control_contract_revision": "c",
+            },
+            "linux": {"kernel_sha256": "k", "config_sha256": "c"},
+            "alpine": {
+                "initramfs_sha256": "i",
+                "initramfs_package_manifest_sha256": "p",
+            },
+            "guest_agent": {
+                "sha256": "a",
+                "size": 1,
+                "external_input_sha256": "a",
+                "external_input_size_bytes": 1,
+                "source_revision": "s",
+                "build_id": "b",
+                "target": "t",
+                "maximum_size_bytes": 2,
+                "artifact": "a",
+                "initramfs_artifact": "i",
+                "transport": "broker-ttrpc",
+                "protocol_schema_version": 2,
+                "startup_modes": ["agent-ready", "image-entrypoint"],
+                "runtime_abi": "microvm-abi-v2-startup-modes-session-operations-v3",
+            },
+        }
+        identity = release._runtime_identity(manifest)
+        fingerprint = release._runtime_fingerprint(identity)
+        cast(dict[str, object], manifest["guest_agent"])["startup_modes"] = [
+            "image-entrypoint"
+        ]
+        self.assertNotEqual(
+            release._runtime_fingerprint(release._runtime_identity(manifest)),
+            fingerprint,
+        )
+
     def test_sandbox_kernel_config_requires_every_feature(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / ".config"
@@ -629,23 +1409,127 @@ class BuildTests(unittest.TestCase):
                 "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
                 encoding="utf-8",
             )
-            build._assert_shared_status_kernel_config(config)
+            build.validate_shared_status_kernel_config(config)
 
             config.write_text("", encoding="utf-8")
             with self.assertRaisesRegex(
                 common.ScriptError,
                 build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG[0],
             ):
-                build._assert_shared_status_kernel_config(config)
+                build.validate_shared_status_kernel_config(config)
 
-    def test_stage_guest_agent_requires_matching_static_x86_64_elf(self):
+    def test_kernel_source_fingerprint_covers_config_and_every_patch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "kernel" / "config-microvm"
+            first_patch = root / "kernel" / "patches" / "0001-first.patch"
+            second_patch = root / "kernel" / "patches" / "0002-second.patch"
+            for path, contents in (
+                (config, "CONFIG_TEST=y\n"),
+                (first_patch, "first\n"),
+                (second_patch, "second\n"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents, encoding="utf-8")
+
+            with patch.object(build, "REPO_ROOT", root):
+                original = build.kernel_source_fingerprint()
+                config.write_text("CONFIG_TEST=n\n", encoding="utf-8")
+                changed_config = build.kernel_source_fingerprint()
+                config.write_text("CONFIG_TEST=y\n", encoding="utf-8")
+                second_patch.write_text("changed\n", encoding="utf-8")
+                changed_patch = build.kernel_source_fingerprint()
+
+            self.assertNotEqual(original, changed_config)
+            self.assertNotEqual(original, changed_patch)
+
+    def test_kernel_fingerprint_is_portable_across_git_checkout_policies(self):
+        expected = build.kernel_source_fingerprint()
+        source_paths = (
+            Path(".gitattributes"),
+            Path("kernel") / "config-microvm",
+            *(
+                path.relative_to(build.REPO_ROOT)
+                for path in build._kernel_patch_files()
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in source_paths:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(build.REPO_ROOT / relative, destination)
+            ordinary_text = root / "ordinary.txt"
+            ordinary_text.write_bytes(b"ordinary\n")
+
+            def git(*arguments: str) -> None:
+                result = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(root),
+                        "-c",
+                        f"core.attributesFile={os.devnull}",
+                        "-c",
+                        "core.safecrlf=false",
+                        *arguments,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=os.environ.copy(),
+                    timeout=TEST_SUBPROCESS_TIMEOUT_SECONDS,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            git("init", "--quiet")
+            git(
+                "-c",
+                "core.autocrlf=false",
+                "add",
+                ".gitattributes",
+                "kernel",
+                "ordinary.txt",
+            )
+            for autocrlf, eol, ordinary_bytes in (
+                ("false", "lf", b"ordinary\n"),
+                ("true", "crlf", b"ordinary\r\n"),
+                ("input", "lf", b"ordinary\n"),
+            ):
+                with (
+                    self.subTest(autocrlf=autocrlf, eol=eol),
+                    patch.object(build, "REPO_ROOT", root),
+                ):
+                    for relative in source_paths[1:]:
+                        (root / relative).unlink()
+                    ordinary_text.unlink()
+                    git(
+                        "-c",
+                        f"core.autocrlf={autocrlf}",
+                        "-c",
+                        f"core.eol={eol}",
+                        "checkout-index",
+                        "--all",
+                        "--force",
+                    )
+                    self.assertEqual(ordinary_text.read_bytes(), ordinary_bytes)
+                    self.assertNotIn(
+                        b"\r\n", (root / "kernel" / "config-microvm").read_bytes()
+                    )
+                    self.assertEqual(build.kernel_source_fingerprint(), expected)
+
+    def test_stage_guest_agent_requires_exact_reviewed_static_x86_64_elf(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "input-agent"
             source.write_bytes(_static_x86_64_elf())
             expected = hashlib.sha256(source.read_bytes()).hexdigest()
+            expected_size = source.stat().st_size
 
-            with patch.object(build, "REPO_ROOT", root):
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "GUEST_AGENT_SHA256", expected),
+                patch.object(build, "GUEST_AGENT_SIZE_BYTES", expected_size),
+            ):
                 destination = build.stage_guest_agent(source, expected.upper())
 
             self.assertEqual(destination.read_bytes(), source.read_bytes())
@@ -656,11 +1540,16 @@ class BuildTests(unittest.TestCase):
                 expected,
             )
 
+            alternate = source.read_bytes() + b"same-source-different-build-id"
+            source.write_bytes(alternate)
+            alternate_sha256 = hashlib.sha256(alternate).hexdigest()
             with (
                 patch.object(build, "REPO_ROOT", root),
-                self.assertRaisesRegex(common.ScriptError, "SHA-256 is"),
+                patch.object(build, "GUEST_AGENT_SHA256", expected),
+                patch.object(build, "GUEST_AGENT_SIZE_BYTES", expected_size),
+                self.assertRaisesRegex(common.ScriptError, "required external input"),
             ):
-                build.stage_guest_agent(source, "0" * 64)
+                build.stage_guest_agent(source, alternate_sha256)
 
             malformed = bytearray(_static_x86_64_elf())
             malformed[72:80] = (4096).to_bytes(8, "little")
@@ -668,6 +1557,8 @@ class BuildTests(unittest.TestCase):
             malformed_sha256 = hashlib.sha256(malformed).hexdigest()
             with (
                 patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "GUEST_AGENT_SHA256", malformed_sha256),
+                patch.object(build, "GUEST_AGENT_SIZE_BYTES", len(malformed)),
                 self.assertRaisesRegex(common.ScriptError, "beyond end of file"),
             ):
                 build.stage_guest_agent(source, malformed_sha256)
@@ -678,9 +1569,34 @@ class BuildTests(unittest.TestCase):
             dynamic_sha256 = hashlib.sha256(dynamic).hexdigest()
             with (
                 patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "GUEST_AGENT_SHA256", dynamic_sha256),
+                patch.object(build, "GUEST_AGENT_SIZE_BYTES", len(dynamic)),
                 self.assertRaisesRegex(common.ScriptError, "statically linked"),
             ):
                 build.stage_guest_agent(source, dynamic_sha256)
+
+            wrong_arch = bytearray(_static_x86_64_elf())
+            wrong_arch[18:20] = (183).to_bytes(2, "little")
+            source.write_bytes(wrong_arch)
+            wrong_arch_sha256 = hashlib.sha256(wrong_arch).hexdigest()
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "GUEST_AGENT_SHA256", wrong_arch_sha256),
+                patch.object(build, "GUEST_AGENT_SIZE_BYTES", len(wrong_arch)),
+                self.assertRaisesRegex(common.ScriptError, "x86-64"),
+            ):
+                build.stage_guest_agent(source, wrong_arch_sha256)
+
+            source.write_bytes(_static_x86_64_elf())
+            oversized_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "GUEST_AGENT_SHA256", oversized_sha256),
+                patch.object(build, "GUEST_AGENT_SIZE_BYTES", source.stat().st_size),
+                patch.object(build, "GUEST_AGENT_MAXIMUM_BYTES", 64),
+                self.assertRaisesRegex(common.ScriptError, "16-MiB"),
+            ):
+                build.stage_guest_agent(source, oversized_sha256)
 
     def test_stage_guest_agent_removes_partial_copy_after_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -691,6 +1607,7 @@ class BuildTests(unittest.TestCase):
 
             with (
                 patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "GUEST_AGENT_SHA256", expected),
                 patch.object(
                     build.shutil,
                     "copyfileobj",
@@ -702,45 +1619,666 @@ class BuildTests(unittest.TestCase):
 
             self.assertEqual(list((root / "build").glob("*.part")), [])
 
+    def test_agent_initramfs_inspection_requires_exact_embedded_pid1(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / build.AGENT_INITRAMFS_NAME
+            agent = _static_x86_64_elf()
+            path.write_bytes(_agent_newc_archive(agent))
+            expected = hashlib.sha256(agent).hexdigest()
+            build.verify_agent_initramfs(path, expected)
+            with self.assertRaisesRegex(common.ScriptError, "embedded.*SHA-256"):
+                build.verify_agent_initramfs(path, "0" * 64)
+            first_archive = path.read_bytes()
+            path.write_bytes(first_archive + first_archive)
+            with self.assertRaisesRegex(common.ScriptError, "second archive"):
+                build.verify_agent_initramfs(path, expected)
+            path.write_bytes(
+                _newc_archive(
+                    [
+                        *_agent_newc_entries(agent),
+                        ("/sbin/nvx-agent", 0o100755, b"replacement"),
+                    ]
+                )
+            )
+            with self.assertRaisesRegex(common.ScriptError, "non-canonical"):
+                build.verify_agent_initramfs(path, expected)
+
+            path.write_bytes(
+                _newc_archive(
+                    [
+                        *_agent_newc_entries(agent),
+                        ("sbin/nvx-agent", 0o100755, b"replacement"),
+                    ]
+                )
+            )
+            with self.assertRaisesRegex(common.ScriptError, "duplicate"):
+                build.verify_agent_initramfs(path, expected)
+
+    def test_newc_parser_retains_extraction_identity_and_data_evidence(self):
+        content = b"member contents"
+        metadata = NewcTestMetadata(
+            inode=0x1234,
+            nlink=1,
+            devmajor=8,
+            devminor=9,
+            rdevmajor=10,
+            rdevminor=11,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.cpio.gz"
+            path.write_bytes(
+                _newc_archive(
+                    [
+                        (".", 0o040755, b""),
+                        ("link", 0o120777, b"target", metadata),
+                        ("target", 0o100644, content),
+                    ]
+                )
+            )
+
+            entries = build._newc_entries(path)
+
+        link = entries[1]
+        target = entries[2]
+        self.assertEqual((link.order, link.name), (1, "link"))
+        self.assertEqual(link.identity, (8, 9, 0x1234))
+        self.assertEqual((link.rdevmajor, link.rdevminor), (10, 11))
+        self.assertEqual((link.mode, link.nlink), (0o120777, 1))
+        self.assertEqual(link.file_type, stat.S_IFLNK)
+        self.assertEqual(link.symlink_target, "target")
+        self.assertEqual(link.data_end - link.data_start, len(link.data))
+        self.assertEqual(link.data_sha256, hashlib.sha256(link.data).hexdigest())
+        self.assertEqual(target.data_sha256, hashlib.sha256(content).hexdigest())
+
+    def test_newc_parser_accepts_ascii_hex_case(self):
+        agent = _static_x86_64_elf()
+        original = gzip.decompress(_agent_newc_archive(agent))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / build.AGENT_INITRAMFS_NAME
+            for uppercase in (False, True):
+                data = bytearray(original)
+                for offset in (0, original.rfind(b"070701")):
+                    header = original[offset + 6 : offset + 110]
+                    data[offset + 6 : offset + 110] = (
+                        header.upper() if uppercase else header.lower()
+                    )
+                path.write_bytes(gzip.compress(data, mtime=0))
+                with self.subTest(uppercase=uppercase):
+                    build.verify_agent_initramfs(
+                        path, hashlib.sha256(agent).hexdigest()
+                    )
+
+    def test_newc_parser_rejects_non_hex_numeric_fields(self):
+        agent = _static_x86_64_elf()
+        original = gzip.decompress(_agent_newc_archive(agent))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / build.AGENT_INITRAMFS_NAME
+            for header in (0, original.rfind(b"070701")):
+                for field_index in range(13):
+                    offset = header + 6 + field_index * 8
+                    field = original[offset : offset + 8]
+                    malformed_fields = (
+                        b"+" + field[1:],
+                        b"-" + field[1:],
+                        b" " + field[1:],
+                        field[:-1] + b" ",
+                        b"\t" + field[1:],
+                        field[:-1] + b"\n",
+                        b"\r" + field[1:],
+                        field[:1] + b"_" + field[2:],
+                        b"g" + field[1:],
+                        b"\xa0" + field[1:],
+                    )
+                    for malformed in malformed_fields:
+                        data = bytearray(original)
+                        data[offset : offset + 8] = malformed
+                        path.write_bytes(gzip.compress(data, mtime=0))
+                        with (
+                            self.subTest(
+                                header=header, field=field_index, value=malformed
+                            ),
+                            self.assertRaisesRegex(
+                                common.ScriptError, "invalid newc header"
+                            ),
+                        ):
+                            build.verify_agent_initramfs(
+                                path, hashlib.sha256(agent).hexdigest()
+                            )
+
+    def test_initramfs_rejects_extraction_graph_aliases_and_reordering(self):
+        agent = _static_x86_64_elf()
+        expected = hashlib.sha256(agent).hexdigest()
+
+        def verify(
+            entries: list[NewcTestEntry],
+            extra_trusted_links: set[tuple[str, str]] | None = None,
+        ) -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / build.AGENT_INITRAMFS_NAME
+                path.write_bytes(_newc_archive(entries))
+                trusted = build.TRUSTED_INITRAMFS_SYMLINKS | frozenset(
+                    extra_trusted_links or ()
+                )
+                with patch.object(build, "TRUSTED_INITRAMFS_SYMLINKS", trusted):
+                    build.verify_agent_initramfs(path, expected)
+
+        cases: list[
+            tuple[
+                str,
+                list[NewcTestEntry],
+                set[tuple[str, str]] | None,
+                str,
+            ]
+        ] = [
+            (
+                "critical symlink alias",
+                [
+                    *_agent_newc_entries(agent),
+                    ("zz", 0o120777, b"sbin"),
+                    ("zz/nvx-agent", 0o100755, b"replacement"),
+                ],
+                {("zz", "sbin")},
+                "below non-directory ancestor 'zz'",
+            ),
+            (
+                "generic symlink ancestor",
+                [
+                    *_agent_newc_entries(agent),
+                    ("usr", 0o040755, b""),
+                    ("usr-link", 0o120777, b"usr"),
+                    ("usr-link/child", 0o100644, b"child"),
+                ],
+                {("usr-link", "usr")},
+                "below non-directory ancestor 'usr-link'",
+            ),
+            (
+                "type replacement",
+                [
+                    *_agent_newc_entries(agent),
+                    ("replace", 0o040755, b""),
+                    ("replace", 0o100644, b"replacement"),
+                ],
+                None,
+                "duplicate newc member 'replace'",
+            ),
+            (
+                "child before ancestor",
+                [
+                    *_agent_newc_entries(agent),
+                    ("late/child", 0o100644, b"child"),
+                    ("late", 0o040755, b""),
+                ],
+                None,
+                "before directory ancestor 'late'",
+            ),
+            (
+                "case collision",
+                [
+                    *_agent_newc_entries(agent),
+                    ("Case", 0o100644, b"first"),
+                    ("case", 0o100644, b"second"),
+                ],
+                None,
+                "case-colliding",
+            ),
+        ]
+        for label, entries, trusted_links, error in cases:
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(common.ScriptError, error),
+            ):
+                verify(entries, trusted_links)
+
+    def test_initramfs_rejects_critical_and_benign_hardlinks(self):
+        agent = _static_x86_64_elf()
+        expected = hashlib.sha256(agent).hexdigest()
+
+        def verify(entries: list[NewcTestEntry]) -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / build.AGENT_INITRAMFS_NAME
+                path.write_bytes(_newc_archive(entries))
+                build.verify_agent_initramfs(path, expected)
+
+        critical = _agent_newc_entries(agent)
+        critical_index = next(
+            index
+            for index, entry in enumerate(critical)
+            if entry[0] == "sbin/nvx-agent"
+        )
+        critical[critical_index] = (
+            "sbin/nvx-agent",
+            0o100755,
+            agent,
+            NewcTestMetadata(inode=0xA11A5, nlink=2),
+        )
+        critical.append(
+            (
+                "sbin/nvx-agent-alias",
+                0o100755,
+                b"",
+                NewcTestMetadata(inode=0xA11A5, nlink=2),
+            )
+        )
+        with self.assertRaisesRegex(
+            common.ScriptError,
+            "nvx-agent.*unsafe link count",
+        ):
+            verify(critical)
+
+        benign = [
+            *_agent_newc_entries(agent),
+            ("usr", 0o040755, b""),
+            ("usr/share", 0o040755, b""),
+            (
+                "usr/share/one",
+                0o100644,
+                b"benign",
+                NewcTestMetadata(inode=0xBEE, nlink=2),
+            ),
+            (
+                "usr/share/two",
+                0o100644,
+                b"",
+                NewcTestMetadata(inode=0xBEE, nlink=2),
+            ),
+        ]
+        with self.assertRaisesRegex(
+            common.ScriptError,
+            "regular file 'usr/share/one'.*unsafe link count",
+        ):
+            verify(benign)
+
+        repeated_identity = [
+            *_agent_newc_entries(agent),
+            ("usr", 0o040755, b""),
+            ("usr/share", 0o040755, b""),
+            (
+                "usr/share/one",
+                0o100644,
+                b"first",
+                NewcTestMetadata(inode=0xD00D),
+            ),
+            (
+                "usr/share/two",
+                0o100644,
+                b"second",
+                NewcTestMetadata(inode=0xD00D),
+            ),
+        ]
+        with self.assertRaisesRegex(
+            common.ScriptError,
+            "repeated newc inode identity.*usr/share/one.*usr/share/two",
+        ):
+            verify(repeated_identity)
+
+    def test_agent_initramfs_rejects_unsafe_metadata_mutations(self):
+        agent = _static_x86_64_elf()
+        expected = hashlib.sha256(agent).hexdigest()
+
+        def mutate(name: str, replacement: NewcTestEntry) -> bytes:
+            entries = _agent_newc_entries(agent)
+            index = next(
+                index for index, entry in enumerate(entries) if entry[0] == name
+            )
+            entries[index] = replacement
+            return _newc_archive(entries)
+
+        mutations = (
+            (
+                mutate(
+                    "sbin/nvx-agent",
+                    ("sbin/nvx-agent", 0o100755, agent, 1, 0),
+                ),
+                "nvx-agent with the wrong mode",
+            ),
+            (
+                mutate("init", ("init", 0o100755, agent)),
+                "does not select",
+            ),
+            (
+                mutate("sbin", ("sbin", 0o040777, b"")),
+                "unsafe world-writable directory",
+            ),
+            (
+                _newc_archive(
+                    [
+                        *_agent_newc_entries(agent),
+                        ("sbin/extra", 0o100755, _static_x86_64_elf()),
+                    ]
+                ),
+                "unexpected entries",
+            ),
+            (
+                _newc_archive(
+                    [
+                        *_agent_newc_entries(agent),
+                        ("dev", 0o040755, b""),
+                        ("dev/console", 0o020600, b""),
+                    ]
+                ),
+                "unsafe entry type",
+            ),
+            (
+                _newc_archive(
+                    [
+                        *_agent_newc_entries(agent),
+                        ("bad-link", 0o120777, b"../../outside"),
+                    ]
+                ),
+                "escaping symlink",
+            ),
+            (
+                _newc_archive(
+                    [
+                        *_agent_newc_entries(agent),
+                        ("unexpected-link", 0o120777, b"/bin/busybox"),
+                    ]
+                ),
+                "untrusted symlink",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / build.AGENT_INITRAMFS_NAME
+            for archive_bytes, error in mutations:
+                with self.subTest(error=error):
+                    path.write_bytes(archive_bytes)
+                    with self.assertRaisesRegex(common.ScriptError, error):
+                        build.verify_agent_initramfs(path, expected)
+
+    def test_simple_and_broker_initramfs_profiles_are_structurally_distinct(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            simple = root / "initramfs.cpio.gz"
+            broker = root / build.AGENT_INITRAMFS_NAME
+            simple.write_bytes(
+                _simple_newc_archive(
+                    (common.REPO_ROOT / "alpine" / "init").read_bytes()
+                )
+            )
+            agent = _static_x86_64_elf()
+            broker.write_bytes(_agent_newc_archive(agent))
+
+            build.verify_simple_initramfs(simple)
+            build.verify_agent_initramfs(
+                broker,
+                hashlib.sha256(agent).hexdigest(),
+            )
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "NVX PID-1 layout|unexpected entries",
+            ):
+                build.verify_agent_initramfs(
+                    simple,
+                    hashlib.sha256(agent).hexdigest(),
+                )
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "contains /sbin/nvx-agent|untrusted symlink",
+            ):
+                build.verify_simple_initramfs(broker)
+
+    def test_initramfs_work_directory_rejects_drvfs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary) / "work"
+            with (
+                patch.object(build, "_linux_filesystem_type", return_value="v9fs"),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "NVX_NATIVE_WORK_DIR.*native Linux filesystem",
+                ),
+            ):
+                with build._require_metadata_preserving_work_directory(work):
+                    self.fail("unsafe filesystem unexpectedly accepted")
+
+    def test_initramfs_metadata_probe_is_removed_after_validation_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary) / "work"
+            with (
+                patch.object(build, "_linux_filesystem_type", return_value="ext4"),
+                patch.object(
+                    Path,
+                    "chmod",
+                    side_effect=OSError("injected metadata failure"),
+                ),
+                self.assertRaisesRegex(common.ScriptError, "cannot preserve"),
+            ):
+                with build._require_metadata_preserving_work_directory(work):
+                    self.fail("invalid metadata probe unexpectedly accepted")
+
+            self.assertEqual(list(work.glob(".nvx-metadata-probe-*")), [])
+
+    def test_native_initramfs_cleans_temporary_paths_on_package_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary) / "work"
+            config = build.AlpineBuildConfig(
+                work=work,
+                output=Path(temporary) / "initramfs.cpio.gz",
+            )
+            probe = work / "metadata-probe"
+
+            with (
+                patch.object(build, "_require_linux"),
+                patch.object(
+                    build,
+                    "_require_metadata_preserving_work_directory",
+                    return_value=self._cleanup_directory(probe),
+                ),
+                patch.object(build, "_download_verified"),
+                patch.object(build, "require_tool", return_value="tar"),
+                patch.object(
+                    build,
+                    "run_checked",
+                    side_effect=self._extract_test_alpine_root,
+                ),
+                patch.object(
+                    build,
+                    "_apk_add",
+                    side_effect=common.ScriptError("injected package failure"),
+                ),
+                self.assertRaisesRegex(common.ScriptError, "injected package failure"),
+            ):
+                build.build_initramfs(config)
+
+            self.assertEqual(list(work.glob("root-*")), [])
+            self.assertFalse(probe.exists())
+
+    def test_native_initramfs_cleans_temporary_paths_on_metadata_parse_failure(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary) / "work"
+            config = build.AlpineBuildConfig(
+                work=work,
+                output=Path(temporary) / "initramfs.cpio.gz",
+            )
+            probe = work / "metadata-probe"
+
+            with (
+                patch.object(build, "_require_linux"),
+                patch.object(
+                    build,
+                    "_require_metadata_preserving_work_directory",
+                    return_value=self._cleanup_directory(probe),
+                ),
+                patch.object(build, "_download_verified"),
+                patch.object(build, "require_tool", return_value="tar"),
+                patch.object(
+                    build,
+                    "run_checked",
+                    side_effect=self._extract_test_alpine_root,
+                ),
+                patch.object(build, "_apk_add"),
+                patch.object(build, "_install"),
+                patch.object(build, "_build_static_helper"),
+                patch.object(
+                    build,
+                    "_build_device_io_helper",
+                    return_value={
+                        "source_sha256": "source",
+                        "binary_sha256": "binary",
+                    },
+                ),
+                patch.object(
+                    build,
+                    "_trusted_alpine_owners",
+                    side_effect=common.ScriptError("injected metadata parse failure"),
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError, "injected metadata parse failure"
+                ),
+            ):
+                build.build_initramfs(config)
+
+            self.assertEqual(list(work.glob("root-*")), [])
+            self.assertFalse(probe.exists())
+
+    def test_native_agent_initramfs_cleans_probe_before_root_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary) / "work"
+            config = build.AlpineBuildConfig(
+                work=work,
+                output=Path(temporary) / build.AGENT_INITRAMFS_NAME,
+                agent_enabled=True,
+            )
+            probe = work / "metadata-probe"
+
+            with (
+                patch.object(build, "_require_linux"),
+                patch.object(
+                    build,
+                    "_require_metadata_preserving_work_directory",
+                    return_value=self._cleanup_directory(probe),
+                ),
+                patch.object(
+                    build,
+                    "verified_staged_guest_agent",
+                    side_effect=common.ScriptError("injected staging failure"),
+                ),
+                self.assertRaisesRegex(common.ScriptError, "injected staging failure"),
+            ):
+                build.build_initramfs(config)
+
+            self.assertFalse(probe.exists())
+            self.assertEqual(list(work.glob("agent-root-*")), [])
+
+    def test_native_agent_root_is_removed_after_copy_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary) / "work"
+            work.mkdir()
+            agent = Path(temporary) / "nvx-agent"
+            agent.write_bytes(b"agent")
+            with (
+                patch.object(
+                    build.shutil,
+                    "copyfile",
+                    side_effect=OSError("injected copy failure"),
+                ),
+                self.assertRaisesRegex(OSError, "injected copy failure"),
+            ):
+                with build._prepare_agent_root(work, agent):
+                    self.fail("agent root unexpectedly prepared")
+
+            self.assertEqual(list(work.glob("agent-root-*")), [])
+
+    def test_agent_initramfs_requires_separate_verified_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                self.assertRaisesRegex(common.ScriptError, "staged NVX guest agent"),
+            ):
+                build.verified_staged_guest_agent()
+
+            simple = build.AlpineBuildConfig()
+            agent = build.AlpineBuildConfig(
+                output=Path(build.AGENT_INITRAMFS_NAME),
+                agent_enabled=True,
+            )
+            self.assertFalse(simple.agent_enabled)
+            self.assertEqual(simple.output.name, "initramfs.cpio.gz")
+            self.assertTrue(agent.agent_enabled)
+            self.assertEqual(agent.output.name, build.AGENT_INITRAMFS_NAME)
+
+    def test_agent_docker_input_uses_sha_but_ci_does_not_cache_image(self):
+        command = [
+            str(value)
+            for value in build.docker_build_agent_initramfs_command(
+                build.DockerBuildConfig(),
+                "a" * 64,
+            )
+        ]
+        self.assertIn("--secret", command)
+        self.assertIn(f"NVX_AGENT_SHA256={'a' * 64}", command)
+        action = (
+            Path(__file__).parents[1]
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("agent-initramfs", action)
+        self.assertNotIn("agent-cache", action)
+        benchmark_action = (
+            Path(__file__).parents[1]
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("agent-initramfs", benchmark_action)
+        self.assertNotIn("agent-cache", benchmark_action)
+        package_action = (
+            Path(__file__).parents[1]
+            / ".github"
+            / "actions"
+            / "package-release"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("--transport broker-ttrpc", package_action)
+        self.assertIn("archive-release", package_action)
+        publish_action = (
+            Path(__file__).parents[1]
+            / ".github"
+            / "actions"
+            / "publish-development-release"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("broker-live-gate-contracts", publish_action)
+        self.assertIn("verify-broker-live-gate", publish_action)
+        self.assertIn("--archive-sha256", publish_action)
+        self.assertIn("externally authenticated live-gate proof", publish_action)
+
 
 class SandboxTests(unittest.TestCase):
-    def test_launch_contract_orders_roles_and_builds_agent_command_line(self):
-        custom = sandbox.SandboxLayer.parse(
-            "custom,custom.erofs,22222222-2222-2222-2222-222222222222"
-        )
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
+    def test_launch_contract_orders_roles_and_keeps_config_off_command_line(self):
+        custom = sandbox.SandboxLayer.parse("custom,custom.erofs")
+        distro = sandbox.SandboxLayer.parse("distro,distro.erofs")
         launch = sandbox.SandboxLaunch(
             layers=(custom, distro),
             scratch=Path("scratch.ext4"),
-            entrypoint="/bin/workload",
-            args=("--serve",),
-            hostname="example",
-            memory_max=268435456,
-            pids_max=64,
         )
 
         self.assertEqual(
             [layer.role for layer in launch.ordered_layers()],
             ["distro", "custom"],
         )
+        self.assertEqual(launch.kernel_command_line("quiet"), "quiet")
         self.assertEqual(
-            launch.kernel_command_line("quiet"),
-            (
-                "quiet nvx_sandbox=1 "
-                "nvx_layer=distro,0xd0003000,11111111-1111-1111-1111-111111111111 "
-                "nvx_layer=custom,0xd0005000,22222222-2222-2222-2222-222222222222 "
-                "nvx_scratch=0xd0006000,ext4 "
-                "nvx_entrypoint=/bin/workload nvx_hostname=example "
-                "nvx_arg=--serve nvx_memory_max=268435456 nvx_pids_max=65"
+            launch.openvmm_arguments(
+                Path.cwd() / "control.sock",
+                Path.cwd() / "boot.sock",
+                9,
             ),
-        )
-        self.assertEqual(
-            launch.openvmm_arguments(),
             [
                 "--machine",
                 "microvm",
+                "--virtio-console",
+                f"listen={Path.cwd() / 'boot.sock'}",
+                "--microvm-control-console",
+                f"listen={Path.cwd() / 'control.sock'}",
+                "--microvm-control-auth-stdin",
+                "--microvm-control-auth-timeout-ms",
+                str(sandbox.CONTROL_AUTH_TIMEOUT_MS),
                 "--microvm-sandbox-block",
                 "distro:file:distro.erofs,ro",
                 "--microvm-sandbox-block",
@@ -751,9 +2289,7 @@ class SandboxTests(unittest.TestCase):
         )
 
     def test_launch_contract_rejects_duplicates_and_reserved_tokens(self):
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
+        distro = sandbox.SandboxLayer.parse("distro,distro.erofs")
         with self.assertRaisesRegex(common.ScriptError, "duplicate.*distro"):
             sandbox.SandboxLaunch(
                 layers=(distro, distro),
@@ -768,16 +2304,30 @@ class SandboxTests(unittest.TestCase):
             launch.kernel_command_line("nvx_sandbox=0")
         with self.assertRaisesRegex(common.ScriptError, "owned"):
             launch.kernel_command_line(r"foo=bar\ nvx_memory_max=max")
+        for command_line in (
+            "rdinit=/bin/sh",
+            "init=/bin/sh",
+            'rdinit="/bin/sh"',
+            r"rdinit\=/bin/sh",
+            "quiet\trdinit=/bin/sh",
+            "nvx_control_tty=hvc9 nvx_control_tty=hvc2",
+            "nvx_sandbox=0 nvx_sandbox=1",
+            "virtnet_ip=192.0.2.1",
+            "console=ttyS0",
+        ):
+            with (
+                self.subTest(command_line=command_line),
+                self.assertRaisesRegex(common.ScriptError, "owned"),
+            ):
+                launch.kernel_command_line(command_line)
         with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
             launch.kernel_command_line("x" * sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE)
 
-    def test_layer_parser_rejects_invalid_role_and_uuid(self):
+    def test_layer_parser_rejects_invalid_role_and_shape(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):
-            sandbox.SandboxLayer.parse(
-                "unknown,layer.erofs,11111111-1111-1111-1111-111111111111"
-            )
-        with self.assertRaisesRegex(common.ScriptError, "UUID is invalid"):
-            sandbox.SandboxLayer.parse("distro,layer.erofs,not-a-uuid")
+            sandbox.SandboxLayer.parse("unknown,layer.erofs")
+        with self.assertRaisesRegex(common.ScriptError, "ROLE,PATH"):
+            sandbox.SandboxLayer.parse("distro,layer.erofs,ignored")
 
     def test_launch_contract_rejects_disk_option_delimiters(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -789,7 +2339,6 @@ class SandboxTests(unittest.TestCase):
             layer = sandbox.SandboxLayer(
                 role="distro",
                 path=layer_path,
-                uuid="11111111-1111-1111-1111-111111111111",
             )
 
             with self.assertRaisesRegex(common.ScriptError, "semicolons"):
@@ -1280,6 +2829,22 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.clocksource_parameter("kvm"), "clocksource=kvm-clock"
         )
         self.assertEqual(benchmark.clocksource_parameter("mshv"), "clocksource=tsc")
+        self.assertEqual(
+            benchmark.lifecycle_tuning("mshv"),
+            f"nolapic_timer {benchmark.BASE_TUNING}",
+        )
+        self.assertEqual(
+            benchmark.lifecycle_tuning("mshv", 2),
+            benchmark.BASE_TUNING,
+        )
+        self.assertEqual(
+            benchmark.lifecycle_tuning("kvm"),
+            f"clocksource=kvm-clock {benchmark.BASE_TUNING}",
+        )
+        self.assertEqual(
+            benchmark.lifecycle_tuning("whp"),
+            benchmark.BASE_TUNING,
+        )
 
     def test_smp_probe_uses_explicit_topology_and_worker_rendezvous(self):
         script = benchmark.smp_probe_script(4)
@@ -2704,6 +4269,8 @@ class BenchmarkTests(unittest.TestCase):
                 "--destination",
                 "dist/custom",
                 "--binary-only",
+                "--transport",
+                "simple",
                 "--force",
             ]
         )
@@ -2716,19 +4283,199 @@ class BenchmarkTests(unittest.TestCase):
             destination=Path("dist/custom"),
             include_source=False,
             force=True,
+            transport="simple",
+            manifest_digest_output=None,
         )
 
     def test_download_command_selects_host_release(self):
-        args = nvx.parse_args(["download", "--repository", "example/nvx"])
+        args = nvx.parse_args(
+            [
+                "download",
+                "--repository",
+                "example/nvx",
+                "--transport",
+                "simple",
+            ]
+        )
         expected_platform = "windows-whp" if os.name == "nt" else "linux-kvm"
 
         with patch.object(nvx, "download_latest_release") as download_release:
             args.handler(args)
 
-        download_release.assert_called_once_with("example/nvx", expected_platform)
+        download_release.assert_called_once_with(
+            "example/nvx",
+            expected_platform,
+            "simple",
+            None,
+        )
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_broker_source_collection_skips_empty_alpine_inventory(self):
+        package_manifest = Path("initramfs-agent.cpio.gz.packages.json")
+        with (
+            patch.object(
+                release,
+                "_guest_release_inputs",
+                return_value=({}, [package_manifest], {}),
+            ),
+            patch.object(release, "collect_alpine_sources") as collect_alpine,
+            patch.object(release, "build_docker_linux_source") as collect_linux,
+        ):
+            release.collect_release_sources("broker-ttrpc")
+
+        collect_alpine.assert_not_called()
+        collect_linux.assert_called_once()
+
+    def test_transaction_rolls_back_base_exceptions_at_every_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_one = root / "source-one"
+            source_two = root / "source-two"
+            source_one.write_bytes(b"new-one")
+            source_two.write_bytes(b"new-two")
+            destination_one = root / "runtime" / "one"
+            destination_two = root / "runtime" / "two"
+            removed = root / "runtime" / "removed"
+            transaction_parent = root / "runtime" / ".install-transactions"
+            original_replace = release._atomic_replace
+
+            def reset() -> dict[Path, tuple[bytes, int]]:
+                values = {
+                    destination_one: b"old-one",
+                    destination_two: b"old-two",
+                    removed: b"old-removed",
+                }
+                snapshot: dict[Path, tuple[bytes, int]] = {}
+                for index, (path, value) in enumerate(values.items()):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(value)
+                    path.chmod(0o600 if index % 2 else 0o700)
+                    snapshot[path] = (
+                        path.read_bytes(),
+                        stat.S_IMODE(path.stat().st_mode),
+                    )
+                return snapshot
+
+            files = [
+                release._InstallFile(source_one, destination_one, 0o644),
+                release._InstallFile(source_two, destination_two, 0o644),
+            ]
+            for exception_type in (KeyboardInterrupt, SystemExit):
+                for failure_call in range(1, 6):
+                    prior = reset()
+                    calls = 0
+
+                    def fail_one(
+                        source: Path,
+                        destination: Path,
+                        target_call: int = failure_call,
+                        raised_exception: type[BaseException] = exception_type,
+                    ) -> None:
+                        nonlocal calls
+                        calls += 1
+                        if calls == target_call:
+                            raise raised_exception()
+                        original_replace(source, destination)
+
+                    def transaction_artifact_path(name: str) -> Path:
+                        return root / "runtime" / name
+
+                    with (
+                        self.subTest(
+                            exception=exception_type.__name__,
+                            failure_call=failure_call,
+                        ),
+                        patch.object(
+                            release,
+                            "artifact_path",
+                            side_effect=transaction_artifact_path,
+                        ),
+                        patch.object(
+                            release,
+                            "_atomic_replace",
+                            side_effect=fail_one,
+                        ),
+                        self.assertRaises(exception_type),
+                    ):
+                        release._transactional_install(files, [removed])
+                    self.assertEqual(
+                        {
+                            path: (
+                                path.read_bytes(),
+                                stat.S_IMODE(path.stat().st_mode),
+                            )
+                            for path in prior
+                        },
+                        prior,
+                    )
+                    self.assertEqual(list(transaction_parent.iterdir()), [])
+
+    def test_transaction_preserves_failed_rollback_for_next_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            destination = root / "runtime" / "destination"
+            source.write_bytes(b"new")
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"prior")
+            destination.chmod(0o700)
+            prior = (
+                destination.read_bytes(),
+                stat.S_IMODE(destination.stat().st_mode),
+            )
+            original_replace = release._atomic_replace
+            calls = 0
+
+            def fail_install_and_rollback(source: Path, target: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise KeyboardInterrupt()
+                if calls == 3:
+                    raise OSError("injected rollback failure")
+                original_replace(source, target)
+
+            def transaction_artifact_path(name: str) -> Path:
+                return root / "runtime" / name
+
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=transaction_artifact_path,
+                ),
+                patch.object(
+                    release,
+                    "_atomic_replace",
+                    side_effect=fail_install_and_rollback,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "journal and backups were preserved",
+                ),
+            ):
+                release._transactional_install(
+                    [release._InstallFile(source, destination, 0o644)],
+                    [],
+                )
+
+            transaction_parent = root / "runtime" / ".install-transactions"
+            transactions = list(transaction_parent.iterdir())
+            self.assertEqual(len(transactions), 1)
+            self.assertTrue((transactions[0] / "journal.json").is_file())
+            self.assertTrue(any((transactions[0] / "backup").iterdir()))
+
+            release._recover_install_transactions(transaction_parent)
+            self.assertEqual(
+                (
+                    destination.read_bytes(),
+                    stat.S_IMODE(destination.stat().st_mode),
+                ),
+                prior,
+            )
+            self.assertEqual(list(transaction_parent.iterdir()), [])
+
     def test_selects_latest_matching_prerelease_asset(self):
         releases = [
             {
@@ -2736,7 +4483,7 @@ class ReleaseTests(unittest.TestCase):
                 "tag_name": "v1.2.4-draft",
                 "assets": [
                     {
-                        "name": "nvx-1.2.4-linux-kvm.tar.gz",
+                        "name": "nvx-1.2.4-linux-kvm-simple.tar.gz",
                         "url": "https://api.example.invalid/draft",
                         "size": 100,
                     }
@@ -2748,12 +4495,12 @@ class ReleaseTests(unittest.TestCase):
                 "tag_name": "v1.2.3-dev.abc123",
                 "assets": [
                     {
-                        "name": "nvx-1.2.3-windows-whp.zip",
+                        "name": "nvx-1.2.3-windows-whp-simple.zip",
                         "url": "https://api.example.invalid/windows",
                         "size": 200,
                     },
                     {
-                        "name": "nvx-1.2.3-linux-kvm.tar.gz",
+                        "name": "nvx-1.2.3-linux-kvm-simple.tar.gz",
                         "url": "https://api.example.invalid/linux",
                         "size": 300,
                     },
@@ -2769,11 +4516,12 @@ class ReleaseTests(unittest.TestCase):
             asset = release._latest_release_asset(
                 "example/nvx",
                 "linux-kvm",
+                "simple",
                 "token",
             )
 
         self.assertEqual(asset.tag, "v1.2.3-dev.abc123")
-        self.assertEqual(asset.name, "nvx-1.2.3-linux-kvm.tar.gz")
+        self.assertEqual(asset.name, "nvx-1.2.3-linux-kvm-simple.tar.gz")
         self.assertEqual(asset.url, "https://api.example.invalid/linux")
         self.assertEqual(asset.size, 300)
 
@@ -2789,6 +4537,8 @@ class ReleaseTests(unittest.TestCase):
                 "vmlinux.config",
                 "initramfs.cpio.gz",
                 "initramfs.cpio.gz.packages.json",
+                build.AGENT_INITRAMFS_NAME,
+                f"{build.AGENT_INITRAMFS_NAME}.packages.json",
             )
             release_files = (
                 "LICENSE",
@@ -2805,19 +4555,43 @@ class ReleaseTests(unittest.TestCase):
             ):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(path.name.encode("ascii"))
+            agent_bytes = _static_x86_64_elf()
+            agent_sha256 = hashlib.sha256(agent_bytes).hexdigest()
+            simple_init = b"#!/bin/sh\necho simple\n"
+            (root / "alpine" / "init").parent.mkdir()
+            (root / "alpine" / "init").write_bytes(simple_init)
+            simple_initramfs = _simple_newc_archive(simple_init)
+            (build_dir / "initramfs.cpio.gz").write_bytes(simple_initramfs)
+            (build_dir / "initramfs.cpio.gz.packages.json").write_bytes(
+                _initramfs_package_manifest("simple", simple_initramfs)
+            )
+            (build_dir / "vmlinux.config").write_text(
+                "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
+                encoding="utf-8",
+            )
             source_manifest = {
+                "format": 1,
                 "openvmm": {
                     "source_revision": "revision",
                     **TEST_CONTROL_CONTRACT,
                 },
-                "linux": {},
+                "linux": {"patches": release._kernel_patch_paths()},
                 "alpine": {},
                 "guest_agent": {
                     "artifact": f"guest/{build.GUEST_AGENT_ARTIFACT_NAME}",
+                    "initramfs_artifact": f"guest/{build.AGENT_INITRAMFS_NAME}",
                     "target": build.GUEST_AGENT_TARGET,
                     "optional": True,
                     "installed_in_initramfs": False,
-                    "protocol_schema_version": 1,
+                    "maximum_size_bytes": build.GUEST_AGENT_MAXIMUM_BYTES,
+                    "source_revision": build.GUEST_AGENT_SOURCE_REVISION,
+                    "build_id": build.GUEST_AGENT_BUILD_ID,
+                    "external_input_sha256": agent_sha256,
+                    "external_input_size_bytes": len(agent_bytes),
+                    "protocol_schema_version": build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION,
+                    "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
+                    "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+                    "transport": "broker-ttrpc",
                 },
             }
             (root / "SOURCE-MANIFEST.json").write_text(
@@ -2838,14 +4612,40 @@ class ReleaseTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            kernel_source_fingerprint = build.kernel_source_fingerprint()
+            (build_dir / build.KERNEL_PROVENANCE_NAME).write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "source_fingerprint": json.loads(kernel_source_fingerprint),
+                        "kernel_sha256": hashlib.sha256(
+                            (build_dir / "vmlinux").read_bytes()
+                        ).hexdigest(),
+                        "config_sha256": hashlib.sha256(
+                            (build_dir / "vmlinux.config").read_bytes()
+                        ).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
             agent = build_dir / build.GUEST_AGENT_ARTIFACT_NAME
-            agent.write_bytes(_static_x86_64_elf())
-            agent_sha256 = hashlib.sha256(agent.read_bytes()).hexdigest()
+            agent.write_bytes(agent_bytes)
+            agent_initramfs = _agent_newc_archive(agent.read_bytes())
+            (build_dir / build.AGENT_INITRAMFS_NAME).write_bytes(agent_initramfs)
+            (build_dir / f"{build.AGENT_INITRAMFS_NAME}.packages.json").write_bytes(
+                _initramfs_package_manifest(
+                    "broker-ttrpc",
+                    agent_initramfs,
+                    agent_bytes,
+                )
+            )
             (build_dir / build.GUEST_AGENT_SHA256_NAME).write_text(
                 f"{agent_sha256}\n",
                 encoding="ascii",
             )
-            destination = root / "staged"
+            destination = root / "dist" / "staged"
+            simple_destination = root / "dist" / "simple"
+            digest_output = root / "trusted" / "manifest.sha256"
             stderr = io.StringIO()
 
             def artifact_path(name: str) -> Path:
@@ -2855,12 +4655,20 @@ class ReleaseTests(unittest.TestCase):
                 patch.object(release, "REPO_ROOT", root),
                 patch.object(release, "SOURCE_DIR", source_dir),
                 patch.object(release, "OPENVMM_DIR", openvmm_dir),
+                patch.object(build, "REPO_ROOT", root),
                 patch.object(
                     release,
                     "artifact_path",
                     side_effect=artifact_path,
                 ),
+                patch.object(
+                    release,
+                    "kernel_source_fingerprint",
+                    return_value=kernel_source_fingerprint,
+                ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
+                patch.object(release, "GUEST_AGENT_SHA256", agent_sha256),
+                patch.object(release, "GUEST_AGENT_SIZE_BYTES", len(agent_bytes)),
                 patch("sys.stderr", stderr),
             ):
                 release.package_release(
@@ -2868,7 +4676,57 @@ class ReleaseTests(unittest.TestCase):
                     destination=destination,
                     include_source=False,
                     force=False,
+                    transport="broker-ttrpc",
+                    manifest_digest_output=digest_output,
                 )
+                release.package_release(
+                    version="1.0.0",
+                    destination=simple_destination,
+                    include_source=False,
+                    force=False,
+                    transport="simple",
+                    manifest_digest_output=None,
+                )
+
+                published_files = [
+                    *destination.rglob("*"),
+                    *simple_destination.rglob("*"),
+                    digest_output,
+                ]
+                before = {
+                    path: path.read_bytes()
+                    for path in published_files
+                    if path.is_file()
+                }
+                for target, transport, digest in (
+                    (destination, "broker-ttrpc", digest_output),
+                    (simple_destination, "simple", None),
+                ):
+                    with (
+                        self.subTest(staged_validation_failure=transport),
+                        patch.object(
+                            release,
+                            "_validate_release_package_tree",
+                            side_effect=common.ScriptError("staged validation failed"),
+                        ) as validate,
+                        patch.object(release, "_publish_release_directory") as publish,
+                        self.assertRaisesRegex(common.ScriptError, "staged validation"),
+                    ):
+                        release.package_release(
+                            version="1.0.0",
+                            destination=target,
+                            include_source=False,
+                            force=True,
+                            transport=transport,
+                            manifest_digest_output=digest,
+                        )
+                    self.assertNotEqual(validate.call_args.args[0], target)
+                    publish.assert_not_called()
+                    self.assertEqual(
+                        {path: path.read_bytes() for path in before},
+                        before,
+                    )
+                    self.assertEqual(list((root / "dist").glob(".*.staging-*")), [])
 
             self.assertTrue((destination / "bin" / binary.name).is_file())
             for name in guest_names:
@@ -2884,16 +4742,1536 @@ class ReleaseTests(unittest.TestCase):
                 runtime_manifest["guest_agent"]["sha256"],
                 agent_sha256,
             )
+            self.assertTrue(runtime_manifest["guest_agent"]["installed_in_initramfs"])
+            self.assertFalse(runtime_manifest["guest_agent"]["optional"])
+            self.assertEqual(
+                runtime_manifest["guest_agent"]["source_revision"],
+                build.GUEST_AGENT_SOURCE_REVISION,
+            )
+            self.assertEqual(
+                runtime_manifest["guest_agent"]["build_id"],
+                build.GUEST_AGENT_BUILD_ID,
+            )
+            self.assertEqual(
+                runtime_manifest["runtime"]["transport"],
+                "broker-ttrpc",
+            )
+            identity = runtime_manifest["runtime"]["fingerprint_inputs"]
+            canonical_identity = json.dumps(
+                identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self.assertEqual(
+                runtime_manifest["runtime"]["guest_fingerprint_sha256"],
+                hashlib.sha256(canonical_identity).hexdigest(),
+            )
+            self.assertEqual(
+                digest_output.read_text(encoding="ascii").strip(),
+                hashlib.sha256(
+                    (destination / "SOURCE-MANIFEST.json").read_bytes()
+                ).hexdigest(),
+            )
             self.assertEqual(
                 runtime_manifest["openvmm"]["executable_sha256"],
                 hashlib.sha256(binary.read_bytes()).hexdigest(),
             )
+            self.assertEqual(
+                (destination / "guest" / "initramfs.cpio.gz").read_bytes(),
+                (build_dir / build.AGENT_INITRAMFS_NAME).read_bytes(),
+            )
+            self.assertEqual(
+                (simple_destination / "guest" / "initramfs.cpio.gz").read_bytes(),
+                (build_dir / "initramfs.cpio.gz").read_bytes(),
+            )
+            self.assertFalse(
+                (
+                    simple_destination / "guest" / build.GUEST_AGENT_ARTIFACT_NAME
+                ).exists()
+            )
+            simple_manifest = json.loads(
+                (simple_destination / "SOURCE-MANIFEST.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(simple_manifest["runtime"]["transport"], "simple")
+            self.assertFalse(simple_manifest["guest_agent"]["installed_in_initramfs"])
             common.verify_sha256_sums(destination)
+            common.verify_sha256_sums(simple_destination)
             self.assertIn("binary-only package", stderr.getvalue())
 
-    def test_release_archive_installs_runtime_layout(self):
+    def test_package_rejects_kernel_or_config_changes_during_staging(self):
+        original_copy = release._copy_release_file
+        source_fingerprint = build.kernel_source_fingerprint()
+        for name in ("vmlinux", "vmlinux.config"):
+            for mutation_point in ("source-and-provenance", "staged"):
+                with (
+                    self.subTest(artifact=name, mutation=mutation_point),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = _make_test_release_package(
+                        Path(temporary), build.SIMPLE_TRANSPORT
+                    )
+                    guest = root / "guest"
+                    (guest / "vmlinux.config").write_text(
+                        "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
+                        encoding="utf-8",
+                    )
+                    kernel_provenance = guest / build.KERNEL_PROVENANCE_NAME
+                    kernel_provenance.write_text(
+                        json.dumps(
+                            {
+                                "format": 1,
+                                "source_fingerprint": json.loads(source_fingerprint),
+                                "kernel_sha256": common.sha256_file(guest / "vmlinux"),
+                                "config_sha256": common.sha256_file(
+                                    guest / "vmlinux.config"
+                                ),
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    binary = next((root / "bin").iterdir())
+                    source_manifest = json.loads(
+                        (root / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+                    )
+                    (guest / build.OPENVMM_PROVENANCE_NAME).write_text(
+                        json.dumps(
+                            {
+                                "format": 1,
+                                "source_revision": source_manifest["openvmm"][
+                                    "source_revision"
+                                ],
+                                "source_clean": True,
+                                "executable_sha256": common.sha256_file(binary),
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    destination = root / "dist" / "existing"
+                    destination.mkdir(parents=True)
+                    marker = destination / "prior-release"
+                    marker.write_bytes(b"keep the prior release")
+
+                    def copy_with_fault(
+                        source: Path,
+                        destination: Path,
+                        target: Path = guest / name,
+                        point: str = mutation_point,
+                        provenance_path: Path = kernel_provenance,
+                    ) -> None:
+                        if source == target and point == "source-and-provenance":
+                            source.write_bytes(source.read_bytes() + b"\nchanged\n")
+                            provenance = json.loads(
+                                provenance_path.read_text(encoding="utf-8")
+                            )
+                            field = (
+                                "kernel_sha256"
+                                if target.name == "vmlinux"
+                                else "config_sha256"
+                            )
+                            provenance[field] = common.sha256_file(source)
+                            provenance_path.write_text(
+                                json.dumps(provenance), encoding="utf-8"
+                            )
+                        original_copy(source, destination)
+                        if source == target and point == "staged":
+                            destination.write_bytes(
+                                destination.read_bytes() + b"\nchanged\n"
+                            )
+
+                    def artifact_path(name: str, directory: Path = guest) -> Path:
+                        return directory / name
+
+                    with (
+                        patch.object(release, "REPO_ROOT", root),
+                        patch.object(
+                            release, "artifact_path", side_effect=artifact_path
+                        ),
+                        patch.object(
+                            release, "openvmm_binary_path", return_value=binary
+                        ),
+                        patch.object(
+                            release,
+                            "kernel_source_fingerprint",
+                            return_value=source_fingerprint,
+                        ),
+                        patch.object(
+                            release, "_copy_release_file", side_effect=copy_with_fault
+                        ),
+                        patch.object(
+                            release, "_runtime_source_manifest"
+                        ) as generate_manifest,
+                        patch.object(release, "_publish_release_directory") as publish,
+                        self.assertRaisesRegex(
+                            common.ScriptError, "kernel build provenance"
+                        ),
+                    ):
+                        release.package_release(
+                            version="1.0.0",
+                            destination=destination,
+                            include_source=False,
+                            force=True,
+                            transport=build.SIMPLE_TRANSPORT,
+                            manifest_digest_output=None,
+                        )
+                    generate_manifest.assert_not_called()
+                    publish.assert_not_called()
+                    self.assertEqual(marker.read_bytes(), b"keep the prior release")
+                    self.assertEqual(list(destination.iterdir()), [marker])
+                    self.assertEqual(list((root / "dist").glob(".*.staging-*")), [])
+
+    def test_release_archive_preserves_previous_output_on_validation_failure(self):
+        original_validate = release.validate_release_archive
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            bundle = _make_test_release_package(root, build.SIMPLE_TRANSPORT)
+            for suffix in (".zip", ".tar.gz"):
+                output = root / f"release{suffix}"
+                release.create_release_archive(bundle, output)
+                previous = output.read_bytes()
+
+                def validate_corrupted_temporary(
+                    path: Path,
+                    expected_suffix: str = suffix,
+                    final_path: Path = output,
+                    prior_bytes: bytes = previous,
+                ) -> None:
+                    self.assertNotEqual(path, final_path)
+                    self.assertTrue(path.name.endswith(expected_suffix))
+                    self.assertEqual(final_path.read_bytes(), prior_bytes)
+                    path.write_bytes(b"corrupted archive")
+                    original_validate(path)
+
+                with (
+                    self.subTest(format=suffix),
+                    patch.object(
+                        release,
+                        "validate_release_archive",
+                        side_effect=validate_corrupted_temporary,
+                    ),
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release.create_release_archive(bundle, output)
+                self.assertEqual(output.read_bytes(), previous)
+                self.assertEqual(list(root.glob(f".{output.name}.staging-*")), [])
+
+    def test_release_archive_rejects_unsafe_or_unexpected_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "unsafe.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive_file:
+                for name, mode, kind, content in (
+                    ("bundle", 0o755, tarfile.DIRTYPE, b""),
+                    ("bundle/bin", 0o755, tarfile.DIRTYPE, b""),
+                    ("bundle/bin/openvmm", 0o4755, tarfile.REGTYPE, b"binary"),
+                ):
+                    member = tarfile.TarInfo(name)
+                    member.mode = mode
+                    member.type = kind
+                    member.size = len(content)
+                    archive_file.addfile(
+                        member,
+                        io.BytesIO(content) if content else None,
+                    )
+
+            with self.assertRaisesRegex(common.ScriptError, "noncanonical metadata"):
+                release._extract_release_archive(archive_path, root / "output")
+
+    def test_release_archive_preflight_enforces_all_resource_bounds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = ("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)
+
+            cases: tuple[
+                tuple[str, bytes, int, str, str, int],
+                ...,
+            ] = (
+                (
+                    "bundle/member-count",
+                    b"x",
+                    stat.S_IFREG,
+                    "member-count",
+                    "RELEASE_ARCHIVE_MAX_MEMBERS",
+                    1,
+                ),
+                (
+                    "bundle/oversized",
+                    b"xxxx",
+                    stat.S_IFREG,
+                    "size limit",
+                    "RELEASE_ARCHIVE_MAX_MEMBER_BYTES",
+                    3,
+                ),
+                (
+                    "bundle/total",
+                    b"xx",
+                    stat.S_IFREG,
+                    "uncompressed-size",
+                    "RELEASE_ARCHIVE_MAX_TOTAL_BYTES",
+                    3,
+                ),
+                (
+                    f"bundle/{'x' * 80}",
+                    b"x",
+                    stat.S_IFREG,
+                    "unsafe path",
+                    "RELEASE_ARCHIVE_MAX_PATH_BYTES",
+                    64,
+                ),
+                (
+                    "bundle/ratio",
+                    b"0" * 4096,
+                    stat.S_IFREG,
+                    "compression-ratio",
+                    "RELEASE_ARCHIVE_MAX_COMPRESSION_RATIO",
+                    2,
+                ),
+                (
+                    "bundle/link",
+                    b"target",
+                    stat.S_IFLNK,
+                    "expected Unix type",
+                    "RELEASE_ARCHIVE_MAX_MEMBERS",
+                    10,
+                ),
+            )
+            for index, (
+                name,
+                data,
+                file_type,
+                error,
+                limit_name,
+                limit,
+            ) in enumerate(cases):
+                archive_path = root / f"bounded-{index}.zip"
+                _write_test_zip(archive_path, [manifest, (name, data, file_type)])
+                with (
+                    self.subTest(error=error),
+                    patch.object(release, limit_name, limit),
+                    self.assertRaisesRegex(common.ScriptError, error),
+                ):
+                    release._preflight_release_archive(archive_path)
+
+            duplicate = root / "duplicate.zip"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                _write_test_zip(
+                    duplicate,
+                    [
+                        manifest,
+                        ("bundle/file", b"one", stat.S_IFREG),
+                        ("bundle/file", b"two", stat.S_IFREG),
+                    ],
+                )
+            with self.assertRaisesRegex(common.ScriptError, "duplicate"):
+                release._preflight_release_archive(duplicate)
+
+            collision = root / "collision.zip"
+            _write_test_zip(
+                collision,
+                [
+                    manifest,
+                    ("bundle/File", b"one", stat.S_IFREG),
+                    ("bundle/file", b"two", stat.S_IFREG),
+                ],
+            )
+            with self.assertRaisesRegex(common.ScriptError, "case-colliding"):
+                release._preflight_release_archive(collision)
+
+            hardlink = root / "hardlink.tar.gz"
+            with tarfile.open(hardlink, "w:gz") as archive:
+                runtime_manifest = tarfile.TarInfo("bundle/SOURCE-MANIFEST.json")
+                runtime_manifest.mode = 0o644
+                runtime_manifest.size = 2
+                archive.addfile(runtime_manifest, io.BytesIO(b"{}"))
+                link = tarfile.TarInfo("bundle/link")
+                link.mode = 0o644
+                link.type = tarfile.LNKTYPE
+                link.linkname = "bundle/SOURCE-MANIFEST.json"
+                archive.addfile(link)
+            with self.assertRaisesRegex(common.ScriptError, "unsupported metadata"):
+                release._preflight_release_archive(hardlink)
+
+    def test_zip_preflight_accepts_member_limit_and_zip64_metadata(self):
+        entries = [
+            ("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG),
+            *(
+                (f"bundle/member-{index}", b"", stat.S_IFREG)
+                for index in range(release.RELEASE_ARCHIVE_MAX_MEMBERS - 1)
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            for layout in ("classic", "zip64", "zip64-sentinels"):
+                path = Path(temporary) / f"{layout}.zip"
+                with (
+                    self.subTest(layout=layout),
+                    patch.object(
+                        zipfile,
+                        "ZIP_FILECOUNT_LIMIT",
+                        0xFFFF if layout == "classic" else 0,
+                    ),
+                ):
+                    _write_test_zip(
+                        path,
+                        entries,
+                        member_comment=b"member comment",
+                        member_extra=struct.pack("<HH", 0xCAFE, 4) + b"data",
+                        archive_comment=b"x" * 0xFFFF,
+                    )
+                if layout == "zip64-sentinels":
+                    data = bytearray(path.read_bytes())
+                    end = data.rfind(b"PK\x05\x06")
+                    struct.pack_into(
+                        "<HHLL", data, end + 8, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+                    )
+                    path.write_bytes(data)
+                inventory = release._preflight_release_archive(path)
+                self.assertEqual(inventory.root_name, "bundle")
+                self.assertEqual(inventory.manifest_bytes, b"{}")
+
+    def test_zip_extraction_accepts_stored_and_deflate_stream_boundaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                for size in (0, 65535, 65536, 65537, 131073):
+                    payload = (bytes(range(256)) * (size // 256 + 1))[:size]
+                    path = root / "boundary.zip"
+                    output = root / f"output-{compression}-{size}"
+                    _write_test_zip(
+                        path,
+                        [
+                            ("bundle/", b"", stat.S_IFDIR),
+                            ("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG),
+                            ("bundle/payload", payload, stat.S_IFREG),
+                        ],
+                        compression=compression,
+                    )
+                    with (
+                        self.subTest(compression=compression, size=size),
+                        patch.object(
+                            release, "RELEASE_ARCHIVE_MAX_MEMBER_BYTES", max(size, 2)
+                        ),
+                        patch.object(
+                            release, "RELEASE_ARCHIVE_MAX_TOTAL_BYTES", size + 2
+                        ),
+                    ):
+                        release._extract_release_archive(path, output)
+                    self.assertEqual(
+                        (output / "bundle" / "payload").read_bytes(), payload
+                    )
+
+    def test_zip_rejects_unsupported_compression_before_opening_members(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "unsupported.zip"
+            for compression in (
+                zipfile.ZIP_BZIP2,
+                zipfile.ZIP_LZMA,
+                9,
+                93,
+                99,
+            ):
+                _write_test_zip(
+                    path, [("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)]
+                )
+                path.write_bytes(
+                    _zip_member_metadata(
+                        path.read_bytes(),
+                        size=2,
+                        checksum=zlib.crc32(b"{}"),
+                        compression=compression,
+                    )
+                )
+                with (
+                    self.subTest(compression=compression),
+                    patch.object(zipfile, "ZipExtFile") as decompress,
+                    self.assertRaisesRegex(
+                        common.ScriptError, "unsupported ZIP compression method"
+                    ),
+                ):
+                    release._preflight_release_archive(path)
+                decompress.assert_not_called()
+
+    def test_zip_rejects_deceptive_lzma_expansion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "deceptive.zip"
+            name = "bundle/SOURCE-MANIFEST.json"
+            prefix = b"{}"
+            _write_test_zip(
+                path,
+                [(name, prefix + bytes(1024 * 1024), stat.S_IFREG)],
+                compression=zipfile.ZIP_LZMA,
+            )
+            path.write_bytes(
+                _zip_member_metadata(
+                    path.read_bytes(), size=len(prefix), checksum=zlib.crc32(prefix)
+                )
+            )
+            with zipfile.ZipFile(path) as archive:
+                self.assertEqual(archive.read(name), prefix)
+            with (
+                patch.object(release, "RELEASE_ARCHIVE_MAX_MEMBER_BYTES", 1024),
+                patch.object(
+                    zipfile, "ZipExtFile", wraps=zipfile.ZipExtFile
+                ) as decompress,
+                self.assertRaisesRegex(
+                    common.ScriptError, "unsupported ZIP compression method"
+                ),
+            ):
+                release._preflight_release_archive(path)
+            decompress.assert_not_called()
+
+    def test_zip_rejects_decompressed_data_beyond_declared_size(self):
+        payload = b"{}" + bytes(128 * 1024)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "expansion.zip"
+            for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                for size in (0, 2, 1024):
+                    _write_test_zip(
+                        path,
+                        [("bundle/SOURCE-MANIFEST.json", payload, stat.S_IFREG)],
+                        compression=compression,
+                    )
+                    path.write_bytes(
+                        _zip_member_metadata(
+                            path.read_bytes(),
+                            size=size,
+                            checksum=zlib.crc32(payload[:size]),
+                        )
+                    )
+                    with (
+                        self.subTest(compression=compression, size=size),
+                        patch.object(release, "RELEASE_ARCHIVE_MAX_MEMBER_BYTES", 1024),
+                        patch.object(release, "RELEASE_ARCHIVE_MAX_TOTAL_BYTES", 1024),
+                        patch.object(zipfile, "ZipExtFile") as decompress,
+                        self.assertRaisesRegex(
+                            common.ScriptError, "stored sizes|exceeds.*header size"
+                        ),
+                    ):
+                        release._preflight_release_archive(path)
+                    decompress.assert_not_called()
+
+    def test_zip_rejects_invalid_deflate_end_and_checksum(self):
+        payload = b"{}"
+        compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        complete = compressor.compress(payload) + compressor.flush()
+        compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        unfinished = compressor.compress(payload) + compressor.flush(zlib.Z_SYNC_FLUSH)
+        cases = (
+            ("unfinished", unfinished, payload, zlib.crc32(payload), "truncated"),
+            ("empty", b"", b"", 0, "truncated"),
+            ("trailing", complete + b"junk", payload, zlib.crc32(payload), "trailing"),
+            ("multiple", complete * 2, payload, zlib.crc32(payload), "trailing"),
+            ("invalid", b"\x07", payload, zlib.crc32(payload), "invalid deflate"),
+            ("short", complete, payload + b" ", zlib.crc32(payload), "truncated"),
+            ("checksum", complete, payload, zlib.crc32(payload) ^ 1, "CRC"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "stream.zip"
+            for label, compressed, declared, checksum, error in cases:
+                _write_test_zip(
+                    path,
+                    [("bundle/SOURCE-MANIFEST.json", compressed, stat.S_IFREG)],
+                    compression=zipfile.ZIP_STORED,
+                )
+                path.write_bytes(
+                    _zip_member_metadata(
+                        path.read_bytes(),
+                        size=len(declared),
+                        checksum=checksum,
+                        compression=zipfile.ZIP_DEFLATED,
+                    )
+                )
+                with (
+                    self.subTest(case=label),
+                    patch.object(zipfile, "ZipExtFile") as decompress,
+                    self.assertRaisesRegex(common.ScriptError, error),
+                ):
+                    release._preflight_release_archive(path)
+                decompress.assert_not_called()
+
+    def test_zip_rejects_invalid_local_stream_bounds_and_methods(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "local.zip"
+            _write_test_zip(
+                path, [("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)]
+            )
+            original = path.read_bytes()
+            directory = struct.unpack_from("<L", original, len(original) - 6)[0]
+            cases = (
+                ("signature", 0, b"bad!"),
+                ("filename", 26, b"\xff\xff"),
+                ("extra", 28, b"\xff\xff"),
+                ("compressed size", directory + 20, struct.pack("<L", len(original))),
+                ("local offset", directory + 42, struct.pack("<L", directory)),
+                ("local LZMA", 8, struct.pack("<H", zipfile.ZIP_LZMA)),
+                ("local BZIP2", 8, struct.pack("<H", zipfile.ZIP_BZIP2)),
+            )
+            for label, offset, value in cases:
+                data = bytearray(original)
+                data[offset : offset + len(value)] = value
+                path.write_bytes(data)
+                with (
+                    self.subTest(case=label),
+                    patch.object(zipfile, "ZipExtFile") as decompress,
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release._preflight_release_archive(path)
+                decompress.assert_not_called()
+
+    def test_zip_extraction_rechecks_compression_and_stream_size(self):
+        original_preflight = release._preflight_release_archive
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "changed.zip"
+            malicious = root / "malicious.zip"
+            for compression, error in (
+                (zipfile.ZIP_LZMA, "unsupported ZIP compression method"),
+                (zipfile.ZIP_DEFLATED, "exceeds.*header size"),
+            ):
+                _write_test_zip(
+                    path, [("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)]
+                )
+                _write_test_zip(
+                    malicious,
+                    [
+                        (
+                            "bundle/SOURCE-MANIFEST.json",
+                            b"{}" + bytes(128 * 1024),
+                            stat.S_IFREG,
+                        )
+                    ],
+                    compression=compression,
+                )
+                malicious.write_bytes(
+                    _zip_member_metadata(
+                        malicious.read_bytes(), size=2, checksum=zlib.crc32(b"{}")
+                    )
+                )
+
+                def replace_after_preflight(path: Path) -> release._ArchiveInventory:
+                    inventory = original_preflight(path)
+                    path.write_bytes(malicious.read_bytes())
+                    return inventory
+
+                output = root / f"output-{compression}"
+                with (
+                    self.subTest(compression=compression),
+                    patch.object(
+                        release,
+                        "_preflight_release_archive",
+                        side_effect=replace_after_preflight,
+                    ),
+                    patch.object(
+                        zipfile, "ZipExtFile", wraps=zipfile.ZipExtFile
+                    ) as decompress,
+                    self.assertRaisesRegex(common.ScriptError, error),
+                ):
+                    release._extract_release_archive(path, output)
+                decompress.assert_called_once()
+                self.assertEqual(list(output.iterdir()), [])
+
+    def test_zip_preflight_rejects_many_entries_before_constructing_zipfile(self):
+        entries = [
+            ("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG),
+            *(
+                (f"bundle/member-{index}", b"", stat.S_IFREG)
+                for index in range(release.RELEASE_ARCHIVE_MAX_MEMBERS)
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "many.zip"
+            for zip64 in (False, True):
+                with patch.object(
+                    zipfile, "ZIP_FILECOUNT_LIMIT", 0 if zip64 else 0xFFFF
+                ):
+                    _write_test_zip(path, entries)
+                original = path.read_bytes()
+                for declared in (None, 0, 1, release.RELEASE_ARCHIVE_MAX_MEMBERS):
+                    path.write_bytes(
+                        _zip_directory_metadata(original, members=declared)
+                    )
+                    with (
+                        self.subTest(zip64=zip64, declared=declared),
+                        patch.object(release.zipfile, "ZipFile") as parse,
+                        self.assertRaisesRegex(
+                            common.ScriptError, "member-count|member count"
+                        ),
+                    ):
+                        release._preflight_release_archive(path)
+                    parse.assert_not_called()
+
+    def test_zip_preflight_rejects_forged_counts_before_constructing_zipfile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "forged.zip"
+            for zip64 in (False, True):
+                with patch.object(
+                    zipfile, "ZIP_FILECOUNT_LIMIT", 0 if zip64 else 0xFFFF
+                ):
+                    _write_test_zip(
+                        path,
+                        [
+                            ("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG),
+                            ("bundle/member", b"", stat.S_IFREG),
+                        ],
+                    )
+                original = path.read_bytes()
+                counts = (0, 1, 3, release.RELEASE_ARCHIVE_MAX_MEMBERS + 1, 0xFFFF)
+                if zip64:
+                    counts += (1 << 32, (1 << 64) - 1)
+                for declared in counts:
+                    path.write_bytes(
+                        _zip_directory_metadata(original, members=declared)
+                    )
+                    with (
+                        self.subTest(zip64=zip64, declared=declared),
+                        patch.object(release.zipfile, "ZipFile") as parse,
+                        self.assertRaises(common.ScriptError),
+                    ):
+                        release._preflight_release_archive(path)
+                    parse.assert_not_called()
+
+    def test_zip_preflight_bounds_metadata_before_constructing_zipfile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "metadata.zip"
+            for zip64 in (False, True):
+                with patch.object(
+                    zipfile, "ZIP_FILECOUNT_LIMIT", 0 if zip64 else 0xFFFF
+                ):
+                    _write_test_zip(
+                        path, [("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)]
+                    )
+                original = path.read_bytes()
+                sizes = (release.RELEASE_ZIP_MAX_DIRECTORY_BYTES + 1, 0xFFFFFFFE)
+                if zip64:
+                    sizes += ((1 << 64) - 1,)
+                for size in sizes:
+                    path.write_bytes(
+                        _zip_directory_metadata(original, directory_size=size)
+                    )
+                    with (
+                        self.subTest(zip64=zip64, size=size),
+                        patch.object(release.zipfile, "ZipFile") as parse,
+                        self.assertRaisesRegex(
+                            common.ScriptError, "central-directory size limit"
+                        ),
+                    ):
+                        release._preflight_release_archive(path)
+                    parse.assert_not_called()
+
+                with patch.object(
+                    zipfile, "ZIP_FILECOUNT_LIMIT", 0 if zip64 else 0xFFFF
+                ):
+                    _write_test_zip(
+                        path,
+                        [
+                            (f"bundle/member-{index}", b"", stat.S_IFREG)
+                            for index in range(17)
+                        ],
+                        member_extra=struct.pack("<HH", 0xCAFE, 32764) + bytes(32764),
+                        member_comment=bytes(32767),
+                    )
+                with (
+                    self.subTest(zip64=zip64, actual_metadata=True),
+                    patch.object(release.zipfile, "ZipFile") as parse,
+                    self.assertRaisesRegex(
+                        common.ScriptError, "central-directory size limit"
+                    ),
+                ):
+                    release._preflight_release_archive(path)
+                parse.assert_not_called()
+
+    def test_zip_directory_metadata_limit_is_inclusive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "boundary.zip"
+            _write_test_zip(
+                path, [("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)]
+            )
+            data = path.read_bytes()
+            directory_size = struct.unpack_from("<L", data, len(data) - 22 + 12)[0]
+            with patch.object(
+                release, "RELEASE_ZIP_MAX_DIRECTORY_BYTES", directory_size
+            ):
+                release._preflight_release_archive(path)
+            with (
+                patch.object(
+                    release, "RELEASE_ZIP_MAX_DIRECTORY_BYTES", directory_size - 1
+                ),
+                patch.object(release.zipfile, "ZipFile") as parse,
+                self.assertRaisesRegex(
+                    common.ScriptError, "central-directory size limit"
+                ),
+            ):
+                release._preflight_release_archive(path)
+            parse.assert_not_called()
+
+    def test_zip_preflight_rejects_malformed_records_before_constructing_zipfile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "malformed.zip"
+            _write_test_zip(
+                path,
+                [
+                    ("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG),
+                    ("bundle/member", b"", stat.S_IFREG),
+                ],
+            )
+            original = path.read_bytes()
+            end = len(original) - 22
+            directory = struct.unpack_from("<L", original, end + 16)[0]
+
+            def changed(offset: int, value: bytes) -> bytes:
+                data = bytearray(original)
+                data[offset : offset + len(value)] = value
+                return bytes(data)
+
+            cases = {
+                "truncated end": original[:-1],
+                "bad signature": changed(end, b"bad!"),
+                "trailing data": original + b"trailing",
+                "truncated comment": changed(end + 20, b"\x01\0"),
+                "signature in comment": (changed(end + 20, b"\x04\0") + b"PK\x05\x06"),
+                "multiple disks": changed(end + 4, b"\x01\0"),
+                "directory on another disk": changed(end + 6, b"\x01\0"),
+                "inconsistent disk count": changed(end + 8, b"\0\0"),
+                "wrong directory offset": _zip_directory_metadata(
+                    original, directory_offset=0
+                ),
+                "empty declared directory": _zip_directory_metadata(
+                    original, directory_size=0
+                ),
+                "invalid directory signature": changed(directory, b"bad!"),
+                "truncated filename": changed(directory + 28, b"\xff\xff"),
+                "truncated extra": changed(directory + 30, b"\xff\xff"),
+                "truncated member comment": changed(directory + 32, b"\xff\xff"),
+                "missing ZIP64 locator": changed(end + 8, b"\xff" * 12),
+                "truncated directory header": (
+                    bytes(45)
+                    + struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0, 0, 45, 0, 0)
+                ),
+            }
+            for name, contents in cases.items():
+                path.write_bytes(contents)
+                with (
+                    self.subTest(case=name),
+                    patch.object(release.zipfile, "ZipFile") as parse,
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release._preflight_release_archive(path)
+                parse.assert_not_called()
+
+    def test_zip64_preflight_rejects_forged_end_records_before_zipfile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "malformed64.zip"
+            with patch.object(zipfile, "ZIP_FILECOUNT_LIMIT", 0):
+                _write_test_zip(
+                    path, [("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)]
+                )
+            original = path.read_bytes()
+            end = len(original) - 22
+            locator = end - 20
+            record = locator - 56
+            self.assertEqual(original[record : record + 4], b"PK\x06\x06")
+
+            def changed(offset: int, value: bytes) -> bytes:
+                data = bytearray(original)
+                data[offset : offset + len(value)] = value
+                return bytes(data)
+
+            extended = changed(record + 4, struct.pack("<Q", 44 + 8))
+            cases = {
+                "missing record": changed(record, b"bad!"),
+                "oversized record": changed(record + 4, b"\xff" * 8),
+                "undersized record": changed(record + 4, struct.pack("<Q", 43)),
+                "extensible record": extended[:locator] + bytes(8) + extended[locator:],
+                "locator on another disk": changed(locator + 4, struct.pack("<L", 1)),
+                "no disks": changed(locator + 16, bytes(4)),
+                "multiple disks": changed(locator + 16, struct.pack("<L", 2)),
+                "forged record offset": changed(locator + 8, b"\xff" * 8),
+                "misplaced record": changed(locator + 8, bytes(8)),
+                "record on another disk": changed(record + 16, struct.pack("<L", 1)),
+                "directory on another disk": changed(record + 20, struct.pack("<L", 1)),
+                "inconsistent wide count": changed(record + 24, bytes(8)),
+                "inconsistent classic counts": changed(end + 8, bytes(4)),
+                "inconsistent classic size": changed(end + 12, bytes(4)),
+                "inconsistent classic offset": changed(end + 16, bytes(4)),
+                "out of bounds directory": _zip_directory_metadata(
+                    original, directory_offset=(1 << 64) - 1
+                ),
+            }
+            for name, contents in cases.items():
+                path.write_bytes(contents)
+                with (
+                    self.subTest(case=name),
+                    patch.object(release.zipfile, "ZipFile") as parse,
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release._preflight_release_archive(path)
+                parse.assert_not_called()
+
+    def test_zip_extraction_rechecks_bounds_before_constructing_second_zipfile(self):
+        original_preflight = release._preflight_release_archive
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = root / "valid.zip"
+            malicious = root / "many.zip"
+            _write_test_zip(
+                valid, [("bundle/SOURCE-MANIFEST.json", b"{}", stat.S_IFREG)]
+            )
+            _write_test_zip(
+                malicious,
+                [
+                    (f"bundle/member-{index}", b"", stat.S_IFREG)
+                    for index in range(release.RELEASE_ARCHIVE_MAX_MEMBERS + 1)
+                ],
+            )
+
+            def replace_after_preflight(path: Path) -> release._ArchiveInventory:
+                inventory = original_preflight(path)
+                path.write_bytes(malicious.read_bytes())
+                return inventory
+
+            with (
+                patch.object(
+                    release,
+                    "_preflight_release_archive",
+                    side_effect=replace_after_preflight,
+                ),
+                patch.object(
+                    release.zipfile, "ZipFile", wraps=zipfile.ZipFile
+                ) as parse,
+                self.assertRaisesRegex(common.ScriptError, "member-count limit"),
+            ):
+                release._extract_release_archive(valid, root / "output")
+            parse.assert_called_once()
+            self.assertEqual(list((root / "output").iterdir()), [])
+
+    def test_raw_tar_preflight_rejects_large_extension_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            metadata_size = 16 * 1024 * 1024
+            for typeflag in (
+                tarfile.XGLTYPE,
+                tarfile.XHDTYPE,
+                tarfile.GNUTYPE_LONGNAME,
+                tarfile.GNUTYPE_LONGLINK,
+            ):
+                path = root / f"extension-{typeflag.hex()}.tar.gz"
+                with path.open("wb") as raw:
+                    with gzip.GzipFile(
+                        filename="",
+                        mode="wb",
+                        fileobj=raw,
+                        mtime=0,
+                    ) as compressed:
+                        compressed.write(
+                            _ustar_header("bundle/metadata", typeflag, metadata_size)
+                        )
+                        zero_chunk = bytes(1024 * 1024)
+                        for _ in range(metadata_size // len(zero_chunk)):
+                            compressed.write(zero_chunk)
+                with (
+                    self.subTest(typeflag=typeflag),
+                    patch.object(
+                        release,
+                        "RELEASE_TAR_MAX_DECOMPRESSED_BYTES",
+                        128 * 1024,
+                    ),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "unsupported metadata",
+                    ),
+                ):
+                    release._preflight_raw_tar(path, compressed=True)
+
+    def test_raw_tar_preflight_enforces_canonical_ustar_encoding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = _canonical_ustar(
+                [
+                    ("bundle", tarfile.DIRTYPE, b""),
+                    ("bundle/SOURCE-MANIFEST.json", tarfile.REGTYPE, b"{}"),
+                ]
+            )
+            raw_path = root / "canonical.tar"
+            raw_path.write_bytes(canonical)
+            compressed_path = root / "canonical.tar.gz"
+            compressed_path.write_bytes(gzip.compress(canonical, mtime=0))
+            release._preflight_raw_tar(raw_path, compressed=False)
+            release._preflight_raw_tar(compressed_path, compressed=True)
+
+            invalid_checksum = bytearray(canonical)
+            invalid_checksum[0] ^= 1
+            invalid_checksum_path = root / "invalid-checksum.tar.gz"
+            invalid_checksum_path.write_bytes(gzip.compress(invalid_checksum, mtime=0))
+            with self.assertRaisesRegex(common.ScriptError, "checksum is invalid"):
+                release._preflight_raw_tar(
+                    invalid_checksum_path,
+                    compressed=True,
+                )
+
+            malformed_size = bytearray(canonical)
+            malformed_size[124:136] = b"0000000000x\0"
+            malformed_header = bytearray(malformed_size[: tarfile.BLOCKSIZE])
+            _replace_tar_checksum(malformed_header)
+            malformed_size[: tarfile.BLOCKSIZE] = malformed_header
+            malformed_size_path = root / "malformed-size.tar.gz"
+            malformed_size_path.write_bytes(gzip.compress(malformed_size, mtime=0))
+            with self.assertRaisesRegex(common.ScriptError, "malformed size"):
+                release._preflight_raw_tar(
+                    malformed_size_path,
+                    compressed=True,
+                )
+
+            sparse = _canonical_ustar(
+                [
+                    ("bundle", tarfile.DIRTYPE, b""),
+                    ("bundle/sparse", tarfile.GNUTYPE_SPARSE, b""),
+                ]
+            )
+            sparse_path = root / "sparse.tar.gz"
+            sparse_path.write_bytes(gzip.compress(sparse, mtime=0))
+            with self.assertRaisesRegex(common.ScriptError, "unsupported metadata"):
+                release._preflight_raw_tar(sparse_path, compressed=True)
+
+            trailing_gzip = root / "trailing-gzip.tar.gz"
+            trailing_gzip.write_bytes(gzip.compress(canonical, mtime=0) + b"trailing")
+            with self.assertRaisesRegex(common.ScriptError, "trailing data"):
+                release._preflight_raw_tar(trailing_gzip, compressed=True)
+
+            trailing_tar = root / "trailing.tar"
+            trailing_tar.write_bytes(canonical + b"trailing")
+            with self.assertRaisesRegex(common.ScriptError, "after its end blocks"):
+                release._preflight_raw_tar(trailing_tar, compressed=False)
+
+            excess_zero_padding = root / "excess-zero-padding.tar"
+            excess_zero_padding.write_bytes(canonical + bytes(tarfile.RECORDSIZE))
+            with self.assertRaisesRegex(common.ScriptError, "end padding"):
+                release._preflight_raw_tar(excess_zero_padding, compressed=False)
+
+            nonzero_padding = bytearray(canonical)
+            nonzero_padding[tarfile.BLOCKSIZE * 2 + 2] = 1
+            padding_path = root / "nonzero-padding.tar"
+            padding_path.write_bytes(nonzero_padding)
+            with self.assertRaisesRegex(common.ScriptError, "nonzero padding"):
+                release._preflight_raw_tar(padding_path, compressed=False)
+
+    def test_raw_tar_preflight_enforces_resource_and_collision_limits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = _canonical_ustar(
+                [
+                    ("bundle", tarfile.DIRTYPE, b""),
+                    ("bundle/SOURCE-MANIFEST.json", tarfile.REGTYPE, b"{}"),
+                ]
+            )
+            path = root / "bounded.tar"
+            path.write_bytes(canonical)
+            cases = (
+                ("RELEASE_ARCHIVE_MAX_BYTES", len(canonical) - 1, "archive-size"),
+                (
+                    "RELEASE_TAR_MAX_DECOMPRESSED_BYTES",
+                    len(canonical) - 1,
+                    "decompressed-size",
+                ),
+                ("RELEASE_ARCHIVE_MAX_MEMBERS", 1, "member-count"),
+                ("RELEASE_ARCHIVE_MAX_MEMBER_BYTES", 1, "size limit"),
+                ("RELEASE_ARCHIVE_MAX_TOTAL_BYTES", 1, "uncompressed-size"),
+                ("RELEASE_ARCHIVE_MAX_PATH_BYTES", 10, "unsafe path"),
+            )
+            for limit_name, limit, error in cases:
+                with (
+                    self.subTest(limit=limit_name),
+                    patch.object(release, limit_name, limit),
+                    self.assertRaisesRegex(common.ScriptError, error),
+                ):
+                    release._preflight_raw_tar(path, compressed=False)
+
+            for name, entries, error in (
+                (
+                    "duplicate",
+                    [
+                        ("bundle", tarfile.DIRTYPE, b""),
+                        ("bundle/file", tarfile.REGTYPE, b"one"),
+                        ("bundle/file", tarfile.REGTYPE, b"two"),
+                    ],
+                    "duplicate",
+                ),
+                (
+                    "collision",
+                    [
+                        ("bundle", tarfile.DIRTYPE, b""),
+                        ("bundle/File", tarfile.REGTYPE, b"one"),
+                        ("bundle/file", tarfile.REGTYPE, b"two"),
+                    ],
+                    "case-colliding",
+                ),
+            ):
+                collision_path = root / f"{name}.tar"
+                collision_path.write_bytes(_canonical_ustar(entries))
+                with (
+                    self.subTest(name=name),
+                    self.assertRaisesRegex(common.ScriptError, error),
+                ):
+                    release._preflight_raw_tar(
+                        collision_path,
+                        compressed=False,
+                    )
+
+    def test_complete_package_validator_rejects_missing_or_renamed_members(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = _make_test_release_package(root / "baseline", "broker-ttrpc")
+
+            def remove_named_alias(package: Path) -> None:
+                (package / "guest" / build.AGENT_INITRAMFS_NAME).unlink()
+
+            def remove_kernel_config(package: Path) -> None:
+                (package / "guest" / "vmlinux.config").unlink()
+
+            def remove_package_manifest(package: Path) -> None:
+                (package / "guest" / "initramfs.cpio.gz.packages.json").unlink()
+
+            def rename_alias(package: Path) -> None:
+                (package / "guest" / build.AGENT_INITRAMFS_NAME).rename(
+                    package / "guest" / "renamed-initramfs.cpio.gz"
+                )
+
+            mutations: tuple[tuple[str, Callable[[Path], None]], ...] = (
+                (
+                    "missing named alias",
+                    remove_named_alias,
+                ),
+                (
+                    "missing kernel config",
+                    remove_kernel_config,
+                ),
+                (
+                    "missing package manifest",
+                    remove_package_manifest,
+                ),
+                (
+                    "renamed alias",
+                    rename_alias,
+                ),
+            )
+            for index, (description, mutate) in enumerate(mutations):
+                package = root / f"mutation-{index}"
+                shutil.copytree(baseline, package)
+                mutate(package)
+                common.write_sha256_sums(package)
+                archive = root / f"mutation-{index}.zip"
+                with (
+                    self.subTest(description=description),
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release.create_release_archive(package, archive)
+                self.assertFalse(archive.exists())
+
+            valid_archive = root / "valid.zip"
+            release.create_release_archive(baseline, valid_archive)
+            release.validate_release_archive(
+                valid_archive,
+                "broker-ttrpc",
+                hashlib.sha256(
+                    (baseline / "SOURCE-MANIFEST.json").read_bytes()
+                ).hexdigest(),
+            )
+
+    def test_pinned_broker_policy_rejects_synthetic_agent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _make_test_release_package(
+                Path(temporary), build.BROKER_TRANSPORT
+            )
+            with self.assertRaisesRegex(common.ScriptError, "pinned"):
+                release._validate_release_package_tree(
+                    package, build.BROKER_TRANSPORT, True
+                )
+
+    def test_pinned_broker_policy_rejects_all_substituted_identities(self):
+        agent_bytes = _static_x86_64_elf()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(release, "REPO_ROOT", Path(temporary)),
+            patch.object(
+                release, "GUEST_AGENT_SHA256", hashlib.sha256(agent_bytes).hexdigest()
+            ),
+            patch.object(release, "GUEST_AGENT_SIZE_BYTES", len(agent_bytes)),
+        ):
+            root = Path(temporary)
+            _write_test_source_manifest(root, agent_bytes)
+            exact = _make_test_release_package(
+                root / "exact",
+                build.BROKER_TRANSPORT,
+                agent_bytes,
+            )
+            release._validate_release_package_tree(
+                exact,
+                build.BROKER_TRANSPORT,
+                True,
+            )
+
+            substituted_agent = agent_bytes + b"substituted"
+            substituted = _make_test_release_package(
+                root / "substituted",
+                build.BROKER_TRANSPORT,
+                substituted_agent,
+            )
+            with self.assertRaisesRegex(common.ScriptError, "pinned"):
+                release._validate_release_package_tree(
+                    substituted,
+                    build.BROKER_TRANSPORT,
+                    True,
+                )
+            substituted_archive = root / "substituted.zip"
+            release.create_release_archive(substituted, substituted_archive)
+            substituted_manifest_bytes = (
+                substituted / "SOURCE-MANIFEST.json"
+            ).read_bytes()
+            substituted_manifest = json.loads(substituted_manifest_bytes)
+            substituted_manifest_sha256 = hashlib.sha256(
+                substituted_manifest_bytes
+            ).hexdigest()
+            substituted_manifest_digest = root / "substituted-manifest.sha256"
+            substituted_manifest_digest.write_text(
+                f"{substituted_manifest_sha256}\n",
+                encoding="ascii",
+            )
+            substituted_guest = substituted / "guest"
+            substituted_agent_sha256 = hashlib.sha256(substituted_agent).hexdigest()
+            substituted_proof = {
+                "format": 1,
+                "result": "passed",
+                "archive_sha256": hashlib.sha256(
+                    substituted_archive.read_bytes()
+                ).hexdigest(),
+                "bundle_manifest_sha256": substituted_manifest_sha256,
+                "canonical_manifest_sha256": release._canonical_json_sha256(
+                    substituted_manifest
+                ),
+                "platform": "windows-whp",
+                "backend": "whp",
+                "transport": build.BROKER_TRANSPORT,
+                "artifact_sha256": release._release_artifact_hashes(substituted),
+                "openvmm_sha256": hashlib.sha256(b"openvmm").hexdigest(),
+                "kernel_sha256": hashlib.sha256(b"vmlinux").hexdigest(),
+                "kernel_config_sha256": hashlib.sha256(b"vmlinux.config").hexdigest(),
+                "initramfs_sha256": hashlib.sha256(
+                    (substituted_guest / "initramfs.cpio.gz").read_bytes()
+                ).hexdigest(),
+                "package_manifest_sha256": hashlib.sha256(
+                    (substituted_guest / "initramfs.cpio.gz.packages.json").read_bytes()
+                ).hexdigest(),
+                "agent_sha256": substituted_agent_sha256,
+                "checks": {
+                    "control_auth": True,
+                    "get_guest_info": True,
+                    "get_guest_info_self_sha256": substituted_agent_sha256,
+                    "bootstrap": True,
+                    "wait_ready": True,
+                    "shutdown": True,
+                },
+            }
+            substituted_proof_path = root / "substituted-proof.json"
+            substituted_proof_path.write_text(
+                json.dumps(substituted_proof),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(common.ScriptError, "pinned"):
+                release.verify_broker_live_gate(
+                    substituted_archive,
+                    substituted_manifest_digest,
+                    substituted_proof_path,
+                    hashlib.sha256(substituted_proof_path.read_bytes()).hexdigest(),
+                    "windows-whp",
+                    hashlib.sha256(substituted_archive.read_bytes()).hexdigest(),
+                )
+
+            runtime_mutations: tuple[tuple[str, str, object], ...] = (
+                ("runtime", "transport", "simple"),
+                ("runtime", "artifact_profile", "simple"),
+                ("guest_agent", "artifact", "guest/other-agent"),
+                (
+                    "guest_agent",
+                    "initramfs_artifact",
+                    "guest/other-initramfs.cpio.gz",
+                ),
+                ("guest_agent", "target", "x86_64-unknown-linux-gnu"),
+                ("guest_agent", "optional", True),
+                ("guest_agent", "installed_in_initramfs", False),
+                (
+                    "guest_agent",
+                    "maximum_size_bytes",
+                    build.GUEST_AGENT_MAXIMUM_BYTES - 1,
+                ),
+                ("guest_agent", "source_revision", "0" * 40),
+                ("guest_agent", "build_id", "0" * 40),
+                ("guest_agent", "external_input_sha256", "0" * 64),
+                (
+                    "guest_agent",
+                    "external_input_size_bytes",
+                    len(agent_bytes) - 1,
+                ),
+                ("guest_agent", "sha256", "0" * 64),
+                ("guest_agent", "size", len(agent_bytes) - 1),
+                (
+                    "guest_agent",
+                    "protocol_schema_version",
+                    build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION + 1,
+                ),
+                ("guest_agent", "transport", "simple"),
+                ("openvmm", "microvm_abi_version", 3),
+                ("openvmm", "control_session_protocol_version", 2),
+                ("openvmm", "control_contract_revision", "other-control"),
+                ("alpine", "initramfs_artifact", "guest/other.cpio.gz"),
+            )
+            for index, (section_name, field, value) in enumerate(runtime_mutations):
+                package = root / f"runtime-mismatch-{index}"
+                shutil.copytree(exact, package)
+                manifest_path = package / "SOURCE-MANIFEST.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                section = cast(dict[str, object], manifest[section_name])
+                section[field] = value
+                runtime = cast(dict[str, object], manifest["runtime"])
+                identity = release._runtime_identity(manifest)
+                runtime["fingerprint_inputs"] = identity
+                runtime["guest_fingerprint_sha256"] = release._runtime_fingerprint(
+                    identity
+                )
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                common.write_sha256_sums(package)
+                with (
+                    self.subTest(section=section_name, field=field),
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release._validate_release_package_tree(
+                        package,
+                        build.BROKER_TRANSPORT,
+                        True,
+                    )
+
+            package_mutations: tuple[tuple[str, object], ...] = (
+                ("path", "/sbin/other-agent"),
+                ("sha256", "0" * 64),
+                ("size", len(agent_bytes) - 1),
+                ("source_revision", "0" * 40),
+                ("build_id", "0" * 40),
+            )
+            for index, (field, value) in enumerate(package_mutations):
+                package = root / f"package-mismatch-{index}"
+                shutil.copytree(exact, package)
+                guest = package / "guest"
+                package_manifest_path = guest / "initramfs.cpio.gz.packages.json"
+                package_manifest = json.loads(
+                    package_manifest_path.read_text(encoding="utf-8")
+                )
+                package_agent = cast(
+                    dict[str, object],
+                    package_manifest["guest_agent"],
+                )
+                package_agent[field] = value
+                package_manifest_bytes = (
+                    json.dumps(package_manifest, indent=2) + "\n"
+                ).encode("utf-8")
+                package_manifest_path.write_bytes(package_manifest_bytes)
+                (guest / f"{build.AGENT_INITRAMFS_NAME}.packages.json").write_bytes(
+                    package_manifest_bytes
+                )
+                manifest_path = package / "SOURCE-MANIFEST.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                alpine = cast(dict[str, object], manifest["alpine"])
+                alpine["initramfs_package_manifest_sha256"] = hashlib.sha256(
+                    package_manifest_bytes
+                ).hexdigest()
+                runtime = cast(dict[str, object], manifest["runtime"])
+                identity = release._runtime_identity(manifest)
+                runtime["fingerprint_inputs"] = identity
+                runtime["guest_fingerprint_sha256"] = release._runtime_fingerprint(
+                    identity
+                )
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                common.write_sha256_sums(package)
+                with (
+                    self.subTest(package_manifest_field=field),
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release._validate_release_package_tree(
+                        package,
+                        build.BROKER_TRANSPORT,
+                        True,
+                    )
+
+    def test_kernel_provenance_rejects_stale_source_or_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kernel = root / "vmlinux"
+            config = root / "vmlinux.config"
+            provenance = root / build.KERNEL_PROVENANCE_NAME
+            kernel.write_bytes(b"kernel")
+            config.write_text(
+                "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
+                encoding="utf-8",
+            )
+            source_fingerprint = json.dumps(
+                {"archive_sha256": "a" * 64, "patches": []},
+                sort_keys=True,
+            )
+            provenance.write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "source_fingerprint": json.loads(source_fingerprint),
+                        "kernel_sha256": hashlib.sha256(
+                            kernel.read_bytes()
+                        ).hexdigest(),
+                        "config_sha256": hashlib.sha256(
+                            config.read_bytes()
+                        ).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                release,
+                "kernel_source_fingerprint",
+                return_value=source_fingerprint,
+            ):
+                release._validate_kernel_provenance(kernel, config, provenance)
+                kernel.write_bytes(b"stale")
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "kernel build provenance",
+                ):
+                    release._validate_kernel_provenance(kernel, config, provenance)
+
+    def test_root_source_manifest_pins_every_broker_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original = json.loads(
+                (common.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            )
+            manifest_path = root / "SOURCE-MANIFEST.json"
+            manifest_path.write_text(json.dumps(original), encoding="utf-8")
+            with patch.object(release, "REPO_ROOT", root):
+                release._validate_root_broker_contract()
+
+            mutations: tuple[tuple[str, str, object], ...] = (
+                ("guest_agent", "artifact", "guest/other-agent"),
+                (
+                    "guest_agent",
+                    "initramfs_artifact",
+                    "guest/other-initramfs.cpio.gz",
+                ),
+                ("guest_agent", "target", "x86_64-unknown-linux-gnu"),
+                ("guest_agent", "optional", False),
+                ("guest_agent", "installed_in_initramfs", True),
+                (
+                    "guest_agent",
+                    "maximum_size_bytes",
+                    build.GUEST_AGENT_MAXIMUM_BYTES - 1,
+                ),
+                ("guest_agent", "source_revision", "0" * 40),
+                ("guest_agent", "build_id", "0" * 40),
+                ("guest_agent", "external_input_sha256", "0" * 64),
+                (
+                    "guest_agent",
+                    "external_input_size_bytes",
+                    build.GUEST_AGENT_SIZE_BYTES - 1,
+                ),
+                (
+                    "guest_agent",
+                    "protocol_schema_version",
+                    build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION + 1,
+                ),
+                ("guest_agent", "transport", "simple"),
+                ("linux", "patches", []),
+                ("openvmm", "microvm_abi_version", 3),
+                ("openvmm", "control_session_protocol_version", 2),
+                ("openvmm", "control_contract_revision", "other-control"),
+            )
+            for section_name, field, value in mutations:
+                changed = json.loads(json.dumps(original))
+                section = cast(dict[str, object], changed[section_name])
+                section[field] = value
+                manifest_path.write_text(json.dumps(changed), encoding="utf-8")
+                with (
+                    self.subTest(section=section_name, field=field),
+                    patch.object(release, "REPO_ROOT", root),
+                    self.assertRaisesRegex(common.ScriptError, "pinned broker"),
+                ):
+                    release._validate_root_broker_contract()
+
+    def test_package_validator_rejects_cross_profile_initramfs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for declared, embedded in (
+                ("broker-ttrpc", "simple"),
+                ("simple", "broker-ttrpc"),
+            ):
+                package = _make_test_release_package(
+                    root / declared,
+                    declared,
+                )
+                agent = _static_x86_64_elf()
+                image = (
+                    _agent_newc_archive(agent)
+                    if embedded == "broker-ttrpc"
+                    else _simple_newc_archive(
+                        (common.REPO_ROOT / "alpine" / "init").read_bytes()
+                    )
+                )
+                package_manifest = _initramfs_package_manifest(
+                    declared,
+                    image,
+                    agent if declared == "broker-ttrpc" else None,
+                )
+                guest = package / "guest"
+                (guest / "initramfs.cpio.gz").write_bytes(image)
+                (guest / "initramfs.cpio.gz.packages.json").write_bytes(
+                    package_manifest
+                )
+                if declared == "broker-ttrpc":
+                    (guest / build.AGENT_INITRAMFS_NAME).write_bytes(image)
+                    (guest / f"{build.AGENT_INITRAMFS_NAME}.packages.json").write_bytes(
+                        package_manifest
+                    )
+                runtime_manifest = json.loads(
+                    (package / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+                )
+                alpine = runtime_manifest["alpine"]
+                alpine["initramfs_sha256"] = hashlib.sha256(image).hexdigest()
+                alpine["initramfs_package_manifest_sha256"] = hashlib.sha256(
+                    package_manifest
+                ).hexdigest()
+                runtime = runtime_manifest["runtime"]
+                identity = release._runtime_identity(runtime_manifest)
+                runtime["fingerprint_inputs"] = identity
+                runtime["guest_fingerprint_sha256"] = release._runtime_fingerprint(
+                    identity
+                )
+                (package / "SOURCE-MANIFEST.json").write_text(
+                    json.dumps(runtime_manifest),
+                    encoding="utf-8",
+                )
+                common.write_sha256_sums(package)
+                with (
+                    self.subTest(declared=declared, embedded=embedded),
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release._validate_release_package_tree(package, declared)
+
+    def test_release_archive_installs_runtime_layout(self):
+        agent_bytes = _static_x86_64_elf()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(release, "REPO_ROOT", Path(temporary)),
+            patch.object(
+                release, "GUEST_AGENT_SHA256", hashlib.sha256(agent_bytes).hexdigest()
+            ),
+            patch.object(release, "GUEST_AGENT_SIZE_BYTES", len(agent_bytes)),
+        ):
+            root = Path(temporary)
+            _write_test_source_manifest(root, agent_bytes)
             package_root = root / "package" / "nvx-1.2.3-test"
             binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
             binary = package_root / "bin" / binary_name
@@ -2903,50 +6281,247 @@ class ReleaseTests(unittest.TestCase):
                 guest = package_root / "guest" / name
                 guest.parent.mkdir(parents=True, exist_ok=True)
                 guest.write_bytes(name.encode("ascii"))
+            agent_initramfs = package_root / "guest" / build.AGENT_INITRAMFS_NAME
+            agent_initramfs.write_bytes(_agent_newc_archive(agent_bytes))
+            (
+                package_root / "guest" / f"{build.AGENT_INITRAMFS_NAME}.packages.json"
+            ).write_text("{}", encoding="ascii")
+            (package_root / "guest" / "initramfs.cpio.gz").write_bytes(
+                agent_initramfs.read_bytes()
+            )
             agent = package_root / "guest" / build.GUEST_AGENT_ARTIFACT_NAME
-            agent.write_bytes(_static_x86_64_elf())
+            agent.write_bytes(agent_bytes)
             agent_sha256 = hashlib.sha256(agent.read_bytes()).hexdigest()
-            source_revision = "a" * 40
+            package_manifest_bytes = _initramfs_package_manifest(
+                "broker-ttrpc",
+                agent_initramfs.read_bytes(),
+                agent.read_bytes(),
+            )
+            (package_root / "guest" / "initramfs.cpio.gz.packages.json").write_bytes(
+                package_manifest_bytes
+            )
+            (
+                package_root / "guest" / f"{build.AGENT_INITRAMFS_NAME}.packages.json"
+            ).write_bytes(package_manifest_bytes)
+            for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
+                (package_root / name).write_text(name, encoding="ascii")
+            for name in ("COPYING-LINUX", "LICENSE-OPENVMM"):
+                license_path = package_root / "licenses" / name
+                license_path.parent.mkdir(parents=True, exist_ok=True)
+                license_path.write_text(name, encoding="ascii")
+            root_manifest = json.loads(
+                (common.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            )
+            source_revision = cast(
+                str,
+                root_manifest["openvmm"]["source_revision"],
+            )
+            manifest: dict[str, object] = {
+                "format": 1,
+                "runtime": {
+                    "transport": "broker-ttrpc",
+                    "artifact_profile": "broker-ttrpc",
+                    "immutable_bundle": True,
+                },
+                "openvmm": {
+                    "source_revision": source_revision,
+                    "executable_sha256": hashlib.sha256(b"openvmm").hexdigest(),
+                    "microvm_abi_version": 2,
+                    "control_session_protocol_version": 1,
+                    "control_contract_revision": "nvx-microvm-v2-control-v1",
+                },
+                "linux": {
+                    "kernel_sha256": hashlib.sha256(b"vmlinux").hexdigest(),
+                    "config_sha256": hashlib.sha256(b"vmlinux.config").hexdigest(),
+                },
+                "alpine": {
+                    "initramfs_sha256": hashlib.sha256(
+                        agent_initramfs.read_bytes()
+                    ).hexdigest(),
+                    "initramfs_package_manifest_sha256": hashlib.sha256(
+                        package_manifest_bytes
+                    ).hexdigest(),
+                    "profile": "broker-ttrpc",
+                    "initramfs_artifact": "guest/initramfs.cpio.gz",
+                },
+                "guest_agent": {
+                    "artifact": build.GUEST_AGENT_ARTIFACT_PATH,
+                    "initramfs_artifact": build.GUEST_AGENT_INITRAMFS_ARTIFACT_PATH,
+                    "target": build.GUEST_AGENT_TARGET,
+                    "optional": False,
+                    "sha256": agent_sha256,
+                    "size": agent.stat().st_size,
+                    "installed_in_initramfs": True,
+                    "maximum_size_bytes": build.GUEST_AGENT_MAXIMUM_BYTES,
+                    "source_revision": build.GUEST_AGENT_SOURCE_REVISION,
+                    "build_id": build.GUEST_AGENT_BUILD_ID,
+                    "external_input_sha256": agent_sha256,
+                    "external_input_size_bytes": agent.stat().st_size,
+                    "protocol_schema_version": (
+                        build.GUEST_AGENT_PROTOCOL_SCHEMA_VERSION
+                    ),
+                    "startup_modes": list(build.GUEST_AGENT_STARTUP_MODES),
+                    "runtime_abi": build.GUEST_AGENT_RUNTIME_ABI,
+                    "transport": build.BROKER_TRANSPORT,
+                },
+            }
+            runtime = cast(dict[str, object], manifest["runtime"])
+            identity = release._runtime_identity(manifest)
+            runtime["fingerprint_inputs"] = identity
+            runtime["guest_fingerprint_sha256"] = release._runtime_fingerprint(identity)
             (package_root / "SOURCE-MANIFEST.json").write_text(
-                json.dumps(
-                    {
-                        "openvmm": {
-                            "source_revision": source_revision,
-                            "executable_sha256": hashlib.sha256(b"openvmm").hexdigest(),
-                            **TEST_CONTROL_CONTRACT,
-                        },
-                        "linux": {
-                            "kernel_sha256": hashlib.sha256(b"vmlinux").hexdigest()
-                        },
-                        "alpine": {
-                            "initramfs_sha256": hashlib.sha256(
-                                b"initramfs.cpio.gz"
-                            ).hexdigest()
-                        },
-                        "guest_agent": {
-                            "sha256": agent_sha256,
-                            "size": agent.stat().st_size,
-                        },
-                    }
-                ),
+                json.dumps(manifest),
                 encoding="utf-8",
             )
             common.write_sha256_sums(package_root)
-
+            trusted_manifest_sha256 = hashlib.sha256(
+                (package_root / "SOURCE-MANIFEST.json").read_bytes()
+            ).hexdigest()
             if os.name == "nt":
                 archive_path = root / "nvx-1.2.3-windows-whp.zip"
-                with zipfile.ZipFile(archive_path, "w") as package:
-                    for path in package_root.rglob("*"):
-                        package.write(path, path.relative_to(package_root.parent))
             else:
                 archive_path = root / "nvx-1.2.3-linux-kvm.tar.gz"
-                with tarfile.open(archive_path, "w:gz") as package:
-                    package.add(package_root, arcname=package_root.name)
+            release.create_release_archive(package_root, archive_path)
+            archive_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+            artifact_hashes = release._release_artifact_hashes(package_root)
+            manifest_digest = root / "SOURCE-MANIFEST.sha256"
+            manifest_digest.write_text(
+                f"{trusted_manifest_sha256}\n",
+                encoding="ascii",
+            )
+            platform = "windows-whp" if os.name == "nt" else "linux-kvm"
+            proof = {
+                "format": 1,
+                "result": "passed",
+                "archive_sha256": archive_sha256,
+                "bundle_manifest_sha256": trusted_manifest_sha256,
+                "canonical_manifest_sha256": release._canonical_json_sha256(manifest),
+                "platform": platform,
+                "backend": platform.rsplit("-", maxsplit=1)[-1],
+                "transport": "broker-ttrpc",
+                "artifact_sha256": artifact_hashes,
+                "openvmm_sha256": hashlib.sha256(b"openvmm").hexdigest(),
+                "kernel_sha256": hashlib.sha256(b"vmlinux").hexdigest(),
+                "kernel_config_sha256": hashlib.sha256(b"vmlinux.config").hexdigest(),
+                "initramfs_sha256": hashlib.sha256(
+                    agent_initramfs.read_bytes()
+                ).hexdigest(),
+                "package_manifest_sha256": hashlib.sha256(
+                    package_manifest_bytes
+                ).hexdigest(),
+                "agent_sha256": agent_sha256,
+                "checks": {
+                    "control_auth": True,
+                    "get_guest_info": True,
+                    "get_guest_info_self_sha256": agent_sha256,
+                    "bootstrap": True,
+                    "wait_ready": True,
+                    "shutdown": True,
+                },
+            }
+            proof_path = root / "live-gate.json"
+            proof_path.write_text(json.dumps(proof), encoding="utf-8")
+            proof_sha256 = hashlib.sha256(proof_path.read_bytes()).hexdigest()
+            release.verify_broker_live_gate(
+                archive_path,
+                manifest_digest,
+                proof_path,
+                proof_sha256,
+                platform,
+                archive_sha256,
+            )
+            changed_archive = root / (
+                "changed.zip" if os.name == "nt" else "changed.tar.gz"
+            )
+            shutil.copyfile(archive_path, changed_archive)
+            if os.name == "nt":
+                with zipfile.ZipFile(changed_archive, "a") as changed_zip:
+                    changed_zip.comment = b"changed archive bytes"
+            else:
+                changed_bytes = bytearray(changed_archive.read_bytes())
+                changed_bytes[9] ^= 1
+                changed_archive.write_bytes(changed_bytes)
+            changed_sha256 = hashlib.sha256(changed_archive.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(common.ScriptError, "archive_sha256"):
+                release.verify_broker_live_gate(
+                    changed_archive,
+                    manifest_digest,
+                    proof_path,
+                    proof_sha256,
+                    platform,
+                    changed_sha256,
+                )
+            proof_checks = cast(dict[str, object], proof["checks"])
+            for field, container in (
+                ("agent_sha256", cast(dict[str, object], proof)),
+                ("get_guest_info_self_sha256", proof_checks),
+            ):
+                original = container[field]
+                container[field] = "0" * 64
+                proof_path.write_text(json.dumps(proof), encoding="utf-8")
+                with (
+                    self.subTest(proof_field=field),
+                    self.assertRaises(common.ScriptError),
+                ):
+                    release.verify_broker_live_gate(
+                        archive_path,
+                        manifest_digest,
+                        proof_path,
+                        hashlib.sha256(proof_path.read_bytes()).hexdigest(),
+                        platform,
+                        archive_sha256,
+                    )
+                container[field] = original
+            proof_checks["shutdown"] = False
+            proof_path.write_text(json.dumps(proof), encoding="utf-8")
+            with self.assertRaisesRegex(common.ScriptError, "exact successful"):
+                release.verify_broker_live_gate(
+                    archive_path,
+                    manifest_digest,
+                    proof_path,
+                    hashlib.sha256(proof_path.read_bytes()).hexdigest(),
+                    platform,
+                    archive_sha256,
+                )
 
             build_dir = root / "runtime" / "build"
+            build_dir.mkdir(parents=True)
             binary_destination = (
                 root / "runtime" / "openvmm" / "target" / "release" / binary_name
             )
+            prior_paths = [
+                binary_destination,
+                *(
+                    build_dir / name
+                    for name in (
+                        "vmlinux",
+                        "vmlinux.config",
+                        "initramfs.cpio.gz",
+                        "initramfs.cpio.gz.packages.json",
+                        build.AGENT_INITRAMFS_NAME,
+                        f"{build.AGENT_INITRAMFS_NAME}.packages.json",
+                        build.GUEST_AGENT_ARTIFACT_NAME,
+                        build.GUEST_AGENT_SHA256_NAME,
+                        build.OPENVMM_PROVENANCE_NAME,
+                    )
+                ),
+            ]
+            for index, path in enumerate(prior_paths):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"prior-{index}".encode("ascii"))
+                path.chmod(0o700 if index % 2 else 0o600)
+
+            def snapshot() -> dict[Path, tuple[bytes, int] | None]:
+                return {
+                    path: (
+                        (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                        if path.exists()
+                        else None
+                    )
+                    for path in prior_paths
+                }
+
+            prior_snapshot = snapshot()
 
             def artifact_path(name: str) -> Path:
                 return build_dir / name
@@ -2963,14 +6538,80 @@ class ReleaseTests(unittest.TestCase):
                     return_value=binary_destination,
                 ),
             ):
-                release._install_release_archive(archive_path)
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "independently delivered",
+                ):
+                    release._install_release_archive(
+                        archive_path,
+                        "broker-ttrpc",
+                    )
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "expected 'simple'",
+                ):
+                    release._install_release_archive(
+                        archive_path,
+                        "simple",
+                    )
+                original_replace = release._atomic_replace
+                simple_only_names = {
+                    "initramfs.cpio.gz",
+                    "initramfs.cpio.gz.packages.json",
+                }
+                promotion_count = sum(
+                    path.name not in simple_only_names for path in prior_paths
+                )
+                # Back up every old path; promote only the selected broker files.
+                for failure_call in range(1, len(prior_paths) + promotion_count + 1):
+                    calls = 0
+
+                    def fail_one(
+                        source: Path,
+                        destination: Path,
+                        target_call: int = failure_call,
+                    ) -> None:
+                        nonlocal calls
+                        calls += 1
+                        if calls == target_call:
+                            raise common.ScriptError("injected promotion failure")
+                        original_replace(source, destination)
+
+                    with (
+                        self.subTest(failure_call=failure_call),
+                        patch.object(
+                            release,
+                            "_atomic_replace",
+                            side_effect=fail_one,
+                        ),
+                        self.assertRaisesRegex(
+                            common.ScriptError,
+                            "injected promotion failure",
+                        ),
+                    ):
+                        release._install_release_archive(
+                            archive_path,
+                            "broker-ttrpc",
+                            trusted_manifest_sha256,
+                        )
+                    self.assertEqual(snapshot(), prior_snapshot)
+                release._install_release_archive(
+                    archive_path,
+                    "broker-ttrpc",
+                    trusted_manifest_sha256,
+                )
 
             self.assertEqual(binary_destination.read_bytes(), b"openvmm")
-            for name in release.GUEST_RELEASE_NAMES:
+            for name in ("vmlinux", "vmlinux.config"):
                 self.assertEqual(
                     (build_dir / name).read_bytes(),
                     name.encode("ascii"),
                 )
+            self.assertEqual(
+                (build_dir / build.AGENT_INITRAMFS_NAME).read_bytes(),
+                agent_initramfs.read_bytes(),
+            )
+            self.assertFalse((build_dir / "initramfs.cpio.gz").exists())
             self.assertEqual(
                 (build_dir / build.GUEST_AGENT_ARTIFACT_NAME).read_bytes(),
                 agent.read_bytes(),
@@ -2986,6 +6627,55 @@ class ReleaseTests(unittest.TestCase):
             )
             self.assertEqual(provenance["source_revision"], source_revision)
             self.assertEqual(provenance["origin"], "release")
+            self.assertTrue(release._runtime_mode_matches(binary_destination, 0o755))
+            self.assertTrue(
+                release._runtime_mode_matches(
+                    build_dir / build.GUEST_AGENT_ARTIFACT_NAME,
+                    0o755,
+                )
+            )
+            for name in (
+                "vmlinux",
+                "vmlinux.config",
+                build.AGENT_INITRAMFS_NAME,
+                f"{build.AGENT_INITRAMFS_NAME}.packages.json",
+                build.GUEST_AGENT_SHA256_NAME,
+                build.OPENVMM_PROVENANCE_NAME,
+            ):
+                self.assertTrue(
+                    release._runtime_mode_matches(
+                        build_dir / name,
+                        0o644,
+                    ),
+                )
+
+            installed_snapshot = snapshot()
+            tampered_entries = _agent_newc_entries(agent.read_bytes())
+            agent_index = next(
+                index
+                for index, entry in enumerate(tampered_entries)
+                if entry[0] == "sbin/nvx-agent"
+            )
+            tampered_entries[agent_index] = (
+                "sbin/nvx-agent",
+                0o100755,
+                b"tampered-agent",
+            )
+            tampered_image = _newc_archive(tampered_entries)
+            agent_initramfs.write_bytes(tampered_image)
+            (package_root / "guest" / "initramfs.cpio.gz").write_bytes(tampered_image)
+            common.write_sha256_sums(package_root)
+            tampered_archive = root / (
+                "tampered.zip" if os.name == "nt" else "tampered.tar.gz"
+            )
+            with self.assertRaisesRegex(common.ScriptError, "packaged identity"):
+                release.create_release_archive(package_root, tampered_archive)
+            self.assertEqual(snapshot(), installed_snapshot)
+            agent_initramfs.write_bytes(_agent_newc_archive(agent.read_bytes()))
+            (package_root / "guest" / "initramfs.cpio.gz").write_bytes(
+                agent_initramfs.read_bytes()
+            )
+            common.write_sha256_sums(package_root)
 
             source_manifest_path = package_root / "SOURCE-MANIFEST.json"
             valid_manifest = json.loads(
@@ -2994,33 +6684,36 @@ class ReleaseTests(unittest.TestCase):
 
             def write_archive(path: Path) -> None:
                 common.write_sha256_sums(package_root)
-                if os.name == "nt":
-                    with zipfile.ZipFile(path, "w") as package:
-                        for member in package_root.rglob("*"):
-                            package.write(
-                                member, member.relative_to(package_root.parent)
-                            )
-                else:
-                    with tarfile.open(path, "w:gz") as package:
-                        package.add(package_root, arcname=package_root.name)
+                # Emit canonical archive metadata around an invalid test manifest.
+                with (
+                    patch.object(release, "_validate_release_package_tree"),
+                    patch.object(release, "validate_release_archive"),
+                ):
+                    release.create_release_archive(package_root, path)
 
             contract_cases = {
                 "missing ABI": ("microvm_abi_version", None),
                 "wrong ABI": ("microvm_abi_version", 3),
+                "boolean ABI": ("microvm_abi_version", True),
+                "string ABI": ("microvm_abi_version", "2"),
+                "float ABI": ("microvm_abi_version", 2.0),
                 "missing protocol": ("control_session_protocol_version", None),
                 "wrong protocol": ("control_session_protocol_version", 2),
+                "boolean protocol": ("control_session_protocol_version", True),
+                "string protocol": ("control_session_protocol_version", "1"),
+                "float protocol": ("control_session_protocol_version", 1.0),
                 "missing revision": ("control_contract_revision", None),
                 "wrong revision": ("control_contract_revision", "other"),
             }
             for name, (field, value) in contract_cases.items():
                 with self.subTest(name=name):
-                    manifest = json.loads(json.dumps(valid_manifest))
+                    invalid_manifest = json.loads(json.dumps(valid_manifest))
                     if value is None:
-                        del manifest["openvmm"][field]
+                        del invalid_manifest["openvmm"][field]
                     else:
-                        manifest["openvmm"][field] = value
+                        invalid_manifest["openvmm"][field] = value
                     source_manifest_path.write_text(
-                        json.dumps(manifest),
+                        json.dumps(invalid_manifest),
                         encoding="utf-8",
                     )
                     invalid_archive = root / (
@@ -3032,6 +6725,7 @@ class ReleaseTests(unittest.TestCase):
                     existing_kernel.write_bytes(b"existing-kernel")
                     existing_provenance = build_dir / build.OPENVMM_PROVENANCE_NAME
                     existing_provenance.write_bytes(b"existing-provenance")
+                    before_invalid_install = snapshot()
                     with (
                         patch.object(
                             release,
@@ -3043,12 +6737,21 @@ class ReleaseTests(unittest.TestCase):
                             "openvmm_binary_path",
                             return_value=binary_destination,
                         ),
+                        patch.object(release, "_transactional_install") as install,
                         self.assertRaisesRegex(
                             common.ScriptError,
                             "control contract",
                         ),
                     ):
-                        release._install_release_archive(invalid_archive)
+                        release._install_release_archive(
+                            invalid_archive,
+                            "broker-ttrpc",
+                            hashlib.sha256(
+                                source_manifest_path.read_bytes()
+                            ).hexdigest(),
+                        )
+                    install.assert_not_called()
+                    self.assertEqual(snapshot(), before_invalid_install)
                     self.assertEqual(
                         binary_destination.read_bytes(), b"existing-openvmm"
                     )
@@ -3067,29 +6770,74 @@ class ReleaseTests(unittest.TestCase):
             invalid_archive = root / (
                 "invalid.zip" if os.name == "nt" else "invalid.tar.gz"
             )
-            if os.name == "nt":
-                with zipfile.ZipFile(invalid_archive, "w") as package:
-                    for path in package_root.rglob("*"):
-                        package.write(path, path.relative_to(package_root.parent))
-            else:
-                with tarfile.open(invalid_archive, "w:gz") as package:
-                    package.add(package_root, arcname=package_root.name)
             binary_destination.write_bytes(b"existing")
+            with self.assertRaisesRegex(common.ScriptError, "artifact names"):
+                release.create_release_archive(package_root, invalid_archive)
+            self.assertEqual(binary_destination.read_bytes(), b"existing")
+
+            agent_initramfs.unlink()
+            (
+                package_root / "guest" / f"{build.AGENT_INITRAMFS_NAME}.packages.json"
+            ).unlink()
+            simple_initramfs = _simple_newc_archive(
+                (common.REPO_ROOT / "alpine" / "init").read_bytes()
+            )
+            simple_package_manifest = _initramfs_package_manifest(
+                "simple",
+                simple_initramfs,
+            )
+            (package_root / "guest" / "initramfs.cpio.gz").write_bytes(simple_initramfs)
+            (package_root / "guest" / "initramfs.cpio.gz.packages.json").write_bytes(
+                simple_package_manifest
+            )
+            manifest_alpine = cast(dict[str, object], manifest["alpine"])
+            manifest_alpine["initramfs_sha256"] = hashlib.sha256(
+                simple_initramfs
+            ).hexdigest()
+            manifest_alpine["initramfs_package_manifest_sha256"] = hashlib.sha256(
+                simple_package_manifest
+            ).hexdigest()
+            manifest_alpine["profile"] = "simple"
+            manifest_agent = cast(dict[str, object], manifest["guest_agent"])
+            manifest_agent["sha256"] = None
+            manifest_agent["size"] = None
+            manifest_agent["installed_in_initramfs"] = False
+            runtime["transport"] = "simple"
+            runtime["artifact_profile"] = "simple"
+            identity = release._runtime_identity(manifest)
+            runtime["fingerprint_inputs"] = identity
+            runtime["guest_fingerprint_sha256"] = release._runtime_fingerprint(identity)
+            (package_root / "SOURCE-MANIFEST.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            common.write_sha256_sums(package_root)
+            simple_archive = root / (
+                "simple.zip" if os.name == "nt" else "simple.tar.gz"
+            )
+            release.create_release_archive(package_root, simple_archive)
             with (
-                patch.object(
-                    release,
-                    "artifact_path",
-                    side_effect=artifact_path,
-                ),
+                patch.object(release, "artifact_path", side_effect=artifact_path),
                 patch.object(
                     release,
                     "openvmm_binary_path",
                     return_value=binary_destination,
                 ),
-                self.assertRaisesRegex(common.ScriptError, "presence"),
             ):
-                release._install_release_archive(invalid_archive)
-            self.assertEqual(binary_destination.read_bytes(), b"existing")
+                release._install_release_archive(simple_archive, "simple")
+            self.assertEqual(
+                (build_dir / "initramfs.cpio.gz").read_bytes(),
+                simple_initramfs,
+            )
+            self.assertFalse((build_dir / build.GUEST_AGENT_ARTIFACT_NAME).exists())
+            self.assertFalse((build_dir / build.GUEST_AGENT_SHA256_NAME).exists())
+            self.assertFalse((build_dir / build.AGENT_INITRAMFS_NAME).exists())
+            self.assertTrue(
+                release._runtime_mode_matches(
+                    build_dir / "initramfs.cpio.gz",
+                    0o644,
+                )
+            )
 
     def test_force_package_preserves_existing_release_on_invalid_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3116,7 +6864,9 @@ class ReleaseTests(unittest.TestCase):
                 patch.object(release, "REPO_ROOT", root),
                 patch.object(release, "SOURCE_DIR", root / "sources"),
                 patch.object(release, "OPENVMM_DIR", root / "openvmm"),
-                patch.object(release, "_guest_release_inputs", return_value=((), [])),
+                patch.object(
+                    release, "_guest_release_inputs", return_value=({}, [], {})
+                ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
                 patch.object(
                     release,
@@ -3130,6 +6880,8 @@ class ReleaseTests(unittest.TestCase):
                     destination=destination,
                     include_source=False,
                     force=True,
+                    transport="simple",
+                    manifest_digest_output=None,
                 )
 
             self.assertEqual(marker.read_bytes(), b"release")
@@ -3175,7 +6927,9 @@ class ReleaseTests(unittest.TestCase):
                 patch.object(release, "REPO_ROOT", root),
                 patch.object(release, "SOURCE_DIR", root / "sources"),
                 patch.object(release, "OPENVMM_DIR", root / "openvmm"),
-                patch.object(release, "_guest_release_inputs", return_value=((), [])),
+                patch.object(
+                    release, "_guest_release_inputs", return_value=({}, [], {})
+                ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
                 patch.object(release, "artifact_path", return_value=provenance_path),
                 patch.object(release, "sha256_file", side_effect=staged_hash),
@@ -3186,6 +6940,8 @@ class ReleaseTests(unittest.TestCase):
                     destination=destination,
                     include_source=False,
                     force=True,
+                    transport="simple",
+                    manifest_digest_output=None,
                 )
 
             self.assertEqual(marker.read_bytes(), b"release")
@@ -3216,7 +6972,191 @@ class ReleaseTests(unittest.TestCase):
                 release._publish_release_directory(staged, destination)
 
             self.assertEqual(marker.read_bytes(), b"release")
-            self.assertFalse(destination.with_name(".release.previous").exists())
+            self.assertEqual(list(root.glob(".*.previous*")), [])
+
+    def test_release_publication_rolls_back_failed_digest_promotion(self):
+        original_replace = Path.replace
+        for existing_bundle in (False, True):
+            for existing_digest in (False, True):
+                with (
+                    self.subTest(bundle=existing_bundle, digest=existing_digest),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = Path(temporary)
+                    destination = root / "release"
+                    if existing_bundle:
+                        destination.mkdir()
+                        (destination / "existing").write_bytes(b"release")
+                    digest = root / "release.sha256"
+                    if existing_digest:
+                        digest.write_bytes(b"previous digest")
+                    staged = root / "staged"
+                    staged.mkdir()
+                    (staged / "replacement").write_bytes(b"new")
+                    staged_digest = root / "staged.sha256"
+                    staged_digest.write_bytes(b"new digest")
+
+                    def fail_digest_replace(
+                        path: Path, target: Path, failed_source: Path = staged_digest
+                    ) -> Path:
+                        if path == failed_source:
+                            raise OSError("injected digest promotion failure")
+                        return original_replace(path, target)
+
+                    with (
+                        patch.object(
+                            Path,
+                            "replace",
+                            autospec=True,
+                            side_effect=fail_digest_replace,
+                        ),
+                        self.assertRaisesRegex(OSError, "injected digest"),
+                    ):
+                        release._publish_release_directory(
+                            staged, destination, (staged_digest, digest)
+                        )
+
+                    if existing_bundle:
+                        self.assertEqual(
+                            (destination / "existing").read_bytes(), b"release"
+                        )
+                        self.assertFalse((destination / "replacement").exists())
+                    else:
+                        self.assertFalse(destination.exists())
+                    if existing_digest:
+                        self.assertEqual(digest.read_bytes(), b"previous digest")
+                    else:
+                        self.assertFalse(digest.exists())
+                    self.assertEqual(list(root.glob(".*.previous*")), [])
+
+    def test_release_publication_recovers_interrupt_after_successful_rename(self):
+        original_replace = Path.replace
+        for existing_bundle in (False, True):
+            for existing_digest in (False, True):
+                for interrupted in ("bundle", "digest"):
+                    with (
+                        self.subTest(
+                            bundle=existing_bundle,
+                            digest=existing_digest,
+                            interrupted=interrupted,
+                        ),
+                        tempfile.TemporaryDirectory() as temporary,
+                    ):
+                        root = Path(temporary)
+                        destination = root / "release"
+                        if existing_bundle:
+                            destination.mkdir()
+                            (destination / "existing").write_bytes(b"old bundle")
+                        digest = root / "release.sha256"
+                        if existing_digest:
+                            digest.write_bytes(b"old digest")
+                        staged = root / "staged"
+                        staged.mkdir()
+                        (staged / "replacement").write_bytes(b"new bundle")
+                        staged_digest = root / "staged.sha256"
+                        staged_digest.write_bytes(b"new digest")
+                        failed_source = (
+                            staged if interrupted == "bundle" else staged_digest
+                        )
+
+                        def interrupt_after_rename(
+                            path: Path, target: Path, fail_at: Path = failed_source
+                        ) -> Path:
+                            result = original_replace(path, target)
+                            if path == fail_at:
+                                raise KeyboardInterrupt("interrupted after rename")
+                            return result
+
+                        with (
+                            patch.object(
+                                Path,
+                                "replace",
+                                autospec=True,
+                                side_effect=interrupt_after_rename,
+                            ),
+                            self.assertRaisesRegex(KeyboardInterrupt, "after rename"),
+                        ):
+                            release._publish_release_directory(
+                                staged, destination, (staged_digest, digest)
+                            )
+
+                        if existing_bundle:
+                            self.assertEqual(
+                                (destination / "existing").read_bytes(), b"old bundle"
+                            )
+                            self.assertEqual(
+                                list(destination.iterdir()), [destination / "existing"]
+                            )
+                        else:
+                            self.assertFalse(destination.exists())
+                        if existing_digest:
+                            self.assertEqual(digest.read_bytes(), b"old digest")
+                        else:
+                            self.assertFalse(digest.exists())
+                        self.assertEqual(list(root.glob(".*.previous*")), [])
+
+                        staged.mkdir(exist_ok=True)
+                        (staged / "replacement").write_bytes(b"recovered bundle")
+                        staged_digest.write_bytes(b"recovered digest")
+                        release._publish_release_directory(
+                            staged, destination, (staged_digest, digest)
+                        )
+                        self.assertEqual(
+                            (destination / "replacement").read_bytes(),
+                            b"recovered bundle",
+                        )
+                        self.assertFalse((destination / "existing").exists())
+                        self.assertEqual(digest.read_bytes(), b"recovered digest")
+                        self.assertFalse(staged.exists())
+                        self.assertFalse(staged_digest.exists())
+                        self.assertEqual(list(root.glob(".*.previous*")), [])
+
+    def test_release_publication_rejects_overlapping_backup_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "release"
+            destination.mkdir()
+            (destination / "existing").write_bytes(b"release")
+            staged = root / "staged"
+            staged.mkdir()
+            staged_digest = root / "staged.sha256"
+            staged_digest.write_bytes(b"new digest")
+            with self.assertRaisesRegex(common.ScriptError, "paths overlap"):
+                release._publish_release_directory(
+                    staged,
+                    destination,
+                    (staged_digest, destination.with_name(".release.previous")),
+                )
+            self.assertEqual((destination / "existing").read_bytes(), b"release")
+            self.assertTrue(staged.exists())
+            self.assertTrue(staged_digest.exists())
+
+
+class PinnedAgentIntegrationTests(unittest.TestCase):
+    def test_real_pinned_agent_in_complete_broker_archive(self):
+        pinned_agent = common.REPO_ROOT / "build" / build.GUEST_AGENT_ARTIFACT_NAME
+        if not pinned_agent.is_file():
+            self.skipTest("pinned NVX guest-agent artifact is not staged")
+        agent_bytes = pinned_agent.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(agent_bytes).hexdigest(), build.GUEST_AGENT_SHA256
+        )
+        self.assertEqual(len(agent_bytes), build.GUEST_AGENT_SIZE_BYTES)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _make_test_release_package(
+                root, build.BROKER_TRANSPORT, agent_bytes
+            )
+            release._validate_release_package_tree(
+                package, build.BROKER_TRANSPORT, True
+            )
+            archive_path = root / "pinned-broker.zip"
+            release.create_release_archive(package, archive_path)
+            release.validate_release_archive(
+                archive_path,
+                build.BROKER_TRANSPORT,
+                common.sha256_file(package / "SOURCE-MANIFEST.json"),
+            )
 
 
 class SharedFileTests(unittest.TestCase):

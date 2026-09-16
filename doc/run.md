@@ -3,7 +3,7 @@
 Download and install the latest release matching the host before the first run:
 
 ```bash
-python3 scripts/nvx.py download
+python3 scripts/nvx.py download --transport simple
 python3 scripts/nvx.py run
 ```
 
@@ -11,6 +11,25 @@ This installs the packaged kernel and initramfs under `build/` and OpenVMM
 under `openvmm/target/release/`, so no local build is required. Set `GH_TOKEN`
 to a token with contents read access when downloading from a private repository.
 On Linux, pass `--hypervisor mshv` to both commands to use the MSHV package.
+The explicit simple selection installs only `build/initramfs.cpio.gz`.
+
+Broker packages are not published by the current development workflow. If a
+separately live-gated broker package is delivered, installation requires its
+independently authenticated manifest digest:
+
+```bash
+python3 scripts/nvx.py download \
+  --transport broker-ttrpc \
+  --manifest-sha256 <trusted-64-hex-digest>
+```
+
+This installs `build/initramfs-agent.cpio.gz`. The installer stages and verifies
+the complete profile before touching current files, then transactionally
+promotes it and rolls back the previous binary, provenance, and both profile
+artifacts on any failure. A shared kernel or VMM therefore cannot be combined
+with an initramfs from another release. Build outputs may still coexist before
+any release install. A digest shipped only inside the same bundle is not a
+trust root.
 
 The CLI chooses WHP on Windows and KVM on Linux:
 
@@ -195,26 +214,44 @@ EROFS lower layers and one preformatted ext4 scratch image:
 
 ```bash
 python3 scripts/nvx.py sandbox \
-  --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
-  --layer runtime,/var/lib/nvx/runtime.erofs,22222222-2222-2222-2222-222222222222 \
-  --scratch /var/lib/nvx/scratch.ext4 \
-  --entrypoint /bin/workload \
-  --arg=--serve
+  --transport broker-ttrpc \
+  --control-socket /run/nvx/control.sock \
+  --boot-console-socket /run/nvx/boot.sock \
+  --control-auth-handle 9 \
+  --layer distro,/var/lib/nvx/distro.erofs \
+  --layer runtime,/var/lib/nvx/runtime.erofs \
+  --scratch /var/lib/nvx/scratch.ext4
 ```
 
-The layer UUID is the EROFS superblock UUID, not a content digest. The command
-validates the files before launch, orders roles independently of option order,
+The command selects `initramfs-agent.cpio.gz`, OpenVMM `microvm` (ABI v2), the
+ordinary boot console, and a separate authenticated control console. OpenVMM
+owns console enumeration and adds the single reserved
+`nvx_control_tty=hvc2` token; the package does not hardcode an HVC device.
+The authentication handle must be the already-open, readable end of an inherited
+one-way pipe created by the ACI-04 launcher. NVX redirects that descriptor to the
+child's standard input and passes the boolean `--microvm-control-auth-stdin`
+option to OpenVMM. Capability bytes never enter arguments, environment variables,
+or logs. Live broker launch is Linux-only; `--dry-run` works on other hosts.
+Layer UUID/GPT identities belong to the authenticated ACI-04 Bootstrap request,
+not this boot-only CLI. The command validates files before launch, orders roles independently of option order,
 attaches layers read-only, and reserves the writable slot for scratch.
 Conversion and scratch formatting stay off the start path; prepare those
 artifacts on Linux with `mkfs.erofs` and `mkfs.ext4`.
 
-This is the cold-filesystem bootstrap described in
-[the sandbox design](design/sandbox-filesystem-and-agent-architecture.md#implemented-filesystem-bootstrap), not the final
-production agent. It accepts no environment variables or secrets and does not
-expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
-Arguments are individual kernel-command-line tokens and therefore cannot
-contain whitespace. The workload enters private mount/PID/UTS namespaces with
-a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
-The outer agent retains the initramfs root; the capability-stripped child
-enters only the assembled root with `chroot`, because Linux cannot
-`pivot_root` away from an initramfs `rootfs`.
+The CLI starts the reviewed PID-1 package but is not an ACI control-plane
+client; production Bootstrap and workload lifecycle RPCs come from ACI-04 over
+the broker socket. Do not place capabilities, secrets, or workload
+configuration on the kernel command line. Broker launch rejects `init`,
+`rdinit`, every `nvx_*` parameter (including duplicate `nvx_control_tty` or
+`nvx_sandbox` tokens), and console, virtio discovery, virtfs, network, and
+other host-owned parameters. The generated command supplies no init override
+and relies on the verified `/init -> /sbin/nvx-agent` image layout.
+
+The source-level ttrpc writer priority/FIFO blocker is resolved. Remaining
+cross-repository gates are live host-observed stress proving bounded downstream
+HVC latency under contention; real privileged MMIO/HVC E2E from broker READY
+through authenticated GetGuestInfo self-hash, Bootstrap, WaitReady, Shutdown,
+and failure cases; tenant-safe snapshot freeze/restore lifecycle; and external
+live-gate proof delivery. Local packaging or initramfs inspection does not
+satisfy those gates, and broker release publication remains disabled without
+an independently authenticated live-gate proof.

@@ -260,7 +260,7 @@ interrupts, whose delivery can be delayed or coalesced by host scheduling.
 
 | Benchmark | Phase | Kernel command line |
 | --- | --- | --- |
-| Shell lifecycle | cold/capture | `BASE` plus the combined `BASE_TUNING` parameters; CI uses 128 MiB. |
+| Shell lifecycle | cold/capture | `BASE` plus the combined `BASE_TUNING` parameters; MSHV also uses `nolapic_timer` for its one-vCPU profile, and KVM uses `clocksource=kvm-clock`; CI uses 128 MiB. |
 | Shell lifecycle | restore | restore (from the measured shell-ready snapshot) |
 | Cold start | baseline | `QUIET` |
 | Cold start | tuning variant | `QUIET` plus one of `clocksource=<backend>`, `tsc=reliable`, `no_timer_check`, `random.trust_cpu=on`, `rcupdate.rcu_expedited=1`, `nokaslr`, `mitigations=off`, or `cryptomgr.notests` |

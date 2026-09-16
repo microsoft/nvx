@@ -9,3 +9,5 @@
 *.sh.in text eol=lf
 alpine/* text eol=lf
 Dockerfile text eol=lf
+# Kernel provenance hashes the exact checkout bytes.
+/kernel/config-microvm text eol=lf

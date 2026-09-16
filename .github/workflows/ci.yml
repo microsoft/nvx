@@ -155,6 +155,7 @@ jobs:
           path: |
             build/vmlinux
             build/vmlinux.config
+            build/vmlinux.provenance.json
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
           if-no-files-found: error
@@ -529,6 +530,7 @@ jobs:
         uses: ./.github/actions/package-release
         with:
           platform: ${{ matrix.release-platform }}
+          cache-compression: ${{ matrix.backend == 'mshv' && 'gzip' || 'zstd' }}
 
   release:
     name: Publish development release

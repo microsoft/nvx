@@ -1,45 +1,124 @@
 name: Publish development release
-description: Download platform packages and publish an NVX development prerelease
+description: Restore platform packages and publish an NVX development prerelease
+
+inputs:
+  broker-live-gate-contracts:
+    description: >-
+      Newline-separated PLATFORM|ARCHIVE|MANIFEST_DIGEST|PROOF|TRUSTED_PROOF_SHA256
+      records from a separately authenticated live broker smoke job
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
-    - name: Download Linux / KVM release
-      uses: actions/download-artifact@v5
-      with:
-        name: release-linux-kvm
-        path: dist
+    - name: Prepare release cache tools
+      id: release-cache-tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+        mkdir -p "${cache_tools}"
+        ln -sf "$(command -v tar)" "${cache_tools}/tar"
+        ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+        echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
 
-    - name: Download Linux / MSHV release
-      uses: actions/download-artifact@v5
+    - name: Restore Linux / KVM release
+      uses: actions/cache/restore@v5
       with:
-        name: release-linux-mshv
-        path: dist
-
-    - name: Download Windows / WHP release
-      uses: actions/download-artifact@v5
+        path: |
+          dist/*-simple.tar.gz
+        key: release-linux-kvm-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
+    - name: Restore Linux / MSHV release
+      uses: actions/cache/restore@v5
+      env:
+        PATH: ${{ steps.release-cache-tools.outputs.path }}
       with:
-        name: release-windows-whp
-        path: dist
+        path: |
+          dist/*-simple.tar.gz
+        key: release-linux-mshv-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
+    - name: Restore Windows / WHP release
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          dist/*-simple.zip
+        key: release-windows-whp-${{ github.run_id }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
 
     - name: Publish GitHub prerelease
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
+        BROKER_LIVE_GATE_CONTRACTS: ${{ inputs.broker-live-gate-contracts }}
       run: |
         set -euo pipefail
         version="$(cat VERSION)"
         short_sha="${GITHUB_SHA:0:12}"
         tag="v${version}-dev.${short_sha}"
         packages=(
-          "dist/nvx-${version}-linux-kvm.tar.gz"
-          "dist/nvx-${version}-linux-mshv.tar.gz"
-          "dist/nvx-${version}-windows-whp.zip"
+          "dist/nvx-${version}-linux-kvm-simple.tar.gz"
+          "dist/nvx-${version}-linux-mshv-simple.tar.gz"
+          "dist/nvx-${version}-windows-whp-simple.zip"
         )
         for package in "${packages[@]}"; do
           test -f "${package}"
         done
+
+        shopt -s nullglob
+        broker_archives=(dist/*-broker-ttrpc.tar.gz dist/*-broker-ttrpc.zip)
+        shopt -u nullglob
+        if [[ -z "${BROKER_LIVE_GATE_CONTRACTS}" ]]; then
+          if (( ${#broker_archives[@]} != 0 )); then
+            echo "::error::broker assets require an externally authenticated live-gate proof"
+            exit 1
+          fi
+        else
+          approved_broker_archives=()
+          while IFS='|' read -r platform archive manifest_digest proof proof_sha extra; do
+            [[ -n "${platform}" && -n "${archive}" && -n "${manifest_digest}" &&
+               -n "${proof}" && -n "${proof_sha}" && -z "${extra:-}" ]] || {
+              echo "::error::invalid broker-live-gate-contracts record"
+              exit 1
+            }
+            broker_base="dist/nvx-${version}-${platform}-broker-ttrpc"
+            [[ "${archive}" == "${broker_base}.tar.gz" ||
+               "${archive}" == "${broker_base}.zip" ]] &&
+              [[ "${manifest_digest}" == "${broker_base}.SOURCE-MANIFEST.sha256" ]] &&
+              [[ "${proof}" == "${broker_base}.live-gate.json" ]] || {
+              echo "::error::live-gated broker contract has an unexpected path"
+              exit 1
+            }
+            archive_sha256="$(sha256sum "${archive}" | awk '{print $1}')"
+            python3 scripts/nvx.py verify-broker-live-gate \
+              --archive "${archive}" \
+              --archive-sha256 "${archive_sha256}" \
+              --manifest-digest "${manifest_digest}" \
+              --proof "${proof}" \
+              --proof-sha256 "${proof_sha}" \
+              --platform "${platform}"
+            approved_broker_archives+=("${archive}")
+            packages+=("${archive}" "${manifest_digest}" "${proof}")
+          done <<< "${BROKER_LIVE_GATE_CONTRACTS}"
+          for archive in "${broker_archives[@]}"; do
+            approved=false
+            for approved_archive in "${approved_broker_archives[@]}"; do
+              if [[ "${archive}" == "${approved_archive}" ]]; then
+                approved=true
+                break
+              fi
+            done
+            [[ "${approved}" == true ]] || {
+              echo "::error::unapproved broker archive present: ${archive}"
+              exit 1
+            }
+          done
+        fi
         if gh release view "${tag}" >/dev/null 2>&1; then
           gh release upload "${tag}" "${packages[@]}" --clobber
         else

@@ -48,7 +48,7 @@ path.
 
 
  /* The alignment to use between consumer and producer parts of vring.
-@@ -56,7 +60,84 @@ struct virtio_mmio_device {
+@@ -56,7 +60,88 @@ struct virtio_mmio_device {
  	void __iomem *base;
  	unsigned long version;
 +#ifdef CONFIG_VIRTIO_MMIO_SHARED_STATUS
@@ -68,6 +68,7 @@ path.
 +#define MICROVM_VIRTIO_RUNTIME_BLK_MMIO_BASE	0xd0004000
 +#define MICROVM_VIRTIO_CUSTOM_BLK_MMIO_BASE	0xd0005000
 +#define MICROVM_VIRTIO_SCRATCH_BLK_MMIO_BASE	0xd0006000
++#define MICROVM_VIRTIO_CONTROL_CONSOLE_MMIO_BASE	0xd0007000
 +
 +static int vm_setup_shared_status(struct virtio_mmio_device *vm_dev)
 +{
@@ -104,6 +105,9 @@ path.
 +		break;
 +	case MICROVM_VIRTIO_SCRATCH_BLK_MMIO_BASE:
 +		offset = 0x18;
++		break;
++	case MICROVM_VIRTIO_CONTROL_CONSOLE_MMIO_BASE:
++		offset = 0x1c; /* Eighth u32 in the ABI-v2 shared-status page. */
 +		break;
 +	default:
 +		dev_err(&pdev->dev,

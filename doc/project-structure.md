@@ -101,9 +101,12 @@ workflows.
 
 ### `alpine/`
 
-Guest-owned scripts copied into the Alpine initramfs. `init` controls early
-boot and launches either the normal guest shell or `nvx-init-agent` for the
-sandbox profile. The sandbox helpers resolve fixed virtio-blk roles through
+Guest-owned scripts copied into the Alpine initramfs profiles. `init`
+controls the simple shell and `nvx-init-agent` sandbox profile. The
+separate broker image links `/init` directly to the externally staged static
+`/sbin/nvx-agent`; it contains only the root directory, `/sbin`, the PID-1
+link, and the verified agent.
+The simple-profile helpers resolve fixed virtio-blk roles through
 sysfs, assemble EROFS lower layers over ext4 scratch, place the workload in its
 cgroup before release, construct its mount/PID/UTS namespaces, enter its
 filesystem root after dropping capabilities, and retain the agent as the outer
