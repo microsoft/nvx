@@ -3411,6 +3411,10 @@ class BenchmarkTests(unittest.TestCase):
             f"nolapic_timer {benchmark.BASE_TUNING}",
         )
         self.assertEqual(
+            benchmark.lifecycle_tuning("mshv", force_lapic_timer=True),
+            f"lapic=notscdeadline {benchmark.BASE_TUNING}",
+        )
+        self.assertEqual(
             benchmark.lifecycle_tuning("mshv", 2),
             benchmark.BASE_TUNING,
         )
@@ -4231,6 +4235,12 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(run.call_args.kwargs["guest_exit_prequeued"])
 
     def test_native_e2e_measures_and_reuses_snapshot_capture(self):
+        self._assert_native_e2e_snapshot_capture("kvm")
+
+    def test_mshv_e2e_capture_enables_lapic_without_changing_cold_boot(self):
+        self._assert_native_e2e_snapshot_capture("mshv")
+
+    def _assert_native_e2e_snapshot_capture(self, backend: str):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             openvmm = root / "openvmm"
@@ -4249,7 +4259,7 @@ class BenchmarkTests(unittest.TestCase):
                     "--suite",
                     "e2e",
                     "--backend",
-                    "kvm",
+                    backend,
                     "--openvmm-dir",
                     str(openvmm),
                     "--nvx-dir",
@@ -4311,7 +4321,9 @@ class BenchmarkTests(unittest.TestCase):
                 "peak_rss_max_bytes": 2048,
             }
             with (
-                patch.object(benchmark, "benchmark", return_value=run_result),
+                patch.object(
+                    benchmark, "benchmark", return_value=run_result
+                ) as cold_start,
                 patch.object(
                     benchmark,
                     "benchmark_snapshot_capture",
@@ -4328,9 +4340,24 @@ class BenchmarkTests(unittest.TestCase):
             retained = capture.call_args.kwargs["retained_snapshot_path"]
             self.assertIsInstance(retained, Path)
             self.assertEqual(restore.call_args.kwargs["snapshot_path"], retained)
+            cold_command = cold_start.call_args.args[0]
+            capture_command = capture.call_args.args[2]
+            restore_command = restore.call_args.args[3]
+            if backend == "mshv":
+                self.assertIn(
+                    "nolapic_timer",
+                    cold_command[cold_command.index("--cmdline") + 1],
+                )
+                for command in (capture_command, restore_command):
+                    cmdline = command[command.index("--cmdline") + 1]
+                    self.assertIn("lapic=notscdeadline", cmdline)
+                    self.assertNotIn("nolapic_timer", cmdline)
+            else:
+                self.assertEqual(cold_command, capture_command)
+                self.assertEqual(cold_command, restore_command)
             document = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(
-                document["snapshot_capture"]["kvm"]["peak_rss_p50_bytes"],
+                document["snapshot_capture"][backend]["peak_rss_p50_bytes"],
                 2048,
             )
 

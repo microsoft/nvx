@@ -1578,10 +1578,15 @@ def whp_stable_clocksource_wait_script() -> str:
     )
 
 
-def lifecycle_tuning(backend: str, processors: int = 1) -> str:
+def lifecycle_tuning(
+    backend: str,
+    processors: int = 1,
+    *,
+    force_lapic_timer: bool = False,
+) -> str:
     backend_tuning = "clocksource=kvm-clock" if backend == "kvm" else None
     if backend == "mshv" and processors == 1:
-        backend_tuning = "nolapic_timer"
+        backend_tuning = "lapic=notscdeadline" if force_lapic_timer else "nolapic_timer"
     return f"{backend_tuning} {BASE_TUNING}" if backend_tuning else BASE_TUNING
 
 
@@ -5342,7 +5347,11 @@ def run_native_linux(args: argparse.Namespace) -> int:
     if run_guest:
         assert executable is not None and kernel is not None and initrd is not None
 
-        def make_boot_command(memory_mib: int) -> list[str]:
+        def make_boot_command(
+            memory_mib: int,
+            *,
+            force_lapic_timer: bool = False,
+        ) -> list[str]:
             command = [
                 *prefix,
                 str(executable),
@@ -5360,7 +5369,11 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 "--initrd",
                 str(initrd),
                 "--cmdline",
-                lifecycle_tuning(backend, args.processors),
+                lifecycle_tuning(
+                    backend,
+                    args.processors,
+                    force_lapic_timer=force_lapic_timer,
+                ),
             ]
             if args.net is not None:
                 append_network_arguments(command, args.net, args.network_profile)
@@ -5373,7 +5386,10 @@ def run_native_linux(args: argparse.Namespace) -> int:
                     args,
                     executable,
                     backend,
-                    make_boot_command,
+                    lambda memory_mib: make_boot_command(
+                        memory_mib,
+                        force_lapic_timer=True,
+                    ),
                     command_prefix=prefix,
                 )
             )
@@ -5395,6 +5411,11 @@ def run_native_linux(args: argparse.Namespace) -> int:
             )
             results["backends"][backend] = result
             print_summary(backend, result)
+        snapshot_boot_command = (
+            make_boot_command(args.memory_mib, force_lapic_timer=True)
+            if run_snapshot or run_restore
+            else boot_command
+        )
         with contextlib.ExitStack() as snapshots:
             retained_snapshot_path = (
                 Path(
@@ -5410,7 +5431,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 result = benchmark_snapshot_capture(
                     args,
                     backend,
-                    boot_command,
+                    snapshot_boot_command,
                     retained_snapshot_path=retained_snapshot_path,
                 )
                 results["snapshot_capture"][backend] = result
@@ -5420,7 +5441,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                     args,
                     executable,
                     backend,
-                    boot_command,
+                    snapshot_boot_command,
                     command_prefix=prefix,
                     snapshot_path=retained_snapshot_path,
                 )
