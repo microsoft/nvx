@@ -36,6 +36,9 @@ APP_STDERR = 0x83
 APP_EXIT = 0x84
 APP_STOPPED = 0x85
 APP_ERROR = 0xFF
+MANAGED_EXIT_CATEGORIES = frozenset(
+    {"exit", "timeout", "output-limit", "signal", "failed"}
+)
 
 
 @dataclass(frozen=True)
@@ -380,6 +383,10 @@ class ControlSession:
                     raise ScriptError(
                         "managed guest returned an invalid exit category"
                     ) from error
+                if category not in MANAGED_EXIT_CATEGORIES:
+                    raise ScriptError(
+                        "managed guest returned an unsupported exit category"
+                    )
                 return ManagedExecResult(status, category, bytes(stdout), bytes(stderr))
             elif kind == APP_ERROR:
                 raise ScriptError(

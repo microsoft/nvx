@@ -175,6 +175,38 @@ class ControlSessionTests(unittest.TestCase):
         session.close()
         server.close()
 
+    def test_exec_rejects_unknown_exit_category(self):
+        client, server = socket.socketpair()
+        instance = bytes.fromhex("22" * 16)
+        session = control_session.ControlSession(control_session._SocketStream(client))
+        session._instance_id = instance
+        session._epoch = 1
+
+        def serve() -> None:
+            *_, frame = _read_outer(server)
+            request_id = control_session.APP_HEADER.unpack(
+                frame[: control_session.APP_HEADER.size]
+            )[4]
+            _write_app(
+                server,
+                instance_id=instance,
+                sequence=0,
+                kind=control_session.APP_EXIT,
+                request_id=request_id,
+                status=125,
+                payload=b"guest-provided-detail",
+            )
+            server.close()
+
+        worker = threading.Thread(target=serve)
+        worker.start()
+        with self.assertRaisesRegex(
+            control_session.ScriptError, "unsupported exit category"
+        ):
+            session.exec(("/bin/true",), timeout_ms=0, response_timeout=5)
+        worker.join(timeout=5)
+        session.close()
+
 
 if __name__ == "__main__":
     unittest.main()

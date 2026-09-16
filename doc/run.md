@@ -306,7 +306,8 @@ python3 scripts/nvx.py sandbox start \
   --state-dir /run/user/1000/nvx-example
 python3 scripts/nvx.py sandbox exec \
   --state-dir /run/user/1000/nvx-example \
-  --entrypoint /usr/bin/python3 --arg=/work/agent.py
+  --entrypoint /usr/bin/python3 --arg=/work/agent.py \
+  --outcome-report /run/user/1000/nvx-example-exec.json
 python3 scripts/nvx.py sandbox exec \
   --state-dir /run/user/1000/nvx-example \
   --entrypoint /bin/sh --arg=-c --arg='cat /tmp/previous-result'
@@ -323,3 +324,11 @@ workload arguments use the bounded control protocol rather than the kernel
 command line and may contain whitespace. The legacy operation-less `sandbox`
 form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
 request to retain VM state.
+
+`run --outcome-report PATH` and one-shot `sandbox run --outcome-report PATH`
+forward OpenVMM's bounded local JSON report. Managed `sandbox exec` writes only
+the operation, bounded result category, numeric status, and an opaque operation
+ID to its requested report; stdout, stderr, arguments, environment values, and
+credentials remain excluded. `sandbox stop` waits for OpenVMM teardown and
+retains the latest VM-level report as `outcome.json` in the state directory.
+Neither OpenVMM nor NVX uploads these files.

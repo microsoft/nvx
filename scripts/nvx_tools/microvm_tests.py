@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import queue
 import secrets
@@ -13,6 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any, cast
 
 from .benchmark import (
     BOOT_MARKER,
@@ -61,6 +63,7 @@ MICROVM_TEST_SCENARIOS = (
     "smp-snapshot",
     "snapshot-core",
     "snapshot-tiers",
+    "structured-outcome",
     "virtio-net",
     "workload-identity",
 )
@@ -107,6 +110,27 @@ SCRATCH_PAIRED_POST_MARKER = b"NVX-SCRATCH-PAIRED-POST-OUT"
 SCRATCH_PAIRED_RESTORED_MARKER = b"NVX-SCRATCH-PAIRED-RESTORED"
 SCRATCH_FRESH_POST_MARKER = b"NVX-SCRATCH-FRESH-POST-OUT"
 WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
+OUTCOME_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "instance_id",
+        "backend",
+        "outcome",
+        "network_policy",
+        "teardown",
+    }
+)
+OUTCOME_TEARDOWN_FIELDS = frozenset(
+    {
+        "guest_workload_stopped",
+        "vm_stopped",
+        "openvmm_process_terminated",
+        "virtiofs_released",
+        "network_released",
+        "temporary_storage_removed",
+        "control_channels_closed",
+    }
+)
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> None:
@@ -217,6 +241,63 @@ def _snapshot_core_script(backend: str) -> str:
 
 def _output_lines(output: bytes) -> list[bytes]:
     return [line.removesuffix(b"\r") for line in output.splitlines()]
+
+
+def _read_outcome_report(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"failed to read structured outcome report {path}"
+        ) from error
+    if not isinstance(value, dict):
+        raise RuntimeError("structured outcome report is not an object")
+    raw = cast(dict[str, object], value)
+    if set(raw) != set(OUTCOME_TOP_LEVEL_FIELDS):
+        raise RuntimeError("structured outcome report has unexpected top-level fields")
+    if raw["schema_version"] != 1:
+        raise RuntimeError("structured outcome report has an unsupported version")
+    instance_id = raw["instance_id"]
+    if (
+        not isinstance(instance_id, str)
+        or len(instance_id) != 32
+        or any(character not in "0123456789abcdef" for character in instance_id)
+    ):
+        raise RuntimeError("structured outcome report has an invalid instance ID")
+    if raw["backend"] not in ("auto", "kvm", "mshv", "whp"):
+        raise RuntimeError("structured outcome report has an invalid backend")
+    outcome_value = raw["outcome"]
+    policy_value = raw["network_policy"]
+    teardown_value = raw["teardown"]
+    if not isinstance(outcome_value, dict):
+        raise RuntimeError("structured outcome report has an invalid outcome")
+    outcome = cast(dict[str, object], outcome_value)
+    if set(outcome) != {
+        "operation",
+        "category",
+        "status_code",
+    }:
+        raise RuntimeError("structured outcome report has an invalid outcome")
+    if not isinstance(policy_value, dict):
+        raise RuntimeError("structured outcome report has an invalid network policy")
+    policy = cast(dict[str, object], policy_value)
+    if set(policy) != {
+        "status",
+        "status_code",
+        "mode",
+        "allow_rule_count",
+        "deny_rule_count",
+        "host_loopback",
+    }:
+        raise RuntimeError("structured outcome report has an invalid network policy")
+    if not isinstance(teardown_value, dict):
+        raise RuntimeError("structured outcome report has an invalid teardown outcome")
+    teardown = cast(dict[str, object], teardown_value)
+    if set(teardown) != set(OUTCOME_TEARDOWN_FIELDS):
+        raise RuntimeError("structured outcome report has an invalid teardown outcome")
+    if not all(isinstance(value, bool) for value in teardown.values()):
+        raise RuntimeError("structured teardown outcomes must be booleans")
+    return cast(dict[str, Any], raw)
 
 
 def _count_line_suffix(output: bytes, marker: bytes) -> int:
@@ -436,6 +517,7 @@ def run_managed_lifecycle(
         )[os.name == "nt"]
         boot_console_address = _available_tcp_address()
         capability = secrets.token_bytes(32)
+        report_path = root / "managed-outcome.json"
         command = workload_boot_command(
             executable,
             backend,
@@ -455,6 +537,8 @@ def run_managed_lifecycle(
                 "--microvm-control-console",
                 f"listen={endpoint_value}",
                 "--microvm-control-auth-stdin",
+                "--microvm-report",
+                str(report_path),
             )
         )
         log_path = output_dir / "managed-lifecycle.log"
@@ -534,6 +618,19 @@ def run_managed_lifecycle(
                     raise RuntimeError(
                         f"managed OpenVMM process exited with status {result}"
                     )
+                report = _read_outcome_report(report_path)
+                if report["backend"] != backend or report["outcome"] != {
+                    "operation": "managed",
+                    "category": "success",
+                    "status_code": 0,
+                }:
+                    raise RuntimeError("managed lifecycle outcome report was invalid")
+                if report["network_policy"]["status"] != "not-requested":
+                    raise RuntimeError(
+                        "managed lifecycle reported an unexpected network policy"
+                    )
+                if not all(report["teardown"].values()):
+                    raise RuntimeError("managed lifecycle reported incomplete teardown")
             finally:
                 if boot_console is not None:
                     (output_dir / "managed-lifecycle-guest.log").write_bytes(
@@ -572,6 +669,135 @@ def run_managed_lifecycle(
             raise RuntimeError(
                 "managed lifecycle without a control endpoint was not rejected before boot"
             )
+
+
+def run_structured_outcome(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-structured-outcome-") as temporary:
+        root = Path(temporary)
+        sensitive_report_name = "sensitive-report-destination.json"
+        report_path = root / sensitive_report_name
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0 nvx_report_secret=sensitive-command-value",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        command.extend(
+            (
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:443",
+                "--network-egress-allow",
+                "198.51.100.0/24",
+                "--network-egress-deny",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:53",
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:54321",
+                "--microvm-report",
+                str(report_path),
+            )
+        )
+        with OpenvmmProcess(
+            command,
+            output_dir / "structured-outcome.log",
+        ) as process:
+            process.wait_for(BOOT_MARKER, timeout)
+            process.send_line("printf 'sensitive-output-value\\n'; /sbin/nvx-exit 37")
+            result = process.wait(timeout)
+        if result.returncode != 37 or b"sensitive-output-value" not in result.output:
+            raise RuntimeError("structured outcome run lost the guest exit result")
+
+        report = _read_outcome_report(report_path)
+        if report["backend"] != backend or report["outcome"] != {
+            "operation": "run",
+            "category": "guest-exit",
+            "status_code": 37,
+        }:
+            raise RuntimeError("structured guest outcome was invalid")
+        if report["network_policy"] != {
+            "status": "applied",
+            "status_code": 0,
+            "mode": "rules",
+            "allow_rule_count": 2,
+            "deny_rule_count": 1,
+            "host_loopback": "deny",
+        }:
+            raise RuntimeError("structured network-policy outcome was invalid")
+        if not all(report["teardown"].values()):
+            raise RuntimeError("structured outcome reported incomplete teardown")
+        encoded = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "sensitive-command-value",
+            "sensitive-output-value",
+            sensitive_report_name,
+            DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+            "54321",
+        ):
+            if forbidden in encoded:
+                raise RuntimeError(
+                    f"structured outcome exposed sensitive value {forbidden!r}"
+                )
+
+        rejected_path = root / "rejected.json"
+        rejected = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        rejected.extend(
+            (
+                "--network-egress-allow",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:443",
+                "--microvm-report",
+                str(rejected_path),
+            )
+        )
+        with OpenvmmProcess(
+            rejected,
+            output_dir / "structured-outcome-rejected.log",
+        ) as process:
+            rejected_result = process.wait(timeout)
+        if rejected_result.returncode == 0 or BOOT_MARKER in rejected_result.output:
+            raise RuntimeError(
+                "structured policy rejection did not fail before guest boot"
+            )
+        rejected_report = _read_outcome_report(rejected_path)
+        if rejected_report["outcome"] != {
+            "operation": "run",
+            "category": "vmm-failure",
+            "status_code": 1,
+        }:
+            raise RuntimeError("configuration rejection outcome was invalid")
+        if rejected_report["network_policy"] != {
+            "status": "failed",
+            "status_code": 1,
+            "mode": "rules",
+            "allow_rule_count": 1,
+            "deny_rule_count": 0,
+            "host_loopback": "allow",
+        }:
+            raise RuntimeError("configuration rejection policy outcome was invalid")
+        if not all(rejected_report["teardown"].values()):
+            raise RuntimeError("configuration rejection leaked host resources")
 
 
 def run_console_exit(
@@ -3127,6 +3353,17 @@ def run(args: argparse.Namespace) -> int:
     if "managed-lifecycle" in scenarios:
         print(f"Running managed microVM lifecycle on OpenVMM/{args.backend}")
         run_managed_lifecycle(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "structured-outcome" in scenarios:
+        print(f"Running structured microVM outcomes on OpenVMM/{args.backend}")
+        run_structured_outcome(
             executable,
             kernel,
             initrd,

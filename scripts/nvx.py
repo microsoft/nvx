@@ -239,6 +239,8 @@ def command_run(args: argparse.Namespace) -> None:
         command.extend(["--network-proxy", args.network_proxy])
     for forward in args.host_loopback_forward:
         command.extend(["--host-loopback-forward", forward])
+    if args.outcome_report is not None:
+        command.extend(["--microvm-report", str(args.outcome_report)])
     if args.cmdline:
         command.extend(["--cmdline", args.cmdline])
     print(f">> {_format_command(command)}")
@@ -248,6 +250,10 @@ def command_run(args: argparse.Namespace) -> None:
 
 def command_sandbox(args: argparse.Namespace) -> None:
     operation = args.sandbox_operation
+    if args.outcome_report is not None and operation not in ("run", "exec"):
+        raise ScriptError(
+            "--outcome-report is only valid for one-shot run or managed exec"
+        )
     if operation in ("run", "provision"):
         if (args.net is None) != (args.network_profile is None):
             raise ScriptError("--net and --network-profile must be specified together")
@@ -295,6 +301,8 @@ def command_sandbox(args: argparse.Namespace) -> None:
     if operation == "exec":
         if args.state_dir is None:
             raise ScriptError("sandbox exec requires --state-dir")
+        if args.outcome_report is not None:
+            sandbox_lifecycle.validate_outcome_destination(args.outcome_report)
         result = sandbox_lifecycle.exec_workload(
             args.state_dir,
             (args.entrypoint, *args.sandbox_arg),
@@ -305,6 +313,8 @@ def command_sandbox(args: argparse.Namespace) -> None:
         sys.stdout.buffer.flush()
         sys.stderr.buffer.write(result.stderr)
         sys.stderr.buffer.flush()
+        if args.outcome_report is not None:
+            sandbox_lifecycle.write_exec_outcome(args.outcome_report, result)
         raise SystemExit(result.returncode)
     if operation == "stop":
         if args.state_dir is None:
@@ -361,6 +371,8 @@ def command_sandbox(args: argparse.Namespace) -> None:
         command.extend(["--network-proxy", args.network_proxy])
     for forward in args.host_loopback_forward:
         command.extend(["--host-loopback-forward", forward])
+    if args.outcome_report is not None:
+        command.extend(["--microvm-report", str(args.outcome_report)])
     print(f">> {_format_command(command)}")
     if not args.dry_run:
         raise SystemExit(subprocess.run(command).returncode)
@@ -479,6 +491,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--host-loopback", choices=("allow", "deny"))
     run.add_argument("--network-proxy", metavar="IPV4:TCP-PORT")
     run.add_argument("--host-loopback-forward", action="append", default=[])
+    run.add_argument(
+        "--outcome-report",
+        type=Path,
+        help="write a bounded local JSON outcome report",
+    )
     run.add_argument("--cmdline", default="")
     run.add_argument("--restore-snapshot", type=Path)
     run.add_argument("--restore-processors", type=int, choices=(1, 2, 4, 8))
@@ -554,6 +571,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sandbox.add_argument("--host-loopback", choices=("allow", "deny"))
     sandbox.add_argument("--network-proxy", metavar="IPV4:TCP-PORT")
     sandbox.add_argument("--host-loopback-forward", action="append", default=[])
+    sandbox.add_argument(
+        "--outcome-report",
+        type=Path,
+        help="write a bounded local JSON outcome report for run or exec",
+    )
     sandbox.add_argument("--cmdline", default="")
     sandbox.add_argument("--dry-run", action="store_true")
     sandbox.set_defaults(handler=command_sandbox)

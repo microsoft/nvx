@@ -15,7 +15,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from typing import cast
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
@@ -266,6 +266,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(execute.sandbox_arg, ["-c", "echo managed"])
         self.assertEqual(execute.exec_timeout_ms, 5000)
 
+        report = nvx.parse_args(
+            [
+                "sandbox",
+                "exec",
+                "--state-dir",
+                "state",
+                "--outcome-report",
+                "exec-outcome.json",
+            ]
+        )
+        self.assertEqual(report.outcome_report, Path("exec-outcome.json"))
+
     def test_network_requires_explicit_portable_profile(self):
         args = nvx.parse_args(
             [
@@ -301,6 +313,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             args.mount_deny,
             [Path("share/secrets"), Path("share/private")],
+        )
+
+    def test_run_forwards_bounded_outcome_report(self):
+        args = nvx.parse_args(["run", "--outcome-report", "outcome.json", "--dry-run"])
+        with (
+            patch.object(nvx, "require_file", return_value=Path("artifact")),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+
+        command = format_command.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--microvm-report") + 1],
+            "outcome.json",
         )
 
     def test_run_exposes_restore_readiness(self):
@@ -791,6 +819,152 @@ class SandboxTests(unittest.TestCase):
 
             sandbox_lifecycle.deprovision(state)
             self.assertFalse(state.exists())
+
+    def test_managed_lifecycle_start_requests_openvmm_outcome(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer_path = root / "distro.erofs"
+            scratch_path = root / "scratch.ext4"
+            layer_path.write_bytes(b"layer")
+            scratch_path.write_bytes(b"scratch")
+            state = root / "state"
+            sandbox_lifecycle.provision(
+                state,
+                sandbox.SandboxLaunch(
+                    layers=(
+                        sandbox.SandboxLayer(
+                            role="distro",
+                            path=layer_path,
+                            uuid="11111111-1111-1111-1111-111111111111",
+                        ),
+                    ),
+                    scratch=scratch_path,
+                ),
+                hypervisor="whp",
+                memory_mib=256,
+                net=None,
+                network_profile=None,
+                network_egress=None,
+                network_ingress=None,
+                network_egress_allow=(),
+                network_egress_deny=(),
+                host_loopback=None,
+                network_proxy=None,
+                host_loopback_forward=(),
+                cmdline="quiet",
+            )
+            process = MagicMock()
+            process.pid = 123
+            process.stdin = io.BytesIO()
+            session = MagicMock()
+            context = MagicMock()
+            context.__enter__.return_value = session
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(
+                    sandbox_lifecycle,
+                    "require_file",
+                    side_effect=require,
+                ),
+                patch.object(
+                    sandbox_lifecycle.subprocess,
+                    "Popen",
+                    return_value=process,
+                ) as popen,
+                patch.object(
+                    sandbox_lifecycle.ControlSession,
+                    "connect",
+                    return_value=context,
+                ),
+            ):
+                sandbox_lifecycle.start(state, 10)
+
+            command = popen.call_args.args[0]
+            self.assertEqual(
+                Path(command[command.index("--microvm-report") + 1]),
+                state / sandbox_lifecycle.OUTCOME_NAME,
+            )
+            session.ping.assert_called_once_with(10)
+
+    def test_managed_exec_outcome_excludes_workload_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "outcome.json"
+            sandbox_lifecycle.write_exec_outcome(
+                path,
+                sandbox_lifecycle.ManagedExecResult(
+                    124,
+                    "timeout",
+                    b"sensitive stdout",
+                    b"sensitive stderr",
+                ),
+            )
+            outcome = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(outcome["schema_version"], 1)
+        self.assertEqual(
+            outcome["outcome"],
+            {
+                "operation": "exec",
+                "category": "timeout",
+                "status_code": 124,
+            },
+        )
+        self.assertEqual(len(outcome["operation_id"]), 32)
+        encoded = json.dumps(outcome)
+        self.assertNotIn("stdout", encoded)
+        self.assertNotIn("stderr", encoded)
+        self.assertNotIn("sensitive", encoded)
+
+    def test_managed_exec_outcome_does_not_overwrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "outcome.json"
+            path.write_text("existing", encoding="utf-8")
+            with self.assertRaisesRegex(common.ScriptError, "already exists"):
+                sandbox_lifecycle.write_exec_outcome(
+                    path,
+                    sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b""),
+                )
+
+    def test_managed_stop_cleans_runtime_state_if_report_is_invalid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            sandbox_lifecycle._write_json(
+                state / sandbox_lifecycle.RUNTIME_NAME,
+                {
+                    "format": sandbox_lifecycle.STATE_FORMAT,
+                    "pid": 123,
+                    "control_endpoint": "control.sock",
+                },
+            )
+            (state / sandbox_lifecycle.CAPABILITY_NAME).write_bytes(b"x" * 32)
+            (state / sandbox_lifecycle.CONTROL_SOCKET_NAME).touch()
+            (state / sandbox_lifecycle.OUTCOME_NAME).write_text(
+                "invalid",
+                encoding="utf-8",
+            )
+            context = MagicMock()
+            with (
+                patch.object(
+                    sandbox_lifecycle,
+                    "_process_running",
+                    side_effect=(True, False),
+                ),
+                patch.object(
+                    sandbox_lifecycle.ControlSession,
+                    "connect",
+                    return_value=context,
+                ),
+                self.assertRaisesRegex(common.ScriptError, "outcome report"),
+            ):
+                sandbox_lifecycle.stop(state, 10)
+
+            self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
+            self.assertFalse((state / sandbox_lifecycle.CAPABILITY_NAME).exists())
+            self.assertFalse((state / sandbox_lifecycle.CONTROL_SOCKET_NAME).exists())
+            self.assertTrue((state / sandbox_lifecycle.OUTCOME_NAME).exists())
 
     def test_launch_contract_rejects_disk_option_delimiters(self):
         with tempfile.TemporaryDirectory() as temporary:

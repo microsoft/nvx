@@ -17,7 +17,11 @@ from .common import (
     openvmm_binary_path,
     require_file,
 )
-from .control_session import ControlSession, ManagedExecResult
+from .control_session import (
+    MANAGED_EXIT_CATEGORIES,
+    ControlSession,
+    ManagedExecResult,
+)
 from .sandbox import SandboxLaunch, SandboxLayer
 
 CONFIG_NAME = "config.json"
@@ -25,7 +29,9 @@ RUNTIME_NAME = "runtime.json"
 CAPABILITY_NAME = "control.capability"
 LOG_NAME = "openvmm.log"
 CONTROL_SOCKET_NAME = "control.sock"
+OUTCOME_NAME = "outcome.json"
 STATE_FORMAT = 1
+OUTCOME_SCHEMA_VERSION = 1
 
 
 def _write_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
@@ -52,6 +58,86 @@ def _read_json(path: Path, description: str) -> dict[str, Any]:
     if typed.get("format") != STATE_FORMAT:
         raise ScriptError(f"{description} has an unsupported format: {path}")
     return typed
+
+
+def _outcome_destination(path: Path) -> Path:
+    candidate = path if path.is_absolute() else Path.cwd() / path
+    parent = candidate.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise ScriptError(f"outcome report parent is not a plain directory: {parent}")
+    if not candidate.name:
+        raise ScriptError("outcome report path has no filename")
+    resolved = parent.resolve() / candidate.name
+    if os.path.lexists(resolved):
+        raise ScriptError(f"outcome report already exists: {resolved}")
+    return resolved
+
+
+def validate_outcome_destination(path: Path) -> None:
+    _outcome_destination(path)
+
+
+def _write_new_json(path: Path, value: dict[str, Any]) -> None:
+    resolved = _outcome_destination(path)
+    temporary = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+    except FileExistsError as error:
+        raise ScriptError("failed to reserve an outcome report staging file") from error
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            json.dump(value, output, indent=2, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, resolved)
+        except FileExistsError as error:
+            raise ScriptError(f"outcome report already exists: {resolved}") from error
+        except OSError as error:
+            raise ScriptError(
+                f"failed to publish outcome report: {resolved}"
+            ) from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_openvmm_outcome(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ScriptError(f"failed to read OpenVMM outcome report: {path}") from error
+    if not isinstance(value, dict):
+        raise ScriptError(f"OpenVMM outcome report has an unsupported format: {path}")
+    typed = cast(dict[str, object], value)
+    if typed.get("schema_version") != OUTCOME_SCHEMA_VERSION:
+        raise ScriptError(f"OpenVMM outcome report has an unsupported format: {path}")
+    for name in ("outcome", "network_policy", "teardown"):
+        if not isinstance(typed.get(name), dict):
+            raise ScriptError(
+                f"OpenVMM outcome report has an invalid {name} section: {path}"
+            )
+    return cast(dict[str, Any], typed)
+
+
+def write_exec_outcome(path: Path, result: ManagedExecResult) -> None:
+    if result.category not in MANAGED_EXIT_CATEGORIES:
+        raise ScriptError("managed workload returned an unsupported outcome category")
+    if not -(2**31) <= result.returncode < 2**31:
+        raise ScriptError("managed workload returned an out-of-range status")
+    _write_new_json(
+        path,
+        {
+            "schema_version": OUTCOME_SCHEMA_VERSION,
+            "operation_id": secrets.token_hex(16),
+            "outcome": {
+                "operation": "exec",
+                "category": result.category,
+                "status_code": result.returncode,
+            },
+        },
+    )
 
 
 def _prepare_state_directory(path: Path, *, create: bool) -> Path:
@@ -244,6 +330,8 @@ def start(state_path: Path, timeout: float) -> None:
     )
     if (state_dir / RUNTIME_NAME).exists():
         raise ScriptError("sandbox is already running or has stale runtime state")
+    outcome_path = state_dir / OUTCOME_NAME
+    outcome_path.unlink(missing_ok=True)
     launch = _deserialize_launch(config)
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
@@ -277,6 +365,8 @@ def start(state_path: Path, timeout: float) -> None:
         "--microvm-control-console",
         f"listen={endpoint_value}",
         "--microvm-control-auth-stdin",
+        "--microvm-report",
+        os.fspath(outcome_path),
     ]
     net = config.get("net")
     network_profile = config.get("network_profile")
@@ -366,7 +456,7 @@ def exec_workload(
         )
 
 
-def stop(state_path: Path, timeout: float) -> None:
+def stop(state_path: Path, timeout: float) -> dict[str, Any]:
     state_dir = _prepare_state_directory(state_path, create=False)
     runtime, capability = _load_running(state_dir)
     with ControlSession.connect(_endpoint(runtime), capability, timeout) as session:
@@ -377,9 +467,13 @@ def stop(state_path: Path, timeout: float) -> None:
         if time.monotonic() >= deadline:
             raise TimeoutError("OpenVMM did not terminate after managed stop")
         time.sleep(0.025)
-    (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
-    (state_dir / CAPABILITY_NAME).unlink(missing_ok=True)
-    (state_dir / CONTROL_SOCKET_NAME).unlink(missing_ok=True)
+    try:
+        outcome = _read_openvmm_outcome(state_dir / OUTCOME_NAME)
+    finally:
+        (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
+        (state_dir / CAPABILITY_NAME).unlink(missing_ok=True)
+        (state_dir / CONTROL_SOCKET_NAME).unlink(missing_ok=True)
+    return outcome
 
 
 def deprovision(state_path: Path) -> None:
@@ -399,6 +493,7 @@ def deprovision(state_path: Path) -> None:
         RUNTIME_NAME,
         CAPABILITY_NAME,
         CONTROL_SOCKET_NAME,
+        OUTCOME_NAME,
         LOG_NAME,
         CONFIG_NAME,
     ):
