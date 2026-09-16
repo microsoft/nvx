@@ -505,6 +505,27 @@ function Get-RequiredCommand {
     return $command.Source
 }
 
+function Get-WinGetCommand {
+    $command = Get-Command winget.exe -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $packages = @(Get-AppxPackage `
+            -AllUsers `
+            -Name Microsoft.DesktopAppInstaller `
+            -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending)
+    foreach ($package in $packages) {
+        $path = Join-Path $package.InstallLocation "winget.exe"
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return $path
+        }
+    }
+    return $null
+}
+
 function Get-PythonCommand {
     param([Parameter()][switch]$AllowMissing)
     $commands = @(Get-Command python.exe -All -ErrorAction SilentlyContinue |
@@ -555,10 +576,9 @@ function Assert-Administrator {
 }
 
 function Install-WinGet {
-    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue |
-    Select-Object -First 1
+    $winget = Get-WinGetCommand
     if ($null -ne $winget) {
-        return $winget.Source
+        return $winget
     }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -572,8 +592,12 @@ function Install-WinGet {
         -Confirm:$false
     Import-Module Microsoft.WinGet.Client -Force
     Repair-WinGetPackageManager -AllUsers -Force -Latest
+    $winget = Get-WinGetCommand
+    if ($null -eq $winget) {
+        throw "required command not found: winget.exe"
+    }
     Update-ProcessPath
-    return (Get-RequiredCommand "winget.exe")
+    return $winget
 }
 
 function Install-WinGetPackage {
