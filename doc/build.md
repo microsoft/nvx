@@ -83,6 +83,30 @@ control-session protocol 1, and contract
 `nvx-microvm-v2-control-v1`; product guest-agent metadata is intentionally not
 part of this platform manifest.
 
+A binary release directory has this layout:
+
+```text
+bin/openvmm[.exe]
+guest/vmlinux
+guest/vmlinux.config
+guest/initramfs.cpio.gz
+guest/initramfs.cpio.gz.packages.json
+provenance/openvmm.provenance.json
+provenance/vmlinux.provenance.json
+licenses/LICENSE-OPENVMM
+licenses/COPYING-LINUX
+LICENSE
+README.md
+SOURCE-MANIFEST.json
+THIRD_PARTY_NOTICES.md
+SHA256SUMS
+```
+
+Packages built with `--include-source` additionally contain `source/`.
+`SHA256SUMS` has sorted `SHA256  relative/path` entries using POSIX separators
+for every packaged file, including `SOURCE-MANIFEST.json`, except
+`SHA256SUMS` itself.
+
 ## Building the packaged Linux source
 
 The Linux corresponding-source archive contains the patched
