@@ -10,7 +10,7 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from .common import ScriptError
 
@@ -108,6 +108,10 @@ if os.name == "nt":
         ctypes.c_void_p,
     ]
     _peek_named_pipe.restype = ctypes.c_int
+else:
+    ctypes = cast(Any, None)
+    msvcrt = cast(Any, None)
+    _peek_named_pipe = cast(Any, None)
 
 
 class _NamedPipeStream:

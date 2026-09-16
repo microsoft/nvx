@@ -4,7 +4,7 @@ set -eu
 uid=$(id -u)
 gid=$(id -g)
 [ "$uid" -ne 0 ] && [ "$gid" -ne 0 ] || exit 80
-if : >/etc/nvx-identity-probe 2>/dev/null; then
+if touch /etc/nvx-identity-probe >/dev/null 2>&1; then
     rm -f /etc/nvx-identity-probe
     exit 81
 fi
