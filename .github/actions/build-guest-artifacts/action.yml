@@ -36,7 +36,7 @@ runs:
       env:
         KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
         ALPINE_VERSION: ${{ steps.guest-versions.outputs.alpine-version }}
-        KERNEL_INPUT_HASH: ${{ hashFiles('kernel/config-microvm', 'kernel/patches/**') }}
+        KERNEL_INPUT_HASH: ${{ hashFiles('kernel/config-microvm', 'kernel/patches/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py') }}
         ALPINE_INPUT_HASH: ${{ hashFiles('alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py') }}
       run: |
         set -euo pipefail
@@ -52,6 +52,7 @@ runs:
         path: |
           build/vmlinux
           build/vmlinux.config
+          build/vmlinux.provenance.json
         key: ${{ steps.guest-cache-keys.outputs.kernel }}
         enableCrossOsArchive: true
 
@@ -82,6 +83,7 @@ runs:
         path: |
           build/vmlinux
           build/vmlinux.config
+          build/vmlinux.provenance.json
         key: ${{ steps.guest-cache-keys.outputs.kernel }}
         enableCrossOsArchive: true
 

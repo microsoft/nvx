@@ -26,6 +26,9 @@ python3 scripts/nvx.py performance gate --help
 | `build-guest` | Build the Linux kernel and Alpine initramfs. |
 | `build-kernel` | Build the pinned and patched Linux kernel natively. |
 | `build-initramfs` | Build the Alpine initramfs natively. |
+| `build-agent-initramfs` | Build the explicit broker-ttrpc PID-1 initramfs. |
+| `stage-agent` | Verify and stage a pinned static NVX agent input. |
+| `verify-agent-initramfs` | Recheck a broker image, full-rootfs metadata, and embedded agent identity. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
@@ -40,6 +43,8 @@ python3 scripts/nvx.py performance gate --help
 | `collect-alpine-sources` | Collect exact Alpine recipes and upstream sources. |
 | `create-linux-source-archive` | Create a Linux corresponding-source archive. |
 | `package` | Stage a binary distribution. |
+| `archive-release` | Create a release archive with canonical safe modes. |
+| `verify-broker-live-gate` | Verify an externally authenticated live broker proof against a package. |
 | `verify` | Verify source and submodule inputs. |
 
 ## Initialization and verification
@@ -75,11 +80,12 @@ See [Setup](setup.md) for host prerequisites.
 ### `build-guest`
 
 ```text
-python3 scripts/nvx.py build-guest [--native]
+python3 scripts/nvx.py build-guest [--native] [--with-agent]
 ```
 
 By default, builds the guest kernel and initramfs with Docker. `--native`
-builds both artifacts directly on Linux instead.
+builds both simple-profile artifacts directly on Linux. `--with-agent` additionally
+requires the staged agent and produces the separate agent initramfs.
 
 ### `build-kernel`
 
@@ -97,6 +103,18 @@ python3 scripts/nvx.py build-initramfs
 
 Builds the Alpine initramfs directly on Linux.
 
+### `build-agent-initramfs`
+
+```text
+python3 scripts/nvx.py build-agent-initramfs [--native]
+```
+
+Builds `build/initramfs-agent.cpio.gz` through Docker, or directly on Linux
+with `--native`. The command requires a previously verified `stage-agent`
+input. Native construction uses `~/.cache/nvx/native-work/broker-ttrpc` by
+default; set `NVX_NATIVE_WORK_DIR` to another native Linux filesystem. DrvFS
+and other mode-losing work roots are rejected before extraction.
+
 ### `build-openvmm`
 
 ```text
@@ -110,7 +128,7 @@ already restored.
 ### `build`
 
 ```text
-python3 scripts/nvx.py build [--native] [--skip-restore]
+python3 scripts/nvx.py build [--native] [--with-agent] [--skip-restore]
 ```
 
 Runs `build-guest` followed by `build-openvmm`. The two options have the same
@@ -154,15 +172,21 @@ it, every scenario runs. The command requires `build/vmlinux`,
 python3 scripts/nvx.py download
     [--repository OWNER/REPOSITORY]
     [--hypervisor {auto,whp,kvm,mshv}]
+    --transport {simple,broker-ttrpc}
+    [--manifest-sha256 SHA256]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `--repository OWNER/REPOSITORY` | `nanvix/nvx` | GitHub repository from which to download the latest release. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the release platform. `auto` chooses WHP on Windows and KVM on Linux. |
+| `--transport {simple,broker-ttrpc}` | required | Select an explicit package profile. |
+| `--manifest-sha256 SHA256` | none | Independently trusted runtime-manifest digest; required for broker-ttrpc. |
 
 Windows release downloads support WHP. Linux release downloads support KVM
 and MSHV. Set `GH_TOKEN` when the selected repository requires authentication.
+Current development releases publish only the simple profile; broker download
+is available only after a separately live-gated package is published.
 
 ### `run`
 
@@ -207,41 +231,80 @@ networking, and virtio-fs examples.
 
 ### `sandbox`
 
+The default `simple` transport supports one-shot execution and a persistent
+managed lifecycle:
+
 ```text
-python3 scripts/nvx.py sandbox
+python3 scripts/nvx.py sandbox [run|provision|start|exec|stop|deprovision]
+    [--transport simple]
     --layer ROLE,PATH,EROFS_UUID [--layer ...]
     --scratch PATH
+    [--state-dir PATH]
     [--entrypoint PATH]
-    [--arg VALUE]...
+    [--arg VALUE ...]
     [--hostname NAME]
+    [--workload-user UID:GID]
     [--memory-max BYTES]
     [--pids-max COUNT]
     [--memory-mib MIB]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--net IPV4/PREFIX]
     [--network-profile {portable}]
+    [--network-egress {allow,deny}]
+    [--network-ingress {allow,deny}]
+    [--network-egress-allow RULE ...]
+    [--network-egress-deny RULE ...]
+    [--host-loopback {allow,deny}]
+    [--network-proxy IPV4:TCP-PORT]
+    [--host-loopback-forward RULE ...]
+    [--outcome-report PATH]
     [--cmdline TEXT]
     [--dry-run]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--layer ROLE,PATH,EROFS_UUID` | required | Attach a `distro`, `runtime`, or `custom` EROFS layer. Repeat once per distinct role. |
-| `--scratch PATH` | required | Attach a preformatted ext4 scratch image as the writable overlay. |
-| `--entrypoint PATH` | `/bin/sh` | Select an absolute workload entrypoint without whitespace. |
-| `--arg VALUE` | none | Append one whitespace-free entrypoint argument. Repeat to pass multiple arguments. |
-| `--hostname NAME` | `nvx-sandbox` | Set the workload UTS hostname. |
-| `--memory-max BYTES` | none | Set the workload cgroup memory limit. |
-| `--pids-max COUNT` | none | Set the workload cgroup process limit. |
+| operation | `run` | Run once, or provision/start/exec/stop/deprovision a managed simple-profile sandbox. |
+| `--transport {simple,broker-ttrpc}` | `simple` | Select the generic simple profile or the authenticated reviewed guest agent. Broker transport supports only one-shot `run`. |
+| `--layer ROLE,PATH,EROFS_UUID` | required for simple run/provision | Attach a `distro`, `runtime`, or `custom` EROFS layer with its authenticated filesystem identity. |
+| `--scratch PATH` | required for run/provision | Attach a preformatted ext4 scratch image as the writable overlay. |
+| `--state-dir PATH` | none | Persist managed simple-profile configuration and runtime state. |
+| `--entrypoint PATH` | `/bin/sh` | Select the simple-profile workload entrypoint, or the managed `exec` program. |
+| `--arg VALUE` | none | Append a simple-profile workload argument. |
+| `--hostname NAME` | `nvx-sandbox` | Select the simple-profile guest hostname. |
+| `--workload-user UID:GID` | `65534:65534` | Select the fixed non-root simple-profile workload identity. |
+| `--memory-max BYTES` | none | Set the simple-profile workload cgroup memory limit. |
+| `--pids-max COUNT` | none | Set the simple-profile workload process limit. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
-| `--cmdline TEXT` | empty | Append non-sandbox kernel parameters; `nvx_*` and `tsc=` tokens are reserved. |
+| policy options | none | Apply the generic network egress/ingress, host-loopback, proxy, and forwarding policy controls. |
+| `--outcome-report PATH` | none | Write the bounded one-shot or managed-exec outcome report. |
+| `--cmdline TEXT` | empty | Append kernel parameters. Simple reserves `nvx_*`; broker also rejects init, console, virtio discovery, virtfs, and network parameters owned by the host profile. |
 | `--dry-run` | off | Print the generated OpenVMM microVM command without running it. |
 
-See [Run](run.md) for artifact preparation, the security boundary, and current
-snapshot/configuration limitations.
+The broker form omits layer UUIDs because authenticated UUID/GPT identity is
+supplied later through ACI-04 Bootstrap:
+
+```text
+python3 scripts/nvx.py sandbox run
+    --transport broker-ttrpc
+    --layer ROLE,PATH [--layer ...]
+    --scratch PATH
+    --control-socket PATH
+    --boot-console-socket PATH
+    --control-auth-handle FD
+    [common memory, hypervisor, networking, policy, report, and cmdline options]
+```
+
+`--control-socket`, `--boot-console-socket`, and `--control-auth-handle` are
+required for broker launch. The handle is the readable inherited ACI-04
+capability pipe redirected to OpenVMM stdin with
+`--microvm-control-auth-stdin`; its bytes never enter arguments, environment
+variables, or logs. See [Run](run.md) for artifact preparation and security
+boundaries. Live broker launch is Linux-only; `--dry-run` is available on
+other hosts.
 
 ## Benchmarking
 
@@ -368,12 +431,12 @@ more than one metric.
 
 ### `collect-sources`
 
-```console
-python3 scripts/nvx.py collect-sources
+```text
+python3 scripts/nvx.py collect-sources --transport {simple,broker-ttrpc}
 ```
 
 Materializes the verified Linux and Alpine source artifacts needed for a
-source-inclusive release.
+source-inclusive release for the selected profile.
 
 ### `collect-alpine-sources`
 
@@ -408,7 +471,9 @@ configuration and output paths.
 python3 scripts/nvx.py package
     [--version VERSION]
     [--destination PATH]
+    --transport {simple,broker-ttrpc}
     (--include-source | --binary-only)
+    [--manifest-digest-output PATH]
     [--force]
 ```
 
@@ -416,10 +481,39 @@ python3 scripts/nvx.py package
 | --- | --- |
 | `--version VERSION` | Override the packaged version. |
 | `--destination PATH` | Override the staging destination. |
+| `--transport {simple,broker-ttrpc}` | Select the explicit release profile. |
 | `--include-source` | Include the corresponding source artifacts in the package. |
 | `--binary-only` | Stage binaries only; publish corresponding source separately. |
+| `--manifest-digest-output PATH` | Write the broker manifest digest outside the bundle for independently trusted delivery. |
 | `--force` | Replace an existing staging destination. |
 
 Exactly one of `--include-source` and `--binary-only` is required. See
 [Package and source delivery](distribution.md) for release procedures and
 source-publication requirements.
+
+### `archive-release`
+
+```text
+python3 scripts/nvx.py archive-release --bundle PATH --output PATH
+```
+
+Creates a `.tar.gz` or `.zip` with one package root and canonical `0755`
+executable/directory or `0644` data modes. It rejects special files and
+verifies `SHA256SUMS` before writing.
+
+### `verify-broker-live-gate`
+
+```text
+python3 scripts/nvx.py verify-broker-live-gate
+    --archive PATH
+    --archive-sha256 SHA256
+    --manifest-digest PATH
+    --proof PATH
+    --proof-sha256 SHA256
+    --platform PLATFORM
+```
+
+Authenticates the external proof by its separately trusted digest, checks the
+publisher-computed exact archive digest, validates the bounded archive and
+complete package, and requires successful control authentication, GetGuestInfo
+self-hash, Bootstrap, WaitReady, and Shutdown results.

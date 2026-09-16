@@ -31,7 +31,7 @@ Requires [KVM configured with read/write access to `/dev/kvm`](doc/setup.md#linu
 
 ```bash
 git clone https://github.com/nanvix/nvx.git && cd nvx
-python3 scripts/nvx.py download
+python3 scripts/nvx.py download --transport simple
 python3 scripts/nvx.py run
 ```
 
@@ -41,7 +41,7 @@ Requires [MSHV configured with read/write access to `/dev/mshv`](doc/setup.md#li
 
 ```bash
 git clone https://github.com/nanvix/nvx.git && cd nvx
-python3 scripts/nvx.py download --hypervisor mshv
+python3 scripts/nvx.py download --hypervisor mshv --transport simple
 python3 scripts/nvx.py run --hypervisor mshv
 ```
 
@@ -51,7 +51,7 @@ Requires [Windows Hypervisor Platform enabled](doc/setup.md#windows--whp).
 
 ```powershell
 git clone https://github.com/nanvix/nvx.git; Set-Location nvx
-python scripts\nvx.py download
+python scripts\nvx.py download --transport simple
 python scripts\nvx.py run
 ```
 

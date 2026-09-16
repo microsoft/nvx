@@ -41,28 +41,54 @@ def parse_workload_identity(value: str) -> tuple[int, int]:
     return uid, gid
 
 
+CONTROL_AUTH_TIMEOUT_MS = 5_000
+MINIMUM_CONTROL_AUTH_FD = 3  # POSIX descriptors 0-2 are standard streams.
+HOST_OWNED_KERNEL_PARAMETERS = frozenset(
+    {
+        "console",
+        "earlycon",
+        "init",
+        "panic",
+        "rdinit",
+        "reboot",
+        "virtfs_dir",
+        "virtfs_mode",
+        "virtfs_tag",
+        "virtnet_dns",
+        "virtnet_gw",
+        "virtnet_ip",
+        "virtnet_mask",
+        "virtio_mmio.device",
+    }
+)
+
+
 @dataclass(frozen=True)
 class SandboxLayer:
     role: str
     path: Path
-    uuid: str
+    uuid: str | None = None
 
     @classmethod
     def parse(cls, value: str) -> SandboxLayer:
         fields = value.split(",")
-        if len(fields) != 3:
-            raise ScriptError("--layer must be ROLE,PATH,EROFS_UUID")
-        role, raw_path, raw_uuid = fields
+        if len(fields) not in (2, 3):
+            raise ScriptError("--layer must be ROLE,PATH[,EROFS_UUID]")
+        role, raw_path = fields[:2]
         if role not in LAYER_ROLES:
             raise ScriptError(
                 f"unsupported layer role {role!r}; choose {', '.join(LAYER_ROLES)}"
             )
         if not raw_path:
             raise ScriptError(f"{role} layer path is empty")
-        try:
-            uuid = str(UUID(raw_uuid))
-        except ValueError as error:
-            raise ScriptError(f"{role} layer UUID is invalid: {raw_uuid!r}") from error
+        uuid = None
+        if len(fields) == 3:
+            try:
+                uuid = str(UUID(fields[2]))
+            except ValueError as error:
+                raise ScriptError(
+                    f"{role} layer UUID is invalid: {fields[2]!r}"
+                ) from error
         return cls(role=role, path=Path(raw_path), uuid=uuid)
 
 
@@ -123,6 +149,23 @@ class SandboxLaunch:
         by_role = {layer.role: layer for layer in self.layers}
         return tuple(by_role[role] for role in LAYER_ROLES if role in by_role)
 
+    def validate_simple(self) -> SandboxLaunch:
+        missing = [layer.role for layer in self.layers if layer.uuid is None]
+        if missing:
+            raise ScriptError(
+                "simple sandbox layers require EROFS UUIDs: " + ", ".join(missing)
+            )
+        return self
+
+    def validate_broker(self) -> SandboxLaunch:
+        unexpected = [layer.role for layer in self.layers if layer.uuid is not None]
+        if unexpected:
+            raise ScriptError(
+                "broker-ttrpc sandbox layers must not include EROFS UUIDs: "
+                + ", ".join(unexpected)
+            )
+        return self
+
     def openvmm_arguments(self) -> list[str]:
         arguments = ["--machine", "microvm"]
         for layer in self.ordered_layers():
@@ -142,6 +185,50 @@ class SandboxLaunch:
         )
         return arguments
 
+    def broker_openvmm_arguments(
+        self,
+        control_socket: Path,
+        boot_console_socket: Path,
+        control_auth_handle: int,
+    ) -> list[str]:
+        for label, path in (
+            ("control", control_socket),
+            ("boot console", boot_console_socket),
+        ):
+            if not path.is_absolute():
+                raise ScriptError(f"{label} socket path must be absolute")
+            if any(character in os.fspath(path) for character in ",;\0\r\n"):
+                raise ScriptError(f"{label} socket path contains a reserved character")
+        if control_auth_handle < MINIMUM_CONTROL_AUTH_FD:
+            raise ScriptError(
+                "control authentication handle must be an inherited pipe FD"
+            )
+        arguments = [
+            "--machine",
+            "microvm",
+            "--virtio-console",
+            f"listen={boot_console_socket}",
+            "--microvm-control-console",
+            f"listen={control_socket}",
+            "--microvm-control-auth-stdin",
+            "--microvm-control-auth-timeout-ms",
+            str(CONTROL_AUTH_TIMEOUT_MS),
+        ]
+        for layer in self.ordered_layers():
+            arguments.extend(
+                (
+                    "--microvm-sandbox-block",
+                    f"{layer.role}:file:{os.fspath(layer.path)},ro",
+                )
+            )
+        arguments.extend(
+            (
+                "--microvm-sandbox-block",
+                f"scratch:file:{os.fspath(self.scratch)}",
+            )
+        )
+        return arguments
+
     def kernel_command_line(self, user_command_line: str = "") -> str:
         if "\0" in user_command_line:
             raise ScriptError("kernel command line contains an embedded NUL")
@@ -152,6 +239,8 @@ class SandboxLaunch:
                 )
         tokens = [user_command_line.strip(), "nvx_sandbox=1"]
         for layer in self.ordered_layers():
+            if layer.uuid is None:
+                raise ScriptError(f"simple {layer.role} layer requires an EROFS UUID")
             tokens.append(
                 "nvx_layer="
                 f"{layer.role},0x{BLOCK_MMIO_BASES[layer.role]:x},{layer.uuid}"
@@ -172,6 +261,24 @@ class SandboxLaunch:
         if len(command_line.encode("utf-8")) + 1 > SANDBOX_COMMAND_LINE_MAX_SIZE:
             raise ScriptError(
                 "sandbox kernel command line exceeds its 1024-byte x86 budget"
+            )
+        return command_line
+
+    def broker_kernel_command_line(self, user_command_line: str = "") -> str:
+        if "\0" in user_command_line:
+            raise ScriptError("kernel command line contains an embedded NUL")
+        for token in user_command_line.split():
+            parameter = token.split("=", maxsplit=1)[0].replace("\\", "").strip("\"'")
+            if (
+                parameter.startswith("nvx_")
+                or parameter in HOST_OWNED_KERNEL_PARAMETERS
+            ):
+                raise ScriptError(f"{parameter} is owned by the sandbox profile")
+        command_line = user_command_line.strip()
+        if len(command_line.encode("utf-8")) + 1 > SANDBOX_COMMAND_LINE_MAX_SIZE:
+            raise ScriptError(
+                "sandbox kernel command line exceeds its "
+                f"{SANDBOX_COMMAND_LINE_MAX_SIZE}-byte x86 budget"
             )
         return command_line
 

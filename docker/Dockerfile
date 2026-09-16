@@ -34,13 +34,27 @@ RUN python3 scripts/nvx.py build-kernel
 FROM base AS initramfs
 RUN python3 scripts/nvx.py build-initramfs
 
+FROM base AS agent-initramfs
+ARG NVX_AGENT_SHA256
+RUN --mount=type=secret,id=nvx-agent,required=true \
+    test -n "${NVX_AGENT_SHA256}" \
+    && python3 scripts/nvx.py stage-agent \
+        --input /run/secrets/nvx-agent \
+        --sha256 "${NVX_AGENT_SHA256}" \
+    && python3 scripts/nvx.py build-agent-initramfs --native
+
 FROM scratch AS kernel-artifacts
 COPY --from=kernel /repo/build/vmlinux /vmlinux
 COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
+COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
 
 FROM scratch AS initramfs-artifacts
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
 COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
+
+FROM scratch AS agent-initramfs-artifacts
+COPY --from=agent-initramfs /repo/build/initramfs-agent.cpio.gz /initramfs-agent.cpio.gz
+COPY --from=agent-initramfs /repo/build/initramfs-agent.cpio.gz.packages.json /initramfs-agent.cpio.gz.packages.json
 
 FROM kernel AS linux-source-archive
 RUN mkdir -p /out \
@@ -51,6 +65,7 @@ RUN mkdir -p /out \
 FROM scratch AS artifacts
 COPY --from=kernel /repo/build/vmlinux /vmlinux
 COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
+COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
 COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
 
