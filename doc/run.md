@@ -84,7 +84,7 @@ If the artifacts are already installed in the repository layout, use
 `openvmm/target/release/openvmm[.exe]`, `build/vmlinux`, and
 `build/initramfs.cpio.gz` instead of the paths above.
 
-Direct OpenVMM launches accept MXC directional network defaults:
+Direct OpenVMM launches accept generic directional network defaults:
 
 ```bash
 ./bin/openvmm \
@@ -104,6 +104,49 @@ Egress defaults to `allow` and ingress defaults to `deny`. With ingress denied,
 responses to guest-initiated connections remain available, while new inbound
 connections do not. The portable profile supports egress `allow` or `deny` but
 rejects ingress `allow` before the workload starts.
+
+For destination and port rules, select an explicit default and repeat generic
+allow/deny options:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --hypervisor kvm \
+  --memory 128M \
+  --kernel guest/vmlinux \
+  --initrd guest/initramfs.cpio.gz \
+  --net 10.0.0.2/24 \
+  --network-profile portable \
+  --network-egress deny \
+  --network-egress-allow 140.82.112.0/20:tcp:443 \
+  --network-egress-deny 140.82.114.0/24:tcp:443
+```
+
+Rules match IPv4 addresses or CIDRs and may add one TCP or UDP destination
+port. Deny matches take precedence over allow matches.
+
+Host loopback is separately controlled in both directions:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --hypervisor kvm \
+  --memory 128M \
+  --kernel guest/vmlinux \
+  --initrd guest/initramfs.cpio.gz \
+  --net 10.0.0.2/24 \
+  --network-profile portable \
+  --host-loopback deny \
+  --network-proxy 10.0.0.1:3128
+```
+
+With `deny`, general guest-to-host loopback and every host-to-guest forward are
+blocked, while the exact proxy endpoint remains available. With explicit
+`--host-loopback allow`, repeat
+`--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form to expose
+only selected localhost ports toward the guest.
 
 Most `nvx.py run` options pass through unchanged: `--machine`, `--processors`,
 `--mount`, `--net`, `--network-profile`, `--cmdline`, `--restore-snapshot`,
@@ -200,6 +243,11 @@ Use `ro` for read-only access. The guest target must be an absolute Linux path.
 Host paths containing commas are unsupported. To expose multiple directories,
 place them under one exported host root. A snapshot captured with a mapping
 requires the same canonical host path, target, mode, and filesystem identity.
+A repeatable `--mount-deny HOST_PATH` hides an existing file or directory
+inside that root. Denied names are omitted from directory listings and remain
+inaccessible through `..`, a symlink/junction, or another mount of the same
+virtio-fs device. Unsafe, external, duplicate, overlapping, and nested-mount
+rules are rejected before boot.
 A snapshot captured without a mapping may restore with a new `--mount`; after
 resume, mount it explicitly inside the guest because the initramfs hook has
 already completed:
@@ -220,6 +268,7 @@ python3 scripts/nvx.py sandbox \
   --layer runtime,/var/lib/nvx/runtime.erofs,22222222-2222-2222-2222-222222222222 \
   --scratch /var/lib/nvx/scratch.ext4 \
   --entrypoint /bin/workload \
+  --workload-user 65534:65534 \
   --arg=--serve
 ```
 
@@ -236,6 +285,50 @@ expose sandbox snapshot capture or restore, the configuration region, or runtime
 Arguments are individual kernel-command-line tokens and therefore cannot
 contain whitespace. The workload enters private mount/PID/UTS namespaces with
 a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
+It always runs as the fixed non-root `UID:GID` selected at VM creation
+(`65534:65534` by default). The guest verifies that exactly one matching user,
+its primary group, and its absolute home directory exist in the assembled
+root; otherwise the workload is never started.
 The outer agent retains the initramfs root; the capability-stripped child
 enters only the assembled root with `chroot`, because Linux cannot
 `pivot_root` away from an initramfs `rootfs`.
+
+For a state-aware sandbox, provision configuration without starting a VM,
+start it once, run multiple workloads in the same warm guest, stop it while
+retaining configuration, and finally deprovision it:
+
+```bash
+python3 scripts/nvx.py sandbox provision \
+  --state-dir /run/user/1000/nvx-example \
+  --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
+  --scratch /var/lib/nvx/scratch.ext4
+python3 scripts/nvx.py sandbox start \
+  --state-dir /run/user/1000/nvx-example
+python3 scripts/nvx.py sandbox exec \
+  --state-dir /run/user/1000/nvx-example \
+  --entrypoint /usr/bin/python3 --arg=/work/agent.py \
+  --outcome-report /run/user/1000/nvx-example-exec.json
+python3 scripts/nvx.py sandbox exec \
+  --state-dir /run/user/1000/nvx-example \
+  --entrypoint /bin/sh --arg=-c --arg='cat /tmp/previous-result'
+python3 scripts/nvx.py sandbox stop \
+  --state-dir /run/user/1000/nvx-example
+python3 scripts/nvx.py sandbox deprovision \
+  --state-dir /run/user/1000/nvx-example
+```
+
+Lifecycle transitions fail closed: `start` rejects an already-running or stale
+runtime record, `exec` and `stop` require a live OpenVMM process, and
+`deprovision` refuses to remove a running sandbox or unknown files. Managed
+workload arguments use the bounded control protocol rather than the kernel
+command line and may contain whitespace. The legacy operation-less `sandbox`
+form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
+request to retain VM state.
+
+`run --outcome-report PATH` and one-shot `sandbox run --outcome-report PATH`
+forward OpenVMM's bounded local JSON report. Managed `sandbox exec` writes only
+the operation, bounded result category, numeric status, and an opaque operation
+ID to its requested report; stdout, stderr, arguments, environment values, and
+credentials remain excluded. `sandbox stop` waits for OpenVMM teardown and
+retains the latest VM-level report as `outcome.json` in the state directory.
+Neither OpenVMM nor NVX uploads these files.

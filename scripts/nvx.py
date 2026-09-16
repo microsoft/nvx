@@ -11,6 +11,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from nvx_tools import sandbox_lifecycle
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
     AlpineBuildConfig,
@@ -48,7 +49,7 @@ from nvx_tools.release import (
     package_release,
     verify_source_tree,
 )
-from nvx_tools.sandbox import SandboxLaunch, SandboxLayer
+from nvx_tools.sandbox import SandboxLaunch, SandboxLayer, parse_workload_identity
 
 DEFAULT_RELEASE_REPOSITORY = "nanvix/nvx"
 HYPERVISORS = ("auto", "whp", "kvm", "mshv")
@@ -220,8 +221,26 @@ def command_run(args: argparse.Namespace) -> None:
         if args.mount.count(",") not in (1, 2):
             raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
         command.extend(["--mount", args.mount])
+    for denied_path in args.mount_deny:
+        command.extend(["--mount-deny", str(denied_path)])
     if args.net is not None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
+    if args.network_egress is not None:
+        command.extend(["--network-egress", args.network_egress])
+    if args.network_ingress is not None:
+        command.extend(["--network-ingress", args.network_ingress])
+    for rule in args.network_egress_allow:
+        command.extend(["--network-egress-allow", rule])
+    for rule in args.network_egress_deny:
+        command.extend(["--network-egress-deny", rule])
+    if args.host_loopback is not None:
+        command.extend(["--host-loopback", args.host_loopback])
+    if args.network_proxy is not None:
+        command.extend(["--network-proxy", args.network_proxy])
+    for forward in args.host_loopback_forward:
+        command.extend(["--host-loopback-forward", forward])
+    if args.outcome_report is not None:
+        command.extend(["--microvm-report", str(args.outcome_report)])
     if args.cmdline:
         command.extend(["--cmdline", args.cmdline])
     print(f">> {_format_command(command)}")
@@ -230,17 +249,89 @@ def command_run(args: argparse.Namespace) -> None:
 
 
 def command_sandbox(args: argparse.Namespace) -> None:
-    if (args.net is None) != (args.network_profile is None):
-        raise ScriptError("--net and --network-profile must be specified together")
-    launch = SandboxLaunch(
-        layers=tuple(args.layer),
-        scratch=args.scratch,
-        entrypoint=args.entrypoint,
-        args=tuple(args.sandbox_arg),
-        hostname=args.hostname,
-        memory_max=args.memory_max,
-        pids_max=args.pids_max,
-    ).validated()
+    operation = args.sandbox_operation
+    if args.outcome_report is not None and operation not in ("run", "exec"):
+        raise ScriptError(
+            "--outcome-report is only valid for one-shot run or managed exec"
+        )
+    if operation in ("run", "provision"):
+        if (args.net is None) != (args.network_profile is None):
+            raise ScriptError("--net and --network-profile must be specified together")
+        if not args.layer or args.scratch is None:
+            raise ScriptError(f"sandbox {operation} requires --layer and --scratch")
+        launch = SandboxLaunch(
+            layers=tuple(args.layer),
+            scratch=args.scratch,
+            entrypoint=args.entrypoint,
+            args=tuple(args.sandbox_arg),
+            hostname=args.hostname,
+            workload_identity=args.workload_user,
+            memory_max=args.memory_max,
+            pids_max=args.pids_max,
+        ).validated()
+    else:
+        launch = None
+
+    if operation == "provision":
+        if args.state_dir is None:
+            raise ScriptError("sandbox provision requires --state-dir")
+        assert launch is not None
+        sandbox_lifecycle.provision(
+            args.state_dir,
+            launch,
+            hypervisor=_hypervisor(args.hypervisor),
+            memory_mib=args.memory_mib,
+            net=args.net,
+            network_profile=args.network_profile,
+            network_egress=args.network_egress,
+            network_ingress=args.network_ingress,
+            network_egress_allow=tuple(args.network_egress_allow),
+            network_egress_deny=tuple(args.network_egress_deny),
+            host_loopback=args.host_loopback,
+            network_proxy=args.network_proxy,
+            host_loopback_forward=tuple(args.host_loopback_forward),
+            cmdline=args.cmdline,
+        )
+        return
+    if operation == "start":
+        if args.state_dir is None:
+            raise ScriptError("sandbox start requires --state-dir")
+        sandbox_lifecycle.start(args.state_dir, args.timeout)
+        return
+    if operation == "exec":
+        if args.state_dir is None:
+            raise ScriptError("sandbox exec requires --state-dir")
+        if args.outcome_report is not None:
+            sandbox_lifecycle.validate_outcome_destination(args.outcome_report)
+        result = sandbox_lifecycle.exec_workload(
+            args.state_dir,
+            (args.entrypoint, *args.sandbox_arg),
+            timeout_ms=args.exec_timeout_ms,
+            response_timeout=args.timeout,
+        )
+        sys.stdout.buffer.write(result.stdout)
+        sys.stdout.buffer.flush()
+        sys.stderr.buffer.write(result.stderr)
+        sys.stderr.buffer.flush()
+        if args.outcome_report is not None:
+            sandbox_lifecycle.write_exec_outcome(args.outcome_report, result)
+        raise SystemExit(result.returncode)
+    if operation == "stop":
+        if args.state_dir is None:
+            raise ScriptError("sandbox stop requires --state-dir")
+        sandbox_lifecycle.stop(args.state_dir, args.timeout)
+        return
+    if operation == "deprovision":
+        if args.state_dir is None:
+            raise ScriptError("sandbox deprovision requires --state-dir")
+        sandbox_lifecycle.deprovision(args.state_dir)
+        return
+    if args.state_dir is not None:
+        raise ScriptError(
+            "one-shot sandbox execution rejects persistent --state-dir settings"
+        )
+    assert operation == "run"
+    assert launch is not None
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
     initrd = require_file(
@@ -250,6 +341,8 @@ def command_sandbox(args: argparse.Namespace) -> None:
     command = [
         str(executable),
         *launch.openvmm_arguments(),
+        "--microvm-lifecycle",
+        "one-shot",
         "--single-process",
         "--hypervisor",
         _hypervisor(args.hypervisor),
@@ -264,6 +357,22 @@ def command_sandbox(args: argparse.Namespace) -> None:
     ]
     if args.net is not None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
+    if args.network_egress is not None:
+        command.extend(["--network-egress", args.network_egress])
+    if args.network_ingress is not None:
+        command.extend(["--network-ingress", args.network_ingress])
+    for rule in args.network_egress_allow:
+        command.extend(["--network-egress-allow", rule])
+    for rule in args.network_egress_deny:
+        command.extend(["--network-egress-deny", rule])
+    if args.host_loopback is not None:
+        command.extend(["--host-loopback", args.host_loopback])
+    if args.network_proxy is not None:
+        command.extend(["--network-proxy", args.network_proxy])
+    for forward in args.host_loopback_forward:
+        command.extend(["--host-loopback-forward", forward])
+    if args.outcome_report is not None:
+        command.extend(["--microvm-report", str(args.outcome_report)])
     print(f">> {_format_command(command)}")
     if not args.dry_run:
         raise SystemExit(subprocess.run(command).returncode)
@@ -372,8 +481,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--memory-capacity-mib", type=int)
     run.add_argument("--processors", type=int, choices=(1, 2, 4, 8), default=1)
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
+    run.add_argument("--mount-deny", action="append", type=Path, default=[])
     run.add_argument("--net", metavar="IPV4/PREFIX")
     run.add_argument("--network-profile", choices=NETWORK_PROFILES)
+    run.add_argument("--network-egress", choices=("allow", "deny"))
+    run.add_argument("--network-ingress", choices=("allow", "deny"))
+    run.add_argument("--network-egress-allow", action="append", default=[])
+    run.add_argument("--network-egress-deny", action="append", default=[])
+    run.add_argument("--host-loopback", choices=("allow", "deny"))
+    run.add_argument("--network-proxy", metavar="IPV4:TCP-PORT")
+    run.add_argument("--host-loopback-forward", action="append", default=[])
+    run.add_argument(
+        "--outcome-report",
+        type=Path,
+        help="write a bounded local JSON outcome report",
+    )
     run.add_argument("--cmdline", default="")
     run.add_argument("--restore-snapshot", type=Path)
     run.add_argument("--restore-processors", type=int, choices=(1, 2, 4, 8))
@@ -384,7 +506,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     sandbox = subparsers.add_parser(
         "sandbox",
-        help="run one workload over EROFS layers and private ext4 scratch",
+        help="run or manage workloads over EROFS layers and private ext4 scratch",
     )
 
     def sandbox_layer(value: str) -> SandboxLayer:
@@ -393,23 +515,67 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         except ScriptError as error:
             raise argparse.ArgumentTypeError(str(error)) from error
 
+    def sandbox_identity(value: str) -> tuple[int, int]:
+        try:
+            return parse_workload_identity(value)
+        except ScriptError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+
+    sandbox.add_argument(
+        "sandbox_operation",
+        nargs="?",
+        choices=("run", "provision", "start", "exec", "stop", "deprovision"),
+        default="run",
+    )
     sandbox.add_argument(
         "--layer",
         action="append",
-        required=True,
+        default=[],
         type=sandbox_layer,
         metavar="ROLE,PATH,EROFS_UUID",
     )
-    sandbox.add_argument("--scratch", required=True, type=Path)
+    sandbox.add_argument("--scratch", type=Path)
+    sandbox.add_argument("--state-dir", type=Path)
     sandbox.add_argument("--entrypoint", default="/bin/sh")
     sandbox.add_argument("--arg", action="append", default=[], dest="sandbox_arg")
     sandbox.add_argument("--hostname", default="nvx-sandbox")
+    sandbox.add_argument(
+        "--workload-user",
+        type=sandbox_identity,
+        default=parse_workload_identity("65534:65534"),
+        metavar="UID:GID",
+        help="fixed non-root workload identity (default: 65534:65534)",
+    )
     sandbox.add_argument("--memory-max", type=int)
     sandbox.add_argument("--pids-max", type=int)
     sandbox.add_argument("--memory-mib", type=int, default=256)
+    sandbox.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="control operation timeout in seconds (default: 60)",
+    )
+    sandbox.add_argument(
+        "--exec-timeout-ms",
+        type=int,
+        default=0,
+        help="guest workload timeout in milliseconds; zero disables it",
+    )
     sandbox.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     sandbox.add_argument("--net", metavar="IPV4/PREFIX")
     sandbox.add_argument("--network-profile", choices=NETWORK_PROFILES)
+    sandbox.add_argument("--network-egress", choices=("allow", "deny"))
+    sandbox.add_argument("--network-ingress", choices=("allow", "deny"))
+    sandbox.add_argument("--network-egress-allow", action="append", default=[])
+    sandbox.add_argument("--network-egress-deny", action="append", default=[])
+    sandbox.add_argument("--host-loopback", choices=("allow", "deny"))
+    sandbox.add_argument("--network-proxy", metavar="IPV4:TCP-PORT")
+    sandbox.add_argument("--host-loopback-forward", action="append", default=[])
+    sandbox.add_argument(
+        "--outcome-report",
+        type=Path,
+        help="write a bounded local JSON outcome report for run or exec",
+    )
     sandbox.add_argument("--cmdline", default="")
     sandbox.add_argument("--dry-run", action="store_true")
     sandbox.set_defaults(handler=command_sandbox)

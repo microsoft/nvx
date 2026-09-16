@@ -97,8 +97,8 @@ All eight fixed address slots are reserved, including the dedicated control
 console at `0xd0007000..0xd0007fff` on IRQ 3 (shared status at `0x3001c`).
 Snapshot-capable builds instantiate the virtio-fs transport even without a host
 attachment so it is discoverable before capture. Other optional devices are
-instantiated only when active; the control slot is reserved but activation is
-currently rejected by the public entry points.
+instantiated only when active. The control slot is activated by an
+authenticated local endpoint on Linux or Windows.
 Every device uses virtio-mmio, is omitted from ACPI, and has packed-ring support
 masked.
 
@@ -111,7 +111,7 @@ masked.
 | `runtime` virtio-blk | `blk:sandbox:runtime` | `0xd0004000..0xd0004fff` | 12 | Optional read-only role |
 | `custom` virtio-blk | `blk:sandbox:custom` | `0xd0005000..0xd0005fff` | 9 | Optional read-only role |
 | `scratch` virtio-blk | `blk:sandbox:scratch` | `0xd0006000..0xd0006fff` | 11 | Required writable final role when blocks are present |
-| Control virtio-console | `console:microvm-control0` | `0xd0007000..0xd0007fff` | 3 | Reserved; authenticated activation not yet available |
+| Control virtio-console | `console:microvm-control0` | `0xd0007000..0xd0007fff` | 3 | Optional authenticated local endpoint |
 
 Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and
@@ -237,13 +237,21 @@ egress policy before externally visible transmission:
 
 - allow only listed IPv4 hosts or CIDRs;
 - allow IPv4 except listed hosts or CIDRs; or
-- allow only exact IPv4 TCP endpoints.
+- allow only exact IPv4 TCP endpoints; or
+- combine canonical IPv4/CIDR allow and deny rules with optional TCP or UDP
+  destination ports and deny precedence.
 
-The modes are mutually exclusive and fail closed for traffic outside the
-selected policy. The snapshot records the profile, network identity, and
+The legacy modes are mutually exclusive. The generic rule mode requires an
+explicit default action and fails closed for malformed or fragmented
+port-specific traffic. The snapshot records the profile, network identity, and
 policy digest. Restore reconstructs a fresh endpoint and requires the profile
 and policy again; native sockets, DNS requests, and flow objects are never
 serialized.
+Host-loopback allow maps the guest gateway to host loopback and may bind
+explicit localhost TCP/UDP forwards into the guest. Deny blocks both general
+gateway socket access and all forwards. One exact gateway TCP proxy endpoint
+may remain available and is bound into the policy digest; live forward sockets
+are not snapshot attachments.
 Capture quiesces the endpoint, drains completion ownership, and requires the
 saved queues to contain no unrepresented RX or TX packets. It then saves the
 queue lifecycle, negotiated features, link state, and endpoint generation.
@@ -262,12 +270,16 @@ transport.
 Read-only mode rejects mutation in the host device before invoking host
 filesystem operations; read-write mode exposes only the supported common host
 contract.
+Denied host paths are canonicalized into a bounded, non-overlapping relative
+set and enforced before HostFs operations. Prefix checks hide complete
+subtrees, while denied root device/inode identities block hard-link, junction,
+and bind-mount aliases. The policy is unchanged by a second guest mount.
 
 The exported directory is external live state, not part of the VM snapshot.
-An active capture saves its exact canonical host path, FUSE negotiation, node
+An active capture saves its exact canonical host path, denied-path set, FUSE negotiation, node
 and handle allocation, aliases, lookup counts, directory snapshots and cookies,
 and the identities needed to reopen objects. Restore requires the same path,
-target, mode, root identity, and reopenable objects. A dormant capture instead
+target, mode, denied-path set, root identity, and reopenable objects. A dormant capture instead
 saves explicit unattached state and may restore with no attachment or bind a
 new HostFs backend. The resumed guest then mounts tag `microvm` explicitly;
 the cold-boot mount hook has already run. Snapshots without this capability

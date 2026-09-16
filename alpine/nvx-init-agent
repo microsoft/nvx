@@ -10,8 +10,10 @@ rootfs=$runtime/rootfs
 
 fatal() {
     echo "NVX-SANDBOX-ERROR: $*" >&2
-    /bin/busybox reboot -f
-    exit 1
+    /sbin/nvx-exit 125
+    while :; do
+        sleep 3600
+    done
 }
 
 cmdline_value() {
@@ -212,6 +214,50 @@ entrypoint=$(cmdline_value nvx_entrypoint || true)
 case "$entrypoint" in /*) ;; *) fatal "entrypoint must be an absolute path" ;; esac
 hostname_value=$(cmdline_value nvx_hostname || true)
 [ -n "$hostname_value" ] || hostname_value=nvx-sandbox
+workload_uid=$(cmdline_value nvx_workload_uid || true)
+workload_gid=$(cmdline_value nvx_workload_gid || true)
+case "$workload_uid" in '' | 0 | *[!0-9]*) fatal "workload UID is unavailable" ;; esac
+case "$workload_gid" in '' | 0 | *[!0-9]*) fatal "workload GID is unavailable" ;; esac
+[ -f "$rootfs/etc/passwd" ] && [ ! -L "$rootfs/etc/passwd" ] ||
+    fatal "workload user database is unavailable"
+[ -f "$rootfs/etc/group" ] && [ ! -L "$rootfs/etc/group" ] ||
+    fatal "workload group database is unavailable"
+workload_record=$(
+    awk -F: -v uid="$workload_uid" '
+        $3 == uid { count++; record = $1 ":" $3 ":" $4 ":" $6 }
+        END { if (count == 1) print record; else exit 1 }
+    ' "$rootfs/etc/passwd"
+) || fatal "configured workload UID is unavailable"
+workload_name=${workload_record%%:*}
+workload_remainder=${workload_record#*:}
+resolved_uid=${workload_remainder%%:*}
+workload_remainder=${workload_remainder#*:}
+resolved_gid=${workload_remainder%%:*}
+workload_home=${workload_remainder#*:}
+[ -n "$workload_name" ] && [ "$workload_home" != "$workload_remainder" ] ||
+    fatal "configured workload user record is invalid"
+[ "$resolved_uid" = "$workload_uid" ] && [ "$resolved_gid" = "$workload_gid" ] ||
+    fatal "configured workload identity does not match the user database"
+awk -F: -v gid="$workload_gid" '$3 == gid { found = 1 } END { exit !found }' \
+    "$rootfs/etc/group" || fatal "configured workload GID is unavailable"
+case "$workload_home" in /*) ;; *) fatal "configured workload home is invalid" ;; esac
+[ -d "$rootfs$workload_home" ] && [ ! -L "$rootfs$workload_home" ] ||
+    fatal "configured workload home is unavailable"
+workload_lifecycle=$(cmdline_value nvx_lifecycle || true)
+[ -n "$workload_lifecycle" ] || workload_lifecycle=one-shot
+case "$workload_lifecycle" in
+    one-shot) ;;
+    managed)
+        control_tty=$(cmdline_value nvx_control_tty || true)
+        [ "$control_tty" = hvc2 ] ||
+            fatal "managed lifecycle requires the dedicated control tty"
+        echo "NVX-SANDBOX-READY: managed layers=$layer_count"
+        exec /sbin/nvx-managed-agent \
+            "/dev/$control_tty" "$rootfs" "$hostname_value" \
+            "$workload_uid" "$workload_gid" "$workload_name" "$workload_home"
+        ;;
+    *) fatal "unsupported workload lifecycle: $workload_lifecycle" ;;
+esac
 
 set -- "$entrypoint"
 # Kernel command-line tokens are deliberately split on spaces.
@@ -228,7 +274,9 @@ barrier=$runtime/container-start
 workload_machine_id=$(tr -d - </proc/sys/kernel/random/uuid)
 printf '%s\n' "$workload_machine_id" >"$runtime/workload-machine-id"
 mkfifo "$barrier"
-/sbin/nvx-container-launch "$barrier" "$rootfs" "$hostname_value" "$@" &
+/sbin/nvx-container-launch \
+    "$barrier" "$rootfs" "$hostname_value" \
+    "$workload_uid" "$workload_gid" "$workload_name" "$workload_home" "$@" &
 container_pid=$!
 if ! echo "$container_pid" >/sys/fs/cgroup/container/cgroup.procs; then
     kill "$container_pid" 2>/dev/null || true

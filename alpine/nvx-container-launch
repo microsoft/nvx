@@ -4,10 +4,16 @@ set -eu
 barrier=$1
 rootfs=$2
 hostname_value=$3
-shift 3
+workload_uid=$4
+workload_gid=$5
+workload_name=$6
+workload_home=$7
+shift 7
 
 IFS= read -r start <"$barrier"
 [ "$start" = start ] || exit 125
 
 exec unshare --mount --pid --uts --fork --kill-child \
-    /sbin/nvx-container-enter "$rootfs" "$hostname_value" "$@"
+    /sbin/nvx-container-enter \
+    "$rootfs" "$hostname_value" "$workload_uid" "$workload_gid" \
+    "$workload_name" "$workload_home" "$@"

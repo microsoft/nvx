@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import queue
+import secrets
 import socket
+import subprocess
 import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any, cast
 
 from .benchmark import (
     BOOT_MARKER,
@@ -34,15 +38,20 @@ from .common import (
     require_file,
     sha256_file,
 )
+from .control_session import ControlSession
 from .openvmm_process import OpenvmmProcess, TcpConsole
 
 MICROVM_TEST_SCENARIOS = (
     "console-exit",
     "console-snapshot",
     "directional-network-policy",
+    "denied-filesystem-paths",
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
+    "host-loopback-policy",
     "lifecycle",
+    "l3-l4-egress-policy",
+    "managed-lifecycle",
     "network-snapshot",
     "restore-memory",
     "restore-processors",
@@ -54,7 +63,9 @@ MICROVM_TEST_SCENARIOS = (
     "smp-snapshot",
     "snapshot-core",
     "snapshot-tiers",
+    "structured-outcome",
     "virtio-net",
+    "workload-identity",
 )
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -68,6 +79,10 @@ DIRECTIONAL_NETWORK_GUEST_IPV4 = "192.0.2.2"
 DIRECTIONAL_NETWORK_GATEWAY_IPV4 = "192.0.2.1"
 DIRECTIONAL_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/24"
 DIRECTIONAL_NETWORK_INGRESS_PORT = 18080
+L3_L4_EGRESS_COMPLETION_MARKER = b"NVX-L3-L4-EGRESS-OK"
+HOST_LOOPBACK_DENY_MARKER = b"NVX-HOST-LOOPBACK-DENY-OK"
+HOST_LOOPBACK_ALLOW_MARKER = b"NVX-HOST-LOOPBACK-ALLOW-OK"
+HOST_LOOPBACK_INGRESS_READY_MARKER = b"NVX-HOST-LOOPBACK-INGRESS-READY"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -83,6 +98,7 @@ ENDPOINT_POLICY = ("10.0.0.9:8443", "192.0.2.7:443", "10.0.0.9:443")
 ENDPOINT_POLICY_BEFORE_MARKER = b"NVX-ENDPOINT-POLICY-BEFORE"
 ENDPOINT_POLICY_AFTER_MARKER = b"NVX-ENDPOINT-POLICY-AFTER"
 FILESYSTEM_READ_ONLY_MARKER = b"NVX-FILESYSTEM-READ-ONLY-OK"
+FILESYSTEM_DENIED_MARKER = b"NVX-DENIED-PATHS-OK"
 FILESYSTEM_DORMANT_BEFORE_MARKER = b"NVX-FILESYSTEM-DORMANT-BEFORE"
 FILESYSTEM_DORMANT_ATTACHED_MARKER = b"NVX-FILESYSTEM-DORMANT-ATTACHED"
 FILESYSTEM_LIVE_BEFORE_MARKER = b"NVX-FILESYSTEM-LIVE-BEFORE"
@@ -93,6 +109,28 @@ NETWORK_AFTER_MARKER = b"NVX-NETWORK-AFTER"
 SCRATCH_PAIRED_POST_MARKER = b"NVX-SCRATCH-PAIRED-POST-OUT"
 SCRATCH_PAIRED_RESTORED_MARKER = b"NVX-SCRATCH-PAIRED-RESTORED"
 SCRATCH_FRESH_POST_MARKER = b"NVX-SCRATCH-FRESH-POST-OUT"
+WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
+OUTCOME_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "instance_id",
+        "backend",
+        "outcome",
+        "network_policy",
+        "teardown",
+    }
+)
+OUTCOME_TEARDOWN_FIELDS = frozenset(
+    {
+        "guest_workload_stopped",
+        "vm_stopped",
+        "openvmm_process_terminated",
+        "virtiofs_released",
+        "network_released",
+        "temporary_storage_removed",
+        "control_channels_closed",
+    }
+)
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> None:
@@ -203,6 +241,63 @@ def _snapshot_core_script(backend: str) -> str:
 
 def _output_lines(output: bytes) -> list[bytes]:
     return [line.removesuffix(b"\r") for line in output.splitlines()]
+
+
+def _read_outcome_report(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"failed to read structured outcome report {path}"
+        ) from error
+    if not isinstance(value, dict):
+        raise RuntimeError("structured outcome report is not an object")
+    raw = cast(dict[str, object], value)
+    if set(raw) != set(OUTCOME_TOP_LEVEL_FIELDS):
+        raise RuntimeError("structured outcome report has unexpected top-level fields")
+    if raw["schema_version"] != 1:
+        raise RuntimeError("structured outcome report has an unsupported version")
+    instance_id = raw["instance_id"]
+    if (
+        not isinstance(instance_id, str)
+        or len(instance_id) != 32
+        or any(character not in "0123456789abcdef" for character in instance_id)
+    ):
+        raise RuntimeError("structured outcome report has an invalid instance ID")
+    if raw["backend"] not in ("auto", "kvm", "mshv", "whp"):
+        raise RuntimeError("structured outcome report has an invalid backend")
+    outcome_value = raw["outcome"]
+    policy_value = raw["network_policy"]
+    teardown_value = raw["teardown"]
+    if not isinstance(outcome_value, dict):
+        raise RuntimeError("structured outcome report has an invalid outcome")
+    outcome = cast(dict[str, object], outcome_value)
+    if set(outcome) != {
+        "operation",
+        "category",
+        "status_code",
+    }:
+        raise RuntimeError("structured outcome report has an invalid outcome")
+    if not isinstance(policy_value, dict):
+        raise RuntimeError("structured outcome report has an invalid network policy")
+    policy = cast(dict[str, object], policy_value)
+    if set(policy) != {
+        "status",
+        "status_code",
+        "mode",
+        "allow_rule_count",
+        "deny_rule_count",
+        "host_loopback",
+    }:
+        raise RuntimeError("structured outcome report has an invalid network policy")
+    if not isinstance(teardown_value, dict):
+        raise RuntimeError("structured outcome report has an invalid teardown outcome")
+    teardown = cast(dict[str, object], teardown_value)
+    if set(teardown) != set(OUTCOME_TEARDOWN_FIELDS):
+        raise RuntimeError("structured outcome report has an invalid teardown outcome")
+    if not all(isinstance(value, bool) for value in teardown.values()):
+        raise RuntimeError("structured teardown outcomes must be booleans")
+    return cast(dict[str, Any], raw)
 
 
 def _count_line_suffix(output: bytes, marker: bytes) -> int:
@@ -350,6 +445,359 @@ def run_lifecycle(
         timeout=timeout,
         log_path=log_path,
     )
+
+
+def run_workload_identity(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    base = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0 nvx_exec=/sbin/nvx-identity-probe",
+    )
+    accepted = [*base, "--microvm-workload-identity", "65534:65534"]
+    with OpenvmmProcess(
+        accepted,
+        output_dir / "workload-identity.log",
+    ) as process:
+        result = process.wait(timeout)
+    if result.returncode != 0 or WORKLOAD_IDENTITY_MARKER not in _output_lines(
+        result.output
+    ):
+        raise RuntimeError("fixed non-root workload identity was not enforced")
+
+    unavailable = [*base, "--microvm-workload-identity", "12345:12345"]
+    with OpenvmmProcess(
+        unavailable,
+        output_dir / "workload-identity-unavailable.log",
+    ) as process:
+        result = process.wait(timeout)
+    if (
+        result.returncode == 0
+        or WORKLOAD_IDENTITY_MARKER in result.output
+        or b"configured workload UID is unavailable" not in result.output
+    ):
+        raise RuntimeError("unavailable workload identity did not fail closed")
+
+    root = [*base, "--microvm-workload-identity", "0:0"]
+    with OpenvmmProcess(
+        root,
+        output_dir / "workload-identity-root.log",
+    ) as process:
+        result = process.wait(timeout)
+    if result.returncode == 0 or BOOT_MARKER in result.output:
+        raise RuntimeError("root workload identity was not rejected before boot")
+
+
+def run_managed_lifecycle(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-managed-lifecycle-") as temporary:
+        root = Path(temporary)
+        endpoint_value = (
+            str(root / "control.sock"),
+            f"//./pipe/openvmm-microvm-{uuid.uuid4().hex}",
+        )[os.name == "nt"]
+        boot_console_address = _available_tcp_address()
+        capability = secrets.token_bytes(32)
+        report_path = root / "managed-outcome.json"
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+        )
+        command.extend(
+            (
+                "--microvm-workload-identity",
+                "65534:65534",
+                "--microvm-lifecycle",
+                "managed",
+                "--virtio-console",
+                f"listen=tcp:{boot_console_address[0]}:{boot_console_address[1]}",
+                "--microvm-control-console",
+                f"listen={endpoint_value}",
+                "--microvm-control-auth-stdin",
+                "--microvm-report",
+                str(report_path),
+            )
+        )
+        log_path = output_dir / "managed-lifecycle.log"
+        process: subprocess.Popen[bytes] | None = None
+        boot_console: TcpConsole | None = None
+        with log_path.open("wb") as log:
+            try:
+                environment = os.environ.copy()
+                environment["OPENVMM_LOG"] = "off"
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=environment,
+                )
+                if process.stdin is None:
+                    raise RuntimeError("failed to create control capability pipe")
+                process.stdin.write(capability)
+                process.stdin.close()
+                boot_console = TcpConsole.connect(boot_console_address, timeout)
+                with ControlSession.connect(
+                    Path(endpoint_value), capability, timeout
+                ) as session:
+                    session.ping(timeout)
+                    first = session.exec(
+                        (
+                            "/bin/sh",
+                            "-c",
+                            "printf managed-state >/tmp/nvx-managed-state; "
+                            "printf first-exec",
+                        ),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                    )
+                if (
+                    first.returncode != 0
+                    or first.category != "exit"
+                    or first.stdout != b"first-exec"
+                    or first.stderr
+                ):
+                    raise RuntimeError(
+                        "first managed workload returned an invalid result"
+                    )
+
+                with ControlSession.connect(
+                    Path(endpoint_value), capability, timeout
+                ) as session:
+                    second = session.exec(
+                        (
+                            "/bin/sh",
+                            "-c",
+                            "cat /tmp/nvx-managed-state; printf second-exec",
+                        ),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                    )
+                    timed_out = session.exec(
+                        ("/bin/sleep", "5"),
+                        timeout_ms=100,
+                        response_timeout=timeout,
+                    )
+                    session.stop(timeout)
+                if (
+                    second.returncode != 0
+                    or second.category != "exit"
+                    or second.stdout != b"managed-statesecond-exec"
+                    or second.stderr
+                ):
+                    raise RuntimeError(
+                        "managed workload state did not survive across exec requests"
+                    )
+                if timed_out.returncode != 124 or timed_out.category != "timeout":
+                    raise RuntimeError("managed workload timeout was not reported")
+                result = process.wait(timeout=timeout)
+                if result != 0:
+                    raise RuntimeError(
+                        f"managed OpenVMM process exited with status {result}"
+                    )
+                report = _read_outcome_report(report_path)
+                if report["backend"] != backend or report["outcome"] != {
+                    "operation": "managed",
+                    "category": "success",
+                    "status_code": 0,
+                }:
+                    raise RuntimeError("managed lifecycle outcome report was invalid")
+                if report["network_policy"]["status"] != "not-requested":
+                    raise RuntimeError(
+                        "managed lifecycle reported an unexpected network policy"
+                    )
+                if not all(report["teardown"].values()):
+                    raise RuntimeError("managed lifecycle reported incomplete teardown")
+            finally:
+                if boot_console is not None:
+                    (output_dir / "managed-lifecycle-guest.log").write_bytes(
+                        boot_console.finish()
+                    )
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+
+        invalid = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+        )
+        invalid.extend(
+            (
+                "--microvm-workload-identity",
+                "65534:65534",
+                "--microvm-lifecycle",
+                "managed",
+            )
+        )
+        with OpenvmmProcess(
+            invalid,
+            output_dir / "managed-lifecycle-invalid-transition.log",
+        ) as rejected:
+            result = rejected.wait(timeout)
+        if result.returncode == 0 or BOOT_MARKER in result.output:
+            raise RuntimeError(
+                "managed lifecycle without a control endpoint was not rejected before boot"
+            )
+
+
+def run_structured_outcome(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-structured-outcome-") as temporary:
+        root = Path(temporary)
+        sensitive_report_name = "sensitive-report-destination.json"
+        report_path = root / sensitive_report_name
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0 nvx_report_secret=sensitive-command-value",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        command.extend(
+            (
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:443",
+                "--network-egress-allow",
+                "198.51.100.0/24",
+                "--network-egress-deny",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:53",
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:54321",
+                "--microvm-report",
+                str(report_path),
+            )
+        )
+        with OpenvmmProcess(
+            command,
+            output_dir / "structured-outcome.log",
+        ) as process:
+            process.wait_for(BOOT_MARKER, timeout)
+            process.send_line("printf 'sensitive-output-value\\n'; /sbin/nvx-exit 37")
+            result = process.wait(timeout)
+        if result.returncode != 37 or b"sensitive-output-value" not in result.output:
+            raise RuntimeError("structured outcome run lost the guest exit result")
+
+        report = _read_outcome_report(report_path)
+        if report["backend"] != backend or report["outcome"] != {
+            "operation": "run",
+            "category": "guest-exit",
+            "status_code": 37,
+        }:
+            raise RuntimeError("structured guest outcome was invalid")
+        if report["network_policy"] != {
+            "status": "applied",
+            "status_code": 0,
+            "mode": "rules",
+            "allow_rule_count": 2,
+            "deny_rule_count": 1,
+            "host_loopback": "deny",
+        }:
+            raise RuntimeError("structured network-policy outcome was invalid")
+        if not all(report["teardown"].values()):
+            raise RuntimeError("structured outcome reported incomplete teardown")
+        encoded = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "sensitive-command-value",
+            "sensitive-output-value",
+            sensitive_report_name,
+            DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+            "54321",
+        ):
+            if forbidden in encoded:
+                raise RuntimeError(
+                    f"structured outcome exposed sensitive value {forbidden!r}"
+                )
+
+        rejected_path = root / "rejected.json"
+        rejected = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        rejected.extend(
+            (
+                "--network-egress-allow",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:443",
+                "--microvm-report",
+                str(rejected_path),
+            )
+        )
+        with OpenvmmProcess(
+            rejected,
+            output_dir / "structured-outcome-rejected.log",
+        ) as process:
+            rejected_result = process.wait(timeout)
+        if rejected_result.returncode == 0 or BOOT_MARKER in rejected_result.output:
+            raise RuntimeError(
+                "structured policy rejection did not fail before guest boot"
+            )
+        rejected_report = _read_outcome_report(rejected_path)
+        if rejected_report["outcome"] != {
+            "operation": "run",
+            "category": "vmm-failure",
+            "status_code": 1,
+        }:
+            raise RuntimeError("configuration rejection outcome was invalid")
+        if rejected_report["network_policy"] != {
+            "status": "failed",
+            "status_code": 1,
+            "mode": "rules",
+            "allow_rule_count": 1,
+            "deny_rule_count": 0,
+            "host_loopback": "allow",
+        }:
+            raise RuntimeError("configuration rejection policy outcome was invalid")
+        if not all(rejected_report["teardown"].values()):
+            raise RuntimeError("configuration rejection leaked host resources")
 
 
 def run_console_exit(
@@ -656,6 +1104,496 @@ def run_directional_network_policy(
     finally:
         listener.close()
         server.join(timeout=1)
+
+
+def run_l3_l4_egress_policy(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    allowed_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    denied_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    allowed_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    denied_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for listener in (allowed_tcp, denied_tcp):
+        listener.bind(("0.0.0.0", 0))
+        listener.listen(1)
+        listener.settimeout(timeout)
+    for endpoint in (allowed_udp, denied_udp):
+        endpoint.bind(("127.0.0.1", 0))
+        endpoint.settimeout(timeout)
+    allowed_tcp_port = int(allowed_tcp.getsockname()[1])
+    denied_tcp_port = int(denied_tcp.getsockname()[1])
+    allowed_udp_port = int(allowed_udp.getsockname()[1])
+    denied_udp_port = int(denied_udp.getsockname()[1])
+    server_errors: list[Exception] = []
+
+    def serve_allowed() -> None:
+        try:
+            connection, _ = allowed_tcp.accept()
+            with connection:
+                connection.settimeout(timeout)
+                request = connection.recv(4096)
+                if not request.startswith(b"GET /allowed HTTP/1."):
+                    raise RuntimeError(f"unexpected L3/L4 HTTP request: {request!r}")
+                body = b"NVX-L3-L4-TCP-ALLOW"
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: "
+                    + str(len(body)).encode("ascii")
+                    + b"\r\nConnection: close\r\n\r\n"
+                    + body
+                )
+            payload, _ = allowed_udp.recvfrom(128)
+            if payload != b"NVX-L3-L4-UDP-ALLOW":
+                raise RuntimeError(f"unexpected allowed UDP payload: {payload!r}")
+        except Exception as error:
+            server_errors.append(error)
+
+    server = threading.Thread(
+        target=serve_allowed,
+        name="nvx-l3-l4-egress-test",
+        daemon=True,
+    )
+    server.start()
+    try:
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        command.extend(("--network-egress", "deny"))
+        for rule in (
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:{allowed_tcp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:{allowed_udp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:{denied_tcp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:{denied_udp_port}",
+        ):
+            command.extend(("--network-egress-allow", rule))
+        for rule in (
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:tcp:{denied_tcp_port}",
+            f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:udp:{denied_udp_port}",
+        ):
+            command.extend(("--network-egress-deny", rule))
+
+        run_guest_script(
+            command,
+            _render_script(
+                "l3-l4-egress-policy.sh.in",
+                GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                ALLOWED_TCP_PORT=str(allowed_tcp_port),
+                DENIED_TCP_PORT=str(denied_tcp_port),
+                ALLOWED_UDP_PORT=str(allowed_udp_port),
+                DENIED_UDP_PORT=str(denied_udp_port),
+            ),
+            L3_L4_EGRESS_COMPLETION_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "l3-l4-egress-policy.log",
+        )
+        server.join(timeout)
+        if server.is_alive():
+            raise TimeoutError("L3/L4 allowed endpoints were not reached")
+        if server_errors:
+            raise RuntimeError(
+                "L3/L4 allowed endpoint server failed"
+            ) from server_errors[0]
+
+        denied_tcp.settimeout(0.25)
+        try:
+            unexpected, _ = denied_tcp.accept()
+        except TimeoutError:
+            pass
+        else:
+            unexpected.close()
+            raise RuntimeError("deny rule did not override the TCP allow rule")
+        denied_udp.settimeout(0.25)
+        try:
+            unexpected, _ = denied_udp.recvfrom(128)
+        except TimeoutError:
+            pass
+        else:
+            raise RuntimeError(
+                f"deny rule did not override the UDP allow rule: {unexpected!r}"
+            )
+
+        for name, extra, expected in (
+            (
+                "missing-default",
+                ("--network-egress-allow", "192.0.2.1:tcp:443"),
+                b"--network-egress is required",
+            ),
+            (
+                "invalid-protocol",
+                (
+                    "--network-egress",
+                    "deny",
+                    "--network-egress-allow",
+                    "192.0.2.1:icmp:443",
+                ),
+                b"invalid egress transport",
+            ),
+        ):
+            invalid = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                network=DIRECTIONAL_NETWORK_CIDR,
+            )
+            invalid.extend(extra)
+            with OpenvmmProcess(
+                invalid,
+                output_dir / f"l3-l4-egress-{name}.log",
+            ) as process:
+                result = process.wait(timeout)
+            if (
+                result.returncode == 0
+                or expected not in result.output
+                or BOOT_MARKER in result.output
+            ):
+                raise RuntimeError(
+                    f"invalid L3/L4 policy {name} was not rejected before boot"
+                )
+    finally:
+        for endpoint in (allowed_tcp, denied_tcp, allowed_udp, denied_udp):
+            endpoint.close()
+        server.join(timeout=1)
+
+
+def _http_server(
+    listener: socket.socket,
+    expected_path: bytes,
+    body: bytes,
+    timeout: float,
+    errors: list[Exception],
+) -> None:
+    try:
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(timeout)
+            request = connection.recv(4096)
+            if not request.startswith(b"GET " + expected_path + b" HTTP/1."):
+                raise RuntimeError(
+                    f"unexpected host-loopback HTTP request: {request!r}"
+                )
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: "
+                + str(len(body)).encode("ascii")
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+    except Exception as error:
+        errors.append(error)
+
+
+def run_host_loopback_policy(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    denied_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    for listener in (denied_general, proxy):
+        listener.bind(("0.0.0.0", 0))
+        listener.listen(1)
+        listener.settimeout(timeout)
+    denied_general_port = int(denied_general.getsockname()[1])
+    proxy_port = int(proxy.getsockname()[1])
+    proxy_errors: list[Exception] = []
+    proxy_server = threading.Thread(
+        target=_http_server,
+        args=(
+            proxy,
+            b"/proxy",
+            b"NVX-HOST-LOOPBACK-PROXY",
+            timeout,
+            proxy_errors,
+        ),
+        name="nvx-host-loopback-proxy",
+        daemon=True,
+    )
+    proxy_server.start()
+    try:
+        deny_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        deny_command.extend(
+            (
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                f"{DIRECTIONAL_NETWORK_GATEWAY_IPV4}:{proxy_port}",
+            )
+        )
+        run_guest_script(
+            deny_command,
+            _render_script(
+                "host-loopback-policy.sh.in",
+                MODE="deny",
+                GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                GENERAL_PORT=str(denied_general_port),
+                PROXY_PORT=str(proxy_port),
+                GUEST_PORT="0",
+            ),
+            HOST_LOOPBACK_DENY_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "host-loopback-deny.log",
+        )
+        proxy_server.join(timeout)
+        if proxy_server.is_alive():
+            raise TimeoutError("host-loopback proxy endpoint was not reached")
+        if proxy_errors:
+            raise RuntimeError("host-loopback proxy server failed") from proxy_errors[0]
+        denied_general.settimeout(0.25)
+        try:
+            unexpected, _ = denied_general.accept()
+        except TimeoutError:
+            pass
+        else:
+            unexpected.close()
+            raise RuntimeError("host-loopback deny reached a general host service")
+    finally:
+        denied_general.close()
+        proxy.close()
+        proxy_server.join(timeout=1)
+
+    allowed_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    allowed_general.bind(("0.0.0.0", 0))
+    allowed_general.listen(1)
+    allowed_general.settimeout(timeout)
+    allowed_general_port = int(allowed_general.getsockname()[1])
+    _, host_forward_port = _available_tcp_address()
+    guest_forward_port = 18081
+    allow_errors: list[Exception] = []
+    allow_server = threading.Thread(
+        target=_http_server,
+        args=(
+            allowed_general,
+            b"/general",
+            b"NVX-HOST-LOOPBACK-GENERAL",
+            timeout,
+            allow_errors,
+        ),
+        name="nvx-host-loopback-general",
+        daemon=True,
+    )
+    allow_server.start()
+    try:
+        allow_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        allow_command.extend(
+            (
+                "--host-loopback",
+                "allow",
+                "--host-loopback-forward",
+                f"tcp:{host_forward_port}:{guest_forward_port}",
+            )
+        )
+        with OpenvmmProcess(
+            allow_command,
+            output_dir / "host-loopback-allow.log",
+        ) as process:
+            process.wait_for(BOOT_MARKER, timeout)
+            _stage_script(
+                process,
+                "/tmp/nvx-host-loopback-policy",
+                "NVX_HOST_LOOPBACK_POLICY",
+                _render_script(
+                    "host-loopback-policy.sh.in",
+                    MODE="allow",
+                    GATEWAY_IPV4=DIRECTIONAL_NETWORK_GATEWAY_IPV4,
+                    GENERAL_PORT=str(allowed_general_port),
+                    PROXY_PORT="0",
+                    GUEST_PORT=str(guest_forward_port),
+                ),
+            )
+            process.wait_for_line(HOST_LOOPBACK_INGRESS_READY_MARKER, timeout)
+            with socket.create_connection(
+                ("127.0.0.1", host_forward_port), timeout=min(timeout, 5)
+            ) as inbound:
+                inbound.sendall(b"NVX-HOST-LOOPBACK-INBOUND\n")
+                time.sleep(1)
+                inbound.shutdown(socket.SHUT_WR)
+            process.wait_for_line(HOST_LOOPBACK_ALLOW_MARKER, timeout)
+            allowed = process.wait(timeout)
+        if allowed.returncode != 0:
+            raise RuntimeError(
+                f"host-loopback allow guest exited with {allowed.returncode}"
+            )
+        allow_server.join(timeout)
+        if allow_server.is_alive():
+            raise TimeoutError("general host-loopback service was not reached")
+        if allow_errors:
+            raise RuntimeError("general host-loopback server failed") from allow_errors[
+                0
+            ]
+    finally:
+        allowed_general.close()
+        allow_server.join(timeout=1)
+
+    for name, extra, expected in (
+        (
+            "deny-forward",
+            (
+                "--host-loopback",
+                "deny",
+                "--host-loopback-forward",
+                f"tcp:{host_forward_port}:{guest_forward_port}",
+            ),
+            b"--host-loopback-forward requires explicit --host-loopback allow",
+        ),
+        (
+            "wrong-proxy-address",
+            (
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                f"198.51.100.1:{proxy_port}",
+            ),
+            b"must match the guest gateway",
+        ),
+    ):
+        invalid = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=DIRECTIONAL_NETWORK_CIDR,
+        )
+        invalid.extend(extra)
+        with OpenvmmProcess(
+            invalid,
+            output_dir / f"host-loopback-{name}.log",
+        ) as process:
+            result = process.wait(timeout)
+        if (
+            result.returncode == 0
+            or expected not in result.output
+            or BOOT_MARKER in result.output
+        ):
+            raise RuntimeError(
+                f"invalid host-loopback policy {name} was not rejected before boot"
+            )
+
+
+def run_denied_filesystem_paths(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-denied-paths-") as temporary:
+        root = Path(temporary) / "share"
+        allowed = root / "allowed"
+        secrets = root / "secrets"
+        allowed.mkdir(parents=True)
+        secrets.mkdir()
+        (allowed / "seed").write_bytes(b"NVX-ALLOWED\n")
+        secret = secrets / "token"
+        secret.write_bytes(b"NVX-SECRET\n")
+        alias = root / "alias"
+        try:
+            os.symlink("secrets", alias, target_is_directory=True)
+        except OSError as error:
+            if os.name != "nt":
+                raise
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(alias), str(secrets)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"failed to create denied-path junction: {result.stderr.strip()}"
+                ) from error
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            mount=f"/mnt/share,{root},rw",
+        )
+        command.extend(("--mount-deny", str(secrets)))
+        run_guest_script(
+            command,
+            _read_script("denied-filesystem-paths.sh"),
+            FILESYSTEM_DENIED_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "denied-filesystem-paths.log",
+        )
+        if (allowed / "from-guest").read_bytes() != b"NVX-GUEST-WRITE\n":
+            raise RuntimeError("allowed filesystem path did not remain writable")
+        if secret.read_bytes() != b"NVX-SECRET\n":
+            raise RuntimeError("denied filesystem path was modified")
+
+        outside = Path(temporary) / "outside"
+        outside.mkdir()
+        for name, denied_paths, expected in (
+            ("outside", (outside,), b"outside the filesystem export root"),
+            ("duplicate", (secrets, secrets), b"unique and non-overlapping"),
+            ("root", (root,), b"cannot hide the complete filesystem export"),
+        ):
+            invalid = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                mount=f"/mnt/share,{root},rw",
+            )
+            for path in denied_paths:
+                invalid.extend(("--mount-deny", str(path)))
+            with OpenvmmProcess(
+                invalid,
+                output_dir / f"denied-filesystem-{name}.log",
+            ) as process:
+                result = process.wait(timeout)
+            if (
+                result.returncode == 0
+                or expected not in result.output
+                or BOOT_MARKER in result.output
+            ):
+                raise RuntimeError(
+                    f"unsafe denied filesystem policy {name} was not rejected before boot"
+                )
 
 
 def run_sandbox_blocks(
@@ -2398,6 +3336,74 @@ def run(args: argparse.Namespace) -> int:
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "lifecycle.log",
+        )
+    if "workload-identity" in scenarios:
+        print(
+            f"Running microVM workload identity correctness on OpenVMM/{args.backend}"
+        )
+        run_workload_identity(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "managed-lifecycle" in scenarios:
+        print(f"Running managed microVM lifecycle on OpenVMM/{args.backend}")
+        run_managed_lifecycle(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "structured-outcome" in scenarios:
+        print(f"Running structured microVM outcomes on OpenVMM/{args.backend}")
+        run_structured_outcome(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "l3-l4-egress-policy" in scenarios:
+        print(f"Running microVM L3/L4 egress policy on OpenVMM/{args.backend}")
+        run_l3_l4_egress_policy(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "host-loopback-policy" in scenarios:
+        print(f"Running microVM host-loopback policy on OpenVMM/{args.backend}")
+        run_host_loopback_policy(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "denied-filesystem-paths" in scenarios:
+        print(f"Running microVM denied filesystem paths on OpenVMM/{args.backend}")
+        run_denied_filesystem_paths(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
         )
     if "network-snapshot" in scenarios:
         print(f"Running microVM network snapshot correctness on OpenVMM/{args.backend}")

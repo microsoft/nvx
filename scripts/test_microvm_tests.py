@@ -60,6 +60,146 @@ class MicrovmTestParserTests(unittest.TestCase):
 
 
 class MicrovmTests(unittest.TestCase):
+    @staticmethod
+    def _outcome_report(
+        backend: str,
+        *,
+        outcome: dict[str, object],
+        policy: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "instance_id": "11" * 16,
+            "backend": backend,
+            "outcome": outcome,
+            "network_policy": policy,
+            "teardown": {name: True for name in microvm_tests.OUTCOME_TEARDOWN_FIELDS},
+        }
+
+    def test_workload_identity_scenario_checks_enforcement_and_rejection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(microvm_tests, "OpenvmmProcess") as process:
+                process.return_value.__enter__.return_value.wait.side_effect = [
+                    openvmm_process.OpenvmmProcessResult(
+                        0, microvm_tests.WORKLOAD_IDENTITY_MARKER + b"\n"
+                    ),
+                    openvmm_process.OpenvmmProcessResult(
+                        125, b"configured workload UID is unavailable\n"
+                    ),
+                    openvmm_process.OpenvmmProcessResult(
+                        2, b"microVM workload UID must be nonzero\n"
+                    ),
+                ]
+                microvm_tests.run_workload_identity(
+                    Path("openvmm"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=40,
+                    output_dir=Path(temporary),
+                )
+
+        self.assertEqual(process.call_count, 3)
+        commands = [call.args[0] for call in process.call_args_list]
+        self.assertEqual(
+            [
+                command[command.index("--microvm-workload-identity") + 1]
+                for command in commands
+            ],
+            ["65534:65534", "12345:12345", "0:0"],
+        )
+        self.assertTrue(
+            all(
+                "nvx_exec=/sbin/nvx-identity-probe"
+                in command[command.index("--cmdline") + 1]
+                for command in commands
+            )
+        )
+
+    def test_structured_outcome_scenario_covers_exit_policy_and_rejection(self):
+        applied = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "guest-exit",
+                "status_code": 37,
+            },
+            policy={
+                "status": "applied",
+                "status_code": 0,
+                "mode": "rules",
+                "allow_rule_count": 2,
+                "deny_rule_count": 1,
+                "host_loopback": "deny",
+            },
+        )
+        rejected = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "vmm-failure",
+                "status_code": 1,
+            },
+            policy={
+                "status": "failed",
+                "status_code": 1,
+                "mode": "rules",
+                "allow_rule_count": 1,
+                "deny_rule_count": 0,
+                "host_loopback": "allow",
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests,
+                    "_read_outcome_report",
+                    side_effect=(applied, rejected),
+                ),
+            ):
+                active = process.return_value.__enter__.return_value
+                active.wait.side_effect = (
+                    openvmm_process.OpenvmmProcessResult(
+                        37, b"sensitive-output-value\n"
+                    ),
+                    openvmm_process.OpenvmmProcessResult(
+                        2, b"--network-egress is required\n"
+                    ),
+                )
+                microvm_tests.run_structured_outcome(
+                    Path("openvmm"),
+                    Path("kernel"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=40,
+                    output_dir=Path(temporary),
+                )
+
+        self.assertEqual(process.call_count, 2)
+        applied_command = process.call_args_list[0].args[0]
+        self.assertIn("--microvm-report", applied_command)
+        self.assertEqual(
+            applied_command.count("--network-egress-allow"),
+            2,
+        )
+        self.assertEqual(
+            applied_command.count("--network-egress-deny"),
+            1,
+        )
+        self.assertEqual(
+            applied_command[applied_command.index("--host-loopback") + 1],
+            "deny",
+        )
+        rejected_command = process.call_args_list[1].args[0]
+        self.assertNotIn("--network-egress", rejected_command)
+        self.assertIn("--network-egress-allow", rejected_command)
+        active.send_line.assert_called_once_with(
+            "printf 'sensitive-output-value\\n'; /sbin/nvx-exit 37"
+        )
+
     def test_console_exit_preserves_full_output_and_guest_status(self):
         expected = (
             b"x" * microvm_tests.CONSOLE_EXIT_PAYLOAD_BYTES
@@ -303,6 +443,27 @@ class MicrovmTests(unittest.TestCase):
                 with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
                     process.wait_for(b"MARKER", 1)
                 self.assertEqual(log_path.read_bytes(), b"MARKER\n")
+
+    def test_process_wait_for_line_ignores_marker_inside_echoed_script(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                queues.return_value.get.side_effect = [
+                    b"echo NVX-READY\n",
+                    b"NVX-READY\n",
+                ]
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
+                    process.wait_for_line(b"NVX-READY", 1)
+                self.assertEqual(
+                    log_path.read_bytes(),
+                    b"echo NVX-READY\nNVX-READY\n",
+                )
 
     def test_process_wait_bounds_missing_output_eof_after_exit(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -864,7 +1025,7 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests.VIRTIO_NET_COMPLETION_MARKER,
         )
 
-    def test_directional_network_commands_map_mxc_default_actions(self):
+    def test_directional_network_commands_map_generic_default_actions(self):
         with patch.object(
             microvm_tests,
             "workload_boot_command",

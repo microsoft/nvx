@@ -79,9 +79,13 @@ the outer supervisor does not replace itself with the workload.
 The current agent sets `memory.low` to 16 MiB by default and accepts optional
 workload `memory.max` and `pids.max`. This is not the stronger production
 resource-reservation contract below. FIFO-gated cgroup placement is also not
-`clone3(CLONE_INTO_CGROUP)`. The shell supervisor, textual errors, fixed root
-user, and capability-stripped launch are an experimental bootstrap, not a
-complete OCI runtime, typed RPC service, or systemd-container profile.
+`clone3(CLONE_INTO_CGROUP)`. The shell supervisor and textual errors remain an
+experimental bootstrap, not a complete OCI runtime, typed RPC service, or
+systemd-container profile. Workloads do run under one host-owned non-root
+numeric identity fixed at initial boot. The agent requires an exact user and
+primary-group match in the assembled root, clears supplementary groups and all
+capability sets, and rejects an unavailable identity before starting the
+workload.
 
 ## Image preparation and distribution (Proposed)
 
@@ -252,25 +256,26 @@ filter is needed for profiles that retain `CAP_MKNOD`. The workload must not
 be able to escape the agent-owned cgroup or undo its freeze; any delegated
 subtree must remain below that boundary.
 
-## Control protocol and checkpoint handoff (Proposed)
+## Control protocol and checkpoint handoff
 
-The runtime protocol should use the dedicated control virtio-console once its
-authenticated broker is implemented. Boot diagnostics and kernel `printk`
-stay on the existing consoles; framed control traffic must not share an
-unstructured byte stream with them. The reservation reuses a proven transport
-but does not implement framing, authorization, guest RPC, or host-side broker
-isolation. A VMM-owned endpoint still needs an authenticated, access-controlled
-host attachment and must not be exposed to the workload.
+The implemented managed runtime uses the dedicated control virtio-console and
+its authenticated broker. Boot diagnostics and kernel `printk` stay on the
+existing consoles; framed control traffic does not share an unstructured byte
+stream with them. OpenVMM owns the bounded outer framing, same-user local
+endpoint authorization, capability authentication, reconnect epochs, and
+receive-credit backpressure. The current guest protocol provides readiness,
+sequential command execution with bounded arguments and output, separate
+stdout/stderr, timeout and exit categories, and graceful VM shutdown. The
+control device is never exposed inside the workload namespaces.
 
-The proposed operation families are:
+The remaining production operation families are:
 
 | Operation | Purpose |
 | --- | --- |
 | `Ready`, `RestoreHello` | Establish readiness, protocol version, and the current launch identity |
 | `Bootstrap` | Explicit configuration when a workflow cannot use the launch region |
-| `ExecuteCommand`, `InteractiveShell` | One-shot execution or PTY-backed interactive sessions, including cancellation and resize |
-| `StreamLogs` | Bounded stdout/stderr streaming with continuation semantics |
-| `Signal`, `Wait`, `ContainerExited` | Lifecycle control, exit status, and OOM reporting |
+| `InteractiveShell` | PTY-backed interactive sessions, including cancellation and resize |
+| `Signal`, `ContainerExited` | Out-of-band signal control and OOM reporting |
 | `Probe` | Execute health checks |
 | `PrepareSnapshot`, `PostRestore`, `Checkpoint` | Agent-coordinated capture and restore hooks |
 | `Shutdown` | Graceful workload and VM termination |

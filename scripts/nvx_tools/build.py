@@ -469,6 +469,10 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         REPO_ROOT / "alpine" / "nvx-init-agent",
         root / "sbin" / "nvx-init-agent",
     )
+    _install(
+        REPO_ROOT / "alpine" / "nvx-identity-probe",
+        root / "sbin" / "nvx-identity-probe",
+    )
     _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
     _install(
         REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",
@@ -493,6 +497,11 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         config.work,
         REPO_ROOT / "alpine" / "nvx-console-pending.c",
         root / "sbin" / "nvx-console-pending",
+    )
+    _build_static_helper(
+        config.work,
+        REPO_ROOT / "alpine" / "nvx-managed-agent.c",
+        root / "sbin" / "nvx-managed-agent",
     )
     device_io = _build_device_io_helper(config.work, root / "sbin" / "nvx-device-io")
     config.output.parent.mkdir(parents=True, exist_ok=True)
