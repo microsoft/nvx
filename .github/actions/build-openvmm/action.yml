@@ -57,9 +57,10 @@ runs:
       uses: actions/cache@v5
       with:
         path: |
+          build/openvmm.provenance.json
           openvmm/target/release/openvmm
           openvmm/target/release/openvmm.exe
-        key: openvmm-binary-v3-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v4-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Cache OpenVMM binary for MSHV
       id: cache-openvmm-mshv
@@ -68,8 +69,10 @@ runs:
       env:
         PATH: ${{ steps.cache-tools-mshv.outputs.path }}
       with:
-        path: openvmm/target/release/openvmm
-        key: openvmm-binary-v3-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        path: |
+          build/openvmm.provenance.json
+          openvmm/target/release/openvmm
+        key: openvmm-binary-v4-${{ inputs.backend }}-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Cache Cargo
       if: inputs.backend != 'mshv' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
@@ -132,6 +135,7 @@ runs:
         cp "openvmm/target/${{ inputs.target }}/release/openvmm" \
           openvmm/target/release/openvmm
         chmod +x openvmm/target/release/openvmm
+        python3 scripts/nvx.py record-openvmm-provenance
 
     - name: Build OpenVMM on Windows
       if: runner.os == 'Windows' && inputs.build-mode == 'native' && steps.cache-openvmm-native.outputs.cache-hit != 'true'
