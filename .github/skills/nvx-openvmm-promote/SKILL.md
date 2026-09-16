@@ -93,13 +93,18 @@ sign the commit with the user's existing configuration, and stop rather than fal
 back to an unsigned commit if signing fails. Never amend, force-push, or rewrite an
 already published integration commit without explicit authorization.
 
-After a requested commit, verify its shape and signature:
+After a requested commit, verify that it is the only commit directly on the target
+and that the target is its sole parent, then verify its signature:
 
 ```console
 git diff --name-only <target-commit>..HEAD
+git rev-list --count <target-commit>..HEAD
+git rev-list --parents --max-count=1 HEAD
 git log --show-signature --format=fuller -1
-git merge-base --is-ancestor <target-commit> HEAD
 ```
+
+Require the count to be exactly `1` and the parent line to contain exactly the `HEAD`
+and `<target-commit>` object IDs. Reject a different parent or any additional parent.
 
 ## 4. Validate The Exact Pin
 

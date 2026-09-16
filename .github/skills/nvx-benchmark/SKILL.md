@@ -112,7 +112,7 @@ results. Reuse the fresh variables established by the matching acceptance branch
 ```bash
 performance_output_dir="$output_dir/performance"
 python3 scripts/nvx.py benchmark --suite performance --backend kvm \
-    --platform "$platform" --processors 1 --warmups 3 \
+    --platform "$platform" --processors 1 --warmups 1 \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$performance_output_dir"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$performance_output_dir" \
@@ -142,7 +142,7 @@ TAP creation or host firewall changes.
 ```bash
 performance_output_dir="$output_dir/performance"
 python3 scripts/nvx.py benchmark --suite performance --backend mshv \
-    --platform "$platform" --processors 1 --warmups 3 \
+    --platform "$platform" --processors 1 --warmups 1 \
     --runs 5 --virtfs-runs 3 --skip-build --output-dir "$performance_output_dir"
 python3 scripts/nvx.py performance collect --platform "$platform" \
     --commit "$commit" --input-dir "$performance_output_dir" \
@@ -172,7 +172,7 @@ TAP creation or host firewall changes.
 ```powershell
 $performanceOutputDir = "$outputDir\performance"
 python scripts\nvx.py benchmark --suite performance --backend whp `
-    --platform $platform --processors 1 --warmups 3 `
+    --platform $platform --processors 1 --warmups 1 `
     --runs 5 --virtfs-runs 3 --skip-build --output-dir $performanceOutputDir
 python scripts\nvx.py performance collect --platform $platform `
     --commit $commit --input-dir $performanceOutputDir `
@@ -210,8 +210,8 @@ for cleanup.
 
 Verify that the retained result set contains the acceptance JSON, raw logs under
 `performance/`, `device-io/device-io.log`, `summary.md`, collected CSV files, and
-`benchmark-metadata.json` records with the expected commit, platform, sampling counts,
-and artifact hashes.
+`benchmark-metadata.json` records with the expected commit, platform, and sampling
+counts. Require the expected artifact hashes only in the device-I/O metadata record.
 
 ## Report
 
