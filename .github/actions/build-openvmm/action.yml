@@ -85,7 +85,9 @@ runs:
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
-        path: ${{ inputs.binary-path }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
         key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore OpenVMM binary on Windows
@@ -93,7 +95,9 @@ runs:
       if: runner.os == 'Windows'
       uses: actions/cache/restore@v5
       with:
-        path: ${{ inputs.binary-path }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
         key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore shared Cargo cache on Linux
@@ -155,6 +159,7 @@ runs:
         cp "openvmm/target/${{ inputs.target }}/release/openvmm" \
           openvmm/target/release/openvmm
         chmod +x openvmm/target/release/openvmm
+        python3 scripts/nvx.py record-openvmm-provenance
 
     - name: Build OpenVMM on Windows
       if: runner.os == 'Windows' && inputs.build-mode == 'native' && steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
@@ -187,7 +192,9 @@ runs:
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
-        path: ${{ inputs.binary-path }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
         key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Save OpenVMM binary on Windows
@@ -199,5 +206,7 @@ runs:
         steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
-        path: ${{ inputs.binary-path }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
         key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}

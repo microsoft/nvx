@@ -14,6 +14,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -21,15 +22,22 @@ from typing import cast
 
 from .archive import create_reproducible_tar_gz
 from .build import (
+    CONTROL_CONTRACT_REVISION,
+    CONTROL_SESSION_PROTOCOL_VERSION,
     DEFAULT_ALPINE_BRANCH,
     DEFAULT_ALPINE_MINIROOTFS_SHA256,
     DEFAULT_ALPINE_VERSION,
     DEFAULT_KERNEL_SHA256,
     DEFAULT_KERNEL_URL,
     DEFAULT_KERNEL_VERSION,
+    KERNEL_PROVENANCE_NAME,
+    MICROVM_ABI_VERSION,
+    OPENVMM_PROVENANCE_NAME,
     REQUIRED_SANDBOX_KERNEL_CONFIG,
     DockerBuildConfig,
+    assert_required_kernel_config,
     build_docker_linux_source,
+    kernel_provenance_inputs,
 )
 from .collect_alpine_sources import collect_alpine_sources
 from .common import (
@@ -42,6 +50,9 @@ from .common import (
     download,
     openvmm_binary_path,
     require_file,
+    require_success,
+    run_capture,
+    sha256_file,
     verify_sha256_sums,
     write_sha256_sums,
 )
@@ -89,6 +100,10 @@ class _GitHubReleaseQueryError(ScriptError):
     def __init__(self, status: int, message: str) -> None:
         self.status = status
         super().__init__(message)
+
+
+class _ReleaseRestoreError(ScriptError):
+    """Raised when release publication and restoration both fail."""
 
 
 def _github_headers(token: str | None, accept: str) -> dict[str, str]:
@@ -303,8 +318,17 @@ def _install_release_archive(archive_path: Path) -> None:
             )
             for name in GUEST_RELEASE_NAMES
         }
+        provenance_sources = {
+            name: require_file(
+                package_root / "provenance" / name,
+                f"packaged provenance artifact {name}",
+            )
+            for name in (OPENVMM_PROVENANCE_NAME, KERNEL_PROVENANCE_NAME)
+        }
         _replace_runtime_file(binary_source, binary_destination)
         for name, source in guest_sources.items():
+            _replace_runtime_file(source, artifact_path(name))
+        for name, source in provenance_sources.items():
             _replace_runtime_file(source, artifact_path(name))
 
 
@@ -462,6 +486,171 @@ def _guest_release_inputs() -> tuple[list[str], list[Path]]:
     return guest_names, package_manifests
 
 
+def _read_json_object(path: Path, description: str) -> dict[str, object]:
+    try:
+        value: object = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        raise ScriptError(f"invalid {description}: {error}") from error
+    if not isinstance(value, dict):
+        raise ScriptError(f"invalid {description}: expected a JSON object")
+    return cast(dict[str, object], value)
+
+
+def _openvmm_git_state() -> tuple[str, bool]:
+    head = run_capture(["git", "-C", OPENVMM_DIR, "rev-parse", "HEAD"])
+    require_success(head, "OpenVMM revision query")
+    gitlink = run_capture(["git", "-C", REPO_ROOT, "rev-parse", ":openvmm"])
+    require_success(gitlink, "OpenVMM gitlink query")
+    status = run_capture(["git", "-C", OPENVMM_DIR, "status", "--porcelain"])
+    require_success(status, "OpenVMM status query")
+    revision = head.stdout.decode("ascii").strip()
+    expected_revision = gitlink.stdout.decode("ascii").strip()
+    if revision != expected_revision:
+        raise ScriptError(
+            f"OpenVMM submodule is at {revision}, expected {expected_revision}"
+        )
+    return revision, not status.stdout.strip()
+
+
+def _validate_openvmm_provenance(
+    binary: Path,
+    provenance_path: Path,
+) -> dict[str, object]:
+    provenance = _read_json_object(provenance_path, "OpenVMM build provenance")
+    revision, source_clean = _openvmm_git_state()
+    if (
+        provenance.get("format") != 1
+        or provenance.get("source_revision") != revision
+        or provenance.get("source_clean") is not True
+        or not source_clean
+        or provenance.get("executable_sha256") != sha256_file(binary)
+    ):
+        raise ScriptError(
+            "OpenVMM build provenance does not match the current clean pinned "
+            "source and executable"
+        )
+    return provenance
+
+
+def _validate_kernel_provenance(
+    kernel: Path,
+    kernel_config: Path,
+    provenance_path: Path,
+) -> dict[str, object]:
+    provenance = _read_json_object(provenance_path, "kernel build provenance")
+    expected_inputs = kernel_provenance_inputs()
+    if (
+        provenance.get("format") != 1
+        or provenance.get("source") != expected_inputs["source"]
+        or provenance.get("input_config") != expected_inputs["input_config"]
+        or provenance.get("kernel_sha256") != sha256_file(kernel)
+        or provenance.get("config_sha256") != sha256_file(kernel_config)
+    ):
+        raise ScriptError(
+            "kernel build provenance does not match the current source, config, "
+            "and vmlinux"
+        )
+    assert_required_kernel_config(kernel_config)
+    return provenance
+
+
+def _packaged_source_manifest(
+    root_manifest: dict[str, object],
+    release_version: str,
+    release_root: Path,
+    openvmm_provenance: dict[str, object],
+    binary_name: str,
+) -> bytes:
+    distribution = root_manifest.get("distribution")
+    openvmm = root_manifest.get("openvmm")
+    linux = root_manifest.get("linux")
+    alpine = root_manifest.get("alpine")
+    if not all(
+        isinstance(section, dict) for section in (distribution, openvmm, linux, alpine)
+    ):
+        raise ScriptError("SOURCE-MANIFEST.json is missing a required object")
+    distribution_section = cast(dict[str, object], distribution)
+    openvmm_section = cast(dict[str, object], openvmm)
+    linux_section = cast(dict[str, object], linux)
+    alpine_section = cast(dict[str, object], alpine)
+    distribution_section["version"] = release_version
+    openvmm_section["source_revision"] = openvmm_provenance["source_revision"]
+    openvmm_section["executable_sha256"] = sha256_file(
+        release_root / "bin" / binary_name
+    )
+    linux_section["kernel_sha256"] = sha256_file(release_root / "guest" / "vmlinux")
+    linux_section["config_sha256"] = sha256_file(
+        release_root / "guest" / "vmlinux.config"
+    )
+    alpine_section["initramfs_sha256"] = sha256_file(
+        release_root / "guest" / "initramfs.cpio.gz"
+    )
+    alpine_section["initramfs_package_manifest_sha256"] = sha256_file(
+        release_root / "guest" / "initramfs.cpio.gz.packages.json"
+    )
+    return (json.dumps(root_manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _validate_root_manifest_contract(manifest: dict[str, object]) -> None:
+    distribution = manifest.get("distribution")
+    openvmm = manifest.get("openvmm")
+    if not isinstance(distribution, dict):
+        raise ScriptError("SOURCE-MANIFEST.json distribution must identify nvx")
+    distribution_section = cast(dict[str, object], distribution)
+    if distribution_section.get("name") != "nvx":
+        raise ScriptError("SOURCE-MANIFEST.json distribution must identify nvx")
+    expected_openvmm = {
+        "microvm_abi_version": MICROVM_ABI_VERSION,
+        "control_session_protocol_version": CONTROL_SESSION_PROTOCOL_VERSION,
+        "control_contract_revision": CONTROL_CONTRACT_REVISION,
+    }
+    if not isinstance(openvmm, dict):
+        raise ScriptError(
+            "SOURCE-MANIFEST.json OpenVMM contract does not match the build contract"
+        )
+    openvmm_section = cast(dict[str, object], openvmm)
+    for field, expected in expected_openvmm.items():
+        if openvmm_section.get(field) != expected:
+            raise ScriptError(
+                "SOURCE-MANIFEST.json OpenVMM contract does not match the "
+                "build contract"
+            )
+    if "source_revision" in openvmm_section:
+        raise ScriptError(
+            "root SOURCE-MANIFEST.json must not duplicate the OpenVMM gitlink revision"
+        )
+    if "guest_agent" in manifest:
+        raise ScriptError(
+            "root SOURCE-MANIFEST.json must not contain product guest-agent metadata"
+        )
+
+
+def _publish_release_directory(staging: Path, destination: Path) -> None:
+    backup = destination.with_name(f".{destination.name}.backup-{uuid.uuid4().hex}")
+    moved_prior = False
+    try:
+        if destination.exists():
+            destination.replace(backup)
+            moved_prior = True
+        staging.replace(destination)
+    except OSError as publish_error:
+        if moved_prior:
+            try:
+                backup.replace(destination)
+            except OSError as restore_error:
+                raise _ReleaseRestoreError(
+                    "failed to publish the staged release and restore the prior "
+                    f"release; prior release remains at {backup} and staged "
+                    f"release remains at {staging}: {restore_error}"
+                ) from publish_error
+        shutil.rmtree(staging, ignore_errors=True)
+        raise ScriptError(f"failed to publish staged release: {publish_error}") from (
+            publish_error
+        )
+    if moved_prior:
+        shutil.rmtree(backup)
+
+
 def collect_release_sources() -> None:
     _guest_names, package_manifests = _guest_release_inputs()
     collect_alpine_sources(
@@ -515,50 +704,157 @@ def package_release(
             raise ScriptError(
                 "--force may only replace a version directory below dist/"
             )
-        shutil.rmtree(release_destination)
-    binary = openvmm_binary_path()
-    _copy_release_file(binary, release_destination / "bin" / binary.name)
-    for name in guest_names:
-        _copy_release_file(artifact_path(name), release_destination / "guest" / name)
-    for name in (
-        "LICENSE",
-        "README.md",
-        "SOURCE-MANIFEST.json",
-        "THIRD_PARTY_NOTICES.md",
-    ):
-        _copy_release_file(REPO_ROOT / name, release_destination / name)
-    _copy_release_file(
-        OPENVMM_DIR / "LICENSE",
-        release_destination / "licenses" / "LICENSE-OPENVMM",
+    binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
+    kernel = require_file(artifact_path("vmlinux"), "required guest artifact vmlinux")
+    kernel_config = require_file(
+        artifact_path("vmlinux.config"),
+        "required guest artifact vmlinux.config",
     )
-    _copy_release_file(
-        REPO_ROOT / "kernel" / "COPYING-LINUX",
-        release_destination / "licenses" / "COPYING-LINUX",
+    openvmm_provenance_path = require_file(
+        artifact_path(OPENVMM_PROVENANCE_NAME),
+        "OpenVMM build provenance",
     )
-    if include_source:
-        source_destination = release_destination / "source"
+    kernel_provenance_path = require_file(
+        artifact_path(KERNEL_PROVENANCE_NAME),
+        "kernel build provenance",
+    )
+    openvmm_provenance = _validate_openvmm_provenance(
+        binary,
+        openvmm_provenance_path,
+    )
+    kernel_provenance = _validate_kernel_provenance(
+        kernel,
+        kernel_config,
+        kernel_provenance_path,
+    )
+    root_manifest_path = require_file(
+        REPO_ROOT / "SOURCE-MANIFEST.json",
+        "source manifest",
+    )
+    root_manifest = _read_json_object(root_manifest_path, "source manifest")
+    _validate_root_manifest_contract(root_manifest)
+    for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
+        require_file(REPO_ROOT / name, name)
+    require_file(OPENVMM_DIR / "LICENSE", "OpenVMM license")
+    require_file(REPO_ROOT / "kernel" / "COPYING-LINUX", "Linux copyright notice")
+
+    release_destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{release_destination.name}.staging-",
+            dir=release_destination.parent,
+        )
+    )
+    preserve_staging = False
+    try:
+        _copy_release_file(binary, staging / "bin" / binary.name)
+        for name in guest_names:
+            _copy_release_file(artifact_path(name), staging / "guest" / name)
         _copy_release_file(
-            linux_source_archive,
-            source_destination / linux_source_archive.name,
+            openvmm_provenance_path,
+            staging / "provenance" / OPENVMM_PROVENANCE_NAME,
         )
-        _project_source_archive(
-            source_destination / f"nvx-project-source-{release_version}.tar.gz",
-            release_version,
-            package_manifests,
+        _copy_release_file(
+            kernel_provenance_path,
+            staging / "provenance" / KERNEL_PROVENANCE_NAME,
         )
-        _alpine_source_archive(
-            source_destination / f"nvx-alpine-source-{release_version}.tar.gz",
-            release_version,
-            package_manifests,
+        for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
+            _copy_release_file(REPO_ROOT / name, staging / name)
+        _copy_release_file(
+            OPENVMM_DIR / "LICENSE",
+            staging / "licenses" / "LICENSE-OPENVMM",
         )
-    write_sha256_sums(release_destination)
+        _copy_release_file(
+            REPO_ROOT / "kernel" / "COPYING-LINUX",
+            staging / "licenses" / "COPYING-LINUX",
+        )
+        if include_source:
+            source_destination = staging / "source"
+            _copy_release_file(
+                linux_source_archive,
+                source_destination / linux_source_archive.name,
+            )
+            _project_source_archive(
+                source_destination / f"nvx-project-source-{release_version}.tar.gz",
+                release_version,
+                package_manifests,
+            )
+            _alpine_source_archive(
+                source_destination / f"nvx-alpine-source-{release_version}.tar.gz",
+                release_version,
+                package_manifests,
+            )
+        packaged_binary = staging / "bin" / binary.name
+        packaged_kernel = staging / "guest" / "vmlinux"
+        packaged_config = staging / "guest" / "vmlinux.config"
+        packaged_openvmm_provenance = staging / "provenance" / OPENVMM_PROVENANCE_NAME
+        packaged_kernel_provenance = staging / "provenance" / KERNEL_PROVENANCE_NAME
+        if sha256_file(packaged_binary) != openvmm_provenance["executable_sha256"]:
+            raise ScriptError(
+                "packaged OpenVMM executable does not match its build provenance"
+            )
+        if sha256_file(packaged_kernel) != kernel_provenance["kernel_sha256"]:
+            raise ScriptError("packaged kernel does not match its build provenance")
+        if sha256_file(packaged_config) != kernel_provenance["config_sha256"]:
+            raise ScriptError(
+                "packaged kernel config does not match its build provenance"
+            )
+        if (
+            _read_json_object(
+                packaged_openvmm_provenance,
+                "packaged OpenVMM build provenance",
+            )
+            != openvmm_provenance
+        ):
+            raise ScriptError("packaged OpenVMM provenance changed while staging")
+        if (
+            _read_json_object(
+                packaged_kernel_provenance,
+                "packaged kernel build provenance",
+            )
+            != kernel_provenance
+        ):
+            raise ScriptError("packaged kernel provenance changed while staging")
+        (staging / "SOURCE-MANIFEST.json").write_bytes(
+            _packaged_source_manifest(
+                root_manifest,
+                release_version,
+                staging,
+                openvmm_provenance,
+                binary.name,
+            )
+        )
+        write_sha256_sums(staging)
+        verify_sha256_sums(staging)
+        _publish_release_directory(staging, release_destination)
+    except _ReleaseRestoreError:
+        preserve_staging = True
+        raise
+    finally:
+        if staging.exists() and not preserve_staging:
+            shutil.rmtree(staging)
     print(f">> packaged {release_destination}")
 
 
 def verify_source_tree() -> None:
-    manifest = json.loads(
-        (REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+    manifest = _read_json_object(
+        REPO_ROOT / "SOURCE-MANIFEST.json",
+        "source manifest",
     )
+    _validate_root_manifest_contract(manifest)
+    linux_value = manifest.get("linux")
+    alpine_value = manifest.get("alpine")
+    if not isinstance(linux_value, dict) or not isinstance(alpine_value, dict):
+        raise ScriptError("SOURCE-MANIFEST.json is missing Linux or Alpine metadata")
+    linux_manifest = cast(dict[str, object], linux_value)
+    alpine_manifest = cast(dict[str, object], alpine_value)
+    patches = linux_manifest.get("patches")
+    if not isinstance(patches, list):
+        raise ScriptError("SOURCE-MANIFEST.json Linux patches must be strings")
+    patch_values = cast(list[object], patches)
+    if not all(isinstance(patch, str) for patch in patch_values):
+        raise ScriptError("SOURCE-MANIFEST.json Linux patches must be strings")
+    patch_paths = cast(list[str], patch_values)
     required = {
         REPO_ROOT / "kernel" / "config-microvm": "kernel build configuration",
         REPO_ROOT
@@ -573,10 +869,7 @@ def verify_source_tree() -> None:
         OPENVMM_DIR / "Cargo.toml": "initialized OpenVMM submodule",
     }
     required.update(
-        {
-            REPO_ROOT / patch: f"kernel patch {patch}"
-            for patch in manifest["linux"]["patches"]
-        }
+        {REPO_ROOT / patch: f"kernel patch {patch}" for patch in patch_paths}
     )
     for path, description in required.items():
         require_file(path, description)
@@ -590,7 +883,6 @@ def verify_source_tree() -> None:
             "generated third-party sources must not be checked out here: "
             + ", ".join(present)
         )
-    linux_manifest = manifest["linux"]
     expected_linux = {
         "version": DEFAULT_KERNEL_VERSION,
         "upstream_url": DEFAULT_KERNEL_URL,
@@ -601,7 +893,6 @@ def verify_source_tree() -> None:
             raise ScriptError(
                 f"SOURCE-MANIFEST.json Linux {field} does not match the build pin"
             )
-    alpine_manifest = manifest["alpine"]
     expected_alpine = {
         "version": DEFAULT_ALPINE_VERSION,
         "branch": DEFAULT_ALPINE_BRANCH,

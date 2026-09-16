@@ -37,6 +37,104 @@ from nvx_tools import (  # noqa: E402
 )
 
 
+def _write_release_fixture(
+    root: Path,
+) -> tuple[dict[str, Path], dict[str, object], str]:
+    build_dir = root / "build"
+    source_dir = build_dir / "sources"
+    openvmm_dir = root / "openvmm"
+    binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+    binary = openvmm_dir / "target" / "release" / binary_name
+    revision = "f9b2fdc7ca1ef0a4feb861be75d05468fe769215"
+    guest_names = (
+        "vmlinux",
+        "vmlinux.config",
+        "initramfs.cpio.gz",
+        "initramfs.cpio.gz.packages.json",
+    )
+    for path in (
+        binary,
+        *(build_dir / name for name in guest_names),
+        root / "LICENSE",
+        root / "README.md",
+        root / "THIRD_PARTY_NOTICES.md",
+        openvmm_dir / "LICENSE",
+        root / "kernel" / "COPYING-LINUX",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(path.name.encode("ascii"))
+    generated_config = build_dir / "vmlinux.config"
+    generated_config.write_text(
+        "\n".join(
+            (
+                *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "format": 1,
+        "distribution": {"name": "nvx", "version": "0.1.0"},
+        "openvmm": {
+            "microvm_abi_version": 2,
+            "control_session_protocol_version": 1,
+            "control_contract_revision": "nvx-microvm-v2-control-v1",
+        },
+        "linux": {
+            "version": "6.18.38",
+            "input_config": "kernel/config-microvm",
+            "patches": ["kernel/patches/example.patch"],
+        },
+        "alpine": {
+            "version": "3.24.1",
+            "guest_sources": "alpine",
+        },
+    }
+    (root / "SOURCE-MANIFEST.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    kernel_inputs: dict[str, object] = {
+        "source": {"version": "6.18.38", "patches": []},
+        "input_config": {
+            "path": "kernel/config-microvm",
+            "sha256": "1" * 64,
+        },
+    }
+    (build_dir / build.OPENVMM_PROVENANCE_NAME).write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "source_revision": revision,
+                "source_clean": True,
+                "executable_sha256": common.sha256_file(binary),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (build_dir / build.KERNEL_PROVENANCE_NAME).write_text(
+        json.dumps(
+            {
+                "format": 1,
+                **kernel_inputs,
+                "kernel_sha256": common.sha256_file(build_dir / "vmlinux"),
+                "config_sha256": common.sha256_file(generated_config),
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = {
+        "build": build_dir,
+        "source": source_dir,
+        "openvmm": openvmm_dir,
+        "binary": binary,
+    }
+    return paths, kernel_inputs, revision
+
+
 class CliTests(unittest.TestCase):
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
@@ -488,6 +586,7 @@ class CliTests(unittest.TestCase):
         with (
             patch.object(nvx, "require_file"),
             patch.object(nvx, "_run") as run,
+            patch.object(nvx, "record_openvmm_provenance") as provenance,
         ):
             nvx.command_build_openvmm(argparse.Namespace(skip_restore=False))
 
@@ -503,6 +602,11 @@ class CliTests(unittest.TestCase):
                 cwd=common.OPENVMM_DIR,
             ),
         )
+        provenance.assert_called_once_with(common.openvmm_binary_path())
+
+    def test_record_openvmm_provenance_command_is_exposed(self):
+        args = nvx.parse_args(["record-openvmm-provenance"])
+        self.assertIs(args.handler, nvx.command_record_openvmm_provenance)
 
 
 class CiTests(unittest.TestCase):
@@ -740,6 +844,39 @@ class CiConfigurationTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_records_openvmm_revision_cleanliness_and_executable_hash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            openvmm_dir = root / "openvmm"
+            executable = openvmm_dir / "target" / "release" / "openvmm"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"openvmm")
+            revision = b"f9b2fdc7ca1ef0a4feb861be75d05468fe769215\n"
+            results = [
+                common.CommandResult(("git",), 0, revision, b""),
+                common.CommandResult(("git",), 0, revision, b""),
+                common.CommandResult(("git",), 0, b" M src/main.rs\n", b""),
+            ]
+
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "OPENVMM_DIR", openvmm_dir),
+                patch.object(build, "run_capture", side_effect=results),
+            ):
+                build.record_openvmm_provenance(executable)
+
+            provenance = json.loads(
+                (root / "build" / build.OPENVMM_PROVENANCE_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(provenance["source_revision"], revision.decode().strip())
+            self.assertFalse(provenance["source_clean"])
+            self.assertEqual(
+                provenance["executable_sha256"],
+                hashlib.sha256(b"openvmm").hexdigest(),
+            )
+
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
             (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
@@ -751,6 +888,15 @@ class BuildTests(unittest.TestCase):
                 for path in build._kernel_patch_files()
             ],
         )
+        self.assertNotIn("guest_agent", manifest)
+        self.assertEqual(
+            manifest["openvmm"],
+            {
+                "microvm_abi_version": 2,
+                "control_session_protocol_version": 1,
+                "control_contract_revision": "nvx-microvm-v2-control-v1",
+            },
+        )
 
     def test_ci_kernel_cache_key_includes_patches(self):
         action = (
@@ -760,10 +906,15 @@ class BuildTests(unittest.TestCase):
             / "build-guest-artifacts"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn(
-            "hashFiles('kernel/config-microvm', 'kernel/patches/**')",
-            action,
-        )
+        for cache_input in (
+            "SOURCE-MANIFEST.json",
+            "kernel/config-microvm",
+            "kernel/patches/**",
+            "scripts/nvx_tools/build.py",
+        ):
+            self.assertIn(cache_input, action)
+        self.assertIn("linux-kernel-v4-", action)
+        self.assertEqual(action.count("build/vmlinux.provenance.json"), 2)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")
@@ -3435,31 +3586,11 @@ class ReleaseTests(unittest.TestCase):
     def test_binary_package_stages_files_and_checksums(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            build_dir = root / "build"
-            source_dir = build_dir / "sources"
-            openvmm_dir = root / "openvmm"
-            binary = openvmm_dir / "target" / "release" / "openvmm.exe"
-            guest_names = (
-                "vmlinux",
-                "vmlinux.config",
-                "initramfs.cpio.gz",
-                "initramfs.cpio.gz.packages.json",
-            )
-            release_files = (
-                "LICENSE",
-                "README.md",
-                "SOURCE-MANIFEST.json",
-                "THIRD_PARTY_NOTICES.md",
-            )
-            for path in (
-                binary,
-                *(build_dir / name for name in guest_names),
-                *(root / name for name in release_files),
-                openvmm_dir / "LICENSE",
-                root / "kernel" / "COPYING-LINUX",
-            ):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(path.name.encode("ascii"))
+            paths, kernel_inputs, revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            source_dir = paths["source"]
+            openvmm_dir = paths["openvmm"]
+            binary = paths["binary"]
             destination = root / "staged"
             stderr = io.StringIO()
 
@@ -3476,6 +3607,16 @@ class ReleaseTests(unittest.TestCase):
                     side_effect=artifact_path,
                 ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, True),
+                ),
                 patch("sys.stderr", stderr),
             ):
                 release.package_release(
@@ -3486,10 +3627,221 @@ class ReleaseTests(unittest.TestCase):
                 )
 
             self.assertTrue((destination / "bin" / binary.name).is_file())
-            for name in guest_names:
+            for name in release.GUEST_RELEASE_NAMES:
                 self.assertTrue((destination / "guest" / name).is_file())
+            self.assertTrue(
+                (destination / "provenance" / build.OPENVMM_PROVENANCE_NAME).is_file()
+            )
+            self.assertTrue(
+                (destination / "provenance" / build.KERNEL_PROVENANCE_NAME).is_file()
+            )
+            manifest = json.loads(
+                (destination / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["distribution"]["version"], "1.0.0")
+            self.assertNotIn("guest_agent", manifest)
+            self.assertEqual(manifest["openvmm"]["source_revision"], revision)
+            self.assertEqual(
+                manifest["openvmm"]["executable_sha256"],
+                common.sha256_file(destination / "bin" / binary.name),
+            )
+            self.assertEqual(
+                manifest["openvmm"]["microvm_abi_version"],
+                2,
+            )
+            self.assertEqual(
+                manifest["openvmm"]["control_session_protocol_version"],
+                1,
+            )
+            self.assertEqual(
+                manifest["openvmm"]["control_contract_revision"],
+                "nvx-microvm-v2-control-v1",
+            )
+            self.assertEqual(
+                manifest["linux"]["kernel_sha256"],
+                common.sha256_file(destination / "guest" / "vmlinux"),
+            )
+            self.assertEqual(
+                manifest["linux"]["config_sha256"],
+                common.sha256_file(destination / "guest" / "vmlinux.config"),
+            )
             common.verify_sha256_sums(destination)
             self.assertIn("binary-only package", stderr.getvalue())
+
+    def test_package_rejects_dirty_openvmm_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, revision = _write_release_fixture(root)
+
+            with (
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, False),
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "current clean pinned source",
+                ),
+            ):
+                release._validate_openvmm_provenance(
+                    paths["binary"],
+                    paths["build"] / build.OPENVMM_PROVENANCE_NAME,
+                )
+
+    def test_package_rejects_stale_kernel_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, kernel_inputs, _revision = _write_release_fixture(root)
+            kernel = paths["build"] / "vmlinux"
+            kernel.write_bytes(b"new kernel bytes")
+
+            with (
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "kernel build provenance",
+                ),
+            ):
+                release._validate_kernel_provenance(
+                    kernel,
+                    paths["build"] / "vmlinux.config",
+                    paths["build"] / build.KERNEL_PROVENANCE_NAME,
+                )
+
+    def test_failed_staged_verification_preserves_existing_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, kernel_inputs, revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            destination = root / "dist" / "1.0.0"
+            destination.mkdir(parents=True)
+            marker = destination / "prior.txt"
+            marker.write_text("prior release", encoding="utf-8")
+
+            def artifact_path(name: str) -> Path:
+                return build_dir / name
+
+            original_copy = release._copy_release_file
+
+            def corrupt_packaged_binary(source: Path, target: Path) -> None:
+                original_copy(source, target)
+                if target.name == paths["binary"].name:
+                    target.write_bytes(b"corrupt")
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                patch.object(release, "SOURCE_DIR", paths["source"]),
+                patch.object(release, "OPENVMM_DIR", paths["openvmm"]),
+                patch.object(release, "artifact_path", side_effect=artifact_path),
+                patch.object(
+                    release,
+                    "openvmm_binary_path",
+                    return_value=paths["binary"],
+                ),
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, True),
+                ),
+                patch.object(
+                    release,
+                    "_copy_release_file",
+                    side_effect=corrupt_packaged_binary,
+                ),
+                patch("sys.stderr", io.StringIO()),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "packaged OpenVMM executable",
+                ),
+            ):
+                release.package_release(
+                    version="1.0.0",
+                    destination=destination,
+                    include_source=False,
+                    force=True,
+                )
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "prior release")
+            self.assertEqual(
+                [path.name for path in destination.iterdir()], ["prior.txt"]
+            )
+
+    def test_publication_failure_restores_existing_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "release"
+            destination.mkdir()
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+            original_replace = Path.replace
+
+            def fail_staging_replace(source: Path, target: Path) -> Path:
+                if source == staging:
+                    raise OSError("injected publication failure")
+                return original_replace(source, target)
+
+            with (
+                patch.object(Path, "replace", new=fail_staging_replace),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "failed to publish staged release",
+                ),
+            ):
+                release._publish_release_directory(staging, destination)
+
+            self.assertEqual(
+                (destination / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertFalse(staging.exists())
+
+    def test_failed_rollback_preserves_prior_backup_and_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "release"
+            destination.mkdir()
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+            original_replace = Path.replace
+
+            def fail_publication_and_restore(source: Path, target: Path) -> Path:
+                if source == staging or source.name.startswith(".release.backup-"):
+                    raise OSError("injected rename failure")
+                return original_replace(source, target)
+
+            with (
+                patch.object(Path, "replace", new=fail_publication_and_restore),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "prior release remains",
+                ),
+            ):
+                release._publish_release_directory(staging, destination)
+
+            backups = list(root.glob(".release.backup-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                (backups[0] / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertEqual(
+                (staging / "new.txt").read_text(encoding="utf-8"),
+                "new",
+            )
 
     def test_release_archive_installs_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3503,6 +3855,13 @@ class ReleaseTests(unittest.TestCase):
                 guest = package_root / "guest" / name
                 guest.parent.mkdir(parents=True, exist_ok=True)
                 guest.write_bytes(name.encode("ascii"))
+            for name in (
+                build.OPENVMM_PROVENANCE_NAME,
+                build.KERNEL_PROVENANCE_NAME,
+            ):
+                provenance = package_root / "provenance" / name
+                provenance.parent.mkdir(parents=True, exist_ok=True)
+                provenance.write_bytes(name.encode("ascii"))
             common.write_sha256_sums(package_root)
 
             if os.name == "nt":
@@ -3539,6 +3898,14 @@ class ReleaseTests(unittest.TestCase):
 
             self.assertEqual(binary_destination.read_bytes(), b"openvmm")
             for name in release.GUEST_RELEASE_NAMES:
+                self.assertEqual(
+                    (build_dir / name).read_bytes(),
+                    name.encode("ascii"),
+                )
+            for name in (
+                build.OPENVMM_PROVENANCE_NAME,
+                build.KERNEL_PROVENANCE_NAME,
+            ):
                 self.assertEqual(
                     (build_dir / name).read_bytes(),
                     name.encode("ascii"),

@@ -13,10 +13,13 @@ from pathlib import Path
 from typing import TypedDict
 
 from .common import (
+    OPENVMM_DIR,
     REPO_ROOT,
     ScriptError,
     download,
     format_size,
+    require_file,
+    require_success,
     require_tool,
     run_capture,
     run_checked,
@@ -33,6 +36,11 @@ DEFAULT_ALPINE_BRANCH = "v3.24"
 DEFAULT_ALPINE_MINIROOTFS_SHA256 = (
     "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081"
 )
+MICROVM_ABI_VERSION = 2
+CONTROL_SESSION_PROTOCOL_VERSION = 1
+CONTROL_CONTRACT_REVISION = "nvx-microvm-v2-control-v1"
+OPENVMM_PROVENANCE_NAME = "openvmm.provenance.json"
+KERNEL_PROVENANCE_NAME = "vmlinux.provenance.json"
 REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_HVC_DRIVER=y",
     "CONFIG_VIRTIO=y",
@@ -110,6 +118,13 @@ def _assert_shared_status_kernel_config(path: Path) -> None:
         )
 
 
+def assert_required_kernel_config(path: Path) -> None:
+    """Validate the generated configuration required by the NVX platform."""
+    _assert_virtio_console_kernel_config(path)
+    _assert_sandbox_kernel_config(path)
+    _assert_shared_status_kernel_config(path)
+
+
 @dataclass(frozen=True)
 class AlpineBuildConfig:
     version: str = DEFAULT_ALPINE_VERSION
@@ -177,14 +192,56 @@ def _kernel_patch_files() -> tuple[Path, ...]:
 def _kernel_source_fingerprint() -> str:
     return json.dumps(
         {
-            "archive_sha256": DEFAULT_KERNEL_SHA256,
+            "version": DEFAULT_KERNEL_VERSION,
+            "upstream_url": DEFAULT_KERNEL_URL,
+            "upstream_archive_sha256": DEFAULT_KERNEL_SHA256,
             "patches": [
-                {"name": patch.name, "sha256": sha256_file(patch)}
+                {
+                    "path": patch.relative_to(REPO_ROOT).as_posix(),
+                    "sha256": sha256_file(patch),
+                }
                 for patch in _kernel_patch_files()
             ],
         },
         sort_keys=True,
     )
+
+
+def kernel_provenance_inputs() -> dict[str, object]:
+    """Return the source and input-config identity required for a kernel build."""
+    return {
+        "source": json.loads(_kernel_source_fingerprint()),
+        "input_config": {
+            "path": "kernel/config-microvm",
+            "sha256": sha256_file(REPO_ROOT / "kernel" / "config-microvm"),
+        },
+    }
+
+
+def record_openvmm_provenance(executable: Path) -> None:
+    """Bind an OpenVMM executable to the checked-out submodule revision."""
+    head = run_capture(["git", "-C", OPENVMM_DIR, "rev-parse", "HEAD"])
+    require_success(head, "OpenVMM revision query")
+    gitlink = run_capture(["git", "-C", REPO_ROOT, "rev-parse", ":openvmm"])
+    require_success(gitlink, "OpenVMM gitlink query")
+    status = run_capture(["git", "-C", OPENVMM_DIR, "status", "--porcelain"])
+    require_success(status, "OpenVMM status query")
+    source_revision = head.stdout.decode("ascii").strip()
+    expected_revision = gitlink.stdout.decode("ascii").strip()
+    if source_revision != expected_revision:
+        raise ScriptError(
+            f"OpenVMM submodule is at {source_revision}, expected {expected_revision}"
+        )
+    require_file(executable, "OpenVMM release binary")
+    provenance = {
+        "format": 1,
+        "source_revision": source_revision,
+        "source_clean": not status.stdout.strip(),
+        "executable_sha256": sha256_file(executable),
+    }
+    path = REPO_ROOT / "build" / OPENVMM_PROVENANCE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
 
 
 def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, str]:
@@ -527,6 +584,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     build_fingerprint = json.dumps(
         {
             "source": source_fingerprint,
+            "input_config_sha256": sha256_file(REPO_ROOT / "kernel" / "config-microvm"),
         },
         sort_keys=True,
     )
@@ -542,9 +600,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     shutil.copy2(REPO_ROOT / "kernel" / "config-microvm", kernel_config)
     make = ["make", "-C", source, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
-    _assert_virtio_console_kernel_config(kernel_config)
-    _assert_sandbox_kernel_config(kernel_config)
-    _assert_shared_status_kernel_config(kernel_config)
+    assert_required_kernel_config(kernel_config)
     jobs = os.cpu_count() or 1
     print(f">> building vmlinux with {jobs} jobs")
     run_checked([*make, f"-j{jobs}", "vmlinux"])
@@ -559,6 +615,17 @@ def build_kernel(config: KernelBuildConfig) -> None:
     else:
         config.output.unlink(missing_ok=True)
         raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
+
+    provenance = {
+        "format": 1,
+        **kernel_provenance_inputs(),
+        "kernel_sha256": sha256_file(config.output),
+        "config_sha256": sha256_file(kernel_config),
+    }
+    config.output.with_name(KERNEL_PROVENANCE_NAME).write_text(
+        json.dumps(provenance, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:
@@ -629,7 +696,12 @@ def build_docker_artifacts(
         f"(kernel {config.kernel_version}, Alpine {config.alpine_version})"
     )
     run_checked(docker_build_command(config, "artifacts"), cwd=REPO_ROOT)
-    expected = ("vmlinux", "initramfs.cpio.gz")
+    expected = (
+        "vmlinux",
+        "vmlinux.config",
+        KERNEL_PROVENANCE_NAME,
+        "initramfs.cpio.gz",
+    )
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:
         raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")

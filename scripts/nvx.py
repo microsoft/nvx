@@ -20,6 +20,7 @@ from nvx_tools.build import (
     build_docker_artifacts,
     build_initramfs,
     build_kernel,
+    record_openvmm_provenance,
 )
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
@@ -113,6 +114,11 @@ def command_build_openvmm(args: argparse.Namespace) -> None:
         ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
         cwd=OPENVMM_DIR,
     )
+    record_openvmm_provenance(openvmm_binary_path())
+
+
+def command_record_openvmm_provenance(_: argparse.Namespace) -> None:
+    record_openvmm_provenance(openvmm_binary_path())
 
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
@@ -429,6 +435,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")
     openvmm.add_argument("--skip-restore", action="store_true")
     openvmm.set_defaults(handler=command_build_openvmm)
+
+    provenance = subparsers.add_parser(
+        "record-openvmm-provenance",
+        help="bind an existing OpenVMM binary to the pinned source revision",
+    )
+    provenance.set_defaults(handler=command_record_openvmm_provenance)
 
     cache = subparsers.add_parser(
         "setup-cross-os-cache",
