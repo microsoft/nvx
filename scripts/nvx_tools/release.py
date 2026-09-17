@@ -37,6 +37,7 @@ from .common import (
     SOURCE_DIR,
     ScriptError,
     artifact_path,
+    credential_safe_opener,
     download,
     openvmm_binary_path,
     require_file,
@@ -94,6 +95,41 @@ def _github_headers(token: str | None, accept: str) -> dict[str, str]:
     return headers
 
 
+def _github_error_message(error: urllib.error.HTTPError) -> str:
+    try:
+        payload = error.read().decode("utf-8", "replace").strip()
+    except (AttributeError, OSError, ValueError):
+        return ""
+    if not payload:
+        return ""
+    try:
+        document: object = json.loads(payload)
+    except json.JSONDecodeError:
+        return " ".join(payload.split())[:200]
+    if isinstance(document, dict):
+        message = cast(dict[str, object], document).get("message")
+        if isinstance(message, str):
+            return message
+    return ""
+
+
+def _github_error_hint(error: urllib.error.HTTPError, token: str | None) -> str:
+    if token is None and error.code in (401, 403, 404):
+        return "set GH_TOKEN to a token that can read the repository"
+    if error.code == 401:
+        return "GH_TOKEN was rejected; refresh the expired or revoked token"
+    if error.code == 403:
+        if error.headers.get("x-ratelimit-remaining") == "0":
+            return "the GitHub API rate limit is exhausted; retry later"
+        return (
+            "GH_TOKEN lacks access; grant it read access to the repository "
+            "contents and authorize it for the organization single sign-on"
+        )
+    if error.code == 404:
+        return "verify --repository and that GH_TOKEN can read that repository"
+    return ""
+
+
 def _latest_release_asset(
     repository: str,
     platform: str,
@@ -114,11 +150,12 @@ def _latest_release_asset(
         with urllib.request.urlopen(request) as response:
             releases: object = json.load(response)
     except urllib.error.HTTPError as error:
-        hint = ""
-        if token is None and error.code in (401, 403, 404):
-            hint = "; set GH_TOKEN to access private releases"
+        message = _github_error_message(error)
+        hint = _github_error_hint(error, token)
+        detail = f": {message.rstrip('.')}" if message else ""
+        advice = f"; {hint}" if hint else ""
         raise ScriptError(
-            f"GitHub release query failed with HTTP {error.code}{hint}"
+            f"GitHub release query failed with HTTP {error.code}{detail}{advice}"
         ) from error
     except (OSError, urllib.error.URLError) as error:
         raise ScriptError(f"GitHub release query failed: {error}") from error
@@ -247,6 +284,7 @@ def download_latest_release(repository: str, platform: str) -> None:
             asset.url,
             archive_path,
             headers=_github_headers(token, "application/octet-stream"),
+            opener=credential_safe_opener(),
         )
         actual_size = archive_path.stat().st_size
         if actual_size != asset.size:

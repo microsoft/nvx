@@ -163,6 +163,9 @@ python3 scripts/nvx.py download
 
 Windows release downloads support WHP. Linux release downloads support KVM
 and MSHV. Set `GH_TOKEN` when the selected repository requires authentication.
+The token needs read access to the repository contents, and must be authorized
+for the organization when it enforces single sign-on; otherwise GitHub answers
+the release query with HTTP 403.
 
 ### `run`
 
