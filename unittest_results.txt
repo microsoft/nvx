@@ -1,0 +1,411 @@
+test_collect_appends_ci_benchmark_table (scripts.test_performance.PerformanceTests.test_collect_appends_ci_benchmark_table) ... ok
+test_collect_cli_accepts_lifecycle_input (scripts.test_performance.PerformanceTests.test_collect_cli_accepts_lifecycle_input) ... ok
+test_collect_cli_accepts_restore_only_contract (scripts.test_performance.PerformanceTests.test_collect_cli_accepts_restore_only_contract) ... ok
+test_collect_does_not_require_python_snapshot_logs (scripts.test_performance.PerformanceTests.test_collect_does_not_require_python_snapshot_logs) ... ok
+test_collect_requires_shell_snapshot_log_when_requested (scripts.test_performance.PerformanceTests.test_collect_requires_shell_snapshot_log_when_requested) ... ok
+test_collects_device_io_metrics_with_abi_dimension (scripts.test_performance.PerformanceTests.test_collects_device_io_metrics_with_abi_dimension) ... ok
+test_collects_dimensioned_microvm_v2_results (scripts.test_performance.PerformanceTests.test_collects_dimensioned_microvm_v2_results) ... ok
+test_collects_linux_metrics_from_utf8_and_utf16_logs (scripts.test_performance.PerformanceTests.test_collects_linux_metrics_from_utf8_and_utf16_logs) ... ok
+test_collects_mshv_shared_suite_with_network (scripts.test_performance.PerformanceTests.test_collects_mshv_shared_suite_with_network) ... ok
+test_collects_only_canonical_higher_vcpu_shell_restore (scripts.test_performance.PerformanceTests.test_collects_only_canonical_higher_vcpu_shell_restore) ... ok
+test_collects_openvmm_json_and_appends_diagnostics (scripts.test_performance.PerformanceTests.test_collects_openvmm_json_and_appends_diagnostics) ... ok
+test_collects_openvmm_mshv_json (scripts.test_performance.PerformanceTests.test_collects_openvmm_mshv_json) ... ok
+test_device_io_parser_filters_warmups_and_retains_failures (scripts.test_performance.PerformanceTests.test_device_io_parser_filters_warmups_and_retains_failures) ... ok
+test_device_io_parser_rejects_duplicate_attempts (scripts.test_performance.PerformanceTests.test_device_io_parser_rejects_duplicate_attempts) ... ok
+test_device_io_parser_rejects_missing_and_zero_results (scripts.test_performance.PerformanceTests.test_device_io_parser_rejects_missing_and_zero_results) ... ok
+test_device_io_parser_requires_every_configured_attempt (scripts.test_performance.PerformanceTests.test_device_io_parser_requires_every_configured_attempt) ... ok
+test_gate_applies_relative_threshold_to_peak_rss (scripts.test_performance.PerformanceTests.test_gate_applies_relative_threshold_to_peak_rss) ... ok
+test_gate_does_not_apply_latency_tolerance_to_throughput (scripts.test_performance.PerformanceTests.test_gate_does_not_apply_latency_tolerance_to_throughput) ... ok
+test_gate_never_uses_legacy_abi_v1_as_abi_v2_baseline (scripts.test_performance.PerformanceTests.test_gate_never_uses_legacy_abi_v1_as_abi_v2_baseline) ... ok
+test_gate_requires_absolute_latency_regression_beyond_tolerance (scripts.test_performance.PerformanceTests.test_gate_requires_absolute_latency_regression_beyond_tolerance) ... ok
+test_gate_uses_baseline_median_for_multimodal_history (scripts.test_performance.PerformanceTests.test_gate_uses_baseline_median_for_multimodal_history) ... ok
+test_gate_uses_latest_ten_p50_values_and_both_directions (scripts.test_performance.PerformanceTests.test_gate_uses_latest_ten_p50_values_and_both_directions) ... ok
+test_gate_uses_verified_windows_virtfs_reuse_history (scripts.test_performance.PerformanceTests.test_gate_uses_verified_windows_virtfs_reuse_history) ... ok
+test_gate_warms_up_metric_without_history (scripts.test_performance.PerformanceTests.test_gate_warms_up_metric_without_history) ... ok
+test_gate_warms_up_until_minimum_history (scripts.test_performance.PerformanceTests.test_gate_warms_up_until_minimum_history) ... ok
+test_live_virtfs_roundtrip_uses_shared_metric_name (scripts.test_performance.PerformanceTests.test_live_virtfs_roundtrip_uses_shared_metric_name) ... ok
+test_matching_explicit_network_metadata_is_accepted (scripts.test_performance.PerformanceTests.test_matching_explicit_network_metadata_is_accepted) ... ok
+test_openvmm_json_rejects_aggregates_that_do_not_match_samples (scripts.test_performance.PerformanceTests.test_openvmm_json_rejects_aggregates_that_do_not_match_samples) ... ok
+test_openvmm_json_requires_guest_exit_without_timeouts (scripts.test_performance.PerformanceTests.test_openvmm_json_requires_guest_exit_without_timeouts) ... ok
+test_openvmm_json_requires_the_platform_backend (scripts.test_performance.PerformanceTests.test_openvmm_json_requires_the_platform_backend) ... ok
+test_persist_and_gate_isolate_processor_counts (scripts.test_performance.PerformanceTests.test_persist_and_gate_isolate_processor_counts) ... ok
+test_persist_excludes_selected_metrics (scripts.test_performance.PerformanceTests.test_persist_excludes_selected_metrics) ... ok
+test_persist_is_idempotent_per_commit_and_metric (scripts.test_performance.PerformanceTests.test_persist_is_idempotent_per_commit_and_metric) ... ok
+test_persist_merges_distinct_metrics_for_same_abi_commit (scripts.test_performance.PerformanceTests.test_persist_merges_distinct_metrics_for_same_abi_commit) ... ok
+test_persist_writes_all_platform_results (scripts.test_performance.PerformanceTests.test_persist_writes_all_platform_results) ... ok
+test_reads_legacy_history_as_microvm_v1_one_vcpu (scripts.test_performance.PerformanceTests.test_reads_legacy_history_as_microvm_v1_one_vcpu) ... ok
+test_rejects_duplicate_dimensional_rows_across_files (scripts.test_performance.PerformanceTests.test_rejects_duplicate_dimensional_rows_across_files) ... ok
+test_rejects_lifecycle_workload_processor_mismatch (scripts.test_performance.PerformanceTests.test_rejects_lifecycle_workload_processor_mismatch) ... ok
+test_rejects_microvm_v3_dimensions (scripts.test_performance.PerformanceTests.test_rejects_microvm_v3_dimensions) ... ok
+test_restore_only_collection_rejects_other_metrics (scripts.test_performance.PerformanceTests.test_restore_only_collection_rejects_other_metrics) ... ok
+test_shared_suite_rejects_missing_scenarios (scripts.test_performance.PerformanceTests.test_shared_suite_rejects_missing_scenarios) ... ok
+test_shell_snapshot_requires_every_memory_size (scripts.test_performance.PerformanceTests.test_shell_snapshot_requires_every_memory_size) ... ok
+test_benchmark_cpu_set_reserves_host_worker_capacity (scripts.test_nvx_tools.BenchmarkTests.test_benchmark_cpu_set_reserves_host_worker_capacity) ... ok
+test_benchmark_network_requires_explicit_profile (scripts.test_nvx_tools.BenchmarkTests.test_benchmark_network_requires_explicit_profile) ... ok
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp4fw67sb3\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp4fw67sb3\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp4fw67sb3\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp4fw67sb3\logs\device-io.log
+Collected 23 p50 metric(s) for windows-whp: C:\Users\ppenna\AppData\Local\Temp\tmp4fw67sb3\results\windows-whp.csv
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpukyd2j5f\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpukyd2j5f\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpukyd2j5f\logs\shell-snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpukyd2j5f\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpukyd2j5f\logs\network.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpukyd2j5f\logs\device-io.log
+Collected 12 p50 metric(s) for linux-kvm: C:\Users\ppenna\AppData\Local\Temp\tmpukyd2j5f\results\linux-kvm.csv
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpr6kehkhv\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpr6kehkhv\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\logs\cold-start.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\logs\virtfs.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\logs\shell-snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\logs\network.log
+Collected 5 p50 metric(s) for linux-mshv-baremetal: C:\Users\ppenna\AppData\Local\Temp\tmpvn94t5j8\results\linux-mshv-baremetal.csv
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpkt4g7g9q\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpkt4g7g9q\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpkt4g7g9q\logs\shell-snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpkt4g7g9q\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpkt4g7g9q\logs\network.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpkt4g7g9q\logs\device-io.log
+Collected 12 p50 metric(s) for linux-kvm-baremetal: C:\Users\ppenna\AppData\Local\Temp\tmpkt4g7g9q\results\linux-kvm-baremetal-microvm-v2-4vcpu.csv
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp6lgi4ytc\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp6lgi4ytc\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp6lgi4ytc\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp6lgi4ytc\logs\device-io.log
+Collected 31 p50 metric(s) for linux-kvm: C:\Users\ppenna\AppData\Local\Temp\tmp6lgi4ytc\results\linux-kvm.csv
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp2_ur315m\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp2_ur315m\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp2_ur315m\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp2_ur315m\logs\device-io.log
+Collected 23 p50 metric(s) for linux-mshv: C:\Users\ppenna\AppData\Local\Temp\tmp2_ur315m\results\linux-mshv.csv
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\logs\cold-start.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\logs\virtfs.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\logs\shell-snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\logs\network.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\logs\device-io.log
+Collected 1 p50 metric(s) for linux-kvm-baremetal: C:\Users\ppenna\AppData\Local\Temp\tmpolt_rrl4\results\linux-kvm-baremetal-microvm-v2-8vcpu.csv
+Collected 8 OpenVMM p50 metric(s) for linux-kvm-baremetal: C:\Users\ppenna\AppData\Local\Temp\tmpvuyxx_82\results\linux-kvm-baremetal.csv
+Collected 8 OpenVMM p50 metric(s) for linux-mshv-virtual-machine: C:\Users\ppenna\AppData\Local\Temp\tmpzlrocn7u\results\linux-mshv-virtual-machine.csv
+REGRESSION: linux-kvm/openvmm_cold_start_peak_rss: p50 151.00 MiB vs 1-point base median 100.00 MiB (+51.0%)
+Checked 1 metric(s), found 1 regression(s) (threshold: >50% vs 10-point median; minimum history: 1; absolute latency tolerance: 1000 ms).
+REGRESSION: linux-kvm/throughput: p50 5.00 MB/s vs 1-point base median 10.00 MB/s (+50.0%)
+Checked 1 metric(s), found 1 regression(s) (threshold: >40% vs 10-point median; minimum history: 1; absolute latency tolerance: 5 ms).
+WARMUP: linux-kvm-baremetal/microvm-v2/1vcpu/latency has no base-branch history
+Checked 0 metric(s), found 0 regression(s) (threshold: >0% vs 1-point median; minimum history: 1; absolute latency tolerance: 5 ms).
+OK: linux-kvm/restore_latency: p50 12.00 ms vs 1-point base median 7.00 ms (+71.4%, +5.00 ms)
+OK: linux-kvm/throughput: p50 100.00 MB/s vs 1-point base median 100.00 MB/s (+0.0%)
+Checked 2 metric(s), found 0 regression(s) (threshold: >40% vs 10-point median; minimum history: 1; absolute latency tolerance: 5 ms).
+REGRESSION: linux-kvm/restore_latency: p50 12.10 ms vs 1-point base median 7.00 ms (+72.9%, +5.10 ms)
+OK: linux-kvm/throughput: p50 100.00 MB/s vs 1-point base median 100.00 MB/s (+0.0%)
+Checked 2 metric(s), found 1 regression(s) (threshold: >40% vs 10-point median; minimum history: 1; absolute latency tolerance: 5 ms).
+REGRESSION: linux-kvm/latency: p50 10.00 ms vs 10-point base median 1.00 ms (+900.0%, +9.00 ms)
+Checked 1 metric(s), found 1 regression(s) (threshold: >40% vs 10-point median; minimum history: 10; absolute latency tolerance: 5 ms).
+OK: linux-kvm/latency: p50 140.00 ms vs 10-point base median 100.00 ms (+40.0%, +40.00 ms)
+OK: linux-kvm/throughput: p50 60.00 MB/s vs 10-point base median 100.00 MB/s (+40.0%)
+Checked 2 metric(s), found 0 regression(s) (threshold: >40% vs 10-point median; minimum history: 10; absolute latency tolerance: 5 ms).
+REGRESSION: linux-kvm/latency: p50 141.00 ms vs 10-point base median 100.00 ms (+41.0%, +41.00 ms)
+REGRESSION: linux-kvm/throughput: p50 59.00 MB/s vs 10-point base median 100.00 MB/s (+41.0%)
+Checked 2 metric(s), found 2 regression(s) (threshold: >40% vs 10-point median; minimum history: 10; absolute latency tolerance: 5 ms).
+OK: windows-whp-baremetal/virtfs_reuse: p50 2270.00 ms vs 4-point base median 2250.00 ms (+0.9%, +20.00 ms)
+Checked 1 metric(s), found 0 regression(s) (threshold: >40% vs 10-point median; minimum history: 4; absolute latency tolerance: 5 ms).
+WARMUP: linux-kvm/python_pandas_restore has no base-branch history
+Checked 0 metric(s), found 0 regression(s) (threshold: >40% vs 10-point median; minimum history: 4; absolute latency tolerance: 5 ms).
+WARMUP: linux-kvm/latency has 9 of 10 required base-branch points
+Checked 0 metric(s), found 0 regression(s) (threshold: >40% vs 10-point median; minimum history: 10; absolute latency tolerance: 5 ms).
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpisu9w132\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpisu9w132\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpisu9w132\logs\shell-snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpisu9w132\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpisu9w132\logs\network.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpisu9w132\logs\device-io.log
+Collected 20 p50 metric(s) for linux-kvm-baremetal: C:\Users\ppenna\AppData\Local\Temp\tmpisu9w132\results\linux-kvm-baremetal-microvm-v2-4vcpu.csv
+Persisted 2 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmptlgm8_57\history\linux-kvm-baremetal-microvm-v2.csv
+WARMUP: linux-kvm-baremetal/microvm-v2/2vcpu/latency has no base-branch history
+Checked 0 metric(s), found 0 regression(s) (threshold: >0% vs 10-point median; minimum history: 10; absolute latency tolerance: 5 ms).
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpbckjlwzf\history\linux-kvm.csv
+Persisted 2 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmp__d70rv6\history\linux-kvm.csv
+No new performance rows to persist for linux-kvm.csv
+Persisted 2 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmp__d70rv6\history\linux-kvm.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpi38vyrs9\history\linux-kvm-baremetal-microvm-v2-1vcpu.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpi38vyrs9\history\linux-kvm-baremetal-microvm-v2-1vcpu.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpwu4rv8ci\history\linux-kvm-baremetal.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpwu4rv8ci\history\linux-kvm-virtual-machine.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpwu4rv8ci\history\linux-mshv-baremetal.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpwu4rv8ci\history\linux-mshv-virtual-machine.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpwu4rv8ci\history\windows-whp-baremetal.csv
+Persisted 1 row(s) to C:\Users\ppenna\AppData\Local\Temp\tmpwu4rv8ci\history\windows-whp-virtual-machine.csv
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpix2vcav0\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpix2vcav0\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpix2vcav0\logs\shell-snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpix2vcav0\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpix2vcav0\logs\network.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmpix2vcav0\logs\device-io.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp9gqvo7dm\logs\virtfs.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp9gqvo7dm\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp9gqvo7dm\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp9gqvo7dm\logs\shell-snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp9gqvo7dm\logs\network.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmp9gqvo7dm\logs\device-io.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmptlomhr5p\logs\snapshot.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmptlomhr5p\logs\snapshot-hello.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmptlomhr5p\logs\shell-snapshot-restore.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmptlomhr5p\logs\network.log
+SKIP: optional benchmark log not found: C:\Users\ppenna\AppData\Local\Temp\tmptlomhr5p\logs\device-io.log
+  sample 1/2: 10.000 ms, peak RSS=0.001 MiB, teardown=2.000 ms
+  sample 2/2: 12.000 ms, peak RSS=0.002 MiB, teardown=3.000 ms
+test_benchmark_preserves_exact_process_wall_samples (scripts.test_nvx_tools.BenchmarkTests.test_benchmark_preserves_exact_process_wall_samples) ... ok
+test_benchmark_snapshot_restore_propagates_processors (scripts.test_nvx_tools.BenchmarkTests.test_benchmark_snapshot_restore_propagates_processors) ... ok
+test_builds_isolated_workload_command (scripts.test_nvx_tools.BenchmarkTests.test_builds_isolated_workload_command) ... ok
+Wrote benchmark-metadata.json
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpwiwry6pk\data\runs\windows-whp\microvm-v2\1vcpu\device-io\device-io.log
+test_device_io_defaults_to_dedicated_abi_v2_directory (scripts.test_nvx_tools.BenchmarkTests.test_device_io_defaults_to_dedicated_abi_v2_directory) ... ok
+test_device_io_missing_guest_result_becomes_failure (scripts.test_nvx_tools.BenchmarkTests.test_device_io_missing_guest_result_becomes_failure) ... ok
+device-io virtio-blk warmup 1/1
+NVX_DEVICE_IO_RESULT={"attempt_index":0,"device":"virtio-blk","peak_rss_bytes":1,"results":[{"bytes_per_operation":4096,"device":"virtio-blk","elapsed_ns":1000000000,"operation":"read","operations":100},{"bytes_per_operation":4096,"device":"virtio-blk","elapsed_ns":1000000000,"operation":"write","operations":100}],"sample_index":null,"schema_version":1,"status":"success","wall_ms":1.0,"warmup":true}
+device-io virtio-blk sample 1/1
+NVX_DEVICE_IO_RESULT={"attempt_index":1,"device":"virtio-blk","peak_rss_bytes":1,"results":[{"bytes_per_operation":4096,"device":"virtio-blk","elapsed_ns":1000000000,"operation":"read","operations":100},{"bytes_per_operation":4096,"device":"virtio-blk","elapsed_ns":1000000000,"operation":"write","operations":100}],"sample_index":0,"schema_version":1,"status":"success","wall_ms":1.0,"warmup":false}
+device-io virtio-fs warmup 1/1
+NVX_DEVICE_IO_RESULT={"attempt_index":0,"device":"virtio-fs","peak_rss_bytes":1,"results":[{"bytes_per_operation":4096,"device":"virtio-fs","elapsed_ns":1000000000,"operation":"read","operations":100},{"bytes_per_operation":4096,"device":"virtio-fs","elapsed_ns":1000000000,"operation":"write","operations":100}],"sample_index":null,"schema_version":1,"status":"success","wall_ms":1.0,"warmup":true}
+device-io virtio-fs sample 1/1
+NVX_DEVICE_IO_RESULT={"attempt_index":1,"device":"virtio-fs","peak_rss_bytes":1,"results":[{"bytes_per_operation":4096,"device":"virtio-fs","elapsed_ns":1000000000,"operation":"read","operations":100},{"bytes_per_operation":4096,"device":"virtio-fs","elapsed_ns":1000000000,"operation":"write","operations":100}],"sample_index":0,"schema_version":1,"status":"success","wall_ms":1.0,"warmup":false}
+device-io virtio-net warmup 1/1
+NVX_DEVICE_IO_RESULT={"attempt_index":0,"device":"virtio-net","peak_rss_bytes":1,"results":[{"bytes_per_operation":64,"device":"virtio-net","elapsed_ns":1000000000,"operation":"roundtrip","operations":100}],"sample_index":null,"schema_version":1,"status":"success","wall_ms":1.0,"warmup":true}
+device-io virtio-net sample 1/1
+NVX_DEVICE_IO_RESULT={"attempt_index":1,"device":"virtio-net","peak_rss_bytes":1,"results":[{"bytes_per_operation":64,"device":"virtio-net","elapsed_ns":1000000000,"operation":"roundtrip","operations":100}],"sample_index":0,"schema_version":1,"status":"success","wall_ms":1.0,"warmup":false}
+test_device_io_retains_failure_and_resumes_completed_attempts (scripts.test_nvx_tools.BenchmarkTests.test_device_io_retains_failure_and_resumes_completed_attempts) ... ok
+test_device_restore_commands_use_fixed_attachments (scripts.test_nvx_tools.BenchmarkTests.test_device_restore_commands_use_fixed_attachments) ... ok
+test_device_restore_marker_and_trace_parsers (scripts.test_nvx_tools.BenchmarkTests.test_device_restore_marker_and_trace_parsers) ... ok
+test_device_restore_profile_rejects_reused_output (scripts.test_nvx_tools.BenchmarkTests.test_device_restore_profile_rejects_reused_output) ... ok
+device I/O operation rates:
+  virtio-blk read     : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-blk write    : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-fs  read     : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-fs  write    : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-net roundtrip: 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+device-io virtio-blk: all 2 attempts already recorded
+device-io virtio-fs: all 2 attempts already recorded
+device-io virtio-net: all 2 attempts already recorded
+device I/O operation rates:
+  virtio-blk read     : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-blk write    : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-fs  read     : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-fs  write    : 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtio-net roundtrip: 100.0 ops/s  (p95 100.0, min 100.0, max 100.0, n=1, failures=0)
+  virtiofs-active warmup 1/1: ready=1.000 ms, I/O=1.000 ms
+  virtiofs-active sample 1/1: ready=1.000 ms, I/O=1.000 ms, peak RSS=0.000 MiB
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpsylk_gg2\device-restore-profile.json
+test_device_restore_profile_writes_lf_only_virtiofs_seed (scripts.test_nvx_tools.BenchmarkTests.test_device_restore_profile_writes_lf_only_virtiofs_seed) ... ok
+  console-active warmup 1/1: ready=10.000 ms, I/O=2.000 ms
+  console-active sample 1/2: ready=10.000 ms, I/O=2.000 ms, peak RSS=0.001 MiB
+  console-active sample 2/2: ready=10.000 ms, I/O=2.000 ms, peak RSS=0.001 MiB
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp9ltjvg24\device-restore-profile.json
+test_device_restore_profile_writes_standalone_result (scripts.test_nvx_tools.BenchmarkTests.test_device_restore_profile_writes_standalone_result) ... ok
+test_device_restore_sample_rejects_premature_activation (scripts.test_nvx_tools.BenchmarkTests.test_device_restore_sample_rejects_premature_activation) ... ok
+test_download_command_selects_host_release (scripts.test_nvx_tools.BenchmarkTests.test_download_command_selects_host_release) ... ok
+Benchmarking OpenVMM/KVM lifecycle
+OPENVMM_KVM_E2E_RESULT={"cold_start":{"p50_ms":10.0},"snapshot_capture":{"p50_ms":3.0},"snapshot_restore":{"p50_ms":10.0}}
+test_kvm_worker_e2e_restores_the_measured_snapshot (scripts.test_nvx_tools.BenchmarkTests.test_kvm_worker_e2e_restores_the_measured_snapshot) ... ok
+test_managed_tap_cleanup_uses_openvmm_pid (scripts.test_nvx_tools.BenchmarkTests.test_managed_tap_cleanup_uses_openvmm_pid) ... ok
+test_measure_once_does_not_resend_prequeued_guest_exit (scripts.test_nvx_tools.BenchmarkTests.test_measure_once_does_not_resend_prequeued_guest_exit) ... ok
+test_measure_once_retains_rss_when_process_exits_after_marker (scripts.test_nvx_tools.BenchmarkTests.test_measure_once_retains_rss_when_process_exits_after_marker) ... ok
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp2yg1pmi9\benchmark-metadata.json
+Benchmarking cold-start on OpenVMM/mshv
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp2yg1pmi9\cold-start.log
+Benchmarking virtfs on OpenVMM/mshv
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp2yg1pmi9\virtfs.log
+Benchmarking shell-snapshot on OpenVMM/mshv
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp2yg1pmi9\shell-snapshot.log
+Benchmarking network-snapshot on OpenVMM/mshv
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp2yg1pmi9\network.log
+test_mshv_performance_suite_includes_network (scripts.test_nvx_tools.BenchmarkTests.test_mshv_performance_suite_includes_network) ... ok
+Benchmarking network-snapshot on OpenVMM/mshv
+test_mshv_runs_explicit_network_snapshot_suite (scripts.test_nvx_tools.BenchmarkTests.test_mshv_runs_explicit_network_snapshot_suite) ... ok
+kvm: p50=10.000 ms p95=10.000 ms min=10.000 ms max=10.000 ms peak-rss-p50=0.001 MiB peak-rss-max=0.001 MiB teardown-p50=2.000 ms teardown-p95=2.000 ms teardown-max=2.000 ms teardown-timeouts=0
+snapshot/kvm: p50=3.000 ms p95=3.000 ms min=3.000 ms max=3.000 ms post-publication-exit-p50=1.000 ms peak-rss-p50=0.002 MiB peak-rss-max=0.002 MiB
+snapshot-restore/kvm: p50=10.000 ms p95=10.000 ms min=10.000 ms max=10.000 ms peak-rss-p50=0.001 MiB peak-rss-max=0.001 MiB teardown-p50=2.000 ms teardown-p95=2.000 ms teardown-max=2.000 ms teardown-timeouts=0
+comparison/kvm (new process to guest marker): cold-start=10.000 ms snapshot-restore=10.000 ms cold/restore=1.00x
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpyiqgpa3_\e2e.json
+test_native_e2e_measures_and_reuses_snapshot_capture (scripts.test_nvx_tools.BenchmarkTests.test_native_e2e_measures_and_reuses_snapshot_capture) ... ok
+test_nearest_rank_percentile (scripts.test_nvx_tools.BenchmarkTests.test_nearest_rank_percentile) ... ok
+test_network_snapshot_restore_selects_portable_profile (scripts.test_nvx_tools.BenchmarkTests.test_network_snapshot_restore_selects_portable_profile) ... ok
+test_network_workload_runs_unmeasured_smp_interrupt_preflight (scripts.test_nvx_tools.BenchmarkTests.test_network_workload_runs_unmeasured_smp_interrupt_preflight) ... ok
+test_output_marker_must_be_a_complete_line (scripts.test_nvx_tools.BenchmarkTests.test_output_marker_must_be_a_complete_line) ... ok
+test_package_command_forwards_parsed_options (scripts.test_nvx_tools.BenchmarkTests.test_package_command_forwards_parsed_options) ... ok
+test_parses_dd_rates_and_network_gateway (scripts.test_nvx_tools.BenchmarkTests.test_parses_dd_rates_and_network_gateway) ... ok
+networking + snapshot benchmark, median of 1, 128 MiB, 4 vCPU, --net 10.0.0.2/24 --network-profile portable
+
+== cold boot -> verified gateway connectivity ==
+  cold  (guest start -> marker):   1.0 ms  (p95 1.0, min 1.0, max 1.0, n=1)
+  cold OpenVMM peak RSS          : 0.0 MiB  (min 0.0, max 0.0, n=1)
+== capture a warmed, network-configured snapshot (one-off) ==
+== restore -> verified gateway connectivity ==
+  restore (guest resume -> marker):  1.0 ms  (p95 1.0, min 1.0, max 1.0, n=1)
+  restore OpenVMM peak RSS         : 0.0 MiB  (min 0.0, max 0.0, n=1)
+== end-to-end wall-clock (process start -> exit) ==
+  restore wall-clock             : 1.0 ms  (p95 1.0, min 1.0, max 1.0, n=1)
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpm9wawba0\data\runs\windows-whp-microvm-v2-1vcpu\benchmark-metadata.json
+Benchmarking cold-start on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpm9wawba0\data\runs\windows-whp-microvm-v2-1vcpu\cold-start.log
+Benchmarking virtfs on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpm9wawba0\data\runs\windows-whp-microvm-v2-1vcpu\virtfs.log
+Benchmarking shell-snapshot on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpm9wawba0\data\runs\windows-whp-microvm-v2-1vcpu\shell-snapshot.log
+Benchmarking network-snapshot on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmpm9wawba0\data\runs\windows-whp-microvm-v2-1vcpu\network.log
+test_performance_suite_defaults_to_data_runs_platform (scripts.test_nvx_tools.BenchmarkTests.test_performance_suite_defaults_to_data_runs_platform) ... ok
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmptx60v6br\benchmark-metadata.json
+Benchmarking cold-start on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmptx60v6br\cold-start.log
+Benchmarking virtfs on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmptx60v6br\virtfs.log
+Benchmarking shell-snapshot on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmptx60v6br\shell-snapshot.log
+Benchmarking network-snapshot on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmptx60v6br\network.log
+test_performance_suite_writes_four_canonical_logs (scripts.test_nvx_tools.BenchmarkTests.test_performance_suite_writes_four_canonical_logs) ... ok
+test_prepare_snapshot_capture_stages_waiting_controller (scripts.test_nvx_tools.BenchmarkTests.test_prepare_snapshot_capture_stages_waiting_controller) ... FAIL
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp47ftl0in\benchmark-metadata.json
+Benchmarking shell-snapshot-restore on OpenVMM/whp
+Wrote C:\Users\ppenna\AppData\Local\Temp\tmp47ftl0in\shell-snapshot-restore.log
+test_restore_only_suite_writes_only_its_canonical_log (scripts.test_nvx_tools.BenchmarkTests.test_restore_only_suite_writes_only_its_canonical_log) ... ok
+test_restore_vcpu_suite_reuses_one_capacity_snapshot_for_matrix (scripts.test_nvx_tools.BenchmarkTests.test_restore_vcpu_suite_reuses_one_capacity_snapshot_for_matrix) ... ok
+test_shell_snapshot_restore_suite_only_measures_restore (scripts.test_nvx_tools.BenchmarkTests.test_shell_snapshot_restore_suite_only_measures_restore) ... ok
+test_smp_probe_uses_explicit_topology_and_worker_rendezvous (scripts.test_nvx_tools.BenchmarkTests.test_smp_probe_uses_explicit_topology_and_worker_rendezvous) ... ok
+  warmup 1/1: 1.000 ms, peak RSS=0.001 MiB
+  sample 1/2: 2.000 ms, request-to-publication=2.000 ms, post-publication exit=0.200 ms, peak RSS=0.002 MiB
+  sample 2/2: 3.000 ms, request-to-publication=3.000 ms, post-publication exit=0.300 ms, peak RSS=0.003 MiB
+test_snapshot_capture_excludes_warmup_and_retains_last_snapshot (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_capture_excludes_warmup_and_retains_last_snapshot) ... ok
+  sample 1/1: 1.000 ms, request-to-publication=1.000 ms, post-publication exit=1.000 ms, peak RSS=0.001 MiB
+test_snapshot_capture_runs_smp_probe_for_selected_count (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_capture_runs_smp_probe_for_selected_count) ... ok
+test_snapshot_profile_records_are_parsed_and_summarized (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_profile_records_are_parsed_and_summarized) ... ok
+test_snapshot_profile_records_console_input_dispatch (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_profile_records_console_input_dispatch) ... ok
+test_snapshot_profile_rejects_incomplete_records (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_profile_rejects_incomplete_records) ... ok
+test_snapshot_request_triggers_waiting_capture_controller (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_request_triggers_waiting_capture_controller) ... ok
+test_snapshot_restore_command_separates_capacity_from_online_target (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_restore_command_separates_capacity_from_online_target) ... ok
+test_snapshot_restore_reuses_provided_snapshot (scripts.test_nvx_tools.BenchmarkTests.test_snapshot_restore_reuses_provided_snapshot) ... ok
+test_virtfs_exchange_uses_lf_only_bytes (scripts.test_nvx_tools.BenchmarkTests.test_virtfs_exchange_uses_lf_only_bytes) ... ok
+test_virtfs_excludes_declared_warmup (scripts.test_nvx_tools.BenchmarkTests.test_virtfs_excludes_declared_warmup) ... ok
+test_virtfs_honors_host_termination_mode (scripts.test_nvx_tools.BenchmarkTests.test_virtfs_honors_host_termination_mode) ... ok
+test_warm_snapshot_cache_reads_every_artifact (scripts.test_nvx_tools.BenchmarkTests.test_warm_snapshot_cache_reads_every_artifact) ... ok
+test_device_io_helper_is_static_with_nonexecutable_stack (scripts.test_nvx_tools.BuildTests.test_device_io_helper_is_static_with_nonexecutable_stack) ... ok
+test_sandbox_kernel_config_requires_every_feature (scripts.test_nvx_tools.BuildTests.test_sandbox_kernel_config_requires_every_feature) ... ok
+test_shared_status_kernel_config_is_required (scripts.test_nvx_tools.BuildTests.test_shared_status_kernel_config_is_required) ... ok
+test_openvmm_tests_are_independent_of_nvx_guest_artifacts (scripts.test_nvx_tools.CiTests.test_openvmm_tests_are_independent_of_nvx_guest_artifacts) ... ok
+test_openvmm_tests_reject_unknown_backend (scripts.test_nvx_tools.CiTests.test_openvmm_tests_reject_unknown_backend) ... ok
+test_benchmark_exposes_device_restore_profile (scripts.test_nvx_tools.CliTests.test_benchmark_exposes_device_restore_profile) ... ok
+test_benchmark_exposes_non_python_performance_suite (scripts.test_nvx_tools.CliTests.test_benchmark_exposes_non_python_performance_suite) ... ok
+test_benchmark_exposes_restore_only_shell_suite (scripts.test_nvx_tools.CliTests.test_benchmark_exposes_restore_only_shell_suite) ... ok
+test_benchmark_exposes_restore_vcpu_matrix (scripts.test_nvx_tools.CliTests.test_benchmark_exposes_restore_vcpu_matrix) ... ok
+test_benchmark_exposes_snapshot_profile_matrix (scripts.test_nvx_tools.CliTests.test_benchmark_exposes_snapshot_profile_matrix) ... ok
+test_benchmark_preserves_canonical_shell_memory_defaults (scripts.test_nvx_tools.CliTests.test_benchmark_preserves_canonical_shell_memory_defaults) ... ok
+test_device_io_uses_canonical_sampling_defaults (scripts.test_nvx_tools.CliTests.test_device_io_uses_canonical_sampling_defaults) ... usage: python.exe -m unittest [-h]
+                              {init,build-guest,build-kernel,build-initramfs,build-openvmm,setup-cross-os-cache,test-openvmm,test-microvm,build,download,run,sandbox,benchmark,performance,collect-sources,collect-alpine-sources,create-linux-source-archive,package,verify} ...
+python.exe -m unittest: error: unrecognized arguments: --device-io-abi 1
+ok
+test_network_requires_explicit_portable_profile (scripts.test_nvx_tools.CliTests.test_network_requires_explicit_portable_profile) ... ok
+test_openvmm_build_skips_compatibility_igvm (scripts.test_nvx_tools.CliTests.test_openvmm_build_skips_compatibility_igvm) ... ok
+test_release_commands_keep_their_cli_contract (scripts.test_nvx_tools.CliTests.test_release_commands_keep_their_cli_contract) ... ok
+test_run_exposes_restore_readiness (scripts.test_nvx_tools.CliTests.test_run_exposes_restore_readiness) ... usage: python.exe -m unittest run [-h] [--hypervisor {auto,whp,kvm,mshv}]
+                                  [--machine {microvm}]
+                                  [--memory-mib MEMORY_MIB]
+                                  [--processors {1,2,4,8}] [--mount MOUNT]
+                                  [--net IPV4/PREFIX]
+                                  [--network-profile {portable}]
+                                  [--cmdline CMDLINE]
+                                  [--restore-snapshot RESTORE_SNAPSHOT]
+                                  [--restore-processors {1,2,4,8}]
+                                  [--restore-ready-path RESTORE_READY_PATH]
+                                  [--dry-run]
+python.exe -m unittest run: error: argument --machine: invalid choice: 'microvm-v2' (choose from 'microvm')
+usage: python.exe -m unittest run [-h] [--hypervisor {auto,whp,kvm,mshv}]
+                                  [--machine {microvm}]
+                                  [--memory-mib MEMORY_MIB]
+                                  [--processors {1,2,4,8}] [--mount MOUNT]
+                                  [--net IPV4/PREFIX]
+                                  [--network-profile {portable}]
+                                  [--cmdline CMDLINE]
+                                  [--restore-snapshot RESTORE_SNAPSHOT]
+                                  [--restore-processors {1,2,4,8}]
+                                  [--restore-ready-path RESTORE_READY_PATH]
+                                  [--dry-run]
+python.exe -m unittest run: error: argument --machine: invalid choice: 'microvm-v3' (choose from 'microvm')
+ok
+test_sandbox_command_parses_typed_launch_contract (scripts.test_nvx_tools.CliTests.test_sandbox_command_parses_typed_launch_contract) ... ok
+test_does_not_publish_checksum_mismatch (scripts.test_nvx_tools.DownloadTests.test_does_not_publish_checksum_mismatch) ... ok
+test_replaces_mismatched_cached_archive (scripts.test_nvx_tools.DownloadTests.test_replaces_mismatched_cached_archive) ... ok
+test_retries_checksum_mismatch (scripts.test_nvx_tools.DownloadTests.test_retries_checksum_mismatch) ... ok
+test_binary_package_stages_files_and_checksums (scripts.test_nvx_tools.ReleaseTests.test_binary_package_stages_files_and_checksums) ... ok
+test_release_archive_installs_runtime_layout (scripts.test_nvx_tools.ReleaseTests.test_release_archive_installs_runtime_layout) ... ok
+test_selects_latest_matching_prerelease_asset (scripts.test_nvx_tools.ReleaseTests.test_selects_latest_matching_prerelease_asset) ... ok
+test_launch_contract_orders_roles_and_builds_agent_command_line (scripts.test_nvx_tools.SandboxTests.test_launch_contract_orders_roles_and_builds_agent_command_line) ... ok
+test_launch_contract_rejects_disk_option_delimiters (scripts.test_nvx_tools.SandboxTests.test_launch_contract_rejects_disk_option_delimiters) ... ok
+test_launch_contract_rejects_duplicates_and_reserved_tokens (scripts.test_nvx_tools.SandboxTests.test_launch_contract_rejects_duplicates_and_reserved_tokens) ... ok
+test_layer_parser_rejects_invalid_role_and_uuid (scripts.test_nvx_tools.SandboxTests.test_layer_parser_rejects_invalid_role_and_uuid) ... ok
+test_checksum_manifest_detects_modified_file (scripts.test_nvx_tools.SharedFileTests.test_checksum_manifest_detects_modified_file) ... ok
+test_source_archives_are_reproducible (scripts.test_nvx_tools.SharedFileTests.test_source_archives_are_reproducible) ... ok
+test_parser_accepts_selected_scenarios_and_processors (scripts.test_microvm_tests.MicrovmTestParserTests.test_parser_accepts_selected_scenarios_and_processors) ... ok
+test_parser_defaults_to_all_correctness_scenarios (scripts.test_microvm_tests.MicrovmTestParserTests.test_parser_defaults_to_all_correctness_scenarios) ... ok
+test_console_snapshot_script_preserves_backend_specific_rx_and_tx (scripts.test_microvm_tests.MicrovmTests.test_console_snapshot_script_preserves_backend_specific_rx_and_tx) ... ok
+test_endpoint_policy_arguments_are_repeatable_and_ordered (scripts.test_microvm_tests.MicrovmTests.test_endpoint_policy_arguments_are_repeatable_and_ordered) ... ok
+test_guest_runner_persists_full_output_on_failure (scripts.test_microvm_tests.MicrovmTests.test_guest_runner_persists_full_output_on_failure) ... ok
+test_lifecycle_uses_one_vcpu_linux_guest (scripts.test_microvm_tests.MicrovmTests.test_lifecycle_uses_one_vcpu_linux_guest) ... ok
+test_network_snapshot_script_renders_host_ports (scripts.test_microvm_tests.MicrovmTests.test_network_snapshot_script_renders_host_ports) ... ok
+test_openvmm_process_preserves_buffered_sequential_markers (scripts.test_microvm_tests.MicrovmTests.test_openvmm_process_preserves_buffered_sequential_markers) ... ok
+test_restore_processors_uses_capacity_eight_and_each_target (scripts.test_microvm_tests.MicrovmTests.test_restore_processors_uses_capacity_eight_and_each_target) ... ok
+test_runner_dispatches_selected_scenarios_once (scripts.test_microvm_tests.MicrovmTests.test_runner_dispatches_selected_scenarios_once) ... ok
+test_sandbox_blocks_use_fixed_roles_and_access (scripts.test_microvm_tests.MicrovmTests.test_sandbox_blocks_use_fixed_roles_and_access) ... ok
+test_smp_snapshot_reruns_probe_and_checks_two_restores (scripts.test_microvm_tests.MicrovmTests.test_smp_snapshot_reruns_probe_and_checks_two_restores) ... ok
+test_smp_uses_requested_processor_count (scripts.test_microvm_tests.MicrovmTests.test_smp_uses_requested_processor_count) ... ok
+test_snapshot_core_script_selects_backend_clocksource (scripts.test_microvm_tests.MicrovmTests.test_snapshot_core_script_selects_backend_clocksource) ... ok
+test_snapshot_marker_parsers_require_single_well_formed_values (scripts.test_microvm_tests.MicrovmTests.test_snapshot_marker_parsers_require_single_well_formed_values) ... ok
+test_snapshot_tier_runner_dispatches_all_tiers (scripts.test_microvm_tests.MicrovmTests.test_snapshot_tier_runner_dispatches_all_tiers) ... ok
+test_snapshot_tier_scripts_preserve_tier_specific_policy (scripts.test_microvm_tests.MicrovmTests.test_snapshot_tier_scripts_preserve_tier_specific_policy) ... ok
+test_virtio_net_uses_portable_endpoint_policy (scripts.test_microvm_tests.MicrovmTests.test_virtio_net_uses_portable_endpoint_policy) ... ok
+
+======================================================================
+FAIL: test_prepare_snapshot_capture_stages_waiting_controller (scripts.test_nvx_tools.BenchmarkTests.test_prepare_snapshot_capture_stages_waiting_controller)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\ppenna\Projects\nvx\scripts\test_nvx_tools.py", line 960, in test_prepare_snapshot_capture_stages_waiting_controller
+    self.assertIn(
+    ~~~~~~~~~~~~~^
+        "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\n",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        script,
+        ^^^^^^^
+    )
+    ^
+AssertionError: '/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\n' not found in 'cat >/tmp/nvx-smp-probe <<\'NVX_SMP_PROBE_SCRIPT\'\nset -eu\ntrap \'status=$?; if [ "$status" -ne 0 ]; then nvx-exit "$status"; fi\' EXIT\nexpected=4\nonline="$(getconf _NPROCESSORS_ONLN)"\n[ "$online" -eq "$expected" ] || { echo "SMP-ONLINE-FAIL expected=$expected actual=$online"; exit 81; }\nloc_before="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"\n[ "$(printf "%s\\n" "$loc_before" | awk \'{ print NF }\')" -eq "$expected" ] || { echo "SMP-LAPIC-FAIL missing-local-timer-counters"; exit 87; }\nworker_dir="/tmp/nvx-smp-probe-$$"\nworker_script="$worker_dir/worker"\nrm -rf "$worker_dir"\nmkdir -p "$worker_dir"\ncat >"$worker_script" <<\'NVX_SMP_WORKER\'\n#!/bin/sh\nset -eu\ncpu="$1"\nbefore="$2"\nresult="$3"\napic_id="$4"\nactual="$(awk \'{ print $39 }\' /proc/self/stat)"\n[ "$actual" -eq "$cpu" ] || { echo "SMP-WORKER-FAIL requested=$cpu actual=$actual"; exit 87; }\nread_loc_counter() {\n  while read -r label cpu0 cpu1 cpu2 cpu3 cpu4 cpu5 cpu6 cpu7 rest; do\n    if [ "$label" = "LOC:" ]; then\n      case "$cpu" in\n        0) current=$cpu0 ;;\n        1) current=$cpu1 ;;\n        2) current=$cpu2 ;;\n        3) current=$cpu3 ;;\n        4) current=$cpu4 ;;\n        5) current=$cpu5 ;;\n        6) current=$cpu6 ;;\n        7) current=$cpu7 ;;\n        *) return 1 ;;\n      esac\n      return 0\n    fi\n  done </proc/interrupts\n  return 1\n}\nwhile :; do\n  read_loc_counter\n  [ "$current" -gt "$before" ] && break\ndone\nprintf \'%s %s %s\\n\' "$actual" "$current" "$apic_id" >"$result"\nNVX_SMP_WORKER\nchmod +x "$worker_script"\nworkers=0\nworker_pids=""\nfor cpu in $(seq 0 $((expected - 1))); do\n  topology="/sys/devices/system/cpu/cpu${cpu}/topology"\n  [ "$(cat "$topology/physical_package_id")" -eq 0 ] || exit 82\n  [ "$(cat "$topology/die_id")" -eq 0 ] || exit 83\n  [ "$(cat "$topology/core_id")" -eq "$cpu" ] || exit 84\n  [ "$(cat "$topology/thread_siblings_list")" = "$cpu" ] || exit 85\n  apic_id="$(awk -v target="$cpu" \'$1 == "processor" { processor = $3 } $1 == "apicid" && processor == target { print $3; exit }\' /proc/cpuinfo)"\n  [ "$apic_id" -eq "$cpu" ] || { echo "SMP-APIC-FAIL cpu=$cpu apic=$apic_id"; exit 86; }\n  field=$((cpu + 1))\n  before="$(printf "%s\\n" "$loc_before" | awk -v field="$field" \'{ print $field }\')"\n  result="$worker_dir/$cpu"\n  taskset -c "$cpu" "$worker_script" "$cpu" "$before" "$result" "$apic_id" &\n  worker_pids="$worker_pids $!"\n  workers=$((workers + 1))\ndone\nfor pid in $worker_pids; do\n  wait "$pid"\ndone\nfor cpu in $(seq 0 $((expected - 1))); do\n  read -r actual current apic_id <"$worker_dir/$cpu"\n  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id actual=$actual loc_after=$current"\ndone\nloc_after="$(awk -v expected="$expected" \'/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }\' /proc/interrupts)"\nfor cpu in $(seq 0 $((expected - 1))); do\n  field=$((cpu + 1))\n  before="$(printf "%s\\n" "$loc_before" | awk -v field="$field" \'{ print $field }\')"\n  after="$(printf "%s\\n" "$loc_after" | awk -v field="$field" \'{ print $field }\')"\n  [ "$after" -gt "$before" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu before=$before after=$after"; exit 88; }\n  if [ "$cpu" -gt 0 ]; then\n    ipi="$(awk -v field=$((cpu + 2)) \'/^(RES|CAL):/ { total += $field } END { print total + 0 }\' /proc/interrupts)"\n    [ "$ipi" -gt 0 ] || { echo "SMP-IPI-FAIL cpu=$cpu count=$ipi"; exit 89; }\n  fi\ndone\necho "SMP-INTERRUPTS-OK loc_before=$loc_before loc_after=$loc_after"\necho "SMP-TOPOLOGY-OK requested=$expected online=$online sockets=1 cores=$expected threads=1 apic_ids=0,1,2,3 bsp=0 workers=$workers"\nrm -rf "$worker_dir"\nioapic_irq=10\nirq_before="$(awk -v irq="$ioapic_irq" -v expected="$expected" \'$1 == irq ":" { for (cpu = 0; cpu < expected; cpu++) total += $(cpu + 2) } END { print total + 0 }\' /proc/interrupts)"\nping -c 2 -W 1 "10.0.0.1" >/dev/null\nirq_after="$(awk -v irq="$ioapic_irq" -v expected="$expected" \'$1 == irq ":" { for (cpu = 0; cpu < expected; cpu++) total += $(cpu + 2) } END { print total + 0 }\' /proc/interrupts)"\n[ "$irq_after" -gt "$irq_before" ] || { echo "SMP-IOAPIC-FAIL irq=$ioapic_irq before=$irq_before after=$irq_after"; exit 91; }\necho "SMP-IOAPIC-OK irq=$ioapic_irq before=$irq_before after=$irq_after"\necho NVX-SMP-PROBE-OK\nNVX_SMP_PROBE_SCRIPT\ncat >/tmp/nvx-c <<\'NVX_SNAPSHOT_CAPTURE_SCRIPT\'\n#!/bin/sh\nset -eu\n/tmp/nvx-smp-probe\nIFS= read -r trigger\nif [ "$trigger" != nvx-snapshot ]; then\n  /sbin/nvx-exit 90\n  exit 90\nfi\necho NVX-SNAPSHOT-DISPATCHED\n/sbin/nvx-snapshot\n\necho OPENVMM-SNAPSHOT-RESTORE-OK\nNVX_SNAPSHOT_CAPTURE_SCRIPT\nchmod +x /tmp/nvx-smp-probe /tmp/nvx-c\n\n/tmp/nvx-c\n'
+
+----------------------------------------------------------------------
+Ran 136 tests in 1.967s
+
+FAILED (failures=1)
+virtfs benchmark: 1 MiB payload, 128 MiB guest, 1 vCPU, median of 3 runs
+
+== sequential throughput (guest dd, conv=fsync writes) ==
+  warmup 1/1: excluded
+  rw live host directory      write      1.0 MB/s  (min 1.0, max 1.0, n=3)
+                              read       2.0 MB/s  (min 2.0, max 2.0, n=3)
+  OpenVMM peak RSS                  : 0.0 MiB  (min 0.0, max 0.0, n=3)
+
+== live host <-> guest visibility (same running VM) ==
+  warmup 1/1: excluded
+  live exchange (cold each)         : 2.0 ms  (p95 2.0, min 2.0, max 2.0, n=3)
+  OpenVMM peak RSS                  : 0.0 MiB  (min 0.0, max 0.0, n=3)
+>> formatted
+>> formatted
+>> download failed (1/3); retrying: archive.tar.xz SHA-256 is 7fd5491c459e648495e3e1c56cb051d5af21ba4f18caef7243913474fe1411d8, expected 040a1170825ade3ff37b189dd280153ecfafb99ee929d1cbebb40fe135afdf26
+>> download failed (2/3); retrying: archive.tar.xz SHA-256 is 7fd5491c459e648495e3e1c56cb051d5af21ba4f18caef7243913474fe1411d8, expected 040a1170825ade3ff37b189dd280153ecfafb99ee929d1cbebb40fe135afdf26
+>> discarding archive.tar.xz: SHA-256 is 7fd5491c459e648495e3e1c56cb051d5af21ba4f18caef7243913474fe1411d8, expected 040a1170825ade3ff37b189dd280153ecfafb99ee929d1cbebb40fe135afdf26
+>> downloading archive.tar.xz
+>> download failed (1/3); retrying: archive.tar.xz SHA-256 is 7fd5491c459e648495e3e1c56cb051d5af21ba4f18caef7243913474fe1411d8, expected 040a1170825ade3ff37b189dd280153ecfafb99ee929d1cbebb40fe135afdf26
+>> packaged C:\Users\ppenna\AppData\Local\Temp\tmpfuv9dwa8\staged
+Running microVM SMP correctness (2 vCPU) on OpenVMM/whp
+Running microVM SMP correctness (8 vCPU) on OpenVMM/whp
+Wrote microVM correctness logs to C:\Users\ppenna\AppData\Local\Temp\tmp9_2y7wea\logs

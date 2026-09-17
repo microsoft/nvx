@@ -1,0 +1,47 @@
+name: Persist performance results
+description: Append benchmark results to tracked performance history
+
+inputs:
+  branch:
+    description: Branch that stores the performance history
+    required: false
+    default: dev
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare performance results
+      uses: ./.github/actions/prepare-performance-results
+
+    - name: Persist results
+      shell: bash
+      env:
+        TARGET_BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        for attempt in 1 2 3; do
+          git fetch origin "${TARGET_BRANCH}"
+          git checkout -B performance-persist "origin/${TARGET_BRANCH}"
+          python3 scripts/nvx.py performance persist \
+            --source-dir data/results \
+            --history-dir data
+          git add data/*.csv
+
+          if git diff --cached --quiet; then
+            echo "No new performance results to persist"
+            exit 0
+          fi
+
+          git commit --no-verify \
+            -m "data: update performance baselines (${GITHUB_SHA}) [skip ci]"
+          if git push origin "HEAD:${TARGET_BRANCH}"; then
+            exit 0
+          fi
+          if [ "${attempt}" -eq 3 ]; then
+            echo "::error::Failed to persist performance results after ${attempt} attempts"
+            exit 1
+          fi
+        done

@@ -1,0 +1,11 @@
+* text=auto
+
+*.c text eol=lf
+*.md text eol=lf
+# Unified diff context includes blank lines and space-prefixed tabs.
+*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
+*.py text eol=lf
+*.sh text eol=lf
+*.sh.in text eol=lf
+alpine/* text eol=lf
+Dockerfile text eol=lf

@@ -1,0 +1,500 @@
+#!/bin/sh
+set -eu
+
+snapshot_tier=legacy
+scratch_policy=paired
+case "$#:${1:-}" in
+    0:) ;;
+    1:--fresh-scratch) scratch_policy=fresh ;;
+    2:--tier)
+        snapshot_tier=$2
+        case "$snapshot_tier" in
+            platform) scratch_policy=fresh ;;
+            workload-start | instance-checkpoint) scratch_policy=paired ;;
+            *)
+                echo "nvx-snapshot: unsupported snapshot tier: $snapshot_tier" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    *)
+        echo "usage: nvx-snapshot [--fresh-scratch | --tier TIER]" >&2
+        exit 2
+        ;;
+esac
+
+runtime=/run/nvx
+container_cgroup=/sys/fs/cgroup/container
+scratch_mount=$runtime/scratch
+RESTORE_PACKET_AVAILABLE=2
+RESTORE_PROCESSOR_TARGET_AVAILABLE=4
+RESTORE_MEMORY_TARGET_AVAILABLE=8
+RESTORE_MEMORY_EXPANSION_AVAILABLE=16
+container_frozen=false
+scratch_frozen=false
+post_restore_pending=false
+mkdir -p "$runtime"
+
+fail_closed() {
+    post_restore_pending=true
+    echo "nvx-snapshot: $*; terminating the VM" >&2
+    /sbin/nvx-exit 1 2>/dev/null || true
+    exit 1
+}
+
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$post_restore_pending" = true ]; then
+        /sbin/nvx-exit 1 2>/dev/null || true
+        exit 1
+    fi
+    if [ "$scratch_frozen" = true ]; then
+        fsfreeze -u "$scratch_mount" >/dev/null 2>&1 ||
+            fail_closed "failed to thaw the scratch filesystem"
+        scratch_frozen=false
+    fi
+    if [ "$container_frozen" = true ]; then
+        echo 0 >"$container_cgroup/cgroup.freeze" 2>/dev/null ||
+            fail_closed "failed to thaw the workload cgroup"
+        container_frozen=false
+    fi
+    exit "$status"
+}
+
+cmdline_value() {
+    key=$1
+    IFS= read -r command_line </proc/cmdline || return 1
+    set -f
+    # Kernel command-line tokens are deliberately split on spaces.
+    # shellcheck disable=SC2086
+    for token in $command_line; do
+        case "$token" in
+            "$key"=*)
+                set +f
+                printf '%s\n' "${token#*=}"
+                return 0
+                ;;
+        esac
+    done
+    set +f
+    return 1
+}
+
+read_port_byte() {
+    /sbin/nvx-port-io read-u8 "$1"
+}
+
+write_port_byte() {
+    /sbin/nvx-port-io write-u8 "$1" "$2"
+}
+
+read_memtotal_kib() {
+    while IFS=' ' read -r key value _; do
+        if [ "$key" = MemTotal: ]; then
+            case "$value" in
+                '' | *[!0-9]*) return 1 ;;
+            esac
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done </proc/meminfo
+    return 1
+}
+
+online_cpu_range() {
+    count=$1
+    if [ "$count" -eq 1 ]; then
+        printf '0\n'
+    else
+        printf '0-%s\n' "$((count - 1))"
+    fi
+}
+
+activate_restore_processors() {
+    target=$1
+    expected=$(online_cpu_range "$target")
+    IFS= read -r before </sys/devices/system/cpu/online ||
+        fail_closed "failed to read the online CPU set"
+    case "$before" in
+        0) before_count=1 ;;
+        0-*)
+            last=${before#0-}
+            case "$last" in
+                '' | *[!0-9]*) fail_closed "online CPU set is not a contiguous prefix: $before" ;;
+            esac
+            before_count=$((last + 1))
+            ;;
+        *) fail_closed "online CPU set is not a contiguous prefix: $before" ;;
+    esac
+    [ "$before_count" -le "$target" ] ||
+        fail_closed "restore target $target is below the online CPU count $before_count"
+
+    cpu=1
+    while [ "$cpu" -lt "$target" ]; do
+        online=/sys/devices/system/cpu/cpu${cpu}/online
+        [ -w "$online" ] || fail_closed "CPU $cpu cannot be onlined"
+        IFS= read -r online_state <"$online" ||
+            fail_closed "failed to read CPU $cpu state"
+        if [ "$online_state" != 1 ]; then
+            echo 1 >"$online" || fail_closed "failed to online CPU $cpu"
+        fi
+        cpu=$((cpu + 1))
+    done
+    IFS= read -r actual </sys/devices/system/cpu/online ||
+        fail_closed "failed to verify the online CPU set"
+    [ "$actual" = "$expected" ] ||
+        fail_closed "online CPU set $actual does not match requested prefix $expected"
+    echo "NVX-CPU-ONLINE-OK: count=$target"
+}
+
+uptime_microseconds() {
+    IFS=' .' read -r uptime_seconds uptime_fraction _ </proc/uptime ||
+        fail_closed "failed to read guest uptime"
+    case "$uptime_seconds:$uptime_fraction" in
+        *[!0-9:]* | *: | :*) fail_closed "guest uptime is invalid" ;;
+    esac
+    uptime_fraction_value=$uptime_fraction
+    while [ "${uptime_fraction_value#0}" != "$uptime_fraction_value" ]; do
+        uptime_fraction_value=${uptime_fraction_value#0}
+    done
+    [ -n "$uptime_fraction_value" ] || uptime_fraction_value=0
+    case "$uptime_fraction" in
+        ?) uptime_scale=100000 ;;
+        ??) uptime_scale=10000 ;;
+        ???) uptime_scale=1000 ;;
+        ????) uptime_scale=100 ;;
+        ?????) uptime_scale=10 ;;
+        ??????) uptime_scale=1 ;;
+        *) fail_closed "guest uptime precision is unsupported" ;;
+    esac
+    printf '%s\n' \
+        "$((uptime_seconds * 1000000 + uptime_fraction_value * uptime_scale))"
+}
+
+activate_restore_memory() {
+    range_count=$1
+    shift
+    [ "$#" -eq $((range_count * 2)) ] ||
+        fail_closed "restore memory range metadata is incomplete"
+    if [ "$range_count" -eq 0 ]; then
+        memtotal_kib=$(read_memtotal_kib) ||
+            fail_closed "failed to read MemTotal after memory activation"
+        echo "NVX-MEMORY-ONLINE-OK: added_bytes=0 memtotal_kib=$memtotal_kib elapsed_us=0"
+        return
+    fi
+
+    IFS= read -r block_size_hex </sys/devices/system/memory/block_size_bytes ||
+        fail_closed "failed to read the Linux memory block size"
+    case "$block_size_hex" in
+        '' | *[!0-9a-fA-F]*) fail_closed "Linux memory block size is invalid" ;;
+    esac
+    block_size=$((0x$block_size_hex))
+    [ "$block_size" -eq 134217728 ] ||
+        fail_closed "Linux memory block size $block_size does not match the snapshot ABI"
+    [ -w /sys/devices/system/memory/probe ] ||
+        fail_closed "Linux memory probe interface is unavailable"
+
+    started_us=$(uptime_microseconds)
+    added_bytes=0
+    range_index=0
+    while [ "$range_index" -lt "$range_count" ]; do
+        range_start=$1
+        range_length=$2
+        shift 2
+        case "$range_start:$range_length" in
+            *[!0-9:]* | *: | :*)
+                fail_closed "restore memory range contains an invalid integer"
+                ;;
+        esac
+        [ "$range_length" -gt 0 ] ||
+            fail_closed "restore memory range $range_index is empty"
+        [ $((range_start % block_size)) -eq 0 ] &&
+            [ $((range_length % block_size)) -eq 0 ] ||
+            fail_closed "restore memory range $range_index is not memory-block aligned"
+        range_end=$((range_start + range_length))
+        [ "$range_end" -gt "$range_start" ] ||
+            fail_closed "restore memory range $range_index overflows"
+
+        address=$range_start
+        while [ "$address" -lt "$range_end" ]; do
+            block=$((address / block_size))
+            state=/sys/devices/system/memory/memory${block}/state
+            if [ ! -e "$state" ]; then
+                printf '0x%x\n' "$address" >/sys/devices/system/memory/probe ||
+                    fail_closed "failed to add memory block $block"
+            fi
+            [ -w "$state" ] ||
+                fail_closed "memory block $block cannot be onlined"
+            IFS= read -r memory_state <"$state" ||
+                fail_closed "failed to read memory block $block state"
+            if [ "$memory_state" != online ]; then
+                echo online >"$state" ||
+                    fail_closed "failed to online memory block $block"
+            fi
+            IFS= read -r memory_state <"$state" ||
+                fail_closed "failed to verify memory block $block state"
+            [ "$memory_state" = online ] ||
+                fail_closed "memory block $block did not become online"
+            address=$((address + block_size))
+        done
+        added_bytes=$((added_bytes + range_length))
+        range_index=$((range_index + 1))
+    done
+    completed_us=$(uptime_microseconds)
+    memtotal_kib=$(read_memtotal_kib) ||
+        fail_closed "failed to read MemTotal after memory activation"
+    echo "NVX-MEMORY-ONLINE-OK: added_bytes=$added_bytes memtotal_kib=$memtotal_kib elapsed_us=$((completed_us - started_us))"
+}
+
+configured_snapshot_tier=$(cmdline_value nvx_snapshot_tier || true)
+if [ -n "$configured_snapshot_tier" ]; then
+    case "$configured_snapshot_tier:$scratch_policy" in
+        platform:* | workload-start:* | instance-checkpoint:*) ;;
+        *)
+            echo "nvx-snapshot: host snapshot tier is invalid" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$snapshot_tier" = legacy ]; then
+        snapshot_tier=$configured_snapshot_tier
+    elif [ "$snapshot_tier" != "$configured_snapshot_tier" ]; then
+        echo "nvx-snapshot: requested tier does not match host snapshot tier" >&2
+        exit 1
+    fi
+    case "$snapshot_tier" in
+        platform) scratch_policy=fresh ;;
+        workload-start | instance-checkpoint) scratch_policy=paired ;;
+    esac
+elif [ "$snapshot_tier" != legacy ]; then
+    echo "nvx-snapshot: host did not configure a snapshot tier" >&2
+    exit 1
+fi
+
+generation_id=$(/sbin/nvx-port-io read-generation-id 233 234) ||
+    fail_closed "failed to read the VM generation ID"
+[ "${#generation_id}" -eq 32 ] ||
+    fail_closed "VM generation ID is not 16 bytes"
+case "$generation_id" in
+    *[!0-9a-f]*) fail_closed "VM generation ID is not hexadecimal" ;;
+esac
+export NVX_VM_GENERATION_ID="$generation_id"
+
+post_restore() {
+    post_restore_pending=true
+    restore_packet=$runtime/restore-packet
+    entropy=$runtime/restore-entropy
+    packet_metadata=$(
+        /sbin/nvx-port-io read-restore-packet 233 234 "$restore_packet"
+    ) || fail_closed "failed to read restore packet"
+    # Metadata starts with version, online CPU count, and range count.
+    # shellcheck disable=SC2086
+    set -- $packet_metadata
+    [ "$#" -ge 3 ] || fail_closed "restore packet metadata is invalid"
+    packet_version=$1
+    packet_online_count=$2
+    packet_memory_range_count=$3
+    shift 3
+    restore_online_count=
+    restore_memory_range_count=
+    case "$packet_version" in
+        1)
+            [ "$#" -eq 0 ] ||
+                fail_closed "version-1 restore packet has unexpected metadata"
+            ;;
+        2)
+            [ "$#" -eq 0 ] ||
+                fail_closed "version-2 restore packet has unexpected metadata"
+            restore_online_count=$packet_online_count
+            ;;
+        3)
+            restore_online_count=$packet_online_count
+            restore_memory_range_count=$packet_memory_range_count
+            ;;
+        *) fail_closed "restore packet has an invalid header" ;;
+    esac
+    if [ "$packet_version" -eq 3 ]; then
+        case "$restore_online_count" in
+            0) restore_online_count= ;;
+            1 | 2 | 4 | 8) ;;
+            *) fail_closed "restore packet has an invalid online CPU count" ;;
+        esac
+        case "$restore_memory_range_count" in
+            '' | *[!0-9]*) fail_closed "restore packet has an invalid memory range count" ;;
+        esac
+    elif [ "$packet_version" -eq 2 ]; then
+        case "$restore_online_count" in
+            1 | 2 | 4 | 8) ;;
+            *) fail_closed "restore packet has an invalid online CPU count" ;;
+        esac
+    fi
+
+    if [ "$snapshot_tier" = legacy ] &&
+        [ -z "$restore_online_count" ] &&
+        [ -z "$restore_memory_range_count" ]; then
+        rm -f "$restore_packet"
+        post_restore_pending=false
+        return
+    fi
+
+    if [ -n "$restore_online_count" ]; then
+        activate_restore_processors "$restore_online_count"
+    fi
+    if [ -n "$restore_memory_range_count" ]; then
+        activate_restore_memory "$restore_memory_range_count" "$@"
+    fi
+
+    tail -c 64 "$restore_packet" >"$entropy" ||
+        fail_closed "failed to extract restore entropy"
+    if [ "$snapshot_tier" = instance-checkpoint ]; then
+        generation_id=$(
+            /sbin/nvx-reseed --generation-only "$entropy" "$generation_id"
+        ) ||
+            fail_closed "failed to refresh the VM generation ID"
+    else
+        generation_id=$(/sbin/nvx-reseed "$entropy" "$generation_id") ||
+            fail_closed "failed to reseed the guest CRNG"
+    fi
+    export NVX_VM_GENERATION_ID="$generation_id"
+
+    if [ "$snapshot_tier" != instance-checkpoint ]; then
+        machine_id=$(sha256sum "$entropy" | cut -c1-32)
+        printf '%s\n' "$machine_id" >/etc/machine-id ||
+            fail_closed "failed to refresh machine identity"
+        workload_machine_id=$runtime/workload-machine-id
+        workload_pid_file=$runtime/container.pid
+        if [ -f "$workload_machine_id" ] && [ ! -L "$workload_machine_id" ]; then
+            printf '%s\n' "$machine_id" >"$workload_machine_id" ||
+                fail_closed "failed to refresh workload machine identity"
+        elif [ "$snapshot_tier" = workload-start ]; then
+            fail_closed "workload-start restore requires workload machine identity"
+        fi
+        hostname_value=$(cmdline_value nvx_hostname || true)
+        [ -n "$hostname_value" ] || hostname_value=nvx-sandbox
+        hostname "$hostname_value" || fail_closed "failed to refresh hostname"
+        if [ -s "$workload_pid_file" ]; then
+            IFS= read -r workload_pid <"$workload_pid_file"
+            case "$workload_pid" in
+                '' | *[!0-9]*) fail_closed "workload PID is invalid" ;;
+            esac
+            kill -0 "$workload_pid" 2>/dev/null ||
+                fail_closed "workload process is unavailable"
+            nsenter -t "$workload_pid" -u hostname "$hostname_value" ||
+                fail_closed "failed to refresh workload hostname"
+        elif [ "$snapshot_tier" = workload-start ]; then
+            fail_closed "workload-start restore requires a workload process"
+        fi
+        if [ "$snapshot_tier" = workload-start ]; then
+            [ -x "$runtime/runtime-post-restore" ] ||
+                fail_closed "workload-start restore requires a runtime hook"
+        fi
+        if [ -x "$runtime/runtime-post-restore" ]; then
+            "$runtime/runtime-post-restore" || fail_closed "runtime RNG hook failed"
+        fi
+    fi
+
+    rm -f "$restore_packet" "$entropy"
+    write_port_byte 1541 2 ||
+        fail_closed "failed to release the VMM restore gate"
+    post_restore_pending=false
+    echo "NVX-POST-RESTORE-OK: tier=$snapshot_tier"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+has_scratch=false
+case " $(cat /proc/cmdline) " in
+    *" virtio_mmio.device=0x1000@0xd0006000:11 "*) has_scratch=true ;;
+esac
+scratch_mounted=false
+mountpoint -q "$scratch_mount" && scratch_mounted=true
+
+if [ "$snapshot_tier" = workload-start ] &&
+    [ ! -x "$runtime/runtime-post-restore" ]; then
+    echo "nvx-snapshot: workload-start capture requires a runtime hook" >&2
+    exit 1
+fi
+
+if [ "$has_scratch" = true ]; then
+    if [ "$scratch_policy" = paired ] && [ "$scratch_mounted" = false ]; then
+        echo "nvx-snapshot: paired capture requires mounted scratch" >&2
+        exit 1
+    fi
+    if [ "$scratch_policy" = fresh ] && [ "$scratch_mounted" = true ]; then
+        echo "nvx-snapshot: fresh-scratch capture requires unmounted scratch" >&2
+        exit 1
+    fi
+elif [ "$scratch_policy" = fresh ]; then
+    echo "nvx-snapshot: fresh-scratch capture requires an ABI-v2 scratch device" >&2
+    exit 1
+fi
+
+if [ "$has_scratch" = true ] && [ "$scratch_policy" = paired ]; then
+    if [ ! -w "$container_cgroup/cgroup.freeze" ] ||
+        [ ! -r "$container_cgroup/cgroup.events" ]; then
+        echo "nvx-snapshot: workload cgroup freezer is unavailable" >&2
+        exit 1
+    fi
+    container_frozen=true
+    if ! echo 1 >"$container_cgroup/cgroup.freeze"; then
+        container_frozen=false
+        echo "nvx-snapshot: failed to freeze the workload cgroup" >&2
+        exit 1
+    fi
+    attempts=0
+    while ! grep -q '^frozen 1$' "$container_cgroup/cgroup.events"; do
+        if [ "$attempts" -ge 500 ]; then
+            echo "nvx-snapshot: timed out freezing the workload cgroup" >&2
+            exit 1
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.01
+    done
+    sync
+    scratch_frozen=true
+    if ! fsfreeze -f "$scratch_mount"; then
+        scratch_frozen=false
+        echo "nvx-snapshot: failed to freeze the scratch filesystem" >&2
+        exit 1
+    fi
+fi
+
+# A successful capture terminates the source before this write returns. On a
+# rejected capture, the trap thaws every guest-owned barrier before returning.
+if [ "$scratch_policy" = fresh ]; then
+    capture_request=0
+else
+    capture_request=1
+fi
+write_port_byte 1541 "$capture_request" ||
+    fail_closed "failed to request snapshot capture"
+
+post_restore_pending=true
+restore_status=$(read_port_byte 234)
+case "$restore_status" in
+    '' | *[!0-9]*) fail_closed "failed to read restore status" ;;
+esac
+if [ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -ne 0 ] &&
+    [ $((restore_status & RESTORE_MEMORY_TARGET_AVAILABLE)) -eq 0 ]; then
+    fail_closed "restore status advertises expansion without a memory target"
+fi
+if [ $((restore_status & RESTORE_PACKET_AVAILABLE)) -ne 0 ] &&
+    [ "$snapshot_tier" = legacy ] &&
+    [ $((restore_status & RESTORE_MEMORY_TARGET_AVAILABLE)) -ne 0 ] &&
+    [ $((restore_status & RESTORE_PROCESSOR_TARGET_AVAILABLE)) -eq 0 ] &&
+    [ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -eq 0 ]; then
+    memtotal_kib=$(read_memtotal_kib) ||
+        fail_closed "failed to read MemTotal after memory activation"
+    echo "NVX-MEMORY-ONLINE-OK: added_bytes=0 memtotal_kib=$memtotal_kib elapsed_us=0"
+    echo "NVX-POST-RESTORE-OK: tier=$snapshot_tier"
+    post_restore_pending=false
+elif [ $((restore_status & RESTORE_PACKET_AVAILABLE)) -ne 0 ] &&
+    { [ "$snapshot_tier" != legacy ] ||
+        [ $((restore_status & RESTORE_PROCESSOR_TARGET_AVAILABLE)) -ne 0 ] ||
+        [ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -ne 0 ]; }; then
+    post_restore
+else
+    post_restore_pending=false
+fi

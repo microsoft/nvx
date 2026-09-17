@@ -1,0 +1,30 @@
+name: Validate NVX
+description: Compile, test, and smoke-test the NVX CLI
+
+runs:
+  using: composite
+  steps:
+    - name: Validate NVX CLI on Linux
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m compileall -q scripts
+        python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py -v
+        python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
+        python3 scripts/nvx.py --help
+        python3 scripts/nvx.py test-openvmm --help
+        python3 scripts/nvx.py test-microvm --help
+        python3 scripts/nvx.py benchmark --help
+
+    - name: Validate NVX CLI on Windows
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        python -m compileall -q scripts
+        python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py -v
+        python .github\skills\nvx-host-connect\scripts\test_hosts.py -v
+        python scripts\nvx.py --help
+        python scripts\nvx.py test-openvmm --help
+        python scripts\nvx.py test-microvm --help
+        python scripts\nvx.py benchmark --help

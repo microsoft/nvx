@@ -1,0 +1,89 @@
+set -eu
+trap 'status=$?; if [ "$status" -ne 0 ]; then nvx-exit "$status"; fi' EXIT
+expected=@PROCESSORS
+online="$(getconf _NPROCESSORS_ONLN)"
+[ "$online" -eq "$expected" ] || { echo "SMP-ONLINE-FAIL expected=$expected actual=$online"; exit 81; }
+loc_before="$(awk -v expected="$expected" '/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }' /proc/interrupts)"
+[ "$(printf "%s\n" "$loc_before" | awk '{ print NF }')" -eq "$expected" ] || { echo "SMP-LAPIC-FAIL missing-local-timer-counters"; exit 87; }
+worker_dir="/tmp/nvx-smp-probe-$$"
+worker_script="$worker_dir/worker"
+rm -rf "$worker_dir"
+mkdir -p "$worker_dir"
+cat >"$worker_script" <<'NVX_SMP_WORKER'
+#!/bin/sh
+set -eu
+cpu="$1"
+result="$2"
+apic_id="$3"
+actual="$(awk '{ print $39 }' /proc/self/stat)"
+[ "$actual" -eq "$cpu" ] || { echo "SMP-WORKER-FAIL requested=$cpu actual=$actual"; exit 87; }
+read_loc_counter() {
+  while read -r label cpu0 cpu1 cpu2 cpu3 cpu4 cpu5 cpu6 cpu7 rest; do
+    if [ "$label" = "LOC:" ]; then
+      case "$cpu" in
+        0) current=$cpu0 ;;
+        1) current=$cpu1 ;;
+        2) current=$cpu2 ;;
+        3) current=$cpu3 ;;
+        4) current=$cpu4 ;;
+        5) current=$cpu5 ;;
+        6) current=$cpu6 ;;
+        7) current=$cpu7 ;;
+        *) echo "SMP-WORKER-FAIL unsupported-cpu=$cpu"; exit 87 ;;
+      esac
+      return 0
+    fi
+  done </proc/interrupts
+  echo "SMP-LAPIC-FAIL cpu=$cpu missing-local-timer-counter"
+  exit 87
+}
+read_loc_counter
+before=$current
+timer_attempts=10000
+attempts=0
+while [ "$attempts" -lt "$timer_attempts" ]; do
+  read_loc_counter
+  [ "$current" -gt "$before" ] && break
+  attempts=$((attempts + 1))
+done
+[ "$current" -gt "$before" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu before=$before after=$current attempts=$attempts"; exit 88; }
+printf '%s %s %s\n' "$actual" "$current" "$apic_id" >"$result"
+NVX_SMP_WORKER
+chmod +x "$worker_script"
+workers=0
+worker_pids=""
+for cpu in $(seq 0 $((expected - 1))); do
+  topology="/sys/devices/system/cpu/cpu${cpu}/topology"
+  [ "$(cat "$topology/physical_package_id")" -eq 0 ] || exit 82
+  [ "$(cat "$topology/die_id")" -eq 0 ] || exit 83
+  [ "$(cat "$topology/core_id")" -eq "$cpu" ] || exit 84
+  [ "$(cat "$topology/thread_siblings_list")" = "$cpu" ] || exit 85
+  apic_id="$(awk -v target="$cpu" '$1 == "processor" { processor = $3 } $1 == "apicid" && processor == target { print $3; exit }' /proc/cpuinfo)"
+  [ "$apic_id" -eq "$cpu" ] || { echo "SMP-APIC-FAIL cpu=$cpu apic=$apic_id"; exit 86; }
+  result="$worker_dir/$cpu"
+  taskset -c "$cpu" "$worker_script" "$cpu" "$result" "$apic_id" &
+  worker_pids="$worker_pids $!"
+  workers=$((workers + 1))
+done
+for pid in $worker_pids; do
+  wait "$pid"
+done
+loc_after="$(awk -v expected="$expected" '/^LOC:/ { for (cpu = 0; cpu < expected; cpu++) printf "%s%s", $(cpu + 2), (cpu + 1 == expected ? "" : " "); exit }' /proc/interrupts)"
+[ "$(printf "%s\n" "$loc_after" | awk '{ print NF }')" -eq "$expected" ] || { echo "SMP-LAPIC-FAIL missing-local-timer-counters"; exit 87; }
+for cpu in $(seq 0 $((expected - 1))); do
+  read -r actual current apic_id <"$worker_dir/$cpu"
+  field=$((cpu + 1))
+  before="$(printf "%s\n" "$loc_before" | awk -v field="$field" '{ print $field }')"
+  after="$(printf "%s\n" "$loc_after" | awk -v field="$field" '{ print $field }')"
+  [ "$after" -gt "$before" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu before=$before after=$after"; exit 88; }
+  [ "$after" -ge "$current" ] || { echo "SMP-LAPIC-FAIL cpu=$cpu worker=$current after=$after"; exit 88; }
+  echo "SMP-WORKER-OK cpu=$cpu apic=$apic_id actual=$actual loc_after=$after"
+  if [ "$cpu" -gt 0 ]; then
+    ipi="$(awk -v field=$((cpu + 2)) '/^(RES|CAL):/ { total += $field } END { print total + 0 }' /proc/interrupts)"
+    [ "$ipi" -gt 0 ] || { echo "SMP-IPI-FAIL cpu=$cpu count=$ipi"; exit 89; }
+  fi
+done
+echo "SMP-INTERRUPTS-OK loc_before=$loc_before loc_after=$loc_after"
+echo "SMP-TOPOLOGY-OK requested=$expected online=$online sockets=1 cores=$expected threads=1 apic_ids=@APIC_IDS bsp=0 workers=$workers"
+rm -rf "$worker_dir"
+@{NETWORK_PROBE}echo @COMPLETION_MARKER

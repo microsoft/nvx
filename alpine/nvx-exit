@@ -1,0 +1,11 @@
+#!/bin/sh
+# Stop the VM through control port 0x604, carrying an 8-bit process exit code.
+code=${1:-1}
+case "$code" in
+    '' | *[!0-9]*) code=1 ;;
+esac
+if [ "$code" -lt 0 ] || [ "$code" -gt 255 ]; then
+    code=1
+fi
+octal=$(printf '%03o' "$code")
+printf '%b' "\\0$octal" | dd of=/dev/port bs=1 seek=1540 count=1 conv=notrunc 2>/dev/null

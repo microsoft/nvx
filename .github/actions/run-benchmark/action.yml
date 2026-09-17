@@ -1,0 +1,433 @@
+name: Run benchmark
+description: Run and publish an OpenVMM performance series
+
+inputs:
+  backend:
+    description: OpenVMM backend to benchmark
+    required: true
+  platform:
+    description: Host-typed performance series name used for results and artifacts
+    required: true
+  teardown-mode:
+    description: How to stop OpenVMM after each guest readiness marker
+    required: false
+    default: guest-exit
+  cpus:
+    description: Optional fixed logical CPU affinity set
+    required: false
+    default: ""
+  host-cpu-reserve:
+    description: Affinity CPUs reserved for VMM and device work
+    required: false
+    default: "2"
+  marker-timeout:
+    description: Seconds allowed for each guest benchmark marker
+    required: false
+    default: "10"
+  runs:
+    description: Measured iterations for every benchmark
+    required: false
+    default: "10"
+  warmups:
+    description: Excluded warmup iterations for every benchmark
+    required: false
+    default: "1"
+runs:
+  using: composite
+  steps:
+    - name: Download guest artifacts
+      uses: actions/download-artifact@v5
+      with:
+        name: guest-artifacts
+        path: build
+
+    - name: Check Linux counting-LAPIC timers
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 scripts/nvx.py test-microvm \
+          --backend "${{ inputs.backend }}" \
+          --scenario smp-lapic \
+          --processors 1 2 4 8 \
+          --timeout "${{ inputs.marker-timeout }}" \
+          --output-dir "data/runs/${{ inputs.platform }}/lapic-correctness"
+
+    - name: Check Windows counting-LAPIC timers
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        python scripts\nvx.py test-microvm `
+          --backend "${{ inputs.backend }}" `
+          --scenario smp-lapic `
+          --processors 1 2 4 8 `
+          --timeout "${{ inputs.marker-timeout }}" `
+          --output-dir "data/runs/${{ inputs.platform }}/lapic-correctness"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Run Linux acceptance test
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python3 scripts/nvx.py benchmark \
+          --suite e2e \
+          --backend "${{ inputs.backend }}" \
+          --platform "${{ inputs.platform }}" \
+          --processors 1 \
+          "${cpu_args[@]}" \
+          --warmups "${{ inputs.warmups }}" \
+          --runs "${{ inputs.runs }}" \
+          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+          --skip-build \
+          --teardown-mode "${{ inputs.teardown-mode }}" \
+          --snapshot-profile \
+          --output "${run_dir}/acceptance.json"
+
+    - name: Run Linux performance suite
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python3 scripts/nvx.py benchmark \
+          --suite performance \
+          --backend "${{ inputs.backend }}" \
+          --platform "${{ inputs.platform }}" \
+          --processors 1 \
+          "${cpu_args[@]}" \
+          --warmups "${{ inputs.warmups }}" \
+          --runs "${{ inputs.runs }}" \
+          --virtfs-runs "${{ inputs.runs }}" \
+          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+          --skip-build \
+          --teardown-mode "${{ inputs.teardown-mode }}" \
+          --output-dir "${run_dir}"
+
+    - name: Run Linux multi-vCPU shell restore
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
+        for processors in 2 4 8; do
+          run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
+          python3 scripts/nvx.py benchmark \
+            --suite shell-snapshot-restore \
+            --backend "${{ inputs.backend }}" \
+            --platform "${{ inputs.platform }}" \
+            --processors "${processors}" \
+            "${cpu_args[@]}" \
+            --warmups "${{ inputs.warmups }}" \
+            --runs "${{ inputs.runs }}" \
+            --shell-memories 512 \
+            --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+            --skip-build \
+            --teardown-mode "${{ inputs.teardown-mode }}" \
+            --output-dir "${run_dir}"
+        done
+
+    - name: Run Linux device operation rates
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
+        python3 scripts/nvx.py benchmark \
+          --suite device-io \
+          --backend "${{ inputs.backend }}" \
+          --platform "${{ inputs.platform }}" \
+          --processors 1 \
+          "${cpu_args[@]}" \
+          --warmups "${{ inputs.warmups }}" \
+          --runs "${{ inputs.runs }}" \
+          --device-io-duration-seconds 1 \
+          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+          --skip-build \
+          --teardown-mode "${{ inputs.teardown-mode }}" \
+          --output-dir "${run_dir}"
+
+    - name: Run Windows acceptance test
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python scripts\nvx.py benchmark `
+          --suite e2e `
+          --backend "${{ inputs.backend }}" `
+          --platform "${{ inputs.platform }}" `
+          --processors 1 `
+          --warmups "${{ inputs.warmups }}" `
+          --runs "${{ inputs.runs }}" `
+          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+          --skip-build `
+          --teardown-mode "${{ inputs.teardown-mode }}" `
+          --snapshot-profile `
+          --output "$RunDir/acceptance.json" `
+          @CpuArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Run Windows performance suite
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python scripts\nvx.py benchmark `
+          --suite performance `
+          --backend "${{ inputs.backend }}" `
+          --platform "${{ inputs.platform }}" `
+          --processors 1 `
+          --warmups "${{ inputs.warmups }}" `
+          --runs "${{ inputs.runs }}" `
+          --virtfs-runs "${{ inputs.runs }}" `
+          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+          --skip-build `
+          --teardown-mode "${{ inputs.teardown-mode }}" `
+          --output-dir "$RunDir" `
+          @CpuArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Run Windows multi-vCPU shell restore
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        foreach ($Processors in 2, 4, 8) {
+          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
+          python scripts\nvx.py benchmark `
+            --suite shell-snapshot-restore `
+            --backend "${{ inputs.backend }}" `
+            --platform "${{ inputs.platform }}" `
+            --processors $Processors `
+            --warmups "${{ inputs.warmups }}" `
+            --runs "${{ inputs.runs }}" `
+            --shell-memories 512 `
+            --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+            --skip-build `
+            --teardown-mode "${{ inputs.teardown-mode }}" `
+            --output-dir "$RunDir" `
+            @CpuArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+
+    - name: Run Windows device operation rates
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
+        python scripts\nvx.py benchmark `
+          --suite device-io `
+          --backend "${{ inputs.backend }}" `
+          --platform "${{ inputs.platform }}" `
+          --processors 1 `
+          --warmups "${{ inputs.warmups }}" `
+          --runs "${{ inputs.runs }}" `
+          --device-io-duration-seconds 1 `
+          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+          --skip-build `
+          --teardown-mode "${{ inputs.teardown-mode }}" `
+          --output-dir "$RunDir" `
+          @CpuArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Publish Linux performance results
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python3 scripts/nvx.py performance collect \
+          --platform "${{ inputs.platform }}" \
+          --commit "${GITHUB_SHA}" \
+          --input-dir "${run_dir}" \
+          --output-dir "${run_dir}" \
+          --require-network \
+          --require-shell-snapshot \
+          --require-shared-suite \
+          --lifecycle-input "${run_dir}/acceptance.json" \
+          --summary "${GITHUB_STEP_SUMMARY}"
+        device_run_dir="${run_dir}/device-io"
+        device_results_dir="${device_run_dir}/results"
+        python3 scripts/nvx.py performance collect \
+          --platform "${{ inputs.platform }}" \
+          --commit "${GITHUB_SHA}" \
+          --input-dir "${device_run_dir}" \
+          --output-dir "${device_results_dir}" \
+          --summary "${GITHUB_STEP_SUMMARY}"
+        python3 scripts/nvx.py performance persist \
+          --source-dir "${device_results_dir}" \
+          --history-dir "${run_dir}"
+        for processors in 2 4 8; do
+          run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
+          python3 scripts/nvx.py performance collect \
+            --platform "${{ inputs.platform }}" \
+            --commit "${GITHUB_SHA}" \
+            --input-dir "${run_dir}" \
+            --output-dir "${run_dir}" \
+            --require-shell-snapshot-restore-512 \
+            --summary "${GITHUB_STEP_SUMMARY}"
+        done
+
+    - name: Publish Windows performance results
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        python scripts\nvx.py performance collect `
+          --platform "${{ inputs.platform }}" `
+          --commit $env:GITHUB_SHA `
+          --input-dir $RunDir `
+          --output-dir $RunDir `
+          --require-network `
+          --require-shell-snapshot `
+          --require-shared-suite `
+          --lifecycle-input "$RunDir/acceptance.json" `
+          --summary $env:GITHUB_STEP_SUMMARY
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $DeviceRunDir = "$RunDir/device-io"
+        $DeviceResultsDir = "$DeviceRunDir/results"
+        python scripts\nvx.py performance collect `
+          --platform "${{ inputs.platform }}" `
+          --commit $env:GITHUB_SHA `
+          --input-dir $DeviceRunDir `
+          --output-dir $DeviceResultsDir `
+          --summary $env:GITHUB_STEP_SUMMARY
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python scripts\nvx.py performance persist `
+          --source-dir $DeviceResultsDir `
+          --history-dir $RunDir
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        foreach ($Processors in 2, 4, 8) {
+          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
+          python scripts\nvx.py performance collect `
+            --platform "${{ inputs.platform }}" `
+            --commit $env:GITHUB_SHA `
+            --input-dir $RunDir `
+            --output-dir $RunDir `
+            --require-shell-snapshot-restore-512 `
+            --summary $env:GITHUB_STEP_SUMMARY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+
+    - name: Verify complete Linux benchmark matrix
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        for processors in 1 2 4 8; do
+          result="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu/${{ inputs.platform }}-microvm-v2-${processors}vcpu.csv"
+          test -s "${result}" || {
+            echo "::error::Missing benchmark result ${result}"
+            exit 1
+          }
+          if [[ "${processors}" == 1 ]] && [[ "$(wc -l < "${result}")" -ne 37 ]]; then
+            echo "::error::Expected 36 microVM one-vCPU metrics in ${result}"
+            exit 1
+          elif [[ "${processors}" != 1 ]] &&
+            { [[ "$(wc -l < "${result}")" -ne 2 ]] ||
+              [[ "$(awk -F, 'NR == 2 { print $5 }' "${result}")" != shell_snapshot_restore_512_mib ]]; }; then
+            echo "::error::Expected only shell_snapshot_restore_512_mib in ${result}"
+            exit 1
+          fi
+        done
+
+    - name: Verify complete Windows benchmark matrix
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        foreach ($Processors in 1, 2, 4, 8) {
+          $Result = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu/${{ inputs.platform }}-microvm-v2-${Processors}vcpu.csv"
+          if (-not (Test-Path $Result -PathType Leaf) -or (Get-Item $Result).Length -eq 0) {
+            throw "Missing benchmark result $Result"
+          }
+          if ($Processors -eq 1) {
+            if (@(Import-Csv $Result).Count -ne 36) {
+              throw "Expected 36 microVM one-vCPU metrics in $Result"
+            }
+          } else {
+            $Rows = @(Import-Csv $Result)
+            if ($Rows.Count -ne 1 -or $Rows[0].metric -ne "shell_snapshot_restore_512_mib") {
+              throw "Expected only shell_snapshot_restore_512_mib in $Result"
+            }
+          }
+        }
+
+    - name: Upload benchmark results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        path: data/runs/${{ inputs.platform }}
+        name: benchmark-${{ inputs.platform }}-${{ github.run_id }}
+        if-no-files-found: error
+        overwrite: true
+        retention-days: 1

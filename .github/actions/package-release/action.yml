@@ -1,0 +1,62 @@
+name: Package release
+description: Build and upload an NVX binary release for one platform
+
+inputs:
+  platform:
+    description: Platform suffix used in the package and artifact names
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Package Linux release
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        version="$(cat VERSION)"
+        package="nvx-${version}-${PLATFORM}"
+        python3 scripts/nvx.py package \
+          --version "${version}" \
+          --destination "dist/${package}" \
+          --binary-only
+        tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+
+    - name: Package Windows release
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        $Version = (Get-Content VERSION -Raw).Trim()
+        $Package = "nvx-$Version-$env:PLATFORM"
+        python scripts\nvx.py package `
+          --version $Version `
+          --destination "dist\$Package" `
+          --binary-only
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Compress-Archive `
+          -Path "dist\$Package" `
+          -DestinationPath "dist\$Package.zip"
+
+    - name: Upload Linux release
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-${{ inputs.platform }}
+        path: dist/*.tar.gz
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1
+
+    - name: Upload Windows release
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-${{ inputs.platform }}
+        path: dist/*.zip
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1

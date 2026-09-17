@@ -1,0 +1,106 @@
+name: Build guest artifacts
+description: Cache or build the pinned Linux kernel and Alpine disk image
+
+outputs:
+  kernel-cache-key:
+    description: Exact cache key for the Linux kernel artifacts
+    value: ${{ steps.guest-cache-keys.outputs.kernel }}
+  alpine-cache-key:
+    description: Exact cache key for the Alpine disk image artifacts
+    value: ${{ steps.guest-cache-keys.outputs.alpine }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve guest artifact versions
+      id: guest-versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        manifest = json.loads(
+            Path("SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+        )
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+            print(f"kernel-version={manifest['linux']['version']}", file=output)
+            print(f"alpine-version={manifest['alpine']['version']}", file=output)
+        PY
+
+    - name: Resolve guest cache keys
+      id: guest-cache-keys
+      shell: bash
+      env:
+        KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
+        ALPINE_VERSION: ${{ steps.guest-versions.outputs.alpine-version }}
+        KERNEL_INPUT_HASH: ${{ hashFiles('kernel/config-microvm', 'kernel/patches/**') }}
+        ALPINE_INPUT_HASH: ${{ hashFiles('alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py') }}
+      run: |
+        set -euo pipefail
+        {
+          echo "kernel=linux-kernel-v1-${KERNEL_VERSION}-${KERNEL_INPUT_HASH}"
+          echo "alpine=alpine-image-v1-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Restore Linux kernel (zstd)
+      id: cache-linux-kernel-zstd
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          build/vmlinux
+          build/vmlinux.config
+        key: ${{ steps.guest-cache-keys.outputs.kernel }}
+        enableCrossOsArchive: true
+
+    - name: Restore Alpine disk image (zstd)
+      id: cache-alpine-image-zstd
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          build/initramfs.cpio.gz
+          build/initramfs.cpio.gz.packages.json
+        key: ${{ steps.guest-cache-keys.outputs.alpine }}
+        enableCrossOsArchive: true
+
+    - name: Build Linux kernel (Docker)
+      if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
+      shell: bash
+      run: >-
+        docker build
+        --file docker/Dockerfile
+        --target kernel-artifacts
+        --output type=local,dest=build
+        .
+
+    - name: Save Linux kernel (zstd)
+      if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          build/vmlinux
+          build/vmlinux.config
+        key: ${{ steps.guest-cache-keys.outputs.kernel }}
+        enableCrossOsArchive: true
+
+    - name: Build Alpine disk image (Docker)
+      if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
+      shell: bash
+      run: >-
+        docker build
+        --file docker/Dockerfile
+        --target initramfs-artifacts
+        --output type=local,dest=build
+        .
+
+    - name: Save Alpine disk image (zstd)
+      if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          build/initramfs.cpio.gz
+          build/initramfs.cpio.gz.packages.json
+        key: ${{ steps.guest-cache-keys.outputs.alpine }}
+        enableCrossOsArchive: true

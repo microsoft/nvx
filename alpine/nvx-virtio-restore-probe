@@ -1,0 +1,225 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: nvx-virtio-restore-probe --device console|net|virtiofs --mode active|deferred" >&2
+    exit 2
+}
+
+emit_marker() {
+    marker=$1
+    if [ -c /dev/hvc0 ]; then
+        printf '%s\n' "$marker" >/dev/hvc0
+    else
+        printf '%s\n' "$marker"
+    fi
+}
+
+fatal() {
+    emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=failure device=$device mode=$mode reason=$1"
+    /sbin/nvx-exit 1 2>/dev/null || true
+    exit 1
+}
+
+cmdline_value() {
+    key=$1
+    set -f
+    # Kernel command-line tokens are deliberately split on spaces.
+    # shellcheck disable=SC2013,SC2086
+    for token in $(cat /proc/cmdline); do
+        case "$token" in
+            "$key"=*)
+                set +f
+                printf '%s\n' "${token#*=}"
+                return 0
+                ;;
+        esac
+    done
+    set +f
+    return 1
+}
+
+resolve_virtio_device() {
+    address_decimal=$(printf '%d' "$mmio_address") || return 1
+    platform=
+    while IFS=' ' read -r range separator candidate _; do
+        [ "$separator" = : ] || continue
+        case "$candidate" in virtio-mmio.*) ;; *) continue ;; esac
+        start=${range%%-*}
+        start_decimal=$(printf '%d' "0x$start") || continue
+        if [ "$start_decimal" -eq "$address_decimal" ]; then
+            platform=$candidate
+            break
+        fi
+    done </proc/iomem
+    [ -n "$platform" ] || return 1
+
+    for candidate_path in "/sys/devices/virtio-mmio-cmdline/$platform"/virtio*; do
+        [ -d "$candidate_path" ] || continue
+        [ -r "$candidate_path/device" ] || continue
+        actual_id=$(cat "$candidate_path/device")
+        actual_id=$(printf '%d' "$actual_id") || continue
+        if [ "$actual_id" -eq "$expected_device_id" ]; then
+            device_path=$candidate_path
+            device_name=${candidate_path##*/}
+            return 0
+        fi
+    done
+    return 1
+}
+
+wait_for_driver_state() {
+    expected=$1
+    attempts=0
+    while [ "$attempts" -lt 500 ]; do
+        attached=false
+        [ -L "$device_path/driver" ] && attached=true
+        [ "$attached" = "$expected" ] && return 0
+        attempts=$((attempts + 1))
+        sleep 0.01
+    done
+    return 1
+}
+
+unbind_device() {
+    [ -L "$device_path/driver" ] || fatal driver-not-bound
+    printf '%s\n' "$device_name" >"$driver_path/unbind" || fatal unbind-failed
+    wait_for_driver_state false || fatal unbind-timeout
+}
+
+bind_device() {
+    printf '%s\n' "$device_name" >"$driver_path/bind" || fatal bind-failed
+    wait_for_driver_state true || fatal bind-timeout
+}
+
+network_interface() {
+    for path in "$device_path"/net/*; do
+        [ -e "$path" ] || continue
+        printf '%s\n' "${path##*/}"
+        return 0
+    done
+    return 1
+}
+
+configure_network() {
+    interface=$(network_interface) || fatal net-interface-missing
+    address=$(cmdline_value virtnet_ip || true)
+    mask=$(cmdline_value virtnet_mask || true)
+    gateway=$(cmdline_value virtnet_gw || true)
+    [ -n "$address" ] || fatal net-address-missing
+    [ -n "$mask" ] || mask=255.255.255.0
+    [ -n "$gateway" ] || fatal net-gateway-missing
+    ifconfig "$interface" "$address" netmask "$mask" up || fatal net-config-failed
+    route del default dev "$interface" 2>/dev/null || true
+    route add -host "$gateway" dev "$interface" 2>/dev/null || true
+    route add default gw "$gateway" dev "$interface" 2>/dev/null || true
+    ping -c 1 -W 2 "$gateway" >/dev/null 2>&1 || fatal net-gateway-unreachable
+}
+
+perform_console_io() {
+    attempts=0
+    while [ "$attempts" -lt 500 ] && [ ! -c /dev/hvc1 ]; do
+        attempts=$((attempts + 1))
+        sleep 0.01
+    done
+    [ -c /dev/hvc1 ] || fatal console-port-missing
+    printf 'NVX-VIRTIO-CONSOLE-IO-OK\n' >/dev/hvc1 || fatal console-write-failed
+}
+
+perform_virtiofs_io() {
+    mount_dir=$(cmdline_value virtfs_dir || true)
+    [ -n "$mount_dir" ] || mount_dir=/mnt/host
+    if ! mountpoint -q "$mount_dir"; then
+        /sbin/nvx-hostmount >/dev/hvc0 2>&1 || fatal virtiofs-mount-failed
+    fi
+    seed=$mount_dir/.nvx-virtio-restore-host-seed
+    result=$mount_dir/.nvx-virtio-restore-guest-result
+    [ -f "$seed" ] || fatal virtiofs-host-seed-missing
+    [ "$(cat "$seed")" = host-to-guest ] || fatal virtiofs-host-seed-invalid
+    printf 'guest-to-host\n' >"$result" || fatal virtiofs-write-failed
+    sync
+    [ "$(cat "$result")" = guest-to-host ] || fatal virtiofs-roundtrip-failed
+}
+
+perform_io() {
+    case "$device" in
+        console) perform_console_io ;;
+        net) configure_network ;;
+        virtiofs) perform_virtiofs_io ;;
+    esac
+}
+
+device=
+mode=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --device)
+            [ "$#" -ge 2 ] || usage
+            device=$2
+            shift 2
+            ;;
+        --mode)
+            [ "$#" -ge 2 ] || usage
+            mode=$2
+            shift 2
+            ;;
+        *) usage ;;
+    esac
+done
+
+case "$device" in
+    console)
+        mmio_address=0xd0002000
+        expected_device_id=3
+        ;;
+    net)
+        mmio_address=0xd0000000
+        expected_device_id=1
+        ;;
+    virtiofs)
+        mmio_address=0xd0001000
+        expected_device_id=26
+        ;;
+    *) usage ;;
+esac
+case "$mode" in active | deferred) ;; *) usage ;; esac
+
+device_path=
+device_name=
+resolve_virtio_device || fatal device-not-found
+driver_path=$(readlink -f "$device_path/driver") || fatal driver-not-bound
+[ -d "$driver_path" ] || fatal driver-not-found
+
+emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=located device=$device mode=$mode mmio=$mmio_address id=$expected_device_id name=$device_name"
+perform_io
+emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=pre-io-success device=$device mode=$mode"
+
+if [ "$mode" = deferred ]; then
+    if [ "$device" = virtiofs ]; then
+        mount_dir=$(cmdline_value virtfs_dir || true)
+        [ -n "$mount_dir" ] || mount_dir=/mnt/host
+        umount "$mount_dir" || fatal virtiofs-unmount-failed
+    fi
+    unbind_device
+fi
+emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=capture-ready device=$device mode=$mode"
+
+/sbin/nvx-snapshot >/dev/hvc0 2>&1 || fatal snapshot-failed
+
+emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=restore-ready device=$device mode=$mode"
+emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=trigger device=$device mode=$mode"
+if [ "$mode" = deferred ]; then
+    [ -c /dev/mem ] || fatal devmem-missing
+    [ -w /dev/mem ] || fatal devmem-not-writable
+    notify_address=$((mmio_address + 0x50))
+    kick_error=/tmp/nvx-virtio-restore-kick-error
+    if ! /sbin/nvx-mmio-write "$notify_address" 0 2>"$kick_error"; then
+        cat "$kick_error" >/dev/hvc0 || true
+        fatal kick-failed
+    fi
+    emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=kick-staged device=$device mode=$mode"
+    bind_device
+fi
+perform_io
+emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=io-success device=$device mode=$mode"
+/sbin/nvx-exit 0

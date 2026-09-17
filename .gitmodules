@@ -1,0 +1,4 @@
+[submodule "openvmm"]
+	path = openvmm
+	url = https://github.com/nanvix/openvmm.git
+	branch = main

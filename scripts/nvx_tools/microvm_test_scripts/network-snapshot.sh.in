@@ -1,0 +1,25 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-NETWORK-SNAPSHOT-FAIL code=$code"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+grep -q 'virtnet_dns=10.0.0.1' /proc/cmdline || fail 20
+ping -c 1 -W 5 10.0.0.1 >/dev/null || fail 21
+printf NVX-NETWORK-UDP | nc -u -w 5 10.0.0.1 @UDP_PORT@ || fail 22
+if ping -c 1 -W 1 -s 2000 10.0.0.1 >/dev/null; then
+    fail 23
+fi
+wget -T 5 -qO /tmp/nvx-network-held http://10.0.0.1:@HTTP_PORT@/hold & held=$!
+sleep 1
+echo NVX-NETWORK-BEFORE
+nvx-snapshot
+if wait "$held"; then
+    fail 24
+fi
+echo NVX-NETWORK-OLD-FLOW-INVALIDATED
+[ "$(wget -qO- http://10.0.0.1:@HTTP_PORT@/fresh)" = NVX-NETWORK-HTTP-OK ] || fail 25
+echo NVX-NETWORK-AFTER
+nvx-exit 0

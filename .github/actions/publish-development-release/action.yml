@@ -1,0 +1,51 @@
+name: Publish development release
+description: Download platform packages and publish an NVX development prerelease
+
+runs:
+  using: composite
+  steps:
+    - name: Download Linux / KVM release
+      uses: actions/download-artifact@v5
+      with:
+        name: release-linux-kvm
+        path: dist
+
+    - name: Download Linux / MSHV release
+      uses: actions/download-artifact@v5
+      with:
+        name: release-linux-mshv
+        path: dist
+
+    - name: Download Windows / WHP release
+      uses: actions/download-artifact@v5
+      with:
+        name: release-windows-whp
+        path: dist
+
+    - name: Publish GitHub prerelease
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        version="$(cat VERSION)"
+        short_sha="${GITHUB_SHA:0:12}"
+        tag="v${version}-dev.${short_sha}"
+        packages=(
+          "dist/nvx-${version}-linux-kvm.tar.gz"
+          "dist/nvx-${version}-linux-mshv.tar.gz"
+          "dist/nvx-${version}-windows-whp.zip"
+        )
+        for package in "${packages[@]}"; do
+          test -f "${package}"
+        done
+        if gh release view "${tag}" >/dev/null 2>&1; then
+          gh release upload "${tag}" "${packages[@]}" --clobber
+        else
+          gh release create "${tag}" "${packages[@]}" \
+            --target "${GITHUB_SHA}" \
+            --title "NVX ${version} dev ${short_sha}" \
+            --notes "Automated development release for ${GITHUB_SHA}." \
+            --prerelease
+        fi

@@ -1,0 +1,62 @@
+name: Prepare performance results
+description: Download host-typed benchmark series and collect their p50 results
+
+runs:
+  using: composite
+  steps:
+    - name: Download Linux / KVM / virtual machine benchmark results
+      uses: actions/download-artifact@v5
+      with:
+        path: data/runs/linux-kvm-virtual-machine
+        name: benchmark-linux-kvm-virtual-machine-${{ github.run_id }}
+
+    - name: Download Linux / MSHV / virtual machine benchmark results
+      uses: actions/download-artifact@v5
+      with:
+        path: data/runs/linux-mshv-virtual-machine
+        name: benchmark-linux-mshv-virtual-machine-${{ github.run_id }}
+
+    - name: Download Windows / WHP / virtual machine benchmark results
+      uses: actions/download-artifact@v5
+      with:
+        path: data/runs/windows-whp-virtual-machine
+        name: benchmark-windows-whp-virtual-machine-${{ github.run_id }}
+
+    - name: Collect p50 results
+      shell: bash
+      run: |
+        set -euo pipefail
+        for platform in \
+          linux-kvm-virtual-machine \
+          linux-mshv-virtual-machine \
+          windows-whp-virtual-machine; do
+          run_dir="data/runs/${platform}/microvm-v2/1vcpu"
+          python3 scripts/nvx.py performance collect \
+            --platform "${platform}" \
+            --commit "${GITHUB_SHA}" \
+            --input-dir "${run_dir}" \
+            --output-dir data/results \
+            --require-network \
+            --require-shell-snapshot \
+            --require-shared-suite \
+            --lifecycle-input "${run_dir}/acceptance.json"
+          device_run_dir="${run_dir}/device-io"
+          device_results_dir="${RUNNER_TEMP}/nvx-device-results/${platform}"
+          python3 scripts/nvx.py performance collect \
+            --platform "${platform}" \
+            --commit "${GITHUB_SHA}" \
+            --input-dir "${device_run_dir}" \
+            --output-dir "${device_results_dir}"
+          python3 scripts/nvx.py performance persist \
+            --source-dir "${device_results_dir}" \
+            --history-dir data/results
+          for processors in 2 4 8; do
+            run_dir="data/runs/${platform}/microvm-v2/${processors}vcpu"
+            python3 scripts/nvx.py performance collect \
+              --platform "${platform}" \
+              --commit "${GITHUB_SHA}" \
+              --input-dir "${run_dir}" \
+              --output-dir data/results \
+              --require-shell-snapshot-restore-512
+          done
+        done

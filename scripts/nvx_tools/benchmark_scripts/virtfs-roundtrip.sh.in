@@ -1,0 +1,6 @@
+printf 'guest-to-host\n' > /mnt/host/guest-visible
+tries=0
+while [ "$(cat /mnt/host/host-visible 2>/dev/null)" != host-to-guest ] && [ "$tries" -lt 1200 ]; do sleep 0.05; tries=$((tries + 1)); done
+if [ "$(cat /mnt/host/host-visible 2>/dev/null)" = host-to-guest ]; then
+  echo @ROUNDTRIP_MARKER
+fi

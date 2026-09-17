@@ -1,0 +1,31 @@
+set -eu
+if /sbin/nvx-snapshot --tier @MISMATCHED_TIER@ >/run/nvx-tier-mismatch.log 2>&1; then
+    nvx-exit 69
+    exit 69
+fi
+grep -q 'requested tier does not match host snapshot tier' /run/nvx-tier-mismatch.log || {
+    cat /run/nvx-tier-mismatch.log
+    nvx-exit 68
+    exit 68
+}
+echo @MISMATCH_MARKER@
+@PAIRED_SETUP@
+echo @SETUP_MARKER@
+@RUNTIME_HOOK@
+echo @HOOK_MARKER@
+@PRE_CAPTURE_ACTION@
+stty -F /dev/hvc1 raw -echo
+(dd if=/dev/hvc1 bs=1 count=1 >/dev/null 2>&1; echo @INPUT_MARKER@) &
+gate_reader=$!
+mkdir -p /run/nvx
+echo "$gate_reader" >/run/nvx/gate-reader.pid
+sleep 0.1
+echo @CAPTURE_MARKER@
+@CAPTURE_ACTION@
+@REPAIR_ACTION@
+wait "$gate_reader"
+echo @RELEASED_MARKER@
+blockdev --flushbufs /dev/vda
+value="$(dd if=/dev/vda bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]')"
+echo "@LAYER_MARKER@$value"
+nvx-exit 0

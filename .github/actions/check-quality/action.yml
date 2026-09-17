@@ -1,0 +1,64 @@
+name: Check quality
+description: Run NVX linting, typing, and formatting checks
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.10"
+        cache: pip
+        cache-dependency-path: requirements-dev.txt
+
+    - name: Install development tools
+      shell: bash
+      run: python -m pip install --requirement requirements-dev.txt
+
+    - name: Check code quality
+      shell: bash
+      env:
+        SHELLCHECK: >-
+          docker run --rm --volume ${{ github.workspace }}:/workspace:ro
+          --workdir /workspace
+          koalaman/shellcheck-alpine@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002
+          shellcheck
+        SHFMT: >-
+          docker run --rm --volume ${{ github.workspace }}:/workspace:ro
+          --workdir /workspace
+          mvdan/shfmt@sha256:307d265ffd25ce832899ae17c93ed5062fc3375c514bba8f52cbf52792735c4d
+      run: |
+        set -euo pipefail
+        python -m ruff check scripts
+        ${SHELLCHECK} --shell=sh \
+          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
+          alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
+          alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
+          scripts/setup/setup-linux-mshv.sh \
+          scripts/setup/setup-linux-runner.sh
+        python -m pyright --pythonplatform Linux
+        python -m pyright --pythonplatform Windows
+        python -m ruff format --check scripts
+        ${SHFMT} -d -ln posix -i 4 -ci \
+          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
+          alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
+          alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
+          scripts/setup/setup-linux-mshv.sh \
+          scripts/setup/setup-linux-runner.sh
+
+    - name: Check PowerShell syntax
+      shell: pwsh
+      run: |
+        $tokens = $null
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile(
+          (Resolve-Path "scripts/setup/setup-windows-whp.ps1"),
+          [ref]$tokens,
+          [ref]$errors
+        )
+        foreach ($error in $errors) {
+          Write-Error $error -ErrorAction Continue
+        }
+        if ($errors.Count -ne 0) {
+          exit 1
+        }

@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "distribution": {
+    "name": "nvx",
+    "version": "0.1.0"
+  },
+  "linux": {
+    "version": "6.18.38",
+    "upstream_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz",
+    "upstream_archive_sha256": "ac26e508abd56e9f8b89872b6e10c49fc823bcc70d8068a5d8504c1a7c4ff045",
+    "source_cache": ".cache/linux/linux-6.18.38",
+    "source_archive": "build/sources/linux/nvx-linux-source-6.18.38.tar.gz",
+    "generated_final_config": "build/vmlinux.config",
+    "input_config": "kernel/config-microvm",
+    "patches": [
+      "kernel/patches/0001-microvm-xe9-earlycon.patch",
+      "kernel/patches/0002-microvm-hvc-xe9.patch",
+      "kernel/patches/0003-microvm-virtio-mmio-shared-status.patch",
+      "kernel/patches/0004-microvm-lapic-frequency.patch"
+    ]
+  },
+  "alpine": {
+    "version": "3.24.1",
+    "branch": "v3.24",
+    "architecture": "x86_64",
+    "minirootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz",
+    "minirootfs_sha256": "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+    "guest_sources": "alpine",
+    "package_manifests": "build/*.packages.json",
+    "source_output": "build/sources/alpine"
+  }
+}

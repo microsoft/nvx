@@ -1,0 +1,49 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-CONSOLE-SNAPSHOT-FAIL code=$code"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+grep -q 'console=hvc1' /proc/cmdline || fail 50
+grep -q 'virtio_mmio.device=0x1000@0xd0002000:7' /proc/cmdline || fail 51
+[ -e /sys/class/tty/hvc1 ] || fail 52
+stty -F /dev/hvc1 raw -echo
+printf '\000\015\012\177\377NVX-CONSOLE-BINARY\n'
+rm -f /tmp/nvx-console-tx-started /tmp/nvx-console-resume
+mkfifo /tmp/nvx-console-resume
+(
+    index=0
+    while [ "$index" -lt @TX_COUNT@ ]; do
+        printf 'NVX-CONSOLE-TX-%05d\n' "$index"
+        index=$((index + 1))
+        if [ "$index" -eq 100 ]; then
+            touch /tmp/nvx-console-tx-started
+            IFS= read -r resume </tmp/nvx-console-resume
+            [ "$resume" = resume ] || fail 55
+        fi
+    done
+) & tx_pid=$!
+while [ ! -e /tmp/nvx-console-tx-started ]; do
+    sleep 0.01
+done
+echo NVX-CONSOLE-RX-READY
+pending=0
+while [ "$pending" -lt @RX_COUNT@ ]; do
+    pending="$(nvx-console-pending /dev/hvc1)" || fail 56
+    [ "$pending" -le @RX_COUNT@ ] || fail 57
+    [ "$pending" -eq @RX_COUNT@ ] || sleep 0.01
+done
+echo NVX-CONSOLE-RX-QUEUED
+snapshot_now=0
+while [ "$snapshot_now" = 0 ]; do
+    snapshot_now="$(dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]')"
+    [ "$snapshot_now" = 0 ] && sleep 0.01
+done
+[ "$snapshot_now" = 1 ] || fail 54
+nvx-snapshot
+@RECEIVE@
+printf 'resume\n' >/tmp/nvx-console-resume
+@RESTORED_MARKER@
+@COMPLETION@

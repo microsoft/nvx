@@ -1,0 +1,57 @@
+From: NVX maintainers
+Subject: [PATCH] x86/apic: accept the microVM LAPIC clock frequency
+
+OpenVMM knows the LAPIC clock frequency independently of guest scheduling.
+Accept that frequency instead of calibrating and verifying the LAPIC against
+emulated PIT interrupts, which can be delayed or coalesced on a busy host.
+Otherwise Linux can disable a working LAPIC timer and leave LOC stuck at the
+12 interrupts used by its verification loop.
+
+Keep native calibration when the parameter is absent and preserve the TSC
+deadline path. Apply the supplied frequency after native TSC discovery so
+CPU-model-specific crystal-clock estimates cannot overwrite it.
+
+--- a/arch/x86/kernel/apic/apic.c
++++ b/arch/x86/kernel/apic/apic.c
+@@ -33,6 +33,7 @@
+ #include <linux/dmar.h>
+ #include <linux/init.h>
++#include <linux/kstrtox.h>
+ #include <linux/cpu.h>
+ #include <linux/dmi.h>
+ #include <linux/smp.h>
+ #include <linux/mm.h>
+@@ -175,6 +176,20 @@
+ 
+ unsigned int lapic_timer_period = 0;
+ 
++static unsigned int lapic_timer_hz __initdata;
++
++static int __init parse_lapic_timer_hz(char *arg)
++{
++	unsigned int frequency;
++
++	if (!arg || kstrtouint(arg, 0, &frequency) || frequency < 1000000)
++		return -EINVAL;
++
++	lapic_timer_hz = frequency;
++	return 0;
++}
++early_param("lapic_timer_hz", parse_lapic_timer_hz);
++
+ static void apic_pm_activate(void);
+ 
+ /*
+@@ -800,6 +815,12 @@ static int __init calibrate_APIC_clock(void)
+ 	if (boot_cpu_has(X86_FEATURE_TSC_DEADLINE_TIMER))
+ 		return 0;
+ 
++	if (lapic_timer_hz) {
++		lapic_timer_period = lapic_timer_hz / HZ;
++		pr_info("APIC timer: using supplied frequency %u Hz\n",
++			lapic_timer_hz);
++	}
++
+ 	/*
+ 	 * Check if lapic timer has already been calibrated by platform
+ 	 * specific routine, such as tsc calibration code. If so just fill

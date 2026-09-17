@@ -1,0 +1,629 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  push:
+    branches:
+      - dev
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  PERFORMANCE_BASELINE_WINDOW: 10
+  PERFORMANCE_BASELINE_MINIMUM_HISTORY: 10
+  PERFORMANCE_REGRESSION_THRESHOLD: 50
+  PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 10
+
+jobs:
+  quality:
+    name: Lint, typing, and formatting
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check code quality
+        uses: ./.github/actions/check-quality
+
+  openvmm-changes:
+    name: Detect CI workload inputs
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-tests: ${{ steps.changes.outputs.run-tests }}
+      run-workloads: ${{ steps.changes.outputs.run-workloads }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect relevant changes
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          run_tests() {
+            echo "run-tests=true" >> "${GITHUB_OUTPUT}"
+            echo "### OpenVMM tests: run" >> "${GITHUB_STEP_SUMMARY}"
+            echo "$1" >> "${GITHUB_STEP_SUMMARY}"
+          }
+
+          run_workloads() {
+            echo "run-workloads=true" >> "${GITHUB_OUTPUT}"
+            echo "### Artifact-backed tests and benchmarks: run" >> "${GITHUB_STEP_SUMMARY}"
+            echo "$1" >> "${GITHUB_STEP_SUMMARY}"
+          }
+
+          if [[ -z "${BASE_SHA}" || "${BASE_SHA}" =~ ^0+$ ]]; then
+            run_tests "The comparison base is unavailable, so the safe fallback is to run the matrix."
+            run_workloads "The comparison base is unavailable, so the safe fallback is to run the workloads."
+            exit 0
+          fi
+
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null ||
+             ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            run_tests "A comparison commit is unavailable, so the safe fallback is to run the matrix."
+            run_workloads "A comparison commit is unavailable, so the safe fallback is to run the workloads."
+            exit 0
+          fi
+
+          changed_files="${RUNNER_TEMP}/ci-changed-files"
+          if ! git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" > "${changed_files}"; then
+            run_tests "The changed files could not be determined, so the safe fallback is to run the matrix."
+            run_workloads "The changed files could not be determined, so the safe fallback is to run the workloads."
+            exit 0
+          fi
+
+          documentation_paths='^(doc/|.*\.md$)'
+          if [[ -s "${changed_files}" ]] &&
+             ! grep -Eivq "${documentation_paths}" "${changed_files}"; then
+            echo "run-workloads=false" >> "${GITHUB_OUTPUT}"
+            {
+              echo "### Artifact-backed tests and benchmarks: skip"
+              echo "Only documentation files changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            run_workloads "At least one non-documentation file changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
+          fi
+
+          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          if grep -Eq "${relevant_paths}" "${changed_files}"; then
+            run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
+          else
+            echo "run-tests=false" >> "${GITHUB_OUTPUT}"
+            {
+              echo "### OpenVMM tests: skip"
+              echo "No OpenVMM test inputs changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  artifacts:
+    name: Build shared artifacts
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Build guest artifacts
+        id: guest-artifacts
+        uses: ./.github/actions/build-guest-artifacts
+
+      - name: Upload guest artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-artifacts
+          path: |
+            build/vmlinux
+            build/vmlinux.config
+            build/initramfs.cpio.gz
+            build/initramfs.cpio.gz.packages.json
+          if-no-files-found: error
+          retention-days: 1
+
+  openvmm-tests:
+    name: OpenVMM tests / ${{ matrix.name }}
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / KVM
+            backend: kvm
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-1"]'
+          - name: Linux / MSHV
+            backend: mshv
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-1"]'
+          - name: Windows / WHP
+            backend: whp
+            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-1"]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        id: openvmm
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Prepare Windows cache tools
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py setup-cross-os-cache
+
+      - name: Prepare MSHV cache tools
+        id: cache-tools-mshv
+        if: matrix.backend == 'mshv'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache OpenVMM test build
+        if: matrix.backend != 'mshv'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+            openvmm/target
+          key: openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Cache OpenVMM test build for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+            openvmm/target
+          key: openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Run OpenVMM tests on KVM
+        if: matrix.backend == 'kvm'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
+      - name: Run OpenVMM tests on MSHV
+        if: matrix.backend == 'mshv'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
+      - name: Run OpenVMM tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
+  nvx-microvm-tests:
+    name: NVX microVM tests / ${{ matrix.name }}
+    needs: [artifacts, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / KVM
+            backend: kvm
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-2"]'
+          - name: Linux / MSHV
+            backend: mshv
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-2"]'
+          - name: Windows / WHP
+            backend: whp
+            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-2"]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        id: openvmm
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Prepare Windows cache tools
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py setup-cross-os-cache
+
+      - name: Prepare MSHV cache tools
+        id: cache-tools-mshv
+        if: matrix.backend == 'mshv'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache NVX microVM test build
+        if: matrix.backend != 'mshv'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+            openvmm/target
+          key: nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Cache NVX microVM test build for MSHV
+        if: matrix.backend == 'mshv'
+        uses: actions/cache@v5
+        env:
+          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+            openvmm/target
+          key: nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+
+      - name: Download guest artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: guest-artifacts
+          path: build
+
+      - name: Build OpenVMM on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nvx.py build-openvmm
+
+      - name: Build OpenVMM on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts\nvx.py build-openvmm
+
+      - name: Run NVX microVM tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend "${{ matrix.backend }}"
+          --output-dir "build/test-results/microvm-${{ matrix.backend }}"
+
+      - name: Run NVX microVM tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          python scripts\nvx.py test-microvm
+          --backend "${{ matrix.backend }}"
+          --output-dir "build/test-results/microvm-${{ matrix.backend }}"
+
+      - name: Upload NVX microVM failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvx-microvm-tests-${{ matrix.backend }}
+          path: build/test-results/microvm-${{ matrix.backend }}
+          if-no-files-found: warn
+
+  platform:
+    name: Platform / ${{ matrix.name }}
+    needs: [artifacts, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / KVM / Virtual machine
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-3"]'
+            backend: kvm
+            release-platform: linux-kvm
+            benchmark-platform: linux-kvm-virtual-machine
+            build-target: x86_64-unknown-linux-gnu
+            build-mode: native
+            teardown-mode: guest-exit
+            benchmark-cpus: 0-7
+            host-cpu-reserve: 0
+            marker-timeout: 40
+            package-release: true
+          - name: Linux / MSHV / Virtual machine
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-3"]'
+            backend: mshv
+            release-platform: linux-mshv
+            benchmark-platform: linux-mshv-virtual-machine
+            build-target: x86_64-unknown-linux-musl
+            build-mode: musl
+            teardown-mode: guest-exit
+            benchmark-cpus: 0-7
+            host-cpu-reserve: 0
+            marker-timeout: 40
+            package-release: true
+          - name: Windows / WHP / Virtual machine
+            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-3"]'
+            backend: whp
+            release-platform: windows-whp
+            benchmark-platform: windows-whp-virtual-machine
+            build-target: x86_64-pc-windows-msvc
+            build-mode: native
+            teardown-mode: guest-exit
+            benchmark-cpus: 0-7
+            host-cpu-reserve: 0
+            marker-timeout: 40
+            package-release: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Build OpenVMM
+        uses: ./.github/actions/build-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+          backend: ${{ matrix.backend }}
+          target: ${{ matrix.build-target }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Run benchmark
+        uses: ./.github/actions/run-benchmark
+        with:
+          backend: ${{ matrix.backend }}
+          platform: ${{ matrix.benchmark-platform }}
+          runs: 10
+          warmups: 1
+          teardown-mode: ${{ matrix.teardown-mode }}
+          cpus: ${{ matrix.benchmark-cpus }}
+          host-cpu-reserve: ${{ matrix.host-cpu-reserve }}
+          marker-timeout: ${{ matrix.marker-timeout }}
+
+      - name: Package release
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          matrix.package-release
+        uses: ./.github/actions/package-release
+        with:
+          platform: ${{ matrix.release-platform }}
+
+  release:
+    name: Publish development release
+    needs: [quality, openvmm-tests, nvx-microvm-tests, platform]
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        !cancelled() &&
+        needs.quality.result == 'success' &&
+        (
+          needs.openvmm-tests.result == 'success' ||
+          needs.openvmm-tests.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-tests.result == 'success' ||
+          needs.nvx-microvm-tests.result == 'skipped'
+        ) &&
+        needs.platform.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Publish development release
+        uses: ./.github/actions/publish-development-release
+
+  performance-gate:
+    name: Performance regression gate
+    needs: [platform]
+    if: >-
+      ${{
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        !cancelled() &&
+        needs.platform.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Gate on performance regressions
+        uses: ./.github/actions/gate-performance
+        with:
+          base-ref: dev
+          baseline-window: ${{ env.PERFORMANCE_BASELINE_WINDOW }}
+          minimum-history: ${{ env.PERFORMANCE_BASELINE_MINIMUM_HISTORY }}
+          regression-threshold: ${{ env.PERFORMANCE_REGRESSION_THRESHOLD }}
+          absolute-tolerance-ms: ${{ env.PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS }}
+
+  performance-persist:
+    name: Persist performance baseline
+    needs: [openvmm-tests, nvx-microvm-tests, platform]
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        !cancelled() &&
+        (
+          needs.openvmm-tests.result == 'success' ||
+          needs.openvmm-tests.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-tests.result == 'success' ||
+          needs.nvx-microvm-tests.result == 'skipped'
+        ) &&
+        needs.platform.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Persist results on dev
+        uses: ./.github/actions/persist-performance-results
+        with:
+          branch: dev

@@ -1,0 +1,6 @@
+dd if=/dev/zero of=/mnt/host/bench.bin bs=1M count=@PAYLOAD_MIB conv=fsync 2>&1
+sync
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+dd if=/mnt/host/bench.bin of=/dev/null bs=1M 2>&1
+sync
+echo @COMPLETION_MARKER
