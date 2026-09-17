@@ -139,6 +139,8 @@ class _NamedPipeStream:
                     errno.EACCES,
                     errno.EBUSY,
                     errno.EAGAIN,
+                    # The Windows CRT reports the reconnect transition as EINVAL.
+                    errno.EINVAL,
                 ):
                     raise
                 time.sleep(0.025)
