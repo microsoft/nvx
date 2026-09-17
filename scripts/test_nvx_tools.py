@@ -3035,8 +3035,60 @@ class ReleaseTests(unittest.TestCase):
         ):
             release._latest_release_asset("example/nvx", "linux-kvm", "token")
 
-    def test_asset_download_drops_credentials_across_hosts(self):
-        handler = common._CrossHostRedirectHandler()
+    def test_forbidden_query_falls_back_to_public_release(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            403,
+            "Forbidden",
+            http.client.HTTPMessage(),
+            io.BytesIO(
+                json.dumps(
+                    {"message": "Resource protected by organization SAML enforcement."}
+                ).encode("utf-8")
+            ),
+        )
+        public_response = io.BytesIO(
+            json.dumps(
+                [
+                    {
+                        "draft": False,
+                        "tag_name": "v1.2.3",
+                        "assets": [
+                            {
+                                "name": "nvx-1.2.3-linux-kvm.tar.gz",
+                                "url": "https://api.example.invalid/linux",
+                                "size": 300,
+                            }
+                        ],
+                    }
+                ]
+            ).encode("utf-8")
+        )
+
+        with (
+            patch(
+                "nvx_tools.release.urllib.request.urlopen",
+                side_effect=[error, public_response],
+            ) as urlopen,
+            patch("sys.stderr", io.StringIO()) as stderr,
+        ):
+            asset, download_token = release._latest_release_asset_with_fallback(
+                "example/nvx",
+                "linux-kvm",
+                "token",
+            )
+
+        self.assertEqual(urlopen.call_count, 2)
+        authenticated_request = urlopen.call_args_list[0].args[0]
+        public_request = urlopen.call_args_list[1].args[0]
+        self.assertIsNotNone(authenticated_request.get_header("Authorization"))
+        self.assertIsNone(public_request.get_header("Authorization"))
+        self.assertEqual(asset.tag, "v1.2.3")
+        self.assertIsNone(download_token)
+        self.assertIn("retrying without credentials", stderr.getvalue())
+
+    def test_asset_download_drops_credentials_across_origins(self):
+        handler = common._CrossOriginRedirectHandler()
         request = urllib.request.Request(
             "https://api.github.invalid/assets/1",
             headers={"Authorization": AUTHORIZATION_VALUE, "Accept": "*/*"},
@@ -3058,15 +3110,101 @@ class ReleaseTests(unittest.TestCase):
             http.client.HTTPMessage(),
             "https://api.github.invalid/assets/2",
         )
+        downgraded = handler.redirect_request(
+            request,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            http.client.HTTPMessage(),
+            "http://api.github.invalid/assets/3",
+        )
 
         self.assertIsNotNone(redirected)
         self.assertIsNotNone(same_host)
-        assert redirected is not None and same_host is not None
+        self.assertIsNotNone(downgraded)
+        assert (
+            redirected is not None and same_host is not None and downgraded is not None
+        )
         self.assertIsNone(redirected.get_header("Authorization"))
         self.assertEqual(redirected.get_header("Accept"), "*/*")
         self.assertEqual(same_host.get_header("Authorization"), AUTHORIZATION_VALUE)
+        self.assertIsNone(downgraded.get_header("Authorization"))
 
-    def test_asset_download_uses_credential_safe_opener(self):
+    def test_rejected_token_falls_back_to_public_release(self):
+        asset = release._ReleaseAsset(
+            "v1.2.3",
+            "nvx-1.2.3-linux-kvm.tar.gz",
+            "https://api.github.invalid/assets/1",
+            4,
+        )
+        authenticated_error = release._GitHubReleaseQueryError(
+            403,
+            "authenticated query failed",
+        )
+        stderr = io.StringIO()
+
+        def write_archive(
+            _url: str,
+            destination: Path,
+            **kwargs: object,
+        ) -> None:
+            self.assertIsInstance(
+                kwargs["opener"],
+                urllib.request.OpenerDirector,
+            )
+            self.assertNotIn("Authorization", cast(dict[str, str], kwargs["headers"]))
+            destination.write_bytes(b"data")
+
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token"}),
+            patch.object(
+                release,
+                "_latest_release_asset",
+                side_effect=[authenticated_error, asset],
+            ) as latest_release_asset,
+            patch.object(release, "download", side_effect=write_archive) as download,
+            patch.object(release, "_install_release_archive") as install,
+            patch("sys.stderr", stderr),
+        ):
+            release.download_latest_release("example/nvx", "linux-kvm")
+
+        self.assertEqual(
+            latest_release_asset.call_args_list,
+            [
+                call("example/nvx", "linux-kvm", "token"),
+                call("example/nvx", "linux-kvm", None),
+            ],
+        )
+        self.assertEqual(download.call_count, 1)
+        install.assert_called_once()
+        self.assertIn("retrying without credentials", stderr.getvalue())
+
+    def test_failed_public_fallback_preserves_authenticated_error(self):
+        authenticated_error = release._GitHubReleaseQueryError(
+            403,
+            "authenticated query failed",
+        )
+        public_error = release._GitHubReleaseQueryError(
+            404,
+            "public query failed",
+        )
+
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token"}),
+            patch.object(
+                release,
+                "_latest_release_asset",
+                side_effect=[authenticated_error, public_error],
+            ),
+            patch("sys.stderr", io.StringIO()),
+            self.assertRaisesRegex(
+                release.ScriptError,
+                "authenticated query failed",
+            ),
+        ):
+            release.download_latest_release("example/nvx", "linux-kvm")
+
+    def test_authenticated_asset_download_uses_credential_safe_opener(self):
         asset = release._ReleaseAsset(
             "v1.2.3",
             "nvx-1.2.3-linux-kvm.tar.gz",
@@ -3083,9 +3221,14 @@ class ReleaseTests(unittest.TestCase):
                 kwargs["opener"],
                 urllib.request.OpenerDirector,
             )
+            self.assertEqual(
+                kwargs["headers"],
+                release._github_headers("token", "application/octet-stream"),
+            )
             destination.write_bytes(b"data")
 
         with (
+            patch.dict(os.environ, {"GH_TOKEN": "token"}),
             patch.object(release, "_latest_release_asset", return_value=asset),
             patch.object(release, "download", side_effect=write_archive) as download,
             patch.object(release, "_install_release_archive") as install,

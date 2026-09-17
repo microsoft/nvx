@@ -153,8 +153,8 @@ def run_checked(
         ) from error
 
 
-class _CrossHostRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Drops credentials when a download is redirected to another host."""
+class _CrossOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Drops credentials when a download leaves its origin."""
 
     def redirect_request(
         self,
@@ -179,9 +179,9 @@ class _CrossHostRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def credential_safe_opener() -> urllib.request.OpenerDirector:
-    """Builds an opener that never forwards credentials across hosts."""
+    """Builds an opener that never forwards credentials across origins."""
 
-    return urllib.request.build_opener(_CrossHostRedirectHandler)
+    return urllib.request.build_opener(_CrossOriginRedirectHandler)
 
 
 def download(
