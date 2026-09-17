@@ -1,0 +1,60 @@
+name: Set up retrying curl
+description: Put a retrying wrapper around the system curl first on PATH
+
+runs:
+  using: composite
+  steps:
+    - name: Set up retrying curl on Linux
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        system_curl="${NVX_SYSTEM_CURL:-$(command -v curl)}"
+        test -x "${system_curl}"
+        shim_dir="${RUNNER_TEMP}/nvx-curl-shim"
+        mkdir -p "${shim_dir}"
+        cat > "${shim_dir}/curl" <<'EOF'
+        #!/usr/bin/env sh
+        set -eu
+        : "${NVX_SYSTEM_CURL:?NVX_SYSTEM_CURL is not set}"
+        exec "${NVX_SYSTEM_CURL}" \
+          --retry 5 \
+          --retry-all-errors \
+          --retry-delay 2 \
+          --retry-max-time 90 \
+          "$@"
+        EOF
+        chmod +x "${shim_dir}/curl"
+        echo "NVX_SYSTEM_CURL=${system_curl}" >> "${GITHUB_ENV}"
+        echo "${shim_dir}" >> "${GITHUB_PATH}"
+
+    - name: Set up retrying curl on Windows
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        $SystemCurl = if ($env:NVX_SYSTEM_CURL) {
+          $env:NVX_SYSTEM_CURL
+        } else {
+          (Get-Command curl.exe -CommandType Application -ErrorAction Stop).Source
+        }
+        if (-not (Test-Path -LiteralPath $SystemCurl -PathType Leaf)) {
+          throw "System curl was not found: $SystemCurl"
+        }
+        $ShimDirectory = Join-Path $env:RUNNER_TEMP "nvx-curl-shim"
+        New-Item -ItemType Directory -Path $ShimDirectory -Force | Out-Null
+        $ShimPath = Join-Path $ShimDirectory "curl.exe"
+        $ShimSource = Join-Path "${{ github.action_path }}" "curl-shim.rs"
+        $Rustc = (Get-Command rustc.exe -CommandType Application -ErrorAction Stop).Source
+        & $Rustc `
+          --edition=2021 `
+          -C opt-level=s `
+          -o $ShimPath `
+          $ShimSource
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to compile the retrying curl shim"
+        }
+        "NVX_SYSTEM_CURL=$SystemCurl" |
+          Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        $ShimDirectory |
+          Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
