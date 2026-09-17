@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -12,6 +13,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 from typing import cast
@@ -2924,6 +2927,9 @@ class BenchmarkTests(unittest.TestCase):
         download_release.assert_called_once_with("microsoft/nvx", expected_platform)
 
 
+AUTHORIZATION_VALUE = "Bearer placeholder-value"
+
+
 class ReleaseTests(unittest.TestCase):
     def test_selects_latest_matching_prerelease_asset(self):
         releases = [
@@ -2972,6 +2978,122 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(asset.name, "nvx-1.2.3-linux-kvm.tar.gz")
         self.assertEqual(asset.url, "https://api.example.invalid/linux")
         self.assertEqual(asset.size, 300)
+
+    def test_forbidden_release_query_reports_github_message_and_hint(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            403,
+            "Forbidden",
+            http.client.HTTPMessage(),
+            io.BytesIO(
+                json.dumps(
+                    {"message": "Resource protected by organization SAML enforcement."}
+                ).encode("utf-8")
+            ),
+        )
+
+        with (
+            patch("nvx_tools.release.urllib.request.urlopen", side_effect=error),
+            self.assertRaises(release.ScriptError) as context,
+        ):
+            release._latest_release_asset("example/nvx", "linux-kvm", "token")
+
+        message = str(context.exception)
+        self.assertIn("HTTP 403", message)
+        self.assertIn("organization SAML enforcement", message)
+        self.assertIn("read access to the repository contents", message)
+
+    def test_unauthenticated_release_query_reports_token_hint(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            404,
+            "Not Found",
+            http.client.HTTPMessage(),
+            io.BytesIO(b"not json"),
+        )
+
+        with (
+            patch("nvx_tools.release.urllib.request.urlopen", side_effect=error),
+            self.assertRaisesRegex(release.ScriptError, "set GH_TOKEN"),
+        ):
+            release._latest_release_asset("example/nvx", "linux-kvm", None)
+
+    def test_exhausted_rate_limit_reports_retry_hint(self):
+        headers = http.client.HTTPMessage()
+        headers["x-ratelimit-remaining"] = "0"
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            403,
+            "Forbidden",
+            headers,
+            io.BytesIO(b""),
+        )
+
+        with (
+            patch("nvx_tools.release.urllib.request.urlopen", side_effect=error),
+            self.assertRaisesRegex(release.ScriptError, "rate limit is exhausted"),
+        ):
+            release._latest_release_asset("example/nvx", "linux-kvm", "token")
+
+    def test_asset_download_drops_credentials_across_hosts(self):
+        handler = common._CrossHostRedirectHandler()
+        request = urllib.request.Request(
+            "https://api.github.invalid/assets/1",
+            headers={"Authorization": AUTHORIZATION_VALUE, "Accept": "*/*"},
+        )
+
+        redirected = handler.redirect_request(
+            request,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            http.client.HTTPMessage(),
+            "https://objects.github.invalid/assets/1?signature=abc",
+        )
+        same_host = handler.redirect_request(
+            request,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            http.client.HTTPMessage(),
+            "https://api.github.invalid/assets/2",
+        )
+
+        self.assertIsNotNone(redirected)
+        self.assertIsNotNone(same_host)
+        assert redirected is not None and same_host is not None
+        self.assertIsNone(redirected.get_header("Authorization"))
+        self.assertEqual(redirected.get_header("Accept"), "*/*")
+        self.assertEqual(same_host.get_header("Authorization"), AUTHORIZATION_VALUE)
+
+    def test_asset_download_uses_credential_safe_opener(self):
+        asset = release._ReleaseAsset(
+            "v1.2.3",
+            "nvx-1.2.3-linux-kvm.tar.gz",
+            "https://api.github.invalid/assets/1",
+            4,
+        )
+
+        def write_archive(
+            _url: str,
+            destination: Path,
+            **kwargs: object,
+        ) -> None:
+            self.assertIsInstance(
+                kwargs["opener"],
+                urllib.request.OpenerDirector,
+            )
+            destination.write_bytes(b"data")
+
+        with (
+            patch.object(release, "_latest_release_asset", return_value=asset),
+            patch.object(release, "download", side_effect=write_archive) as download,
+            patch.object(release, "_install_release_archive") as install,
+        ):
+            release.download_latest_release("example/nvx", "linux-kvm")
+
+        self.assertEqual(download.call_count, 1)
+        install.assert_called_once()
 
     def test_binary_package_stages_files_and_checksums(self):
         with tempfile.TemporaryDirectory() as temporary:
