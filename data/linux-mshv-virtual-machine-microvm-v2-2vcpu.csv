@@ -4,3 +4,4 @@ linux-mshv-virtual-machine,2,2,22003726a9ec9046fdecfc904515221441dfb3c3,shell_sn
 linux-mshv-virtual-machine,2,2,142587bbceae27ef94e08862d6a3e44024eac9e9,shell_snapshot_restore_512_mib,ms,lower,41.3
 linux-mshv-virtual-machine,2,2,3644cbc18c57b900c61bdcd0ce8b6a64586f7b4b,shell_snapshot_restore_512_mib,ms,lower,40.4
 linux-mshv-virtual-machine,2,2,5c86da3dff0267a1771d5954a16ba9807e9504be,shell_snapshot_restore_512_mib,ms,lower,42.3
+linux-mshv-virtual-machine,2,2,a1452df7fa3bea9284949f6afc68e6bc2a6b3eb3,shell_snapshot_restore_512_mib,ms,lower,44.5
