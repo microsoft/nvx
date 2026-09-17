@@ -162,10 +162,11 @@ python3 scripts/nvx.py download
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the release platform. `auto` chooses WHP on Windows and KVM on Linux. |
 
 Windows release downloads support WHP. Linux release downloads support KVM
-and MSHV. Set `GH_TOKEN` when the selected repository requires authentication.
-The token needs read access to the repository contents, and must be authorized
-for the organization when it enforces single sign-on; otherwise GitHub answers
-the release query with HTTP 403.
+and MSHV. `download` first uses `GH_TOKEN` or `GITHUB_TOKEN` when configured.
+If GitHub rejects that token with HTTP 401 or 403, NVX reports the failure and
+retries without credentials so public releases remain downloadable. Private
+repositories require a token with read access to the repository contents that
+is authorized for the organization when it enforces single sign-on.
 
 ### `run`
 

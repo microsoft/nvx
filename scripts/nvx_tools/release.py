@@ -84,6 +84,12 @@ class _ReleaseAsset:
     size: int
 
 
+class _GitHubReleaseQueryError(ScriptError):
+    def __init__(self, status: int, message: str) -> None:
+        self.status = status
+        super().__init__(message)
+
+
 def _github_headers(token: str | None, accept: str) -> dict[str, str]:
     headers = {
         "Accept": accept,
@@ -117,16 +123,19 @@ def _github_error_hint(error: urllib.error.HTTPError, token: str | None) -> str:
     if token is None and error.code in (401, 403, 404):
         return "set GH_TOKEN to a token that can read the repository"
     if error.code == 401:
-        return "GH_TOKEN was rejected; refresh the expired or revoked token"
+        return "the configured GitHub token was rejected; refresh or replace it"
     if error.code == 403:
         if error.headers.get("x-ratelimit-remaining") == "0":
             return "the GitHub API rate limit is exhausted; retry later"
         return (
-            "GH_TOKEN lacks access; grant it read access to the repository "
-            "contents and authorize it for the organization single sign-on"
+            "the configured GitHub token lacks access; grant it read access to "
+            "the repository contents and authorize it for organization single sign-on"
         )
     if error.code == 404:
-        return "verify --repository and that GH_TOKEN can read that repository"
+        return (
+            "verify --repository and that the configured GitHub token can read "
+            "that repository"
+        )
     return ""
 
 
@@ -154,8 +163,9 @@ def _latest_release_asset(
         hint = _github_error_hint(error, token)
         detail = f": {message.rstrip('.')}" if message else ""
         advice = f"; {hint}" if hint else ""
-        raise ScriptError(
-            f"GitHub release query failed with HTTP {error.code}{detail}{advice}"
+        raise _GitHubReleaseQueryError(
+            error.code,
+            f"GitHub release query failed with HTTP {error.code}{detail}{advice}",
         ) from error
     except (OSError, urllib.error.URLError) as error:
         raise ScriptError(f"GitHub release query failed: {error}") from error
@@ -189,6 +199,29 @@ def _latest_release_asset(
             ):
                 return _ReleaseAsset(tag, name, asset_url, size)
     raise ScriptError(f"no GitHub release contains an NVX package for {platform}")
+
+
+def _latest_release_asset_with_fallback(
+    repository: str,
+    platform: str,
+    token: str | None,
+) -> tuple[_ReleaseAsset, str | None]:
+    if token is None:
+        return _latest_release_asset(repository, platform, None), None
+
+    try:
+        return _latest_release_asset(repository, platform, token), token
+    except _GitHubReleaseQueryError as authenticated_error:
+        if authenticated_error.status not in (401, 403):
+            raise
+        print(
+            f">> {authenticated_error}; retrying without credentials",
+            file=sys.stderr,
+        )
+        try:
+            return _latest_release_asset(repository, platform, None), None
+        except _GitHubReleaseQueryError as public_error:
+            raise authenticated_error from public_error
 
 
 def _validate_archive_member(name: str) -> None:
@@ -276,14 +309,18 @@ def _install_release_archive(archive_path: Path) -> None:
 
 def download_latest_release(repository: str, platform: str) -> None:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    asset = _latest_release_asset(repository, platform, token)
+    asset, download_token = _latest_release_asset_with_fallback(
+        repository,
+        platform,
+        token,
+    )
     print(f">> downloading {asset.name} from {asset.tag}")
     with tempfile.TemporaryDirectory(prefix="nvx-download-") as temporary:
         archive_path = Path(temporary) / asset.name
         download(
             asset.url,
             archive_path,
-            headers=_github_headers(token, "application/octet-stream"),
+            headers=_github_headers(download_token, "application/octet-stream"),
             opener=credential_safe_opener(),
         )
         actual_size = archive_path.stat().st_size
