@@ -158,7 +158,7 @@ python3 scripts/nvx.py download
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--repository OWNER/REPOSITORY` | `nanvix/nvx` | GitHub repository from which to download the latest release. |
+| `--repository OWNER/REPOSITORY` | `microsoft/nvx` | GitHub repository from which to download the latest release. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the release platform. `auto` chooses WHP on Windows and KVM on Linux. |
 
 Windows release downloads support WHP. Linux release downloads support KVM
