@@ -15,7 +15,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import benchmark, microvm_tests, openvmm_process  # noqa: E402
+from nvx_tools import (  # noqa: E402
+    benchmark,
+    control_session,
+    microvm_tests,
+    openvmm_process,
+)
 
 
 def _posix_shell() -> str | None:
@@ -57,6 +62,30 @@ class MicrovmTestParserTests(unittest.TestCase):
         self.assertEqual(args.scenario, ["smp"])
         self.assertEqual(args.processors, [2, 8])
         self.assertEqual(args.output_dir, Path("results"))
+
+
+class ControlSessionTests(unittest.TestCase):
+    def test_named_pipe_connect_retries_transient_invalid_argument(self):
+        error = OSError(control_session.errno.EINVAL, "Invalid argument")
+        with (
+            patch.object(
+                control_session.os, "open", side_effect=[error, 123]
+            ) as open_pipe,
+            patch.object(
+                control_session.time,
+                "monotonic",
+                side_effect=[0.0, 0.0],
+            ),
+            patch.object(control_session.time, "sleep") as sleep,
+        ):
+            stream = control_session._NamedPipeStream.connect(
+                Path(r"\\.\pipe\nvx-test"),
+                1.0,
+            )
+
+        self.assertEqual(stream._fd, 123)
+        self.assertEqual(open_pipe.call_count, 2)
+        sleep.assert_called_once_with(0.025)
 
 
 class MicrovmTests(unittest.TestCase):
