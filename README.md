@@ -30,7 +30,7 @@ see [Run OpenVMM directly](doc/run.md#run-openvmm-directly).
 Requires [KVM configured with read/write access to `/dev/kvm`](doc/setup.md#linux--kvm).
 
 ```bash
-git clone https://github.com/nanvix/nvx.git && cd nvx
+git clone https://github.com/microsoft/nvx.git && cd nvx
 python3 scripts/nvx.py download
 python3 scripts/nvx.py run
 ```
@@ -40,7 +40,7 @@ python3 scripts/nvx.py run
 Requires [MSHV configured with read/write access to `/dev/mshv`](doc/setup.md#linux--mshv).
 
 ```bash
-git clone https://github.com/nanvix/nvx.git && cd nvx
+git clone https://github.com/microsoft/nvx.git && cd nvx
 python3 scripts/nvx.py download --hypervisor mshv
 python3 scripts/nvx.py run --hypervisor mshv
 ```
@@ -50,7 +50,7 @@ python3 scripts/nvx.py run --hypervisor mshv
 Requires [Windows Hypervisor Platform enabled](doc/setup.md#windows--whp).
 
 ```powershell
-git clone https://github.com/nanvix/nvx.git; Set-Location nvx
+git clone https://github.com/microsoft/nvx.git; Set-Location nvx
 python scripts\nvx.py download
 python scripts\nvx.py run
 ```

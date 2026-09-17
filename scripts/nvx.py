@@ -51,7 +51,7 @@ from nvx_tools.release import (
 )
 from nvx_tools.sandbox import SandboxLaunch, SandboxLayer, parse_workload_identity
 
-DEFAULT_RELEASE_REPOSITORY = "nanvix/nvx"
+DEFAULT_RELEASE_REPOSITORY = "microsoft/nvx"
 HYPERVISORS = ("auto", "whp", "kvm", "mshv")
 NETWORK_PROFILES = ("portable",)
 

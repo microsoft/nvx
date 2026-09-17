@@ -2914,6 +2914,15 @@ class BenchmarkTests(unittest.TestCase):
 
         download_release.assert_called_once_with("example/nvx", expected_platform)
 
+    def test_download_command_defaults_to_integration_repository(self):
+        args = nvx.parse_args(["download"])
+        expected_platform = "windows-whp" if os.name == "nt" else "linux-kvm"
+
+        with patch.object(nvx, "download_latest_release") as download_release:
+            args.handler(args)
+
+        download_release.assert_called_once_with("microsoft/nvx", expected_platform)
+
 
 class ReleaseTests(unittest.TestCase):
     def test_selects_latest_matching_prerelease_asset(self):
