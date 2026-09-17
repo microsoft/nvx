@@ -5,19 +5,19 @@ runs:
   using: composite
   steps:
     - name: Download Linux / KVM release
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@v8
       with:
         name: release-linux-kvm
         path: dist
 
     - name: Download Linux / MSHV release
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@v8
       with:
         name: release-linux-mshv
         path: dist
 
     - name: Download Windows / WHP release
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@v8
       with:
         name: release-windows-whp
         path: dist

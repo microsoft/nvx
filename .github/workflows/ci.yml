@@ -149,7 +149,7 @@ jobs:
         uses: ./.github/actions/build-guest-artifacts
 
       - name: Upload guest artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: guest-artifacts
           path: |
@@ -228,7 +228,7 @@ jobs:
           binary-path: ${{ matrix.binary }}
 
       - name: Upload OpenVMM binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.binary }}
@@ -558,13 +558,13 @@ jobs:
         uses: ./.github/actions/setup-curl
 
       - name: Download guest artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: guest-artifacts
           path: build
 
       - name: Download OpenVMM binary
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.openvmm-artifact }}
           path: openvmm/target/release
@@ -592,7 +592,7 @@ jobs:
 
       - name: Upload NVX microVM failure logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nvx-microvm-tests-${{ matrix.backend }}
           path: build/test-results/microvm-${{ matrix.backend }}
@@ -689,7 +689,7 @@ jobs:
         run: python scripts\nvx.py verify
 
       - name: Download OpenVMM binary
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.openvmm-artifact }}
           path: openvmm/target/release
