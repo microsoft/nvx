@@ -109,7 +109,7 @@ jobs:
             run_workloads "At least one non-documentation file changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           fi
 
-          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
           if grep -Eq "${relevant_paths}" "${changed_files}"; then
             run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           else
@@ -158,6 +158,83 @@ jobs:
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
           if-no-files-found: error
+          retention-days: 1
+
+  openvmm-binaries:
+    name: OpenVMM binary / ${{ matrix.name }}
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GNU
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-3"]'
+            backend: kvm
+            target: x86_64-unknown-linux-gnu
+            build-mode: native
+            artifact: openvmm-linux-gnu
+            binary: openvmm/target/release/openvmm
+          - name: Linux musl
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-3"]'
+            backend: mshv
+            target: x86_64-unknown-linux-musl
+            build-mode: musl
+            artifact: openvmm-linux-musl
+            binary: openvmm/target/release/openvmm
+          - name: Windows MSVC
+            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-3"]'
+            backend: whp
+            target: x86_64-pc-windows-msvc
+            build-mode: native
+            artifact: openvmm-windows-msvc
+            binary: openvmm/target/release/openvmm.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Build OpenVMM
+        uses: ./.github/actions/build-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+          target: ${{ matrix.target }}
+          build-mode: ${{ matrix.build-mode }}
+          binary-path: ${{ matrix.binary }}
+
+      - name: Upload OpenVMM binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
           retention-days: 1
 
   openvmm-tests:
@@ -215,14 +292,17 @@ jobs:
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
+      - name: Set up retrying curl
+        uses: ./.github/actions/setup-curl
+
       - name: Prepare Windows cache tools
         if: runner.os == 'Windows'
         shell: powershell
         run: python scripts\nvx.py setup-cross-os-cache
 
-      - name: Prepare MSHV cache tools
-        id: cache-tools-mshv
-        if: matrix.backend == 'mshv'
+      - name: Prepare Linux cache tools
+        id: cache-tools-linux
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -232,33 +312,81 @@ jobs:
           ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
           echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
 
-      - name: Cache OpenVMM test build
-        if: matrix.backend != 'mshv'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ${{ format('{0}/cargo-home/registry', runner.temp) }}
-            ${{ format('{0}/cargo-home/git', runner.temp) }}
-            openvmm/target
-          key: openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
-
-      - name: Cache OpenVMM test build for MSHV
-        if: matrix.backend == 'mshv'
-        uses: actions/cache@v5
+      - name: Restore OpenVMM inputs on Linux
+        id: restore-openvmm-inputs-linux
+        if: runner.os != 'Windows'
+        uses: actions/cache/restore@v5
         env:
-          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore OpenVMM inputs on Windows
+        id: restore-openvmm-inputs-windows
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore OpenVMM test build on Linux
+        id: restore-openvmm-tests-linux
+        if: runner.os != 'Windows'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: openvmm/target
+          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore shared Cargo cache on Linux
+        id: restore-openvmm-cargo-linux
+        if: runner.os != 'Windows'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
         with:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-            openvmm/target
-          key: openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
-            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            openvmm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+            openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore OpenVMM test build on Windows
+        id: restore-openvmm-tests-windows
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v5
+        with:
+          path: openvmm/target
+          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore shared Cargo cache on Windows
+        id: restore-openvmm-cargo-windows
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: |
+            openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Run OpenVMM tests on KVM
         if: matrix.backend == 'kvm'
@@ -281,9 +409,95 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
 
+      - name: Save OpenVMM inputs on Linux
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os != 'Windows' &&
+          steps.restore-openvmm-inputs-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save OpenVMM inputs on Windows
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os == 'Windows' &&
+          steps.restore-openvmm-inputs-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save OpenVMM test build on Linux
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os != 'Windows' &&
+          steps.restore-openvmm-tests-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: openvmm/target
+          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save shared Cargo cache on Linux
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os != 'Windows' &&
+          steps.restore-openvmm-cargo-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+
+      - name: Save OpenVMM test build on Windows
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os == 'Windows' &&
+          steps.restore-openvmm-tests-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: openvmm/target
+          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save shared Cargo cache on Windows
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os == 'Windows' &&
+          steps.restore-openvmm-cargo-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+
   nvx-microvm-tests:
     name: NVX microVM tests / ${{ matrix.name }}
-    needs: [artifacts, openvmm-changes]
+    needs: [artifacts, openvmm-binaries, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -297,6 +511,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         ) &&
         needs.artifacts.result == 'success' &&
+        needs.openvmm-binaries.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-tests == 'true'
@@ -311,12 +526,15 @@ jobs:
           - name: Linux / KVM
             backend: kvm
             runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-2"]'
+            openvmm-artifact: openvmm-linux-gnu
           - name: Linux / MSHV
             backend: mshv
             runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-2"]'
+            openvmm-artifact: openvmm-linux-gnu
           - name: Windows / WHP
             backend: whp
             runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-2"]'
+            openvmm-artifact: openvmm-windows-msvc
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -332,55 +550,12 @@ jobs:
         uses: ./.github/actions/validate-nvx
 
       - name: Checkout OpenVMM
-        id: openvmm
         uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Prepare Windows cache tools
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: python scripts\nvx.py setup-cross-os-cache
-
-      - name: Prepare MSHV cache tools
-        id: cache-tools-mshv
-        if: matrix.backend == 'mshv'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
-          mkdir -p "${cache_tools}"
-          ln -sf "$(command -v tar)" "${cache_tools}/tar"
-          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
-          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
-
-      - name: Cache NVX microVM test build
-        if: matrix.backend != 'mshv'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ${{ format('{0}/cargo-home/registry', runner.temp) }}
-            ${{ format('{0}/cargo-home/git', runner.temp) }}
-            openvmm/target
-          key: nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
-
-      - name: Cache NVX microVM test build for MSHV
-        if: matrix.backend == 'mshv'
-        uses: actions/cache@v5
-        env:
-          PATH: ${{ steps.cache-tools-mshv.outputs.path }}
-        with:
-          path: |
-            ${{ format('{0}/cargo-home/registry', runner.temp) }}
-            ${{ format('{0}/cargo-home/git', runner.temp) }}
-            openvmm/target
-          key: nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            nvx-microvm-tests-v1-${{ matrix.backend }}-${{ runner.os }}-
+      - name: Set up retrying curl
+        uses: ./.github/actions/setup-curl
 
       - name: Download guest artifacts
         uses: actions/download-artifact@v5
@@ -388,19 +563,16 @@ jobs:
           name: guest-artifacts
           path: build
 
-      - name: Build OpenVMM on Linux
+      - name: Download OpenVMM binary
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ matrix.openvmm-artifact }}
+          path: openvmm/target/release
+
+      - name: Make OpenVMM executable
         if: runner.os != 'Windows'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/nvx.py build-openvmm
-
-      - name: Build OpenVMM on Windows
-        if: runner.os == 'Windows'
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python scripts\nvx.py build-openvmm
+        run: chmod +x openvmm/target/release/openvmm
 
       - name: Run NVX microVM tests on Linux
         if: runner.os != 'Windows'
@@ -428,7 +600,7 @@ jobs:
 
   platform:
     name: Platform / ${{ matrix.name }}
-    needs: [artifacts, openvmm-changes]
+    needs: [artifacts, openvmm-binaries, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -442,6 +614,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         ) &&
         needs.artifacts.result == 'success' &&
+        needs.openvmm-binaries.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-workloads == 'true'
@@ -458,8 +631,7 @@ jobs:
             backend: kvm
             release-platform: linux-kvm
             benchmark-platform: linux-kvm-virtual-machine
-            build-target: x86_64-unknown-linux-gnu
-            build-mode: native
+            openvmm-artifact: openvmm-linux-gnu
             teardown-mode: guest-exit
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
@@ -470,8 +642,7 @@ jobs:
             backend: mshv
             release-platform: linux-mshv
             benchmark-platform: linux-mshv-virtual-machine
-            build-target: x86_64-unknown-linux-musl
-            build-mode: musl
+            openvmm-artifact: openvmm-linux-musl
             teardown-mode: guest-exit
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
@@ -482,8 +653,7 @@ jobs:
             backend: whp
             release-platform: windows-whp
             benchmark-platform: windows-whp-virtual-machine
-            build-target: x86_64-pc-windows-msvc
-            build-mode: native
+            openvmm-artifact: openvmm-windows-msvc
             teardown-mode: guest-exit
             benchmark-cpus: 0-7
             host-cpu-reserve: 0
@@ -503,13 +673,31 @@ jobs:
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
 
-      - name: Build OpenVMM
-        uses: ./.github/actions/build-openvmm
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-          backend: ${{ matrix.backend }}
-          target: ${{ matrix.build-target }}
-          build-mode: ${{ matrix.build-mode }}
+
+      - name: Verify source pins on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/nvx.py verify
+
+      - name: Verify source pins on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py verify
+
+      - name: Download OpenVMM binary
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ matrix.openvmm-artifact }}
+          path: openvmm/target/release
+
+      - name: Make OpenVMM executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x openvmm/target/release/openvmm
 
       - name: Run benchmark
         uses: ./.github/actions/run-benchmark

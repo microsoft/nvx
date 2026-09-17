@@ -4,14 +4,17 @@
 import argparse
 import hashlib
 import http.client
+import http.server
 import io
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 import urllib.error
 import urllib.request
@@ -558,6 +561,158 @@ class CiTests(unittest.TestCase):
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
             ci.run_openvmm_tests("unknown")
+
+
+class CiConfigurationTests(unittest.TestCase):
+    def test_flowey_downloads_use_retrying_curl(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "action.yml"
+        ).read_text(encoding="utf-8")
+        windows_shim = (
+            common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "curl-shim.rs"
+        ).read_text(encoding="utf-8")
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        build_action = (
+            common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        for option in (
+            "--retry 5",
+            "--retry-all-errors",
+            "--retry-delay 2",
+            "--retry-max-time 90",
+        ):
+            self.assertEqual(action.count(option), 1)
+        for argument in (
+            '"--retry"',
+            '"5"',
+            '"--retry-all-errors"',
+            '"--retry-delay"',
+            '"2"',
+            '"--retry-max-time"',
+            '"90"',
+        ):
+            self.assertIn(argument, windows_shim)
+        self.assertIn('system_curl="${NVX_SYSTEM_CURL:-$(command -v curl)}"', action)
+        self.assertIn("Get-Command curl.exe", action)
+        self.assertIn('Join-Path $ShimDirectory "curl.exe"', action)
+        self.assertIn("Get-Command rustc.exe", action)
+        self.assertNotIn("curl.cmd", action)
+        self.assertEqual(
+            workflow.count("uses: ./.github/actions/setup-curl"),
+            2,
+        )
+        self.assertIn("uses: ./.github/actions/setup-curl", build_action)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific curl resolution")
+    def test_windows_curl_shim_retries_http_500(self):
+        rustc = shutil.which("rustc")
+        system_curl = shutil.which("curl.exe")
+        if rustc is None or system_curl is None:
+            self.fail("Windows curl shim test requires rustc and curl.exe")
+
+        class RetryHandler(http.server.BaseHTTPRequestHandler):
+            request_count = 0
+
+            def do_GET(self) -> None:
+                type(self).request_count += 1
+                if type(self).request_count == 1:
+                    self.send_error(http.HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                body = b"ok"
+                self.send_response(http.HTTPStatus.OK)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RetryHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                shim = Path(directory) / "curl.exe"
+                shim_source = (
+                    common.REPO_ROOT
+                    / ".github"
+                    / "actions"
+                    / "setup-curl"
+                    / "curl-shim.rs"
+                )
+                subprocess.run(
+                    [
+                        rustc,
+                        "--edition=2021",
+                        "-C",
+                        "opt-level=s",
+                        "-o",
+                        os.fspath(shim),
+                        os.fspath(shim_source),
+                    ],
+                    check=True,
+                )
+                environment = os.environ.copy()
+                environment["NVX_SYSTEM_CURL"] = system_curl
+                environment["PATH"] = directory + os.pathsep + environment["PATH"]
+                port = server.server_address[1]
+                result = subprocess.run(
+                    [
+                        "curl",
+                        "--fail",
+                        "-L",
+                        f"http://127.0.0.1:{port}/asset",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    env=environment,
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
+
+        self.assertFalse(
+            server_thread.is_alive(),
+            "HTTP test server did not stop within 5 seconds",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(result.stdout, b"ok")
+        self.assertEqual(RetryHandler.request_count, 2)
+
+    def test_ci_shares_openvmm_inputs_and_binary_artifacts(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        build_action = (
+            common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        for configuration in (workflow, build_action):
+            self.assertIn(
+                "openvmm/flowey-persist/flowey_lib_common__download_gh_release",
+                configuration,
+            )
+            self.assertIn(
+                "openvmm/flowey-persist/flowey_lib_common__cache",
+                configuration,
+            )
+            self.assertIn(
+                "openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-",
+                configuration,
+            )
+        self.assertIn("openvmm-binaries:", workflow)
+        self.assertIn("artifact: openvmm-linux-gnu", workflow)
+        self.assertIn("artifact: openvmm-linux-musl", workflow)
+        self.assertIn("artifact: openvmm-windows-msvc", workflow)
+        self.assertIn("uses: actions/download-artifact@v5", workflow)
+        self.assertNotIn("nvx-microvm-tests-v1", workflow)
+        self.assertNotIn("cargo-v2-", build_action)
+        self.assertNotIn("uses: actions/cache@v5", workflow)
+        self.assertNotIn("uses: actions/cache@v5", build_action)
 
 
 class BuildTests(unittest.TestCase):
