@@ -566,10 +566,11 @@ jobs:
           name: guest-artifacts
           path: build
 
-      - name: Download OpenVMM binary
+      - name: Download OpenVMM binary and provenance
         uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.openvmm-artifact }}
+          # Preserve the artifact's build/ and openvmm/ directory layout.
           path: .
 
       - name: Make OpenVMM executable
@@ -691,10 +692,11 @@ jobs:
         shell: powershell
         run: python scripts\nvx.py verify
 
-      - name: Download OpenVMM binary
+      - name: Download OpenVMM binary and provenance
         uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.openvmm-artifact }}
+          # Preserve the artifact's build/ and openvmm/ directory layout.
           path: .
 
       - name: Make OpenVMM executable

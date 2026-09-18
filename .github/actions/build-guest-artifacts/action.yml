@@ -41,7 +41,7 @@ runs:
       run: |
         set -euo pipefail
         {
-          echo "kernel=linux-kernel-v2-${KERNEL_VERSION}-${KERNEL_INPUT_HASH}"
+          echo "kernel=linux-kernel-v1-${KERNEL_VERSION}-${KERNEL_INPUT_HASH}"
           echo "alpine=alpine-image-v1-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}"
         } >> "${GITHUB_OUTPUT}"
 

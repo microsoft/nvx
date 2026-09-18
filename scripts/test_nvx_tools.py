@@ -1011,7 +1011,7 @@ class BuildTests(unittest.TestCase):
             "scripts/nvx_tools/build.py",
         ):
             self.assertIn(cache_input, action)
-        self.assertIn("linux-kernel-v2-", action)
+        self.assertIn("linux-kernel-v1-", action)
         self.assertEqual(action.count("build/vmlinux.provenance.json"), 2)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
