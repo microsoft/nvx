@@ -281,10 +281,9 @@ def _asset_mismatch(
         return f"remote state is {remote.state!r}"
     if remote.size != local.size:
         return f"remote size is {remote.size} bytes, expected {local.size}"
-    if remote.digest is not None and remote.digest.startswith("sha256:"):
-        expected_digest = f"sha256:{local.sha256}"
-        if remote.digest != expected_digest:
-            return f"remote digest is {remote.digest}, expected {expected_digest}"
+    expected_digest = f"sha256:{local.sha256}"
+    if remote.digest != expected_digest:
+        return f"remote digest is {remote.digest!r}, expected {expected_digest}"
     return None
 
 

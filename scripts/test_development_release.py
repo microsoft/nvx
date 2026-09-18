@@ -211,34 +211,74 @@ class DevelopmentReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
             target = "a" * 40
-            mismatched = self._release(
-                "v1",
-                target,
-                [self._remote_asset(local, digest=f"sha256:{'0' * 64}")],
+            cases = (
+                (
+                    "digest",
+                    development_release._DevelopmentReleaseAsset(
+                        local.name,
+                        local.size,
+                        f"sha256:{'0' * 64}",
+                        "uploaded",
+                    ),
+                ),
+                (
+                    "missing-digest",
+                    development_release._DevelopmentReleaseAsset(
+                        local.name,
+                        local.size,
+                        None,
+                        "uploaded",
+                    ),
+                ),
+                (
+                    "size",
+                    development_release._DevelopmentReleaseAsset(
+                        local.name,
+                        local.size + 1,
+                        f"sha256:{local.sha256}",
+                        "uploaded",
+                    ),
+                ),
+                (
+                    "state",
+                    development_release._DevelopmentReleaseAsset(
+                        local.name,
+                        local.size,
+                        f"sha256:{local.sha256}",
+                        "new",
+                    ),
+                ),
             )
-            with (
-                patch.object(
-                    development_release,
-                    "_query_development_release",
-                    return_value=mismatched,
-                ),
-                patch.object(development_release, "_run_gh") as run,
-                patch("sys.stdout", io.StringIO()),
-                self.assertRaisesRegex(
-                    development_release.ScriptError,
-                    "already exists but is invalid.*refusing to replace",
-                ),
-            ):
-                development_release._upload_expected_asset(
-                    "example/nvx",
-                    "v1",
-                    local,
-                    attempts=3,
-                    timeout_seconds=180,
-                    retry_backoff_seconds=10,
-                )
+            for name, remote_asset in cases:
+                with self.subTest(name=name):
+                    mismatched = self._release(
+                        "v1",
+                        target,
+                        [remote_asset],
+                    )
+                    with (
+                        patch.object(
+                            development_release,
+                            "_query_development_release",
+                            return_value=mismatched,
+                        ),
+                        patch.object(development_release, "_run_gh") as run,
+                        patch("sys.stdout", io.StringIO()),
+                        self.assertRaisesRegex(
+                            development_release.ScriptError,
+                            "already exists but is invalid.*refusing to replace",
+                        ),
+                    ):
+                        development_release._upload_expected_asset(
+                            "example/nvx",
+                            "v1",
+                            local,
+                            attempts=3,
+                            timeout_seconds=180,
+                            retry_backoff_seconds=10,
+                        )
 
-        run.assert_not_called()
+                    run.assert_not_called()
 
     def test_failed_asset_created_by_successful_attempt_is_cleaned_up(self):
         with tempfile.TemporaryDirectory() as temporary:
