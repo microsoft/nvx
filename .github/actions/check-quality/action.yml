@@ -31,7 +31,8 @@ runs:
         set -euo pipefail
         python -m ruff check scripts
         ${SHELLCHECK} --shell=sh \
-          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
+          alpine/init alpine/nvx-container-enter alpine/nvx-container-enter-azurelinux \
+          alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
           alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \
@@ -40,7 +41,8 @@ runs:
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts
         ${SHFMT} -d -ln posix -i 4 -ci \
-          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
+          alpine/init alpine/nvx-container-enter alpine/nvx-container-enter-azurelinux \
+          alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
           alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \

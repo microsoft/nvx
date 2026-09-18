@@ -63,7 +63,8 @@ RUN set -eux; \
     install -m 0755 /tmp/nvx/init /rootfs/init; \
     sed -i 's/ || mdev -s/ || exit 1/' /rootfs/init; \
     install -m 0755 /tmp/nvx/nvx-exit /tmp/nvx/nvx-hostmount \
-        /tmp/nvx/nvx-container-enter /tmp/nvx/nvx-container-launch \
+        /tmp/nvx/nvx-container-enter-azurelinux /rootfs/sbin/nvx-container-enter; \
+    install -m 0755 /tmp/nvx/nvx-container-launch \
         /tmp/nvx/nvx-init-agent /tmp/nvx/nvx-identity-probe \
         /tmp/nvx/nvx-snapshot /tmp/nvx/nvx-virtio-restore-probe /rootfs/sbin/; \
     cd /rootfs; \
