@@ -4397,9 +4397,10 @@ class SharedFileTests(unittest.TestCase):
             create_archive = archive.create_reproducible_release_archive
 
             def archive_mutated_source(source: Path, output: Path) -> None:
-                payload.write_bytes(b"replacement")
+                snapshot_payload = source / "bin" / "openvmm"
+                snapshot_payload.write_bytes(b"replacement")
                 create_archive(source, output)
-                payload.write_bytes(b"original")
+                snapshot_payload.write_bytes(b"original")
 
             with (
                 patch.object(
@@ -4417,6 +4418,65 @@ class SharedFileTests(unittest.TestCase):
                 list(root.glob(".staging-*-release.tar.gz")),
                 [],
             )
+
+    def test_release_snapshot_rejects_coherent_source_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-1.0.0-test"
+            payload = source / "bin" / "openvmm"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"original")
+            common.write_sha256_sums(source)
+            checksum_file = source / "SHA256SUMS"
+            original_checksum = checksum_file.read_bytes()
+            replacement = b"coherent replacement"
+            replacement_checksum = (
+                f"{hashlib.sha256(replacement).hexdigest()}  bin/openvmm\n"
+            ).encode("ascii")
+            destination = root / "release.tar.gz"
+            destination.write_bytes(b"prior archive")
+            copy_pinned_file = release._copy_pinned_regular_file
+
+            def replace_between_copies(
+                source_root: Path,
+                snapshot_root: Path,
+                relative_name: str,
+                expected_sha256: str,
+            ) -> None:
+                copy_pinned_file(
+                    source_root,
+                    snapshot_root,
+                    relative_name,
+                    expected_sha256,
+                )
+                if relative_name == "SHA256SUMS":
+                    payload.write_bytes(replacement)
+                    checksum_file.write_bytes(replacement_checksum)
+
+            try:
+                with (
+                    patch.object(
+                        release,
+                        "_copy_pinned_regular_file",
+                        side_effect=replace_between_copies,
+                    ),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "release snapshot source changed",
+                    ),
+                ):
+                    release.create_release_archive(source, destination)
+            finally:
+                if payload.exists():
+                    payload.write_bytes(b"original")
+                if checksum_file.exists():
+                    checksum_file.write_bytes(original_checksum)
+
+            self.assertEqual(destination.read_bytes(), b"prior archive")
+            self.assertEqual(payload.read_bytes(), b"original")
+            self.assertEqual(checksum_file.read_bytes(), original_checksum)
+            self.assertEqual(list(root.glob(".snapshot-*")), [])
+            self.assertEqual(list(root.glob(".staging-*-release.tar.gz")), [])
 
     def test_source_archives_are_reproducible(self):
         with tempfile.TemporaryDirectory() as temporary:

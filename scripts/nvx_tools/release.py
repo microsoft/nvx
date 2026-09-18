@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,7 @@ from .common import (
     REPO_ROOT,
     SOURCE_DIR,
     ScriptError,
+    VerifiedChecksumInventory,
     artifact_path,
     credential_safe_opener,
     download,
@@ -108,20 +110,31 @@ class _ReleaseRestoreError(ScriptError):
 
 
 def create_release_archive(source: Path, destination: Path) -> None:
+    if source.is_symlink():
+        raise ScriptError(f"release package directory must not be a symlink: {source}")
     source = source.resolve()
     destination = destination.resolve()
     if destination == source or source in destination.parents:
         raise ScriptError("release archive destination must be outside its source")
-    verify_sha256_sums(source)
+    accepted_inventory = verify_sha256_sums(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = destination.with_name(f".staging-{uuid.uuid4().hex}-{destination.name}")
+    snapshot_parent = Path(
+        tempfile.mkdtemp(
+            prefix=f".snapshot-{uuid.uuid4().hex}-",
+            dir=destination.parent,
+        )
+    )
+    snapshot_parent.chmod(0o700)
+    snapshot = snapshot_parent / source.name
     try:
-        create_reproducible_release_archive(source, staging)
-        _verify_release_archive(staging, source.name)
-        verify_sha256_sums(source)
+        _capture_release_snapshot(source, snapshot, accepted_inventory)
+        create_reproducible_release_archive(snapshot, staging)
+        _verify_release_archive(staging, source.name, accepted_inventory)
         staging.replace(destination)
     finally:
         staging.unlink(missing_ok=True)
+        shutil.rmtree(snapshot_parent, ignore_errors=True)
     print(f">> archived {source} as {destination}")
 
 
@@ -257,6 +270,103 @@ def _latest_release_asset_with_fallback(
             return _latest_release_asset(repository, platform, None), None
         except _GitHubReleaseQueryError as public_error:
             raise authenticated_error from public_error
+
+
+def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+
+
+def _require_safe_source_parents(root: Path, relative: PurePosixPath) -> None:
+    root_metadata = root.lstat()
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise ScriptError(f"release snapshot source is not a directory: {root}")
+    current = root
+    for part in relative.parts[:-1]:
+        current /= part
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ScriptError(
+                f"release snapshot source has an unsafe directory: {relative}"
+            )
+
+
+def _copy_pinned_regular_file(
+    source_root: Path,
+    snapshot_root: Path,
+    relative_name: str,
+    expected_sha256: str,
+) -> None:
+    relative = PurePosixPath(relative_name)
+    _require_safe_source_parents(source_root, relative)
+    source = source_root.joinpath(*relative.parts)
+    before = source.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ScriptError(
+            f"release snapshot source is not a regular file: {relative_name}"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source, flags)
+    try:
+        opened = os.fstat(descriptor)
+        after_open = source.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(after_open.st_mode)
+            or not _same_file_identity(before, opened)
+            or not _same_file_identity(opened, after_open)
+        ):
+            raise ScriptError(
+                f"release snapshot source changed while opening: {relative_name}"
+            )
+
+        destination = snapshot_root.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as source_file:
+            with destination.open("xb") as destination_file:
+                while chunk := source_file.read(1024 * 1024):
+                    destination_file.write(chunk)
+                    digest.update(chunk)
+            after_read = os.fstat(descriptor)
+        if not _same_file_identity(opened, after_read):
+            raise ScriptError(
+                f"release snapshot source changed while reading: {relative_name}"
+            )
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise ScriptError(
+                f"release snapshot source changed for {relative_name}: "
+                f"{actual_sha256}, expected {expected_sha256}"
+            )
+        destination.chmod(
+            0o755 if relative.parts[0] == "bin" or before.st_mode & 0o111 else 0o644
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _capture_release_snapshot(
+    source: Path,
+    snapshot: Path,
+    accepted: VerifiedChecksumInventory,
+) -> None:
+    snapshot.mkdir(mode=0o700)
+    expected_files = dict(accepted.files)
+    expected_files["SHA256SUMS"] = accepted.checksum_sha256
+    for relative_name, expected_sha256 in sorted(expected_files.items()):
+        _copy_pinned_regular_file(
+            source,
+            snapshot,
+            relative_name,
+            expected_sha256,
+        )
+    captured = verify_sha256_sums(snapshot)
+    if captured != accepted:
+        raise ScriptError(
+            "captured release snapshot does not match the accepted source inventory"
+        )
 
 
 def _canonical_archive_member(name: str, *, is_directory: bool) -> str:
@@ -417,7 +527,11 @@ def _filesystem_archive_layout(destination: Path) -> dict[str, bool]:
     return layout
 
 
-def _verify_release_archive(archive_path: Path, expected_root: str) -> None:
+def _verify_release_archive(
+    archive_path: Path,
+    expected_root: str,
+    accepted: VerifiedChecksumInventory,
+) -> None:
     root, archived_layout = _release_archive_layout(
         archive_path,
         expected_root=expected_root,
@@ -435,7 +549,11 @@ def _verify_release_archive(archive_path: Path, expected_root: str) -> None:
             raise ScriptError(
                 "release archive extraction did not preserve its exact member layout"
             )
-        verify_sha256_sums(extraction / root)
+        archived = verify_sha256_sums(extraction / root)
+        if archived != accepted:
+            raise ScriptError(
+                "release archive does not match the accepted source inventory"
+            )
     finally:
         shutil.rmtree(extraction, ignore_errors=True)
 

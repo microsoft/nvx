@@ -50,6 +50,12 @@ class CommandResult:
         return f"{stderr}\n{stdout}"
 
 
+@dataclass(frozen=True)
+class VerifiedChecksumInventory:
+    files: tuple[tuple[str, str], ...]
+    checksum_sha256: str
+
+
 def diagnostic_tail(text: str, lines: int = 20) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
@@ -115,10 +121,13 @@ def write_sha256_sums(directory: Path) -> None:
     )
 
 
-def verify_sha256_sums(directory: Path) -> None:
+def verify_sha256_sums(directory: Path) -> VerifiedChecksumInventory:
     checksum_file = require_file(directory / "SHA256SUMS", "source checksums")
     if checksum_file.is_symlink() or not stat.S_ISREG(checksum_file.stat().st_mode):
         raise ScriptError(f"source checksums must be a regular file: {checksum_file}")
+    checksum_bytes = checksum_file.read_bytes()
+    checksum_sha256 = hashlib.sha256(checksum_bytes).hexdigest()
+    checksum_text = checksum_bytes.decode("ascii")
 
     packaged_files: set[str] = set()
     for path in directory.rglob("*"):
@@ -135,8 +144,8 @@ def verify_sha256_sums(directory: Path) -> None:
         if relative != "SHA256SUMS":
             packaged_files.add(relative)
 
-    listed_files: set[str] = set()
-    for line in checksum_file.read_text(encoding="ascii").splitlines():
+    listed_files: dict[str, str] = {}
+    for line in checksum_text.splitlines():
         expected, separator, relative = line.partition("  ")
         path = PurePosixPath(relative)
         if (
@@ -154,7 +163,7 @@ def verify_sha256_sums(directory: Path) -> None:
             raise ScriptError(f"malformed checksum line in {checksum_file}: {line}")
         if relative in listed_files:
             raise ScriptError(f"duplicate checksum path in {checksum_file}: {relative}")
-        listed_files.add(relative)
+        listed_files[relative] = expected
         packaged_path = directory.joinpath(*path.parts)
         if relative not in packaged_files:
             raise ScriptError(f"invalid checksum path in {checksum_file}: {relative}")
@@ -164,9 +173,13 @@ def verify_sha256_sums(directory: Path) -> None:
                 f"source checksum mismatch for {relative}: {actual}, "
                 f"expected {expected}"
             )
-    unlisted = sorted(packaged_files - listed_files)
+    unlisted = sorted(packaged_files - listed_files.keys())
     if unlisted:
         raise ScriptError(f"unlisted file in checksummed tree: {unlisted[0]}")
+    return VerifiedChecksumInventory(
+        files=tuple(sorted(listed_files.items())),
+        checksum_sha256=checksum_sha256,
+    )
 
 
 def run_checked(
