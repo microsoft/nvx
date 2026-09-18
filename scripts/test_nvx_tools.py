@@ -724,6 +724,20 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
         self.assertNotRegex(configurations, r"actions/download-artifact@v[1-6]\b")
 
+    def test_windows_ci_remeasures_only_unstable_lifecycle_results(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(action.count("performance validate-openvmm"), 1)
+        self.assertNotIn("for attempt in 1 2", action)
+        self.assertEqual(action.count("foreach ($Attempt in 1, 2)"), 1)
+        self.assertEqual(action.count("$ValidationStatus -ne 75"), 1)
+        self.assertEqual(
+            action.count("Lifecycle snapshot generation was unstable"),
+            1,
+        )
+
 
 class BuildTests(unittest.TestCase):
     def test_manifest_tracks_every_kernel_patch(self):

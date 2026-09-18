@@ -505,6 +505,12 @@ Both CI contracts use one-second operation windows. Canonical baseline collectio
 full `5 + 30` contract.
 
 The current workflow collects 10 measured lifecycle samples after one warmup.
+Windows CI validates the lifecycle result before starting the remaining benchmark
+suites. Snapshot-generation instability is reported with temporary-failure exit
+status 75; CI discards that lifecycle result and remeasures it once on the same
+runner. Other validation failures stop immediately, and a second unstable result
+still fails the job. The 25% p50-over-p25 stability guard remains unchanged so pooled
+Windows runners cannot publish a bimodal host-stall series into topology-wide history.
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10
 matching history points. A metric regresses only when it is more than 50%
