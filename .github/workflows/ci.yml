@@ -741,7 +741,7 @@ jobs:
         needs.platform.result == 'success'
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 90
     permissions:
       actions: read
       contents: write
