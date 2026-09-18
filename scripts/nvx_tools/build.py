@@ -653,7 +653,7 @@ def build_docker_artifacts(
         f">> building Linux artifacts into '{destination}' "
         f"(kernel {config.kernel_version}, guest {config.guest})"
     )
-    target = "artifacts" if config.guest == "alpine" else "azurelinux-artifacts"
+    target = "artifacts" if config.guest == "alpine" else "azurelinux-guest-artifacts"
     run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
     expected = ("vmlinux", "initramfs.cpio.gz")
     missing = [name for name in expected if not (destination / name).is_file()]

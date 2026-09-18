@@ -74,7 +74,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("--target", command)
             self.assertEqual(
                 command[command.index("--target") + 1],
-                "azurelinux-artifacts",
+                "azurelinux-guest-artifacts",
             )
             self.assertIn(
                 f"type=local,dest={destination.resolve()}",
