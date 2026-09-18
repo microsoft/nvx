@@ -516,8 +516,14 @@ install_runner() {
         run_as_root "${runner_directory}/bin/installdependencies.sh"
     fi
 
+    configured_runner_name=
+    if run_as_root test -f "${runner_directory}/.runner"; then
+        configured_runner_name=$(run_as_root python3 -c \
+            'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
+            "${runner_directory}/.runner")
+    fi
     registration_required=false
-    if ! run_as_root test -f "${runner_directory}/.runner" ||
+    if [ "$configured_runner_name" != "$runner_name" ] ||
         ! run_as_root test -f "$runner_labels_file" ||
         [ "$(run_as_root cat "$runner_labels_file" 2>/dev/null || true)" != \
             "$expected_runner_labels" ]; then
@@ -754,7 +760,7 @@ if [ "$configure_runner" = true ]; then
 fi
 runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
 runner_labels_file=${runner_directory}/.nvx-labels
-expected_runner_labels=linux,${backend},virtual-machine,${runner_name}
+expected_runner_labels=linux,${backend},virtual-machine
 
 if [ "$check_only" = false ]; then
     install_packages

@@ -188,21 +188,21 @@ jobs:
       matrix:
         include:
           - name: Linux GNU
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-3"]'
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
             backend: kvm
             target: x86_64-unknown-linux-gnu
             build-mode: native
             artifact: openvmm-linux-gnu
             binary: openvmm/target/release/openvmm
           - name: Linux musl
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-3"]'
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
             backend: mshv
             target: x86_64-unknown-linux-musl
             build-mode: musl
             artifact: openvmm-linux-musl
             binary: openvmm/target/release/openvmm
           - name: Windows MSVC
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-3"]'
+            runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
             backend: whp
             target: x86_64-pc-windows-msvc
             build-mode: native
@@ -265,13 +265,13 @@ jobs:
         include:
           - name: Linux / KVM
             backend: kvm
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-1"]'
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
           - name: Linux / MSHV
             backend: mshv
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-1"]'
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
           - name: Windows / WHP
             backend: whp
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-1"]'
+            runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -525,15 +525,15 @@ jobs:
         include:
           - name: Linux / KVM
             backend: kvm
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-2"]'
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
             openvmm-artifact: openvmm-linux-gnu
           - name: Linux / MSHV
             backend: mshv
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-2"]'
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
             openvmm-artifact: openvmm-linux-gnu
           - name: Windows / WHP
             backend: whp
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-2"]'
+            runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
             openvmm-artifact: openvmm-windows-msvc
     steps:
       - name: Checkout
@@ -627,7 +627,7 @@ jobs:
       matrix:
         include:
           - name: Linux / KVM / Virtual machine
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-3"]'
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
             backend: kvm
             release-platform: linux-kvm
             benchmark-platform: linux-kvm-virtual-machine
@@ -638,7 +638,7 @@ jobs:
             marker-timeout: 40
             package-release: true
           - name: Linux / MSHV / Virtual machine
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-3"]'
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
             backend: mshv
             release-platform: linux-mshv
             benchmark-platform: linux-mshv-virtual-machine
@@ -649,7 +649,7 @@ jobs:
             marker-timeout: 40
             package-release: true
           - name: Windows / WHP / Virtual machine
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-3"]'
+            runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
             backend: whp
             release-platform: windows-whp
             benchmark-platform: windows-whp-virtual-machine
