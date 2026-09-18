@@ -46,10 +46,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(initramfs.guest, "azurelinux")
 
     def test_azure_linux_uses_its_artifact_target(self):
-        config = build.DockerBuildConfig(guest="azurelinux")
-        command = build.docker_build_command(config, "azurelinux-artifacts")
-        self.assertIn("azurelinux-artifacts", command)
-        self.assertIn(f"AZURELINUX_IMAGE={build.DEFAULT_AZURELINUX_IMAGE}", command)
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "artifacts"
+            config = build.DockerBuildConfig(
+                destination=destination,
+                guest="azurelinux",
+            )
+
+            def export_artifacts(*_args: object, **_kwargs: object) -> None:
+                destination.mkdir()
+                (destination / "vmlinux").write_bytes(b"kernel")
+                (destination / "initramfs.cpio.gz").write_bytes(b"initramfs")
+
+            with (
+                patch.object(build, "require_tool"),
+                patch.object(
+                    build,
+                    "run_checked",
+                    side_effect=export_artifacts,
+                ) as run_checked,
+            ):
+                build.build_docker_artifacts(config)
+
+            run_checked.assert_called_once()
+            command = run_checked.call_args.args[0]
+            self.assertEqual(run_checked.call_args.kwargs["cwd"], build.REPO_ROOT)
+            self.assertIn("--target", command)
+            self.assertEqual(
+                command[command.index("--target") + 1],
+                "azurelinux-artifacts",
+            )
+            self.assertIn(
+                f"type=local,dest={destination.resolve()}",
+                command,
+            )
+            self.assertIn(
+                f"AZURELINUX_IMAGE={build.DEFAULT_AZURELINUX_IMAGE}",
+                command,
+            )
 
     def test_native_azure_linux_rejected_before_kernel_build(self):
         args = argparse.Namespace(native=True, guest="azurelinux")
