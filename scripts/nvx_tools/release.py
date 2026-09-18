@@ -24,6 +24,8 @@ from .build import (
     DEFAULT_ALPINE_BRANCH,
     DEFAULT_ALPINE_MINIROOTFS_SHA256,
     DEFAULT_ALPINE_VERSION,
+    DEFAULT_AZURELINUX_IMAGE,
+    DEFAULT_AZURELINUX_VERSION,
     DEFAULT_KERNEL_SHA256,
     DEFAULT_KERNEL_URL,
     DEFAULT_KERNEL_VERSION,
@@ -610,6 +612,16 @@ def verify_source_tree() -> None:
         if alpine_manifest.get(field) != expected:
             raise ScriptError(
                 f"SOURCE-MANIFEST.json Alpine {field} does not match the build pin"
+            )
+    azurelinux_manifest = manifest["azurelinux"]
+    expected_azurelinux = {
+        "version": DEFAULT_AZURELINUX_VERSION,
+        "image": DEFAULT_AZURELINUX_IMAGE,
+    }
+    for field, expected in expected_azurelinux.items():
+        if azurelinux_manifest.get(field) != expected:
+            raise ScriptError(
+                f"SOURCE-MANIFEST.json Azure Linux {field} does not match the build pin"
             )
     config_path = REPO_ROOT / "kernel" / "config-microvm"
     config = config_path.read_text(encoding="utf-8")

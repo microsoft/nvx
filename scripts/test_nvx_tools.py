@@ -38,6 +38,18 @@ from nvx_tools import (  # noqa: E402
 
 
 class CliTests(unittest.TestCase):
+    def test_guest_selection_includes_azure_linux(self):
+        guest = nvx.parse_args(["build-guest", "--guest", "azurelinux"])
+        self.assertEqual(guest.guest, "azurelinux")
+
+        initramfs = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
+        self.assertEqual(initramfs.guest, "azurelinux")
+
+    def test_azure_linux_uses_its_artifact_target(self):
+        config = build.DockerBuildConfig(guest="azurelinux")
+        command = build.docker_build_command(config, "azurelinux-artifacts")
+        self.assertIn("azurelinux-artifacts", command)
+
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
             [

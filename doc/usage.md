@@ -23,9 +23,9 @@ python3 scripts/nvx.py performance gate --help
 | Command | Description |
 | --- | --- |
 | `init` | Initialize the OpenVMM submodule and its nested submodules. |
-| `build-guest` | Build the Linux kernel and Alpine initramfs. |
+| `build-guest` | Build the Linux kernel and an Alpine or Azure Linux initramfs. |
 | `build-kernel` | Build the pinned and patched Linux kernel natively. |
-| `build-initramfs` | Build the Alpine initramfs natively. |
+| `build-initramfs` | Build an Alpine or Azure Linux initramfs. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
@@ -75,11 +75,12 @@ See [Setup](setup.md) for host prerequisites.
 ### `build-guest`
 
 ```text
-python3 scripts/nvx.py build-guest [--native]
+python3 scripts/nvx.py build-guest [--guest {alpine,azurelinux}] [--native]
 ```
 
 By default, builds the guest kernel and initramfs with Docker. `--native`
-builds both artifacts directly on Linux instead.
+builds both artifacts directly on Linux instead. Azure Linux uses its
+digest-pinned public container image and therefore requires Docker.
 
 ### `build-kernel`
 
@@ -92,10 +93,11 @@ Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
 ### `build-initramfs`
 
 ```console
-python3 scripts/nvx.py build-initramfs
+python3 scripts/nvx.py build-initramfs [--guest {alpine,azurelinux}]
 ```
 
-Builds the Alpine initramfs directly on Linux.
+Builds the selected initramfs. Alpine builds directly on Linux; Azure Linux
+builds through Docker from its digest-pinned public base image.
 
 ### `build-openvmm`
 
