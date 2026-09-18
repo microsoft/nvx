@@ -109,7 +109,7 @@ jobs:
             run_workloads "At least one non-documentation file changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           fi
 
-          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|guest/|ubuntu/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
           if grep -Eq "${relevant_paths}" "${changed_files}"; then
             run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           else
@@ -157,6 +157,11 @@ jobs:
             build/vmlinux.config
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
+            build/initramfs-ubuntu.cpio.gz
+            build/initramfs-ubuntu.cpio.gz.packages.json
+            build/ubuntu-distro.erofs
+            build/ubuntu-distro.erofs.manifest.json
+            build/ubuntu-smoke-scratch.ext4
           if-no-files-found: error
           retention-days: 1
 
@@ -590,12 +595,95 @@ jobs:
           --backend "${{ matrix.backend }}"
           --output-dir "build/test-results/microvm-${{ matrix.backend }}"
 
+      - name: Run Ubuntu guest smoke tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend "${{ matrix.backend }}"
+          --guest ubuntu
+          --processors 1
+          --scenario guest-boot
+          --scenario guest-identity
+          --scenario console-exit
+          --scenario lifecycle
+          --scenario virtio-net
+          --scenario filesystem-snapshot
+          --output-dir "build/test-results/ubuntu-${{ matrix.backend }}"
+
+      - name: Run Ubuntu guest smoke tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          python scripts\nvx.py test-microvm
+          --backend "${{ matrix.backend }}"
+          --guest ubuntu
+          --processors 1
+          --scenario guest-boot
+          --scenario guest-identity
+          --scenario console-exit
+          --scenario lifecycle
+          --scenario virtio-net
+          --scenario filesystem-snapshot
+          --output-dir "build/test-results/ubuntu-${{ matrix.backend }}"
+
+      - name: Run extended Ubuntu guest tests on Linux/KVM
+        if: matrix.backend == 'kvm'
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend kvm
+          --guest ubuntu
+          --scenario managed-lifecycle
+          --scenario network-snapshot
+          --scenario smp
+          --scenario snapshot-core
+          --scenario workload-identity
+          --output-dir "build/test-results/ubuntu-kvm-extended"
+
+      - name: Run Ubuntu sandbox layer smoke test on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uuid=$(
+            python3 -c 'import json; print(json.load(open("build/ubuntu-distro.erofs.manifest.json", encoding="utf-8"))["uuid"])'
+          )
+          scratch="build/ubuntu-smoke-${{ matrix.backend }}.ext4"
+          cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
+          python3 scripts/nvx.py sandbox \
+            --hypervisor "${{ matrix.backend }}" \
+            --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
+            --scratch "${scratch}" \
+            --entrypoint /sbin/nvx-sandbox-smoke \
+            --workload-user 65534:65534 \
+            --memory-mib 256
+
+      - name: Run Ubuntu sandbox layer smoke test on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $manifest = Get-Content -Raw build\ubuntu-distro.erofs.manifest.json |
+              ConvertFrom-Json
+          $scratch = "build\ubuntu-smoke-${{ matrix.backend }}.ext4"
+          Copy-Item build\ubuntu-smoke-scratch.ext4 $scratch
+          python scripts\nvx.py sandbox `
+            --hypervisor "${{ matrix.backend }}" `
+            --layer "distro,build\ubuntu-distro.erofs,$($manifest.uuid)" `
+            --scratch $scratch `
+            --entrypoint /sbin/nvx-sandbox-smoke `
+            --workload-user 65534:65534 `
+            --memory-mib 256
+
       - name: Upload NVX microVM failure logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: nvx-microvm-tests-${{ matrix.backend }}
-          path: build/test-results/microvm-${{ matrix.backend }}
+          path: |
+            build/test-results/microvm-${{ matrix.backend }}
+            build/test-results/ubuntu-${{ matrix.backend }}
+            build/test-results/ubuntu-kvm-extended
           if-no-files-found: warn
 
   platform:

@@ -29,6 +29,15 @@ def artifact_path(name: str) -> Path:
     return BUILD_DIR / name
 
 
+def cache_root() -> Path:
+    configured = os.environ.get("NVX_CACHE_DIR")
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else (REPO_ROOT / ".cache").resolve()
+    )
+
+
 def openvmm_binary_path() -> Path:
     suffix = ".exe" if os.name == "nt" else ""
     return OPENVMM_DIR / "target" / "release" / f"openvmm{suffix}"
@@ -233,6 +242,20 @@ def download(
             if attempt == attempts:
                 raise ScriptError(f"failed to download {url}: {error}") from error
             print(f">> download failed ({attempt}/{attempts}); retrying: {error}")
+
+
+def download_verified(url: str, destination: Path, expected_sha256: str) -> None:
+    if destination.is_file():
+        actual_sha256 = sha256_file(destination)
+        if actual_sha256 == expected_sha256:
+            return
+        print(
+            f">> discarding {destination.name}: SHA-256 is {actual_sha256}, "
+            f"expected {expected_sha256}"
+        )
+        destination.unlink()
+    print(f">> downloading {destination.name}")
+    download(url, destination, expected_sha256=expected_sha256)
 
 
 def format_size(size: int) -> str:

@@ -10,13 +10,14 @@ are build products or caches and are not part of the tracked source tree. The
 | --- | --- |
 | `.github/prompts` | Copilot prompts for common development workflows |
 | `kernel` | Reproducible configs and complete Linux patch series |
-| `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
+| `guest` | Common guest sources plus Alpine-control-specific helpers |
+| `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
 | `scripts/nvx.py` | Canonical build, run, benchmark, and packaging CLI |
 | `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
-| `build/sources` | Generated Linux and Alpine release sources; ignored by Git |
+| `build/sources` | Generated Linux, Alpine, and Ubuntu release sources; ignored by Git |
 
 ## Directory tree
 
@@ -26,17 +27,12 @@ nvx/
 |   |-- actions/                 Reusable local CI actions
 |   |-- prompts/                 Copilot development workflow prompts
 |   `-- workflows/ci.yml         Main build, test, and benchmark workflow
-|-- alpine/                      Files installed in the Alpine guest
-|   |-- init                     Guest PID 1 and boot sequence
-|   |-- nvx-container-enter      Container mount namespace and root setup
-|   |-- nvx-container-launch     Cgroup placement barrier and namespace launch
-|   |-- nvx-exit                 Clean guest shutdown helper
-|   |-- nvx-hostmount            virtio-fs host mount helper
-|   |-- nvx-init-agent           EROFS/overlay sandbox bootstrap and supervisor
-|   |-- nvx-device-io.c          Static device operation-rate workload helper
-|   |-- nvx-port-io.c            Static repeated-port restore packet helper
-|   |-- nvx-reseed.c             Static clone-restore CRNG reseed helper
-|   `-- nvx-snapshot             Snapshot preparation and restore repair helper
+|-- guest/                       Guest-owned scripts and static helpers
+|   |-- common/                  Shared init, lifecycle, console, and test helpers
+|   |-- alpine/                  Alpine-control container entry helpers
+|   `-- ubuntu/                  Ubuntu interactive-shell startup policy
+|-- ubuntu/
+|   `-- packages.lock.json       Exact supplemental Ubuntu binary package closure
 |-- data/                        Benchmark data
 |   |-- linux-kvm-virtual-machine*.csv       Rolling Linux/KVM CI histories
 |   |-- linux-mshv-virtual-machine*.csv      Rolling Linux/MSHV CI histories
@@ -66,6 +62,9 @@ nvx/
 |   |   |-- benchmark_scripts/   Shell programs and benchmark templates
 |   |   |-- performance.py       Performance commands
 |   |   |-- collect_alpine_sources.py Alpine source collection
+|   |   |-- collect_ubuntu_sources.py Ubuntu source collection
+|   |   |-- guests.py           Typed guest descriptors
+|   |   |-- ubuntu.py           Verified Ubuntu rootfs and EROFS preparation
 |   |   `-- create_linux_source_archive.py Linux source packaging
 |   |-- nvx.py                   Supported command-line entry point
 |   `-- test_*.py                Python tooling tests
@@ -96,16 +95,20 @@ builds, benchmarks, packaging, releases, and performance history management.
 The `prompts/` directory defines Copilot prompts for common development
 workflows.
 
-### `alpine/`
+### `guest/` and `ubuntu/`
 
-Guest-owned scripts copied into the Alpine initramfs. `init` controls early
-boot and launches either the normal guest shell or `nvx-init-agent` for the
-sandbox profile. The sandbox helpers resolve fixed virtio-blk roles through
+`guest/common` contains scripts and static helper sources shared by the Alpine
+and Ubuntu initramfs builds. `init` controls early boot, emits a stable
+distribution marker, and launches either the normal guest shell or the
+Alpine-only `nvx-init-agent` sandbox profile. `guest/alpine` contains the
+musl-linked container-entry helpers that are not installed in the Ubuntu
+initramfs. The sandbox helpers resolve fixed virtio-blk roles through
 sysfs, assemble EROFS lower layers over ext4 scratch, place the workload in its
 cgroup before release, construct its mount/PID/UTS namespaces, enter its
 filesystem root after dropping capabilities, and retain the agent as the outer
-PID 1. The remaining helpers handle shutdown, virtio-fs
-mounting, and snapshot preparation.
+PID 1. The remaining common helpers handle shutdown, virtio-fs mounting, and
+snapshot preparation. `ubuntu/packages.lock.json` pins the complete
+supplemental `.deb` closure installed without maintainer-script execution.
 
 ### `data/`
 
@@ -115,8 +118,9 @@ hold run logs, downloaded artifacts, collected results, and gate inputs.
 
 ### `docker/`
 
-The container definition used to build the Linux kernel and Alpine initramfs
-in a reproducible Linux environment.
+The container definition used to build the Linux kernel, Alpine and Ubuntu
+initramfs images, and the Ubuntu EROFS distro layer in a reproducible Linux
+environment.
 
 ### `kernel/`
 
@@ -138,8 +142,8 @@ made in that repository and then recorded here by updating the submodule pin.
 Host-side Python tooling. `nvx.py` is the public entry point; command
 implementations live in `nvx_tools/`. Standalone benchmark shell programs and
 parameterized guest templates live in `nvx_tools/benchmark_scripts/`.
-Source-collection scripts assemble corresponding-source archives for Linux and
-Alpine. Performance scripts analyze benchmark outputs, with adjacent
+Source-collection scripts assemble corresponding-source archives for Linux,
+Alpine, and Ubuntu. Performance scripts analyze benchmark outputs, with adjacent
 `test_*.py` files covering those utilities.
 
 ## Root files
@@ -149,7 +153,7 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | `README.md` | Project overview and documentation index |
 | `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
 | `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
-| `SOURCE-MANIFEST.json` | Exact Linux and Alpine source identities and output locations |
+| `SOURCE-MANIFEST.json` | Exact Linux, Alpine, and Ubuntu source identities and output locations |
 | `VERSION` | Distribution version consumed by packaging tools |
 | `.gitmodules` | OpenVMM repository URL, path, and tracking branch |
 | `.gitignore` | Excludes build products, caches, virtual environments, logs, and platform metadata |
@@ -163,7 +167,7 @@ Alpine. Performance scripts analyze benchmark outputs, with adjacent
 | Path | Contents |
 | --- | --- |
 | `.cache/` | Downloaded, verified, and patched upstream source trees |
-| `build/` | Kernels, initramfs images, package manifests, and collected sources |
+| `build/` | Kernels, initramfs and EROFS images, package manifests, and collected sources |
 | `data/baseline/` | Base-branch histories staged by the performance gate |
 | `data/results/` | Collected p50 results for the current commit |
 | `data/runs/` | Raw benchmark logs and per-platform artifacts |

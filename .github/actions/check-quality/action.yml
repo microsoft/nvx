@@ -31,20 +31,26 @@ runs:
         set -euo pipefail
         python -m ruff check scripts
         ${SHELLCHECK} --shell=sh \
-          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-          alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-          alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
+          guest/common/init guest/alpine/nvx-container-enter \
+          guest/alpine/nvx-container-launch guest/common/nvx-exit \
+          guest/common/nvx-hostmount guest/common/nvx-init-agent \
+          guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
+          guest/common/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
+        ${SHELLCHECK} --shell=bash guest/ubuntu/nvx-bashrc
         python -m pyright --pythonplatform Linux
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts
         ${SHFMT} -d -ln posix -i 4 -ci \
-          alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-          alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-          alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
+          guest/common/init guest/alpine/nvx-container-enter \
+          guest/alpine/nvx-container-launch guest/common/nvx-exit \
+          guest/common/nvx-hostmount guest/common/nvx-init-agent \
+          guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
+          guest/common/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
+        ${SHFMT} -d -ln bash -i 4 -ci guest/ubuntu/nvx-bashrc
 
     - name: Check PowerShell syntax
       shell: pwsh

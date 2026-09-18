@@ -1,0 +1,2 @@
+PS1='nvx-ubuntu# '
+printf '%s\n' 'NVX-GUEST-BOOT-OK: ubuntu'

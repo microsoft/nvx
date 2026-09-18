@@ -8,9 +8,10 @@ unique host name. Instance 1 runs `openvmm-tests`, instance 2 runs
 can execute concurrently. `openvmm-tests` builds its Xen PVH probe entirely
 from the OpenVMM checkout and exercises OpenVMM lifecycle, TTRPC, and snapshot
 contracts without restoring NVX guest artifacts. `nvx-microvm-tests` consumes
-the NVX Linux kernel and Alpine initramfs and exercises Linux, SMP, virtio,
-sandbox, and snapshot behavior through the public OpenVMM CLI. Failure logs
-from the NVX layer are uploaded per backend.
+the NVX Linux kernel plus the selected Alpine or Ubuntu initramfs and exercises
+Linux, SMP, virtio, sandbox, and snapshot behavior through the public OpenVMM
+CLI. Alpine-control-only scenarios remain explicit and are rejected for the
+Ubuntu initramfs. Failure logs from the NVX layer are uploaded per backend.
 The restore-processor scenario also rejects Linux TSC instability diagnostics,
 even if the requested CPUs came online, so clock skew cannot silently pass by
 falling back to a different clocksource.
@@ -40,6 +41,14 @@ The harness waits for the output reader's EOF notification even after the
 process exits, so delayed final output chunks cannot create a false failure.
 
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
+The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
+separate cache keys. Ubuntu keys include the Canonical archive pin,
+supplemental package lock, common guest sources, converter implementation, and
+Dockerfile. Artifact upload retains the Alpine filenames and adds the distinct
+Ubuntu filenames. Each backend also boots the Ubuntu initramfs and runs
+`/sbin/nvx-sandbox-smoke` from the Ubuntu EROFS layer as UID/GID 65534 over a
+fresh ext4 scratch copy. Linux/KVM runs the broader Ubuntu SMP, managed
+lifecycle, network snapshot, blockless snapshot, and workload-identity set.
 Once they are ready, benchmarks run in parallel with the NVX test layer and
 remain pinned to instance 3 of each backend so a rolling history does not mix
 hosts. All three use virtual-machine performance series and the constrained
