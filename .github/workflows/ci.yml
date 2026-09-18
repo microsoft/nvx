@@ -162,7 +162,7 @@ jobs:
 
   openvmm-tests:
     name: OpenVMM tests / ${{ matrix.name }}
-    needs: [openvmm-changes]
+    needs: [artifacts, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -175,6 +175,7 @@ jobs:
           github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository
         ) &&
+        needs.artifacts.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-tests == 'true'
@@ -214,6 +215,12 @@ jobs:
         uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Download guest artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: guest-artifacts
+          path: build
 
       - name: Prepare Windows cache tools
         if: runner.os == 'Windows'

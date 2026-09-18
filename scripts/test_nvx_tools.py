@@ -616,6 +616,20 @@ class BuildTests(unittest.TestCase):
             action,
         )
 
+    def test_openvmm_ci_downloads_guest_artifacts(self):
+        workflow = (build.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        openvmm_tests = workflow.split("\n  openvmm-tests:\n", 1)[1].split(
+            "\n  nvx-microvm-tests:\n",
+            1,
+        )[0]
+        self.assertIn("needs: [artifacts, openvmm-changes]", openvmm_tests)
+        self.assertIn("needs.artifacts.result == 'success'", openvmm_tests)
+        self.assertIn("- name: Download guest artifacts", openvmm_tests)
+        self.assertIn("name: guest-artifacts", openvmm_tests)
+        self.assertIn("path: build", openvmm_tests)
+
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")
         with (
