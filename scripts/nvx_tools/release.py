@@ -27,6 +27,7 @@ from .build import (
     DEFAULT_KERNEL_SHA256,
     DEFAULT_KERNEL_URL,
     DEFAULT_KERNEL_VERSION,
+    REQUIRED_SANDBOX_KERNEL_CONFIG,
     DockerBuildConfig,
     build_docker_linux_source,
 )
@@ -618,6 +619,7 @@ def verify_source_tree() -> None:
         "CONFIG_HVC_XE9=y",
         "CONFIG_VIRTIO_FS=y",
         "CONFIG_FUSE_FS=y",
+        *REQUIRED_SANDBOX_KERNEL_CONFIG,
     ):
         if setting not in config.splitlines():
             raise ScriptError(f"{config_path} is missing {setting}")
@@ -630,7 +632,11 @@ def verify_source_tree() -> None:
     generated_config = artifact_path("vmlinux.config")
     if generated_config.is_file():
         generated = generated_config.read_text(encoding="utf-8").splitlines()
-        for setting in ("CONFIG_PVH=y", "CONFIG_HVC_XE9=y"):
+        for setting in (
+            "CONFIG_PVH=y",
+            "CONFIG_HVC_XE9=y",
+            *REQUIRED_SANDBOX_KERNEL_CONFIG,
+        ):
             if setting not in generated:
                 raise ScriptError(f"{generated_config} is missing {setting}")
     head = subprocess.run(

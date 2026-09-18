@@ -56,6 +56,12 @@ cgroup BPF. The build fails if `olddefconfig` drops any required option. The
 APK manifest records the `blkid` and `util-linux` tools used by the bootstrap
 plus the device helper's source and binary SHA-256 values.
 
+The platform configuration also enables Unix-domain sockets for local guest
+IPC and seccomp filters for workload syscall policies. Overlayfs does not
+unconditionally follow redirect metadata. These are kernel capabilities, not
+product-agent configuration; the same requirements are checked after
+`olddefconfig` and when verifying source and generated configurations.
+
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
 generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
