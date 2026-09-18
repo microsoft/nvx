@@ -841,6 +841,7 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("name: ${{ matrix.artifact }}-provenance", workflow)
         self.assertIn("path: openvmm/target/release", workflow)
         self.assertIn("path: build", workflow)
+        self.assertEqual(workflow.count("overwrite: true"), 2)
         self.assertNotIn("path: .", workflow)
         self.assertIn("uses: actions/download-artifact@v8", workflow)
         self.assertIn("openvmm-binary-v5-", build_action)
@@ -4382,6 +4383,40 @@ class SharedFileTests(unittest.TestCase):
                                 for member in members.values()
                             )
                         )
+
+    def test_release_archive_rejects_internally_inconsistent_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-1.0.0-test"
+            payload = source / "bin" / "openvmm"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"original")
+            common.write_sha256_sums(source)
+            destination = root / "release.tar.gz"
+            destination.write_bytes(b"prior archive")
+            create_archive = archive.create_reproducible_release_archive
+
+            def archive_mutated_source(source: Path, output: Path) -> None:
+                payload.write_bytes(b"replacement")
+                create_archive(source, output)
+                payload.write_bytes(b"original")
+
+            with (
+                patch.object(
+                    release,
+                    "create_reproducible_release_archive",
+                    side_effect=archive_mutated_source,
+                ),
+                self.assertRaisesRegex(common.ScriptError, "checksum mismatch"),
+            ):
+                release.create_release_archive(source, destination)
+
+            self.assertEqual(destination.read_bytes(), b"prior archive")
+            self.assertEqual(payload.read_bytes(), b"original")
+            self.assertEqual(
+                list(root.glob(".staging-*-release.tar.gz")),
+                [],
+            )
 
     def test_source_archives_are_reproducible(self):
         with tempfile.TemporaryDirectory() as temporary:

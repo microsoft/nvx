@@ -117,6 +117,7 @@ def create_release_archive(source: Path, destination: Path) -> None:
     staging = destination.with_name(f".staging-{uuid.uuid4().hex}-{destination.name}")
     try:
         create_reproducible_release_archive(source, staging)
+        _verify_release_archive(staging, source.name)
         verify_sha256_sums(source)
         staging.replace(destination)
     finally:
@@ -258,47 +259,185 @@ def _latest_release_asset_with_fallback(
             raise authenticated_error from public_error
 
 
-def _validate_archive_member(name: str) -> None:
-    path = PurePosixPath(name)
+def _canonical_archive_member(name: str, *, is_directory: bool) -> str:
+    normalized_name = name[:-1] if is_directory and name.endswith("/") else name
+    path = PurePosixPath(normalized_name)
     if (
-        not name
-        or "\\" in name
+        not normalized_name
+        or "\\" in normalized_name
         or path.is_absolute()
+        or "." in path.parts
         or ".." in path.parts
-        or (path.parts and path.parts[0].endswith(":"))
+        or any(":" in part for part in path.parts)
+        or path.as_posix() != normalized_name
+        or (not is_directory and name.endswith("/"))
     ):
         raise ScriptError(f"unsafe path in release archive: {name}")
+    return normalized_name
 
 
-def _extract_release_archive(archive_path: Path, destination: Path) -> None:
+def _validate_archive_layout(
+    entries: Sequence[tuple[str, bool]],
+    *,
+    expected_root: str | None = None,
+) -> tuple[str, dict[str, bool]]:
+    layout: dict[str, bool] = {}
+    for name, is_directory in entries:
+        canonical = _canonical_archive_member(name, is_directory=is_directory)
+        if canonical in layout:
+            raise ScriptError(f"duplicate path in release archive: {canonical}")
+        layout[canonical] = is_directory
+    roots = {PurePosixPath(name).parts[0] for name in layout}
+    if len(roots) != 1:
+        raise ScriptError("release archive must contain exactly one package root")
+    root = roots.pop()
+    if expected_root is not None and root != expected_root:
+        raise ScriptError(f"release archive root is {root}, expected {expected_root}")
+    if root in layout and layout[root] is not True:
+        raise ScriptError("release archive package root must be a directory")
+    if expected_root is not None:
+        if layout.get(root) is not True:
+            raise ScriptError("release archive omits its package root directory")
+        for name in layout:
+            parent = PurePosixPath(name).parent
+            while parent != PurePosixPath("."):
+                parent_name = parent.as_posix()
+                if layout.get(parent_name) is not True:
+                    raise ScriptError(
+                        f"release archive omits directory entry {parent_name}"
+                    )
+                parent = parent.parent
+    return root, layout
+
+
+def _release_archive_layout(
+    archive_path: Path,
+    *,
+    expected_root: str | None = None,
+) -> tuple[str, dict[str, bool]]:
     try:
         if archive_path.name.endswith(".tar.gz"):
             with tarfile.open(archive_path, "r:gz") as archive:
-                members = archive.getmembers()
-                for member in members:
-                    _validate_archive_member(member.name)
+                entries: list[tuple[str, bool]] = []
+                for member in archive.getmembers():
                     if not (member.isfile() or member.isdir()):
                         raise ScriptError(
                             f"unsupported entry in release archive: {member.name}"
                         )
-                archive.extractall(destination)
+                    entries.append((member.name, member.isdir()))
+            return _validate_archive_layout(entries, expected_root=expected_root)
+        if archive_path.suffix == ".zip":
+            with zipfile.ZipFile(archive_path) as archive:
+                entries = []
+                for member in archive.infolist():
+                    is_directory = member.is_dir()
+                    file_type = (member.external_attr >> 16) & 0o170000
+                    allowed_types = (
+                        (0, stat.S_IFDIR) if is_directory else (0, stat.S_IFREG)
+                    )
+                    if file_type not in allowed_types:
+                        raise ScriptError(
+                            f"unsupported entry in release archive: {member.filename}"
+                        )
+                    entries.append((member.filename, is_directory))
+            return _validate_archive_layout(entries, expected_root=expected_root)
+    except (tarfile.TarError, zipfile.BadZipFile) as error:
+        raise ScriptError(
+            f"invalid release archive {archive_path.name}: {error}"
+        ) from error
+    raise ScriptError(f"unsupported release archive: {archive_path.name}")
+
+
+def _extract_release_archive(archive_path: Path, destination: Path) -> None:
+    _release_archive_layout(archive_path)
+    try:
+        if archive_path.name.endswith(".tar.gz"):
+            with tarfile.open(archive_path, "r:gz") as archive:
+                for member in archive.getmembers():
+                    canonical = _canonical_archive_member(
+                        member.name,
+                        is_directory=member.isdir(),
+                    )
+                    target = destination.joinpath(*PurePosixPath(canonical).parts)
+                    if member.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        target.chmod(member.mode & 0o777)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise ScriptError(
+                            f"could not read release archive entry: {member.name}"
+                        )
+                    with source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                    target.chmod(member.mode & 0o777)
             return
         if archive_path.suffix == ".zip":
             with zipfile.ZipFile(archive_path) as archive:
                 for member in archive.infolist():
-                    _validate_archive_member(member.filename)
-                    file_type = (member.external_attr >> 16) & 0o170000
-                    if file_type not in (0, stat.S_IFDIR, stat.S_IFREG):
-                        raise ScriptError(
-                            f"unsupported entry in release archive: {member.filename}"
-                        )
-                archive.extractall(destination)
+                    is_directory = member.is_dir()
+                    canonical = _canonical_archive_member(
+                        member.filename,
+                        is_directory=is_directory,
+                    )
+                    target = destination.joinpath(*PurePosixPath(canonical).parts)
+                    mode = (member.external_attr >> 16) & 0o777
+                    if is_directory:
+                        target.mkdir(parents=True, exist_ok=True)
+                        if mode:
+                            target.chmod(mode)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                    if mode:
+                        target.chmod(mode)
             return
     except (tarfile.TarError, zipfile.BadZipFile) as error:
         raise ScriptError(
             f"invalid release archive {archive_path.name}: {error}"
         ) from error
     raise ScriptError(f"unsupported release archive: {archive_path.name}")
+
+
+def _filesystem_archive_layout(destination: Path) -> dict[str, bool]:
+    layout: dict[str, bool] = {}
+    for path in destination.rglob("*"):
+        metadata = path.lstat()
+        relative = path.relative_to(destination).as_posix()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ScriptError(f"release archive extracted a symlink: {relative}")
+        if stat.S_ISDIR(metadata.st_mode):
+            layout[relative] = True
+        elif stat.S_ISREG(metadata.st_mode):
+            layout[relative] = False
+        else:
+            raise ScriptError(f"release archive extracted a special file: {relative}")
+    return layout
+
+
+def _verify_release_archive(archive_path: Path, expected_root: str) -> None:
+    root, archived_layout = _release_archive_layout(
+        archive_path,
+        expected_root=expected_root,
+    )
+    extraction = Path(
+        tempfile.mkdtemp(
+            prefix=f".{archive_path.name}.verify-",
+            dir=archive_path.parent,
+        )
+    )
+    try:
+        _extract_release_archive(archive_path, extraction)
+        extracted_layout = _filesystem_archive_layout(extraction)
+        if extracted_layout != archived_layout:
+            raise ScriptError(
+                "release archive extraction did not preserve its exact member layout"
+            )
+        verify_sha256_sums(extraction / root)
+    finally:
+        shutil.rmtree(extraction, ignore_errors=True)
 
 
 def _replace_runtime_file(source: Path, destination: Path) -> None:
