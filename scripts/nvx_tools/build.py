@@ -33,6 +33,12 @@ DEFAULT_ALPINE_BRANCH = "v3.24"
 DEFAULT_ALPINE_MINIROOTFS_SHA256 = (
     "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081"
 )
+DEFAULT_AZURELINUX_VERSION = "3.0"
+DEFAULT_AZURELINUX_IMAGE = (
+    "mcr.microsoft.com/azurelinux/base/core@"
+    "sha256:c877612270d1ee2d6ab2bc1f64bfe38ab697ac50be325154ee5129fce89c17e4"
+)
+GUESTS = ("alpine", "azurelinux")
 REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_HVC_DRIVER=y",
     "CONFIG_VIRTIO=y",
@@ -127,6 +133,7 @@ class DockerBuildConfig:
     kernel_version: str = DEFAULT_KERNEL_VERSION
     alpine_version: str = DEFAULT_ALPINE_VERSION
     alpine_branch: str = DEFAULT_ALPINE_BRANCH
+    guest: str = "alpine"
 
 
 def _require_linux(workflow: str) -> None:
@@ -568,12 +575,16 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
             f"{DEFAULT_KERNEL_VERSION} and Alpine {DEFAULT_ALPINE_VERSION} "
             f"({DEFAULT_ALPINE_BRANCH})"
         )
+    if config.guest not in GUESTS:
+        raise ScriptError(f"unsupported guest: {config.guest}")
     destination = _docker_destination(config.destination)
     command: list[str | Path] = [
         "docker",
         "build",
         "-f",
         REPO_ROOT / "docker" / "Dockerfile",
+        "--build-arg",
+        f"AZURELINUX_IMAGE={DEFAULT_AZURELINUX_IMAGE}",
         "--target",
         target,
     ]
@@ -612,6 +623,24 @@ def build_docker_linux_source(config: DockerBuildConfig) -> Path:
     return archive
 
 
+def build_docker_initramfs(config: DockerBuildConfig) -> None:
+    """Build and export a container-backed initramfs."""
+    if config.guest == "alpine":
+        raise ScriptError("use the native Alpine initramfs builder")
+    require_tool(
+        "docker",
+        "docker was not found on PATH; install Docker with the Linux engine first",
+    )
+    destination = _docker_destination(config.destination)
+    target = f"{config.guest}-artifacts"
+    print(f">> building {config.guest} initramfs into '{destination}'")
+    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
+    initramfs = destination / "initramfs.cpio.gz"
+    if not initramfs.is_file():
+        raise ScriptError(f"Docker build did not produce {initramfs.name}")
+    print(f">> built {initramfs} ({format_size(initramfs.stat().st_size)})")
+
+
 def build_docker_artifacts(
     config: DockerBuildConfig,
 ) -> None:
@@ -622,9 +651,10 @@ def build_docker_artifacts(
     destination = _docker_destination(config.destination)
     print(
         f">> building Linux artifacts into '{destination}' "
-        f"(kernel {config.kernel_version}, Alpine {config.alpine_version})"
+        f"(kernel {config.kernel_version}, guest {config.guest})"
     )
-    run_checked(docker_build_command(config, "artifacts"), cwd=REPO_ROOT)
+    target = "artifacts" if config.guest == "alpine" else "azurelinux-guest-artifacts"
+    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
     expected = ("vmlinux", "initramfs.cpio.gz")
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:

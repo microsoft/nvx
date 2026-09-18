@@ -14,10 +14,12 @@ from pathlib import Path
 from nvx_tools import sandbox_lifecycle
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
+    GUESTS,
     AlpineBuildConfig,
     DockerBuildConfig,
     KernelBuildConfig,
     build_docker_artifacts,
+    build_docker_initramfs,
     build_initramfs,
     build_kernel,
 )
@@ -75,7 +77,9 @@ def _native_kernel() -> None:
     )
 
 
-def _native_initramfs() -> None:
+def _native_initramfs(guest: str = "alpine") -> None:
+    if guest != "alpine":
+        raise ScriptError("native initramfs builds currently support Alpine only")
     build_initramfs(
         AlpineBuildConfig(
             work=BUILD_DIR / "initramfs-work",
@@ -86,11 +90,13 @@ def _native_initramfs() -> None:
 
 def command_build_guest(args: argparse.Namespace) -> None:
     if args.native:
+        if args.guest != "alpine":
+            raise ScriptError("native initramfs builds currently support Alpine only")
         _native_kernel()
-        _native_initramfs()
+        _native_initramfs(args.guest)
         return
 
-    config = DockerBuildConfig(destination=BUILD_DIR)
+    config = DockerBuildConfig(destination=BUILD_DIR, guest=args.guest)
     build_docker_artifacts(config)
 
 
@@ -98,8 +104,13 @@ def command_build_kernel(_: argparse.Namespace) -> None:
     _native_kernel()
 
 
-def command_build_initramfs(_: argparse.Namespace) -> None:
-    _native_initramfs()
+def command_build_initramfs(args: argparse.Namespace) -> None:
+    if args.guest == "alpine":
+        _native_initramfs()
+    else:
+        build_docker_initramfs(
+            DockerBuildConfig(destination=BUILD_DIR, guest=args.guest)
+        )
 
 
 def command_build_openvmm(args: argparse.Namespace) -> None:
@@ -397,6 +408,12 @@ def command_verify(_: argparse.Namespace) -> None:
 
 def _add_guest_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--guest",
+        choices=GUESTS,
+        default="alpine",
+        help="guest userspace to include (default: alpine)",
+    )
+    parser.add_argument(
         "--native",
         action="store_true",
         help="build directly on Linux instead of using Docker",
@@ -422,8 +439,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     initramfs = subparsers.add_parser(
         "build-initramfs",
-        help="build an Alpine initramfs natively on Linux",
+        help="build an Alpine or Azure Linux initramfs",
     )
+    initramfs.add_argument("--guest", choices=GUESTS, default="alpine")
     initramfs.set_defaults(handler=command_build_initramfs)
 
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")

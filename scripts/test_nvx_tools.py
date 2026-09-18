@@ -30,6 +30,7 @@ from nvx_tools import (  # noqa: E402
     benchmark,
     build,
     ci,
+    collect_alpine_sources,
     common,
     release,
     sandbox,
@@ -38,6 +39,93 @@ from nvx_tools import (  # noqa: E402
 
 
 class CliTests(unittest.TestCase):
+    def test_guest_selection_includes_azure_linux(self):
+        guest = nvx.parse_args(["build-guest", "--guest", "azurelinux"])
+        self.assertEqual(guest.guest, "azurelinux")
+
+        initramfs = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
+        self.assertEqual(initramfs.guest, "azurelinux")
+
+    def test_azure_linux_uses_its_artifact_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "artifacts"
+            config = build.DockerBuildConfig(
+                destination=destination,
+                guest="azurelinux",
+            )
+
+            def export_artifacts(*_args: object, **_kwargs: object) -> None:
+                destination.mkdir()
+                (destination / "vmlinux").write_bytes(b"kernel")
+                (destination / "initramfs.cpio.gz").write_bytes(b"initramfs")
+
+            with (
+                patch.object(build, "require_tool"),
+                patch.object(
+                    build,
+                    "run_checked",
+                    side_effect=export_artifacts,
+                ) as run_checked,
+            ):
+                build.build_docker_artifacts(config)
+
+            run_checked.assert_called_once()
+            command = run_checked.call_args.args[0]
+            self.assertEqual(run_checked.call_args.kwargs["cwd"], build.REPO_ROOT)
+            self.assertIn("--target", command)
+            self.assertEqual(
+                command[command.index("--target") + 1],
+                "azurelinux-guest-artifacts",
+            )
+            self.assertIn(
+                f"type=local,dest={destination.resolve()}",
+                command,
+            )
+            self.assertIn(
+                f"AZURELINUX_IMAGE={build.DEFAULT_AZURELINUX_IMAGE}",
+                command,
+            )
+
+    def test_native_azure_linux_rejected_before_kernel_build(self):
+        args = argparse.Namespace(native=True, guest="azurelinux")
+
+        with (
+            patch.object(nvx, "_native_kernel") as native_kernel,
+            self.assertRaises(nvx.ScriptError) as context,
+        ):
+            nvx.command_build_guest(args)
+
+        self.assertEqual(
+            str(context.exception),
+            "native initramfs builds currently support Alpine only",
+        )
+        native_kernel.assert_not_called()
+
+    def test_alpine_source_collection_rejects_azurelinux_manifest(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            manifest_path = Path(tempdir) / "initramfs.cpio.gz.packages.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "distribution": "azurelinux",
+                        "version": "3.0",
+                        "architecture": "x86_64",
+                        "packages": ["e2fsprogs", "iproute", "net-tools"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(collect_alpine_sources.SourceError) as context:
+                collect_alpine_sources.collect_alpine_sources(
+                    [manifest_path],
+                    Path(tempdir) / "output",
+                    Path(tempdir) / "cache",
+                )
+
+        self.assertIn("azurelinux", str(context.exception))
+
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
             [

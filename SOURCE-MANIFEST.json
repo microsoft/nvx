@@ -28,5 +28,11 @@
     "guest_sources": "alpine",
     "package_manifests": "build/*.packages.json",
     "source_output": "build/sources/alpine"
+  },
+  "azurelinux": {
+    "version": "3.0",
+    "architecture": "x86_64",
+    "image": "mcr.microsoft.com/azurelinux/base/core@sha256:c877612270d1ee2d6ab2bc1f64bfe38ab697ac50be325154ee5129fce89c17e4",
+    "guest_sources": "https://github.com/microsoft/azurelinux/tree/3.0"
   }
 }
