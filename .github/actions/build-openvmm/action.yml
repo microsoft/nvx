@@ -88,7 +88,7 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore OpenVMM binary on Windows
       id: restore-openvmm-binary-windows
@@ -98,7 +98,7 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore shared Cargo cache on Linux
       id: restore-cargo-linux
@@ -181,6 +181,19 @@ runs:
           throw "OpenVMM binary was not produced: ${{ inputs.binary-path }}"
         }
 
+    - name: Verify OpenVMM provenance on Linux
+      if: runner.os != 'Windows'
+      shell: bash
+      run: test -f build/openvmm.provenance.json
+
+    - name: Verify OpenVMM provenance on Windows
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        if (-not (Test-Path -LiteralPath "build/openvmm.provenance.json" -PathType Leaf)) {
+          throw "OpenVMM provenance was not produced"
+        }
+
     - name: Save OpenVMM binary on Linux
       if: >-
         success() &&
@@ -195,7 +208,7 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Save OpenVMM binary on Windows
       if: >-
@@ -209,4 +222,4 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
