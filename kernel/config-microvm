@@ -910,6 +910,7 @@ CONFIG_PT_RECLAIM=y
 # Networking support (minimal: IPv4 over a virtio-net-mmio NIC for --net)
 #
 CONFIG_NET=y
+CONFIG_UNIX=y
 CONFIG_INET=y
 # CONFIG_IPV6 is not set
 CONFIG_NETDEVICES=y
