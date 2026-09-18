@@ -210,6 +210,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(openvmm_tests.backend, "mshv")
         self.assertIs(openvmm_tests.handler, nvx.command_test_openvmm)
 
+        openvmm_unit_tests = nvx.parse_args(
+            ["test-openvmm-unit", "--output-dir", "results"]
+        )
+        self.assertEqual(openvmm_unit_tests.output_dir, Path("results"))
+        self.assertIs(openvmm_unit_tests.handler, nvx.command_test_openvmm_unit)
+
     def test_sandbox_command_parses_typed_launch_contract(self):
         args = nvx.parse_args(
             [
@@ -562,6 +568,56 @@ class CiTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
             ci.run_openvmm_tests("unknown")
 
+    def test_openvmm_unit_tests_use_canonical_flowey_pipeline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            openvmm = root / "openvmm"
+            openvmm.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            output_dir = root / "results"
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci.sys, "platform", "linux"),
+                patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "run_checked") as run_checked,
+            ):
+                ci.run_openvmm_unit_tests(output_dir)
+
+            self.assertEqual(
+                run_checked.call_args_list,
+                [
+                    call(
+                        [
+                            "cargo",
+                            "xflowey",
+                            "restore-packages",
+                            "--no-compat-igvm",
+                        ],
+                        cwd=openvmm,
+                    ),
+                    call(
+                        [
+                            "cargo",
+                            "xflowey",
+                            "--out-dir",
+                            os.fspath(output_dir),
+                            "unit-tests-run",
+                            "--locked",
+                            "--no-incremental",
+                            "--auto-install-deps",
+                            "--non-interactive",
+                        ],
+                        cwd=openvmm,
+                    ),
+                ],
+            )
+
+    def test_openvmm_unit_tests_require_linux(self):
+        with patch.object(ci.sys, "platform", "win32"):
+            with self.assertRaisesRegex(common.ScriptError, "require Linux"):
+                ci.run_openvmm_unit_tests(Path("results"))
+
 
 class CiConfigurationTests(unittest.TestCase):
     def test_flowey_downloads_use_retrying_curl(self):
@@ -602,7 +658,7 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("curl.cmd", action)
         self.assertEqual(
             workflow.count("uses: ./.github/actions/setup-curl"),
-            2,
+            3,
         )
         self.assertIn("uses: ./.github/actions/setup-curl", build_action)
 
@@ -713,6 +769,31 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("cargo-v2-", build_action)
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
+
+    def test_ci_runs_canonical_openvmm_linux_gnu_unit_tests(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        unit_job = workflow.split("  openvmm-unit-tests:", 1)[1].split(
+            "\n  nvx-microvm-tests:", 1
+        )[0]
+        release_job = workflow.split("  release:", 1)[1].split(
+            "\n  performance-gate:", 1
+        )[0]
+
+        self.assertIn("runs-on: ubuntu-latest", unit_job)
+        self.assertIn(
+            "needs.openvmm-changes.outputs.run-tests == 'true'",
+            unit_job,
+        )
+        self.assertIn("python3 scripts/nvx.py test-openvmm-unit", unit_job)
+        self.assertIn("openvmm-inputs-v1-", unit_job)
+        self.assertIn("openvmm-unit-tests-v1-", unit_job)
+        self.assertIn("openvmm/target/nextest", unit_job)
+        self.assertIn("if: always()", unit_job)
+        self.assertNotIn("--include-jobs", unit_job)
+        self.assertNotIn("validate-runner", unit_job)
+        self.assertIn("needs.openvmm-unit-tests.result == 'success'", release_job)
 
 
 class BuildTests(unittest.TestCase):

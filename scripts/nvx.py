@@ -24,6 +24,7 @@ from nvx_tools.build import (
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
     run_openvmm_tests,
+    run_openvmm_unit_tests,
     setup_cross_os_cache,
 )
 from nvx_tools.collect_alpine_sources import (
@@ -121,6 +122,10 @@ def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
 
 def command_test_openvmm(args: argparse.Namespace) -> None:
     run_openvmm_tests(args.backend)
+
+
+def command_test_openvmm_unit(args: argparse.Namespace) -> None:
+    run_openvmm_unit_tests(args.output_dir)
 
 
 def command_build(args: argparse.Namespace) -> None:
@@ -446,6 +451,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         required=True,
     )
     openvmm_tests.set_defaults(handler=command_test_openvmm)
+
+    openvmm_unit_tests = subparsers.add_parser(
+        "test-openvmm-unit",
+        help="run OpenVMM x64 Linux GNU unit tests and doctests",
+    )
+    openvmm_unit_tests.add_argument(
+        "--output-dir",
+        type=Path,
+        default=BUILD_DIR / "test-results" / "openvmm-unit-tests",
+    )
+    openvmm_unit_tests.set_defaults(handler=command_test_openvmm_unit)
 
     microvm_tests = subparsers.add_parser(
         "test-microvm",

@@ -14,6 +14,7 @@ runs:
         python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
         python3 scripts/nvx.py --help
         python3 scripts/nvx.py test-openvmm --help
+        python3 scripts/nvx.py test-openvmm-unit --help
         python3 scripts/nvx.py test-microvm --help
         python3 scripts/nvx.py benchmark --help
 
@@ -26,5 +27,6 @@ runs:
         python .github\skills\nvx-host-connect\scripts\test_hosts.py -v
         python scripts\nvx.py --help
         python scripts\nvx.py test-openvmm --help
+        python scripts\nvx.py test-openvmm-unit --help
         python scripts\nvx.py test-microvm --help
         python scripts\nvx.py benchmark --help

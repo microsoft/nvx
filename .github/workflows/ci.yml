@@ -495,6 +495,166 @@ jobs:
             ${{ format('{0}/cargo-home/git', runner.temp) }}
           key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
 
+  openvmm-unit-tests:
+    name: OpenVMM unit and documentation tests / Linux GNU
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-home
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        id: openvmm
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Set up retrying curl
+        uses: ./.github/actions/setup-curl
+
+      - name: Configure Cargo home
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${CARGO_HOME}/bin"
+          echo "${CARGO_HOME}/bin" >> "${GITHUB_PATH}"
+
+      - name: Prepare Linux cache tools
+        id: cache-tools-linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore OpenVMM inputs
+        id: restore-openvmm-inputs
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore OpenVMM unit-test build
+        id: restore-openvmm-unit-tests
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: openvmm/target
+          key: openvmm-unit-tests-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-unit-tests-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-
+            openvmm-unit-tests-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore shared Cargo cache
+        id: restore-openvmm-cargo
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: |
+            openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Run OpenVMM unit and documentation tests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/nvx.py test-openvmm-unit
+          --output-dir "${RUNNER_TEMP}/openvmm-unit-tests"
+
+      - name: Upload OpenVMM unit-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvmm-unit-tests-linux-gnu
+          path: |
+            ${{ runner.temp }}/openvmm-unit-tests
+            openvmm/target/nextest
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Save OpenVMM inputs
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          steps.restore-openvmm-inputs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save OpenVMM unit-test build
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          steps.restore-openvmm-unit-tests.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: openvmm/target
+          key: openvmm-unit-tests-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save shared Cargo cache
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          steps.restore-openvmm-cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+
   nvx-microvm-tests:
     name: NVX microVM tests / ${{ matrix.name }}
     needs: [artifacts, openvmm-binaries, openvmm-changes]
@@ -722,7 +882,8 @@ jobs:
 
   release:
     name: Publish development release
-    needs: [quality, openvmm-tests, nvx-microvm-tests, platform]
+    needs:
+      [quality, openvmm-tests, openvmm-unit-tests, nvx-microvm-tests, platform]
     if: >-
       ${{
         always() &&
@@ -733,6 +894,10 @@ jobs:
         (
           needs.openvmm-tests.result == 'success' ||
           needs.openvmm-tests.result == 'skipped'
+        ) &&
+        (
+          needs.openvmm-unit-tests.result == 'success' ||
+          needs.openvmm-unit-tests.result == 'skipped'
         ) &&
         (
           needs.nvx-microvm-tests.result == 'success' ||
