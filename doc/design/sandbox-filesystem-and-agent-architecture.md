@@ -183,7 +183,7 @@ for consumed read-only layers; a future cache-admission optimization needs an
 explicit trusted artifact contract rather than replacing that check with UUIDs.
 
 The region must be separate from both captured RAM and restore-time expansion
-backing, omitted from the PVH usable-memory map and `memory.bin`, and populated
+backing, omitted from the Linux direct e820 RAM map and `memory.bin`, and populated
 before every launch. Its placement must not overlap any capacity reservation
 or device. Restoring RAM must never overwrite newly supplied configuration.
 A header with magic, version, bounded length, and corruption detection does not
@@ -222,7 +222,7 @@ The cold launch should require no configuration RPC round trip:
 
 1. the host stages layers and private scratch, constructs all devices, prepares
    the network backend, and writes the launch configuration;
-2. the VMM PVH-boots the kernel and initramfs;
+2. the VMM boots the kernel and initramfs through Linux direct MP-table mode;
 3. the agent sets up pseudo-filesystems and sibling cgroups, consumes only
    invariants, and configures the platform-owned guest network;
 4. a trusted platform-template build captures here, before image binding,

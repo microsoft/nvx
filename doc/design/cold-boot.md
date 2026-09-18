@@ -2,32 +2,28 @@
 
 [Design index](../design.md)
 
-## Xen PVH loader
+## Linux direct MP-table loader
 
-The dedicated loader in [`vm/loader/src/pvh.rs`](../../openvmm/vm/loader/src/pvh.rs)
-treats the kernel, initramfs, command line, and all guest addresses as
-untrusted. It:
+The dedicated mode in
+[`vm/loader/src/linux.rs`](../../openvmm/vm/loader/src/linux.rs) and the shared
+builder in [`vm/loader/src/mptable.rs`](../../openvmm/vm/loader/src/mptable.rs)
+treat the kernel, initramfs, command line, topology, reservations, and guest
+addresses as untrusted. It:
 
-1. requires a little-endian ELF64 image for `EM_X86_64`;
-2. validates every program-header range with checked arithmetic;
-3. loads nonempty, nonoverlapping `PT_LOAD` segments at `p_paddr` and zeros
-   their BSS tails;
-4. finds exactly one Xen `XEN_ELFNOTE_PHYS32_ENTRY` note and verifies that its
-   32-bit physical entry lies in a loaded segment;
-5. places an optional initramfs, page-aligned, at the top of low RAM;
-6. builds Xen version-1 `hvm_start_info`, a RAM-only memory map, and the fixed
-   MP and ACPI platform metadata; and
-7. enters the kernel in flat 32-bit protected mode with paging disabled and
-   `RBX` pointing to the start-info structure.
+1. requires a little-endian uncompressed ELF64 image for `EM_X86_64`;
+2. loads validated `PT_LOAD` segments at their physical addresses and zeros
+   BSS tails;
+3. places an optional page-aligned initramfs after the kernel;
+4. builds Intel MP 1.4 processor, ISA bus, IOAPIC, and legacy IRQ entries;
+5. builds Linux `boot_params` with the canonical e820 RAM and reservation map;
+6. imports a bootstrap GDT and 4-GiB identity page table; and
+7. enters the ELF kernel in long mode with paging enabled and `RSI` pointing
+   to `boot_params`.
 
-The loader does not synthesize a Linux zero page, page tables, SMBIOS, a device
-tree, or a firmware execution environment. The worker does build a minimal
-RSDP, MADT, and DSDT for the direct-boot guest. The loader places them below the
-command line and publishes the RSDP through `hvm_start_info.rsdp_paddr`. It also
-writes Intel MP 1.4 tables for every advertised processor, the ISA bus, IOAPIC,
-and legacy IRQ routing. Virtio IRQs are edge-triggered and therefore are not
-marked as level-triggered in the MP table or MADT; fixed device discovery remains command-line
-based rather than firmware-enumerated.
+No Xen notes, Xen start-info structures, ACPI tables, RSDP, SMBIOS data,
+device tree, or firmware execution environment are parsed or imported. Fixed
+virtio devices remain discoverable only through profile-owned command-line
+tokens.
 
 The fixed boot reservations are:
 
@@ -35,21 +31,18 @@ The fixed boot reservations are:
 | ---: | --- |
 | `0x0000..0x000f` | Intel MP 1.4 floating pointer |
 | `0x0400...` | MP configuration table (`180 + 20 * vCPU count` bytes) |
-| `0x800..0x81f` | Four-entry bootstrap GDT |
-| `0x820` | Empty IDT |
-| `0x6000` | Xen `hvm_start_info` |
-| `0x6040` | Optional initramfs module entry |
-| `0x7000` | Xen PVH RAM map |
-| `0x8000..0x8fff` | ACPI RSDP page |
-| `0x9000..0x1ffff` | Bounded ACPI table region |
-| `0x20000` | NUL-terminated kernel command line |
+| `0x1000` | Linux-direct bootstrap GDT |
+| `0x2000` | Linux `boot_params` zero page |
+| `0x4000..0x17fff` | Linux-direct identity page tables |
+| `0x20000..0x2ffff` | NUL-terminated kernel command line |
 | `0x30000..0x30fff` | Shared virtio interrupt-status page |
 | `0x100000` and above | Kernel load segments and ordinary RAM |
 
-The initial state has `RIP` set to the Xen physical entry, `RBX=0x6000`,
-`RSP=0`, `RFLAGS=2`, `CR0.PE=1`, and `CR3=CR4=EFER=0`. Code and data segments
-are flat 32-bit segments, and the GDT, IDT, and TSS descriptors point at the
-fixed bootstrap structures.
+The initial state has `RIP` set to the ELF entry, `RSI=0x2000`, `CR3=0x4000`,
+`CR0.PE=CR0.PG=1`, `CR4.PAE=1`, and long mode enabled in `EFER`. The zero page
+leaves `acpi_rsdp_addr` zero. Its e820 map reserves the live status page and
+ISA hole, splits low and high RAM around the fixed 3-to-4-GiB MMIO aperture,
+and never reports that aperture as RAM.
 
 ## Memory layout
 
@@ -71,14 +64,14 @@ flowchart LR
 Active RAM occupies `[0, min(size, 3 GiB))`. Memory displaced by the fixed
 one-GiB MMIO aperture resumes at 4 GiB. There is no high-MMIO or VTL2 aperture.
 The central OpenVMM layout engine owns this split; the profile does not
-maintain a second allocator. The resulting active RAM ranges are also the
-authoritative PVH memory map and snapshot memory-range inventory.
+maintain a second allocator. The resulting active RAM ranges are also the authoritative Linux e820 and
+snapshot memory-range inventory.
 
 When capture uses `--memory-capacity`, the layout engine reserves addresses for
 the full capacity before publishing only the active base-size prefix as RAM.
 Consequently, selecting a larger restore target does not move the MMIO gap or
-any device. The machine contract records the canonical suffix ranges that are
-absent from the captured PVH map and `memory.bin`; a suffix that crosses the
+any device. The machine contract records the canonical suffix ranges that are absent from
+the captured e820 RAM map and `memory.bin`; a suffix that crosses the
 three-GiB boundary is represented as separate low- and high-RAM ranges.
 
 The fixed layout is implemented by
@@ -95,6 +88,9 @@ command line is:
 ```text
 earlycon=xe9 console=hvc0 reboot=t panic=-1
 ```
+
+OpenVMM appends the profile-owned `nr_cpus=<capacity>` token for fresh boots so
+Linux sizes processor state to the validated 1, 2, 4, or 8-vCPU topology.
 
 When virtio-console is present, `console=hvc0` becomes `console=hvc1`; the raw
 portb console remains the early console. User arguments are inserted after the

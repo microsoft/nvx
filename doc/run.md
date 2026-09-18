@@ -45,7 +45,7 @@ Select an explicit processor count after building the matching specialized guest
 python3 scripts/nvx.py run --machine microvm --processors 8
 ```
 
-The microVM uses fixed device topology, reserves a PVH status page, and uses
+The microVM uses fixed device topology, reserves a shared interrupt-status page, and uses
 shared-status edge-triggered virtio interrupts with 1, 2, 4, or 8 vCPUs.
 
 ## Run OpenVMM directly
@@ -192,9 +192,10 @@ automatically. For example:
 
 `microvm` is now the only selector and launches the contract previously named
 `microvm-v2`. The `microvm-v2` spelling, the former one-vCPU ABI-1 behavior,
-ABI-1 device-I/O control, TTRPC numeric value 1, and ABI/PVH-layout-1 snapshot
-restore are removed. Snapshot metadata and performance series continue to use
-numeric ABI value 2 so existing ABI-2 artifacts are not reinterpreted as ABI 1.
+ABI-1 device-I/O control, TTRPC numeric value 1, and ABI-1 snapshot restore are
+removed. Snapshot metadata and performance series continue to use numeric ABI
+value 2, while Linux direct boot layout 3 rejects removed boot-layout value 2
+snapshots.
 Use NVX commit `cb52bcd454b454cb241096c33ed42a1dcdc65347` with OpenVMM commit
 `1b70365613517a10718e00284a62bdffbd80e41c`, or an earlier compatible pair, to
 run retired ABI-1 guests or snapshots.

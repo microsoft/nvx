@@ -3356,7 +3356,7 @@ def run_snapshot_tiers(
 def run(args: argparse.Namespace) -> int:
     validate_openvmm_test_backend(args.backend)
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "microVM PVH kernel")
+    kernel = require_file(artifact_path("vmlinux"), "microVM Linux direct kernel")
     initrd = require_file(
         artifact_path("initramfs.cpio.gz"),
         "microVM Alpine initramfs",

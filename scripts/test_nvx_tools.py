@@ -488,6 +488,7 @@ class CliTests(unittest.TestCase):
         with (
             patch.object(nvx, "require_file"),
             patch.object(nvx, "_run") as run,
+            patch.object(nvx, "_install_openvmm_release") as install,
         ):
             nvx.command_build_openvmm(argparse.Namespace(skip_restore=False))
 
@@ -503,19 +504,45 @@ class CliTests(unittest.TestCase):
                 cwd=common.OPENVMM_DIR,
             ),
         )
+        self.assertEqual(
+            run.call_args_list[1],
+            call(
+                [
+                    "cargo",
+                    "build",
+                    "--profile",
+                    "microvm-release",
+                    "-p",
+                    "openvmm",
+                    "--bin",
+                    "openvmm",
+                ],
+                cwd=common.OPENVMM_DIR,
+            ),
+        )
+        install.assert_called_once()
 
 
 class CiTests(unittest.TestCase):
-    def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
+    def test_openvmm_tests_use_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             openvmm = root / "openvmm"
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
+            kernel = root / "vmlinux"
+            initrd = root / "initramfs.cpio.gz"
+            kernel.touch()
+            initrd.touch()
             backend = "whp" if os.name == "nt" else "kvm"
 
             with (
                 patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(
+                    ci,
+                    "artifact_path",
+                    side_effect=[kernel, initrd],
+                ),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
@@ -523,8 +550,6 @@ class CiTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "OPENVMM_MICROVM_PVH_KERNEL": "nvx-kernel",
-                        "OPENVMM_MICROVM_PVH_INITRD": "nvx-initrd",
                         "PETRI_CAPABILITIES": "vpci",
                         "RUNNER_TEMP": os.fspath(root),
                     },
@@ -547,11 +572,19 @@ class CiTests(unittest.TestCase):
             filter_index = command.index("--filter")
             self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
             self.assertIn(
-                "test_ttrpc_microvm_pvh_snapshot",
+                "test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
                 ci.OPENVMM_MICROVM_TEST_FILTER,
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
-            self.assertNotIn("env", tests.kwargs)
+            self.assertEqual(
+                tests.kwargs["env"]["OPENVMM_MICROVM_TEST_KERNEL"],
+                os.fspath(kernel.resolve()),
+            )
+            self.assertEqual(
+                tests.kwargs["env"]["OPENVMM_MICROVM_TEST_INITRD"],
+                os.fspath(initrd.resolve()),
+            )
+            self.assertEqual(tests.kwargs["env"]["PETRI_CAPABILITIES"], "vpci")
             if os.name == "nt":
                 self.assertEqual(
                     command[command.index("--dir") + 1],
@@ -568,9 +601,6 @@ class CiConfigurationTests(unittest.TestCase):
         action = (
             common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "action.yml"
         ).read_text(encoding="utf-8")
-        windows_shim = (
-            common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "curl-shim.rs"
-        ).read_text(encoding="utf-8")
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
@@ -585,20 +615,23 @@ class CiConfigurationTests(unittest.TestCase):
             "--retry-max-time 90",
         ):
             self.assertEqual(action.count(option), 1)
-        for argument in (
-            '"--retry"',
-            '"5"',
-            '"--retry-all-errors"',
-            '"--retry-delay"',
-            '"2"',
-            '"--retry-max-time"',
-            '"90"',
+        windows_action = action.split(
+            "- name: Set up retrying curl on Windows",
+            1,
+        )[1]
+        for option in (
+            '"retry = 5"',
+            '"retry-all-errors"',
+            '"retry-delay = 2"',
+            '"retry-max-time = 90"',
         ):
-            self.assertIn(argument, windows_shim)
+            self.assertIn(option, windows_action)
         self.assertIn('system_curl="${NVX_SYSTEM_CURL:-$(command -v curl)}"', action)
         self.assertIn("Get-Command curl.exe", action)
-        self.assertIn('Join-Path $ShimDirectory "curl.exe"', action)
-        self.assertIn("Get-Command rustc.exe", action)
+        self.assertIn('Join-Path $CurlHome ".curlrc"', windows_action)
+        self.assertIn('"CURL_HOME=$CurlHome"', windows_action)
+        self.assertNotIn("rustc", windows_action)
+        self.assertNotIn("NVX_SYSTEM_CURL", windows_action)
         self.assertNotIn("curl.cmd", action)
         self.assertEqual(
             workflow.count("uses: ./.github/actions/setup-curl"),
@@ -607,11 +640,10 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/setup-curl", build_action)
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific curl resolution")
-    def test_windows_curl_shim_retries_http_500(self):
-        rustc = shutil.which("rustc")
+    def test_windows_curl_config_retries_http_500(self):
         system_curl = shutil.which("curl.exe")
-        if rustc is None or system_curl is None:
-            self.fail("Windows curl shim test requires rustc and curl.exe")
+        if system_curl is None:
+            self.fail("Windows curl configuration test requires curl.exe")
 
         class RetryHandler(http.server.BaseHTTPRequestHandler):
             request_count = 0
@@ -635,33 +667,19 @@ class CiConfigurationTests(unittest.TestCase):
         server_thread.start()
         try:
             with tempfile.TemporaryDirectory() as directory:
-                shim = Path(directory) / "curl.exe"
-                shim_source = (
-                    common.REPO_ROOT
-                    / ".github"
-                    / "actions"
-                    / "setup-curl"
-                    / "curl-shim.rs"
-                )
-                subprocess.run(
-                    [
-                        rustc,
-                        "--edition=2021",
-                        "-C",
-                        "opt-level=s",
-                        "-o",
-                        os.fspath(shim),
-                        os.fspath(shim_source),
-                    ],
-                    check=True,
+                (Path(directory) / ".curlrc").write_text(
+                    "retry = 5\n"
+                    "retry-all-errors\n"
+                    "retry-delay = 0\n"
+                    "retry-max-time = 30\n",
+                    encoding="ascii",
                 )
                 environment = os.environ.copy()
-                environment["NVX_SYSTEM_CURL"] = system_curl
-                environment["PATH"] = directory + os.pathsep + environment["PATH"]
+                environment["CURL_HOME"] = directory
                 port = server.server_address[1]
                 result = subprocess.run(
                     [
-                        "curl",
+                        system_curl,
                         "--fail",
                         "-L",
                         f"http://127.0.0.1:{port}/asset",
@@ -750,6 +768,20 @@ class BuildTests(unittest.TestCase):
             "hashFiles('kernel/config-microvm', 'kernel/patches/**')",
             action,
         )
+
+    def test_openvmm_ci_downloads_guest_artifacts(self):
+        workflow = (build.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        openvmm_tests = workflow.split("\n  openvmm-tests:\n", 1)[1].split(
+            "\n  nvx-microvm-tests:\n",
+            1,
+        )[0]
+        self.assertIn("needs: [artifacts, openvmm-changes]", openvmm_tests)
+        self.assertIn("needs.artifacts.result == 'success'", openvmm_tests)
+        self.assertIn("- name: Download guest artifacts", openvmm_tests)
+        self.assertIn("name: guest-artifacts", openvmm_tests)
+        self.assertIn("path: build", openvmm_tests)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")

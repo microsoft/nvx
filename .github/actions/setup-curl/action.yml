@@ -33,28 +33,21 @@ runs:
       shell: powershell
       run: |
         $ErrorActionPreference = "Stop"
-        $SystemCurl = if ($env:NVX_SYSTEM_CURL) {
-          $env:NVX_SYSTEM_CURL
-        } else {
-          (Get-Command curl.exe -CommandType Application -ErrorAction Stop).Source
-        }
+        $SystemCurl = (
+          Get-Command curl.exe -CommandType Application -ErrorAction Stop
+        ).Source
         if (-not (Test-Path -LiteralPath $SystemCurl -PathType Leaf)) {
           throw "System curl was not found: $SystemCurl"
         }
-        $ShimDirectory = Join-Path $env:RUNNER_TEMP "nvx-curl-shim"
-        New-Item -ItemType Directory -Path $ShimDirectory -Force | Out-Null
-        $ShimPath = Join-Path $ShimDirectory "curl.exe"
-        $ShimSource = Join-Path "${{ github.action_path }}" "curl-shim.rs"
-        $Rustc = (Get-Command rustc.exe -CommandType Application -ErrorAction Stop).Source
-        & $Rustc `
-          --edition=2021 `
-          -C opt-level=s `
-          -o $ShimPath `
-          $ShimSource
-        if ($LASTEXITCODE -ne 0) {
-          throw "Failed to compile the retrying curl shim"
-        }
-        "NVX_SYSTEM_CURL=$SystemCurl" |
+        $CurlHome = Join-Path $env:RUNNER_TEMP "nvx-curl-home"
+        New-Item -ItemType Directory -Path $CurlHome -Force | Out-Null
+        @(
+          "retry = 5"
+          "retry-all-errors"
+          "retry-delay = 2"
+          "retry-max-time = 90"
+        ) | Set-Content `
+          -LiteralPath (Join-Path $CurlHome ".curlrc") `
+          -Encoding ascii
+        "CURL_HOME=$CurlHome" |
           Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        $ShimDirectory |
-          Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

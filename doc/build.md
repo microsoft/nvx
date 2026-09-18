@@ -16,10 +16,14 @@ The OpenVMM restore step excludes the compatibility IGVM artifact, which NVX
 does not build or package, so builds do not depend on unrelated upstream
 workflow artifacts.
 
-OpenVMM's microVM tests build their own minimal Xen PVH guest from source in
-the OpenVMM checkout. They do not consume `build/vmlinux` or
-`build/initramfs.cpio.gz`. NVX uses those two artifacts only for its Linux and
-device correctness tests, benchmarks, and packaged runtime.
+`build-openvmm` uses the `microvm-release` profile: fat LTO with one codegen
+unit. Linux builds retain separate debug information in `openvmm.dbg` and
+stage a stripped runtime binary. Windows builds stage the linker-produced
+executable and PDB.
+
+When invoked through NVX, OpenVMM's microVM integration tests use the same
+ACPI-free, MP-enabled `build/vmlinux` and `build/initramfs.cpio.gz` artifacts
+as NVX's Linux/device correctness tests, benchmarks, and packaged runtime.
 
 On a Linux host, build the guest directly:
 
@@ -35,6 +39,7 @@ build/vmlinux.config
 build/initramfs.cpio.gz
 build/initramfs.cpio.gz.packages.json
 openvmm/target/release/openvmm[.exe]
+openvmm/target/release/openvmm.dbg  # Linux only
 ```
 
 Run the two test layers separately:
@@ -44,8 +49,8 @@ python3 scripts/nvx.py test-openvmm --backend kvm
 python3 scripts/nvx.py test-microvm --backend kvm
 ```
 
-The first command needs only the OpenVMM checkout. The second needs the
-standard build outputs above and writes complete per-scenario logs under
+Both commands need the standard guest build outputs above. The second writes
+complete per-scenario logs under
 `build/test-results/microvm` by default.
 
 The initramfs includes the sandbox PID-1 bootstrap, its container namespace
@@ -58,9 +63,10 @@ plus the device helper's source and binary SHA-256 values.
 
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
-generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
-absent. Changing an archive hash or patch invalidates both source and object
-caches.
+generated config as `build/vmlinux.config`, and fails if ACPI is enabled,
+PVH remains enabled, or the MP-table, APIC, IOAPIC, and command-line
+virtio-mmio requirements are missing. Changing an archive hash or patch
+invalidates both source and object caches.
 
 ## Building the packaged Linux source
 
