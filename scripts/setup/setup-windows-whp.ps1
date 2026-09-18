@@ -855,7 +855,13 @@ function Install-ActionsRunner {
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     $serviceFile = Join-Path $RunnerDirectory ".service"
     $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-    $labels = "windows,whp,virtual-machine,$RunnerName"
+    $labels = "windows,whp,virtual-machine"
+    $runnerNameValidated = $false
+    if (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) {
+        $configuration = Get-Content -LiteralPath $runnerConfiguration -Raw |
+        ConvertFrom-Json
+        $runnerNameValidated = $configuration.agentName -eq $RunnerName
+    }
     $serviceInstalled = $false
     if (Test-Path -LiteralPath $serviceFile -PathType Leaf) {
         $serviceName = (Get-Content -LiteralPath $serviceFile -Raw).Trim()
@@ -869,6 +875,7 @@ function Install-ActionsRunner {
     (Get-Content -LiteralPath $labelsFile -Raw).Trim() -eq $labels
     $registrationRequired = `
         -not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) -or
+    -not $runnerNameValidated -or
     -not $serviceInstalled -or
     -not $labelsValidated
     if ($registrationRequired) {
@@ -1033,7 +1040,7 @@ function Assert-ActionsRunner {
     }
     if (-not [string]::IsNullOrWhiteSpace($RunnerName)) {
         $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-        $expectedLabels = "windows,whp,virtual-machine,$RunnerName"
+        $expectedLabels = "windows,whp,virtual-machine"
         if (-not (Test-Path -LiteralPath $labelsFile -PathType Leaf) -or
             (Get-Content -LiteralPath $labelsFile -Raw).Trim() -ne
             $expectedLabels) {

@@ -202,13 +202,13 @@ and at least `N+2` processors for an `N`-vCPU guest. The additional processors
 cover VMM and device work. The default selector follows this policy; an
 explicit undersized `--cpus` set is rejected before measurement.
 
-The three pinned virtual-machine CI runners expose four cores as eight sibling
-logical CPUs. Their virtual-machine series deliberately use the fixed `0-7`
-set with `--host-cpu-reserve 0`, including sibling CPUs and sharing capacity
-between guest, VMM, and device work. These constrained nested-host results are
-kept separate from the bare-metal series; other runs retain the two-CPU
-reserve. CI gives the constrained series a 40-second guest-marker deadline;
-completed measurements still record their actual latency.
+The virtual-machine CI runners expose four cores as eight sibling logical
+CPUs. Their virtual-machine series deliberately use the fixed `0-7` set with
+`--host-cpu-reserve 0`, including sibling CPUs and sharing capacity between
+guest, VMM, and device work. These constrained nested-host results are kept
+separate from the bare-metal series; other runs retain the two-CPU reserve. CI
+gives the constrained series a 40-second guest-marker deadline; completed
+measurements still record their actual latency.
 
 ### MSHV lifecycle diagnostics
 
