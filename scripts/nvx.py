@@ -90,6 +90,8 @@ def _native_initramfs(guest: str = "alpine") -> None:
 
 def command_build_guest(args: argparse.Namespace) -> None:
     if args.native:
+        if args.guest != "alpine":
+            raise ScriptError("native initramfs builds currently support Alpine only")
         _native_kernel()
         _native_initramfs(args.guest)
         return

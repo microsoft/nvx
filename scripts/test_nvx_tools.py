@@ -50,6 +50,21 @@ class CliTests(unittest.TestCase):
         command = build.docker_build_command(config, "azurelinux-artifacts")
         self.assertIn("azurelinux-artifacts", command)
 
+    def test_native_azure_linux_rejected_before_kernel_build(self):
+        args = argparse.Namespace(native=True, guest="azurelinux")
+
+        with (
+            patch.object(nvx, "_native_kernel") as native_kernel,
+            self.assertRaises(nvx.ScriptError) as context,
+        ):
+            nvx.command_build_guest(args)
+
+        self.assertEqual(
+            str(context.exception),
+            "native initramfs builds currently support Alpine only",
+        )
+        native_kernel.assert_not_called()
+
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
             [
