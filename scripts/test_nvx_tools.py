@@ -708,11 +708,21 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("artifact: openvmm-linux-gnu", workflow)
         self.assertIn("artifact: openvmm-linux-musl", workflow)
         self.assertIn("artifact: openvmm-windows-msvc", workflow)
-        self.assertIn("uses: actions/download-artifact@v5", workflow)
+        self.assertIn("uses: actions/download-artifact@v8", workflow)
         self.assertNotIn("nvx-microvm-tests-v1", workflow)
         self.assertNotIn("cargo-v2-", build_action)
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
+
+    def test_ci_artifact_actions_use_node24(self):
+        configurations = "\n".join(
+            path.read_text(encoding="utf-8")
+            for pattern in ("*.yml", "*.yaml")
+            for path in (common.REPO_ROOT / ".github").rglob(pattern)
+        )
+
+        self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
+        self.assertNotRegex(configurations, r"actions/download-artifact@v[1-6]\b")
 
 
 class BuildTests(unittest.TestCase):
