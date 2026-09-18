@@ -907,7 +907,7 @@ CONFIG_PT_RECLAIM=y
 # end of Memory Management options
 
 #
-# Networking support (minimal: IPv4 over a virtio-net-mmio NIC for --net)
+# Networking support (minimal: Unix sockets and IPv4 over a virtio-net-mmio NIC for --net)
 #
 CONFIG_NET=y
 CONFIG_UNIX=y
