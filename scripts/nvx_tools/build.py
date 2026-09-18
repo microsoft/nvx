@@ -12,16 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
+from . import ubuntu
 from .common import (
     REPO_ROOT,
     ScriptError,
-    download,
+    artifact_path,
+    cache_root,
+    download_verified,
     format_size,
     require_tool,
     run_capture,
     run_checked,
     sha256_file,
 )
+from .guests import GuestDescriptor, guest_descriptor
 
 DEFAULT_KERNEL_VERSION = "6.18.38"
 DEFAULT_KERNEL_URL = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz"
@@ -107,11 +111,18 @@ def _assert_shared_status_kernel_config(path: Path) -> None:
 
 
 @dataclass(frozen=True)
-class AlpineBuildConfig:
-    version: str = DEFAULT_ALPINE_VERSION
-    branch: str = DEFAULT_ALPINE_BRANCH
+class InitramfsBuildConfig:
+    guest: str = "alpine"
     work: Path = Path.home() / "build" / "initramfs"
-    output: Path = Path.home() / "build" / "initramfs.cpio.gz"
+    output: Path | None = None
+
+
+@dataclass(frozen=True)
+class DistroLayerBuildConfig:
+    guest: str = "ubuntu"
+    work: Path = Path.home() / "build" / "distro-layer"
+    output: Path = Path.home() / "build" / "ubuntu-distro.erofs"
+    replace: bool = False
 
 
 @dataclass(frozen=True)
@@ -127,6 +138,7 @@ class DockerBuildConfig:
     kernel_version: str = DEFAULT_KERNEL_VERSION
     alpine_version: str = DEFAULT_ALPINE_VERSION
     alpine_branch: str = DEFAULT_ALPINE_BRANCH
+    ubuntu_version: str = ubuntu.DEFAULT_UBUNTU_VERSION
 
 
 def _require_linux(workflow: str) -> None:
@@ -136,31 +148,8 @@ def _require_linux(workflow: str) -> None:
         )
 
 
-def _alpine_tarball(config: AlpineBuildConfig) -> Path:
-    return config.work / f"alpine-minirootfs-{config.version}-x86_64.tar.gz"
-
-
-def _download_verified(url: str, destination: Path, expected_sha256: str) -> None:
-    if destination.is_file():
-        actual_sha256 = sha256_file(destination)
-        if actual_sha256 == expected_sha256:
-            return
-        print(
-            f">> discarding {destination.name}: SHA-256 is {actual_sha256}, "
-            f"expected {expected_sha256}"
-        )
-        destination.unlink()
-    print(f">> downloading {destination.name}")
-    download(url, destination, expected_sha256=expected_sha256)
-
-
-def _cache_root() -> Path:
-    configured = os.environ.get("NVX_CACHE_DIR")
-    return (
-        Path(configured).expanduser().resolve()
-        if configured
-        else (REPO_ROOT / ".cache").resolve()
-    )
+def _alpine_tarball(config: InitramfsBuildConfig) -> Path:
+    return config.work / f"alpine-minirootfs-{DEFAULT_ALPINE_VERSION}-x86_64.tar.gz"
 
 
 def _kernel_patch_files() -> tuple[Path, ...]:
@@ -191,7 +180,7 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
         )
     for tool in ("patch", "tar"):
         require_tool(tool)
-    cache = _cache_root()
+    cache = cache_root()
     downloads = cache / "downloads"
     source_parent = cache / "linux"
     tarball = downloads / f"linux-{version}.tar.xz"
@@ -201,7 +190,7 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
 
     downloads.mkdir(parents=True, exist_ok=True)
     source_parent.mkdir(parents=True, exist_ok=True)
-    _download_verified(DEFAULT_KERNEL_URL, tarball, DEFAULT_KERNEL_SHA256)
+    download_verified(DEFAULT_KERNEL_URL, tarball, DEFAULT_KERNEL_SHA256)
 
     cached_fingerprint = stamp.read_text(encoding="utf-8") if stamp.is_file() else None
     if source.is_dir() and cached_fingerprint != fingerprint:
@@ -222,17 +211,12 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
     return source, fingerprint
 
 
-def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
-    if config.version != DEFAULT_ALPINE_VERSION:
-        raise ScriptError(
-            "this source tree pins Alpine "
-            f"{DEFAULT_ALPINE_VERSION}; requested {config.version}"
-        )
+def _prepare_alpine_root(config: InitramfsBuildConfig) -> Path:
     config.work.mkdir(parents=True, exist_ok=True)
     tarball = _alpine_tarball(config)
-    _download_verified(
+    download_verified(
         "https://dl-cdn.alpinelinux.org/alpine/"
-        f"{config.branch}/releases/x86_64/{tarball.name}",
+        f"{DEFAULT_ALPINE_BRANCH}/releases/x86_64/{tarball.name}",
         tarball,
         DEFAULT_ALPINE_MINIROOTFS_SHA256,
     )
@@ -241,15 +225,35 @@ def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
     root.mkdir(parents=True)
     require_tool("tar")
     run_checked(["tar", "-xzf", tarball, "-C", root])
+    print(">> installing sandbox utilities into the Alpine rootfs")
+    _apk_add(
+        root,
+        "blkid",
+        "busybox-extras",
+        "e2fsprogs",
+        "util-linux",
+        "util-linux-misc",
+    )
+    resolver = root / "etc" / "resolv.conf"
+    resolver.unlink(missing_ok=True)
+    resolver.touch()
     return root
 
 
-def _install(source: Path, destination: Path) -> None:
+def _install(source: Path, destination: Path) -> dict[str, str]:
     destination.write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
     destination.chmod(0o755)
+    return {
+        "source_sha256": sha256_file(source),
+        "binary_sha256": sha256_file(destination),
+    }
 
 
-def _build_static_helper(work: Path, source: Path, destination: Path) -> None:
+def _build_static_helper(
+    work: Path,
+    source: Path,
+    destination: Path,
+) -> dict[str, str]:
     compiler = require_tool("cc")
     output = work / source.stem
     run_checked(
@@ -268,11 +272,15 @@ def _build_static_helper(work: Path, source: Path, destination: Path) -> None:
     )
     shutil.copyfile(output, destination)
     destination.chmod(0o755)
+    return {
+        "source_sha256": sha256_file(source),
+        "binary_sha256": sha256_file(output),
+    }
 
 
 def _build_device_io_helper(work: Path, destination: Path) -> dict[str, str]:
     compiler = require_tool("cc")
-    source = REPO_ROOT / "alpine" / "nvx-device-io.c"
+    source = REPO_ROOT / "guest" / "common" / "nvx-device-io.c"
     output = work / "nvx-device-io"
     run_checked(
         [
@@ -392,7 +400,6 @@ def _pack_initramfs(root: Path, output: Path) -> None:
 def _write_apk_manifest(
     root: Path,
     output: Path,
-    config: AlpineBuildConfig,
     helpers: dict[str, dict[str, str]],
 ) -> None:
     installed = root / "lib" / "apk" / "db" / "installed"
@@ -423,8 +430,8 @@ def _write_apk_manifest(
         json.dumps(
             {
                 "format": 1,
-                "alpine_version": config.version,
-                "alpine_branch": config.branch,
+                "alpine_version": DEFAULT_ALPINE_VERSION,
+                "alpine_branch": DEFAULT_ALPINE_BRANCH,
                 "architecture": "x86_64",
                 "packages": packages,
                 "helpers": helpers,
@@ -436,83 +443,297 @@ def _write_apk_manifest(
     )
 
 
-def build_initramfs(config: AlpineBuildConfig) -> None:
+def _install_guest_files(
+    config: InitramfsBuildConfig,
+    root: Path,
+    descriptor: GuestDescriptor,
+) -> dict[str, dict[str, str]]:
+    common = REPO_ROOT / "guest" / "common"
+    helpers: dict[str, dict[str, str]] = {}
+    scripts = [
+        ("init", common / "init", root / "init"),
+        ("nvx-exit", common / "nvx-exit", root / "sbin" / "nvx-exit"),
+        (
+            "nvx-hostmount",
+            common / "nvx-hostmount",
+            root / "sbin" / "nvx-hostmount",
+        ),
+        (
+            "nvx-identity-probe",
+            common / "nvx-identity-probe",
+            root / "sbin" / "nvx-identity-probe",
+        ),
+        (
+            "nvx-snapshot",
+            common / "nvx-snapshot",
+            root / "sbin" / "nvx-snapshot",
+        ),
+        (
+            "nvx-sandbox-smoke",
+            common / "nvx-sandbox-smoke",
+            root / "sbin" / "nvx-sandbox-smoke",
+        ),
+        (
+            "nvx-virtio-restore-probe",
+            common / "nvx-virtio-restore-probe",
+            root / "sbin" / "nvx-virtio-restore-probe",
+        ),
+    ]
+    if descriptor.sandbox_control:
+        alpine = REPO_ROOT / "guest" / "alpine"
+        scripts.extend(
+            [
+                (
+                    "nvx-init-agent",
+                    common / "nvx-init-agent",
+                    root / "sbin" / "nvx-init-agent",
+                ),
+                (
+                    "nvx-container-enter",
+                    alpine / "nvx-container-enter",
+                    root / "sbin" / "nvx-container-enter",
+                ),
+                (
+                    "nvx-container-launch",
+                    alpine / "nvx-container-launch",
+                    root / "sbin" / "nvx-container-launch",
+                ),
+            ]
+        )
+    else:
+        scripts.append(
+            (
+                "nvx-bashrc",
+                REPO_ROOT / "guest" / "ubuntu" / "nvx-bashrc",
+                root / "etc" / "nvx-bashrc",
+            )
+        )
+    for name, source, destination in scripts:
+        helpers[name] = _install(source, destination)
+        if name == "nvx-bashrc":
+            destination.chmod(0o644)
+
+    for name in (
+        "nvx-reseed",
+        "nvx-mmio-write",
+        "nvx-port-io",
+        "nvx-console-pending",
+        "nvx-managed-agent",
+    ):
+        helpers[name] = _build_static_helper(
+            config.work,
+            common / f"{name}.c",
+            root / "sbin" / name,
+        )
+    helpers["nvx-device-io"] = _build_device_io_helper(
+        config.work,
+        root / "sbin" / "nvx-device-io",
+    )
+    return helpers
+
+
+def _prepare_guest_root(
+    config: InitramfsBuildConfig,
+    descriptor: GuestDescriptor,
+) -> Path:
+    if descriptor.name == "alpine":
+        return _prepare_alpine_root(config)
+    if descriptor.name == "ubuntu":
+        return ubuntu.prepare_root(config.work)
+    raise AssertionError(f"missing rootfs preparer for {descriptor.name}")
+
+
+def _write_ubuntu_manifest(
+    root: Path,
+    output: Path,
+    helpers: dict[str, dict[str, str]],
+) -> None:
+    manifest = output.with_name(f"{output.name}.packages.json")
+    manifest.write_text(
+        json.dumps(ubuntu.package_manifest(root, helpers), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _guest_customization_files(descriptor: GuestDescriptor) -> tuple[Path, ...]:
+    common = tuple(
+        path
+        for path in sorted((REPO_ROOT / "guest" / "common").iterdir())
+        if path.is_file()
+    )
+    if descriptor.name == "ubuntu":
+        ubuntu_sources = tuple(
+            path
+            for path in sorted((REPO_ROOT / "guest" / "ubuntu").iterdir())
+            if path.is_file()
+        )
+        return (*common, *ubuntu_sources, ubuntu.UBUNTU_PACKAGE_LOCK)
+    alpine = tuple(
+        path
+        for path in sorted((REPO_ROOT / "guest" / "alpine").iterdir())
+        if path.is_file()
+    )
+    return (*common, *alpine)
+
+
+def build_initramfs(config: InitramfsBuildConfig) -> None:
     _require_linux("build-initramfs")
-    root = _prepare_alpine_root(config)
-    print(">> installing sandbox utilities into the rootfs")
-    _apk_add(
-        root,
-        "blkid",
-        "busybox-extras",
-        "e2fsprogs",
-        "util-linux",
-        "util-linux-misc",
+    descriptor = guest_descriptor(config.guest)
+    output = config.output or artifact_path(descriptor.initramfs_name)
+    root = _prepare_guest_root(config, descriptor)
+    helpers = _install_guest_files(config, root, descriptor)
+    if descriptor.name == "ubuntu":
+        ubuntu.apply_metadata_policy(root)
+        _write_ubuntu_manifest(root, output, helpers)
+    else:
+        _write_apk_manifest(root, output, helpers)
+    _pack_initramfs(root, output)
+    print(f">> built {output} ({format_size(output.stat().st_size)})")
+
+
+def build_distro_layer(config: DistroLayerBuildConfig) -> None:
+    _require_linux("build-distro-layer")
+    descriptor = guest_descriptor(config.guest)
+    if descriptor.name != "ubuntu":
+        raise ScriptError("build-distro-layer currently supports only --guest ubuntu")
+    output = config.output.resolve()
+    manifest = output.with_name(f"{output.name}.manifest.json")
+    existing = [str(path) for path in (output, manifest) if path.exists()]
+    if existing and not config.replace:
+        raise ScriptError(
+            "refusing to replace existing Ubuntu distro artifact: "
+            + ", ".join(existing)
+            + "; pass --replace"
+        )
+
+    initramfs_config = InitramfsBuildConfig(
+        guest=descriptor.name,
+        work=config.work,
     )
-    resolver = root / "etc" / "resolv.conf"
-    resolver.unlink(missing_ok=True)
-    resolver.touch()
-    _install(REPO_ROOT / "alpine" / "init", root / "init")
-    _install(REPO_ROOT / "alpine" / "nvx-exit", root / "sbin" / "nvx-exit")
-    _install(
-        REPO_ROOT / "alpine" / "nvx-hostmount",
-        root / "sbin" / "nvx-hostmount",
+    root = _prepare_guest_root(initramfs_config, descriptor)
+    helpers = _install_guest_files(initramfs_config, root, descriptor)
+    ubuntu.apply_metadata_policy(root)
+    if (root / "sbin" / "init").exists() or any(
+        package["name"] == "systemd" for package in ubuntu.package_records(root)
+    ):
+        raise ScriptError("systemd is unsupported in the Ubuntu sandbox layer profile")
+    _normalize_initramfs_metadata(root)
+
+    input_sha256 = ubuntu.converter_input_sha256(_guest_customization_files(descriptor))
+    filesystem_uuid = ubuntu.erofs_uuid(input_sha256)
+    document = ubuntu.package_manifest(root, helpers)
+    document.update(
+        {
+            "artifact": output.name,
+            "converter_format": ubuntu.UBUNTU_EROFS_FORMAT,
+            "input_sha256": input_sha256,
+            "uuid": filesystem_uuid,
+            "compression": "lz4hc",
+        }
     )
-    _install(
-        REPO_ROOT / "alpine" / "nvx-container-enter",
-        root / "sbin" / "nvx-container-enter",
+
+    mkfs = require_tool(
+        "mkfs.erofs",
+        "mkfs.erofs was not found on PATH; install erofs-utils",
     )
-    _install(
-        REPO_ROOT / "alpine" / "nvx-container-launch",
-        root / "sbin" / "nvx-container-launch",
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output.with_name(f"{output.name}.part")
+    temporary_manifest = manifest.with_name(f"{manifest.name}.part")
+    temporary_output.unlink(missing_ok=True)
+    temporary_manifest.unlink(missing_ok=True)
+    try:
+        run_checked(
+            [
+                mkfs,
+                "--quiet",
+                "--all-root",
+                "-T",
+                "0",
+                "-U",
+                filesystem_uuid,
+                "-z",
+                "lz4hc",
+                temporary_output,
+                root,
+            ]
+        )
+        document["artifact_sha256"] = sha256_file(temporary_output)
+        temporary_manifest.write_text(
+            json.dumps(document, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary_output.replace(output)
+        temporary_manifest.replace(manifest)
+    finally:
+        temporary_output.unlink(missing_ok=True)
+        temporary_manifest.unlink(missing_ok=True)
+    print(f">> built {output} ({format_size(output.stat().st_size)})")
+
+
+def verify_guest_determinism(work: Path, guest: str) -> None:
+    _require_linux("verify-guest-determinism")
+    descriptor = guest_descriptor(guest)
+    if descriptor.name != "ubuntu":
+        raise ScriptError(
+            "verify-guest-determinism currently supports only --guest ubuntu"
+        )
+    artifact_names = (
+        descriptor.initramfs_name,
+        descriptor.package_manifest_name,
+        "ubuntu-distro.erofs",
+        "ubuntu-distro.erofs.manifest.json",
     )
-    _install(
-        REPO_ROOT / "alpine" / "nvx-init-agent",
-        root / "sbin" / "nvx-init-agent",
-    )
-    _install(
-        REPO_ROOT / "alpine" / "nvx-identity-probe",
-        root / "sbin" / "nvx-identity-probe",
-    )
-    _install(REPO_ROOT / "alpine" / "nvx-snapshot", root / "sbin" / "nvx-snapshot")
-    _install(
-        REPO_ROOT / "alpine" / "nvx-virtio-restore-probe",
-        root / "sbin" / "nvx-virtio-restore-probe",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-reseed.c",
-        root / "sbin" / "nvx-reseed",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-mmio-write.c",
-        root / "sbin" / "nvx-mmio-write",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-port-io.c",
-        root / "sbin" / "nvx-port-io",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-console-pending.c",
-        root / "sbin" / "nvx-console-pending",
-    )
-    _build_static_helper(
-        config.work,
-        REPO_ROOT / "alpine" / "nvx-managed-agent.c",
-        root / "sbin" / "nvx-managed-agent",
-    )
-    device_io = _build_device_io_helper(config.work, root / "sbin" / "nvx-device-io")
-    config.output.parent.mkdir(parents=True, exist_ok=True)
-    _write_apk_manifest(
-        root,
-        config.output,
-        config,
-        {"nvx-device-io": device_io},
-    )
-    _pack_initramfs(root, config.output)
-    print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
+    attempts: list[Path] = []
+    digests: list[dict[str, str]] = []
+    for attempt in (1, 2):
+        attempt_root = work / f"attempt-{attempt}"
+        if attempt_root.exists():
+            shutil.rmtree(attempt_root)
+        attempt_root.mkdir(parents=True)
+        build_initramfs(
+            InitramfsBuildConfig(
+                guest=descriptor.name,
+                work=attempt_root / "initramfs-work",
+                output=attempt_root / descriptor.initramfs_name,
+            )
+        )
+        build_distro_layer(
+            DistroLayerBuildConfig(
+                guest=descriptor.name,
+                work=attempt_root / "distro-work",
+                output=attempt_root / "ubuntu-distro.erofs",
+            )
+        )
+        attempts.append(attempt_root)
+        digests.append(
+            {name: sha256_file(attempt_root / name) for name in artifact_names}
+        )
+    if digests[0] != digests[1]:
+        first_inventory = ubuntu.rootfs_inventory(
+            attempts[0] / "initramfs-work" / "root"
+        )
+        second_inventory = ubuntu.rootfs_inventory(
+            attempts[1] / "initramfs-work" / "root"
+        )
+        differing_paths = sorted(
+            path
+            for path in first_inventory.keys() | second_inventory.keys()
+            if first_inventory.get(path) != second_inventory.get(path)
+        )
+        if differing_paths:
+            path = differing_paths[0]
+            diagnostic = (
+                f"; first rootfs difference at {path}: "
+                f"{first_inventory.get(path)!r} != "
+                f"{second_inventory.get(path)!r}"
+            )
+        else:
+            diagnostic = "; normalized rootfs inventories are identical"
+        raise ScriptError(
+            f"Ubuntu guest artifacts are not deterministic: "
+            f"{digests[0]!r} != {digests[1]!r}{diagnostic}"
+        )
+    print(">> Ubuntu initramfs and EROFS artifacts are deterministic")
 
 
 def build_kernel(config: KernelBuildConfig) -> None:
@@ -562,11 +783,13 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
         config.kernel_version != DEFAULT_KERNEL_VERSION
         or config.alpine_version != DEFAULT_ALPINE_VERSION
         or config.alpine_branch != DEFAULT_ALPINE_BRANCH
+        or config.ubuntu_version != ubuntu.DEFAULT_UBUNTU_VERSION
     ):
         raise ScriptError(
             "Docker builds are pinned to Linux "
             f"{DEFAULT_KERNEL_VERSION} and Alpine {DEFAULT_ALPINE_VERSION} "
-            f"({DEFAULT_ALPINE_BRANCH})"
+            f"({DEFAULT_ALPINE_BRANCH}) and Ubuntu "
+            f"{ubuntu.DEFAULT_UBUNTU_VERSION}"
         )
     destination = _docker_destination(config.destination)
     command: list[str | Path] = [
@@ -614,18 +837,43 @@ def build_docker_linux_source(config: DockerBuildConfig) -> Path:
 
 def build_docker_artifacts(
     config: DockerBuildConfig,
+    guest: str = "alpine",
 ) -> None:
     require_tool(
         "docker",
         "docker was not found on PATH; install Docker with the Linux engine first",
     )
     destination = _docker_destination(config.destination)
+    if guest == "all":
+        target = "all-guest-artifacts"
+        expected = (
+            "vmlinux",
+            "vmlinux.config",
+            "initramfs.cpio.gz",
+            "initramfs.cpio.gz.packages.json",
+            "initramfs-ubuntu.cpio.gz",
+            "initramfs-ubuntu.cpio.gz.packages.json",
+            "ubuntu-distro.erofs",
+            "ubuntu-distro.erofs.manifest.json",
+        )
+        guest_label = "Alpine and Ubuntu"
+    else:
+        descriptor = guest_descriptor(guest)
+        target = (
+            "artifacts" if descriptor.name == "alpine" else "ubuntu-guest-artifacts"
+        )
+        expected = (
+            "vmlinux",
+            "vmlinux.config",
+            descriptor.initramfs_name,
+            descriptor.package_manifest_name,
+        )
+        guest_label = descriptor.distribution
     print(
         f">> building Linux artifacts into '{destination}' "
-        f"(kernel {config.kernel_version}, Alpine {config.alpine_version})"
+        f"(kernel {config.kernel_version}, {guest_label})"
     )
-    run_checked(docker_build_command(config, "artifacts"), cwd=REPO_ROOT)
-    expected = ("vmlinux", "initramfs.cpio.gz")
+    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:
         raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")

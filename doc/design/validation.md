@@ -10,8 +10,8 @@ The implementation is exercised at three levels:
   checkout-built [`guest_test_pvh`](../../openvmm/guest_test_pvh); and
 - NVX-owned process tests in
   [`scripts/nvx_tools/microvm_tests.py`](../../scripts/nvx_tools/microvm_tests.py)
-  using this repository's Linux kernel and Alpine initramfs through the public
-  OpenVMM CLI.
+  using this repository's Linux kernel and selected Alpine or Ubuntu initramfs
+  through the public OpenVMM CLI.
 
 The NVX-owned suite boots the same PVH artifacts on the available native
 backend and covers IRQ0/RTC behavior, raw portb I/O, shutdown status, exact

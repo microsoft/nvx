@@ -55,7 +55,11 @@ $RequiredGuestArtifacts = @(
     "vmlinux",
     "vmlinux.config",
     "initramfs.cpio.gz",
-    "initramfs.cpio.gz.packages.json"
+    "initramfs.cpio.gz.packages.json",
+    "initramfs-ubuntu.cpio.gz",
+    "initramfs-ubuntu.cpio.gz.packages.json",
+    "ubuntu-distro.erofs",
+    "ubuntu-distro.erofs.manifest.json"
 )
 
 function Assert-LastExitCode {
