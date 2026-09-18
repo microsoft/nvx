@@ -49,6 +49,7 @@ class CliTests(unittest.TestCase):
         config = build.DockerBuildConfig(guest="azurelinux")
         command = build.docker_build_command(config, "azurelinux-artifacts")
         self.assertIn("azurelinux-artifacts", command)
+        self.assertIn(f"AZURELINUX_IMAGE={build.DEFAULT_AZURELINUX_IMAGE}", command)
 
     def test_native_azure_linux_rejected_before_kernel_build(self):
         args = argparse.Namespace(native=True, guest="azurelinux")

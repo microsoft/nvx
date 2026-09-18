@@ -583,6 +583,8 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
         "build",
         "-f",
         REPO_ROOT / "docker" / "Dockerfile",
+        "--build-arg",
+        f"AZURELINUX_IMAGE={DEFAULT_AZURELINUX_IMAGE}",
         "--target",
         target,
     ]
