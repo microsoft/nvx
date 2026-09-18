@@ -506,16 +506,25 @@ class CliTests(unittest.TestCase):
 
 
 class CiTests(unittest.TestCase):
-    def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
+    def test_openvmm_tests_use_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             openvmm = root / "openvmm"
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
+            kernel = root / "vmlinux"
+            initrd = root / "initramfs.cpio.gz"
+            kernel.touch()
+            initrd.touch()
             backend = "whp" if os.name == "nt" else "kvm"
 
             with (
                 patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(
+                    ci,
+                    "artifact_path",
+                    side_effect=[kernel, initrd],
+                ),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
@@ -523,8 +532,6 @@ class CiTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "OPENVMM_MICROVM_PVH_KERNEL": "nvx-kernel",
-                        "OPENVMM_MICROVM_PVH_INITRD": "nvx-initrd",
                         "PETRI_CAPABILITIES": "vpci",
                         "RUNNER_TEMP": os.fspath(root),
                     },
@@ -547,11 +554,23 @@ class CiTests(unittest.TestCase):
             filter_index = command.index("--filter")
             self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
             self.assertIn(
-                "test_ttrpc_microvm_pvh_snapshot",
+                "test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
+                ci.OPENVMM_MICROVM_TEST_FILTER,
+            )
+            self.assertIn(
+                "openvmm_linux_x64_phase_1_lifecycle",
                 ci.OPENVMM_MICROVM_TEST_FILTER,
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
-            self.assertNotIn("env", tests.kwargs)
+            self.assertEqual(
+                tests.kwargs["env"]["OPENVMM_MICROVM_TEST_KERNEL"],
+                os.fspath(kernel.resolve()),
+            )
+            self.assertEqual(
+                tests.kwargs["env"]["OPENVMM_MICROVM_TEST_INITRD"],
+                os.fspath(initrd.resolve()),
+            )
+            self.assertEqual(tests.kwargs["env"]["PETRI_CAPABILITIES"], "vpci")
             if os.name == "nt":
                 self.assertEqual(
                     command[command.index("--dir") + 1],
@@ -764,6 +783,20 @@ class BuildTests(unittest.TestCase):
             "hashFiles('kernel/config-microvm', 'kernel/patches/**')",
             action,
         )
+
+    def test_openvmm_ci_downloads_guest_artifacts(self):
+        workflow = (build.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        openvmm_tests = workflow.split("\n  openvmm-tests:\n", 1)[1].split(
+            "\n  nvx-microvm-tests:\n",
+            1,
+        )[0]
+        self.assertIn("needs: [artifacts, openvmm-changes]", openvmm_tests)
+        self.assertIn("needs.artifacts.result == 'success'", openvmm_tests)
+        self.assertIn("- name: Download guest artifacts", openvmm_tests)
+        self.assertIn("name: guest-artifacts", openvmm_tests)
+        self.assertIn("path: build", openvmm_tests)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")

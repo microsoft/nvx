@@ -5,9 +5,9 @@ self-hosted KVM, MSHV, and WHP virtual machines. Each backend has a pool of
 three runners labeled by operating system, backend, and `virtual-machine`.
 Jobs target the shared backend labels so any available matching runner can
 execute them. This allows the backend lanes to execute concurrently without
-binding a workload to a specific host. `openvmm-tests` builds its Xen PVH probe
-entirely from the OpenVMM checkout and exercises OpenVMM lifecycle, TTRPC, and
-snapshot contracts without restoring NVX guest artifacts.
+binding a workload to a specific host. `openvmm-tests` uses OpenVMM's
+Linux-direct kernel and initrd artifacts and exercises Linux MP-table lifecycle,
+TTRPC, and snapshot contracts without restoring NVX guest artifacts.
 `nvx-microvm-tests` consumes the NVX Linux kernel and Alpine initramfs and
 exercises Linux, SMP, virtio, sandbox, and snapshot behavior through the public
 OpenVMM CLI. Failure logs from the NVX layer are uploaded per backend.

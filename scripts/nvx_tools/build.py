@@ -18,7 +18,6 @@ from .common import (
     download,
     format_size,
     require_tool,
-    run_capture,
     run_checked,
     sha256_file,
 )
@@ -41,6 +40,15 @@ REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
 )
 REQUIRED_SHARED_STATUS_KERNEL_CONFIG = ("CONFIG_VIRTIO_MMIO_SHARED_STATUS=y",)
+REQUIRED_DIRECT_BOOT_KERNEL_CONFIG = (
+    "# CONFIG_ACPI is not set",
+    "# CONFIG_PVH is not set",
+    "CONFIG_X86_MPPARSE=y",
+    "CONFIG_X86_LOCAL_APIC=y",
+    "CONFIG_X86_IO_APIC=y",
+    "CONFIG_VIRTIO_MMIO=y",
+    "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
+)
 REQUIRED_SANDBOX_KERNEL_CONFIG = (
     "CONFIG_BPF_SYSCALL=y",
     "CONFIG_CGROUP_BPF=y",
@@ -79,6 +87,20 @@ def _assert_virtio_console_kernel_config(path: Path) -> None:
     if missing:
         raise ScriptError(
             "kernel configuration cannot provide /dev/hvc1: " + ", ".join(missing)
+        )
+
+
+def _assert_direct_boot_kernel_config(path: Path) -> None:
+    configured = set(path.read_text(encoding="utf-8").splitlines())
+    missing = [
+        setting
+        for setting in REQUIRED_DIRECT_BOOT_KERNEL_CONFIG
+        if setting not in configured
+    ]
+    if missing:
+        raise ScriptError(
+            "kernel configuration cannot boot the ACPI-free MP-table microVM: "
+            + ", ".join(missing)
         )
 
 
@@ -521,7 +543,7 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
 
 def build_kernel(config: KernelBuildConfig) -> None:
     _require_linux("build-kernel")
-    for tool in ("make", "readelf"):
+    for tool in ("make",):
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config.version)
     build_fingerprint = json.dumps(
@@ -542,6 +564,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     shutil.copy2(REPO_ROOT / "kernel" / "config-microvm", kernel_config)
     make = ["make", "-C", source, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
+    _assert_direct_boot_kernel_config(kernel_config)
     _assert_virtio_console_kernel_config(kernel_config)
     _assert_sandbox_kernel_config(kernel_config)
     _assert_shared_status_kernel_config(kernel_config)
@@ -552,13 +575,6 @@ def build_kernel(config: KernelBuildConfig) -> None:
     shutil.copy2(config.work / "vmlinux", config.output)
     shutil.copy2(kernel_config, config.output.with_name(f"{config.output.name}.config"))
     print(f">> built {config.output}")
-
-    notes = run_capture(["readelf", "-n", config.output])
-    if "Xen" in notes.text and "0x00000012" in notes.text:
-        print(">> PVH entry note present")
-    else:
-        config.output.unlink(missing_ok=True)
-        raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
 
 
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:

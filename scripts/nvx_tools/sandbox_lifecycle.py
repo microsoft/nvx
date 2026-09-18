@@ -334,7 +334,7 @@ def start(state_path: Path, timeout: float) -> None:
     outcome_path.unlink(missing_ok=True)
     launch = _deserialize_launch(config)
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+    kernel = require_file(artifact_path("vmlinux"), "Linux direct kernel")
     initrd = require_file(artifact_path("initramfs.cpio.gz"), "initramfs")
     capability = secrets.token_bytes(32)
     if capability == bytes(32):

@@ -89,6 +89,15 @@ class ControlSessionTests(unittest.TestCase):
 
 
 class MicrovmTests(unittest.TestCase):
+    def test_host_loopback_allocator_binds_tcp_and_udp_to_same_port(self):
+        tcp, udp = microvm_tests._bind_tcp_udp_pair()
+        try:
+            tcp.listen(1)
+            self.assertEqual(tcp.getsockname()[1], udp.getsockname()[1])
+        finally:
+            tcp.close()
+            udp.close()
+
     def test_host_loopback_rejections_cover_generic_allow_and_explicit_denial(self):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(microvm_tests, "OpenvmmProcess") as process:
