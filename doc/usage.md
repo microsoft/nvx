@@ -23,9 +23,11 @@ python3 scripts/nvx.py performance gate --help
 | Command | Description |
 | --- | --- |
 | `init` | Initialize the OpenVMM submodule and its nested submodules. |
-| `build-guest` | Build the Linux kernel and Alpine initramfs. |
+| `build-guest` | Build the Linux kernel and selected guest artifacts. |
 | `build-kernel` | Build the pinned and patched Linux kernel natively. |
-| `build-initramfs` | Build the Alpine initramfs natively. |
+| `build-initramfs` | Build the selected Alpine or Ubuntu initramfs natively. |
+| `build-distro-layer` | Build a deterministic Ubuntu EROFS distro layer. |
+| `verify-guest-determinism` | Rebuild Ubuntu guest artifacts twice and compare SHA-256 values. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
@@ -38,8 +40,9 @@ python3 scripts/nvx.py performance gate --help
 | `sandbox` | Run one workload from EROFS layers over private ext4 scratch. |
 | `benchmark` | Run the OpenVMM-native benchmark coordinator. |
 | `performance` | Collect, gate, and persist CI performance results. |
-| `collect-sources` | Materialize verified Linux and Alpine release sources. |
+| `collect-sources` | Materialize verified Linux, Alpine, and Ubuntu release sources. |
 | `collect-alpine-sources` | Collect exact Alpine recipes and upstream sources. |
+| `collect-ubuntu-sources` | Collect exact Ubuntu source packages. |
 | `create-linux-source-archive` | Create a Linux corresponding-source archive. |
 | `package` | Stage a binary distribution. |
 | `verify` | Verify source and submodule inputs. |
@@ -77,11 +80,14 @@ See [Setup](setup.md) for host prerequisites.
 ### `build-guest`
 
 ```text
-python3 scripts/nvx.py build-guest [--native]
+python3 scripts/nvx.py build-guest
+    [--guest {alpine,ubuntu,all}]
+    [--native]
 ```
 
 By default, builds the guest kernel and initramfs with Docker. `--native`
-builds both artifacts directly on Linux instead.
+builds the selected artifacts directly on Linux instead. Alpine is the
+default. `--guest all` also builds the Ubuntu EROFS distro layer.
 
 ### `build-kernel`
 
@@ -94,10 +100,35 @@ Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
 ### `build-initramfs`
 
 ```console
-python3 scripts/nvx.py build-initramfs
+python3 scripts/nvx.py build-initramfs [--guest {alpine,ubuntu}]
 ```
 
-Builds the Alpine initramfs directly on Linux.
+Builds the selected initramfs directly on Linux. Alpine is the default.
+
+### `build-distro-layer`
+
+```text
+python3 scripts/nvx.py build-distro-layer
+    --guest ubuntu
+    [--output PATH]
+    [--replace]
+```
+
+Builds the immutable Ubuntu EROFS `distro` layer directly on Linux. The default
+output is `build/ubuntu-distro.erofs`. Existing output or manifest files are
+rejected unless `--replace` is present.
+
+### `verify-guest-determinism`
+
+```text
+python3 scripts/nvx.py verify-guest-determinism
+    --guest ubuntu
+    [--work-dir PATH]
+```
+
+Builds the Ubuntu initramfs and EROFS layer twice from separate roots and
+compares every artifact SHA-256. A mismatch reports the first differing
+normalized rootfs entry when one exists.
 
 ### `build-openvmm`
 
@@ -112,7 +143,10 @@ already restored.
 ### `build`
 
 ```text
-python3 scripts/nvx.py build [--native] [--skip-restore]
+python3 scripts/nvx.py build
+    [--guest {alpine,ubuntu,all}]
+    [--native]
+    [--skip-restore]
 ```
 
 Runs `build-guest` followed by `build-openvmm`. The two options have the same
@@ -147,6 +181,7 @@ produced by OpenVMM itself; NVX's kernel and initramfs are not required.
 ```text
 python3 scripts/nvx.py test-microvm
     --backend {kvm,mshv,whp}
+    [--guest {alpine,ubuntu}]
     [--scenario SCENARIO]...
     [--processors {1,2,4,8} ...]
     [--memory-mib MIB]
@@ -156,8 +191,10 @@ python3 scripts/nvx.py test-microvm
 
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
-it, every scenario runs. The command requires `build/vmlinux`,
-`build/initramfs.cpio.gz`, and `openvmm/target/release/openvmm[.exe]`.
+it, every scenario supported by the selected guest runs. Alpine remains the
+default. Ubuntu rejects the Alpine-control-only `sandbox-blocks` and
+`scratch-snapshot` scenarios. The command requires `build/vmlinux`, the
+selected initramfs, and `openvmm/target/release/openvmm[.exe]`.
 
 ### `test-adversarial`
 
@@ -242,6 +279,7 @@ is authorized for the organization when it enforces single sign-on.
 
 ```text
 python3 scripts/nvx.py run
+    [--guest {alpine,ubuntu}]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--machine {microvm}]
     [--memory-mib MIB]
@@ -260,9 +298,10 @@ python3 scripts/nvx.py run
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--guest {alpine,ubuntu}` | `alpine` | Select Alpine or Ubuntu userland with the same NVX kernel. This option is not used for snapshot restore. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
-| `--memory-mib MIB` | `128` | Set guest memory in MiB. |
+| `--memory-mib MIB` | guest-specific | Set guest memory in MiB. Defaults to 128 for Alpine and 256 for Ubuntu. |
 | `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target. Active snapshot restore requires the same canonical path, target, and mode; a dormant-slot restore may attach a new mapping that the resumed guest mounts explicitly. |
@@ -275,9 +314,10 @@ python3 scripts/nvx.py run
 | `--restore-ready-path PATH` | none | Publish one restore-readiness event to an existing Unix socket or Windows named pipe. |
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 
-The command requires the OpenVMM release binary, `build/vmlinux`, and
-`build/initramfs.cpio.gz`. See [Run](run.md) for host setup, guest shutdown,
-networking, and virtio-fs examples.
+The command requires the OpenVMM release binary, `build/vmlinux`, and the
+selected `build/initramfs*.cpio.gz`. Ubuntu selection never falls back to
+Alpine. See [Run](run.md) for host setup, guest shutdown, networking, and
+virtio-fs examples.
 
 ### `sandbox`
 
@@ -463,8 +503,8 @@ more than one metric.
 python3 scripts/nvx.py collect-sources
 ```
 
-Materializes the verified Linux and Alpine source artifacts needed for a
-source-inclusive release.
+Materializes the verified Linux, Alpine, and Ubuntu source artifacts needed
+for a source-inclusive release.
 
 ### `collect-alpine-sources`
 
@@ -481,6 +521,24 @@ python3 scripts/nvx.py collect-alpine-sources MANIFEST [MANIFEST ...]
 | `--output PATH` | `build/sources/alpine` | Select the output directory. |
 | `--cache PATH` | `.cache/aports` | Select the aports cache directory. |
 | `--skip-upstream` | off | Collect exact aports recipes without running `abuild fetch`. |
+
+### `collect-ubuntu-sources`
+
+```text
+python3 scripts/nvx.py collect-ubuntu-sources MANIFEST [MANIFEST ...]
+    [--output PATH]
+    [--cache PATH]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `MANIFEST` | required | One or more Ubuntu package or EROFS manifests to collect. |
+| `--output PATH` | `build/sources/ubuntu` | Select the output directory. |
+| `--cache PATH` | `.cache/ubuntu-source-indexes` | Select the downloaded source-index cache. |
+
+The collector deduplicates source package name/version pairs, verifies source
+index SHA-256 metadata, validates each `.dsc`, and downloads every referenced
+source member.
 
 ### `create-linux-source-archive`
 

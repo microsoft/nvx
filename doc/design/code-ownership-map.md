@@ -21,8 +21,8 @@
 | Portb process-exit output drain | [`openvmm_entry/src/microvm_output.rs`](../../openvmm/openvmm/openvmm_entry/src/microvm_output.rs) |
 | Backend snapshot clocks | [`virt_kvm`](../../openvmm/vmm_core/virt_kvm), [`virt_mshv`](../../openvmm/vmm_core/virt_mshv), and [`virt_whp`](../../openvmm/vmm_core/virt_whp) |
 | Sandbox launch and kernel features | [`scripts/nvx_tools/sandbox.py`](../../scripts/nvx_tools/sandbox.py) and [`kernel/config-microvm`](../../kernel/config-microvm) |
-| Workload namespace and root construction | [`alpine/nvx-container-launch`](../../alpine/nvx-container-launch) and [`alpine/nvx-container-enter`](../../alpine/nvx-container-enter) |
-| Guest workload, scratch quiesce, and post-restore CPU/RAM repair | [`alpine/nvx-snapshot`](../../alpine/nvx-snapshot) and [`alpine/nvx-init-agent`](../../alpine/nvx-init-agent) |
+| Workload namespace and root construction | [`guest/alpine/nvx-container-launch`](../../guest/alpine/nvx-container-launch) and [`guest/alpine/nvx-container-enter`](../../guest/alpine/nvx-container-enter) |
+| Guest workload, scratch quiesce, and post-restore CPU/RAM repair | [`guest/common/nvx-snapshot`](../../guest/common/nvx-snapshot) and [`guest/common/nvx-init-agent`](../../guest/common/nvx-init-agent) |
 | Self-contained OpenVMM control-plane tests | [`guest_test_pvh`](../../openvmm/guest_test_pvh), [`vmm_tests/tests/tests/x86_64/microvm.rs`](../../openvmm/vmm_tests/vmm_tests/tests/tests/x86_64/microvm.rs), and [`vmm_tests/tests/tests/ttrpc.rs`](../../openvmm/vmm_tests/vmm_tests/tests/tests/ttrpc.rs) |
 | NVX Linux and device integration tests | [`scripts/nvx_tools/microvm_tests.py`](../../scripts/nvx_tools/microvm_tests.py) and [`scripts/nvx_tools/microvm_test_scripts`](../../scripts/nvx_tools/microvm_test_scripts) |
 | Copilot adversarial controller and typed broker | [`scripts/nvx_tools/adversarial.py`](../../scripts/nvx_tools/adversarial.py) and [`scripts/nvx_tools/adversarial_broker.py`](../../scripts/nvx_tools/adversarial_broker.py) |

@@ -7,7 +7,8 @@
 *.py text eol=lf
 *.sh text eol=lf
 *.sh.in text eol=lf
-alpine/* text eol=lf
+guest/* text eol=lf
+guest/**/* text eol=lf
 Dockerfile text eol=lf
 kernel/config-microvm text eol=lf
 

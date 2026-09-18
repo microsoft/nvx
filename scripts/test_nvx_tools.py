@@ -30,10 +30,13 @@ from nvx_tools import (  # noqa: E402
     benchmark,
     build,
     ci,
+    collect_ubuntu_sources,
     common,
+    guests,
     release,
     sandbox,
     sandbox_lifecycle,
+    ubuntu,
 )
 
 
@@ -75,12 +78,7 @@ def _write_release_fixture(
     binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
     binary = openvmm_dir / "target" / "release" / binary_name
     revision = "0bc357bbcf3a654b63dfb51f1103c5751bf3d31f"
-    guest_names = (
-        "vmlinux",
-        "vmlinux.config",
-        "initramfs.cpio.gz",
-        "initramfs.cpio.gz.packages.json",
-    )
+    guest_names = release.GUEST_RELEASE_NAMES
     for path in (
         binary,
         *(build_dir / name for name in guest_names),
@@ -133,9 +131,32 @@ def _write_release_fixture(
                 "x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz"
             ),
             "minirootfs_sha256": build.DEFAULT_ALPINE_MINIROOTFS_SHA256,
-            "guest_sources": "alpine",
-            "package_manifests": "build/*.packages.json",
+            "guest_sources": ["guest/common", "guest/alpine"],
+            "package_manifests": ["build/initramfs.cpio.gz.packages.json"],
             "source_output": "build/sources/alpine",
+        },
+        "ubuntu": {
+            "distribution": "Ubuntu Base",
+            "version": ubuntu.DEFAULT_UBUNTU_VERSION,
+            "codename": ubuntu.DEFAULT_UBUNTU_CODENAME,
+            "architecture": ubuntu.DEFAULT_UBUNTU_ARCHITECTURE,
+            "base_url": ubuntu.DEFAULT_UBUNTU_BASE_URL,
+            "base_sha256": ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
+            "package_lock": "ubuntu/packages.lock.json",
+            "package_lock_sha256": common.sha256_file(
+                ubuntu.UBUNTU_PACKAGE_LOCK
+            ),
+            "guest_sources": [
+                "guest/common",
+                "guest/ubuntu",
+                "ubuntu/packages.lock.json",
+            ],
+            "package_manifests": [
+                "build/initramfs-ubuntu.cpio.gz.packages.json",
+                "build/ubuntu-distro.erofs.manifest.json",
+            ],
+            "source_output": "build/sources/ubuntu",
+            "erofs_converter_format": ubuntu.UBUNTU_EROFS_FORMAT,
         },
     }
     (root / "SOURCE-MANIFEST.json").write_text(
@@ -389,6 +410,85 @@ class CliTests(unittest.TestCase):
         help_text = output.getvalue()
         self.assertIn("run OpenVMM Petri VMM tests", help_text)
         self.assertNotIn("run OpenVMM microVM integration tests", help_text)
+
+    def test_guest_selection_cli_contract(self):
+        default_build = nvx.parse_args(["build-guest"])
+        self.assertEqual(default_build.guest, "alpine")
+
+        all_guests = nvx.parse_args(["build-guest", "--guest", "all"])
+        self.assertEqual(all_guests.guest, "all")
+
+        ubuntu_initramfs = nvx.parse_args(["build-initramfs", "--guest", "ubuntu"])
+        self.assertEqual(ubuntu_initramfs.guest, "ubuntu")
+
+        distro = nvx.parse_args(
+            [
+                "build-distro-layer",
+                "--guest",
+                "ubuntu",
+                "--output",
+                "ubuntu.erofs",
+                "--replace",
+            ]
+        )
+        self.assertEqual(distro.guest, "ubuntu")
+        self.assertEqual(distro.output, Path("ubuntu.erofs"))
+        self.assertTrue(distro.replace)
+
+        with self.assertRaises(SystemExit):
+            nvx.parse_args(["run", "--guest", "all"])
+
+    def test_ubuntu_run_selects_artifact_and_default_memory(self):
+        args = nvx.parse_args(["run", "--guest", "ubuntu", "--dry-run"])
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with (
+            patch.object(nvx, "require_file", side_effect=require),
+            patch.object(
+                nvx,
+                "_format_command",
+                return_value="formatted",
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[command.index("--memory") + 1], "256M")
+        self.assertEqual(
+            Path(command[command.index("--initrd") + 1]).name,
+            "initramfs-ubuntu.cpio.gz",
+        )
+
+    def test_restore_rejects_ubuntu_guest_selection(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--guest",
+                "ubuntu",
+                "--restore-snapshot",
+                "snapshot",
+                "--dry-run",
+            ]
+        )
+        with self.assertRaisesRegex(common.ScriptError, "snapshot already fixes"):
+            nvx.command_run(args)
+
+    def test_sandbox_rejects_systemd_entrypoint(self):
+        args = nvx.parse_args(
+            [
+                "sandbox",
+                "--entrypoint",
+                "/sbin/init",
+                "--layer",
+                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+                "--scratch",
+                "scratch.ext4",
+            ]
+        )
+        with self.assertRaisesRegex(common.ScriptError, "systemd entrypoints"):
+            nvx.command_sandbox(args)
 
     def test_sandbox_command_parses_typed_launch_contract(self):
         args = nvx.parse_args(
@@ -2229,6 +2329,210 @@ class BuildTests(unittest.TestCase):
                 "control_contract_revision": "nvx-microvm-v2-control-v1",
             },
         )
+
+    def test_guest_descriptors_preserve_alpine_and_select_ubuntu_outputs(self):
+        alpine = guests.guest_descriptor("alpine")
+        ubuntu_guest = guests.guest_descriptor("ubuntu")
+
+        self.assertEqual(alpine.initramfs_name, "initramfs.cpio.gz")
+        self.assertEqual(alpine.default_memory_mib, 128)
+        self.assertTrue(alpine.sandbox_control)
+        self.assertEqual(
+            ubuntu_guest.initramfs_name,
+            "initramfs-ubuntu.cpio.gz",
+        )
+        self.assertEqual(ubuntu_guest.default_memory_mib, 256)
+        self.assertFalse(ubuntu_guest.sandbox_control)
+
+    def test_ubuntu_manifest_and_package_lock_match_build_pins(self):
+        manifest = json.loads(
+            (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+        )
+        ubuntu_manifest = manifest["ubuntu"]
+        self.assertEqual(
+            ubuntu_manifest["version"],
+            ubuntu.DEFAULT_UBUNTU_VERSION,
+        )
+        self.assertEqual(
+            ubuntu_manifest["base_url"],
+            ubuntu.DEFAULT_UBUNTU_BASE_URL,
+        )
+        self.assertEqual(
+            ubuntu_manifest["base_sha256"],
+            ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
+        )
+        self.assertEqual(
+            ubuntu_manifest["package_lock_sha256"],
+            common.sha256_file(ubuntu.UBUNTU_PACKAGE_LOCK),
+        )
+        packages = ubuntu.load_package_lock()
+        self.assertEqual(
+            [package["name"] for package in packages],
+            [
+                "busybox-static",
+                "iputils-ping",
+                "libcap2",
+                "libidn2-0",
+                "libunistring5",
+                "net-tools",
+                "netcat-openbsd",
+            ],
+        )
+
+    def test_ubuntu_safe_extractor_rejects_archive_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "unsafe.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive_file:
+                symlink = tarfile.TarInfo("etc")
+                symlink.type = tarfile.SYMTYPE
+                symlink.linkname = "../../outside"
+                archive_file.addfile(symlink)
+                payload = b"nameserver 192.0.2.1\n"
+                resolver = tarfile.TarInfo("etc/resolv.conf")
+                resolver.size = len(payload)
+                archive_file.addfile(resolver, io.BytesIO(payload))
+
+            with self.assertRaisesRegex(common.ScriptError, "escapes|non-directory"):
+                ubuntu.safe_extract_tar(
+                    archive_path,
+                    root / "extracted",
+                    label="test archive",
+                )
+            self.assertFalse((root / "outside").exists())
+
+    def test_ubuntu_safe_extractor_rejects_absolute_and_parent_paths(self):
+        for member_name in ("/absolute", "../parent"):
+            with self.subTest(member_name=member_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    archive_path = root / "unsafe.tar"
+                    with tarfile.open(archive_path, "w") as archive_file:
+                        payload = b"x"
+                        member = tarfile.TarInfo(member_name)
+                        member.size = len(payload)
+                        archive_file.addfile(member, io.BytesIO(payload))
+                    with self.assertRaisesRegex(
+                        common.ScriptError,
+                        "absolute path|path traversal",
+                    ):
+                        ubuntu.safe_extract_tar(
+                            archive_path,
+                            root / "extracted",
+                            label="test archive",
+                        )
+
+    def test_ubuntu_rootfs_digest_and_erofs_uuid_are_deterministic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            for directory in (first, second):
+                (directory / "etc").mkdir(parents=True)
+                (directory / "etc" / "os-release").write_text(
+                    "ID=ubuntu\n",
+                    encoding="ascii",
+                )
+            os.utime(second / "etc" / "os-release", (1234, 1234))
+
+            first_digest = ubuntu.rootfs_sha256(first)
+            second_digest = ubuntu.rootfs_sha256(second)
+            self.assertEqual(first_digest, second_digest)
+            self.assertEqual(
+                ubuntu.erofs_uuid(first_digest),
+                ubuntu.erofs_uuid(second_digest),
+            )
+
+    def test_distro_layer_refuses_existing_output_without_replace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ubuntu.erofs"
+            output.touch()
+            with (
+                patch.object(build.sys, "platform", "linux"),
+                self.assertRaisesRegex(common.ScriptError, "refusing to replace"),
+            ):
+                build.build_distro_layer(build.DistroLayerBuildConfig(output=output))
+
+    def test_ubuntu_source_requirements_deduplicate_binary_manifests(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifests: list[Path] = []
+            for name in ("initramfs.json", "layer.json"):
+                path = root / name
+                path.write_text(
+                    json.dumps(
+                        {
+                            "guest": "ubuntu",
+                            "release": ubuntu.DEFAULT_UBUNTU_VERSION,
+                            "architecture": ubuntu.DEFAULT_UBUNTU_ARCHITECTURE,
+                            "packages": [
+                                {
+                                    "source_name": "glibc",
+                                    "source_version": "2.43-2ubuntu2.3",
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                manifests.append(path)
+
+            requirements = collect_ubuntu_sources._source_requirements(manifests)
+
+        self.assertEqual(
+            requirements,
+            (
+                {
+                    "source_name": "glibc",
+                    "source_version": "2.43-2ubuntu2.3",
+                },
+            ),
+        )
+
+    def test_ubuntu_dsc_validation_matches_source_index(self):
+        payload = b"source"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            dsc = Path(temporary) / "example_1.0.dsc"
+            dsc.write_text(
+                (
+                    "Format: 3.0 (quilt)\n"
+                    "Source: example\n"
+                    "Version: 1.0\n"
+                    "Checksums-Sha256:\n"
+                    f" {digest} {len(payload)} example_1.0.orig.tar.xz\n"
+                ),
+                encoding="utf-8",
+            )
+            record: collect_ubuntu_sources.SourceRecord = {
+                "source_name": "example",
+                "source_version": "1.0",
+                "directory": "pool/main/e/example",
+                "index_url": "https://archive.invalid/Sources.xz",
+                "index_sha256": "0" * 64,
+                "files": [
+                    {
+                        "name": "example_1.0.dsc",
+                        "size": dsc.stat().st_size,
+                        "sha256": common.sha256_file(dsc),
+                        "url": "https://archive.invalid/example_1.0.dsc",
+                    },
+                    {
+                        "name": "example_1.0.orig.tar.xz",
+                        "size": len(payload),
+                        "sha256": digest,
+                        "url": "https://archive.invalid/example_1.0.orig.tar.xz",
+                    },
+                ],
+            }
+
+            collect_ubuntu_sources._validate_dsc(dsc, record)
+            record["files"][1]["sha256"] = "f" * 64
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "do not match",
+            ):
+                collect_ubuntu_sources._validate_dsc(dsc, record)
 
     def test_ci_kernel_cache_key_includes_patches(self):
         action = (
@@ -5866,8 +6170,8 @@ class DownloadTests(unittest.TestCase):
                 )
                 output.write_bytes(payload)
 
-            with patch.object(build, "download", side_effect=write_verified):
-                build._download_verified(
+            with patch.object(common, "download", side_effect=write_verified):
+                common.download_verified(
                     "https://example.invalid/archive.tar.xz",
                     destination,
                     expected_sha256,

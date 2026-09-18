@@ -1,5 +1,5 @@
 name: Build guest artifacts
-description: Cache or build the pinned Linux kernel and Alpine disk image
+description: Cache or build the pinned Linux kernel and guest images
 
 outputs:
   kernel-cache-key:
@@ -8,6 +8,12 @@ outputs:
   alpine-cache-key:
     description: Exact cache key for the Alpine disk image artifacts
     value: ${{ steps.guest-cache-keys.outputs.alpine }}
+  ubuntu-cache-key:
+    description: Exact cache key for the Ubuntu initramfs artifacts
+    value: ${{ steps.guest-cache-keys.outputs.ubuntu }}
+  ubuntu-distro-cache-key:
+    description: Exact cache key for the Ubuntu EROFS distro artifacts
+    value: ${{ steps.guest-cache-keys.outputs.ubuntu-distro }}
 
 runs:
   using: composite
@@ -28,6 +34,7 @@ runs:
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             print(f"kernel-version={manifest['linux']['version']}", file=output)
             print(f"alpine-version={manifest['alpine']['version']}", file=output)
+            print(f"ubuntu-version={manifest['ubuntu']['version']}", file=output)
         PY
 
     - name: Resolve guest cache keys
@@ -36,13 +43,17 @@ runs:
       env:
         KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
         ALPINE_VERSION: ${{ steps.guest-versions.outputs.alpine-version }}
+        UBUNTU_VERSION: ${{ steps.guest-versions.outputs.ubuntu-version }}
         KERNEL_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'kernel/config-microvm', 'kernel/patches/**', 'scripts/nvx_tools/build.py') }}
-        ALPINE_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/common.py') }}
+        ALPINE_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py') }}
+        UBUNTU_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/ubuntu/**', 'ubuntu/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py', 'scripts/nvx_tools/ubuntu.py') }}
       run: |
         set -euo pipefail
         {
           echo "kernel=linux-kernel-v1-${KERNEL_VERSION}-${KERNEL_INPUT_HASH}"
           echo "alpine=alpine-image-v1-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}"
+          echo "ubuntu=ubuntu-initramfs-v1-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}"
+          echo "ubuntu-distro=ubuntu-distro-v1-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}"
         } >> "${GITHUB_OUTPUT}"
 
     - name: Restore Linux kernel (zstd)
@@ -65,6 +76,26 @@ runs:
           build/initramfs.cpio.gz.packages.json
           build/initramfs.provenance.json
         key: ${{ steps.guest-cache-keys.outputs.alpine }}
+        enableCrossOsArchive: true
+
+    - name: Restore Ubuntu initramfs (zstd)
+      id: cache-ubuntu-initramfs-zstd
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          build/initramfs-ubuntu.cpio.gz
+          build/initramfs-ubuntu.cpio.gz.packages.json
+        key: ${{ steps.guest-cache-keys.outputs.ubuntu }}
+        enableCrossOsArchive: true
+
+    - name: Restore Ubuntu distro layer (zstd)
+      id: cache-ubuntu-distro-zstd
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          build/ubuntu-distro.erofs
+          build/ubuntu-distro.erofs.manifest.json
+        key: ${{ steps.guest-cache-keys.outputs.ubuntu-distro }}
         enableCrossOsArchive: true
 
     - name: Build Linux kernel (Docker)
@@ -108,3 +139,65 @@ runs:
           build/initramfs.provenance.json
         key: ${{ steps.guest-cache-keys.outputs.alpine }}
         enableCrossOsArchive: true
+
+    - name: Build Ubuntu initramfs (Docker)
+      if: steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true'
+      shell: bash
+      run: >-
+        docker build
+        --file docker/Dockerfile
+        --target ubuntu-initramfs-artifacts
+        --output type=local,dest=build
+        .
+
+    - name: Verify Ubuntu artifact determinism (Docker)
+      if: >-
+        steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true' ||
+        steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
+      shell: bash
+      run: >-
+        docker build
+        --file docker/Dockerfile
+        --target ubuntu-determinism
+        .
+
+    - name: Save Ubuntu initramfs (zstd)
+      if: steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          build/initramfs-ubuntu.cpio.gz
+          build/initramfs-ubuntu.cpio.gz.packages.json
+        key: ${{ steps.guest-cache-keys.outputs.ubuntu }}
+        enableCrossOsArchive: true
+
+    - name: Build Ubuntu distro layer (Docker)
+      if: steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
+      shell: bash
+      run: >-
+        docker build
+        --file docker/Dockerfile
+        --target ubuntu-distro-layer-artifacts
+        --output type=local,dest=build
+        .
+
+    - name: Save Ubuntu distro layer (zstd)
+      if: steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          build/ubuntu-distro.erofs
+          build/ubuntu-distro.erofs.manifest.json
+        key: ${{ steps.guest-cache-keys.outputs.ubuntu-distro }}
+        enableCrossOsArchive: true
+
+    - name: Prepare Ubuntu sandbox scratch template
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -f build/ubuntu-smoke-scratch.ext4
+        truncate --size 64M build/ubuntu-smoke-scratch.ext4
+        mkfs.ext4 -q -F -m 0 \
+          -U 4f3c8bf7-1959-47b4-8811-62b17bbddaf4 \
+          -E lazy_itable_init=0,lazy_journal_init=0 \
+          build/ubuntu-smoke-scratch.ext4

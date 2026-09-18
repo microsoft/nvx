@@ -34,7 +34,7 @@ compression and xattrs, overlayfs, cgroup v2, memory and process controllers,
 namespaces, `CONFIG_BPF_SYSCALL`, and `CONFIG_CGROUP_BPF`. Kernel support for a
 device filter does not mean the current agent installs one.
 
-[`alpine/nvx-init-agent`](../../alpine/nvx-init-agent) performs the assembly:
+[`guest/common/nvx-init-agent`](../../guest/common/nvx-init-agent) performs the assembly:
 
 1. mount runtime tmpfs and cgroup2, create sibling `agent` and `container`
    cgroups, and move the supervisor into the agent cgroup;
@@ -67,9 +67,9 @@ the intended curated-image shape, not a requirement that all three lower
 slots be populated. The initramfs remains the supervisor's root and is not
 another container lower layer.
 
-[`alpine/nvx-container-launch`](../../alpine/nvx-container-launch) releases the
+[`guest/alpine/nvx-container-launch`](../../guest/alpine/nvx-container-launch) releases the
 barrier into private mount, PID, and UTS namespaces.
-[`alpine/nvx-container-enter`](../../alpine/nvx-container-enter) makes mounts
+[`guest/alpine/nvx-container-enter`](../../guest/alpine/nvx-container-enter) makes mounts
 private, creates private proc, read-only sysfs, `/dev`, devpts, and shared-memory
 mounts, binds the workload machine ID read-only, and enters the overlay with
 `chroot`. It clears supplementary groups and all capability sets and enables

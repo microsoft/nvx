@@ -109,7 +109,7 @@ jobs:
             run_workloads "At least one non-documentation file changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           fi
 
-          relevant_paths='^(openvmm($|/)|\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests|run-platform)\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|sccache|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|scripts/setup/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          relevant_paths='^(openvmm($|/)|\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests|run-platform)\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|sccache|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|scripts/setup/|kernel/|alpine/|guest/|ubuntu/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
           if grep -Eq "${relevant_paths}" "${changed_files}"; then
             run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           else
@@ -159,6 +159,11 @@ jobs:
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
             build/initramfs.provenance.json
+            build/initramfs-ubuntu.cpio.gz
+            build/initramfs-ubuntu.cpio.gz.packages.json
+            build/ubuntu-distro.erofs
+            build/ubuntu-distro.erofs.manifest.json
+            build/ubuntu-smoke-scratch.ext4
           if-no-files-found: error
           retention-days: 1
 

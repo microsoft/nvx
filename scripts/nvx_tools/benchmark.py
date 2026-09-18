@@ -1925,6 +1925,7 @@ def run_guest_script(
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
     log_path: Path | None = None,
+    boot_marker: bytes = BOOT_MARKER,
 ) -> GuestCommandResult:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
@@ -1959,7 +1960,7 @@ def run_guest_script(
                 break
             output.extend(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
-            if not input_sent and BOOT_MARKER in output:
+            if not input_sent and boot_marker in output:
                 interaction.write_input(script.encode("utf-8"))
                 input_sent = True
             if input_sent and contains_output_line(output, completion_marker):
@@ -4122,6 +4123,7 @@ def capture_snapshot(
     profile_sink: list[dict[str, object]] | None = None,
     post_restore_script: str | None = None,
     log_path: Path | None = None,
+    boot_marker: bytes = BOOT_MARKER,
 ) -> tuple[float, float, float, int]:
     if snapshot_path.exists():
         shutil.rmtree(snapshot_path)
@@ -4207,7 +4209,7 @@ def capture_snapshot(
                 and contains_output_line(output, SNAPSHOT_GUEST_DISPATCH_MARKER)
             ):
                 snapshot_guest_dispatched_ns = time.perf_counter_ns()
-            if not boot_seen and BOOT_MARKER in output:
+            if not boot_seen and boot_marker in output:
                 boot_seen = True
                 if processors is None:
                     request_snapshot()

@@ -15,14 +15,17 @@ from nvx_tools import sandbox_lifecycle
 from nvx_tools.adversarial import configure_parser as configure_adversarial_parser
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
-    AlpineBuildConfig,
+    DistroLayerBuildConfig,
     DockerBuildConfig,
+    InitramfsBuildConfig,
     KernelBuildConfig,
+    build_distro_layer,
     build_docker_artifacts,
     build_initramfs,
     build_kernel,
     materialize_kernel_provenance_inputs,
     record_openvmm_provenance,
+    verify_guest_determinism,
 )
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
@@ -34,6 +37,9 @@ from nvx_tools.ci import (
 )
 from nvx_tools.collect_alpine_sources import (
     configure_parser as configure_alpine_sources_parser,
+)
+from nvx_tools.collect_ubuntu_sources import (
+    configure_parser as configure_ubuntu_sources_parser,
 )
 from nvx_tools.common import (
     BUILD_DIR,
@@ -47,6 +53,7 @@ from nvx_tools.common import (
 from nvx_tools.create_linux_source_archive import (
     configure_parser as configure_linux_source_archive_parser,
 )
+from nvx_tools.guests import GUEST_NAMES, guest_descriptor
 from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_parser
 from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.release import (
@@ -82,11 +89,13 @@ def _native_kernel() -> None:
     )
 
 
-def _native_initramfs() -> None:
+def _native_initramfs(guest: str) -> None:
+    descriptor = guest_descriptor(guest)
     build_initramfs(
-        AlpineBuildConfig(
-            work=BUILD_DIR / "initramfs-work",
-            output=artifact_path("initramfs.cpio.gz"),
+        InitramfsBuildConfig(
+            guest=descriptor.name,
+            work=BUILD_DIR / f"initramfs-{descriptor.name}-work",
+            output=artifact_path(descriptor.initramfs_name),
         )
     )
 
@@ -94,19 +103,45 @@ def _native_initramfs() -> None:
 def command_build_guest(args: argparse.Namespace) -> None:
     if args.native:
         _native_kernel()
-        _native_initramfs()
+        selected = GUEST_NAMES if args.guest == "all" else (args.guest,)
+        for guest in selected:
+            _native_initramfs(guest)
+        if args.guest == "all":
+            build_distro_layer(
+                DistroLayerBuildConfig(
+                    guest="ubuntu",
+                    work=BUILD_DIR / "ubuntu-distro-work",
+                    output=artifact_path("ubuntu-distro.erofs"),
+                    replace=True,
+                )
+            )
         return
 
     config = DockerBuildConfig(destination=BUILD_DIR)
-    build_docker_artifacts(config)
+    build_docker_artifacts(config, args.guest)
 
 
 def command_build_kernel(_: argparse.Namespace) -> None:
     _native_kernel()
 
 
-def command_build_initramfs(_: argparse.Namespace) -> None:
-    _native_initramfs()
+def command_build_initramfs(args: argparse.Namespace) -> None:
+    _native_initramfs(args.guest)
+
+
+def command_build_distro_layer(args: argparse.Namespace) -> None:
+    build_distro_layer(
+        DistroLayerBuildConfig(
+            guest=args.guest,
+            work=BUILD_DIR / f"{args.guest}-distro-work",
+            output=args.output,
+            replace=args.replace,
+        )
+    )
+
+
+def command_verify_guest_determinism(args: argparse.Namespace) -> None:
+    verify_guest_determinism(args.work_dir, args.guest)
 
 
 def command_build_openvmm(args: argparse.Namespace) -> None:
@@ -206,10 +241,15 @@ def command_run(args: argparse.Namespace) -> None:
         raise ScriptError("--restore-memory-mib requires --restore-snapshot")
     if args.memory_capacity_mib is not None and args.restore_snapshot is not None:
         raise ScriptError("--memory-capacity-mib is only valid for a fresh boot")
-    if (
-        args.memory_capacity_mib is not None
-        and args.memory_capacity_mib < args.memory_mib
-    ):
+    descriptor = guest_descriptor(args.guest)
+    if args.restore_snapshot is not None and descriptor.name != "alpine":
+        raise ScriptError(
+            "--guest is not accepted for restore; the snapshot already fixes the guest"
+        )
+    memory_mib = (
+        descriptor.default_memory_mib if args.memory_mib is None else args.memory_mib
+    )
+    if args.memory_capacity_mib is not None and args.memory_capacity_mib < memory_mib:
         raise ScriptError("--memory-capacity-mib cannot be below --memory-mib")
     if args.restore_processors is not None:
         if args.restore_processors > args.processors:
@@ -240,13 +280,13 @@ def command_run(args: argparse.Namespace) -> None:
     else:
         kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
         initrd = require_file(
-            artifact_path("initramfs.cpio.gz"),
-            "initramfs",
+            artifact_path(descriptor.initramfs_name),
+            f"{descriptor.distribution} initramfs",
         )
         command.extend(
             [
                 "--memory",
-                f"{args.memory_mib}M",
+                f"{memory_mib}M",
                 "--kernel",
                 str(kernel),
                 "--initrd",
@@ -288,6 +328,10 @@ def command_run(args: argparse.Namespace) -> None:
 
 def command_sandbox(args: argparse.Namespace) -> None:
     operation = args.sandbox_operation
+    if args.entrypoint in ("/sbin/init", "/usr/lib/systemd/systemd"):
+        raise ScriptError(
+            "systemd entrypoints are unsupported by the sandbox security profile"
+        )
     if args.outcome_report is not None and operation not in ("run", "exec"):
         raise ScriptError(
             "--outcome-report is only valid for one-shot run or managed exec"
@@ -437,7 +481,18 @@ def command_verify(_: argparse.Namespace) -> None:
     verify_source_tree()
 
 
-def _add_guest_options(parser: argparse.ArgumentParser) -> None:
+def _add_guest_options(
+    parser: argparse.ArgumentParser,
+    *,
+    allow_all: bool,
+) -> None:
+    choices = (*GUEST_NAMES, "all") if allow_all else GUEST_NAMES
+    parser.add_argument(
+        "--guest",
+        choices=choices,
+        default="alpine",
+        help="guest userland to build (default: alpine)",
+    )
     parser.add_argument(
         "--native",
         action="store_true",
@@ -453,7 +508,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     init.set_defaults(handler=command_init)
 
     guest = subparsers.add_parser("build-guest", help="build Linux guest artifacts")
-    _add_guest_options(guest)
+    _add_guest_options(guest, allow_all=True)
     guest.set_defaults(handler=command_build_guest)
 
     kernel = subparsers.add_parser(
@@ -464,9 +519,40 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     initramfs = subparsers.add_parser(
         "build-initramfs",
-        help="build an Alpine initramfs natively on Linux",
+        help="build a selected guest initramfs natively on Linux",
+    )
+    initramfs.add_argument(
+        "--guest",
+        choices=GUEST_NAMES,
+        default="alpine",
+        help="guest userland to build (default: alpine)",
     )
     initramfs.set_defaults(handler=command_build_initramfs)
+
+    distro_layer = subparsers.add_parser(
+        "build-distro-layer",
+        help="build a deterministic EROFS distro layer natively on Linux",
+    )
+    distro_layer.add_argument("--guest", choices=GUEST_NAMES, required=True)
+    distro_layer.add_argument(
+        "--output",
+        type=Path,
+        default=artifact_path("ubuntu-distro.erofs"),
+    )
+    distro_layer.add_argument("--replace", action="store_true")
+    distro_layer.set_defaults(handler=command_build_distro_layer)
+
+    determinism = subparsers.add_parser(
+        "verify-guest-determinism",
+        help="build Ubuntu guest artifacts twice and compare them",
+    )
+    determinism.add_argument("--guest", choices=GUEST_NAMES, required=True)
+    determinism.add_argument(
+        "--work-dir",
+        type=Path,
+        default=BUILD_DIR / "guest-determinism",
+    )
+    determinism.set_defaults(handler=command_verify_guest_determinism)
 
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")
     openvmm.add_argument("--skip-restore", action="store_true")
@@ -538,7 +624,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     configure_adversarial_parser(adversarial_tests)
 
     build = subparsers.add_parser("build", help="build guest artifacts and OpenVMM")
-    _add_guest_options(build)
+    _add_guest_options(build, allow_all=True)
     build.add_argument("--skip-restore", action="store_true")
     build.set_defaults(handler=command_build)
 
@@ -555,13 +641,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     download.set_defaults(handler=command_download)
 
     run = subparsers.add_parser("run", help="run an OpenVMM microVM")
+    run.add_argument("--guest", choices=GUEST_NAMES, default="alpine")
     run.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
     run.add_argument(
         "--machine",
         choices=("microvm",),
         default="microvm",
     )
-    run.add_argument("--memory-mib", type=int, default=128)
+    run.add_argument(
+        "--memory-mib",
+        type=int,
+        help="guest RAM; defaults to 128 MiB for Alpine and 256 MiB for Ubuntu",
+    )
     run.add_argument("--memory-capacity-mib", type=int)
     run.add_argument("--processors", type=int, choices=(1, 2, 4, 8), default=1)
     run.add_argument("--mount", help="GUEST_TARGET,HOST_PATH,ro|rw")
@@ -678,7 +769,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     sources = subparsers.add_parser(
         "collect-sources",
-        help="materialize verified Linux and Alpine release-source artifacts",
+        help="materialize verified Linux, Alpine, and Ubuntu release sources",
     )
     sources.set_defaults(handler=command_collect_sources)
 
@@ -687,6 +778,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="collect exact Alpine recipes and upstream sources",
     )
     configure_alpine_sources_parser(alpine_sources)
+
+    ubuntu_sources = subparsers.add_parser(
+        "collect-ubuntu-sources",
+        help="collect exact Ubuntu source packages",
+    )
+    configure_ubuntu_sources_parser(ubuntu_sources)
 
     linux_source_archive = subparsers.add_parser(
         "create-linux-source-archive",

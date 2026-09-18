@@ -164,16 +164,18 @@ Run all lint and formatting checks before submitting a change:
 ```bash
 python3 -m ruff check scripts benchmarks
 shellcheck --shell=sh \
-  alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-  alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/init guest/alpine/nvx-container-enter \
+  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/common/nvx-hostmount guest/common/nvx-init-agent \
+  guest/common/nvx-snapshot scripts/setup/setup-linux-mshv.sh
 python3 -m pyright --pythonplatform Linux
 python3 -m pyright --pythonplatform Windows
 python3 -m ruff format --check scripts benchmarks
 shfmt -d -ln posix -i 4 -ci \
-  alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-  alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/init guest/alpine/nvx-container-enter \
+  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/common/nvx-hostmount guest/common/nvx-init-agent \
+  guest/common/nvx-snapshot scripts/setup/setup-linux-mshv.sh
 ```
 
 Pyright runs in strict mode for both Linux and Windows platform APIs.
@@ -205,7 +207,8 @@ Apply the configured Python and POSIX shell formatters with:
 ```bash
 python3 -m ruff format scripts benchmarks
 shfmt -w -ln posix -i 4 -ci \
-  alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-  alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/init guest/alpine/nvx-container-enter \
+  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/common/nvx-hostmount guest/common/nvx-init-agent \
+  guest/common/nvx-snapshot scripts/setup/setup-linux-mshv.sh
 ```
