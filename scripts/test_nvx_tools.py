@@ -45,7 +45,7 @@ def _write_release_fixture(
     openvmm_dir = root / "openvmm"
     binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
     binary = openvmm_dir / "target" / "release" / binary_name
-    revision = "fc0e30ee394fa2f6a251f527825492637ef5ac4a"
+    revision = "0bc357bbcf3a654b63dfb51f1103c5751bf3d31f"
     guest_names = (
         "vmlinux",
         "vmlinux.config",
@@ -875,7 +875,7 @@ class BuildTests(unittest.TestCase):
             executable = openvmm_dir / "target" / "release" / "openvmm"
             executable.parent.mkdir(parents=True)
             executable.write_bytes(b"openvmm")
-            revision = b"fc0e30ee394fa2f6a251f527825492637ef5ac4a\n"
+            revision = b"0bc357bbcf3a654b63dfb51f1103c5751bf3d31f\n"
             results = [
                 common.CommandResult(("git",), 0, revision, b""),
                 common.CommandResult(("git",), 0, revision, b""),
