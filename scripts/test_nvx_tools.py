@@ -482,6 +482,7 @@ class CliTests(unittest.TestCase):
         with (
             patch.object(nvx, "require_file"),
             patch.object(nvx, "_run") as run,
+            patch.object(nvx, "_install_openvmm_release") as install,
         ):
             nvx.command_build_openvmm(argparse.Namespace(skip_restore=False))
 
@@ -497,19 +498,45 @@ class CliTests(unittest.TestCase):
                 cwd=common.OPENVMM_DIR,
             ),
         )
+        self.assertEqual(
+            run.call_args_list[1],
+            call(
+                [
+                    "cargo",
+                    "build",
+                    "--profile",
+                    "microvm-release",
+                    "-p",
+                    "openvmm",
+                    "--bin",
+                    "openvmm",
+                ],
+                cwd=common.OPENVMM_DIR,
+            ),
+        )
+        install.assert_called_once()
 
 
 class CiTests(unittest.TestCase):
-    def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
+    def test_openvmm_tests_use_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             openvmm = root / "openvmm"
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
+            kernel = root / "vmlinux"
+            initrd = root / "initramfs.cpio.gz"
+            kernel.touch()
+            initrd.touch()
             backend = "whp" if os.name == "nt" else "kvm"
 
             with (
                 patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(
+                    ci,
+                    "artifact_path",
+                    side_effect=[kernel, initrd],
+                ),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
@@ -517,8 +544,6 @@ class CiTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "OPENVMM_MICROVM_PVH_KERNEL": "nvx-kernel",
-                        "OPENVMM_MICROVM_PVH_INITRD": "nvx-initrd",
                         "PETRI_CAPABILITIES": "vpci",
                         "RUNNER_TEMP": os.fspath(root),
                     },
@@ -541,11 +566,19 @@ class CiTests(unittest.TestCase):
             filter_index = command.index("--filter")
             self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
             self.assertIn(
-                "test_ttrpc_microvm_pvh_snapshot",
+                "test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
                 ci.OPENVMM_MICROVM_TEST_FILTER,
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
-            self.assertNotIn("env", tests.kwargs)
+            self.assertEqual(
+                tests.kwargs["env"]["OPENVMM_MICROVM_TEST_KERNEL"],
+                os.fspath(kernel.resolve()),
+            )
+            self.assertEqual(
+                tests.kwargs["env"]["OPENVMM_MICROVM_TEST_INITRD"],
+                os.fspath(initrd.resolve()),
+            )
+            self.assertEqual(tests.kwargs["env"]["PETRI_CAPABILITIES"], "vpci")
             if os.name == "nt":
                 self.assertEqual(
                     command[command.index("--dir") + 1],

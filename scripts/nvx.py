@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -37,6 +38,7 @@ from nvx_tools.common import (
     artifact_path,
     openvmm_binary_path,
     require_file,
+    require_tool,
 )
 from nvx_tools.create_linux_source_archive import (
     configure_parser as configure_linux_source_archive_parser,
@@ -54,6 +56,7 @@ from nvx_tools.sandbox import SandboxLaunch, SandboxLayer, parse_workload_identi
 DEFAULT_RELEASE_REPOSITORY = "microsoft/nvx"
 HYPERVISORS = ("auto", "whp", "kvm", "mshv")
 NETWORK_PROFILES = ("portable",)
+OPENVMM_MICROVM_RELEASE_PROFILE = "microvm-release"
 
 
 def _run(args: list[str | os.PathLike[str]], *, cwd: Path = REPO_ROOT) -> None:
@@ -102,6 +105,38 @@ def command_build_initramfs(_: argparse.Namespace) -> None:
     _native_initramfs()
 
 
+def _install_openvmm_release(source: Path) -> None:
+    destination = openvmm_binary_path()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        shutil.copy2(source, destination)
+        pdb = source.with_suffix(".pdb")
+        if pdb.is_file():
+            shutil.copy2(pdb, destination.with_suffix(".pdb"))
+        return
+
+    objcopy = require_tool("objcopy", "GNU objcopy is required to stage OpenVMM")
+    debug = destination.with_name(f"{destination.name}.dbg")
+    temporary = destination.with_name(f"{destination.name}.tmp")
+    temporary.unlink(missing_ok=True)
+    try:
+        _run([objcopy, "--only-keep-debug", source, debug])
+        _run(
+            [
+                objcopy,
+                "--strip-all",
+                "--keep-section=.build_info",
+                f"--add-gnu-debuglink={debug}",
+                source,
+                temporary,
+            ]
+        )
+        shutil.copymode(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def command_build_openvmm(args: argparse.Namespace) -> None:
     require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
     if not args.skip_restore:
@@ -110,9 +145,24 @@ def command_build_openvmm(args: argparse.Namespace) -> None:
             cwd=OPENVMM_DIR,
         )
     _run(
-        ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
+        [
+            "cargo",
+            "build",
+            "--profile",
+            OPENVMM_MICROVM_RELEASE_PROFILE,
+            "-p",
+            "openvmm",
+            "--bin",
+            "openvmm",
+        ],
         cwd=OPENVMM_DIR,
     )
+    suffix = ".exe" if os.name == "nt" else ""
+    source = require_file(
+        OPENVMM_DIR / "target" / OPENVMM_MICROVM_RELEASE_PROFILE / f"openvmm{suffix}",
+        "optimized OpenVMM binary",
+    )
+    _install_openvmm_release(source)
 
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
@@ -200,7 +250,7 @@ def command_run(args: argparse.Namespace) -> None:
         if args.restore_ready_path is not None:
             command.extend(["--restore-ready-path", str(args.restore_ready_path)])
     else:
-        kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+        kernel = require_file(artifact_path("vmlinux"), "Linux direct kernel")
         initrd = require_file(
             artifact_path("initramfs.cpio.gz"),
             "initramfs",
@@ -333,7 +383,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
     assert operation == "run"
     assert launch is not None
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+    kernel = require_file(artifact_path("vmlinux"), "Linux direct kernel")
     initrd = require_file(
         artifact_path("initramfs.cpio.gz"),
         "initramfs",

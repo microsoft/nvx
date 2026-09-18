@@ -10,6 +10,7 @@ from pathlib import Path
 from .common import (
     OPENVMM_DIR,
     ScriptError,
+    artifact_path,
     download,
     require_file,
     require_tool,
@@ -25,8 +26,7 @@ ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
 OPENVMM_GUEST_RUST_TARGET = "x86_64-unknown-none"
 OPENVMM_MICROVM_TEST_FILTER = (
-    "test(openvmm_microvm_test_pvh_x64_phase_1_lifecycle) + "
-    "test(test_ttrpc_microvm_pvh_snapshot)"
+    "test(test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot)"
 )
 
 
@@ -58,6 +58,14 @@ def run_openvmm_tests(backend: str) -> None:
     require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
     cargo = require_tool("cargo")
     rustup = require_tool("rustup")
+    kernel = require_file(
+        artifact_path("vmlinux"),
+        "microVM Linux direct kernel",
+    )
+    initrd = require_file(
+        artifact_path("initramfs.cpio.gz"),
+        "microVM Alpine initramfs",
+    )
 
     run_checked([rustup, "target", "add", OPENVMM_GUEST_RUST_TARGET])
     run_checked(
@@ -83,7 +91,10 @@ def run_openvmm_tests(backend: str) -> None:
                 ),
             )
         )
-    run_checked(command, cwd=OPENVMM_DIR)
+    test_env = os.environ.copy()
+    test_env["OPENVMM_MICROVM_TEST_KERNEL"] = os.fspath(kernel.resolve())
+    test_env["OPENVMM_MICROVM_TEST_INITRD"] = os.fspath(initrd.resolve())
+    run_checked(command, cwd=OPENVMM_DIR, env=test_env)
 
 
 def setup_cross_os_cache() -> None:

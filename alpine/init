@@ -310,10 +310,14 @@ case " $(cat /proc/cmdline) " in
         # ---- on restore, execution resumes here ----
         ;;
 esac
+echo "ALPINE-MICROVM-BOOT-OK"
 echo
 echo "=========================================="
-echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
-echo " uname: $(uname -a)"
+alpine_release=unknown
+IFS= read -r alpine_release </etc/alpine-release || true
+echo " release: $alpine_release"
+printf " uname: "
+uname -a
 echo "=========================================="
 echo
 restore_probe=$(sed -n 's/.*nvx_virtio_restore_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
