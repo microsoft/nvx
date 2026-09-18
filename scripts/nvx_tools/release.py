@@ -615,7 +615,13 @@ def verify_source_tree() -> None:
     config_path = REPO_ROOT / "kernel" / "config-microvm"
     config = config_path.read_text(encoding="utf-8")
     for setting in (
-        "CONFIG_PVH=y",
+        "# CONFIG_ACPI is not set",
+        "# CONFIG_PVH is not set",
+        "CONFIG_X86_MPPARSE=y",
+        "CONFIG_X86_LOCAL_APIC=y",
+        "CONFIG_X86_IO_APIC=y",
+        "CONFIG_VIRTIO_MMIO=y",
+        "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
         "CONFIG_HVC_XE9=y",
         "CONFIG_VIRTIO_FS=y",
         "CONFIG_FUSE_FS=y",
@@ -633,7 +639,13 @@ def verify_source_tree() -> None:
     if generated_config.is_file():
         generated = generated_config.read_text(encoding="utf-8").splitlines()
         for setting in (
-            "CONFIG_PVH=y",
+            "# CONFIG_ACPI is not set",
+            "# CONFIG_PVH is not set",
+            "CONFIG_X86_MPPARSE=y",
+            "CONFIG_X86_LOCAL_APIC=y",
+            "CONFIG_X86_IO_APIC=y",
+            "CONFIG_VIRTIO_MMIO=y",
+            "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
             "CONFIG_HVC_XE9=y",
             *REQUIRED_SANDBOX_KERNEL_CONFIG,
         ):

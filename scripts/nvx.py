@@ -200,7 +200,7 @@ def command_run(args: argparse.Namespace) -> None:
         if args.restore_ready_path is not None:
             command.extend(["--restore-ready-path", str(args.restore_ready_path)])
     else:
-        kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+        kernel = require_file(artifact_path("vmlinux"), "Linux direct kernel")
         initrd = require_file(
             artifact_path("initramfs.cpio.gz"),
             "initramfs",
@@ -333,7 +333,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
     assert operation == "run"
     assert launch is not None
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+    kernel = require_file(artifact_path("vmlinux"), "Linux direct kernel")
     initrd = require_file(
         artifact_path("initramfs.cpio.gz"),
         "initramfs",

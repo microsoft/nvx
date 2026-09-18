@@ -334,6 +334,19 @@ def _available_tcp_address() -> tuple[str, int]:
         return str(host), int(port)
 
 
+def _bind_tcp_udp_pair() -> tuple[socket.socket, socket.socket]:
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        udp.bind(("127.0.0.1", 0))
+        tcp.bind(("0.0.0.0", int(udp.getsockname()[1])))
+    except Exception:
+        tcp.close()
+        udp.close()
+        raise
+    return tcp, udp
+
+
 def _persist_console_log(
     console: TcpConsole | None,
     output: bytes,
@@ -1307,10 +1320,9 @@ def run_host_loopback_policy(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    denied_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    denied_general, denied_general_udp = _bind_tcp_udp_pair()
+    proxy, proxy_udp = _bind_tcp_udp_pair()
     for listener in (denied_general, proxy):
-        listener.bind(("0.0.0.0", 0))
         listener.listen(1)
         listener.settimeout(timeout)
     denied_general_port = int(denied_general.getsockname()[1])
@@ -1328,12 +1340,9 @@ def run_host_loopback_policy(
         name="nvx-host-loopback-proxy",
         daemon=True,
     )
-    denied_udp: list[socket.socket] = []
+    denied_udp = [proxy_udp, denied_general_udp]
     try:
-        for port in (proxy_port, denied_general_port):
-            listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            denied_udp.append(listener)
-            listener.bind(("127.0.0.1", port))
+        for listener in denied_udp:
             listener.settimeout(0.25)
         control_command = workload_boot_command(
             executable,
@@ -3356,7 +3365,7 @@ def run_snapshot_tiers(
 def run(args: argparse.Namespace) -> int:
     validate_openvmm_test_backend(args.backend)
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "microVM PVH kernel")
+    kernel = require_file(artifact_path("vmlinux"), "microVM Linux direct kernel")
     initrd = require_file(
         artifact_path("initramfs.cpio.gz"),
         "microVM Alpine initramfs",

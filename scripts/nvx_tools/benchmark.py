@@ -5265,7 +5265,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
     executable = None
     if run_guest:
         artifact_dir = args.nvx_dir.resolve() / "build"
-        kernel = require_file(artifact_dir / "vmlinux", "NVX PVH kernel")
+        kernel = require_file(artifact_dir / "vmlinux", "NVX Linux direct kernel")
         initrd = require_file(
             artifact_dir / "initramfs.cpio.gz",
             "NVX initramfs",
@@ -5719,7 +5719,7 @@ def run(args: argparse.Namespace) -> int:
     initrd = None
     if run_guest:
         nvx_dir = args.nvx_dir.resolve()
-        kernel = require_file(nvx_dir / "build" / "vmlinux", "NVX PVH kernel")
+        kernel = require_file(nvx_dir / "build" / "vmlinux", "NVX Linux direct kernel")
         initrd = require_file(
             nvx_dir / "build" / "initramfs.cpio.gz",
             "NVX initramfs",
