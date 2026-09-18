@@ -228,16 +228,22 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           binary-path: ${{ matrix.binary }}
 
-      - name: Upload OpenVMM binary and provenance
+      - name: Upload OpenVMM executable
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.binary }}
-            build/openvmm.provenance.json
+          name: ${{ matrix.artifact }}-executable
+          path: ${{ matrix.binary }}
           if-no-files-found: error
           compression-level: 0
-          overwrite: true
+          retention-days: 1
+
+      - name: Upload OpenVMM provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}-provenance
+          path: build/openvmm.provenance.json
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 1
 
   openvmm-tests:
@@ -566,12 +572,17 @@ jobs:
           name: guest-artifacts
           path: build
 
-      - name: Download OpenVMM binary and provenance
+      - name: Download OpenVMM executable
         uses: actions/download-artifact@v8
         with:
-          name: ${{ matrix.openvmm-artifact }}
-          # Preserve the artifact's build/ and openvmm/ directory layout.
-          path: .
+          name: ${{ matrix.openvmm-artifact }}-executable
+          path: openvmm/target/release
+
+      - name: Download OpenVMM provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.openvmm-artifact }}-provenance
+          path: build
 
       - name: Make OpenVMM executable
         if: runner.os != 'Windows'
@@ -692,12 +703,17 @@ jobs:
         shell: powershell
         run: python scripts\nvx.py verify
 
-      - name: Download OpenVMM binary and provenance
+      - name: Download OpenVMM executable
         uses: actions/download-artifact@v8
         with:
-          name: ${{ matrix.openvmm-artifact }}
-          # Preserve the artifact's build/ and openvmm/ directory layout.
-          path: .
+          name: ${{ matrix.openvmm-artifact }}-executable
+          path: openvmm/target/release
+
+      - name: Download OpenVMM provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.openvmm-artifact }}-provenance
+          path: build
 
       - name: Make OpenVMM executable
         if: runner.os != 'Windows'

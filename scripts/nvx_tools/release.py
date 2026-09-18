@@ -16,11 +16,12 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-from .archive import create_reproducible_tar_gz
+from .archive import create_reproducible_release_archive, create_reproducible_tar_gz
 from .build import (
     CONTROL_CONTRACT_REVISION,
     CONTROL_SESSION_PROTOCOL_VERSION,
@@ -104,6 +105,23 @@ class _GitHubReleaseQueryError(ScriptError):
 
 class _ReleaseRestoreError(ScriptError):
     """Raised when release publication and restoration both fail."""
+
+
+def create_release_archive(source: Path, destination: Path) -> None:
+    source = source.resolve()
+    destination = destination.resolve()
+    if destination == source or source in destination.parents:
+        raise ScriptError("release archive destination must be outside its source")
+    verify_sha256_sums(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.with_name(f".staging-{uuid.uuid4().hex}-{destination.name}")
+    try:
+        create_reproducible_release_archive(source, staging)
+        verify_sha256_sums(source)
+        staging.replace(destination)
+    finally:
+        staging.unlink(missing_ok=True)
+    print(f">> archived {source} as {destination}")
 
 
 def _github_headers(token: str | None, accept: str) -> dict[str, str]:

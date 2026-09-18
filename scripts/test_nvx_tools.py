@@ -837,7 +837,11 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("artifact: openvmm-linux-musl", workflow)
         self.assertIn("artifact: openvmm-windows-msvc", workflow)
         self.assertIn("build/openvmm.provenance.json", workflow)
-        self.assertIn("path: .", workflow)
+        self.assertIn("name: ${{ matrix.artifact }}-executable", workflow)
+        self.assertIn("name: ${{ matrix.artifact }}-provenance", workflow)
+        self.assertIn("path: openvmm/target/release", workflow)
+        self.assertIn("path: build", workflow)
+        self.assertNotIn("path: .", workflow)
         self.assertIn("uses: actions/download-artifact@v8", workflow)
         self.assertIn("openvmm-binary-v5-", build_action)
         self.assertNotIn("openvmm-binary-v4-", build_action)
@@ -847,6 +851,27 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("cargo-v2-", build_action)
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
+
+    def test_release_actions_use_deterministic_immutable_tooling(self):
+        package_action = (
+            common.REPO_ROOT / ".github" / "actions" / "package-release" / "action.yml"
+        ).read_text(encoding="utf-8")
+        publish_action = (
+            common.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "publish-development-release"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(package_action.count("archive-release"), 2)
+        self.assertNotIn("tar -czf", package_action)
+        self.assertNotIn("Compress-Archive", package_action)
+        self.assertIn(
+            "python3 -u scripts/publish_development_release.py",
+            publish_action,
+        )
+        self.assertNotIn("--clobber", publish_action)
 
     def test_ci_artifact_actions_use_node24(self):
         configurations = "\n".join(
@@ -3351,6 +3376,25 @@ class BenchmarkTests(unittest.TestCase):
             force=True,
         )
 
+    def test_archive_release_command_forwards_paths(self):
+        args = nvx.parse_args(
+            [
+                "archive-release",
+                "--source",
+                "dist/package",
+                "--destination",
+                "dist/package.zip",
+            ]
+        )
+
+        with patch.object(nvx, "create_release_archive") as create_archive:
+            args.handler(args)
+
+        create_archive.assert_called_once_with(
+            Path("dist/package"),
+            Path("dist/package.zip"),
+        )
+
     def test_download_command_selects_host_release(self):
         args = nvx.parse_args(["download", "--repository", "example/nvx"])
         expected_platform = "windows-whp" if os.name == "nt" else "linux-kvm"
@@ -4176,6 +4220,168 @@ class SharedFileTests(unittest.TestCase):
 
             with self.assertRaisesRegex(common.ScriptError, "checksum mismatch"):
                 common.verify_sha256_sums(root)
+
+    def test_checksum_manifest_rejects_unlisted_tampered_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "bin" / "openvmm"
+            provenance = root / "provenance" / "openvmm.provenance.json"
+            payload.parent.mkdir()
+            provenance.parent.mkdir()
+            payload.write_bytes(b"openvmm")
+            provenance.write_bytes(b"original provenance")
+            common.write_sha256_sums(root)
+            checksum_file = root / "SHA256SUMS"
+            checksum_file.write_text(
+                "\n".join(
+                    line
+                    for line in checksum_file.read_text(encoding="ascii").splitlines()
+                    if not line.endswith("provenance/openvmm.provenance.json")
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            provenance.write_bytes(b"tampered provenance")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "unlisted file.*openvmm.provenance.json",
+            ):
+                common.verify_sha256_sums(root)
+
+    def test_checksum_manifest_rejects_missing_and_duplicate_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "payload"
+            payload.write_bytes(b"payload")
+            common.write_sha256_sums(root)
+            checksum_file = root / "SHA256SUMS"
+            line = checksum_file.read_text(encoding="ascii")
+
+            payload.unlink()
+            with self.assertRaisesRegex(common.ScriptError, "invalid checksum path"):
+                common.verify_sha256_sums(root)
+
+            payload.write_bytes(b"payload")
+            checksum_file.write_text(line + line, encoding="ascii")
+            with self.assertRaisesRegex(common.ScriptError, "duplicate checksum path"):
+                common.verify_sha256_sums(root)
+
+    def test_checksum_manifest_rejects_unsafe_paths_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "payload"
+            payload.write_bytes(b"payload")
+            common.write_sha256_sums(root)
+            checksum_file = root / "SHA256SUMS"
+            checksum = hashlib.sha256(b"payload").hexdigest()
+            checksum_file.write_text(
+                f"{checksum}  ../payload\n",
+                encoding="ascii",
+            )
+            with self.assertRaisesRegex(common.ScriptError, "malformed checksum line"):
+                common.verify_sha256_sums(root)
+
+            common.write_sha256_sums(root)
+            link = root / "payload-link"
+            try:
+                link.symlink_to(payload)
+            except OSError as error:
+                self.skipTest(f"symlinks are unavailable: {error}")
+            with self.assertRaisesRegex(common.ScriptError, "symlink is not allowed"):
+                common.verify_sha256_sums(root)
+
+    def test_release_archives_are_reproducible_with_fixed_layout_and_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-1.0.0-test"
+            executable = source / "bin" / "openvmm"
+            data = source / "provenance" / "openvmm.provenance.json"
+            executable.parent.mkdir(parents=True)
+            data.parent.mkdir()
+            executable.write_bytes(b"openvmm")
+            data.write_bytes(b"provenance")
+            executable.chmod(0o755)
+            data.chmod(0o644)
+            common.write_sha256_sums(source)
+
+            for suffix in (".tar.gz", ".zip"):
+                with self.subTest(suffix=suffix):
+                    first = root / f"first{suffix}"
+                    second = root / f"second{suffix}"
+                    release.create_release_archive(source, first)
+                    os.utime(executable, (1000, 1000))
+                    release.create_release_archive(source, second)
+                    self.assertEqual(first.read_bytes(), second.read_bytes())
+
+                    if suffix == ".tar.gz":
+                        with tarfile.open(first, "r:gz") as package:
+                            member_list = package.getmembers()
+                            members = {member.name: member for member in member_list}
+                        self.assertEqual(
+                            [member.name for member in member_list],
+                            sorted(member.name for member in member_list),
+                        )
+                        self.assertEqual(
+                            {member.name for member in member_list if member.isfile()},
+                            {
+                                f"{source.name}/SHA256SUMS",
+                                f"{source.name}/bin/openvmm",
+                                (f"{source.name}/provenance/openvmm.provenance.json"),
+                            },
+                        )
+                        self.assertEqual(
+                            members[f"{source.name}/bin/openvmm"].mode,
+                            0o755,
+                        )
+                        self.assertEqual(
+                            members[
+                                f"{source.name}/provenance/openvmm.provenance.json"
+                            ].mode,
+                            0o644,
+                        )
+                        self.assertTrue(
+                            all(member.mtime == 0 for member in members.values())
+                        )
+                    else:
+                        with zipfile.ZipFile(first) as package:
+                            member_list = package.infolist()
+                            members = {
+                                member.filename: member for member in member_list
+                            }
+                        self.assertEqual(
+                            [member.filename for member in member_list],
+                            sorted(member.filename for member in member_list),
+                        )
+                        self.assertEqual(
+                            {
+                                member.filename
+                                for member in member_list
+                                if not member.is_dir()
+                            },
+                            {
+                                f"{source.name}/SHA256SUMS",
+                                f"{source.name}/bin/openvmm",
+                                (f"{source.name}/provenance/openvmm.provenance.json"),
+                            },
+                        )
+                        executable_mode = (
+                            members[f"{source.name}/bin/openvmm"].external_attr >> 16
+                        ) & 0o777
+                        data_mode = (
+                            members[
+                                f"{source.name}/provenance/openvmm.provenance.json"
+                            ].external_attr
+                            >> 16
+                        ) & 0o777
+                        self.assertEqual(executable_mode, 0o755)
+                        self.assertEqual(data_mode, 0o644)
+                        self.assertTrue(
+                            all(
+                                member.date_time == (1980, 1, 1, 0, 0, 0)
+                                for member in members.values()
+                            )
+                        )
 
     def test_source_archives_are_reproducible(self):
         with tempfile.TemporaryDirectory() as temporary:

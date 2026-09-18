@@ -361,12 +361,10 @@ def _upload_expected_asset(
                 f"({_verification_description(existing, local)}); skipping upload"
             )
             return
-        if not release.draft:
-            raise ScriptError(
-                f"published release asset {local.name} is invalid: {mismatch}"
-            )
-        print(f">> {local.name}: removing mismatched asset ({mismatch})")
-        _delete_development_release_asset(repository, tag, local.name)
+        raise ScriptError(
+            f"development release asset {local.name} already exists but is invalid: "
+            f"{mismatch}; refusing to replace it"
+        )
     elif not release.draft:
         raise ScriptError(f"published release is missing required asset {local.name}")
 
@@ -411,6 +409,12 @@ def _upload_expected_asset(
                 f"release {tag} was published before {local.name} was verified"
             )
         if observed is not None:
+            if result.returncode != 0:
+                raise ScriptError(
+                    f"upload attempt for {local.name} encountered an invalid asset: "
+                    f"{mismatch}; refusing to delete it because upload ownership "
+                    "is uncertain"
+                )
             print(f">> {local.name}: removing failed upload ({mismatch})")
             _delete_development_release_asset(repository, tag, local.name)
 

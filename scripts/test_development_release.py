@@ -207,7 +207,7 @@ class DevelopmentReleaseTests(unittest.TestCase):
         )
         self.assertEqual(commands[-1][:2], ("release", "edit"))
 
-    def test_mismatched_asset_is_replaced_independently(self):
+    def test_mismatched_existing_asset_is_rejected_without_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
             local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
             target = "a" * 40
@@ -216,7 +216,40 @@ class DevelopmentReleaseTests(unittest.TestCase):
                 target,
                 [self._remote_asset(local, digest=f"sha256:{'0' * 64}")],
             )
+            with (
+                patch.object(
+                    development_release,
+                    "_query_development_release",
+                    return_value=mismatched,
+                ),
+                patch.object(development_release, "_run_gh") as run,
+                patch("sys.stdout", io.StringIO()),
+                self.assertRaisesRegex(
+                    development_release.ScriptError,
+                    "already exists but is invalid.*refusing to replace",
+                ),
+            ):
+                development_release._upload_expected_asset(
+                    "example/nvx",
+                    "v1",
+                    local,
+                    attempts=3,
+                    timeout_seconds=180,
+                    retry_backoff_seconds=10,
+                )
+
+        run.assert_not_called()
+
+    def test_failed_asset_created_by_successful_attempt_is_cleaned_up(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
+            target = "a" * 40
             empty = self._release("v1", target, [])
+            mismatched = self._release(
+                "v1",
+                target,
+                [self._remote_asset(local, state="new")],
+            )
             complete = self._release(
                 "v1",
                 target,
@@ -226,13 +259,14 @@ class DevelopmentReleaseTests(unittest.TestCase):
                 patch.object(
                     development_release,
                     "_query_development_release",
-                    side_effect=[mismatched, empty, complete],
+                    side_effect=[empty, mismatched, empty, complete],
                 ),
                 patch.object(
                     development_release,
                     "_run_gh",
-                    side_effect=[self._result(), self._result()],
+                    side_effect=[self._result(), self._result(), self._result()],
                 ) as run,
+                patch.object(development_release.time, "sleep") as sleep,
                 patch("sys.stdout", io.StringIO()),
             ):
                 development_release._upload_expected_asset(
@@ -245,10 +279,56 @@ class DevelopmentReleaseTests(unittest.TestCase):
                 )
 
         commands = [tuple(item.args[0]) for item in run.call_args_list]
-        self.assertEqual(commands[0][:2], ("release", "delete-asset"))
-        self.assertEqual(commands[0][3], local.name)
-        self.assertEqual(commands[1][:2], ("release", "upload"))
-        self.assertNotIn("--clobber", commands[1])
+        self.assertEqual(
+            [command[:2] for command in commands],
+            [
+                ("release", "upload"),
+                ("release", "delete-asset"),
+                ("release", "upload"),
+            ],
+        )
+        sleep.assert_called_once_with(10)
+
+    def test_failed_upload_does_not_delete_asset_with_uncertain_ownership(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
+            target = "a" * 40
+            empty = self._release("v1", target, [])
+            mismatched = self._release(
+                "v1",
+                target,
+                [self._remote_asset(local, state="new")],
+            )
+            with (
+                patch.object(
+                    development_release,
+                    "_query_development_release",
+                    side_effect=[empty, mismatched],
+                ),
+                patch.object(
+                    development_release,
+                    "_run_gh",
+                    return_value=self._result(124, timed_out=True),
+                ) as run,
+                patch.object(development_release.time, "sleep") as sleep,
+                patch("sys.stdout", io.StringIO()),
+                self.assertRaisesRegex(
+                    development_release.ScriptError,
+                    "ownership is uncertain",
+                ),
+            ):
+                development_release._upload_expected_asset(
+                    "example/nvx",
+                    "v1",
+                    local,
+                    attempts=3,
+                    timeout_seconds=180,
+                    retry_backoff_seconds=10,
+                )
+
+        command = tuple(run.call_args.args[0])
+        self.assertEqual(command[:2], ("release", "upload"))
+        sleep.assert_not_called()
 
     def test_timed_out_client_detects_server_side_upload(self):
         with tempfile.TemporaryDirectory() as temporary:

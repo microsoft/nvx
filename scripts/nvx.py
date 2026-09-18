@@ -46,6 +46,7 @@ from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_p
 from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.release import (
     collect_release_sources,
+    create_release_archive,
     download_latest_release,
     package_release,
     verify_source_tree,
@@ -397,6 +398,10 @@ def command_package(args: argparse.Namespace) -> None:
     )
 
 
+def command_archive_release(args: argparse.Namespace) -> None:
+    create_release_archive(args.source, args.destination)
+
+
 def command_verify(_: argparse.Namespace) -> None:
     verify_source_tree()
 
@@ -634,6 +639,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     package.add_argument("--force", action="store_true")
     package.set_defaults(handler=command_package)
+
+    archive_release = subparsers.add_parser(
+        "archive-release",
+        help="create a deterministic archive from a staged distribution",
+    )
+    archive_release.add_argument("--source", type=Path, required=True)
+    archive_release.add_argument("--destination", type=Path, required=True)
+    archive_release.set_defaults(handler=command_archive_release)
 
     verify = subparsers.add_parser("verify", help="verify source and submodule inputs")
     verify.set_defaults(handler=command_verify)

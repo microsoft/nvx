@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
+import stat
 import subprocess
 import urllib.error
 import urllib.parse
@@ -12,7 +14,7 @@ import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPMessage
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -115,20 +117,56 @@ def write_sha256_sums(directory: Path) -> None:
 
 def verify_sha256_sums(directory: Path) -> None:
     checksum_file = require_file(directory / "SHA256SUMS", "source checksums")
-    root = directory.resolve()
+    if checksum_file.is_symlink() or not stat.S_ISREG(checksum_file.stat().st_mode):
+        raise ScriptError(f"source checksums must be a regular file: {checksum_file}")
+
+    packaged_files: set[str] = set()
+    for path in directory.rglob("*"):
+        file_stat = path.lstat()
+        relative = path.relative_to(directory).as_posix()
+        if stat.S_ISLNK(file_stat.st_mode):
+            raise ScriptError(f"symlink is not allowed in checksummed tree: {relative}")
+        if stat.S_ISDIR(file_stat.st_mode):
+            continue
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ScriptError(
+                f"special file is not allowed in checksummed tree: {relative}"
+            )
+        if relative != "SHA256SUMS":
+            packaged_files.add(relative)
+
+    listed_files: set[str] = set()
     for line in checksum_file.read_text(encoding="ascii").splitlines():
         expected, separator, relative = line.partition("  ")
-        if not separator:
+        path = PurePosixPath(relative)
+        if (
+            not separator
+            or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+            or not relative
+            or "\\" in relative
+            or path.is_absolute()
+            or "." in path.parts
+            or ".." in path.parts
+            or path.as_posix() != relative
+            or (path.parts and path.parts[0].endswith(":"))
+            or relative == "SHA256SUMS"
+        ):
             raise ScriptError(f"malformed checksum line in {checksum_file}: {line}")
-        path = (directory / relative).resolve()
-        if root not in path.parents or not path.is_file():
+        if relative in listed_files:
+            raise ScriptError(f"duplicate checksum path in {checksum_file}: {relative}")
+        listed_files.add(relative)
+        packaged_path = directory.joinpath(*path.parts)
+        if relative not in packaged_files:
             raise ScriptError(f"invalid checksum path in {checksum_file}: {relative}")
-        actual = sha256_file(path)
+        actual = sha256_file(packaged_path)
         if actual != expected:
             raise ScriptError(
                 f"source checksum mismatch for {relative}: {actual}, "
                 f"expected {expected}"
             )
+    unlisted = sorted(packaged_files - listed_files)
+    if unlisted:
+        raise ScriptError(f"unlisted file in checksummed tree: {unlisted[0]}")
 
 
 def run_checked(
