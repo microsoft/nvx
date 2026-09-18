@@ -74,7 +74,9 @@ LIFECYCLE_BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
 LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 LIFECYCLE_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
 LIFECYCLE_STABILITY_MINIMUM_SAMPLES = 10
+LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES = 2
 LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 = 1.25
+LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP = 1.25
 UNSTABLE_LIFECYCLE_EXIT_CODE = 75
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -948,6 +950,29 @@ def _validate_snapshot_generation_stability(
             f"{backend}.samples_ms: p50 {p50:.3f} ms is "
             f"{(ratio - 1) * 100:.1f}% above p25 {p25:.3f} ms "
             f"(limit {(LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 - 1) * 100:.1f}%); "
+            "rerun on an idle host"
+        )
+
+    cluster_gaps = (
+        (
+            ordered[split_index] / ordered[split_index - 1],
+            split_index,
+            ordered[split_index - 1],
+            ordered[split_index],
+        )
+        for split_index in range(
+            LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES,
+            len(ordered) - LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES + 1,
+        )
+    )
+    gap_ratio, split_index, lower, upper = max(cluster_gaps)
+    if gap_ratio > LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP:
+        raise UnstablePerformanceError(
+            f"unstable snapshot generation at {source}:snapshot_capture."
+            f"{backend}.samples_ms: samples split {split_index}/"
+            f"{len(ordered) - split_index} between {lower:.3f} ms and "
+            f"{upper:.3f} ms ({(gap_ratio - 1) * 100:.1f}% gap, "
+            f"limit {(LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP - 1) * 100:.1f}%); "
             "rerun on an idle host"
         )
 

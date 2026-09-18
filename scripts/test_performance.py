@@ -431,6 +431,18 @@ class PerformanceTests(unittest.TestCase):
             1233.186,
             747.7988,
         ]
+        minority_fast_path = [
+            763.3528,
+            1219.9358,
+            1242.3189,
+            1256.6633,
+            1275.0555,
+            1274.4436,
+            737.5818,
+            1257.1264,
+            1240.7679,
+            1231.9344,
+        ]
         uniformly_slow = [1200.0 + index for index in range(10)]
         fast_outliers = [
             3.975,
@@ -444,11 +456,29 @@ class PerformanceTests(unittest.TestCase):
             3.741,
             3.919,
         ]
-        for name, samples, rejected in (
-            ("host-stall", unstable, True),
-            ("pooled-runner-stall", pooled_runner_stall, True),
-            ("uniform-slowdown", uniformly_slow, False),
-            ("two-fast-outliers", fast_outliers, False),
+        single_slow_outlier = [
+            809.1277,
+            805.7773,
+            1399.4701,
+            772.9118,
+            784.0111,
+            742.691,
+            760.8222,
+            762.4693,
+            746.5348,
+            733.4866,
+        ]
+        for name, samples, error_pattern in (
+            ("host-stall", unstable, r"p25.*idle host"),
+            ("pooled-runner-stall", pooled_runner_stall, r"p25.*idle host"),
+            (
+                "minority-fast-path",
+                minority_fast_path,
+                r"split 2/8.*59\.8% gap.*idle host",
+            ),
+            ("uniform-slowdown", uniformly_slow, None),
+            ("two-fast-outliers", fast_outliers, None),
+            ("single-slow-outlier", single_slow_outlier, None),
         ):
             with self.subTest(name=name):
                 document = lifecycle_document("whp")
@@ -465,10 +495,10 @@ class PerformanceTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temporary:
                     source = Path(temporary) / "acceptance.json"
                     source.write_text(json.dumps(document), encoding="utf-8")
-                    if rejected:
+                    if error_pattern is not None:
                         with self.assertRaisesRegex(
                             performance.UnstablePerformanceError,
-                            r"unstable snapshot generation.*p25.*idle host",
+                            rf"unstable snapshot generation.*{error_pattern}",
                         ):
                             performance.read_lifecycle_data(
                                 "windows-whp-virtual-machine", source
