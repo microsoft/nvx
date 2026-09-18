@@ -75,6 +75,7 @@ LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 LIFECYCLE_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
 LIFECYCLE_STABILITY_MINIMUM_SAMPLES = 10
 LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 = 1.25
+UNSTABLE_LIFECYCLE_EXIT_CODE = 75
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
@@ -102,6 +103,10 @@ SHELL_SNAPSHOT_SECTION = re.compile(
 
 class PerformanceError(RuntimeError):
     """Raised when benchmark data is missing or malformed."""
+
+
+class UnstablePerformanceError(PerformanceError):
+    """Raised when benchmark samples expose temporary host instability."""
 
 
 @dataclass(frozen=True)
@@ -938,7 +943,7 @@ def _validate_snapshot_generation_stability(
     p50 = statistics.median(ordered)
     ratio = p50 / p25
     if ratio > LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25:
-        raise PerformanceError(
+        raise UnstablePerformanceError(
             f"unstable snapshot generation at {source}:snapshot_capture."
             f"{backend}.samples_ms: p50 {p50:.3f} ms is "
             f"{(ratio - 1) * 100:.1f}% above p25 {p25:.3f} ms "
@@ -1956,6 +1961,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     collect.add_argument("--summary", type=Path)
 
+    validate_openvmm = commands.add_parser(
+        "validate-openvmm", help="validate an OpenVMM benchmark JSON result"
+    )
+    validate_openvmm.add_argument("--platform", required=True)
+    validate_openvmm.add_argument("--input", type=Path, required=True)
+
     collect_openvmm = commands.add_parser(
         "collect-openvmm", help="convert an OpenVMM benchmark JSON result to p50 CSV"
     )
@@ -2027,6 +2038,13 @@ def command_performance(args: argparse.Namespace) -> int:
                     args.require_shell_snapshot_restore_512
                 ),
             )
+            return 0
+        if args.performance_command == "validate-openvmm":
+            try:
+                read_lifecycle_data(args.platform, args.input)
+            except UnstablePerformanceError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return UNSTABLE_LIFECYCLE_EXIT_CODE
             return 0
         if args.performance_command == "collect-openvmm":
             collect_openvmm_results(

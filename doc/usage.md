@@ -323,6 +323,19 @@ selects `device-io` is collected as five additional ABI-2, one-vCPU `ops/s`
 metrics; CI merges them into a 36-metric one-vCPU result.
 `--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
 
+#### `performance validate-openvmm`
+
+```text
+python3 scripts/nvx.py performance validate-openvmm
+    --platform PLATFORM
+    --input PATH
+```
+
+Validates a complete 128 MiB, guest-exit OpenVMM `e2e` result without
+writing a CSV. Snapshot-generation instability exits with status 75 so
+callers can remeasure the temporary host condition selectively; other
+malformed or incomplete inputs exit with status 2.
+
 #### `performance collect-openvmm`
 
 ```text

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # pyright: reportPrivateUsage=false
 
+import contextlib
+import io
 import json
 import statistics
 import sys
@@ -417,6 +419,18 @@ class PerformanceTests(unittest.TestCase):
             769.0158,
             744.6426,
         ]
+        pooled_runner_stall = [
+            736.2791,
+            753.5391,
+            780.7033,
+            753.063,
+            1272.4222,
+            1260.2828,
+            1271.4175,
+            1297.1824,
+            1233.186,
+            747.7988,
+        ]
         uniformly_slow = [1200.0 + index for index in range(10)]
         fast_outliers = [
             3.975,
@@ -432,6 +446,7 @@ class PerformanceTests(unittest.TestCase):
         ]
         for name, samples, rejected in (
             ("host-stall", unstable, True),
+            ("pooled-runner-stall", pooled_runner_stall, True),
             ("uniform-slowdown", uniformly_slow, False),
             ("two-fast-outliers", fast_outliers, False),
         ):
@@ -452,7 +467,7 @@ class PerformanceTests(unittest.TestCase):
                     source.write_text(json.dumps(document), encoding="utf-8")
                     if rejected:
                         with self.assertRaisesRegex(
-                            performance.PerformanceError,
+                            performance.UnstablePerformanceError,
                             r"unstable snapshot generation.*p25.*idle host",
                         ):
                             performance.read_lifecycle_data(
@@ -462,6 +477,77 @@ class PerformanceTests(unittest.TestCase):
                         performance.read_lifecycle_data(
                             "windows-whp-virtual-machine", source
                         )
+
+    def test_unstable_snapshot_generation_uses_temporary_failure_exit_code(self):
+        samples = [
+            736.2791,
+            753.5391,
+            780.7033,
+            753.063,
+            1272.4222,
+            1260.2828,
+            1271.4175,
+            1297.1824,
+            1233.186,
+            747.7988,
+        ]
+        document = lifecycle_document("whp")
+        capture = cast(
+            dict[str, object],
+            cast(dict[str, object], document["snapshot_capture"])["whp"],
+        )
+        capture.update(
+            samples_ms=samples,
+            p50_ms=statistics.median(samples),
+            min_ms=min(samples),
+            max_ms=max(samples),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "acceptance.json"
+            source.write_text(json.dumps(document), encoding="utf-8")
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                status = nvx.main(
+                    [
+                        "performance",
+                        "validate-openvmm",
+                        "--platform",
+                        "windows-whp-virtual-machine",
+                        "--input",
+                        str(source),
+                    ]
+                )
+
+        self.assertEqual(status, performance.UNSTABLE_LIFECYCLE_EXIT_CODE)
+        self.assertEqual(status, 75)
+        self.assertIn("unstable snapshot generation", stderr.getvalue())
+
+    def test_invalid_openvmm_result_uses_regular_failure_exit_code(self):
+        document = lifecycle_document("whp")
+        controls = cast(dict[str, object], document["controls"])
+        controls["backend"] = "kvm"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "acceptance.json"
+            source.write_text(json.dumps(document), encoding="utf-8")
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                status = nvx.main(
+                    [
+                        "performance",
+                        "validate-openvmm",
+                        "--platform",
+                        "windows-whp-virtual-machine",
+                        "--input",
+                        str(source),
+                    ]
+                )
+
+        self.assertEqual(status, 2)
+        self.assertIn("does not match platform", stderr.getvalue())
 
     def test_collect_appends_ci_benchmark_table(self):
         with tempfile.TemporaryDirectory() as temporary:

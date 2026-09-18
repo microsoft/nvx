@@ -194,20 +194,31 @@ runs:
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
-        python scripts\nvx.py benchmark `
-          --suite e2e `
-          --backend "${{ inputs.backend }}" `
-          --platform "${{ inputs.platform }}" `
-          --processors 1 `
-          --warmups "${{ inputs.warmups }}" `
-          --runs "${{ inputs.runs }}" `
-          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
-          --skip-build `
-          --teardown-mode "${{ inputs.teardown-mode }}" `
-          --snapshot-profile `
-          --output "$RunDir/acceptance.json" `
-          @CpuArgs
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        foreach ($Attempt in 1, 2) {
+          python scripts\nvx.py benchmark `
+            --suite e2e `
+            --backend "${{ inputs.backend }}" `
+            --platform "${{ inputs.platform }}" `
+            --processors 1 `
+            --warmups "${{ inputs.warmups }}" `
+            --runs "${{ inputs.runs }}" `
+            --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+            --skip-build `
+            --teardown-mode "${{ inputs.teardown-mode }}" `
+            --snapshot-profile `
+            --output "$RunDir/acceptance.json" `
+            @CpuArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts\nvx.py performance validate-openvmm `
+            --platform "${{ inputs.platform }}" `
+            --input "$RunDir/acceptance.json"
+          $ValidationStatus = $LASTEXITCODE
+          if ($ValidationStatus -eq 0) { break }
+          if ($ValidationStatus -ne 75 -or $Attempt -eq 2) {
+            exit $ValidationStatus
+          }
+          Write-Output "::warning::Lifecycle snapshot generation was unstable on attempt $Attempt; remeasuring once"
+        }
 
     - name: Run Windows performance suite
       if: runner.os == 'Windows'
