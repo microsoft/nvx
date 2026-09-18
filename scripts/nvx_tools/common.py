@@ -7,10 +7,13 @@ import os
 import shutil
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPMessage
 from pathlib import Path
+from typing import IO
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_DIR = REPO_ROOT / "build"
@@ -150,6 +153,37 @@ def run_checked(
         ) from error
 
 
+class _CrossOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Drops credentials when a download leaves its origin."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        source_url = urllib.parse.urlsplit(req.full_url)
+        redirect_url = urllib.parse.urlsplit(newurl)
+        if (
+            source_url.scheme.lower() != redirect_url.scheme.lower()
+            or source_url.netloc.lower() != redirect_url.netloc.lower()
+        ):
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def credential_safe_opener() -> urllib.request.OpenerDirector:
+    """Builds an opener that never forwards credentials across origins."""
+
+    return urllib.request.build_opener(_CrossOriginRedirectHandler)
+
+
 def download(
     url: str,
     destination: Path,
@@ -157,6 +191,7 @@ def download(
     *,
     expected_sha256: str | None = None,
     headers: Mapping[str, str] | None = None,
+    opener: urllib.request.OpenerDirector | None = None,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.part")
@@ -168,8 +203,13 @@ def download(
                 if headers is not None
                 else url
             )
+            response_context = (
+                opener.open(request)
+                if opener is not None
+                else urllib.request.urlopen(request)
+            )
             with (
-                urllib.request.urlopen(request) as response,
+                response_context as response,
                 temporary.open("wb") as output,
             ):
                 while chunk := response.read(1024 * 1024):

@@ -5,19 +5,19 @@ runs:
   using: composite
   steps:
     - name: Download Linux / KVM / virtual machine benchmark results
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@v8
       with:
         path: data/runs/linux-kvm-virtual-machine
         name: benchmark-linux-kvm-virtual-machine-${{ github.run_id }}
 
     - name: Download Linux / MSHV / virtual machine benchmark results
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@v8
       with:
         path: data/runs/linux-mshv-virtual-machine
         name: benchmark-linux-mshv-virtual-machine-${{ github.run_id }}
 
     - name: Download Windows / WHP / virtual machine benchmark results
-      uses: actions/download-artifact@v5
+      uses: actions/download-artifact@v8
       with:
         path: data/runs/windows-whp-virtual-machine
         name: benchmark-windows-whp-virtual-machine-${{ github.run_id }}

@@ -3,15 +3,21 @@
 
 import argparse
 import hashlib
+import http.client
+import http.server
 import io
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 from typing import cast
@@ -588,6 +594,153 @@ class CiTests(unittest.TestCase):
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
             ci.run_openvmm_tests("unknown")
+
+
+class CiConfigurationTests(unittest.TestCase):
+    def test_flowey_downloads_use_retrying_curl(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "action.yml"
+        ).read_text(encoding="utf-8")
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        build_action = (
+            common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        for option in (
+            "--retry 5",
+            "--retry-all-errors",
+            "--retry-delay 2",
+            "--retry-max-time 90",
+        ):
+            self.assertEqual(action.count(option), 1)
+        windows_action = action.split(
+            "- name: Set up retrying curl on Windows",
+            1,
+        )[1]
+        for option in (
+            '"retry = 5"',
+            '"retry-all-errors"',
+            '"retry-delay = 2"',
+            '"retry-max-time = 90"',
+        ):
+            self.assertIn(option, windows_action)
+        self.assertIn('system_curl="${NVX_SYSTEM_CURL:-$(command -v curl)}"', action)
+        self.assertIn("Get-Command curl.exe", action)
+        self.assertIn('Join-Path $CurlHome ".curlrc"', windows_action)
+        self.assertIn('"CURL_HOME=$CurlHome"', windows_action)
+        self.assertNotIn("rustc", windows_action)
+        self.assertNotIn("NVX_SYSTEM_CURL", windows_action)
+        self.assertNotIn("curl.cmd", action)
+        self.assertEqual(
+            workflow.count("uses: ./.github/actions/setup-curl"),
+            2,
+        )
+        self.assertIn("uses: ./.github/actions/setup-curl", build_action)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific curl resolution")
+    def test_windows_curl_config_retries_http_500(self):
+        system_curl = shutil.which("curl.exe")
+        if system_curl is None:
+            self.fail("Windows curl configuration test requires curl.exe")
+
+        class RetryHandler(http.server.BaseHTTPRequestHandler):
+            request_count = 0
+
+            def do_GET(self) -> None:
+                type(self).request_count += 1
+                if type(self).request_count == 1:
+                    self.send_error(http.HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                body = b"ok"
+                self.send_response(http.HTTPStatus.OK)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RetryHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                (Path(directory) / ".curlrc").write_text(
+                    "retry = 5\n"
+                    "retry-all-errors\n"
+                    "retry-delay = 0\n"
+                    "retry-max-time = 30\n",
+                    encoding="ascii",
+                )
+                environment = os.environ.copy()
+                environment["CURL_HOME"] = directory
+                port = server.server_address[1]
+                result = subprocess.run(
+                    [
+                        system_curl,
+                        "--fail",
+                        "-L",
+                        f"http://127.0.0.1:{port}/asset",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    env=environment,
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
+
+        self.assertFalse(
+            server_thread.is_alive(),
+            "HTTP test server did not stop within 5 seconds",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(result.stdout, b"ok")
+        self.assertEqual(RetryHandler.request_count, 2)
+
+    def test_ci_shares_openvmm_inputs_and_binary_artifacts(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        build_action = (
+            common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        for configuration in (workflow, build_action):
+            self.assertIn(
+                "openvmm/flowey-persist/flowey_lib_common__download_gh_release",
+                configuration,
+            )
+            self.assertIn(
+                "openvmm/flowey-persist/flowey_lib_common__cache",
+                configuration,
+            )
+            self.assertIn(
+                "openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-",
+                configuration,
+            )
+        self.assertIn("openvmm-binaries:", workflow)
+        self.assertIn("artifact: openvmm-linux-gnu", workflow)
+        self.assertIn("artifact: openvmm-linux-musl", workflow)
+        self.assertIn("artifact: openvmm-windows-msvc", workflow)
+        self.assertIn("uses: actions/download-artifact@v8", workflow)
+        self.assertNotIn("nvx-microvm-tests-v1", workflow)
+        self.assertNotIn("cargo-v2-", build_action)
+        self.assertNotIn("uses: actions/cache@v5", workflow)
+        self.assertNotIn("uses: actions/cache@v5", build_action)
+
+    def test_ci_artifact_actions_use_node24(self):
+        configurations = "\n".join(
+            path.read_text(encoding="utf-8")
+            for pattern in ("*.yml", "*.yaml")
+            for path in (common.REPO_ROOT / ".github").rglob(pattern)
+        )
+
+        self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
+        self.assertNotRegex(configurations, r"actions/download-artifact@v[1-6]\b")
 
 
 class BuildTests(unittest.TestCase):
@@ -2971,6 +3124,9 @@ class BenchmarkTests(unittest.TestCase):
         download_release.assert_called_once_with("microsoft/nvx", expected_platform)
 
 
+AUTHORIZATION_VALUE = "Bearer placeholder-value"
+
+
 class ReleaseTests(unittest.TestCase):
     def test_selects_latest_matching_prerelease_asset(self):
         releases = [
@@ -3019,6 +3175,265 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(asset.name, "nvx-1.2.3-linux-kvm.tar.gz")
         self.assertEqual(asset.url, "https://api.example.invalid/linux")
         self.assertEqual(asset.size, 300)
+
+    def test_forbidden_release_query_reports_github_message_and_hint(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            403,
+            "Forbidden",
+            http.client.HTTPMessage(),
+            io.BytesIO(
+                json.dumps(
+                    {"message": "Resource protected by organization SAML enforcement."}
+                ).encode("utf-8")
+            ),
+        )
+
+        with (
+            patch("nvx_tools.release.urllib.request.urlopen", side_effect=error),
+            self.assertRaises(release.ScriptError) as context,
+        ):
+            release._latest_release_asset("example/nvx", "linux-kvm", "token")
+
+        message = str(context.exception)
+        self.assertIn("HTTP 403", message)
+        self.assertIn("organization SAML enforcement", message)
+        self.assertIn("read access to the repository contents", message)
+
+    def test_unauthenticated_release_query_reports_token_hint(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            404,
+            "Not Found",
+            http.client.HTTPMessage(),
+            io.BytesIO(b"not json"),
+        )
+
+        with (
+            patch("nvx_tools.release.urllib.request.urlopen", side_effect=error),
+            self.assertRaisesRegex(release.ScriptError, "set GH_TOKEN"),
+        ):
+            release._latest_release_asset("example/nvx", "linux-kvm", None)
+
+    def test_exhausted_rate_limit_reports_retry_hint(self):
+        headers = http.client.HTTPMessage()
+        headers["x-ratelimit-remaining"] = "0"
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            403,
+            "Forbidden",
+            headers,
+            io.BytesIO(b""),
+        )
+
+        with (
+            patch("nvx_tools.release.urllib.request.urlopen", side_effect=error),
+            self.assertRaisesRegex(release.ScriptError, "rate limit is exhausted"),
+        ):
+            release._latest_release_asset("example/nvx", "linux-kvm", "token")
+
+    def test_forbidden_query_falls_back_to_public_release(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.invalid/releases",
+            403,
+            "Forbidden",
+            http.client.HTTPMessage(),
+            io.BytesIO(
+                json.dumps(
+                    {"message": "Resource protected by organization SAML enforcement."}
+                ).encode("utf-8")
+            ),
+        )
+        public_response = io.BytesIO(
+            json.dumps(
+                [
+                    {
+                        "draft": False,
+                        "tag_name": "v1.2.3",
+                        "assets": [
+                            {
+                                "name": "nvx-1.2.3-linux-kvm.tar.gz",
+                                "url": "https://api.example.invalid/linux",
+                                "size": 300,
+                            }
+                        ],
+                    }
+                ]
+            ).encode("utf-8")
+        )
+
+        with (
+            patch(
+                "nvx_tools.release.urllib.request.urlopen",
+                side_effect=[error, public_response],
+            ) as urlopen,
+            patch("sys.stderr", io.StringIO()) as stderr,
+        ):
+            asset, download_token = release._latest_release_asset_with_fallback(
+                "example/nvx",
+                "linux-kvm",
+                "token",
+            )
+
+        self.assertEqual(urlopen.call_count, 2)
+        authenticated_request = urlopen.call_args_list[0].args[0]
+        public_request = urlopen.call_args_list[1].args[0]
+        self.assertIsNotNone(authenticated_request.get_header("Authorization"))
+        self.assertIsNone(public_request.get_header("Authorization"))
+        self.assertEqual(asset.tag, "v1.2.3")
+        self.assertIsNone(download_token)
+        self.assertIn("retrying without credentials", stderr.getvalue())
+
+    def test_asset_download_drops_credentials_across_origins(self):
+        handler = common._CrossOriginRedirectHandler()
+        request = urllib.request.Request(
+            "https://api.github.invalid/assets/1",
+            headers={"Authorization": AUTHORIZATION_VALUE, "Accept": "*/*"},
+        )
+
+        redirected = handler.redirect_request(
+            request,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            http.client.HTTPMessage(),
+            "https://objects.github.invalid/assets/1?signature=abc",
+        )
+        same_host = handler.redirect_request(
+            request,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            http.client.HTTPMessage(),
+            "https://api.github.invalid/assets/2",
+        )
+        downgraded = handler.redirect_request(
+            request,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            http.client.HTTPMessage(),
+            "http://api.github.invalid/assets/3",
+        )
+
+        self.assertIsNotNone(redirected)
+        self.assertIsNotNone(same_host)
+        self.assertIsNotNone(downgraded)
+        assert (
+            redirected is not None and same_host is not None and downgraded is not None
+        )
+        self.assertIsNone(redirected.get_header("Authorization"))
+        self.assertEqual(redirected.get_header("Accept"), "*/*")
+        self.assertEqual(same_host.get_header("Authorization"), AUTHORIZATION_VALUE)
+        self.assertIsNone(downgraded.get_header("Authorization"))
+
+    def test_rejected_token_falls_back_to_public_release(self):
+        asset = release._ReleaseAsset(
+            "v1.2.3",
+            "nvx-1.2.3-linux-kvm.tar.gz",
+            "https://api.github.invalid/assets/1",
+            4,
+        )
+        authenticated_error = release._GitHubReleaseQueryError(
+            403,
+            "authenticated query failed",
+        )
+        stderr = io.StringIO()
+
+        def write_archive(
+            _url: str,
+            destination: Path,
+            **kwargs: object,
+        ) -> None:
+            self.assertIsInstance(
+                kwargs["opener"],
+                urllib.request.OpenerDirector,
+            )
+            self.assertNotIn("Authorization", cast(dict[str, str], kwargs["headers"]))
+            destination.write_bytes(b"data")
+
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token"}),
+            patch.object(
+                release,
+                "_latest_release_asset",
+                side_effect=[authenticated_error, asset],
+            ) as latest_release_asset,
+            patch.object(release, "download", side_effect=write_archive) as download,
+            patch.object(release, "_install_release_archive") as install,
+            patch("sys.stderr", stderr),
+        ):
+            release.download_latest_release("example/nvx", "linux-kvm")
+
+        self.assertEqual(
+            latest_release_asset.call_args_list,
+            [
+                call("example/nvx", "linux-kvm", "token"),
+                call("example/nvx", "linux-kvm", None),
+            ],
+        )
+        self.assertEqual(download.call_count, 1)
+        install.assert_called_once()
+        self.assertIn("retrying without credentials", stderr.getvalue())
+
+    def test_failed_public_fallback_preserves_authenticated_error(self):
+        authenticated_error = release._GitHubReleaseQueryError(
+            403,
+            "authenticated query failed",
+        )
+        public_error = release._GitHubReleaseQueryError(
+            404,
+            "public query failed",
+        )
+
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token"}),
+            patch.object(
+                release,
+                "_latest_release_asset",
+                side_effect=[authenticated_error, public_error],
+            ),
+            patch("sys.stderr", io.StringIO()),
+            self.assertRaisesRegex(
+                release.ScriptError,
+                "authenticated query failed",
+            ),
+        ):
+            release.download_latest_release("example/nvx", "linux-kvm")
+
+    def test_authenticated_asset_download_uses_credential_safe_opener(self):
+        asset = release._ReleaseAsset(
+            "v1.2.3",
+            "nvx-1.2.3-linux-kvm.tar.gz",
+            "https://api.github.invalid/assets/1",
+            4,
+        )
+
+        def write_archive(
+            _url: str,
+            destination: Path,
+            **kwargs: object,
+        ) -> None:
+            self.assertIsInstance(
+                kwargs["opener"],
+                urllib.request.OpenerDirector,
+            )
+            self.assertEqual(
+                kwargs["headers"],
+                release._github_headers("token", "application/octet-stream"),
+            )
+            destination.write_bytes(b"data")
+
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token"}),
+            patch.object(release, "_latest_release_asset", return_value=asset),
+            patch.object(release, "download", side_effect=write_archive) as download,
+            patch.object(release, "_install_release_archive") as install,
+        ):
+            release.download_latest_release("example/nvx", "linux-kvm")
+
+        self.assertEqual(download.call_count, 1)
+        install.assert_called_once()
 
     def test_binary_package_stages_files_and_checksums(self):
         with tempfile.TemporaryDirectory() as temporary:
