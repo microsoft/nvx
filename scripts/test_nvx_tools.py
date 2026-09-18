@@ -789,7 +789,7 @@ class CiConfigurationTests(unittest.TestCase):
                 port = server.server_address[1]
                 result = subprocess.run(
                     [
-                        "curl",
+                        os.fspath(shim),
                         "--fail",
                         "-L",
                         f"http://127.0.0.1:{port}/asset",
