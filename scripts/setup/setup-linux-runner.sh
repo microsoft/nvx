@@ -461,13 +461,11 @@ install_rust_tools() {
         RUSTUP_HOME="$trusted_rustup_home" \
         RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
         "$rustup" target add x86_64-unknown-none
-    if [ "$backend" = mshv ]; then
-        run_as_root env \
-            CARGO_HOME="$trusted_cargo_home" \
-            RUSTUP_HOME="$trusted_rustup_home" \
-            RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
-            "$rustup" target add x86_64-unknown-linux-musl
-    fi
+    run_as_root env \
+        CARGO_HOME="$trusted_cargo_home" \
+        RUSTUP_HOME="$trusted_rustup_home" \
+        RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        "$rustup" target add x86_64-unknown-linux-musl
 
     rust_version=$(run_as_root env \
         CARGO_HOME="$trusted_cargo_home" \
@@ -624,6 +622,13 @@ check_environment() {
         rustc --version | awk '{print $2}')
     version_at_least "$rust_version" "$RUST_MINIMUM_VERSION" ||
         die "Rust ${RUST_MINIMUM_VERSION} or newer is required"
+    installed_rust_targets=$(run_as_runner env \
+        RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        rustup target list --installed)
+    for rust_target in x86_64-unknown-none x86_64-unknown-linux-musl; do
+        printf '%s\n' "$installed_rust_targets" | grep -Fxq "$rust_target" ||
+            die "Rust target ${rust_target} is not installed"
+    done
     run_as_runner cargo nextest --version |
         grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
         die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
