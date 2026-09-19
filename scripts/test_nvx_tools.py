@@ -867,6 +867,10 @@ class CiConfigurationTests(unittest.TestCase):
 
         self.assertEqual(package_action.count("archive-release"), 2)
         self.assertIn(
+            '$KernelInputs = @("kernel/config-microvm") + @(',
+            package_action,
+        )
+        self.assertIn(
             'git ls-files "kernel/patches/*.patch"',
             package_action,
         )
