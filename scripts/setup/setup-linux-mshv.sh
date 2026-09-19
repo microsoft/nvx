@@ -69,8 +69,9 @@ install_packages() {
             docker-buildx docker-cli elfutils-libelf-devel findutils flex gcc \
             gcc-c++ git glibc-devel glibc-iconv gzip iproute iptables \
             kernel-headers libarchive libarchive-devel make moby-engine \
-            ninja-build openssl openssl-devel patch perl pkgconf \
-            pkgconf-pkg-config protobuf python3 rsync shadow-utils tar \
+            ninja-build openssl openssl-devel patch perl perl-FindBin \
+            perl-IPC-Cmd perl-Time-Piece perl-lib pkgconf pkgconf-pkg-config \
+            protobuf python3 rsync shadow-utils tar \
             util-linux which xz zstd
         run_as_root tdnf install -y docker-cli
     elif command -v dnf >/dev/null 2>&1; then

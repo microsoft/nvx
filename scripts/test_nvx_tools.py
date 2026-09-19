@@ -1021,6 +1021,22 @@ class CiConfigurationTests(unittest.TestCase):
             linux_setup.index('test -w "$runner_sccache_dir"'),
         )
 
+    def test_linux_setup_installs_openvmm_perl_modules(self):
+        setup_directory = common.REPO_ROOT / "scripts" / "setup"
+        configurations = (
+            (setup_directory / "setup-linux-runner.sh").read_text(encoding="utf-8"),
+            (setup_directory / "setup-linux-mshv.sh").read_text(encoding="utf-8"),
+        )
+
+        for configuration in configurations:
+            for package in (
+                "perl-FindBin",
+                "perl-IPC-Cmd",
+                "perl-Time-Piece",
+                "perl-lib",
+            ):
+                self.assertIn(package, configuration)
+
     def test_release_actions_use_deterministic_immutable_tooling(self):
         package_action = (
             common.REPO_ROOT / ".github" / "actions" / "package-release" / "action.yml"
