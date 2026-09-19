@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import argparse
+import gzip
 import hashlib
 import http.client
 import http.server
@@ -10,6 +11,7 @@ import json
 import os
 import queue
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -19,6 +21,7 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, call, patch
@@ -75,6 +78,12 @@ def _write_release_fixture(
         + "\n",
         encoding="utf-8",
     )
+    input_config = root / "kernel" / "config-microvm"
+    input_config.parent.mkdir(parents=True, exist_ok=True)
+    input_config.write_bytes(b"accepted input config\n")
+    patch_path = root / "kernel" / "patches" / "example.patch"
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_bytes(b"accepted patch\n")
     manifest = {
         "format": 1,
         "distribution": {"name": "nvx", "version": "0.1.0"},
@@ -113,19 +122,26 @@ def _write_release_fixture(
         json.dumps(manifest),
         encoding="utf-8",
     )
+    kernel_source = root / "linux-source"
+    kernel_driver = kernel_source / "drivers" / "tty" / "hvc" / "hvc_xe9.c"
+    kernel_driver.parent.mkdir(parents=True)
+    (kernel_source / "Makefile").write_bytes(b"VERSION = 6\nPATCHLEVEL = 18\n")
+    kernel_driver.write_bytes(b"/* accepted xe9 driver */\n")
+    _write_kernel_symlink_fixture(kernel_source)
     kernel_inputs: dict[str, object] = {
         "source": {
             "version": "6.18.38",
+            "tree_sha256": archive.canonical_source_tree_digest(kernel_source),
             "patches": [
                 {
                     "path": "kernel/patches/example.patch",
-                    "sha256": "2" * 64,
+                    "sha256": common.sha256_file(patch_path),
                 }
             ],
         },
         "input_config": {
             "path": "kernel/config-microvm",
-            "sha256": "1" * 64,
+            "sha256": common.sha256_file(input_config),
         },
     }
     (build_dir / build.OPENVMM_PROVENANCE_NAME).write_text(
@@ -155,8 +171,77 @@ def _write_release_fixture(
         "source": source_dir,
         "openvmm": openvmm_dir,
         "binary": binary,
+        "kernel_source": kernel_source,
     }
     return paths, kernel_inputs, revision
+
+
+def _create_fixture_linux_archive(
+    root: Path,
+    paths: dict[str, Path],
+    *,
+    source_tree: Path | None = None,
+    output: Path | None = None,
+) -> Path:
+    source_tree = source_tree or paths["kernel_source"]
+    output = output or (
+        paths["source"]
+        / "linux"
+        / f"nvx-linux-source-{build.DEFAULT_KERNEL_VERSION}.tar.gz"
+    )
+    package_root = f"nvx-linux-source-{build.DEFAULT_KERNEL_VERSION}"
+    archive.create_reproducible_tar_gz(
+        output,
+        (
+            (
+                source_tree,
+                f"{package_root}/linux-{build.DEFAULT_KERNEL_VERSION}",
+            ),
+            (
+                paths["build"] / "vmlinux.config",
+                f"{package_root}/vmlinux.config",
+            ),
+            (root / "SOURCE-MANIFEST.json", f"{package_root}/SOURCE-MANIFEST.json"),
+            (
+                root / "kernel",
+                f"{package_root}/kernel",
+            ),
+        ),
+        normalize_file_modes=True,
+    )
+    return output
+
+
+def _write_kernel_symlink_fixture(source: Path) -> None:
+    files = {
+        "Documentation/process/changes.rst": b"requirements\n",
+        "Documentation/process/other.rst": b"other requirements\n",
+        "scripts/syscall.tbl": b"0 common read sys_read\n",
+        "include/uapi/linux/input-event-codes.h": b"#define EV_SYN 0x00\n",
+        "arch/arm64/boot/dts/example.dts": b"/dts-v1/;\n",
+    }
+    for relative, contents in files.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+    links = (
+        ("Documentation/Changes", "process/changes.rst", False),
+        ("arch/arm64/tools/syscall_64.tbl", "../../../scripts/syscall.tbl", False),
+        (
+            "include/dt-bindings/input/linux-event-codes.h",
+            "../../uapi/linux/input-event-codes.h",
+            False,
+        ),
+        (
+            "scripts/dtc/include-prefixes/arm64",
+            "../../../arch/arm64/boot/dts",
+            True,
+        ),
+    )
+    for relative, target, target_is_directory in links:
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(target, path, target_is_directory=target_is_directory)
 
 
 class CliTests(unittest.TestCase):
@@ -900,6 +985,72 @@ class CiConfigurationTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_prepare_kernel_source_rebuilds_mutated_cached_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            patch_path = root / "kernel" / "patches" / "example.patch"
+            patch_path.parent.mkdir(parents=True)
+            patch_path.write_text("patch", encoding="ascii")
+            cache = root / "cache"
+            source = cache / "linux" / f"linux-{build.DEFAULT_KERNEL_VERSION}"
+            source.mkdir(parents=True)
+            (source / "Makefile").write_text("cached\n", encoding="ascii")
+            with patch.object(build, "REPO_ROOT", root):
+                source_fingerprint = build._kernel_source_fingerprint()
+                tree_sha256 = build._kernel_source_tree_digest(source)
+                stamp = source.with_name(f"{source.name}.nvx-source.json")
+                stamp.write_text(
+                    build._kernel_source_stamp(source_fingerprint, tree_sha256),
+                    encoding="utf-8",
+                )
+            (source / "Makefile").write_text("mutated\n", encoding="ascii")
+
+            def extract_or_patch(command: object, **_kwargs: object) -> None:
+                if isinstance(command, list) and command[0] == "tar":
+                    source.mkdir(parents=True)
+                    (source / "Makefile").write_text("fresh\n", encoding="ascii")
+                elif isinstance(command, list) and command[0] == "patch":
+                    (source / "patched").write_text("yes\n", encoding="ascii")
+
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "_download_verified"),
+                patch.object(build, "require_tool", return_value="tool"),
+                patch.object(build, "run_checked", side_effect=extract_or_patch),
+                patch.dict(os.environ, {"NVX_CACHE_DIR": str(cache)}),
+            ):
+                accepted_source, accepted_fingerprint = build.prepare_kernel_source()
+
+            accepted = json.loads(accepted_fingerprint)
+            self.assertEqual(accepted_source, source)
+            self.assertEqual(
+                (source / "Makefile").read_text(encoding="ascii"),
+                "fresh\n",
+            )
+            self.assertEqual(
+                accepted["tree_sha256"],
+                build._kernel_source_tree_digest(source),
+            )
+            self.assertEqual(
+                stamp.read_text(encoding="utf-8"),
+                build._kernel_source_stamp(
+                    source_fingerprint,
+                    cast(str, accepted["tree_sha256"]),
+                ),
+            )
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "_download_verified"),
+                patch.object(build, "require_tool", return_value="tool"),
+                patch.object(build, "run_checked") as run_checked,
+                patch.dict(os.environ, {"NVX_CACHE_DIR": str(cache)}),
+            ):
+                cached_source, cached_fingerprint = build.prepare_kernel_source()
+
+            self.assertEqual(cached_source, source)
+            self.assertEqual(cached_fingerprint, accepted_fingerprint)
+            run_checked.assert_not_called()
+
     def test_records_openvmm_revision_cleanliness_and_executable_hash(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -961,7 +1112,10 @@ class BuildTests(unittest.TestCase):
             prior_provenance.write_text("stale", encoding="utf-8")
 
             with patch.object(build, "REPO_ROOT", root):
-                source_fingerprint = build._kernel_source_fingerprint()
+                source_fingerprint = build._kernel_source_provenance_fingerprint(
+                    build._kernel_source_fingerprint(),
+                    build._kernel_source_tree_digest(source),
+                )
 
             def run_build(command: object, **_kwargs: object) -> None:
                 if isinstance(command, list) and command[-1] == "vmlinux":
@@ -987,7 +1141,7 @@ class BuildTests(unittest.TestCase):
                 patch.object(build, "run_capture", return_value=notes),
                 self.assertRaisesRegex(
                     common.ScriptError,
-                    "inputs changed during the build",
+                    "input config changed during the build",
                 ),
             ):
                 build.build_kernel(
@@ -1000,6 +1154,170 @@ class BuildTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse(output.with_name("vmlinux.config").exists())
             self.assertFalse(prior_provenance.exists())
+            self.assertFalse(work.exists())
+
+    def test_kernel_build_compiles_private_snapshot_during_live_cache_race(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_config = root / "kernel" / "config-microvm"
+            input_config.parent.mkdir(parents=True)
+            input_config.write_text(
+                "\n".join(
+                    (
+                        *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                        *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                        *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            patch_path = root / "kernel" / "patches" / "example.patch"
+            patch_path.parent.mkdir()
+            patch_path.write_text("patch", encoding="utf-8")
+            source = root / "cache" / "linux"
+            source.mkdir(parents=True)
+            live_makefile = source / "Makefile"
+            live_makefile.write_bytes(b"accepted source")
+            work = root / "work"
+            output = root / "output" / "vmlinux"
+
+            with patch.object(build, "REPO_ROOT", root):
+                source_fingerprint = build._kernel_source_provenance_fingerprint(
+                    build._kernel_source_fingerprint(),
+                    build._kernel_source_tree_digest(source),
+                )
+
+            compiled_tree_sha256 = ""
+
+            def run_build(command: object, **_kwargs: object) -> None:
+                nonlocal compiled_tree_sha256
+                if isinstance(command, list) and command[-1] == "vmlinux":
+                    snapshot = Path(cast(str | Path, command[2]))
+                    live_makefile.write_bytes(b"transient malicious source")
+                    compiled = (snapshot / "Makefile").read_bytes()
+                    compiled_tree_sha256 = build._kernel_source_tree_digest(snapshot)
+                    (work / "vmlinux").write_bytes(compiled)
+                    live_makefile.write_bytes(b"accepted source")
+
+            notes = common.CommandResult(("readelf",), 0, b"Xen 0x00000012", b"")
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "_require_linux"),
+                patch.object(build, "require_tool", return_value="tool"),
+                patch.object(
+                    build,
+                    "prepare_kernel_source",
+                    return_value=(source, source_fingerprint),
+                ),
+                patch.object(build, "run_checked", side_effect=run_build),
+                patch.object(build, "run_capture", return_value=notes),
+            ):
+                build.build_kernel(
+                    build.KernelBuildConfig(
+                        work=work,
+                        output=output,
+                    )
+                )
+
+            self.assertEqual(output.read_bytes(), b"accepted source")
+            self.assertEqual(live_makefile.read_bytes(), b"accepted source")
+            provenance = json.loads(
+                output.with_name(build.KERNEL_PROVENANCE_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                provenance["source"]["tree_sha256"],
+                compiled_tree_sha256,
+            )
+
+    def test_failed_kernel_build_discards_contaminated_work_before_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_config = root / "kernel" / "config-microvm"
+            input_config.parent.mkdir(parents=True)
+            required_config = (
+                "\n".join(
+                    (
+                        *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                        *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                        *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+                    )
+                )
+                + "\n"
+            )
+            input_config.write_text(required_config, encoding="utf-8")
+            patch_path = root / "kernel" / "patches" / "example.patch"
+            patch_path.parent.mkdir()
+            patch_path.write_text("patch", encoding="utf-8")
+            source = root / "cache" / "linux"
+            source.mkdir(parents=True)
+            (source / "Makefile").write_text("accepted", encoding="utf-8")
+            work = root / "work"
+            output = root / "output" / "vmlinux"
+
+            with patch.object(build, "REPO_ROOT", root):
+                source_fingerprint = build._kernel_source_provenance_fingerprint(
+                    build._kernel_source_fingerprint(),
+                    build._kernel_source_tree_digest(source),
+                )
+
+            attempts = 0
+            retry_started_clean = False
+
+            def run_build(command: object, **_kwargs: object) -> None:
+                nonlocal attempts, retry_started_clean
+                if not isinstance(command, list):
+                    return
+                if command[-1] == "olddefconfig" and attempts == 1:
+                    retry_started_clean = not (work / "contaminated.o").exists()
+                if command[-1] != "vmlinux":
+                    return
+                attempts += 1
+                (work / "vmlinux").write_bytes(
+                    b"contaminated" if attempts == 1 else b"clean"
+                )
+                if attempts == 1:
+                    (work / "contaminated.o").write_bytes(b"poison")
+                    input_config.write_text("CONFIG_CHANGED=y\n", encoding="utf-8")
+
+            notes = common.CommandResult(("readelf",), 0, b"Xen 0x00000012", b"")
+
+            def invoke_build() -> None:
+                with (
+                    patch.object(build, "REPO_ROOT", root),
+                    patch.object(build, "_require_linux"),
+                    patch.object(build, "require_tool", return_value="tool"),
+                    patch.object(
+                        build,
+                        "prepare_kernel_source",
+                        return_value=(source, source_fingerprint),
+                    ),
+                    patch.object(build, "run_checked", side_effect=run_build),
+                    patch.object(build, "run_capture", return_value=notes),
+                ):
+                    build.build_kernel(
+                        build.KernelBuildConfig(
+                            work=work,
+                            output=output,
+                        )
+                    )
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "input config changed during the build",
+            ):
+                invoke_build()
+
+            self.assertFalse(work.exists())
+            self.assertFalse(output.exists())
+            input_config.write_text(required_config, encoding="utf-8")
+            invoke_build()
+
+            self.assertTrue(retry_started_clean)
+            self.assertEqual(output.read_bytes(), b"clean")
+            self.assertFalse((work / "contaminated.o").exists())
 
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
@@ -1034,6 +1352,7 @@ class BuildTests(unittest.TestCase):
             "SOURCE-MANIFEST.json",
             "kernel/config-microvm",
             "kernel/patches/**",
+            "scripts/nvx_tools/archive.py",
             "scripts/nvx_tools/build.py",
         ):
             self.assertIn(cache_input, action)
@@ -3426,6 +3745,252 @@ AUTHORIZATION_VALUE = "Bearer placeholder-value"
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_archive_layout_rejects_empty_component_root_in_tar_and_zip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tar_path = root / "unsafe.tar.gz"
+            with tarfile.open(tar_path, "w:gz") as package:
+                entry = tarfile.TarInfo("./")
+                entry.type = tarfile.DIRTYPE
+                package.addfile(entry)
+            zip_path = root / "unsafe.zip"
+            with zipfile.ZipFile(zip_path, "w") as package:
+                package.writestr("./", b"")
+
+            for archive_path in (tar_path, zip_path):
+                with (
+                    self.subTest(archive=archive_path.suffix),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "unsafe path in release archive",
+                    ),
+                ):
+                    release._release_archive_layout(archive_path)
+
+    def test_archive_layout_rejects_non_directory_parents_in_tar_and_zip(self):
+        for parent_kind in ("file", "symlink"):
+            with (
+                self.subTest(parent_kind=parent_kind),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                tar_path = root / "unsafe.tar.gz"
+                with tarfile.open(tar_path, "w:gz") as package:
+                    package_root = tarfile.TarInfo("package")
+                    package_root.type = tarfile.DIRTYPE
+                    package.addfile(package_root)
+                    tree_root = tarfile.TarInfo("package/linux")
+                    tree_root.type = tarfile.DIRTYPE
+                    package.addfile(tree_root)
+                    alias = tarfile.TarInfo("package/alias")
+                    if parent_kind == "symlink":
+                        alias.type = tarfile.SYMTYPE
+                        alias.linkname = "linux"
+                    else:
+                        alias.size = 0
+                    package.addfile(alias, io.BytesIO())
+                    child = tarfile.TarInfo("package/alias/Makefile")
+                    child.size = 0
+                    package.addfile(child, io.BytesIO())
+
+                zip_path = root / "unsafe.zip"
+                with zipfile.ZipFile(zip_path, "w") as package:
+                    package.writestr("package/", b"")
+                    package.writestr("package/linux/", b"")
+                    alias = zipfile.ZipInfo("package/alias")
+                    if parent_kind == "symlink":
+                        alias.create_system = 3
+                        alias.external_attr = (stat.S_IFLNK | 0o777) << 16
+                        package.writestr(alias, b"linux")
+                    else:
+                        package.writestr(alias, b"")
+                    package.writestr("package/alias/Makefile", b"overwrite")
+
+                for archive_path in (tar_path, zip_path):
+                    with (
+                        self.subTest(archive=archive_path.suffix),
+                        self.assertRaisesRegex(
+                            common.ScriptError,
+                            "colliding path|unsupported entry",
+                        ),
+                    ):
+                        release._release_archive_layout(archive_path)
+
+    def test_provenance_and_schema_integer_fields_reject_bool(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, kernel_inputs, revision = _write_release_fixture(root)
+            openvmm_provenance = paths["build"] / build.OPENVMM_PROVENANCE_NAME
+            document = json.loads(openvmm_provenance.read_text(encoding="utf-8"))
+            document["format"] = True
+            openvmm_provenance.write_text(json.dumps(document), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, True),
+                ),
+                self.assertRaisesRegex(common.ScriptError, "build provenance"),
+            ):
+                release._validate_openvmm_provenance(
+                    paths["binary"],
+                    openvmm_provenance,
+                )
+
+            kernel_provenance = paths["build"] / build.KERNEL_PROVENANCE_NAME
+            document = json.loads(kernel_provenance.read_text(encoding="utf-8"))
+            document["format"] = True
+            kernel_provenance.write_text(json.dumps(document), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                self.assertRaisesRegex(common.ScriptError, "kernel build provenance"),
+            ):
+                release._validate_kernel_provenance(
+                    paths["build"] / "vmlinux",
+                    paths["build"] / "vmlinux.config",
+                    kernel_provenance,
+                )
+
+            manifest = json.loads(
+                (root / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            )
+            for section, field in (
+                (manifest, "format"),
+                (manifest["openvmm"], "microvm_abi_version"),
+                (manifest["openvmm"], "control_session_protocol_version"),
+            ):
+                original = section[field]
+                section[field] = True
+                with self.assertRaises(common.ScriptError):
+                    release._validate_source_manifest_metadata(
+                        manifest,
+                        kernel_inputs,
+                    )
+                section[field] = original
+
+    def test_linux_source_snapshot_rejects_archive_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            snapshot = root / "snapshot"
+            source.mkdir()
+            snapshot.mkdir()
+            archive_path = source / "linux.tar.gz"
+            archive_path.write_bytes(b"accepted")
+            accepted_sha256, accepted_mode = release._pinned_regular_file_metadata(
+                source,
+                archive_path.name,
+            )
+            archive_path.write_bytes(b"replacement")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "release snapshot source changed",
+            ):
+                release._copy_pinned_regular_file(
+                    source,
+                    snapshot,
+                    archive_path.name,
+                    accepted_sha256,
+                    expected_mode=accepted_mode,
+                )
+
+    def test_project_source_snapshot_rejects_coherent_tree_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            snapshot = root / "snapshot"
+            selected = source / "project"
+            selected.mkdir(parents=True)
+            first = selected / "first"
+            second = selected / "second"
+            first.write_bytes(b"old first")
+            second.write_bytes(b"old second")
+            copy_pinned = release._copy_pinned_regular_file
+            copied = False
+
+            def mutate_after_first_copy(
+                source_root: Path,
+                snapshot_root: Path,
+                relative_name: str,
+                expected_sha256: str,
+                *,
+                expected_mode: int | None = None,
+            ) -> None:
+                nonlocal copied
+                copy_pinned(
+                    source_root,
+                    snapshot_root,
+                    relative_name,
+                    expected_sha256,
+                    expected_mode=expected_mode,
+                )
+                if not copied:
+                    copied = True
+                    first.write_bytes(b"new first")
+                    second.write_bytes(b"new second")
+
+            with (
+                patch.object(
+                    release,
+                    "_copy_pinned_regular_file",
+                    side_effect=mutate_after_first_copy,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "release snapshot source changed|release source tree changed",
+                ),
+            ):
+                release._capture_selected_tree(source, snapshot, ("project",))
+
+    def test_alpine_source_snapshot_rejects_coherent_tree_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "alpine"
+            snapshot = root / "snapshot"
+            source.mkdir()
+            payload = source / "payload"
+            payload.write_bytes(b"old")
+            common.write_sha256_sums(source)
+            accepted = common.verify_sha256_sums(source)
+            copy_pinned = release._copy_pinned_regular_file
+
+            def mutate_after_checksum(
+                source_root: Path,
+                snapshot_root: Path,
+                relative_name: str,
+                expected_sha256: str,
+                *,
+                expected_mode: int | None = None,
+            ) -> None:
+                copy_pinned(
+                    source_root,
+                    snapshot_root,
+                    relative_name,
+                    expected_sha256,
+                    expected_mode=expected_mode,
+                )
+                if relative_name == "SHA256SUMS":
+                    payload.write_bytes(b"new")
+                    common.write_sha256_sums(source)
+
+            with (
+                patch.object(
+                    release,
+                    "_copy_pinned_regular_file",
+                    side_effect=mutate_after_checksum,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "release snapshot source changed",
+                ),
+            ):
+                release._capture_release_snapshot(source, snapshot, accepted)
+
     def test_selects_latest_matching_prerelease_asset(self):
         releases = [
             {
@@ -3818,6 +4383,241 @@ class ReleaseTests(unittest.TestCase):
             common.verify_sha256_sums(destination)
             self.assertIn("binary-only package", stderr.getvalue())
 
+    def test_binary_package_uses_pinned_license_snapshot_during_race(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, kernel_inputs, revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            openvmm_dir = paths["openvmm"]
+            destination = root / "staged"
+            accepted = {
+                "LICENSE": (root / "LICENSE").read_bytes(),
+                "README.md": (root / "README.md").read_bytes(),
+                "THIRD_PARTY_NOTICES.md": (
+                    root / "THIRD_PARTY_NOTICES.md"
+                ).read_bytes(),
+                "COPYING-LINUX": (root / "kernel" / "COPYING-LINUX").read_bytes(),
+                "LICENSE-OPENVMM": (openvmm_dir / "LICENSE").read_bytes(),
+            }
+
+            def artifact_path(name: str) -> Path:
+                return build_dir / name
+
+            capture_snapshot = release._capture_packaging_file_snapshot
+
+            def mutate_after_capture(parent: Path) -> release._PackagingFileSnapshot:
+                snapshot = capture_snapshot(parent)
+                (root / "LICENSE").write_bytes(b"replacement project license")
+                (root / "README.md").write_bytes(b"replacement readme")
+                (root / "THIRD_PARTY_NOTICES.md").write_bytes(b"replacement notices")
+                (root / "kernel" / "COPYING-LINUX").write_bytes(
+                    b"replacement Linux notice"
+                )
+                (openvmm_dir / "LICENSE").write_bytes(b"replacement OpenVMM license")
+                return snapshot
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                patch.object(release, "SOURCE_DIR", paths["source"]),
+                patch.object(release, "OPENVMM_DIR", openvmm_dir),
+                patch.object(release, "artifact_path", side_effect=artifact_path),
+                patch.object(
+                    release,
+                    "openvmm_binary_path",
+                    return_value=paths["binary"],
+                ),
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, True),
+                ),
+                patch.object(
+                    release,
+                    "_capture_packaging_file_snapshot",
+                    side_effect=mutate_after_capture,
+                ),
+                patch("sys.stderr", io.StringIO()),
+            ):
+                release.package_release(
+                    version="1.0.0",
+                    destination=destination,
+                    include_source=False,
+                    force=False,
+                )
+
+            for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
+                self.assertEqual((destination / name).read_bytes(), accepted[name])
+            self.assertEqual(
+                (destination / "licenses" / "COPYING-LINUX").read_bytes(),
+                accepted["COPYING-LINUX"],
+            )
+            self.assertEqual(
+                (destination / "licenses" / "LICENSE-OPENVMM").read_bytes(),
+                accepted["LICENSE-OPENVMM"],
+            )
+
+    def test_source_package_uses_verified_immutable_snapshots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, kernel_inputs, revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            source_dir = paths["source"]
+            openvmm_dir = paths["openvmm"]
+            binary = paths["binary"]
+            destination = root / "dist" / "1.0.0"
+            package_manifest = build_dir / "initramfs.cpio.gz.packages.json"
+            package_manifest.write_text(
+                json.dumps({"packages": []}),
+                encoding="utf-8",
+            )
+            project_payload = root / "scripts" / "source.py"
+            project_payload.parent.mkdir()
+            project_payload.write_bytes(b"accepted project source")
+
+            alpine_root = source_dir / "alpine"
+            alpine_root.mkdir(parents=True)
+            (alpine_root / "manifest.json").write_text(
+                json.dumps({"packages": []}),
+                encoding="utf-8",
+            )
+            alpine_payload = alpine_root / "payload"
+            alpine_payload.write_bytes(b"accepted Alpine source")
+            common.write_sha256_sums(alpine_root)
+
+            linux_archive = (
+                source_dir
+                / "linux"
+                / f"nvx-linux-source-{build.DEFAULT_KERNEL_VERSION}.tar.gz"
+            )
+            _create_fixture_linux_archive(root, paths, output=linux_archive)
+            accepted_linux_sha256 = common.sha256_file(linux_archive)
+            accepted_package_files = {
+                name: (root / name).read_bytes()
+                for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md")
+            }
+            accepted_linux_copying = (root / "kernel" / "COPYING-LINUX").read_bytes()
+            accepted_openvmm_license = (openvmm_dir / "LICENSE").read_bytes()
+
+            def artifact_path(name: str) -> Path:
+                return build_dir / name
+
+            capture_snapshot = release._capture_packaging_source_snapshot
+
+            def mutate_live_sources_after_capture(
+                package_manifests: list[Path],
+                source_archive: Path,
+                parent: Path,
+                root_manifest: dict[str, object],
+                kernel_provenance: dict[str, object],
+            ) -> release._PackagingSourceSnapshot:
+                snapshot = capture_snapshot(
+                    package_manifests,
+                    source_archive,
+                    parent,
+                    root_manifest,
+                    kernel_provenance,
+                )
+                project_payload.write_bytes(b"replacement project source")
+                alpine_payload.write_bytes(b"replacement Alpine source")
+                common.write_sha256_sums(alpine_root)
+                linux_archive.write_bytes(b"replacement Linux archive")
+                for name in accepted_package_files:
+                    (root / name).write_bytes(b"replacement " + name.encode("ascii"))
+                (root / "kernel" / "COPYING-LINUX").write_bytes(
+                    b"replacement Linux notice"
+                )
+                (openvmm_dir / "LICENSE").write_bytes(b"replacement OpenVMM license")
+                return snapshot
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                patch.object(release, "SOURCE_DIR", source_dir),
+                patch.object(release, "OPENVMM_DIR", openvmm_dir),
+                patch.object(
+                    release,
+                    "PROJECT_SOURCE_PATHS",
+                    (
+                        "SOURCE-MANIFEST.json",
+                        "scripts",
+                        "kernel/patches/example.patch",
+                        "kernel/COPYING-LINUX",
+                        "LICENSE",
+                        "README.md",
+                        "THIRD_PARTY_NOTICES.md",
+                    ),
+                ),
+                patch.object(release, "artifact_path", side_effect=artifact_path),
+                patch.object(
+                    release,
+                    "openvmm_binary_path",
+                    return_value=binary,
+                ),
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, True),
+                ),
+                patch.object(
+                    release,
+                    "_capture_packaging_source_snapshot",
+                    side_effect=mutate_live_sources_after_capture,
+                ),
+            ):
+                release.package_release(
+                    version="1.0.0",
+                    destination=destination,
+                    include_source=True,
+                    force=False,
+                )
+
+            common.verify_sha256_sums(destination)
+            packaged_linux = destination / "source" / linux_archive.name
+            self.assertEqual(
+                common.sha256_file(packaged_linux),
+                accepted_linux_sha256,
+            )
+            project_archive = destination / "source" / "nvx-project-source-1.0.0.tar.gz"
+            with tarfile.open(project_archive, "r:gz") as package:
+                project_source = package.extractfile(
+                    "nvx-project-source-1.0.0/scripts/source.py"
+                )
+                self.assertIsNotNone(project_source)
+                assert project_source is not None
+                self.assertEqual(project_source.read(), b"accepted project source")
+                for name, expected in accepted_package_files.items():
+                    member = package.extractfile(f"nvx-project-source-1.0.0/{name}")
+                    self.assertIsNotNone(member)
+                    assert member is not None
+                    self.assertEqual(member.read(), expected)
+            alpine_archive = destination / "source" / "nvx-alpine-source-1.0.0.tar.gz"
+            with tarfile.open(alpine_archive, "r:gz") as package:
+                alpine_source = package.extractfile(
+                    "nvx-alpine-source-1.0.0/sources/payload"
+                )
+                self.assertIsNotNone(alpine_source)
+                assert alpine_source is not None
+                self.assertEqual(alpine_source.read(), b"accepted Alpine source")
+            for name, expected in accepted_package_files.items():
+                self.assertEqual((destination / name).read_bytes(), expected)
+            self.assertEqual(
+                (destination / "licenses" / "COPYING-LINUX").read_bytes(),
+                accepted_linux_copying,
+            )
+            self.assertEqual(
+                (destination / "licenses" / "LICENSE-OPENVMM").read_bytes(),
+                accepted_openvmm_license,
+            )
+
     def test_package_rejects_dirty_openvmm_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3862,6 +4662,49 @@ class ReleaseTests(unittest.TestCase):
                     paths["build"] / "vmlinux.config",
                     paths["build"] / build.KERNEL_PROVENANCE_NAME,
                 )
+
+    def test_linux_source_archive_requires_exact_compilation_tree(self):
+        def retarget_symlink(tree: Path) -> None:
+            link = tree / "Documentation" / "Changes"
+            link.unlink()
+            os.symlink("process/other.rst", link)
+
+        mutations: dict[str, Callable[[Path], object]] = {
+            "modified": lambda tree: (tree / "Makefile").write_bytes(b"substituted\n"),
+            "extra": lambda tree: (tree / "unexpected.c").write_bytes(b"extra\n"),
+            "missing": lambda tree: (tree / "Makefile").unlink(),
+            "symlink-target": retarget_symlink,
+        }
+        for name, mutate in mutations.items():
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                paths, kernel_inputs, _revision = _write_release_fixture(root)
+                source_tree = root / f"linux-source-{name}"
+                shutil.copytree(paths["kernel_source"], source_tree, symlinks=True)
+                mutate(source_tree)
+                linux_archive = _create_fixture_linux_archive(
+                    root,
+                    paths,
+                    source_tree=source_tree,
+                    output=root / f"{name}.tar.gz",
+                )
+                source_inputs = cast(dict[str, object], kernel_inputs["source"])
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "compilation source snapshot",
+                ):
+                    release._validate_linux_source_archive(
+                        linux_archive,
+                        repo_root=root,
+                        kernel_config=paths["build"] / "vmlinux.config",
+                        expected_tree_sha256=cast(
+                            str,
+                            source_inputs["tree_sha256"],
+                        ),
+                    )
 
     def test_package_rejects_tampered_source_metadata_without_replacing_output(self):
         cases: tuple[tuple[str, str, object, str], ...] = (
@@ -4215,6 +5058,22 @@ class ReleaseTests(unittest.TestCase):
 
 
 class SharedFileTests(unittest.TestCase):
+    def test_checksum_manifest_authenticates_nested_checksum_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested_checksum = root / "nested" / "SHA256SUMS"
+            nested_checksum.parent.mkdir()
+            nested_checksum.write_text("nested payload\n", encoding="ascii")
+
+            common.write_sha256_sums(root)
+            checksum_text = (root / "SHA256SUMS").read_text(encoding="ascii")
+            self.assertIn("  nested/SHA256SUMS\n", checksum_text)
+            common.verify_sha256_sums(root)
+
+            nested_checksum.write_text("tampered\n", encoding="ascii")
+            with self.assertRaisesRegex(common.ScriptError, "checksum mismatch"):
+                common.verify_sha256_sums(root)
+
     def test_checksum_manifest_detects_modified_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -4491,6 +5350,7 @@ class SharedFileTests(unittest.TestCase):
             source = root / "source"
             source.mkdir()
             (source / "payload.txt").write_text("payload", encoding="ascii")
+            os.symlink("payload.txt", source / "payload.link")
             cache = source / "__pycache__"
             cache.mkdir()
             (cache / "ignored.pyc").write_bytes(b"cache")
@@ -4507,6 +5367,279 @@ class SharedFileTests(unittest.TestCase):
             self.assertNotIn("bundle/__pycache__", {member.name for member in members})
             self.assertTrue(all(member.mtime == 0 for member in members))
             self.assertTrue(all(member.uid == member.gid == 0 for member in members))
+            symlink = next(member for member in members if member.issym())
+            self.assertEqual(symlink.name, "bundle/payload.link")
+            self.assertEqual(symlink.linkname, "payload.txt")
+            self.assertEqual(symlink.mode, 0o777)
+
+    def test_source_archives_ignore_umask_and_directory_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original_umask = os.umask(0o077)
+            try:
+                source = root / "source"
+                nested = source / "nested"
+                nested.mkdir(parents=True)
+                (nested / "payload.txt").write_text("payload", encoding="ascii")
+            finally:
+                os.umask(original_umask)
+            first = root / "first.tar.gz"
+            second = root / "second.tar.gz"
+
+            archive.create_reproducible_tar_gz(first, [(source, "bundle")])
+            source.chmod(0o755)
+            nested.chmod(0o755)
+            original_umask = os.umask(0o022)
+            try:
+                archive.create_reproducible_tar_gz(second, [(source, "bundle")])
+            finally:
+                os.umask(original_umask)
+
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            with tarfile.open(first, "r:gz") as package:
+                directories = [member for member in package if member.isdir()]
+            self.assertTrue(directories)
+            self.assertTrue(all(member.mode == 0o755 for member in directories))
+
+    def test_source_tree_and_archive_digests_preserve_safe_kernel_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "linux"
+            _write_kernel_symlink_fixture(source)
+            expected = archive.canonical_source_tree_digest(source)
+            source_archive = root / "source.tar.gz"
+
+            archive.create_reproducible_tar_gz(
+                source_archive,
+                ((source, "package/linux"),),
+                normalize_file_modes=True,
+            )
+
+            self.assertEqual(
+                archive.canonical_source_archive_tree_digest(
+                    source_archive,
+                    package_root="package",
+                    tree_root="package/linux",
+                ),
+                expected,
+            )
+            with tarfile.open(source_archive, "r:gz") as package:
+                members = {member.name: member for member in package}
+            expected_links = {
+                "package/linux/Documentation/Changes": "process/changes.rst",
+                "package/linux/arch/arm64/tools/syscall_64.tbl": (
+                    "../../../scripts/syscall.tbl"
+                ),
+                "package/linux/include/dt-bindings/input/linux-event-codes.h": (
+                    "../../uapi/linux/input-event-codes.h"
+                ),
+                "package/linux/scripts/dtc/include-prefixes/arm64": (
+                    "../../../arch/arm64/boot/dts"
+                ),
+            }
+            for name, target in expected_links.items():
+                self.assertTrue(members[name].issym())
+                self.assertEqual(members[name].linkname, target)
+                self.assertEqual(members[name].mode, 0o777)
+
+            changed = source / "Documentation" / "Changes"
+            changed.unlink()
+            os.symlink("process/other.rst", changed)
+            modified = archive.canonical_source_tree_digest(source)
+            self.assertNotEqual(modified, expected)
+            modified_archive = root / "modified.tar.gz"
+            archive.create_reproducible_tar_gz(
+                modified_archive,
+                ((source, "package/linux"),),
+                normalize_file_modes=True,
+            )
+            self.assertEqual(
+                archive.canonical_source_archive_tree_digest(
+                    modified_archive,
+                    package_root="package",
+                    tree_root="package/linux",
+                ),
+                modified,
+            )
+            self.assertNotEqual(modified, expected)
+
+    def test_source_symlinks_reject_unsafe_targets_consistently(self):
+        unsafe_targets = (
+            "../outside",
+            "/absolute",
+            "C:/windows-drive",
+            "C:\\windows-drive",
+            "\\\\server\\share",
+        )
+        for target in unsafe_targets:
+            with (
+                self.subTest(target=target),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = root / "linux"
+                source.mkdir()
+                os.symlink(target, source / "unsafe")
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "unsafe symlink target|escapes Linux source tree",
+                ):
+                    archive.canonical_source_tree_digest(source)
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "unsafe symlink target|escapes Linux source tree",
+                ):
+                    archive.create_reproducible_tar_gz(
+                        root / "source.tar.gz",
+                        ((source, "package/linux"),),
+                        normalize_file_modes=True,
+                    )
+
+        for target in ("", "contains\0nul"):
+            with (
+                self.subTest(target=repr(target)),
+                self.assertRaisesRegex(common.ScriptError, "unsafe symlink target"),
+            ):
+                archive._canonical_symlink_target("safe/link", target)
+
+        self.assertEqual(
+            archive._canonical_symlink_target(
+                "arch/arm64/tools/syscall_64.tbl",
+                "../../../scripts/syscall.tbl",
+            ),
+            b"../../../scripts/syscall.tbl",
+        )
+        self.assertEqual(
+            archive._canonical_symlink_target(
+                "tools/testing/selftests/powerpc/primitives/asm/asm-compat.h",
+                "../.././../../../../arch/powerpc/include/asm/asm-compat.h",
+            ),
+            b"../.././../../../../arch/powerpc/include/asm/asm-compat.h",
+        )
+
+    def test_source_archive_rejects_escaping_symlink_and_special_entries(self):
+        def write_archive(
+            output: Path,
+            *,
+            entry_type: bytes,
+            linkname: str = "",
+            duplicate: bool = False,
+        ) -> None:
+            with output.open("wb") as raw:
+                with gzip.GzipFile(
+                    filename="",
+                    mode="wb",
+                    fileobj=raw,
+                    mtime=0,
+                ) as compressed:
+                    with tarfile.open(fileobj=compressed, mode="w") as package:
+                        for name in ("package", "package/linux"):
+                            directory = tarfile.TarInfo(name)
+                            directory.type = tarfile.DIRTYPE
+                            directory.mode = 0o755
+                            package.addfile(directory)
+                        entry = tarfile.TarInfo("package/linux/entry")
+                        entry.type = entry_type
+                        entry.mode = 0o777
+                        entry.linkname = linkname
+                        package.addfile(entry)
+                        if duplicate:
+                            package.addfile(entry)
+
+        cases = (
+            ("escaping", tarfile.SYMTYPE, "../outside", False, "escapes"),
+            ("absolute", tarfile.SYMTYPE, "/outside", False, "unsafe symlink"),
+            ("hard-link", tarfile.LNKTYPE, "target", False, "unsupported entry"),
+            ("duplicate", tarfile.SYMTYPE, "target", True, "duplicate path"),
+        )
+        for name, entry_type, target, duplicate, error in cases:
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                source_archive = Path(temporary) / "source.tar.gz"
+                write_archive(
+                    source_archive,
+                    entry_type=entry_type,
+                    linkname=target,
+                    duplicate=duplicate,
+                )
+                with self.assertRaisesRegex(common.ScriptError, error):
+                    archive.canonical_source_archive_tree_digest(
+                        source_archive,
+                        package_root="package",
+                        tree_root="package/linux",
+                    )
+
+    def test_source_archive_rejects_collisions_outside_linux_tree(self):
+        for parent_kind in ("file", "symlink"):
+            with (
+                self.subTest(parent_kind=parent_kind),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                source_archive = Path(temporary) / "source.tar.gz"
+                with tarfile.open(source_archive, "w:gz") as package:
+                    for name in ("package", "package/linux"):
+                        directory = tarfile.TarInfo(name)
+                        directory.type = tarfile.DIRTYPE
+                        directory.mode = 0o755
+                        package.addfile(directory)
+                    makefile = tarfile.TarInfo("package/linux/Makefile")
+                    makefile.mode = 0o644
+                    makefile.size = len(b"expected")
+                    package.addfile(makefile, io.BytesIO(b"expected"))
+                    alias = tarfile.TarInfo("package/alias")
+                    if parent_kind == "symlink":
+                        alias.type = tarfile.SYMTYPE
+                        alias.mode = 0o777
+                        alias.linkname = "linux"
+                    else:
+                        alias.mode = 0o644
+                    package.addfile(alias, io.BytesIO())
+                    overwrite = tarfile.TarInfo("package/alias/Makefile")
+                    overwrite.mode = 0o644
+                    overwrite.size = len(b"overwrite")
+                    package.addfile(overwrite, io.BytesIO(b"overwrite"))
+
+                with self.assertRaisesRegex(common.ScriptError, "colliding path"):
+                    archive.canonical_source_archive_tree_digest(
+                        source_archive,
+                        package_root="package",
+                        tree_root="package/linux",
+                    )
+
+    def test_source_archive_validates_all_paths_before_linux_tree_filter(self):
+        for invalid_layout, error in (
+            ("duplicate", "duplicate path"),
+            ("missing-parent", "omits directory entry package/metadata"),
+        ):
+            with (
+                self.subTest(invalid_layout=invalid_layout),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                source_archive = Path(temporary) / "source.tar.gz"
+                with tarfile.open(source_archive, "w:gz") as package:
+                    for name in ("package", "package/linux"):
+                        directory = tarfile.TarInfo(name)
+                        directory.type = tarfile.DIRTYPE
+                        directory.mode = 0o755
+                        package.addfile(directory)
+                    metadata = tarfile.TarInfo(
+                        "package/metadata"
+                        if invalid_layout == "duplicate"
+                        else "package/metadata/value"
+                    )
+                    metadata.mode = 0o644
+                    package.addfile(metadata, io.BytesIO())
+                    if invalid_layout == "duplicate":
+                        package.addfile(metadata, io.BytesIO())
+
+                with self.assertRaisesRegex(common.ScriptError, error):
+                    archive.canonical_source_archive_tree_digest(
+                        source_archive,
+                        package_root="package",
+                        tree_root="package/linux",
+                    )
 
 
 class DownloadTests(unittest.TestCase):

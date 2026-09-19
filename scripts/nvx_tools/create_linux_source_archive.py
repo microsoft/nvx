@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from nvx_tools.archive import create_reproducible_tar_gz
+from nvx_tools.archive import (
+    canonical_source_archive_tree_digest,
+    canonical_source_tree_digest,
+    create_reproducible_tar_gz,
+)
 from nvx_tools.build import DEFAULT_KERNEL_VERSION, prepare_kernel_source
-from nvx_tools.common import REPO_ROOT
+from nvx_tools.common import REPO_ROOT, ScriptError
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> None:
@@ -17,7 +22,14 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def command_create_linux_source_archive(args: argparse.Namespace) -> None:
-    source, _ = prepare_kernel_source()
+    source, source_fingerprint = prepare_kernel_source()
+    accepted_source = json.loads(source_fingerprint)
+    expected_tree_sha256 = accepted_source.get("tree_sha256")
+    if (
+        not isinstance(expected_tree_sha256, str)
+        or canonical_source_tree_digest(source) != expected_tree_sha256
+    ):
+        raise ScriptError("accepted Linux source tree digest is invalid")
     config = args.config.resolve()
     if not config.is_file():
         raise FileNotFoundError(f"generated kernel config not found: {config}")
@@ -35,5 +47,19 @@ def command_create_linux_source_archive(args: argparse.Namespace) -> None:
         (REPO_ROOT / "THIRD_PARTY_NOTICES.md", f"{root}/THIRD_PARTY_NOTICES.md"),
         (REPO_ROOT / "LICENSE", f"{root}/LICENSE"),
     )
-    create_reproducible_tar_gz(output, inputs)
+    try:
+        create_reproducible_tar_gz(output, inputs, normalize_file_modes=True)
+        archived_tree_sha256 = canonical_source_archive_tree_digest(
+            output,
+            package_root=root,
+            tree_root=f"{root}/linux-{DEFAULT_KERNEL_VERSION}",
+        )
+        if archived_tree_sha256 != expected_tree_sha256:
+            raise ScriptError(
+                "Linux corresponding-source archive does not match the accepted "
+                "source tree"
+            )
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
     print(f">> created {output}")

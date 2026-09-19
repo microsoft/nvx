@@ -240,6 +240,15 @@ class DevelopmentReleaseTests(unittest.TestCase):
                     ),
                 ),
                 (
+                    "boolean-size",
+                    development_release._DevelopmentReleaseAsset(
+                        local.name,
+                        True,
+                        f"sha256:{local.sha256}",
+                        "uploaded",
+                    ),
+                ),
+                (
                     "state",
                     development_release._DevelopmentReleaseAsset(
                         local.name,

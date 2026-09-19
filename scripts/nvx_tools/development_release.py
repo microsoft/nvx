@@ -161,7 +161,7 @@ def _parse_release(payload: str) -> _DevelopmentRelease:
         state = asset.get("state")
         if (
             not isinstance(name, str)
-            or not isinstance(size, int)
+            or type(size) is not int
             or isinstance(size, bool)
             or not isinstance(state, str)
             or not (digest_value is None or isinstance(digest_value, str))
