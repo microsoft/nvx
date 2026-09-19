@@ -41,6 +41,11 @@ Both scripts pin and verify the Actions runner package. Linux runner labels are
 but are not registered as labels.
 Rustup bootstrap binaries are versioned and SHA-256 verified before execution;
 Linux provisioning also installs `zstd` for native Actions cache archives.
+Both runner setup scripts install a pinned, SHA-256-verified `sccache` binary.
+Runner services use a persistent `_work/_sccache` directory with a 10-GiB
+limit, disable Cargo incremental compilation, and expose `sccache` through
+`RUSTC_WRAPPER`. CI uses clean Cargo target directories and reports per-job
+cache statistics instead of restoring compiled `target/` trees.
 Supply a fresh registration token again when migrating an existing runner or
 changing its name, backend, or labels; provisioning replaces the registration
 and records the expected label set in a protected local marker.
