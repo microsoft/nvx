@@ -6,8 +6,20 @@ three runners labeled by operating system, backend, and `virtual-machine`.
 Jobs target the shared backend labels so any available matching runner can
 execute them. This allows the backend lanes to execute concurrently without
 binding a workload to a specific host. `openvmm-tests` builds its Xen PVH probe
-entirely from the OpenVMM checkout and exercises OpenVMM lifecycle, TTRPC, and
-snapshot contracts without restoring NVX guest artifacts.
+entirely from the OpenVMM checkout and exercises OpenVMM lifecycle, TTRPC,
+snapshot, and the canonical `multiarch::openvmm_linux_x64_boot` Linux-direct
+boot contract without restoring NVX guest artifacts. The selector uses an exact
+nextest name matcher so similarly named boot variants are not included.
+Linux runners build the static musl pipette locally. The Linux musl OpenVMM
+binary job also uploads a same-revision pipette for WHP; Windows prepares the
+remaining test bundle, adds that pipette, and runs the complete selector with
+`vmm-tests-run-target`. Linux runner provisioning installs both
+`x86_64-unknown-none` and `x86_64-unknown-linux-musl` because the protected
+Rustup state is read-only to workflow jobs.
+Failed OpenVMM jobs upload available Petri/OpenVMM diagnostics and nextest
+JUnit results as `openvmm-tests-<backend>`. Uploads warn if setup failed before
+producing diagnostics.
+
 `nvx-microvm-tests` consumes the NVX Linux kernel and Alpine initramfs and
 exercises Linux, SMP, virtio, sandbox, and snapshot behavior through the public
 OpenVMM CLI. Failure logs from the NVX layer are uploaded per backend.

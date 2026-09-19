@@ -24,9 +24,14 @@ ZSTD_URL = (
 ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
 OPENVMM_GUEST_RUST_TARGET = "x86_64-unknown-none"
-OPENVMM_MICROVM_TEST_FILTER = (
+OPENVMM_LINUX_RUST_TARGET = "x86_64-unknown-linux-musl"
+OPENVMM_MICROVM_BASE_TEST_FILTER = (
     "test(openvmm_microvm_test_pvh_x64_phase_1_lifecycle) + "
     "test(test_ttrpc_microvm_pvh_snapshot)"
+)
+OPENVMM_LINUX_X64_BOOT_TEST_FILTER = "test(=multiarch::openvmm_linux_x64_boot)"
+OPENVMM_MICROVM_TEST_FILTER = (
+    f"{OPENVMM_MICROVM_BASE_TEST_FILTER} + {OPENVMM_LINUX_X64_BOOT_TEST_FILTER}"
 )
 
 
@@ -59,11 +64,15 @@ def run_openvmm_tests(backend: str) -> None:
     cargo = require_tool("cargo")
     rustup = require_tool("rustup")
 
-    run_checked([rustup, "target", "add", OPENVMM_GUEST_RUST_TARGET])
+    targets = [OPENVMM_GUEST_RUST_TARGET]
+    if os.name != "nt":
+        targets.append(OPENVMM_LINUX_RUST_TARGET)
+    run_checked([rustup, "target", "add", *targets])
     run_checked(
         [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
         cwd=OPENVMM_DIR,
     )
+    test_dir = Path(os.environ.get("RUNNER_TEMP", "C:/ovm-tests")) / backend
     command = [
         cargo,
         "xflowey",
@@ -75,12 +84,36 @@ def run_openvmm_tests(backend: str) -> None:
         OPENVMM_MICROVM_TEST_FILTER,
     ]
     if os.name == "nt":
+        pipette = os.environ.get("OPENVMM_LINUX_PIPETTE")
+        if not pipette:
+            raise ScriptError("OPENVMM_LINUX_PIPETTE is required for WHP OpenVMM tests")
+        pipette_path = require_file(Path(pipette), "OpenVMM Linux pipette")
+        build_command = [
+            *command,
+            "--build-only",
+            "--dir",
+            os.fspath(test_dir),
+        ]
+        build_command[build_command.index("--filter") + 1] = (
+            OPENVMM_MICROVM_BASE_TEST_FILTER
+        )
+        run_checked(build_command, cwd=OPENVMM_DIR)
+        test_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pipette_path, test_dir / "pipette")
+        command = [
+            cargo,
+            "xflowey",
+            "vmm-tests-run-target",
+            "--needs-whp",
+            "--ci-profile",
+            "--skip-vhd-prompt",
+            "--filter",
+            OPENVMM_MICROVM_TEST_FILTER,
+        ]
         command.extend(
             (
                 "--dir",
-                os.fspath(
-                    Path(os.environ.get("RUNNER_TEMP", "C:/ovm-tests")) / backend
-                ),
+                os.fspath(test_dir),
             )
         )
     run_checked(command, cwd=OPENVMM_DIR)

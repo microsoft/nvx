@@ -16,9 +16,10 @@ The OpenVMM restore step excludes the compatibility IGVM artifact, which NVX
 does not build or package, so builds do not depend on unrelated upstream
 workflow artifacts.
 
-OpenVMM's microVM tests build their own minimal Xen PVH guest from source in
-the OpenVMM checkout. They do not consume `build/vmlinux` or
-`build/initramfs.cpio.gz`. NVX uses those two artifacts only for its Linux and
+OpenVMM's tests build their own minimal Xen PVH guest and Linux pipette agent
+from source in the OpenVMM checkout. They also restore OpenVMM's packaged
+Linux-direct test kernel and initrd. They do not consume `build/vmlinux` or
+`build/initramfs.cpio.gz`; NVX uses those two artifacts only for its Linux and
 device correctness tests, benchmarks, and packaged runtime.
 
 On a Linux host, build the guest directly:
@@ -51,8 +52,11 @@ python3 scripts/nvx.py test-openvmm --backend kvm
 python3 scripts/nvx.py test-microvm --backend kvm
 ```
 
-The first command needs only the OpenVMM checkout. The second needs the
-standard build outputs above and writes complete per-scenario logs under
+On Linux, the first command needs only the initialized OpenVMM checkout and the
+Rust targets provisioned by the host setup. A local Windows/WHP run additionally
+needs `OPENVMM_LINUX_PIPETTE` to identify a same-revision Linux pipette; see
+[Usage](usage.md#test-openvmm). The second command needs the standard build
+outputs above and writes complete per-scenario logs under
 `build/test-results/microvm` by default.
 
 The initramfs includes the sandbox PID-1 bootstrap, its container namespace

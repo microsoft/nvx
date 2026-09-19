@@ -640,6 +640,8 @@ class CiTests(unittest.TestCase):
             openvmm = root / "openvmm"
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
+            pipette = root / "pipette"
+            pipette.write_bytes(b"pipette")
             backend = "whp" if os.name == "nt" else "kvm"
 
             with (
@@ -655,36 +657,72 @@ class CiTests(unittest.TestCase):
                         "OPENVMM_MICROVM_PVH_INITRD": "nvx-initrd",
                         "PETRI_CAPABILITIES": "vpci",
                         "RUNNER_TEMP": os.fspath(root),
+                        "OPENVMM_LINUX_PIPETTE": os.fspath(pipette),
                     },
                 ),
             ):
                 ci.run_openvmm_tests(backend)
 
-            self.assertEqual(run_checked.call_count, 3)
-            install_target, restore, tests = run_checked.call_args_list
+            self.assertEqual(run_checked.call_count, 4 if os.name == "nt" else 3)
+            install_target, restore, *test_commands = run_checked.call_args_list
             self.assertEqual(
                 install_target.args[0],
-                ["rustup", "target", "add", "x86_64-unknown-none"],
+                [
+                    "rustup",
+                    "target",
+                    "add",
+                    "x86_64-unknown-none",
+                    *([] if os.name == "nt" else ["x86_64-unknown-linux-musl"]),
+                ],
             )
             self.assertEqual(
                 restore.args[0],
                 ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
             )
-            command = tests.args[0]
-            self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
+            for test_command in test_commands:
+                self.assertIn("--ci-profile", test_command.args[0])
+                self.assertIn("--skip-vhd-prompt", test_command.args[0])
+            command = test_commands[-1].args[0]
+            self.assertEqual(
+                command[:3],
+                [
+                    "cargo",
+                    "xflowey",
+                    "vmm-tests-run-target" if os.name == "nt" else "vmm-tests-run",
+                ],
+            )
+            if os.name == "nt":
+                self.assertIn("--needs-whp", command)
+                self.assertNotIn("--needs-hyperv", command)
+            else:
+                self.assertIn("--release", command)
             filter_index = command.index("--filter")
             self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
-            self.assertIn(
-                "test_ttrpc_microvm_pvh_snapshot",
+            self.assertEqual(
                 ci.OPENVMM_MICROVM_TEST_FILTER,
+                "test(openvmm_microvm_test_pvh_x64_phase_1_lifecycle) + "
+                "test(test_ttrpc_microvm_pvh_snapshot) + "
+                "test(=multiarch::openvmm_linux_x64_boot)",
             )
-            self.assertEqual(tests.kwargs["cwd"], openvmm)
-            self.assertNotIn("env", tests.kwargs)
+            self.assertEqual(
+                ci.OPENVMM_LINUX_X64_BOOT_TEST_FILTER,
+                "test(=multiarch::openvmm_linux_x64_boot)",
+            )
+            self.assertEqual(test_commands[-1].kwargs["cwd"], openvmm)
+            self.assertNotIn("env", test_commands[-1].kwargs)
             if os.name == "nt":
+                build = test_commands[0].args[0]
+                self.assertIn("--build-only", build)
+                self.assertIn("--release", build)
+                self.assertEqual(
+                    build[build.index("--filter") + 1],
+                    ci.OPENVMM_MICROVM_BASE_TEST_FILTER,
+                )
                 self.assertEqual(
                     command[command.index("--dir") + 1],
                     os.fspath(root / backend),
                 )
+                self.assertEqual((root / backend / "pipette").read_bytes(), b"pipette")
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
@@ -692,6 +730,79 @@ class CiTests(unittest.TestCase):
 
 
 class CiConfigurationTests(unittest.TestCase):
+    def test_validate_nvx_windows_propagates_python_failures(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "validate-nvx" / "action.yml"
+        ).read_text(encoding="utf-8")
+        windows_steps = action.split(
+            "    - name: Validate NVX CLI on Windows",
+            maxsplit=1,
+        )[1]
+        lines = windows_steps.splitlines()
+        python_commands = [
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("        python ")
+        ]
+
+        self.assertGreater(len(python_commands), 0)
+        for index in python_commands:
+            self.assertEqual(
+                lines[index + 1],
+                "        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+            )
+
+    def test_openvmm_tests_require_binary_handoff(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        openvmm_tests = workflow.split("  openvmm-tests:", maxsplit=1)[1].split(
+            "\n  nvx-microvm-tests:", maxsplit=1
+        )[0]
+
+        self.assertIn(
+            "needs.openvmm-binaries.result == 'success'",
+            openvmm_tests,
+        )
+
+    def test_openvmm_tests_upload_failure_diagnostics(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        openvmm_tests = workflow.split("  openvmm-tests:", maxsplit=1)[1].split(
+            "\n  nvx-microvm-tests:", maxsplit=1
+        )[0]
+        upload_name = "      - name: Upload OpenVMM failure diagnostics"
+        self.assertIn(upload_name, openvmm_tests)
+        upload_step = openvmm_tests.split(upload_name, maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+
+        self.assertIn("        if: failure()", upload_step)
+        self.assertIn("        uses: actions/upload-artifact@v7", upload_step)
+        self.assertIn(
+            "          name: openvmm-tests-${{ matrix.backend }}", upload_step
+        )
+        self.assertIn("          if-no-files-found: warn", upload_step)
+        self.assertIn("          overwrite: true", upload_step)
+        for platform in ("KVM", "MSHV", "Windows"):
+            self.assertLess(
+                openvmm_tests.index(f"      - name: Run OpenVMM tests on {platform}"),
+                openvmm_tests.index(upload_name),
+            )
+        upload_paths = upload_step.split("          path: |\n", maxsplit=1)[1].split(
+            "\n          if-no-files-found:", maxsplit=1
+        )[0]
+        self.assertEqual(
+            [line.strip() for line in upload_paths.splitlines()],
+            [
+                "openvmm/target/vmm_tests/test_results",
+                "openvmm/target/vmm_tests/target/nextest/ci/junit.xml",
+                "${{ runner.temp }}/${{ matrix.backend }}/test_results",
+                "${{ runner.temp }}/${{ matrix.backend }}/target/nextest/ci/junit.xml",
+            ],
+        )
+
     def test_flowey_downloads_use_retrying_curl(self):
         action = (
             common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "action.yml"
@@ -837,11 +948,19 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("artifact: openvmm-linux-musl", workflow)
         self.assertIn("artifact: openvmm-windows-msvc", workflow)
         self.assertIn("build/openvmm.provenance.json", workflow)
-        self.assertIn("name: ${{ matrix.artifact }}-executable", workflow)
-        self.assertIn("name: ${{ matrix.artifact }}-provenance", workflow)
+        for step_name, artifact_name in (
+            ("Upload Linux pipette", "openvmm-linux-pipette"),
+            ("Upload OpenVMM executable", "${{ matrix.artifact }}-executable"),
+            ("Upload OpenVMM provenance", "${{ matrix.artifact }}-provenance"),
+        ):
+            upload_step = workflow.split(
+                f"      - name: {step_name}",
+                maxsplit=1,
+            )[1].split("\n      - name:", maxsplit=1)[0]
+            self.assertIn(f"name: {artifact_name}", upload_step)
+            self.assertIn("overwrite: true", upload_step)
         self.assertIn("path: openvmm/target/release", workflow)
         self.assertIn("path: build", workflow)
-        self.assertEqual(workflow.count("overwrite: true"), 2)
         self.assertNotIn("path: .", workflow)
         self.assertIn("uses: actions/download-artifact@v8", workflow)
         self.assertIn("openvmm-binary-v5-", build_action)
@@ -876,6 +995,10 @@ class CiConfigurationTests(unittest.TestCase):
         linux_setup = (
             common.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
         ).read_text(encoding="utf-8")
+        check_environment = linux_setup.split(
+            "check_environment() {",
+            maxsplit=1,
+        )[1].split("\n}", maxsplit=1)[0]
 
         self.assertIn('$SccacheVersion = "0.18.0"', windows_setup)
         self.assertIn(
@@ -897,6 +1020,9 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("sccache --stop-server", action)
         self.assertIn("SCCACHE_IDLE_TIMEOUT", action)
         self.assertIn("sccache --version", validate_runner)
+        self.assertIn("rustup target list --installed", check_environment)
+        for rust_target in ("x86_64-unknown-none", "x86_64-unknown-linux-musl"):
+            self.assertIn(rust_target, check_environment)
         self.assertNotRegex(
             workflow,
             r"(?m)^\s+path: openvmm/target\s*$",

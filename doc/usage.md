@@ -28,7 +28,7 @@ python3 scripts/nvx.py performance gate --help
 | `build-initramfs` | Build the Alpine initramfs natively. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
-| `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
+| `test-openvmm` | Run checkout-owned OpenVMM control-plane and Linux-direct boot tests. |
 | `test-microvm` | Run NVX Linux and device correctness tests through OpenVMM. |
 | `build` | Build the guest artifacts and OpenVMM. |
 | `download` | Download and install the latest matching GitHub release. |
@@ -127,7 +127,33 @@ python3 scripts/nvx.py test-openvmm --backend {kvm,mshv,whp}
 ```
 
 Builds and runs OpenVMM's checkout-owned microVM tests. The test artifacts are
-produced by OpenVMM itself; NVX's kernel and initramfs are not required.
+produced from the pinned OpenVMM source; NVX's kernel and initramfs are not
+required. The selector includes only the canonical Linux-direct boot test
+`multiarch::openvmm_linux_x64_boot`, not similarly named boot variants.
+
+Linux hosts build the required static Linux pipette guest agent locally and
+therefore need the `x86_64-unknown-linux-musl` Rust target. On Windows, set
+`OPENVMM_LINUX_PIPETTE` to a same-revision Linux pipette before running the WHP
+test:
+
+```powershell
+$env:OPENVMM_LINUX_PIPETTE = "C:\path\to\pipette"
+python scripts\nvx.py test-openvmm --backend whp
+```
+
+Build that artifact from the OpenVMM checkout on Linux:
+
+```bash
+cd openvmm
+cargo xflowey restore-packages --no-compat-igvm
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl \
+    --package pipette --bin pipette
+```
+
+The resulting file is
+`openvmm/target/x86_64-unknown-linux-musl/release/pipette`. GitHub Actions
+builds, uploads, and downloads this artifact automatically for the WHP lane.
 
 ### `test-microvm`
 
