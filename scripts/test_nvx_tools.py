@@ -867,21 +867,16 @@ class CiConfigurationTests(unittest.TestCase):
 
         self.assertEqual(package_action.count("archive-release"), 2)
         self.assertIn(
-            '$KernelInputs = @("kernel/config-microvm") + @(',
-            package_action,
-        )
-        self.assertIn(
-            'git ls-files "kernel/patches/*.patch"',
-            package_action,
-        )
-        self.assertIn(
-            "git checkout-index --force -- $KernelInputs",
+            "python scripts\\nvx.py materialize-kernel-provenance-inputs",
             package_action,
         )
         self.assertLess(
-            package_action.index("git checkout-index --force -- $KernelInputs"),
+            package_action.index(
+                "python scripts\\nvx.py materialize-kernel-provenance-inputs"
+            ),
             package_action.index("- name: Package Windows release"),
         )
+        self.assertNotIn("git checkout-index", package_action)
         self.assertNotIn("tar -czf", package_action)
         self.assertNotIn("Compress-Archive", package_action)
         self.assertIn(
@@ -1016,6 +1011,124 @@ class BuildTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse(output.with_name("vmlinux.config").exists())
             self.assertFalse(prior_provenance.exists())
+
+    def test_materialize_kernel_provenance_inputs_bypasses_mutable_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_CONFIG_")
+            }
+            config = root / "kernel" / "config-microvm"
+            patch_path = root / "kernel" / "patches" / "example.patch"
+            config.parent.mkdir(parents=True)
+            patch_path.parent.mkdir()
+            config.write_bytes(b"CONFIG_EXAMPLE=y\n")
+            patch_path.write_bytes(b"patch\n")
+            (root / ".gitattributes").write_text(
+                "\n".join(
+                    (
+                        "kernel/config-microvm text eol=lf",
+                        "kernel/patches/*.patch text eol=lf",
+                    )
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            subprocess.run(
+                ["git", "init", "-q"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "NVX Tests"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "nvx-tests@example.com"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    ".gitattributes",
+                    "kernel/config-microvm",
+                    "kernel/patches/example.patch",
+                ],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-qm", "kernel provenance fixture"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            git_dir = Path(
+                subprocess.run(
+                    ["git", "rev-parse", "--git-dir"],
+                    cwd=root,
+                    env=git_environment,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            (root / git_dir / "info" / "attributes").write_text(
+                "\n".join(
+                    (
+                        "kernel/config-microvm -text",
+                        "kernel/patches/*.patch -text",
+                    )
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            config.write_bytes(b"CONFIG_EXAMPLE=y\r\n")
+            patch_path.write_bytes(b"patch\r\n")
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "kernel/config-microvm",
+                    "kernel/patches/example.patch",
+                ],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "checkout-index",
+                    "--force",
+                    "--",
+                    "kernel/config-microvm",
+                    "kernel/patches/example.patch",
+                ],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            self.assertEqual(config.read_bytes(), b"CONFIG_EXAMPLE=y\r\n")
+            self.assertEqual(patch_path.read_bytes(), b"patch\r\n")
+
+            with (
+                patch.dict(os.environ, git_environment, clear=True),
+                patch.object(build, "REPO_ROOT", root),
+            ):
+                build.materialize_kernel_provenance_inputs()
+
+            self.assertEqual(config.read_bytes(), b"CONFIG_EXAMPLE=y\n")
+            self.assertEqual(patch_path.read_bytes(), b"patch\n")
 
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(

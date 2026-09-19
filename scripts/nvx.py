@@ -20,6 +20,7 @@ from nvx_tools.build import (
     build_docker_artifacts,
     build_initramfs,
     build_kernel,
+    materialize_kernel_provenance_inputs,
     record_openvmm_provenance,
 )
 from nvx_tools.ci import (
@@ -120,6 +121,10 @@ def command_build_openvmm(args: argparse.Namespace) -> None:
 
 def command_record_openvmm_provenance(_: argparse.Namespace) -> None:
     record_openvmm_provenance(openvmm_binary_path())
+
+
+def command_materialize_kernel_provenance_inputs(_: argparse.Namespace) -> None:
+    materialize_kernel_provenance_inputs()
 
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
@@ -446,6 +451,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="bind an existing OpenVMM binary to the pinned source revision",
     )
     provenance.set_defaults(handler=command_record_openvmm_provenance)
+
+    kernel_provenance = subparsers.add_parser(
+        "materialize-kernel-provenance-inputs",
+        help="write kernel provenance inputs from raw run-head blobs",
+    )
+    kernel_provenance.set_defaults(handler=command_materialize_kernel_provenance_inputs)
 
     cache = subparsers.add_parser(
         "setup-cross-os-cache",
