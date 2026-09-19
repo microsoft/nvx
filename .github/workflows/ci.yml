@@ -109,7 +109,7 @@ jobs:
             run_workloads "At least one non-documentation file changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           fi
 
-          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|sccache|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|scripts/setup/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
           if grep -Eq "${relevant_paths}" "${changed_files}"; then
             run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           else
@@ -220,6 +220,11 @@ jobs:
         with:
           backend: ${{ matrix.backend }}
 
+      - name: Prepare sccache
+        uses: ./.github/actions/sccache
+        with:
+          operation: start
+
       - name: Build OpenVMM
         uses: ./.github/actions/build-openvmm
         with:
@@ -227,6 +232,12 @@ jobs:
           target: ${{ matrix.target }}
           build-mode: ${{ matrix.build-mode }}
           binary-path: ${{ matrix.binary }}
+
+      - name: Report sccache
+        if: always()
+        uses: ./.github/actions/sccache
+        with:
+          operation: stop
 
       - name: Upload OpenVMM executable
         uses: actions/upload-artifact@v7
@@ -349,19 +360,6 @@ jobs:
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Restore OpenVMM test build on Linux
-        id: restore-openvmm-tests-linux
-        if: runner.os != 'Windows'
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.cache-tools-linux.outputs.path }}
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-
-
       - name: Restore shared Cargo cache on Linux
         id: restore-openvmm-cargo-linux
         if: runner.os != 'Windows'
@@ -376,17 +374,6 @@ jobs:
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Restore OpenVMM test build on Windows
-        id: restore-openvmm-tests-windows
-        if: runner.os == 'Windows'
-        uses: actions/cache/restore@v5
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-
-
       - name: Restore shared Cargo cache on Windows
         id: restore-openvmm-cargo-windows
         if: runner.os == 'Windows'
@@ -398,6 +385,11 @@ jobs:
           key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare sccache
+        uses: ./.github/actions/sccache
+        with:
+          operation: start
 
       - name: Run OpenVMM tests on KVM
         if: matrix.backend == 'kvm'
@@ -419,6 +411,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
+      - name: Report sccache
+        if: always()
+        uses: ./.github/actions/sccache
+        with:
+          operation: stop
 
       - name: Save OpenVMM inputs on Linux
         if: >-
@@ -450,20 +448,6 @@ jobs:
             openvmm/flowey-persist/flowey_lib_common__cache
           key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
-      - name: Save OpenVMM test build on Linux
-        if: >-
-          success() &&
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/dev' &&
-          runner.os != 'Windows' &&
-          steps.restore-openvmm-tests-linux.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        env:
-          PATH: ${{ steps.cache-tools-linux.outputs.path }}
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-
       - name: Save shared Cargo cache on Linux
         if: >-
           success() &&
@@ -479,18 +463,6 @@ jobs:
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
           key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
-
-      - name: Save OpenVMM test build on Windows
-        if: >-
-          success() &&
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/dev' &&
-          runner.os == 'Windows' &&
-          steps.restore-openvmm-tests-windows.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
 
       - name: Save shared Cargo cache on Windows
         if: >-

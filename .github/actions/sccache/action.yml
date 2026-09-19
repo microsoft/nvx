@@ -1,0 +1,81 @@
+name: Manage sccache
+description: Start or report the persistent runner-local Rust compilation cache
+
+inputs:
+  operation:
+    description: Operation to perform (start or stop)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate operation on Linux
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        OPERATION: ${{ inputs.operation }}
+      run: |
+        set -euo pipefail
+        case "${OPERATION}" in
+          start|stop) ;;
+          *)
+            echo "::error::Unsupported sccache operation: ${OPERATION}"
+            exit 1
+            ;;
+        esac
+
+    - name: Validate operation on Windows
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        OPERATION: ${{ inputs.operation }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        if ($env:OPERATION -notin @("start", "stop")) {
+          throw "Unsupported sccache operation: $env:OPERATION"
+        }
+
+    - name: Start sccache on Linux
+      if: inputs.operation == 'start' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sccache --version
+        test -n "${SCCACHE_DIR:-}"
+        mkdir -p "${SCCACHE_DIR}"
+        export SCCACHE_IDLE_TIMEOUT=0
+        sccache --zero-stats
+
+    - name: Start sccache on Windows
+      if: inputs.operation == 'start' && runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        sccache --version
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ([string]::IsNullOrWhiteSpace($env:SCCACHE_DIR)) {
+          throw "SCCACHE_DIR is not configured"
+        }
+        New-Item -ItemType Directory -Path $env:SCCACHE_DIR -Force |
+          Out-Null
+        $env:SCCACHE_IDLE_TIMEOUT = "0"
+        sccache --zero-stats
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Report sccache on Linux
+      if: inputs.operation == 'stop' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sccache --show-stats
+        sccache --stop-server
+
+    - name: Report sccache on Windows
+      if: inputs.operation == 'stop' && runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        sccache --show-stats
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        sccache --stop-server
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
