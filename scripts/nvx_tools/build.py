@@ -220,6 +220,15 @@ def materialize_kernel_provenance_inputs() -> None:
     if not patch_paths:
         raise ScriptError("kernel patches are missing from the run head")
 
+    head_patch_paths = set(patch_paths)
+    worktree_patch_paths = {
+        path.relative_to(REPO_ROOT).as_posix(): path
+        for path in (REPO_ROOT / "kernel" / "patches").glob("*.patch")
+    }
+    for relative in sorted(worktree_patch_paths.keys() - head_patch_paths):
+        worktree_patch_paths[relative].unlink()
+        print(f">> removed stale {relative} absent from the run head")
+
     for relative in (config_path, *patch_paths):
         blob = run_capture(
             ["git", "cat-file", "blob", f"HEAD:{relative}"],

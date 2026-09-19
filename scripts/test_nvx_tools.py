@@ -1022,6 +1022,7 @@ class BuildTests(unittest.TestCase):
             }
             config = root / "kernel" / "config-microvm"
             patch_path = root / "kernel" / "patches" / "example.patch"
+            stale_patch = root / "kernel" / "patches" / "stale.patch"
             config.parent.mkdir(parents=True)
             patch_path.parent.mkdir()
             config.write_bytes(b"CONFIG_EXAMPLE=y\n")
@@ -1094,12 +1095,14 @@ class BuildTests(unittest.TestCase):
             )
             config.write_bytes(b"CONFIG_EXAMPLE=y\r\n")
             patch_path.write_bytes(b"patch\r\n")
+            stale_patch.write_bytes(b"stale\r\n")
             subprocess.run(
                 [
                     "git",
                     "add",
                     "kernel/config-microvm",
                     "kernel/patches/example.patch",
+                    "kernel/patches/stale.patch",
                 ],
                 cwd=root,
                 env=git_environment,
@@ -1113,6 +1116,7 @@ class BuildTests(unittest.TestCase):
                     "--",
                     "kernel/config-microvm",
                     "kernel/patches/example.patch",
+                    "kernel/patches/stale.patch",
                 ],
                 cwd=root,
                 env=git_environment,
@@ -1120,6 +1124,7 @@ class BuildTests(unittest.TestCase):
             )
             self.assertEqual(config.read_bytes(), b"CONFIG_EXAMPLE=y\r\n")
             self.assertEqual(patch_path.read_bytes(), b"patch\r\n")
+            self.assertEqual(stale_patch.read_bytes(), b"stale\r\n")
 
             with (
                 patch.dict(os.environ, git_environment, clear=True),
@@ -1129,6 +1134,7 @@ class BuildTests(unittest.TestCase):
 
             self.assertEqual(config.read_bytes(), b"CONFIG_EXAMPLE=y\n")
             self.assertEqual(patch_path.read_bytes(), b"patch\n")
+            self.assertFalse(stale_patch.exists())
 
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
