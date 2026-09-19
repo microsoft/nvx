@@ -12,7 +12,9 @@ from .common import (
     ScriptError,
     download,
     require_file,
+    require_success,
     require_tool,
+    run_capture,
     run_checked,
 )
 
@@ -24,6 +26,18 @@ ZSTD_URL = (
 ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
 OPENVMM_GUEST_RUST_TARGET = "x86_64-unknown-none"
+OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
+    "vmm_tests",
+    "cca_tests",
+    "guest_test_uefi",
+    "inspect_derive",
+    "mesh_derive",
+    "save_restore_derive",
+    "test_with_tracing_macro",
+    "pal_async_test",
+    "vmm_test_macros",
+    "flowey_core",
+)
 OPENVMM_MICROVM_TEST_FILTER = (
     "test(openvmm_microvm_test_pvh_x64_phase_1_lifecycle) + "
     "test(test_ttrpc_microvm_pvh_snapshot)"
@@ -50,6 +64,38 @@ def validate_openvmm_test_backend(backend: str) -> None:
             raise ScriptError(
                 "/dev/mshv is present, so OpenVMM would select MSHV instead of KVM"
             )
+
+
+def run_openvmm_unit_tests() -> None:
+    require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
+    cargo = require_tool("cargo")
+
+    fuzz_crates = run_capture(
+        [cargo, "xtask", "fuzz", "list", "--crates"],
+        cwd=OPENVMM_DIR,
+    )
+    require_success(fuzz_crates, "OpenVMM fuzz crate query")
+
+    command = [
+        cargo,
+        "nextest",
+        "run",
+        "--profile",
+        "agent",
+        "--workspace",
+        "--tests",
+        "--bins",
+        "--features",
+        "ci",
+    ]
+    excluded_packages = (
+        *OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES,
+        *fuzz_crates.stdout.decode("utf-8").splitlines(),
+    )
+    for package in excluded_packages:
+        command.extend(("--exclude", package))
+
+    run_checked(command, cwd=OPENVMM_DIR)
 
 
 def run_openvmm_tests(backend: str) -> None:
