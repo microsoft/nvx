@@ -9,6 +9,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Rematerialize canonical kernel inputs
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $KernelInputs = @("kernel/config-microvm") + @(
+          git ls-files "kernel/patches/*.patch"
+        )
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        git checkout-index --force -- $KernelInputs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: Package Linux release
       if: runner.os != 'Windows'
       shell: bash
