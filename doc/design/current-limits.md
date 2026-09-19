@@ -4,7 +4,8 @@
 
 The current ABI family intentionally does not provide:
 
-- processor counts other than 1/2/4/8, SMT, multiple NUMA nodes, non-x86 guests, or nested virtualization;
+- processor counts other than 1/2/4/8, SMT, multiple NUMA nodes, non-x86 guests,
+  or nested virtualization on MSHV;
 - firmware boot, caller-defined ACPI, SMBIOS, PCI, VPCI, VMBus, arbitrary
    post-readiness CPU or memory hotplug, or arbitrary devices;
 - cross-hypervisor snapshot restore;
@@ -36,6 +37,11 @@ The control-console reservation, attachment serialization, and snapshot RPC
 exclusion are foundations for that protocol, not completion of it. The shell
 bootstrap does not implement a fleet-safe platform build point, warm-runtime
 handoff, arbitrary OCI policy, or production agent resource guarantees.
+
+Nested virtualization is currently an opt-in KVM/WHP experiment. It changes the
+guest-visible CPU feature contract without a new microVM ABI version, and the KVM
+backend cannot save or restore nested processor state. Nested measurements must not
+be persisted as ordinary ABI-v2 baseline history.
 
 Changing a guest-visible address, IRQ, command-line token, feature mask, queue
 shape, time policy, or device behavior requires a new microVM ABI version. A
