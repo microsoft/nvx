@@ -23,6 +23,13 @@ runs:
         rustc --version
         cargo --version
         cargo nextest --version
+        sccache --version
+        test "${RUSTC_WRAPPER:-}" = sccache
+        test "${CARGO_INCREMENTAL:-}" = 0
+        test -n "${SCCACHE_DIR:-}"
+        test "${SCCACHE_CACHE_SIZE:-}" = 10G
+        test -d "${SCCACHE_DIR}"
+        test -w "${SCCACHE_DIR}"
         if sudo -n true >/dev/null 2>&1; then
           echo "::error::Runner has passwordless sudo access" >&2
           exit 1
@@ -54,6 +61,22 @@ runs:
         rustc --version
         cargo --version
         cargo nextest --version
+        sccache --version
+        if ($env:RUSTC_WRAPPER -ne "sccache") {
+          throw "RUSTC_WRAPPER is not configured for sccache"
+        }
+        if ($env:CARGO_INCREMENTAL -ne "0") {
+          throw "CARGO_INCREMENTAL is not disabled"
+        }
+        if ([string]::IsNullOrWhiteSpace($env:SCCACHE_DIR)) {
+          throw "SCCACHE_DIR is not configured"
+        }
+        if ($env:SCCACHE_CACHE_SIZE -ne "10G") {
+          throw "SCCACHE_CACHE_SIZE is not configured"
+        }
+        if (-not (Test-Path -LiteralPath $env:SCCACHE_DIR -PathType Container)) {
+          throw "sccache directory was not found: $env:SCCACHE_DIR"
+        }
         if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
           throw "RUNNER_TEMP is not configured"
         }
