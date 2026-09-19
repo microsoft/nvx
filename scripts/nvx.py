@@ -26,6 +26,7 @@ from nvx_tools.build import (
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
     run_openvmm_tests,
+    run_openvmm_unit_tests,
     setup_cross_os_cache,
 )
 from nvx_tools.collect_alpine_sources import (
@@ -133,6 +134,10 @@ def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
 
 def command_test_openvmm(args: argparse.Namespace) -> None:
     run_openvmm_tests(args.backend)
+
+
+def command_test_openvmm_unit(_: argparse.Namespace) -> None:
+    run_openvmm_unit_tests()
 
 
 def command_build(args: argparse.Namespace) -> None:
@@ -463,6 +468,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="install GNU tar and zstd for GitHub Actions cross-OS caches",
     )
     cache.set_defaults(handler=command_setup_cross_os_cache)
+
+    openvmm_unit_tests = subparsers.add_parser(
+        "test-openvmm-unit",
+        help="run OpenVMM unit tests",
+    )
+    openvmm_unit_tests.set_defaults(handler=command_test_openvmm_unit)
 
     openvmm_tests = subparsers.add_parser(
         "test-openvmm",

@@ -13,6 +13,7 @@ runs:
         python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py -v
         python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
         python3 scripts/nvx.py --help
+        python3 scripts/nvx.py test-openvmm-unit --help
         python3 scripts/nvx.py test-openvmm --help
         python3 scripts/nvx.py test-microvm --help
         python3 scripts/nvx.py benchmark --help
@@ -25,6 +26,7 @@ runs:
         python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py -v
         python .github\skills\nvx-host-connect\scripts\test_hosts.py -v
         python scripts\nvx.py --help
+        python scripts\nvx.py test-openvmm-unit --help
         python scripts\nvx.py test-openvmm --help
         python scripts\nvx.py test-microvm --help
         python scripts\nvx.py benchmark --help

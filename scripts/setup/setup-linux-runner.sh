@@ -412,8 +412,9 @@ install_packages() {
             elfutils-libelf-devel findutils flex gcc \
             gcc-c++ git glibc-devel glibc-iconv gzip icu iproute iptables \
             kernel-headers libarchive libarchive-devel lttng-ust make \
-            ninja-build openssl openssl-devel patch perl pkgconf \
-            pkgconf-pkg-config protobuf python3 rsync shadow-utils tar \
+            ninja-build openssl openssl-devel patch perl perl-FindBin \
+            perl-IPC-Cmd perl-Time-Piece perl-lib pkgconf pkgconf-pkg-config \
+            protobuf python3 rsync shadow-utils tar \
             util-linux which xz zstd
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \

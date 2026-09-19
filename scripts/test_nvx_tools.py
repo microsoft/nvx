@@ -328,6 +328,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(verify.command, "verify")
         self.assertIs(verify.handler, nvx.command_verify)
 
+        openvmm_unit_tests = nvx.parse_args(["test-openvmm-unit"])
+        self.assertEqual(openvmm_unit_tests.command, "test-openvmm-unit")
+        self.assertIs(openvmm_unit_tests.handler, nvx.command_test_openvmm_unit)
+
         openvmm_tests = nvx.parse_args(["test-openvmm", "--backend", "mshv"])
         self.assertEqual(openvmm_tests.backend, "mshv")
         self.assertIs(openvmm_tests.handler, nvx.command_test_openvmm)
@@ -634,6 +638,87 @@ class CliTests(unittest.TestCase):
 
 
 class CiTests(unittest.TestCase):
+    def test_openvmm_unit_tests_exclude_unsupported_and_fuzz_crates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            openvmm = Path(temporary) / "openvmm"
+            openvmm.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            fuzz_crates = common.CommandResult(
+                args=("cargo", "xtask", "fuzz", "list", "--crates"),
+                returncode=0,
+                stdout=b"fuzz_alpha\nfuzz_beta\n",
+                stderr=b"",
+            )
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "run_capture", return_value=fuzz_crates) as capture,
+                patch.object(ci, "run_checked") as run_checked,
+            ):
+                ci.run_openvmm_unit_tests()
+
+            capture.assert_called_once_with(
+                ["cargo", "xtask", "fuzz", "list", "--crates"],
+                cwd=openvmm,
+            )
+            command = run_checked.call_args.args[0]
+            self.assertEqual(
+                command[:10],
+                [
+                    "cargo",
+                    "nextest",
+                    "run",
+                    "--profile",
+                    "agent",
+                    "--workspace",
+                    "--tests",
+                    "--bins",
+                    "--features",
+                    "ci",
+                ],
+            )
+            excluded_packages = [
+                command[index + 1]
+                for index, argument in enumerate(command)
+                if argument == "--exclude"
+            ]
+            self.assertEqual(
+                excluded_packages,
+                [
+                    *ci.OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES,
+                    "fuzz_alpha",
+                    "fuzz_beta",
+                ],
+            )
+            self.assertEqual(run_checked.call_args.kwargs["cwd"], openvmm)
+
+    def test_openvmm_unit_tests_stop_when_fuzz_crate_query_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            openvmm = Path(temporary) / "openvmm"
+            openvmm.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            failed_query = common.CommandResult(
+                args=("cargo", "xtask", "fuzz", "list", "--crates"),
+                returncode=2,
+                stdout=b"",
+                stderr=b"query failed",
+            )
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "run_capture", return_value=failed_query),
+                patch.object(ci, "run_checked") as run_checked,
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "OpenVMM fuzz crate query exited 2",
+                ),
+            ):
+                ci.run_openvmm_unit_tests()
+
+            run_checked.assert_not_called()
+
     def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -860,6 +945,36 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
 
+    def test_ci_runs_openvmm_unit_tests_on_each_backend(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            """      - name: Run OpenVMM unit tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/nvx.py test-openvmm-unit""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Run OpenVMM unit tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\\nvx.py test-openvmm-unit""",
+            workflow,
+        )
+        self.assertEqual(workflow.count("scripts/nvx.py test-openvmm-unit"), 1)
+        self.assertEqual(workflow.count("scripts\\nvx.py test-openvmm-unit"), 1)
+        self.assertLess(
+            workflow.index("- name: Run OpenVMM tests on MSHV"),
+            workflow.index("- name: Run OpenVMM unit tests on Linux"),
+        )
+        self.assertLess(
+            workflow.index("- name: Run OpenVMM tests on Windows"),
+            workflow.index("- name: Run OpenVMM unit tests on Windows"),
+        )
+
     def test_runner_setup_pins_and_validates_sccache(self):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
@@ -905,6 +1020,22 @@ class CiConfigurationTests(unittest.TestCase):
             linux_setup.index('test -f "${runner_directory}/.runner"'),
             linux_setup.index('test -w "$runner_sccache_dir"'),
         )
+
+    def test_linux_setup_installs_openvmm_perl_modules(self):
+        setup_directory = common.REPO_ROOT / "scripts" / "setup"
+        configurations = (
+            (setup_directory / "setup-linux-runner.sh").read_text(encoding="utf-8"),
+            (setup_directory / "setup-linux-mshv.sh").read_text(encoding="utf-8"),
+        )
+
+        for configuration in configurations:
+            for package in (
+                "perl-FindBin",
+                "perl-IPC-Cmd",
+                "perl-Time-Piece",
+                "perl-lib",
+            ):
+                self.assertIn(package, configuration)
 
     def test_release_actions_use_deterministic_immutable_tooling(self):
         package_action = (
