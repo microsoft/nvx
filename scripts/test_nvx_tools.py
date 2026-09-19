@@ -638,7 +638,7 @@ class CliTests(unittest.TestCase):
 
 
 class CiTests(unittest.TestCase):
-    def test_openvmm_unit_tests_exclude_unsupported_and_fuzz_crates(self):
+    def test_openvmm_unit_tests_run_nextest_and_doctests(self):
         with tempfile.TemporaryDirectory() as temporary:
             openvmm = Path(temporary) / "openvmm"
             openvmm.mkdir()
@@ -662,7 +662,8 @@ class CiTests(unittest.TestCase):
                 ["cargo", "xtask", "fuzz", "list", "--crates"],
                 cwd=openvmm,
             )
-            command = run_checked.call_args.args[0]
+            self.assertEqual(run_checked.call_count, 2)
+            command = run_checked.call_args_list[0].args[0]
             self.assertEqual(
                 command[:10],
                 [
@@ -691,7 +692,21 @@ class CiTests(unittest.TestCase):
                     "fuzz_beta",
                 ],
             )
-            self.assertEqual(run_checked.call_args.kwargs["cwd"], openvmm)
+            self.assertEqual(run_checked.call_args_list[0].kwargs["cwd"], openvmm)
+            self.assertEqual(
+                run_checked.call_args_list[1],
+                call(
+                    [
+                        "cargo",
+                        "test",
+                        "--locked",
+                        "--doc",
+                        "--workspace",
+                        "--no-fail-fast",
+                    ],
+                    cwd=openvmm,
+                ),
+            )
 
     def test_openvmm_unit_tests_stop_when_fuzz_crate_query_fails(self):
         with tempfile.TemporaryDirectory() as temporary:

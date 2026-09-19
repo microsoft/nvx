@@ -28,7 +28,7 @@ python3 scripts/nvx.py performance gate --help
 | `build-initramfs` | Build the Alpine initramfs natively. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
-| `test-openvmm-unit` | Run the OpenVMM workspace unit tests. |
+| `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
 | `test-microvm` | Run NVX Linux and device correctness tests through OpenVMM. |
 | `build` | Build the guest artifacts and OpenVMM. |
@@ -130,6 +130,7 @@ python3 scripts/nvx.py test-openvmm-unit
 Runs the OpenVMM workspace's unit-test binaries with cargo-nextest's `agent`
 profile and the `ci` feature. Packages that require specialized test harnesses
 are excluded, along with all fuzz crates reported by OpenVMM's `xtask`.
+Afterward, runs the workspace doctests with Cargo.
 
 ### `test-openvmm`
 

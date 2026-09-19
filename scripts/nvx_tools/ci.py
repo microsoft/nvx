@@ -96,6 +96,17 @@ def run_openvmm_unit_tests() -> None:
         command.extend(("--exclude", package))
 
     run_checked(command, cwd=OPENVMM_DIR)
+    run_checked(
+        [
+            cargo,
+            "test",
+            "--locked",
+            "--doc",
+            "--workspace",
+            "--no-fail-fast",
+        ],
+        cwd=OPENVMM_DIR,
+    )
 
 
 def run_openvmm_tests(backend: str) -> None:
