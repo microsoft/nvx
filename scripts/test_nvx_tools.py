@@ -69,6 +69,7 @@ def _write_release_fixture(
             (
                 *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
                 *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                *build.REQUIRED_NESTED_VIRT_KERNEL_CONFIG,
                 *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
             )
         )
@@ -458,6 +459,18 @@ class CliTests(unittest.TestCase):
             command[command.index("--microvm-report") + 1],
             "outcome.json",
         )
+
+    def test_run_forwards_nested_virtualization(self):
+        args = nvx.parse_args(["run", "--nested-virt", "--dry-run"])
+        with (
+            patch.object(nvx, "require_file", return_value=Path("artifact")),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+
+        self.assertIn("--nested-virt", format_command.call_args.args[0])
 
     def test_run_exposes_restore_readiness(self):
         args = nvx.parse_args(
@@ -943,6 +956,7 @@ class BuildTests(unittest.TestCase):
                     (
                         *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
                         *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                        *build.REQUIRED_NESTED_VIRT_KERNEL_CONFIG,
                         *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
                     )
                 )
@@ -1130,6 +1144,29 @@ class BuildTests(unittest.TestCase):
             "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
         ):
             self.assertIn(setting, configured)
+
+    def test_nested_virt_kernel_config_requires_kvm_hosts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            config.write_text(
+                "\n".join(build.REQUIRED_NESTED_VIRT_KERNEL_CONFIG) + "\n",
+                encoding="utf-8",
+            )
+            build._assert_nested_virt_kernel_config(config)
+
+            for missing in build.REQUIRED_NESTED_VIRT_KERNEL_CONFIG:
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(
+                            setting
+                            for setting in build.REQUIRED_NESTED_VIRT_KERNEL_CONFIG
+                            if setting != missing
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(common.ScriptError, missing):
+                        build._assert_nested_virt_kernel_config(config)
 
     def test_shared_status_kernel_config_is_required(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1820,6 +1857,36 @@ class BenchmarkTests(unittest.TestCase):
                 "/mnt/host,C:/work,rw",
             ],
         )
+
+    def test_nested_virtualization_is_forwarded_to_benchmark_commands(self):
+        commands = [
+            benchmark.workload_boot_command(
+                Path("openvmm"),
+                "whp",
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                128,
+                "quiet",
+                nested_virt=True,
+            ),
+            benchmark.snapshot_restore_command(
+                Path("openvmm"),
+                "whp",
+                Path("snapshot"),
+                nested_virt=True,
+            ),
+            benchmark.whp_command(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                128,
+                None,
+                nested_virt=True,
+            ),
+        ]
+
+        for command in commands:
+            self.assertIn("--nested-virt", command)
 
     def test_benchmark_network_requires_explicit_profile(self):
         args = nvx.parse_args(
@@ -3115,6 +3182,7 @@ class BenchmarkTests(unittest.TestCase):
                     "performance",
                     "--backend",
                     "whp",
+                    "--nested-virt",
                     "--platform",
                     "windows-whp-baremetal",
                     "--processors",
@@ -3155,6 +3223,7 @@ class BenchmarkTests(unittest.TestCase):
             )
             self.assertEqual(metadata["platform"], "windows-whp-baremetal")
             self.assertEqual(metadata["backend"], "whp")
+            self.assertTrue(metadata["nested_virtualization"])
             self.assertEqual(metadata["microvm_abi_version"], 2)
             self.assertEqual(metadata["processors"], 8)
             self.assertEqual(metadata["host_affinity_set"], args.cpus)

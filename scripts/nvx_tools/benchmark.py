@@ -260,6 +260,10 @@ DEVICE_RESTORE_TYPE_IDS = {"console": 3, "net": 1, "virtiofs": 26}
 DEVICE_RESTORE_QUEUE_COUNTS = {"console": 2, "net": 2, "virtiofs": 2}
 
 
+def nested_virt_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "nested_virt", False))
+
+
 def configure_parser(
     parser: argparse.ArgumentParser,
     repository_dir: Path,
@@ -293,6 +297,11 @@ def configure_parser(
         choices=("whp", "kvm", "mshv", "both"),
         default="both" if os.name == "nt" else "kvm",
         help="backend to benchmark (default: both on Windows, kvm on Linux)",
+    )
+    parser.add_argument(
+        "--nested-virt",
+        action="store_true",
+        help="enable nested virtualization for Windows/WHP guest benchmarks",
     )
     parser.add_argument(
         "--platform",
@@ -1609,6 +1618,7 @@ def workload_boot_command(
     cmdline: str,
     *,
     processors: int = 1,
+    nested_virt: bool = False,
     command_prefix: Sequence[str] = (),
     network: str | None = None,
     mount: str | None = None,
@@ -1634,6 +1644,8 @@ def workload_boot_command(
         "--cmdline",
         cmdline,
     ]
+    if nested_virt:
+        command.append("--nested-virt")
     if network is not None:
         append_network_arguments(command, network)
     if mount is not None:
@@ -1659,6 +1671,7 @@ def device_restore_commands(
     device: str,
     mode: str,
     *,
+    nested_virt: bool = False,
     command_prefix: Sequence[str] = (),
     network: str = "10.0.0.2/24",
     host_directory: Path | None = None,
@@ -1685,6 +1698,7 @@ def device_restore_commands(
         memory_mib,
         f"quiet loglevel=0 nvx_virtio_restore_probe={device},{mode}",
         processors=1,
+        nested_virt=nested_virt,
         command_prefix=command_prefix,
         network=network if device == "net" else None,
         mount=mount,
@@ -1696,6 +1710,7 @@ def device_restore_commands(
             backend,
             snapshot_path,
             processors=1,
+            nested_virt=nested_virt,
             network_profile="portable" if device == "net" else None,
         ),
     ]
@@ -2300,6 +2315,7 @@ def benchmark_device_restore_profile(
                     args.memory_mib,
                     device,
                     mode,
+                    nested_virt=nested_virt_requested(args),
                     command_prefix=command_prefix,
                     network=network,
                     host_directory=host_directory,
@@ -2451,6 +2467,7 @@ def benchmark_cold_start_workload(
                 args.memory_mib,
                 cmdline,
                 processors=args.processors,
+                nested_virt=nested_virt_requested(args),
                 command_prefix=command_prefix,
             ),
             warmups=args.warmups,
@@ -2846,6 +2863,7 @@ def benchmark_device_io_workload(
                 DEVICE_IO_MEMORY_MIB,
                 "quiet loglevel=0",
                 processors=1,
+                nested_virt=nested_virt_requested(args),
                 command_prefix=command_prefix,
                 network=network,
                 mount=mount,
@@ -3092,6 +3110,7 @@ def benchmark_virtfs_workload(
             args.virtfs_memory_mib,
             "quiet loglevel=0",
             processors=args.processors,
+            nested_virt=nested_virt_requested(args),
             command_prefix=command_prefix,
             mount=mount,
         )
@@ -3213,6 +3232,7 @@ def benchmark_snapshot_restore_memory_workload(
             RESTORE_MEMORY_BASE_MIB,
             "quiet loglevel=0 shellsnap",
             processors=args.processors,
+            nested_virt=nested_virt_requested(args),
             command_prefix=command_prefix,
         )
         capture_automatic_snapshot(
@@ -3244,6 +3264,7 @@ def benchmark_snapshot_restore_memory_workload(
                             backend,
                             snapshot_path,
                             processors=args.processors,
+                            nested_virt=nested_virt_requested(args),
                             restore_memory_mib=target_mib,
                         ),
                     ],
@@ -3354,6 +3375,7 @@ def _benchmark_shell_snapshot_restore(
         memory_mib,
         "quiet loglevel=0",
         processors=args.processors,
+        nested_virt=nested_virt_requested(args),
         command_prefix=command_prefix,
     )
     capture_snapshot(
@@ -3410,6 +3432,7 @@ def benchmark_shell_snapshot_workload(
                 memory_mib,
                 "quiet loglevel=0",
                 processors=args.processors,
+                nested_virt=nested_virt_requested(args),
                 command_prefix=command_prefix,
             )
             cold = benchmark(
@@ -3518,6 +3541,7 @@ def benchmark_snapshot_restore_vcpu_workload(
             args.memory_mib,
             "quiet loglevel=0 shellsnap maxcpus=1",
             processors=args.processors,
+            nested_virt=nested_virt_requested(args),
             command_prefix=command_prefix,
         )
         capture_automatic_snapshot(
@@ -3540,6 +3564,7 @@ def benchmark_snapshot_restore_vcpu_workload(
                         backend,
                         snapshot_path,
                         processors=args.processors,
+                        nested_virt=nested_virt_requested(args),
                         restore_processors=target,
                     ),
                 ],
@@ -3599,6 +3624,7 @@ def benchmark_network_snapshot_workload(
         args.network_memory_mib,
         probe_cmdline,
         processors=args.processors,
+        nested_virt=nested_virt_requested(args),
         command_prefix=command_prefix,
         network=network,
     )
@@ -3643,6 +3669,7 @@ def benchmark_network_snapshot_workload(
             args.network_memory_mib,
             f"{probe_cmdline} netsnap",
             processors=args.processors,
+            nested_virt=nested_virt_requested(args),
             command_prefix=command_prefix,
             network=network,
         )
@@ -3667,6 +3694,7 @@ def benchmark_network_snapshot_workload(
                     backend,
                     snapshot_path,
                     processors=args.processors,
+                    nested_virt=nested_virt_requested(args),
                     network_profile="portable",
                 ),
             ],
@@ -3800,6 +3828,7 @@ def write_benchmark_metadata(
         "suite": args.suite,
         "platform": platform,
         "backend": backend,
+        "nested_virtualization": nested_virt_requested(args),
         "microvm_abi_version": microvm_abi_version,
         "processors": processors,
         "restore_processor_targets": (
@@ -4392,6 +4421,7 @@ def snapshot_restore_command(
     snapshot_path: Path,
     *,
     processors: int = 1,
+    nested_virt: bool = False,
     restore_processors: int | None = None,
     restore_memory_mib: int | None = None,
     network_profile: str | None = None,
@@ -4409,6 +4439,8 @@ def snapshot_restore_command(
         str(snapshot_path),
         "--restore-entropy",
     ]
+    if nested_virt:
+        command.append("--nested-virt")
     if restore_processors is not None:
         command.extend(("--restore-processors", str(restore_processors)))
     if restore_memory_mib is not None:
@@ -4438,6 +4470,7 @@ def benchmark_snapshot_restore(
                     hypervisor,
                     snapshot_path,
                     processors=args.processors,
+                    nested_virt=nested_virt_requested(args),
                     network_profile=args.network_profile,
                 ),
             ],
@@ -4650,6 +4683,7 @@ def benchmark_snapshot_profile_matrix(
                                 backend,
                                 restore_path,
                                 processors=args.processors,
+                                nested_virt=nested_virt_requested(args),
                                 network_profile=args.network_profile,
                             ),
                         ],
@@ -4911,6 +4945,7 @@ def whp_command(
     network: str | None,
     *,
     processors: int = 1,
+    nested_virt: bool = False,
 ) -> list[str]:
     command = [
         str(executable),
@@ -4930,6 +4965,8 @@ def whp_command(
         "--cmdline",
         BASE_TUNING,
     ]
+    if nested_virt:
+        command.append("--nested-virt")
     if network is not None:
         append_network_arguments(command, network)
     return command
@@ -5169,6 +5206,7 @@ def result_document(
             "memory_mib": args.memory_mib,
             "platform": args.platform,
             "backend": backend or args.backend,
+            "nested_virtualization": nested_virt_requested(args),
             "microvm_abi_version": MICROVM_ABI_VERSION,
             "processors": args.processors,
             "artifact_revisions": {
@@ -5689,6 +5727,8 @@ def run(args: argparse.Namespace) -> int:
     apply_benchmark_suite_defaults(args)
     if (args.net is None) != (args.network_profile is None):
         raise ValueError("--net and --network-profile must be specified together")
+    if nested_virt_requested(args) and (os.name != "nt" or args.backend != "whp"):
+        raise ValueError("--nested-virt benchmarks currently require Windows/WHP")
     if args._kvm_worker:
         return run_kvm_worker(args)
     if os.name != "nt":
@@ -5800,6 +5840,7 @@ def run(args: argparse.Namespace) -> int:
                 memory_mib,
                 args.net,
                 processors=args.processors,
+                nested_virt=nested_virt_requested(args),
             )
 
         results["snapshot_profile_matrix"]["whp"] = benchmark_snapshot_profile_matrix(
@@ -5838,6 +5879,7 @@ def run(args: argparse.Namespace) -> int:
                 args.memory_mib,
                 args.net,
                 processors=args.processors,
+                nested_virt=nested_virt_requested(args),
             ),
             warmups=args.warmups,
             runs=args.runs,
@@ -5890,6 +5932,7 @@ def run(args: argparse.Namespace) -> int:
                     args.memory_mib,
                     args.net,
                     processors=args.processors,
+                    nested_virt=nested_virt_requested(args),
                 ),
                 windows_cpus=cpus,
                 retained_snapshot_path=retained_whp_snapshot,
@@ -5924,6 +5967,7 @@ def run(args: argparse.Namespace) -> int:
                     args.memory_mib,
                     args.net,
                     processors=args.processors,
+                    nested_virt=nested_virt_requested(args),
                 ),
                 windows_cpus=cpus,
                 snapshot_path=retained_whp_snapshot,
