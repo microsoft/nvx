@@ -1040,6 +1040,13 @@ class BuildTests(unittest.TestCase):
         self.assertIn("linux-kernel-v1-", action)
         self.assertEqual(action.count("build/vmlinux.provenance.json"), 2)
 
+    def test_kernel_input_config_uses_canonical_lf_line_endings(self):
+        attributes = (build.REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn(
+            "kernel/config-microvm text eol=lf",
+            attributes.splitlines(),
+        )
+
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")
         with (
