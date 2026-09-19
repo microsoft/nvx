@@ -966,6 +966,14 @@ class CiConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(workflow.count("scripts/nvx.py test-openvmm-unit"), 1)
         self.assertEqual(workflow.count("scripts\\nvx.py test-openvmm-unit"), 1)
+        self.assertLess(
+            workflow.index("- name: Run OpenVMM tests on MSHV"),
+            workflow.index("- name: Run OpenVMM unit tests on Linux"),
+        )
+        self.assertLess(
+            workflow.index("- name: Run OpenVMM tests on Windows"),
+            workflow.index("- name: Run OpenVMM unit tests on Windows"),
+        )
 
     def test_runner_setup_pins_and_validates_sccache(self):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(

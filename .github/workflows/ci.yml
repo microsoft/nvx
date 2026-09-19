@@ -412,6 +412,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
 
+      - name: Run OpenVMM unit tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/nvx.py test-openvmm-unit
+
+      - name: Run OpenVMM unit tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py test-openvmm-unit
+
       - name: Report sccache
         if: always()
         uses: ./.github/actions/sccache
