@@ -866,6 +866,18 @@ class CiConfigurationTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertEqual(package_action.count("archive-release"), 2)
+        self.assertIn(
+            'git ls-files "kernel/patches/*.patch"',
+            package_action,
+        )
+        self.assertIn(
+            "git checkout-index --force -- $KernelInputs",
+            package_action,
+        )
+        self.assertLess(
+            package_action.index("git checkout-index --force -- $KernelInputs"),
+            package_action.index("- name: Package Windows release"),
+        )
         self.assertNotIn("tar -czf", package_action)
         self.assertNotIn("Compress-Archive", package_action)
         self.assertIn(
