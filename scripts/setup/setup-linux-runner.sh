@@ -7,6 +7,8 @@ RUST_MINIMUM_VERSION=1.95.0
 RUSTUP_VERSION=1.29.1
 RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 CARGO_NEXTEST_VERSION=0.9.133
+SCCACHE_VERSION=0.18.0
+SCCACHE_SHA256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
 RUNNER_VERSION=2.337.0
 RUNNER_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
 
@@ -73,8 +75,12 @@ run_as_root() {
 run_as_runner() {
     run_as_root -u "$runner_service_account" env \
         PATH="$runner_service_path" \
+        CARGO_INCREMENTAL=0 \
         CARGO_HOME="$runner_cargo_home" \
+        RUSTC_WRAPPER=sccache \
         RUSTUP_HOME="$trusted_rustup_home" \
+        SCCACHE_CACHE_SIZE=10G \
+        SCCACHE_DIR="$runner_sccache_dir" \
         "$@"
 }
 
@@ -119,6 +125,7 @@ validate_runner_work_paths() {
         "$target_work_directory" \
         "${target_work_directory}/_temp" \
         "${target_work_directory}/_diag" \
+        "${target_work_directory}/_sccache" \
         "${target_work_directory}/_temp/cargo-home"; do
         if run_as_root test -L "$path"; then
             die "runner writable path must not be a symlink: ${path}"
@@ -310,7 +317,8 @@ protect_runner_installation() {
     run_as_root mkdir -p \
         "$work_directory" \
         "$diagnostics_target" \
-        "${runner_cargo_home}/bin"
+        "${runner_cargo_home}/bin" \
+        "$runner_sccache_dir"
 
     if [ -L "$diagnostics_directory" ] &&
         [ "$(readlink "$diagnostics_directory")" != _work/_diag ]; then
@@ -339,7 +347,8 @@ protect_runner_installation() {
         "$work_directory" \
         "$temporary_directory" \
         "$diagnostics_target" \
-        "$runner_cargo_home"; do
+        "$runner_cargo_home" \
+        "$runner_sccache_dir"; do
         run_as_root chown \
             "${runner_service_account}:${runner_service_account}" "$path"
         run_as_root chmod u=rwx,go= "$path"
@@ -373,8 +382,11 @@ configure_runner_service() {
     service_name=$(runner_service_name)
     drop_in=/etc/systemd/system/${service_name}.d
     run_as_root mkdir -p "$drop_in"
-    printf '[Service]\nEnvironment="PATH=%s"\nEnvironment="CARGO_HOME=%s"\nEnvironment="RUSTUP_HOME=%s"\nLimitCORE=infinity\n' \
-        "$runner_service_path" "$runner_cargo_home" "$trusted_rustup_home" |
+    printf '[Service]\nEnvironment="PATH=%s"\nEnvironment="CARGO_HOME=%s"\nEnvironment="RUSTUP_HOME=%s"\nEnvironment="RUSTC_WRAPPER=sccache"\nEnvironment="CARGO_INCREMENTAL=0"\nEnvironment="SCCACHE_DIR=%s"\nEnvironment="SCCACHE_CACHE_SIZE=10G"\nLimitCORE=infinity\n' \
+        "$runner_service_path" \
+        "$runner_cargo_home" \
+        "$trusted_rustup_home" \
+        "$runner_sccache_dir" |
         run_as_root tee "${drop_in}/nvx.conf" >/dev/null
     run_as_root systemctl daemon-reload
     run_as_root systemctl stop "$service_name"
@@ -421,12 +433,13 @@ install_rust_tools() {
     cargo=${trusted_cargo_home}/bin/cargo
     rustc=${trusted_cargo_home}/bin/rustc
     nextest=${trusted_cargo_home}/bin/cargo-nextest
+    sccache=${trusted_cargo_home}/bin/sccache
     run_as_root mkdir -p "$trusted_cargo_home" "$trusted_rustup_home"
 
     if [ ! -x "$rustup" ]; then
         installer=${trusted_tool_root}/rustup-init-${RUSTUP_VERSION}
         installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init
-        run_as_root curl --fail --proto '=https' --tlsv1.2 \
+        run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
             --silent --show-error --output "$installer" "$installer_url"
         printf '%s  %s\n' "$RUSTUP_SHA256" "$installer" |
             run_as_root sha256sum --check -
@@ -470,6 +483,31 @@ install_rust_tools() {
             RUSTUP_HOME="$trusted_rustup_home" \
             "$cargo" +"$RUST_TOOLCHAIN" install --locked --force cargo-nextest \
             --version "$CARGO_NEXTEST_VERSION"
+    fi
+    if [ ! -x "$sccache" ] ||
+        ! "$sccache" --version | grep -Fq "sccache ${SCCACHE_VERSION}"; then
+        (
+            package_directory=$(run_as_root mktemp -d \
+                "${trusted_tool_root}/sccache-package.XXXXXX")
+            archive=${package_directory}/sccache.tar.gz
+            root=${package_directory}/root
+            trap 'run_as_root rm -rf "$package_directory"' 0 HUP INT TERM
+            run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
+                --silent --show-error \
+                --output "$archive" \
+                "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+            actual_sha256=$(run_as_root sha256sum "$archive" | awk '{print $1}')
+            [ "$actual_sha256" = "$SCCACHE_SHA256" ] ||
+                die "sccache archive checksum mismatch: ${actual_sha256}"
+            run_as_root mkdir -p "$root"
+            run_as_root tar --extract --gzip \
+                --file "$archive" \
+                --directory "$root"
+            extracted=${root}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache
+            run_as_root test -x "$extracted" ||
+                die "sccache executable was not found after extraction"
+            run_as_root install -m 0755 "$extracted" "$sccache"
+        )
     fi
     run_as_root chown -R root:root "$trusted_tool_root"
     run_as_root chmod -R go-w "$trusted_tool_root"
@@ -573,7 +611,7 @@ install_runner() {
 check_environment() {
     [ "$(uname -s)" = Linux ] || die "this script requires Linux"
     [ "$(uname -m)" = x86_64 ] || die "this script requires x86_64"
-    for command_name in python3 git curl diff rustup cargo cargo-nextest gcc make ld \
+    for command_name in python3 git curl diff rustup cargo cargo-nextest sccache gcc make ld \
         bison flex cpio gzip sha256sum tar xz zstd systemctl; do
         require_command "$command_name"
     done
@@ -589,13 +627,15 @@ check_environment() {
     run_as_runner cargo nextest --version |
         grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
         die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
+    run_as_runner sccache --version |
+        grep -Fq "sccache ${SCCACHE_VERSION}" ||
+        die "sccache ${SCCACHE_VERSION} is not installed"
     [ "$(stat -c %U "$trusted_tool_root")" = root ] ||
         die "trusted Rust toolchain is not root-owned"
     run_as_runner test ! -w "${trusted_cargo_home}/bin/cargo" ||
         die "runner service account can modify trusted Cargo"
     run_as_runner test ! -w "$trusted_rustup_home" ||
         die "runner service account can modify trusted Rustup state"
-
     run_as_runner sh -c \
         "test -r /dev/${backend} && test -w /dev/${backend}" ||
         die "${runner_service_account} cannot access /dev/${backend}"
@@ -639,6 +679,8 @@ check_environment() {
             die "runner service account can replace the runner installation"
         run_as_runner test -w "${runner_directory}/_work" ||
             die "runner service account cannot modify its work directory"
+        run_as_runner test -w "$runner_sccache_dir" ||
+            die "runner service account cannot modify its sccache directory"
         run_as_root test -L "${runner_directory}/_diag" &&
             [ "$(run_as_root readlink "${runner_directory}/_diag")" = _work/_diag ] ||
             die "GitHub Actions runner diagnostics are not stored under _work"
@@ -661,7 +703,11 @@ check_environment() {
         for expected_environment in \
             "PATH=${runner_service_path}" \
             "CARGO_HOME=${runner_cargo_home}" \
-            "RUSTUP_HOME=${trusted_rustup_home}"; do
+            "RUSTUP_HOME=${trusted_rustup_home}" \
+            "RUSTC_WRAPPER=sccache" \
+            "CARGO_INCREMENTAL=0" \
+            "SCCACHE_DIR=${runner_sccache_dir}" \
+            "SCCACHE_CACHE_SIZE=10G"; do
             printf '%s\n' "$service_environment" |
                 grep -Fxq "$expected_environment" ||
                 die "GitHub Actions runner service environment is not configured: ${expected_environment}"
@@ -683,7 +729,11 @@ check_environment() {
         for expected_environment in \
             "PATH=${runner_service_path}" \
             "CARGO_HOME=${runner_cargo_home}" \
-            "RUSTUP_HOME=${trusted_rustup_home}"; do
+            "RUSTUP_HOME=${trusted_rustup_home}" \
+            "RUSTC_WRAPPER=sccache" \
+            "CARGO_INCREMENTAL=0" \
+            "SCCACHE_DIR=${runner_sccache_dir}" \
+            "SCCACHE_CACHE_SIZE=10G"; do
             printf '%s\n' "$listener_environment" |
                 grep -Fxq "$expected_environment" ||
                 die "GitHub Actions runner listener environment is not configured: ${expected_environment}"
@@ -759,6 +809,7 @@ if [ "$configure_runner" = true ]; then
     validate_runner_name "$runner_name"
 fi
 runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
+runner_sccache_dir=${runner_directory}/_work/_sccache
 runner_labels_file=${runner_directory}/.nvx-labels
 expected_runner_labels=linux,${backend},virtual-machine
 

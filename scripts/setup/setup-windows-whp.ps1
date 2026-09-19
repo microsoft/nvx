@@ -45,11 +45,14 @@ $MinimumRustVersion = [version]"1.95.0"
 $RustupVersion = "1.29.1"
 $RustupSha256 = "6f4bef66261261fcb43131be8720bab817d403a09edec7455c371974b90bdb7e"
 $CargoNextestVersion = "0.9.133"
+$SccacheVersion = "0.18.0"
+$SccacheSha256 = "1a63c1be2beab3f04d27e4cc145443e092e02d3dd83a51030989829d7023091b"
 $RunnerVersion = "2.337.0"
 $RunnerSha256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 $ToolRoot = Join-Path $env:ProgramData "nvx"
 $TrustedCargoHome = Join-Path $ToolRoot "cargo"
 $CargoHome = Join-Path $RunnerDirectory "_work\_temp\cargo-home"
+$SccacheDirectory = Join-Path $RunnerDirectory "_work\_sccache"
 $RustupHome = Join-Path $ToolRoot "rustup"
 $RequiredGuestArtifacts = @(
     "vmlinux",
@@ -290,7 +293,8 @@ function Assert-ActionsRunnerWritablePaths {
             $workDirectory,
             (Join-Path $RunnerDirectory "_work\_temp"),
             (Join-Path $RunnerDirectory "_work\_diag"),
-            $CargoHome
+            $CargoHome,
+            $SccacheDirectory
         )) {
         $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         if ($null -eq $item) {
@@ -445,7 +449,12 @@ function Protect-ActionsRunner {
     Assert-ActionsRunnerWritablePaths
     New-Item `
         -ItemType Directory `
-        -Path $workDirectory, $temporaryDirectory, $diagnosticsTarget, $CargoHome `
+        -Path `
+        $workDirectory, `
+        $temporaryDirectory, `
+        $diagnosticsTarget, `
+        $CargoHome, `
+        $SccacheDirectory `
         -Force |
     Out-Null
 
@@ -483,7 +492,8 @@ function Protect-ActionsRunner {
             $workDirectory,
             $temporaryDirectory,
             $diagnosticsTarget,
-            $CargoHome
+            $CargoHome,
+            $SccacheDirectory
         )) {
         Set-ServiceDirectoryAcl `
             -Path $path `
@@ -721,11 +731,86 @@ function Install-Toolchain {
         )
     }
 
+    $sccache = Join-Path $TrustedCargoHome "bin\sccache.exe"
+    $installSccache = -not (Test-Path -LiteralPath $sccache -PathType Leaf)
+    if (-not $installSccache) {
+        $installedSccacheVersion = & $sccache --version
+        Assert-LastExitCode "sccache --version"
+        $installSccache = ($installedSccacheVersion -join "`n") -notmatch `
+            "sccache $([regex]::Escape($SccacheVersion))"
+    }
+    if ($installSccache) {
+        $archive = Join-Path $ToolRoot `
+            "sccache-v$SccacheVersion-x86_64-pc-windows-msvc-$([guid]::NewGuid().ToString('N')).tar.gz"
+        $extractDirectory = Join-Path $ToolRoot `
+            "sccache-v$SccacheVersion-$([guid]::NewGuid().ToString('N'))"
+        try {
+            Invoke-WebRequest `
+                -UseBasicParsing `
+                -Uri "https://github.com/mozilla/sccache/releases/download/v$SccacheVersion/sccache-v$SccacheVersion-x86_64-pc-windows-msvc.tar.gz" `
+                -OutFile $archive
+            $actualHash = (Get-FileHash `
+                    -LiteralPath $archive `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $SccacheSha256) {
+                throw "sccache archive checksum mismatch: $actualHash"
+            }
+            New-Item `
+                -ItemType Directory `
+                -Path $extractDirectory `
+                -Force |
+            Out-Null
+            Invoke-Native (Get-RequiredCommand "tar.exe") @(
+                "-xzf", $archive, "-C", $extractDirectory
+            )
+            $extracted = Join-Path `
+                $extractDirectory `
+                "sccache-v$SccacheVersion-x86_64-pc-windows-msvc\sccache.exe"
+            if (-not (Test-Path -LiteralPath $extracted -PathType Leaf)) {
+                throw "sccache executable was not found after extraction"
+            }
+            Copy-Item -LiteralPath $extracted -Destination $sccache -Force
+        }
+        finally {
+            Remove-Item `
+                -LiteralPath $archive, $extractDirectory `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+
     Set-ServiceDirectoryAcl `
         -Path $ToolRoot `
         -ServiceRights "ReadAndExecute" `
         -AllowInternalLinks
     $env:CARGO_HOME = $CargoHome
+}
+
+function Configure-SccacheEnvironment {
+    New-Item -ItemType Directory -Path $SccacheDirectory -Force |
+    Out-Null
+    Set-ServiceDirectoryAcl `
+        -Path $SccacheDirectory `
+        -ServiceRights "Modify" `
+        -SkipChildren
+    foreach ($entry in @{
+            CARGO_INCREMENTAL   = "0"
+            RUSTC_WRAPPER       = "sccache"
+            SCCACHE_CACHE_SIZE  = "10G"
+            SCCACHE_DIR         = $SccacheDirectory
+        }.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable(
+            $entry.Key,
+            $entry.Value,
+            "Machine"
+        )
+        [Environment]::SetEnvironmentVariable(
+            $entry.Key,
+            $entry.Value,
+            "Process"
+        )
+    }
 }
 
 function Get-RelativePackageFiles {
@@ -1211,7 +1296,13 @@ function Assert-Environment {
     }
     Assert-TrustedToolchainAcl
     $python = Get-PythonCommand
-    foreach ($command in @("git.exe", "rustup.exe", "cargo.exe", "cargo-nextest.exe")) {
+    foreach ($command in @(
+            "git.exe",
+            "rustup.exe",
+            "cargo.exe",
+            "cargo-nextest.exe",
+            "sccache.exe"
+        )) {
         [void](Get-RequiredCommand $command)
     }
 
@@ -1228,6 +1319,29 @@ function Assert-Environment {
     if (($nextestVersion -join "`n") -notmatch `
             "cargo-nextest $([regex]::Escape($CargoNextestVersion))") {
         throw "cargo-nextest $CargoNextestVersion is not installed"
+    }
+    $installedSccacheVersion = & (Get-RequiredCommand "sccache.exe") --version
+    Assert-LastExitCode "sccache --version"
+    if (($installedSccacheVersion -join "`n") -notmatch `
+            "sccache $([regex]::Escape($SccacheVersion))") {
+        throw "sccache $SccacheVersion is not installed"
+    }
+    if ($RunnerOnly) {
+        $expectedEnvironment = @{
+            CARGO_INCREMENTAL  = "0"
+            RUSTC_WRAPPER      = "sccache"
+            SCCACHE_CACHE_SIZE = "10G"
+            SCCACHE_DIR        = $SccacheDirectory
+        }
+        foreach ($entry in $expectedEnvironment.GetEnumerator()) {
+            if ([Environment]::GetEnvironmentVariable(
+                    $entry.Key,
+                    "Machine"
+                ) -ne $entry.Value) {
+                throw "machine $($entry.Key) is not configured"
+            }
+        }
+        Assert-ServiceDirectoryAcl -Path $SccacheDirectory -Writable
     }
     $installedTargets = & (Get-RequiredCommand "rustup.exe") `
         target list --installed --toolchain $RustToolchain
@@ -1298,6 +1412,9 @@ if ($CheckOnly) {
 
 Assert-Administrator
 Install-Toolchain
+if ($RunnerOnly) {
+    Configure-SccacheEnvironment
+}
 $restartNeeded = Enable-Whp
 
 if ($restartNeeded) {

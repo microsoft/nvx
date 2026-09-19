@@ -850,8 +850,61 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("Verify OpenVMM provenance on Windows", build_action)
         self.assertNotIn("nvx-microvm-tests-v1", workflow)
         self.assertNotIn("cargo-v2-", build_action)
+        self.assertNotIn("openvmm-tests-v2-", workflow)
+        self.assertNotIn("Restore OpenVMM test build", workflow)
+        self.assertNotIn("Save OpenVMM test build", workflow)
+        self.assertEqual(
+            workflow.count("uses: ./.github/actions/sccache"),
+            4,
+        )
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
+
+    def test_runner_setup_pins_and_validates_sccache(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "sccache" / "action.yml"
+        ).read_text(encoding="utf-8")
+        validate_runner = (
+            common.REPO_ROOT / ".github" / "actions" / "validate-runner" / "action.yml"
+        ).read_text(encoding="utf-8")
+        windows_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+        linux_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('$SccacheVersion = "0.18.0"', windows_setup)
+        self.assertIn(
+            '$SccacheSha256 = "1a63c1be2beab3f04d27e4cc145443e092e02d3dd83a51030989829d7023091b"',
+            windows_setup,
+        )
+        self.assertIn("SCCACHE_VERSION=0.18.0", linux_setup)
+        self.assertIn(
+            "SCCACHE_SHA256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89",
+            linux_setup,
+        )
+        for configuration in (windows_setup, linux_setup):
+            self.assertIn("RUSTC_WRAPPER", configuration)
+            self.assertIn("CARGO_INCREMENTAL", configuration)
+            self.assertIn("SCCACHE_DIR", configuration)
+            self.assertIn("SCCACHE_CACHE_SIZE", configuration)
+        self.assertIn("sccache --zero-stats", action)
+        self.assertIn("sccache --show-stats", action)
+        self.assertIn("sccache --stop-server", action)
+        self.assertIn("SCCACHE_IDLE_TIMEOUT", action)
+        self.assertIn("sccache --version", validate_runner)
+        self.assertNotRegex(
+            workflow,
+            r"(?m)^\s+path: openvmm/target\s*$",
+        )
+        self.assertLess(
+            linux_setup.index('test -f "${runner_directory}/.runner"'),
+            linux_setup.index('test -w "$runner_sccache_dir"'),
+        )
 
     def test_release_actions_use_deterministic_immutable_tooling(self):
         package_action = (
