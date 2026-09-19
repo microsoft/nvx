@@ -6,12 +6,15 @@ import json
 import os
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
+from .archive import canonical_source_tree_digest
 from .common import (
     OPENVMM_DIR,
     REPO_ROOT,
@@ -257,6 +260,163 @@ def _kernel_source_fingerprint() -> str:
     )
 
 
+def _kernel_source_tree_digest(source: Path) -> str:
+    return canonical_source_tree_digest(source)
+
+
+def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+
+
+def _kernel_source_stamp(
+    source_fingerprint: str,
+    tree_sha256: str,
+) -> str:
+    return json.dumps(
+        {
+            "source": json.loads(source_fingerprint),
+            "tree_sha256": tree_sha256,
+        },
+        sort_keys=True,
+    )
+
+
+def _kernel_source_provenance_fingerprint(
+    source_fingerprint: str,
+    tree_sha256: str,
+) -> str:
+    source = json.loads(source_fingerprint)
+    source["tree_sha256"] = tree_sha256
+    return json.dumps(source, sort_keys=True)
+
+
+def _copy_kernel_source_snapshot(
+    source: Path,
+    destination: Path,
+    expected_tree_sha256: str,
+) -> str:
+    """Copy a private, no-follow kernel source tree and make it read-only."""
+
+    def copy_entry(source_path: Path, destination_path: Path, relative: str) -> None:
+        before = source_path.lstat()
+        mode = before.st_mode
+        if stat.S_ISDIR(mode):
+            destination_path.mkdir(mode=0o700)
+            with os.scandir(source_path) as entries:
+                children = sorted(entries, key=lambda entry: entry.name)
+            for child in children:
+                child_relative = f"{relative}/{child.name}" if relative else child.name
+                copy_entry(
+                    source_path / child.name,
+                    destination_path / child.name,
+                    child_relative,
+                )
+            after = source_path.lstat()
+            if (
+                not stat.S_ISDIR(after.st_mode)
+                or not _same_file_identity(before, after)
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                raise ScriptError(
+                    "Linux source tree changed while snapshotting: "
+                    f"{relative or source}"
+                )
+            destination_path.chmod(stat.S_IMODE(mode))
+            return
+        if stat.S_ISLNK(mode):
+            target = os.readlink(source_path)
+            after = source_path.lstat()
+            if (
+                not stat.S_ISLNK(after.st_mode)
+                or not _same_file_identity(before, after)
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                raise ScriptError(
+                    f"Linux source tree changed while snapshotting: {relative}"
+                )
+            destination_path.symlink_to(target)
+            return
+        if not stat.S_ISREG(mode):
+            raise ScriptError(f"unsupported file in Linux source tree: {relative}")
+
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(source_path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            after_open = source_path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(after_open.st_mode)
+                or not _same_file_identity(before, opened)
+                or not _same_file_identity(opened, after_open)
+            ):
+                raise ScriptError(
+                    f"Linux source tree changed while opening: {relative}"
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as source_file:
+                with destination_path.open("xb") as destination_file:
+                    shutil.copyfileobj(
+                        source_file,
+                        destination_file,
+                        length=1024 * 1024,
+                    )
+                after_read = os.fstat(descriptor)
+            after = source_path.lstat()
+            if (
+                not _same_file_identity(opened, after_read)
+                or not _same_file_identity(after_read, after)
+                or opened.st_size != after_read.st_size
+                or opened.st_mtime_ns != after_read.st_mtime_ns
+                or opened.st_ctime_ns != after_read.st_ctime_ns
+            ):
+                raise ScriptError(
+                    f"Linux source tree changed while snapshotting: {relative}"
+                )
+            destination_path.chmod(stat.S_IMODE(mode))
+        finally:
+            os.close(descriptor)
+
+    copy_entry(source, destination, "")
+    snapshot_tree_sha256 = _kernel_source_tree_digest(destination)
+    if snapshot_tree_sha256 != expected_tree_sha256:
+        raise ScriptError(
+            "private Linux source snapshot does not match the accepted source tree"
+        )
+    _make_tree_read_only(destination)
+    return _kernel_source_tree_digest(destination)
+
+
+def _make_tree_read_only(root: Path) -> None:
+    paths = list(root.rglob("*"))
+    for path in paths:
+        if path.is_file() and not path.is_symlink():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+    for path in sorted(paths, key=lambda item: len(item.parts), reverse=True):
+        if path.is_dir() and not path.is_symlink():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+    root.chmod(stat.S_IMODE(root.stat().st_mode) & ~0o222)
+
+
+def _make_tree_writable(root: Path) -> None:
+    if not root.exists():
+        return
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) | 0o700)
+    root.chmod(stat.S_IMODE(root.stat().st_mode) | 0o700)
+
+
+def _invalidate_kernel_build(config: KernelBuildConfig) -> None:
+    if config.work.exists():
+        shutil.rmtree(config.work)
+    config.output.unlink(missing_ok=True)
+    config.output.with_name(f"{config.output.name}.config").unlink(missing_ok=True)
+    config.output.with_name(KERNEL_PROVENANCE_NAME).unlink(missing_ok=True)
+
+
 def _kernel_provenance_inputs(
     source_fingerprint: str,
     input_config_sha256: str,
@@ -318,15 +478,23 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
     tarball = downloads / f"linux-{version}.tar.xz"
     source = source_parent / f"linux-{version}"
     stamp = source_parent / f"linux-{version}.nvx-source.json"
-    fingerprint = _kernel_source_fingerprint()
+    source_fingerprint = _kernel_source_fingerprint()
 
     downloads.mkdir(parents=True, exist_ok=True)
     source_parent.mkdir(parents=True, exist_ok=True)
     _download_verified(DEFAULT_KERNEL_URL, tarball, DEFAULT_KERNEL_SHA256)
 
-    cached_fingerprint = stamp.read_text(encoding="utf-8") if stamp.is_file() else None
-    if source.is_dir() and cached_fingerprint != fingerprint:
-        shutil.rmtree(source)
+    cached_stamp = stamp.read_text(encoding="utf-8") if stamp.is_file() else None
+    tree_sha256 = ""
+    if source.is_dir():
+        try:
+            tree_sha256 = _kernel_source_tree_digest(source)
+        except (OSError, ScriptError):
+            tree_sha256 = ""
+        expected_stamp = _kernel_source_stamp(source_fingerprint, tree_sha256)
+        if not tree_sha256 or cached_stamp != expected_stamp:
+            print(f">> discarding mutated Linux {version} source cache")
+            shutil.rmtree(source)
     if not source.is_dir():
         stamp.unlink(missing_ok=True)
         print(f">> extracting and patching Linux {version}")
@@ -339,8 +507,17 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
                 ["patch", "--batch", "--forward", "-p1", "-i", patch],
                 cwd=source,
             )
-        stamp.write_text(fingerprint, encoding="utf-8")
-    return source, fingerprint
+        tree_sha256 = _kernel_source_tree_digest(source)
+        temporary_stamp = stamp.with_suffix(f"{stamp.suffix}.part")
+        temporary_stamp.write_text(
+            _kernel_source_stamp(source_fingerprint, tree_sha256),
+            encoding="utf-8",
+        )
+        temporary_stamp.replace(stamp)
+    return source, _kernel_source_provenance_fingerprint(
+        source_fingerprint,
+        tree_sha256,
+    )
 
 
 def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
@@ -640,70 +817,100 @@ def build_kernel(config: KernelBuildConfig) -> None:
     _require_linux("build-kernel")
     for tool in ("make", "readelf"):
         require_tool(tool)
-    source, source_fingerprint = prepare_kernel_source(config.version)
+    source, accepted_source_fingerprint = prepare_kernel_source(config.version)
     input_config = REPO_ROOT / "kernel" / "config-microvm"
     input_config_sha256 = sha256_file(input_config)
-    provenance_inputs = _kernel_provenance_inputs(
-        source_fingerprint,
-        input_config_sha256,
-    )
-    build_fingerprint = json.dumps(
-        {
-            "source": source_fingerprint,
-            "input_config_sha256": input_config_sha256,
-        },
-        sort_keys=True,
-    )
-    build_stamp = config.work / ".nvx-build.json"
-    cached_build_fingerprint = (
-        build_stamp.read_text(encoding="utf-8") if build_stamp.is_file() else None
-    )
-    if config.work.is_dir() and cached_build_fingerprint != build_fingerprint:
-        shutil.rmtree(config.work)
-    config.work.mkdir(parents=True, exist_ok=True)
-    build_stamp.write_text(build_fingerprint, encoding="utf-8")
-    kernel_config = config.work / ".config"
     provenance_path = config.output.with_name(KERNEL_PROVENANCE_NAME)
-    provenance_path.unlink(missing_ok=True)
-    shutil.copy2(input_config, kernel_config)
-    if sha256_file(kernel_config) != input_config_sha256:
-        raise ScriptError("kernel input config changed while it was being copied")
-    make = ["make", "-C", source, f"O={config.work}"]
-    run_checked([*make, "olddefconfig"])
-    assert_required_kernel_config(kernel_config)
-    jobs = os.cpu_count() or 1
-    print(f">> building vmlinux with {jobs} jobs")
-    run_checked([*make, f"-j{jobs}", "vmlinux"])
-    config.output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config.work / "vmlinux", config.output)
     generated_config = config.output.with_name(f"{config.output.name}.config")
-    shutil.copy2(kernel_config, generated_config)
-    print(f">> built {config.output}")
-
-    notes = run_capture(["readelf", "-n", config.output])
-    if "Xen" in notes.text and "0x00000012" in notes.text:
-        print(">> PVH entry note present")
-    else:
-        config.output.unlink(missing_ok=True)
-        raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
-
-    if (
-        _kernel_source_fingerprint() != source_fingerprint
-        or sha256_file(input_config) != input_config_sha256
-    ):
+    config.work.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_parent = Path(
+        tempfile.mkdtemp(
+            prefix=f".{config.work.name}.source-",
+            dir=config.work.parent,
+        )
+    )
+    snapshot_parent.chmod(0o700)
+    source_snapshot = snapshot_parent / "linux"
+    try:
+        accepted_source = json.loads(accepted_source_fingerprint)
+        accepted_tree_sha256 = accepted_source.get("tree_sha256")
+        if not isinstance(accepted_tree_sha256, str):
+            raise ScriptError("accepted Linux source fingerprint has no tree digest")
+        snapshot_tree_sha256 = _copy_kernel_source_snapshot(
+            source,
+            source_snapshot,
+            accepted_tree_sha256,
+        )
+        source_fingerprint = json.dumps(
+            {
+                **accepted_source,
+                "tree_sha256": snapshot_tree_sha256,
+            },
+            sort_keys=True,
+        )
+        provenance_inputs = _kernel_provenance_inputs(
+            source_fingerprint,
+            input_config_sha256,
+        )
+        build_fingerprint = json.dumps(
+            {
+                "source": source_fingerprint,
+                "input_config_sha256": input_config_sha256,
+            },
+            sort_keys=True,
+        )
+        build_stamp = config.work / ".nvx-build.json"
+        cached_build_fingerprint = (
+            build_stamp.read_text(encoding="utf-8") if build_stamp.is_file() else None
+        )
+        if config.work.is_dir() and cached_build_fingerprint != build_fingerprint:
+            _invalidate_kernel_build(config)
+        config.work.mkdir(parents=True, exist_ok=True)
         config.output.unlink(missing_ok=True)
         generated_config.unlink(missing_ok=True)
-        raise ScriptError("kernel source inputs changed during the build")
-    provenance = {
-        "format": 1,
-        **provenance_inputs,
-        "kernel_sha256": sha256_file(config.output),
-        "config_sha256": sha256_file(generated_config),
-    }
-    provenance_path.write_text(
-        json.dumps(provenance, indent=2) + "\n",
-        encoding="utf-8",
-    )
+        provenance_path.unlink(missing_ok=True)
+        kernel_config = config.work / ".config"
+        shutil.copy2(input_config, kernel_config)
+        if sha256_file(kernel_config) != input_config_sha256:
+            raise ScriptError("kernel input config changed while it was being copied")
+        make = ["make", "-C", source_snapshot, f"O={config.work}"]
+        run_checked([*make, "olddefconfig"])
+        assert_required_kernel_config(kernel_config)
+        jobs = os.cpu_count() or 1
+        print(f">> building vmlinux with {jobs} jobs")
+        run_checked([*make, f"-j{jobs}", "vmlinux"])
+        if _kernel_source_tree_digest(source_snapshot) != snapshot_tree_sha256:
+            raise ScriptError("private kernel source snapshot changed during the build")
+        config.output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(config.work / "vmlinux", config.output)
+        shutil.copy2(kernel_config, generated_config)
+        print(f">> built {config.output}")
+
+        notes = run_capture(["readelf", "-n", config.output])
+        if "Xen" in notes.text and "0x00000012" in notes.text:
+            print(">> PVH entry note present")
+        else:
+            raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
+
+        if sha256_file(input_config) != input_config_sha256:
+            raise ScriptError("kernel input config changed during the build")
+        provenance = {
+            "format": 1,
+            **provenance_inputs,
+            "kernel_sha256": sha256_file(config.output),
+            "config_sha256": sha256_file(generated_config),
+        }
+        provenance_path.write_text(
+            json.dumps(provenance, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        build_stamp.write_text(build_fingerprint, encoding="utf-8")
+    except BaseException:
+        _invalidate_kernel_build(config)
+        raise
+    finally:
+        _make_tree_writable(snapshot_parent)
+        shutil.rmtree(snapshot_parent, ignore_errors=True)
 
 
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:

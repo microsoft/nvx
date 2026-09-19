@@ -106,16 +106,17 @@ def sha256_file(path: Path) -> str:
 
 
 def write_sha256_sums(directory: Path) -> None:
+    checksum_file = directory / "SHA256SUMS"
     files = sorted(
         path
         for path in directory.rglob("*")
-        if path.is_file() and path.name != "SHA256SUMS"
+        if path.is_file() and path != checksum_file
     )
     lines = [
         f"{sha256_file(path)}  {path.relative_to(directory).as_posix()}"
         for path in files
     ]
-    (directory / "SHA256SUMS").write_text(
+    checksum_file.write_text(
         "\n".join(lines) + "\n",
         encoding="ascii",
     )

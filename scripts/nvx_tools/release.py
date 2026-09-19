@@ -22,7 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-from .archive import create_reproducible_release_archive, create_reproducible_tar_gz
+from .archive import (
+    canonical_source_archive_tree_digest,
+    create_reproducible_release_archive,
+    create_reproducible_tar_gz,
+)
 from .build import (
     CONTROL_CONTRACT_REVISION,
     CONTROL_SESSION_PROTOCOL_VERSION,
@@ -97,6 +101,32 @@ class _ReleaseAsset:
     name: str
     url: str
     size: int
+
+
+@dataclass(frozen=True)
+class _SourceTreeInventory:
+    directories: tuple[str, ...]
+    files: tuple[tuple[str, str, int], ...]
+
+
+@dataclass(frozen=True)
+class _PackagingSourceSnapshot:
+    root: Path
+    project: Path
+    project_inventory: _SourceTreeInventory
+    alpine: Path
+    alpine_inventory: _SourceTreeInventory
+    linux_archive: Path
+    linux_archive_sha256: str
+    package_manifests: tuple[Path, ...]
+    openvmm_license: Path
+
+
+@dataclass(frozen=True)
+class _PackagingFileSnapshot:
+    root: Path
+    project: Path
+    openvmm_license: Path
 
 
 class _GitHubReleaseQueryError(ScriptError):
@@ -243,7 +273,7 @@ def _latest_release_asset(
                 isinstance(name, str)
                 and asset_pattern.fullmatch(name) is not None
                 and isinstance(asset_url, str)
-                and isinstance(size, int)
+                and type(size) is int
             ):
                 return _ReleaseAsset(tag, name, asset_url, size)
     raise ScriptError(f"no GitHub release contains an NVX package for {platform}")
@@ -295,6 +325,8 @@ def _copy_pinned_regular_file(
     snapshot_root: Path,
     relative_name: str,
     expected_sha256: str,
+    *,
+    expected_mode: int | None = None,
 ) -> None:
     relative = PurePosixPath(relative_name)
     _require_safe_source_parents(source_root, relative)
@@ -304,6 +336,8 @@ def _copy_pinned_regular_file(
         raise ScriptError(
             f"release snapshot source is not a regular file: {relative_name}"
         )
+    if expected_mode is not None and stat.S_IMODE(before.st_mode) != expected_mode:
+        raise ScriptError(f"release snapshot source mode changed for {relative_name}")
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -330,7 +364,14 @@ def _copy_pinned_regular_file(
                     destination_file.write(chunk)
                     digest.update(chunk)
             after_read = os.fstat(descriptor)
-        if not _same_file_identity(opened, after_read):
+        after = source.lstat()
+        if (
+            not _same_file_identity(opened, after_read)
+            or not _same_file_identity(after_read, after)
+            or opened.st_size != after_read.st_size
+            or opened.st_mtime_ns != after_read.st_mtime_ns
+            or opened.st_ctime_ns != after_read.st_ctime_ns
+        ):
             raise ScriptError(
                 f"release snapshot source changed while reading: {relative_name}"
             )
@@ -341,10 +382,159 @@ def _copy_pinned_regular_file(
                 f"{actual_sha256}, expected {expected_sha256}"
             )
         destination.chmod(
-            0o755 if relative.parts[0] == "bin" or before.st_mode & 0o111 else 0o644
+            expected_mode
+            if expected_mode is not None
+            else (
+                0o755 if relative.parts[0] == "bin" or before.st_mode & 0o111 else 0o644
+            )
         )
     finally:
         os.close(descriptor)
+
+
+def _pinned_regular_file_metadata(
+    source_root: Path,
+    relative_name: str,
+) -> tuple[str, int]:
+    relative = PurePosixPath(relative_name)
+    _require_safe_source_parents(source_root, relative)
+    source = source_root.joinpath(*relative.parts)
+    before = source.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ScriptError(
+            f"release snapshot source is not a regular file: {relative_name}"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source, flags)
+    try:
+        opened = os.fstat(descriptor)
+        after_open = source.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(after_open.st_mode)
+            or not _same_file_identity(before, opened)
+            or not _same_file_identity(opened, after_open)
+        ):
+            raise ScriptError(
+                f"release snapshot source changed while opening: {relative_name}"
+            )
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as source_file:
+            while chunk := source_file.read(1024 * 1024):
+                digest.update(chunk)
+        after_read = os.fstat(descriptor)
+        after = source.lstat()
+        if (
+            not _same_file_identity(opened, after_read)
+            or not _same_file_identity(after_read, after)
+            or opened.st_size != after_read.st_size
+            or opened.st_mtime_ns != after_read.st_mtime_ns
+            or opened.st_ctime_ns != after_read.st_ctime_ns
+        ):
+            raise ScriptError(
+                f"release snapshot source changed while reading: {relative_name}"
+            )
+        return digest.hexdigest(), stat.S_IMODE(opened.st_mode)
+    finally:
+        os.close(descriptor)
+
+
+def _selected_tree_inventory(
+    source_root: Path,
+    selections: Sequence[str],
+) -> _SourceTreeInventory:
+    directories: set[str] = set()
+    files: dict[str, tuple[str, int]] = {}
+
+    def visit(relative: PurePosixPath) -> None:
+        if "__pycache__" in relative.parts or relative.suffix in (".pyc", ".pyo"):
+            return
+        relative_name = relative.as_posix()
+        path = source_root.joinpath(*relative.parts)
+        before = path.lstat()
+        if stat.S_ISLNK(before.st_mode):
+            raise ScriptError(
+                f"symlink is not allowed in release source: {relative_name}"
+            )
+        if stat.S_ISREG(before.st_mode):
+            metadata = _pinned_regular_file_metadata(source_root, relative_name)
+            prior = files.setdefault(relative_name, metadata)
+            if prior != metadata:
+                raise ScriptError(
+                    f"overlapping release source changed: {relative_name}"
+                )
+            return
+        if not stat.S_ISDIR(before.st_mode):
+            raise ScriptError(
+                f"special file is not allowed in release source: {relative_name}"
+            )
+        directories.add(relative_name)
+        with os.scandir(path) as entries:
+            children = sorted(entries, key=lambda entry: entry.name)
+        for child in children:
+            visit(relative / child.name)
+        after = path.lstat()
+        if (
+            not stat.S_ISDIR(after.st_mode)
+            or not _same_file_identity(before, after)
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise ScriptError(f"release source changed while scanning: {relative_name}")
+
+    for selection in selections:
+        relative = PurePosixPath(selection)
+        if (
+            not relative.parts
+            or relative.is_absolute()
+            or "." in relative.parts
+            or ".." in relative.parts
+            or relative.as_posix() != selection
+        ):
+            raise ScriptError(f"unsafe release source path: {selection}")
+        _require_safe_source_parents(source_root, relative)
+        parent = relative.parent
+        while parent.parts:
+            directories.add(parent.as_posix())
+            parent = parent.parent
+        visit(relative)
+    return _SourceTreeInventory(
+        directories=tuple(sorted(directories)),
+        files=tuple(
+            (relative, digest, mode)
+            for relative, (digest, mode) in sorted(files.items())
+        ),
+    )
+
+
+def _capture_selected_tree(
+    source_root: Path,
+    snapshot_root: Path,
+    selections: Sequence[str],
+) -> _SourceTreeInventory:
+    accepted = _selected_tree_inventory(source_root, selections)
+    snapshot_root.mkdir(mode=0o700)
+    for relative_name in accepted.directories:
+        snapshot_root.joinpath(*PurePosixPath(relative_name).parts).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+    for relative_name, expected_sha256, expected_mode in accepted.files:
+        _copy_pinned_regular_file(
+            source_root,
+            snapshot_root,
+            relative_name,
+            expected_sha256,
+            expected_mode=expected_mode,
+        )
+    if _selected_tree_inventory(source_root, selections) != accepted:
+        raise ScriptError("release source tree changed while its snapshot was captured")
+    if _selected_tree_inventory(snapshot_root, selections) != accepted:
+        raise ScriptError(
+            "captured release source snapshot does not match its accepted inventory"
+        )
+    return accepted
 
 
 def _capture_release_snapshot(
@@ -376,6 +566,7 @@ def _canonical_archive_member(name: str, *, is_directory: bool) -> str:
         not normalized_name
         or "\\" in normalized_name
         or path.is_absolute()
+        or not path.parts
         or "." in path.parts
         or ".." in path.parts
         or any(":" in part for part in path.parts)
@@ -405,18 +596,23 @@ def _validate_archive_layout(
         raise ScriptError(f"release archive root is {root}, expected {expected_root}")
     if root in layout and layout[root] is not True:
         raise ScriptError("release archive package root must be a directory")
-    if expected_root is not None:
-        if layout.get(root) is not True:
-            raise ScriptError("release archive omits its package root directory")
-        for name in layout:
-            parent = PurePosixPath(name).parent
-            while parent != PurePosixPath("."):
-                parent_name = parent.as_posix()
-                if layout.get(parent_name) is not True:
-                    raise ScriptError(
-                        f"release archive omits directory entry {parent_name}"
-                    )
-                parent = parent.parent
+    for name in layout:
+        if name == root:
+            continue
+        parent = PurePosixPath(name).parent
+        while parent != PurePosixPath("."):
+            parent_name = parent.as_posix()
+            if parent_name == root:
+                if parent_name in layout and layout[parent_name] is not True:
+                    raise ScriptError(f"colliding path in release archive: {name}")
+                break
+            if parent_name not in layout:
+                raise ScriptError(
+                    f"release archive omits directory entry {parent_name}"
+                )
+            if layout[parent_name] is not True:
+                raise ScriptError(f"colliding path in release archive: {name}")
+            parent = parent.parent
     return root, layout
 
 
@@ -558,6 +754,69 @@ def _verify_release_archive(
         shutil.rmtree(extraction, ignore_errors=True)
 
 
+def _verify_source_archive_inventory(
+    archive_path: Path,
+    expected_root: str,
+    accepted: _SourceTreeInventory,
+) -> None:
+    expected_files = {
+        f"{expected_root}/{relative}": (digest, mode)
+        for relative, digest, mode in accepted.files
+    }
+    expected_directories = {
+        expected_root,
+        *(f"{expected_root}/{relative}" for relative in accepted.directories),
+    }
+    actual_files: dict[str, tuple[str, int]] = {}
+    actual_directories: set[str] = set()
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive.getmembers():
+                canonical = _canonical_archive_member(
+                    member.name,
+                    is_directory=member.isdir(),
+                )
+                if member.isdir():
+                    if member.mode & 0o777 != 0o755:
+                        raise ScriptError(
+                            f"non-canonical directory mode in source archive: "
+                            f"{member.name}"
+                        )
+                    if canonical in actual_directories or canonical in actual_files:
+                        raise ScriptError(
+                            f"duplicate path in source archive: {canonical}"
+                        )
+                    actual_directories.add(canonical)
+                    continue
+                if not member.isfile():
+                    raise ScriptError(
+                        f"unsupported entry in source archive: {member.name}"
+                    )
+                if canonical in actual_files or canonical in actual_directories:
+                    raise ScriptError(f"duplicate path in source archive: {canonical}")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ScriptError(
+                        f"could not read source archive entry: {member.name}"
+                    )
+                digest = hashlib.sha256()
+                with source:
+                    while chunk := source.read(1024 * 1024):
+                        digest.update(chunk)
+                actual_files[canonical] = (
+                    digest.hexdigest(),
+                    member.mode & 0o777,
+                )
+    except tarfile.TarError as error:
+        raise ScriptError(
+            f"invalid source archive {archive_path.name}: {error}"
+        ) from error
+    if actual_files != expected_files or actual_directories != expected_directories:
+        raise ScriptError(
+            f"{archive_path} does not match the accepted source inventory"
+        )
+
+
 def _replace_runtime_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.part")
@@ -638,8 +897,12 @@ def _copy_release_file(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
-def _validate_alpine_sources(package_manifests: list[Path]) -> None:
-    source_root = SOURCE_DIR / "alpine"
+def _validate_alpine_sources(
+    package_manifests: Sequence[Path],
+    *,
+    source_root: Path | None = None,
+) -> None:
+    source_root = source_root or SOURCE_DIR / "alpine"
     source_manifest_path = require_file(
         source_root / "manifest.json",
         "collected Alpine source manifest",
@@ -687,9 +950,14 @@ def _create_source_archive(
 def _project_source_archive(
     output: Path,
     version: str,
-    package_manifests: list[Path],
+    package_manifests: Sequence[Path],
+    *,
+    snapshot: Path | None = None,
 ) -> None:
     root = f"nvx-project-source-{version}"
+    if snapshot is not None:
+        _create_source_archive(output, [(snapshot, root)])
+        return
     inputs = [
         (REPO_ROOT / relative, f"{root}/{relative}")
         for relative in PROJECT_SOURCE_PATHS
@@ -708,9 +976,14 @@ def _project_source_archive(
 def _alpine_source_archive(
     output: Path,
     version: str,
-    package_manifests: list[Path],
+    package_manifests: Sequence[Path],
+    *,
+    snapshot: Path | None = None,
 ) -> None:
     root = f"nvx-alpine-source-{version}"
+    if snapshot is not None:
+        _create_source_archive(output, [(snapshot, root)])
+        return
     inputs = [(SOURCE_DIR / "alpine", f"{root}/sources")]
     inputs.extend(
         (
@@ -722,18 +995,36 @@ def _alpine_source_archive(
     _create_source_archive(output, inputs)
 
 
-def _validate_linux_source_archive(path: Path) -> None:
+def _validate_linux_source_archive(
+    path: Path,
+    *,
+    repo_root: Path | None = None,
+    kernel_config: Path | None = None,
+    expected_tree_sha256: str,
+) -> None:
+    repo_root = repo_root or REPO_ROOT
+    kernel_config = kernel_config or artifact_path("vmlinux.config")
     expected_members = {
-        "vmlinux.config": artifact_path("vmlinux.config").read_bytes(),
-        "SOURCE-MANIFEST.json": (REPO_ROOT / "SOURCE-MANIFEST.json").read_bytes(),
+        "vmlinux.config": kernel_config.read_bytes(),
+        "SOURCE-MANIFEST.json": (repo_root / "SOURCE-MANIFEST.json").read_bytes(),
     }
     manifest = json.loads(expected_members["SOURCE-MANIFEST.json"])
     expected_members.update(
         {
-            patch: (REPO_ROOT / patch).read_bytes()
+            patch: (repo_root / patch).read_bytes()
             for patch in manifest["linux"]["patches"]
         }
     )
+    package_root = f"nvx-linux-source-{DEFAULT_KERNEL_VERSION}"
+    archived_tree_sha256 = canonical_source_archive_tree_digest(
+        path,
+        package_root=package_root,
+        tree_root=f"{package_root}/linux-{DEFAULT_KERNEL_VERSION}",
+    )
+    if archived_tree_sha256 != expected_tree_sha256:
+        raise ScriptError(
+            f"{path} Linux tree does not match the kernel compilation source snapshot"
+        )
     with tarfile.open(path, "r:gz") as archive:
         members = archive.getmembers()
         names = [member.name for member in members]
@@ -751,6 +1042,170 @@ def _validate_linux_source_archive(path: Path) -> None:
             extracted = archive.extractfile(matches[0])
             if extracted is None or extracted.read() != expected:
                 raise ScriptError(f"{path} has stale contents for {suffix}")
+
+
+def _capture_packaging_source_snapshot(
+    package_manifests: Sequence[Path],
+    linux_source_archive: Path,
+    parent: Path,
+    root_manifest: dict[str, object],
+    kernel_provenance: dict[str, object],
+) -> _PackagingSourceSnapshot:
+    snapshot_root = Path(
+        tempfile.mkdtemp(
+            prefix=".nvx-source-snapshot-",
+            dir=parent,
+        )
+    )
+    snapshot_root.chmod(0o700)
+    try:
+        project = snapshot_root / "project"
+        project_selections = [
+            *PROJECT_SOURCE_PATHS,
+            *(path.relative_to(REPO_ROOT).as_posix() for path in package_manifests),
+            artifact_path("vmlinux.config").relative_to(REPO_ROOT).as_posix(),
+        ]
+        project_inventory = _capture_selected_tree(
+            REPO_ROOT,
+            project,
+            project_selections,
+        )
+        captured_manifest = _read_json_object(
+            project / "SOURCE-MANIFEST.json",
+            "captured source manifest",
+        )
+        if captured_manifest != root_manifest:
+            raise ScriptError(
+                "source manifest changed while release sources were captured"
+            )
+        captured_config = project / artifact_path("vmlinux.config").relative_to(
+            REPO_ROOT
+        )
+        if sha256_file(captured_config) != kernel_provenance["config_sha256"]:
+            raise ScriptError(
+                "kernel config changed while release sources were captured"
+            )
+        captured_manifests = tuple(
+            project / path.relative_to(REPO_ROOT) for path in package_manifests
+        )
+
+        alpine = snapshot_root / "alpine"
+        alpine.mkdir(mode=0o700)
+        alpine_sources = alpine / "sources"
+        accepted_alpine = verify_sha256_sums(SOURCE_DIR / "alpine")
+        _capture_release_snapshot(
+            SOURCE_DIR / "alpine",
+            alpine_sources,
+            accepted_alpine,
+        )
+        alpine_manifests = alpine / "manifests"
+        alpine_manifests.mkdir()
+        captured_alpine_manifests: list[Path] = []
+        for manifest in captured_manifests:
+            destination = alpine_manifests / manifest.name
+            shutil.copy2(manifest, destination)
+            captured_alpine_manifests.append(destination)
+        _validate_alpine_sources(
+            captured_alpine_manifests,
+            source_root=alpine_sources,
+        )
+        alpine_inventory = _selected_tree_inventory(
+            alpine,
+            ("sources", "manifests"),
+        )
+
+        linux = snapshot_root / "linux"
+        linux.mkdir(mode=0o700)
+        linux_archive_sha256, linux_archive_mode = _pinned_regular_file_metadata(
+            linux_source_archive.parent,
+            linux_source_archive.name,
+        )
+        _copy_pinned_regular_file(
+            linux_source_archive.parent,
+            linux,
+            linux_source_archive.name,
+            linux_archive_sha256,
+            expected_mode=linux_archive_mode,
+        )
+        captured_linux_archive = linux / linux_source_archive.name
+        _validate_linux_source_archive(
+            captured_linux_archive,
+            repo_root=project,
+            kernel_config=captured_config,
+            expected_tree_sha256=cast(
+                str,
+                cast(dict[str, object], kernel_provenance["source"])["tree_sha256"],
+            ),
+        )
+        openvmm = snapshot_root / "openvmm"
+        openvmm.mkdir(mode=0o700)
+        openvmm_license_sha256, openvmm_license_mode = _pinned_regular_file_metadata(
+            OPENVMM_DIR, "LICENSE"
+        )
+        _copy_pinned_regular_file(
+            OPENVMM_DIR,
+            openvmm,
+            "LICENSE",
+            openvmm_license_sha256,
+            expected_mode=openvmm_license_mode,
+        )
+        return _PackagingSourceSnapshot(
+            root=snapshot_root,
+            project=project,
+            project_inventory=project_inventory,
+            alpine=alpine,
+            alpine_inventory=alpine_inventory,
+            linux_archive=captured_linux_archive,
+            linux_archive_sha256=linux_archive_sha256,
+            package_manifests=captured_manifests,
+            openvmm_license=openvmm / "LICENSE",
+        )
+    except Exception:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        raise
+
+
+def _capture_packaging_file_snapshot(parent: Path) -> _PackagingFileSnapshot:
+    snapshot_root = Path(
+        tempfile.mkdtemp(
+            prefix=".nvx-package-files-",
+            dir=parent,
+        )
+    )
+    snapshot_root.chmod(0o700)
+    try:
+        project = snapshot_root / "project"
+        _capture_selected_tree(
+            REPO_ROOT,
+            project,
+            (
+                "LICENSE",
+                "README.md",
+                "THIRD_PARTY_NOTICES.md",
+                "kernel/COPYING-LINUX",
+            ),
+        )
+        openvmm = snapshot_root / "openvmm"
+        openvmm.mkdir(mode=0o700)
+        license_sha256, license_mode = _pinned_regular_file_metadata(
+            OPENVMM_DIR,
+            "LICENSE",
+        )
+        _copy_pinned_regular_file(
+            OPENVMM_DIR,
+            openvmm,
+            "LICENSE",
+            license_sha256,
+            expected_mode=license_mode,
+        )
+        return _PackagingFileSnapshot(
+            root=snapshot_root,
+            project=project,
+            openvmm_license=openvmm / "LICENSE",
+        )
+    except Exception:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        raise
 
 
 def _guest_release_inputs() -> tuple[list[str], list[Path]]:
@@ -794,7 +1249,8 @@ def _validate_openvmm_provenance(
     provenance = _read_json_object(provenance_path, "OpenVMM build provenance")
     revision, source_clean = _openvmm_git_state()
     if (
-        provenance.get("format") != 1
+        type(provenance.get("format")) is not int
+        or provenance.get("format") != 1
         or provenance.get("source_revision") != revision
         or provenance.get("source_clean") is not True
         or not source_clean
@@ -815,8 +1271,28 @@ def _validate_kernel_provenance(
     provenance = _read_json_object(provenance_path, "kernel build provenance")
     expected_inputs = kernel_provenance_inputs()
     if (
-        provenance.get("format") != 1
-        or provenance.get("source") != expected_inputs["source"]
+        type(provenance.get("format")) is not int
+        or provenance.get("format") != 1
+        or not isinstance(provenance.get("source"), dict)
+        or any(
+            cast(dict[str, object], provenance["source"]).get(field) != expected
+            for field, expected in cast(
+                dict[str, object],
+                expected_inputs["source"],
+            ).items()
+        )
+        or not isinstance(
+            cast(dict[str, object], provenance["source"]).get("tree_sha256"),
+            str,
+        )
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            cast(
+                str,
+                cast(dict[str, object], provenance["source"]).get("tree_sha256"),
+            ),
+        )
+        is None
         or provenance.get("input_config") != expected_inputs["input_config"]
         or provenance.get("kernel_sha256") != sha256_file(kernel)
         or provenance.get("config_sha256") != sha256_file(kernel_config)
@@ -885,7 +1361,10 @@ def _validate_root_manifest_contract(manifest: dict[str, object]) -> None:
         )
     openvmm_section = cast(dict[str, object], openvmm)
     for field, expected in expected_openvmm.items():
-        if openvmm_section.get(field) != expected:
+        actual = openvmm_section.get(field)
+        if (
+            type(expected) is int and (type(actual) is not int or actual != expected)
+        ) or (type(expected) is not int and actual != expected):
             raise ScriptError(
                 "SOURCE-MANIFEST.json OpenVMM contract does not match the "
                 "build contract"
@@ -905,7 +1384,7 @@ def _validate_source_manifest_metadata(
     kernel_inputs: dict[str, object],
 ) -> list[str]:
     _validate_root_manifest_contract(manifest)
-    if manifest.get("format") != 1:
+    if type(manifest.get("format")) is not int or manifest.get("format") != 1:
         raise ScriptError("SOURCE-MANIFEST.json format must be 1")
     linux_value = manifest.get("linux")
     alpine_value = manifest.get("alpine")
@@ -1041,11 +1520,7 @@ def package_release(
     linux_source_archive = (
         SOURCE_DIR / "linux" / f"nvx-linux-source-{DEFAULT_KERNEL_VERSION}.tar.gz"
     )
-    if include_source:
-        _validate_alpine_sources(package_manifests)
-        require_file(linux_source_archive, "Linux corresponding-source archive")
-        _validate_linux_source_archive(linux_source_archive)
-    else:
+    if not include_source:
         print(
             "!! binary-only package: publish matching Linux and Alpine "
             "corresponding source separately",
@@ -1094,12 +1569,34 @@ def package_release(
     require_file(REPO_ROOT / "kernel" / "COPYING-LINUX", "Linux copyright notice")
 
     release_destination.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=f".{release_destination.name}.staging-",
-            dir=release_destination.parent,
+    source_snapshot: _PackagingSourceSnapshot | None = None
+    file_snapshot: _PackagingFileSnapshot | None = None
+    if include_source:
+        require_file(linux_source_archive, "Linux corresponding-source archive")
+        source_snapshot = _capture_packaging_source_snapshot(
+            package_manifests,
+            linux_source_archive,
+            artifact_path("vmlinux.config").parent,
+            root_manifest,
+            kernel_provenance,
         )
-    )
+    else:
+        file_snapshot = _capture_packaging_file_snapshot(
+            artifact_path("vmlinux.config").parent
+        )
+    try:
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{release_destination.name}.staging-",
+                dir=release_destination.parent,
+            )
+        )
+    except OSError:
+        if source_snapshot is not None:
+            shutil.rmtree(source_snapshot.root, ignore_errors=True)
+        if file_snapshot is not None:
+            shutil.rmtree(file_snapshot.root, ignore_errors=True)
+        raise
     preserve_staging = False
     try:
         _copy_release_file(binary, staging / "bin" / binary.name)
@@ -1113,37 +1610,82 @@ def package_release(
             kernel_provenance_path,
             staging / "provenance" / KERNEL_PROVENANCE_NAME,
         )
+        project_snapshot = (
+            source_snapshot.project
+            if source_snapshot is not None
+            else cast(_PackagingFileSnapshot, file_snapshot).project
+        )
         for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
-            _copy_release_file(REPO_ROOT / name, staging / name)
+            _copy_release_file(project_snapshot / name, staging / name)
+        openvmm_license = (
+            source_snapshot.openvmm_license
+            if source_snapshot is not None
+            else cast(_PackagingFileSnapshot, file_snapshot).openvmm_license
+        )
         _copy_release_file(
-            OPENVMM_DIR / "LICENSE",
+            openvmm_license,
             staging / "licenses" / "LICENSE-OPENVMM",
         )
         _copy_release_file(
-            REPO_ROOT / "kernel" / "COPYING-LINUX",
+            project_snapshot / "kernel" / "COPYING-LINUX",
             staging / "licenses" / "COPYING-LINUX",
         )
         if include_source:
+            assert source_snapshot is not None
             source_destination = staging / "source"
             _copy_release_file(
-                linux_source_archive,
-                source_destination / linux_source_archive.name,
+                source_snapshot.linux_archive,
+                source_destination / source_snapshot.linux_archive.name,
+            )
+            packaged_linux_source = (
+                source_destination / source_snapshot.linux_archive.name
+            )
+            if (
+                sha256_file(packaged_linux_source)
+                != source_snapshot.linux_archive_sha256
+            ):
+                raise ScriptError("packaged Linux source archive changed while staging")
+            project_archive = (
+                source_destination / f"nvx-project-source-{release_version}.tar.gz"
             )
             _project_source_archive(
-                source_destination / f"nvx-project-source-{release_version}.tar.gz",
+                project_archive,
                 release_version,
-                package_manifests,
+                source_snapshot.package_manifests,
+                snapshot=source_snapshot.project,
+            )
+            _verify_source_archive_inventory(
+                project_archive,
+                f"nvx-project-source-{release_version}",
+                source_snapshot.project_inventory,
+            )
+            alpine_archive = (
+                source_destination / f"nvx-alpine-source-{release_version}.tar.gz"
             )
             _alpine_source_archive(
-                source_destination / f"nvx-alpine-source-{release_version}.tar.gz",
+                alpine_archive,
                 release_version,
-                package_manifests,
+                source_snapshot.package_manifests,
+                snapshot=source_snapshot.alpine,
+            )
+            _verify_source_archive_inventory(
+                alpine_archive,
+                f"nvx-alpine-source-{release_version}",
+                source_snapshot.alpine_inventory,
             )
         packaged_binary = staging / "bin" / binary.name
         packaged_kernel = staging / "guest" / "vmlinux"
         packaged_config = staging / "guest" / "vmlinux.config"
         packaged_openvmm_provenance = staging / "provenance" / OPENVMM_PROVENANCE_NAME
         packaged_kernel_provenance = staging / "provenance" / KERNEL_PROVENANCE_NAME
+        if source_snapshot is not None:
+            for manifest in source_snapshot.package_manifests:
+                packaged_manifest = staging / "guest" / manifest.name
+                if sha256_file(packaged_manifest) != sha256_file(manifest):
+                    raise ScriptError(
+                        f"packaged source manifest changed while staging: "
+                        f"{manifest.name}"
+                    )
         if sha256_file(packaged_binary) != openvmm_provenance["executable_sha256"]:
             raise ScriptError(
                 "packaged OpenVMM executable does not match its build provenance"
@@ -1188,6 +1730,10 @@ def package_release(
     finally:
         if staging.exists() and not preserve_staging:
             shutil.rmtree(staging)
+        if source_snapshot is not None:
+            shutil.rmtree(source_snapshot.root, ignore_errors=True)
+        if file_snapshot is not None:
+            shutil.rmtree(file_snapshot.root, ignore_errors=True)
     print(f">> packaged {release_destination}")
 
 

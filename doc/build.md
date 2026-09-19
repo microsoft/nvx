@@ -40,9 +40,10 @@ openvmm/target/release/openvmm[.exe]
 ```
 
 The provenance sidecars bind the kernel to its pinned archive, patch set,
-input configuration, generated configuration, and output hash, and bind
-OpenVMM to the exact clean gitlink revision and executable hash. Packaging
-rejects missing, dirty, stale, or mismatched provenance.
+verified patched-source tree digest, input configuration, generated
+configuration, and output hash, and bind OpenVMM to the exact clean gitlink
+revision and executable hash. Packaging rejects missing, dirty, stale, or
+mismatched provenance.
 
 Run the two test layers separately:
 
@@ -72,8 +73,10 @@ product-agent configuration; the same requirements are checked after
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
 generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
-absent. Changing an archive hash or patch invalidates both source and object
-caches; changing the input configuration invalidates the object cache.
+absent. The cache stamp records the complete patched-tree digest; each cache
+acceptance verifies that digest and safely reconstructs a mutated tree.
+Changing an archive hash or patch invalidates both source and object caches;
+changing the input configuration invalidates the object cache.
 
 Release packaging stages and verifies a complete output before replacing an
 existing `dist/` version. Its `SOURCE-MANIFEST.json` records the package
@@ -103,9 +106,13 @@ SHA256SUMS
 ```
 
 Packages built with `--include-source` additionally contain `source/`.
+Packaging captures no-follow, content-addressed snapshots of the accepted
+project, Alpine, and Linux source inputs and verifies generated source archives
+against those inventories before atomic publication.
 `SHA256SUMS` has sorted `SHA256  relative/path` entries using POSIX separators
 for every packaged file, including `SOURCE-MANIFEST.json`, except
-`SHA256SUMS` itself.
+the package-root `SHA256SUMS` itself; nested files named `SHA256SUMS` are
+included.
 
 ## Building the packaged Linux source
 
