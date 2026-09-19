@@ -189,6 +189,56 @@ def _kernel_patch_files() -> tuple[Path, ...]:
     return patches
 
 
+def materialize_kernel_provenance_inputs() -> None:
+    """Write kernel provenance inputs from immutable run-head blobs."""
+    tracked = run_capture(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "HEAD",
+            "--",
+            "kernel/config-microvm",
+            "kernel/patches",
+        ],
+        cwd=REPO_ROOT,
+    )
+    require_success(tracked, "run-head kernel provenance input query")
+    tree_paths = tuple(
+        path for path in tracked.stdout.decode("utf-8").split("\0") if path
+    )
+    config_path = "kernel/config-microvm"
+    patch_paths = tuple(
+        path
+        for path in tree_paths
+        if path.startswith("kernel/patches/") and path.endswith(".patch")
+    )
+    if config_path not in tree_paths:
+        raise ScriptError("kernel config is missing from the run head")
+    if not patch_paths:
+        raise ScriptError("kernel patches are missing from the run head")
+
+    head_patch_paths = set(patch_paths)
+    worktree_patch_paths = {
+        path.relative_to(REPO_ROOT).as_posix(): path
+        for path in (REPO_ROOT / "kernel" / "patches").glob("*.patch")
+    }
+    for relative in sorted(worktree_patch_paths.keys() - head_patch_paths):
+        worktree_patch_paths[relative].unlink()
+        print(f">> removed stale {relative} absent from the run head")
+
+    for relative in (config_path, *patch_paths):
+        blob = run_capture(
+            ["git", "cat-file", "blob", f"HEAD:{relative}"],
+            cwd=REPO_ROOT,
+        )
+        require_success(blob, f"run-head kernel provenance input read for {relative}")
+        (REPO_ROOT / relative).write_bytes(blob.stdout)
+        print(f">> materialized {relative} from the run head")
+
+
 def _kernel_source_fingerprint() -> str:
     return json.dumps(
         {

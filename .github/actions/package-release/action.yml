@@ -13,11 +13,7 @@ runs:
       if: runner.os == 'Windows'
       shell: powershell
       run: |
-        $KernelInputs = @("kernel/config-microvm") + @(
-          git ls-files "kernel/patches/*.patch"
-        )
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        git checkout-index --force -- $KernelInputs
+        python scripts\nvx.py materialize-kernel-provenance-inputs
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Package Linux release
