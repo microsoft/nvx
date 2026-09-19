@@ -471,7 +471,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     openvmm_unit_tests = subparsers.add_parser(
         "test-openvmm-unit",
-        help="run OpenVMM unit tests",
+        help="run OpenVMM unit and documentation tests",
     )
     openvmm_unit_tests.set_defaults(handler=command_test_openvmm_unit)
 
