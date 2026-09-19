@@ -9,5 +9,6 @@
 *.sh.in text eol=lf
 alpine/* text eol=lf
 Dockerfile text eol=lf
+kernel/config-microvm text eol=lf
 
 .github/workflows/*.lock.yml linguist-generated=true
