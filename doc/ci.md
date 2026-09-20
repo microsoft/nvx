@@ -10,9 +10,10 @@ probe entirely from the OpenVMM checkout and exercises OpenVMM lifecycle,
 TTRPC, and snapshot contracts without restoring NVX guest artifacts.
 `openvmm-unit-tests` runs the OpenVMM unit and documentation tests independently
 on the same backend matrix.
-`nvx-microvm-tests` consumes the NVX Linux kernel and Alpine initramfs and
-exercises Linux, SMP, virtio, sandbox, and snapshot behavior through the public
-OpenVMM CLI. Failure logs from the NVX layer are uploaded per backend.
+The `nvx-microvm-tests-{kvm,mshv,whp}` jobs consume the NVX Linux kernel and
+Alpine initramfs and exercise Linux, SMP, virtio, sandbox, and snapshot behavior
+through the public OpenVMM CLI. Failure logs from the NVX layer are uploaded per
+backend.
 The restore-processor scenario also rejects Linux TSC instability diagnostics,
 even if the requested CPUs came online, so clock skew cannot silently pass by
 falling back to a different clocksource.
@@ -42,16 +43,27 @@ The harness waits for the output reader's EOF notification even after the
 process exits, so delayed final output chunks cannot create a false failure.
 
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
-Once they are ready, benchmarks run in parallel with the NVX test layer and
-use any available runner in the matching backend pool. All three use
-virtual-machine performance series and the constrained eight-CPU affinity
-policy. Development releases and performance baseline updates still require
-every applicable test and benchmark lane to pass. The workflow uses the
-read-only OpenVMM deploy key stored in the
+OpenVMM release executables and provenance are built once by the independently
+addressable `build-openvmm-linux-gnu`, `build-openvmm-linux-musl`, and
+`build-openvmm-windows-msvc` producer jobs. KVM workloads and MSHV microVM tests
+consume the GNU artifact, MSHV platform workloads consume the musl artifact,
+and WHP workloads consume the Windows MSVC artifact. Each workload can start
+after its compatible OpenVMM producer and the shared guest-artifact job finish,
+without waiting for unrelated OpenVMM targets.
+
+The producer handoff uses one-day workflow artifacts rather than caches. Each
+consumer downloads both the normalized executable and its build provenance,
+then restores executable permissions on Linux. Once the required artifacts are
+ready, benchmarks run in parallel with the NVX test layer and use any available
+runner in the matching backend pool. All three use virtual-machine performance
+series and the constrained eight-CPU affinity policy. Development releases and
+performance baseline updates still require every applicable test and benchmark
+lane to pass. The workflow uses the read-only OpenVMM deploy key stored in the
 `OPENVMM_DEPLOY_KEY` Actions secret to fetch the private submodule at its pinned
 commit. Shared guest binaries and development release packages move through
-runner-compatible Actions caches; benchmark results use short-lived workflow
-artifacts.
+short-lived workflow artifacts alongside the OpenVMM handoff and benchmark
+results. Caches only accelerate reproducible build inputs and outputs; consumers
+do not depend on them as a handoff.
 Pull requests gate regressions against recent matching-platform history, and
 successful pushes to `dev` append their p50 values under `data/`. Metadata-only
 performance jobs use GitHub-hosted Ubuntu runners. Provisioning instructions

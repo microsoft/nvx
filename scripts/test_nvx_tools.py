@@ -1023,6 +1023,9 @@ class CiConfigurationTests(unittest.TestCase):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        microvm_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
+        ).read_text(encoding="utf-8")
         build_action = (
             common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
         ).read_text(encoding="utf-8")
@@ -1052,7 +1055,6 @@ class CiConfigurationTests(unittest.TestCase):
         for job_name in (
             "openvmm-vmm-tests",
             "openvmm-unit-tests",
-            "nvx-microvm-tests",
         ):
             with self.subTest(job_name=job_name):
                 self.assertEqual(
@@ -1061,6 +1063,10 @@ class CiConfigurationTests(unittest.TestCase):
                     ),
                     1,
                 )
+        self.assertEqual(
+            microvm_workflow.count("uses: ./.github/actions/setup-curl"),
+            1,
+        )
         self.assertIn("uses: ./.github/actions/setup-curl", build_action)
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific curl resolution")
@@ -1144,6 +1150,15 @@ class CiConfigurationTests(unittest.TestCase):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        build_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "build-openvmm-binary.yml"
+        ).read_text(encoding="utf-8")
+        microvm_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
+        ).read_text(encoding="utf-8")
+        platform_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "run-platform.yml"
+        ).read_text(encoding="utf-8")
         build_action = (
             common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
         ).read_text(encoding="utf-8")
@@ -1161,18 +1176,112 @@ class CiConfigurationTests(unittest.TestCase):
                 "openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-",
                 configuration,
             )
-        self.assertIn("openvmm-binaries:", workflow)
-        self.assertIn("artifact: openvmm-linux-gnu", workflow)
-        self.assertIn("artifact: openvmm-linux-musl", workflow)
-        self.assertIn("artifact: openvmm-windows-msvc", workflow)
-        self.assertIn("build/openvmm.provenance.json", workflow)
-        self.assertIn("name: ${{ matrix.artifact }}-executable", workflow)
-        self.assertIn("name: ${{ matrix.artifact }}-provenance", workflow)
-        self.assertIn("path: openvmm/target/release", workflow)
-        self.assertIn("path: build", workflow)
-        self.assertEqual(workflow.count("overwrite: true"), 2)
-        self.assertNotIn("path: .", workflow)
-        self.assertIn("uses: actions/download-artifact@v8", workflow)
+        producers = {
+            "build-openvmm-linux-gnu": (
+                "x86_64-unknown-linux-gnu",
+                "openvmm-linux-gnu",
+            ),
+            "build-openvmm-linux-musl": (
+                "x86_64-unknown-linux-musl",
+                "openvmm-linux-musl",
+            ),
+            "build-openvmm-windows-msvc": (
+                "x86_64-pc-windows-msvc",
+                "openvmm-windows-msvc",
+            ),
+        }
+        self.assertEqual(
+            workflow.count("uses: ./.github/workflows/build-openvmm-binary.yml"),
+            len(producers),
+        )
+        for job_name, (target, artifact) in producers.items():
+            with self.subTest(producer=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn(f"target: {target}", job)
+                self.assertIn(f"artifact: {artifact}", job)
+                self.assertNotIn("strategy:", job)
+
+        consumers = {
+            "nvx-microvm-tests-kvm": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "nvx-microvm-tests-mshv": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "nvx-microvm-tests-whp": (
+                "build-openvmm-windows-msvc",
+                "openvmm-windows-msvc",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "platform-kvm": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-platform.yml",
+            ),
+            "platform-mshv": (
+                "build-openvmm-linux-musl",
+                "openvmm-linux-musl",
+                "run-platform.yml",
+            ),
+            "platform-whp": (
+                "build-openvmm-windows-msvc",
+                "openvmm-windows-msvc",
+                "run-platform.yml",
+            ),
+        }
+        for job_name, (producer, artifact, reusable_workflow) in consumers.items():
+            with self.subTest(consumer=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn(
+                    f"needs: [artifacts, {producer}, openvmm-changes]",
+                    job,
+                )
+                self.assertIn(f"needs.{producer}.result == 'success'", job)
+                self.assertIn(f"uses: ./.github/workflows/{reusable_workflow}", job)
+                self.assertIn(f"openvmm-artifact: {artifact}", job)
+                for unrelated_producer in producers.keys() - {producer}:
+                    self.assertNotIn(unrelated_producer, job)
+
+        self.assertIn("build/openvmm.provenance.json", build_workflow)
+        self.assertIn(
+            "name: ${{ inputs.artifact }}-executable",
+            build_workflow,
+        )
+        self.assertIn(
+            "name: ${{ inputs.artifact }}-provenance",
+            build_workflow,
+        )
+        self.assertEqual(
+            build_workflow.count("uses: ./.github/actions/build-openvmm"),
+            1,
+        )
+        self.assertEqual(build_workflow.count("overwrite: true"), 2)
+        self.assertEqual(build_workflow.count("retention-days: 1"), 2)
+        for consumer_workflow, download_count in (
+            (microvm_workflow, 3),
+            (platform_workflow, 2),
+        ):
+            self.assertIn("path: openvmm/target/release", consumer_workflow)
+            self.assertIn("path: build", consumer_workflow)
+            self.assertEqual(
+                consumer_workflow.count("uses: actions/download-artifact@v8"),
+                download_count,
+            )
+            self.assertIn(
+                "run: chmod +x openvmm/target/release/openvmm",
+                consumer_workflow,
+            )
+        for configuration in (
+            workflow,
+            build_workflow,
+            microvm_workflow,
+            platform_workflow,
+        ):
+            self.assertNotIn("path: .", configuration)
         self.assertIn("openvmm-binary-v5-", build_action)
         self.assertNotIn("openvmm-binary-v4-", build_action)
         self.assertIn("Verify OpenVMM provenance on Linux", build_action)
@@ -1182,8 +1291,11 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("openvmm-tests-v2-", workflow)
         self.assertNotIn("Restore OpenVMM test build", workflow)
         self.assertNotIn("Save OpenVMM test build", workflow)
+        self.assertEqual(
+            build_workflow.count("uses: ./.github/actions/sccache"),
+            2,
+        )
         for job_name, cache_namespace in (
-            ("openvmm-binaries", None),
             ("openvmm-vmm-tests", "vmm-tests"),
             ("openvmm-unit-tests", "unit-tests"),
         ):
@@ -1193,33 +1305,45 @@ class CiConfigurationTests(unittest.TestCase):
                     job.count("uses: ./.github/actions/sccache"),
                     2,
                 )
-                if cache_namespace is not None:
-                    self.assertIn(
-                        f"key: openvmm-inputs-v1-${{{{ runner.os }}}}-"
-                        f"${{{{ runner.arch }}}}-{cache_namespace}-"
-                        "${{ steps.openvmm.outputs.sha }}",
-                        job,
-                    )
-                    self.assertIn(
-                        f"key: openvmm-cargo-v1-${{{{ runner.os }}}}-"
-                        f"${{{{ runner.arch }}}}-{cache_namespace}-"
-                        "${{ hashFiles('openvmm/Cargo.lock') }}",
-                        job,
-                    )
-                    self.assertIn(
-                        "restore-keys: |\n"
-                        "            openvmm-inputs-v1-${{ runner.os }}-"
-                        "${{ runner.arch }}-",
-                        job,
-                    )
-                    self.assertIn(
-                        "restore-keys: |\n"
-                        "            openvmm-cargo-v1-${{ runner.os }}-"
-                        "${{ runner.arch }}-",
-                        job,
-                    )
+                self.assertIn(
+                    f"key: openvmm-inputs-v1-${{{{ runner.os }}}}-"
+                    f"${{{{ runner.arch }}}}-{cache_namespace}-"
+                    "${{ steps.openvmm.outputs.sha }}",
+                    job,
+                )
+                self.assertIn(
+                    f"key: openvmm-cargo-v1-${{{{ runner.os }}}}-"
+                    f"${{{{ runner.arch }}}}-{cache_namespace}-"
+                    "${{ hashFiles('openvmm/Cargo.lock') }}",
+                    job,
+                )
+                self.assertIn(
+                    "restore-keys: |\n"
+                    "            openvmm-inputs-v1-${{ runner.os }}-"
+                    "${{ runner.arch }}-",
+                    job,
+                )
+                self.assertIn(
+                    "restore-keys: |\n"
+                    "            openvmm-cargo-v1-${{ runner.os }}-"
+                    "${{ runner.arch }}-",
+                    job,
+                )
         self.assertNotIn("uses: actions/cache@v5", workflow)
+        self.assertNotIn("uses: actions/cache@v5", build_workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
+
+        release_job = _workflow_job(workflow, "release")
+        performance_gate_job = _workflow_job(workflow, "performance-gate")
+        performance_persist_job = _workflow_job(workflow, "performance-persist")
+        for job_name in consumers:
+            self.assertIn(f"      - {job_name}", release_job)
+            self.assertIn(f"needs.{job_name}.result", release_job)
+            self.assertIn(f"      - {job_name}", performance_persist_job)
+            self.assertIn(f"needs.{job_name}.result", performance_persist_job)
+        for job_name in ("platform-kvm", "platform-mshv", "platform-whp"):
+            self.assertIn(job_name, performance_gate_job)
+            self.assertIn(f"needs.{job_name}.result", performance_gate_job)
 
     def test_ci_runs_openvmm_tests_and_unit_tests_on_each_backend(self):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
