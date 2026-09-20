@@ -461,14 +461,10 @@ install_rust_tools() {
         CARGO_HOME="$trusted_cargo_home" \
         RUSTUP_HOME="$trusted_rustup_home" \
         RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
-        "$rustup" target add x86_64-unknown-none
-    if [ "$backend" = mshv ]; then
-        run_as_root env \
-            CARGO_HOME="$trusted_cargo_home" \
-            RUSTUP_HOME="$trusted_rustup_home" \
-            RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
-            "$rustup" target add x86_64-unknown-linux-musl
-    fi
+        "$rustup" target add \
+        x86_64-unknown-none \
+        x86_64-unknown-linux-musl \
+        x86_64-unknown-uefi
 
     rust_version=$(run_as_root env \
         CARGO_HOME="$trusted_cargo_home" \
@@ -628,6 +624,15 @@ check_environment() {
     run_as_runner cargo nextest --version |
         grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
         die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
+    installed_targets=$(run_as_runner env RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN \
+        rustup target list --installed)
+    for target in \
+        x86_64-unknown-none \
+        x86_64-unknown-linux-musl \
+        x86_64-unknown-uefi; do
+        printf '%s\n' "$installed_targets" | grep -Fxq "$target" ||
+            die "Rust target ${target} is not installed"
+    done
     run_as_runner sccache --version |
         grep -Fq "sccache ${SCCACHE_VERSION}" ||
         die "sccache ${SCCACHE_VERSION} is not installed"
