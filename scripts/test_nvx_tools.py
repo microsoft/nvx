@@ -2122,6 +2122,29 @@ class SandboxTests(unittest.TestCase):
             )
             session.ping.assert_called_once_with(10)
 
+    def test_versioned_json_reader_supports_custom_version_field(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "outcome.json"
+            payload = {"schema_version": sandbox_lifecycle.OUTCOME_SCHEMA_VERSION}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertEqual(
+                sandbox_lifecycle._read_json(
+                    path,
+                    "OpenVMM outcome report",
+                    version_field="schema_version",
+                    version=sandbox_lifecycle.OUTCOME_SCHEMA_VERSION,
+                ),
+                payload,
+            )
+            with self.assertRaisesRegex(common.ScriptError, "unsupported format"):
+                sandbox_lifecycle._read_json(
+                    path,
+                    "OpenVMM outcome report",
+                    version_field="schema_version",
+                    version=sandbox_lifecycle.OUTCOME_SCHEMA_VERSION + 1,
+                )
+
     def test_managed_exec_outcome_excludes_workload_data(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "outcome.json"

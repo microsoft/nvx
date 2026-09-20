@@ -47,7 +47,13 @@ def _write_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _read_json(path: Path, description: str) -> dict[str, Any]:
+def _read_json(
+    path: Path,
+    description: str,
+    *,
+    version_field: str = "format",
+    version: int = STATE_FORMAT,
+) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -55,7 +61,7 @@ def _read_json(path: Path, description: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ScriptError(f"{description} has an unsupported format: {path}")
     typed = cast(dict[str, Any], value)
-    if typed.get("format") != STATE_FORMAT:
+    if typed.get(version_field) != version:
         raise ScriptError(f"{description} has an unsupported format: {path}")
     return typed
 
@@ -104,21 +110,18 @@ def _write_new_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _read_openvmm_outcome(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ScriptError(f"failed to read OpenVMM outcome report: {path}") from error
-    if not isinstance(value, dict):
-        raise ScriptError(f"OpenVMM outcome report has an unsupported format: {path}")
-    typed = cast(dict[str, object], value)
-    if typed.get("schema_version") != OUTCOME_SCHEMA_VERSION:
-        raise ScriptError(f"OpenVMM outcome report has an unsupported format: {path}")
+    typed = _read_json(
+        path,
+        "OpenVMM outcome report",
+        version_field="schema_version",
+        version=OUTCOME_SCHEMA_VERSION,
+    )
     for name in ("outcome", "network_policy", "teardown"):
         if not isinstance(typed.get(name), dict):
             raise ScriptError(
                 f"OpenVMM outcome report has an invalid {name} section: {path}"
             )
-    return cast(dict[str, Any], typed)
+    return typed
 
 
 def write_exec_outcome(path: Path, result: ManagedExecResult) -> None:
