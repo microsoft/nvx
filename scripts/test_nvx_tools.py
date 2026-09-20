@@ -37,6 +37,20 @@ from nvx_tools import (  # noqa: E402
 )
 
 
+def _workflow_job(workflow: str, job_name: str) -> str:
+    lines = workflow.splitlines()
+    start = lines.index(f"  {job_name}:")
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start + 1 :], start + 1)
+            if len(line) > 2 and line[:2] == "  " and not line[2].isspace()
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
 def _write_release_fixture(
     root: Path,
 ) -> tuple[dict[str, Path], dict[str, object], str]:
@@ -1023,10 +1037,18 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn('Join-Path $ShimDirectory "curl.exe"', action)
         self.assertIn("Get-Command rustc.exe", action)
         self.assertNotIn("curl.cmd", action)
-        self.assertEqual(
-            workflow.count("uses: ./.github/actions/setup-curl"),
-            2,
-        )
+        for job_name in (
+            "openvmm-vmm-tests",
+            "openvmm-unit-tests",
+            "nvx-microvm-tests",
+        ):
+            with self.subTest(job_name=job_name):
+                self.assertEqual(
+                    _workflow_job(workflow, job_name).count(
+                        "uses: ./.github/actions/setup-curl"
+                    ),
+                    1,
+                )
         self.assertIn("uses: ./.github/actions/setup-curl", build_action)
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific curl resolution")
@@ -1148,10 +1170,18 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("openvmm-tests-v2-", workflow)
         self.assertNotIn("Restore OpenVMM test build", workflow)
         self.assertNotIn("Save OpenVMM test build", workflow)
-        self.assertEqual(
-            workflow.count("uses: ./.github/actions/sccache"),
-            4,
-        )
+        for job_name in (
+            "openvmm-binaries",
+            "openvmm-vmm-tests",
+            "openvmm-unit-tests",
+        ):
+            with self.subTest(job_name=job_name):
+                self.assertEqual(
+                    _workflow_job(workflow, job_name).count(
+                        "uses: ./.github/actions/sccache"
+                    ),
+                    2,
+                )
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
 
