@@ -1,0 +1,95 @@
+name: Build OpenVMM binary
+
+on:
+  workflow_call:
+    inputs:
+      display-name:
+        description: Platform name shown in the job list
+        required: true
+        type: string
+      runner:
+        description: JSON array of labels selecting the build runner
+        required: true
+        type: string
+      backend:
+        description: NVX backend provided by the build runner
+        required: true
+        type: string
+      target:
+        description: Rust target used to build OpenVMM
+        required: true
+        type: string
+      build-mode:
+        description: OpenVMM build mode
+        required: true
+        type: string
+      artifact:
+        description: Base name for the executable and provenance artifacts
+        required: true
+        type: string
+      binary:
+        description: Normalized path to the OpenVMM executable
+        required: true
+        type: string
+    secrets:
+      OPENVMM_DEPLOY_KEY:
+        description: SSH deploy key used to checkout OpenVMM
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: OpenVMM binary / ${{ inputs.display-name }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ inputs.backend }}
+
+      - name: Prepare sccache
+        uses: ./.github/actions/sccache
+        with:
+          operation: start
+
+      - name: Build OpenVMM
+        uses: ./.github/actions/build-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+          target: ${{ inputs.target }}
+          build-mode: ${{ inputs.build-mode }}
+          binary-path: ${{ inputs.binary }}
+
+      - name: Report sccache
+        if: always()
+        uses: ./.github/actions/sccache
+        with:
+          operation: stop
+
+      - name: Upload OpenVMM executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact }}-executable
+          path: ${{ inputs.binary }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
+
+      - name: Upload OpenVMM provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact }}-provenance
+          path: build/openvmm.provenance.json
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 1

@@ -1,0 +1,128 @@
+name: Run NVX platform
+
+on:
+  workflow_call:
+    inputs:
+      display-name:
+        description: Platform name shown in the job list
+        required: true
+        type: string
+      runner:
+        description: JSON array of labels selecting the platform runner
+        required: true
+        type: string
+      backend:
+        description: NVX backend to run
+        required: true
+        type: string
+      release-platform:
+        description: Platform suffix used in release artifact names
+        required: true
+        type: string
+      benchmark-platform:
+        description: Platform identifier used for performance results
+        required: true
+        type: string
+      openvmm-artifact:
+        description: Base name of the compatible OpenVMM artifacts
+        required: true
+        type: string
+      teardown-mode:
+        description: Guest teardown mode used by the benchmark
+        required: true
+        type: string
+      benchmark-cpus:
+        description: Host CPUs assigned to the benchmark
+        required: true
+        type: string
+      host-cpu-reserve:
+        description: Host CPU reserved from the benchmark
+        required: true
+        type: number
+      marker-timeout:
+        description: Guest readiness timeout in seconds
+        required: true
+        type: number
+      package-release:
+        description: Whether the platform produces a development release package
+        required: true
+        type: boolean
+    secrets:
+      OPENVMM_DEPLOY_KEY:
+        description: SSH deploy key used to checkout OpenVMM
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: Platform / ${{ inputs.display-name }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ inputs.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Verify source pins on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/nvx.py verify
+
+      - name: Verify source pins on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py verify
+
+      - name: Download OpenVMM executable
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openvmm-artifact }}-executable
+          path: openvmm/target/release
+
+      - name: Download OpenVMM provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openvmm-artifact }}-provenance
+          path: build
+
+      - name: Make OpenVMM executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x openvmm/target/release/openvmm
+
+      - name: Run benchmark
+        uses: ./.github/actions/run-benchmark
+        with:
+          backend: ${{ inputs.backend }}
+          platform: ${{ inputs.benchmark-platform }}
+          runs: 10
+          warmups: 1
+          teardown-mode: ${{ inputs.teardown-mode }}
+          cpus: ${{ inputs.benchmark-cpus }}
+          host-cpu-reserve: ${{ inputs.host-cpu-reserve }}
+          marker-timeout: ${{ inputs.marker-timeout }}
+
+      - name: Package release
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          inputs.package-release
+        uses: ./.github/actions/package-release
+        with:
+          platform: ${{ inputs.release-platform }}

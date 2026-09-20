@@ -1,0 +1,102 @@
+name: Run NVX microVM tests
+
+on:
+  workflow_call:
+    inputs:
+      display-name:
+        description: Platform name shown in the job list
+        required: true
+        type: string
+      runner:
+        description: JSON array of labels selecting the test runner
+        required: true
+        type: string
+      backend:
+        description: NVX backend to test
+        required: true
+        type: string
+      openvmm-artifact:
+        description: Base name of the compatible OpenVMM artifacts
+        required: true
+        type: string
+    secrets:
+      OPENVMM_DEPLOY_KEY:
+        description: SSH deploy key used to checkout OpenVMM
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: NVX microVM tests / ${{ inputs.display-name }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ inputs.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Set up retrying curl
+        uses: ./.github/actions/setup-curl
+
+      - name: Download guest artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-artifacts
+          path: build
+
+      - name: Download OpenVMM executable
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openvmm-artifact }}-executable
+          path: openvmm/target/release
+
+      - name: Download OpenVMM provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openvmm-artifact }}-provenance
+          path: build
+
+      - name: Make OpenVMM executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x openvmm/target/release/openvmm
+
+      - name: Run NVX microVM tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --output-dir "build/test-results/microvm-${{ inputs.backend }}"
+
+      - name: Run NVX microVM tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          python scripts\nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --output-dir "build/test-results/microvm-${{ inputs.backend }}"
+
+      - name: Upload NVX microVM failure logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-microvm-tests-${{ inputs.backend }}
+          path: build/test-results/microvm-${{ inputs.backend }}
+          if-no-files-found: warn
