@@ -226,6 +226,7 @@ steps:
           ("git-diff-check", ["git", "diff", "--check"]),
       ]
 
+      command_timeout_seconds = 300
       results: list[dict[str, object]] = []
       for name, command in checks:
           log_path = log_dir / f"{name}.log"
@@ -238,10 +239,22 @@ steps:
                   text=True,
                   errors="replace",
                   check=False,
+                  timeout=command_timeout_seconds,
               )
               text = completed.stdout
               status = "passed" if completed.returncode == 0 else "failed"
               return_code = completed.returncode
+          except subprocess.TimeoutExpired as error:
+              if isinstance(error.stdout, bytes):
+                  partial_output = error.stdout.decode("utf-8", errors="replace")
+              else:
+                  partial_output = error.stdout or ""
+              text = (
+                  f"{partial_output}\n"
+                  f"Timed out after {command_timeout_seconds} seconds.\n"
+              )
+              status = "failed"
+              return_code = None
           except OSError as error:
               text = f"{type(error).__name__}: {error}\n"
               status = "failed"
@@ -254,6 +267,7 @@ steps:
                   "return_code": return_code,
                   "command": command,
                   "log": str(log_path),
+                  "timeout_seconds": command_timeout_seconds,
               }
           )
 
@@ -380,6 +394,7 @@ safe-outputs:
       - "openvmm/**"
       - ".gitmodules"
       - ".github/workflows/*.lock.yml"
+      - "scripts/nvx_tools/release.py"
       - "data/**"
       - "build/**"
       - ".cache/**"
