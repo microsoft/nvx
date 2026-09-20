@@ -35,6 +35,7 @@ from .build import (
     KERNEL_PROVENANCE_NAME,
     MICROVM_ABI_VERSION,
     OPENVMM_PROVENANCE_NAME,
+    REQUIRED_NESTED_VIRT_KERNEL_CONFIG,
     REQUIRED_SANDBOX_KERNEL_CONFIG,
     DockerBuildConfig,
     assert_required_kernel_config,
@@ -1235,6 +1236,7 @@ def verify_source_tree() -> None:
         "CONFIG_HVC_XE9=y",
         "CONFIG_VIRTIO_FS=y",
         "CONFIG_FUSE_FS=y",
+        *REQUIRED_NESTED_VIRT_KERNEL_CONFIG,
         *REQUIRED_SANDBOX_KERNEL_CONFIG,
     ):
         if setting not in config.splitlines():
@@ -1251,6 +1253,7 @@ def verify_source_tree() -> None:
         for setting in (
             "CONFIG_PVH=y",
             "CONFIG_HVC_XE9=y",
+            *REQUIRED_NESTED_VIRT_KERNEL_CONFIG,
             *REQUIRED_SANDBOX_KERNEL_CONFIG,
         ):
             if setting not in generated:

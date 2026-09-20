@@ -258,6 +258,8 @@ def command_run(args: argparse.Namespace) -> None:
         command.extend(["--host-loopback-forward", forward])
     if args.outcome_report is not None:
         command.extend(["--microvm-report", str(args.outcome_report)])
+    if args.nested_virt:
+        command.append("--nested-virt")
     if args.cmdline:
         command.extend(["--cmdline", args.cmdline])
     print(f">> {_format_command(command)}")
@@ -535,6 +537,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="write a bounded local JSON outcome report",
     )
+    run.add_argument("--nested-virt", action="store_true")
     run.add_argument("--cmdline", default="")
     run.add_argument("--restore-snapshot", type=Path)
     run.add_argument("--restore-processors", type=int, choices=(1, 2, 4, 8))

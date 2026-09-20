@@ -14,7 +14,8 @@ The microVM requires:
 - one NUMA node;
 - Xen PVH direct boot;
 - KVM, MSHV, or WHP;
-- no VTL2, isolation, nested virtualization, or Hyper-V enlightenments; and
+- no VTL2, isolation, or Hyper-V enlightenments; nested virtualization is an
+  opt-in KVM/WHP capability; and
 - the exact [chipset and device inventory](machine-and-device-abi.md).
 
 It accepts exactly 1, 2, 4, or 8 vCPUs
