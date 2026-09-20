@@ -2149,6 +2149,14 @@ class SandboxTests(unittest.TestCase):
                     version=sandbox_lifecycle.OUTCOME_SCHEMA_VERSION + 1,
                 )
 
+    def test_versioned_json_reader_rejects_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_bytes(b"\xff")
+
+            with self.assertRaisesRegex(common.ScriptError, "failed to read"):
+                sandbox_lifecycle._read_json(path, "sandbox configuration")
+
     def test_managed_exec_outcome_excludes_workload_data(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "outcome.json"

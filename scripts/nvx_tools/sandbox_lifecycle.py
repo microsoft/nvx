@@ -56,7 +56,7 @@ def _read_json(
 ) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ScriptError(f"failed to read {description}: {path}") from error
     if not isinstance(value, dict):
         raise ScriptError(f"{description} has an unsupported format: {path}")
