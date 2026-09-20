@@ -741,12 +741,23 @@ class CiTests(unittest.TestCase):
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
             backend = "whp" if os.name == "nt" else "kvm"
+            installed_targets = common.CommandResult(
+                args=("rustup", "target", "list"),
+                returncode=0,
+                stdout=("\n".join(ci.OPENVMM_RUST_TARGETS[backend]) + "\n").encode(),
+                stderr=b"",
+            )
 
             with (
                 patch.object(ci, "OPENVMM_DIR", openvmm),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
+                patch.object(
+                    ci,
+                    "run_capture",
+                    return_value=installed_targets,
+                ) as run_capture,
                 patch.object(ci, "run_checked") as run_checked,
                 patch.dict(
                     os.environ,
@@ -760,31 +771,215 @@ class CiTests(unittest.TestCase):
             ):
                 ci.run_openvmm_tests(backend)
 
-            self.assertEqual(run_checked.call_count, 3)
-            install_target, restore, tests = run_checked.call_args_list
-            self.assertEqual(
-                install_target.args[0],
-                ["rustup", "target", "add", "x86_64-unknown-none"],
+            run_capture.assert_called_once_with(
+                [
+                    "rustup",
+                    "target",
+                    "list",
+                    "--installed",
+                    "--toolchain",
+                    ci.OPENVMM_RUST_TOOLCHAIN,
+                ]
             )
+            self.assertEqual(run_checked.call_count, 2)
+            restore, tests = run_checked.call_args_list
             self.assertEqual(
                 restore.args[0],
                 ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
             )
+            environment = restore.kwargs["env"]
+            self.assertEqual(
+                environment["RUSTUP_TOOLCHAIN"],
+                ci.OPENVMM_RUST_TOOLCHAIN,
+            )
+            if os.name == "nt":
+                self.assertNotIn("XDG_CACHE_HOME", environment)
+            else:
+                self.assertEqual(
+                    environment["XDG_CACHE_HOME"],
+                    os.fspath(root / "openvmm-cache"),
+                )
             command = tests.args[0]
             self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
             filter_index = command.index("--filter")
-            self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
-            self.assertIn(
-                "test_ttrpc_microvm_pvh_snapshot",
-                ci.OPENVMM_MICROVM_TEST_FILTER,
+            self.assertEqual(
+                command[filter_index + 1],
+                ci.OPENVMM_TEST_FILTERS[backend],
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
-            self.assertNotIn("env", tests.kwargs)
+            self.assertIs(tests.kwargs["env"], environment)
             if os.name == "nt":
                 self.assertEqual(
                     command[command.index("--dir") + 1],
                     os.fspath(root / backend),
                 )
+
+    def test_openvmm_tests_pin_stable_toolchain_without_runner_temp(self):
+        installed_targets = common.CommandResult(
+            args=("rustup", "target", "list"),
+            returncode=0,
+            stdout=("\n".join(ci.OPENVMM_RUST_TARGETS["whp"]) + "\n").encode(),
+            stderr=b"",
+        )
+
+        with (
+            patch.object(ci, "run_capture", return_value=installed_targets),
+            patch.object(ci, "run_checked") as run_checked,
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            environment = ci._prepare_openvmm_test_environment("whp", "rustup")
+
+        self.assertEqual(
+            environment,
+            {"RUSTUP_TOOLCHAIN": ci.OPENVMM_RUST_TOOLCHAIN},
+        )
+        run_checked.assert_not_called()
+
+    def test_openvmm_tests_prepare_job_local_toolchain_for_missing_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            openvmm = root / "openvmm"
+            openvmm.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            backend = "whp" if os.name == "nt" else "kvm"
+            installed_targets = common.CommandResult(
+                args=("rustup", "target", "list"),
+                returncode=0,
+                stdout=f"{ci.OPENVMM_GUEST_RUST_TARGET}\n".encode(),
+                stderr=b"",
+            )
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci.os, "access", return_value=True),
+                patch.object(ci.Path, "exists", return_value=False),
+                patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
+                patch.object(ci, "run_capture", return_value=installed_targets),
+                patch.object(ci, "run_checked") as run_checked,
+                patch.dict(os.environ, {"RUNNER_TEMP": os.fspath(root)}),
+            ):
+                ci.run_openvmm_tests(backend)
+
+            self.assertEqual(run_checked.call_count, 4)
+            install_toolchain, install_targets, restore, tests = (
+                run_checked.call_args_list
+            )
+            environment = install_toolchain.kwargs["env"]
+            self.assertEqual(
+                environment["RUSTUP_HOME"],
+                os.fspath(root / "openvmm-rustup"),
+            )
+            self.assertEqual(
+                environment["RUSTUP_TOOLCHAIN"],
+                ci.OPENVMM_RUST_TOOLCHAIN,
+            )
+            if os.name != "nt":
+                self.assertEqual(
+                    environment["XDG_CACHE_HOME"],
+                    os.fspath(root / "openvmm-cache"),
+                )
+            self.assertEqual(
+                install_toolchain.args[0],
+                [
+                    "rustup",
+                    "toolchain",
+                    "install",
+                    ci.OPENVMM_RUST_TOOLCHAIN,
+                    "--profile",
+                    "minimal",
+                ],
+            )
+            self.assertEqual(
+                install_targets.args[0],
+                [
+                    "rustup",
+                    "target",
+                    "add",
+                    *ci.OPENVMM_RUST_TARGETS[backend],
+                    "--toolchain",
+                    ci.OPENVMM_RUST_TOOLCHAIN,
+                ],
+            )
+            for command in (install_targets, restore, tests):
+                self.assertIs(command.kwargs["env"], environment)
+
+    def test_openvmm_tests_define_each_backend_filter(self):
+        self.assertEqual(
+            set(ci.OPENVMM_TEST_FILTERS),
+            set(ci.OPENVMM_TEST_BACKENDS),
+        )
+        self.assertEqual(
+            set(ci.OPENVMM_RUST_TARGETS),
+            set(ci.OPENVMM_TEST_BACKENDS),
+        )
+        self.assertEqual(
+            ci.OPENVMM_TEST_FILTERS["kvm"],
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        self.assertIn(
+            "!test(no_vmbus_prepped_boot_no_vmbus_windows)",
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        self.assertIn(
+            "!test(windows_datacenter_core_2022_x64)",
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        for excluded_test in (
+            "openvmm_pcat_x64",
+            "virtio_net_windows",
+            "openvmm_linux_x64_apicid_offset",
+            "openvmm_linux_x64_legacy_xapic",
+        ):
+            self.assertIn(f"!test({excluded_test})", ci.OPENVMM_KVM_TEST_FILTER)
+        self.assertEqual(
+            ci.OPENVMM_TEST_FILTERS["mshv"],
+            ci.OPENVMM_MSHV_TEST_FILTER,
+        )
+        self.assertIn(
+            "!test(windows_datacenter_core_2022_x64)",
+            ci.OPENVMM_MSHV_TEST_FILTER,
+        )
+        self.assertIn("!test(openvmm_pcat_x64)", ci.OPENVMM_MSHV_TEST_FILTER)
+        self.assertIn(
+            "!test(openvmm_linux_x64_pcie_save_restore)",
+            ci.OPENVMM_MSHV_TEST_FILTER,
+        )
+        self.assertIn("!test(test_ttrpc_interface)", ci.OPENVMM_MSHV_TEST_FILTER)
+        self.assertIn(
+            "!test(openvmm_linux_x64_virtio_blk_device)",
+            ci.OPENVMM_MSHV_TEST_FILTER,
+        )
+        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 29)
+        self.assertEqual(
+            len(set(ci.OPENVMM_WHP_TESTS)),
+            len(ci.OPENVMM_WHP_TESTS),
+        )
+        for existing_test in (
+            "ttrpc::test_ttrpc_microvm_pvh_snapshot",
+            "x86_64::microvm::openvmm_microvm_test_pvh_x64_phase_1_lifecycle",
+        ):
+            self.assertIn(existing_test, ci.OPENVMM_WHP_TESTS)
+        self.assertEqual(len(ci.OPENVMM_WHP_EXCLUDED_TESTS), 5)
+        self.assertTrue(
+            set(ci.OPENVMM_WHP_EXCLUDED_TESTS).issubset(ci.OPENVMM_WHP_TESTS)
+        )
+        self.assertEqual(
+            ci.OPENVMM_TEST_FILTERS["whp"],
+            ci._join_openvmm_tests(
+                ci.OPENVMM_WHP_TESTS,
+                ci.OPENVMM_WHP_EXCLUDED_TESTS,
+            ),
+        )
+        self.assertEqual(
+            ci._join_openvmm_tests(
+                ("suite::boot", "suite::boot_heavy"),
+                ("suite::boot_heavy",),
+            ),
+            (
+                "(test(/^suite::boot$/) | test(/^suite::boot_heavy$/))"
+                " & !test(/^suite::boot_heavy$/)"
+            ),
+        )
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
@@ -960,7 +1155,7 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
 
-    def test_ci_runs_openvmm_unit_tests_on_each_backend(self):
+    def test_ci_runs_openvmm_tests_and_unit_tests_on_each_backend(self):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
@@ -978,6 +1173,18 @@ class CiConfigurationTests(unittest.TestCase):
         shell: powershell
         run: python scripts\\nvx.py test-openvmm-unit""",
             workflow,
+        )
+        self.assertEqual(
+            workflow.count(
+                'scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"'
+            ),
+            2,
+        )
+        self.assertEqual(
+            workflow.count(
+                'scripts\\nvx.py test-openvmm --backend "${{ matrix.backend }}"'
+            ),
+            1,
         )
         self.assertEqual(workflow.count("scripts/nvx.py test-openvmm-unit"), 1)
         self.assertEqual(workflow.count("scripts\\nvx.py test-openvmm-unit"), 1)
@@ -1051,6 +1258,30 @@ class CiConfigurationTests(unittest.TestCase):
                 "perl-lib",
             ):
                 self.assertIn(package, configuration)
+
+    def test_runner_setups_install_backend_native_openvmm_targets(self):
+        linux_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+        ).read_text(encoding="utf-8")
+        windows_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+
+        for target in (
+            "x86_64-unknown-none",
+            "x86_64-unknown-uefi",
+        ):
+            self.assertIn(target, linux_setup)
+            self.assertIn(target, windows_setup)
+        self.assertIn("x86_64-unknown-linux-musl", linux_setup)
+        for cross_platform_tool in (
+            "x86_64-pc-windows-gnu",
+            "gcc-mingw-w64-x86-64-win32",
+            "mingw64-gcc",
+            "x86_64-w64-mingw32-gcc",
+            "x86_64-w64-mingw32-dlltool",
+        ):
+            self.assertNotIn(cross_platform_tool, linux_setup)
 
     def test_release_actions_use_deterministic_immutable_tooling(self):
         package_action = (
