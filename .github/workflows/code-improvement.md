@@ -396,6 +396,7 @@ safe-outputs:
       - "openvmm/**"
       - ".gitmodules"
       - ".github/workflows/*.lock.yml"
+      - "scripts/publish_development_release.py"
       - "scripts/nvx_tools/release.py"
       - "data/**"
       - "build/**"
