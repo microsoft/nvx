@@ -225,6 +225,10 @@ def run_openvmm_unit_tests() -> None:
     )
     require_success(fuzz_crates, "OpenVMM fuzz crate query")
 
+    run_checked(
+        [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
+        cwd=OPENVMM_DIR,
+    )
     command = [
         cargo,
         "nextest",

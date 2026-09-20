@@ -676,8 +676,20 @@ class CiTests(unittest.TestCase):
                 ["cargo", "xtask", "fuzz", "list", "--crates"],
                 cwd=openvmm,
             )
-            self.assertEqual(run_checked.call_count, 2)
-            command = run_checked.call_args_list[0].args[0]
+            self.assertEqual(run_checked.call_count, 3)
+            self.assertEqual(
+                run_checked.call_args_list[0],
+                call(
+                    [
+                        "cargo",
+                        "xflowey",
+                        "restore-packages",
+                        "--no-compat-igvm",
+                    ],
+                    cwd=openvmm,
+                ),
+            )
+            command = run_checked.call_args_list[1].args[0]
             self.assertEqual(
                 command[:10],
                 [
@@ -706,9 +718,9 @@ class CiTests(unittest.TestCase):
                     "fuzz_beta",
                 ],
             )
-            self.assertEqual(run_checked.call_args_list[0].kwargs["cwd"], openvmm)
+            self.assertEqual(run_checked.call_args_list[1].kwargs["cwd"], openvmm)
             self.assertEqual(
-                run_checked.call_args_list[1],
+                run_checked.call_args_list[2],
                 call(
                     [
                         "cargo",
