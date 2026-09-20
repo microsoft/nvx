@@ -21,7 +21,7 @@ engine:
   id: copilot
   version: "1.0.86"
 model: gpt-5.6-sol-fast
-max-turns: 20
+max-turns: 50
 timeout-minutes: 60
 concurrency: code-improvement
 sandbox:
@@ -377,7 +377,9 @@ safe-outputs:
     base-branch: dev
     allowed-files:
       - "README.md"
+      - "doc/*.md"
       - "doc/**/*.md"
+      - "scripts/*.py"
       - "scripts/**/*.py"
       - "scripts/setup/*.sh"
       - "scripts/setup/*.ps1"
@@ -394,6 +396,7 @@ safe-outputs:
       - "openvmm/**"
       - ".gitmodules"
       - ".github/workflows/*.lock.yml"
+      - "scripts/publish_development_release.py"
       - "scripts/nvx_tools/release.py"
       - "data/**"
       - "build/**"
@@ -543,6 +546,10 @@ write path. The pull request must remain a draft. Its title and body must state:
 - the changed files and total added-plus-deleted line count;
 - the exact validation commands and results;
 - that no dependency, public API/CLI/ABI, gitlink, or OpenVMM change was made.
+
+Reserve one model invocation after the final commit for `create-pull-request`.
+Once the commit succeeds, call that safe output immediately without additional
+searches or rereading passing validation logs.
 
 If no candidate clears every requirement, call `noop` with the checked scope
 and concise reason. Never create activity merely to avoid a no-op.
