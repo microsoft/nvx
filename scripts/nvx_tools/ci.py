@@ -112,7 +112,6 @@ OPENVMM_WHP_EXCLUDED_TESTS = (
     "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
     "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
     "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
-    "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_nvme_boot",
 )
 
 
