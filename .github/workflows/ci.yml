@@ -259,8 +259,8 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  openvmm-tests:
-    name: OpenVMM tests / ${{ matrix.name }}
+  openvmm-vmm-tests:
+    name: OpenVMM vmm-tests / ${{ matrix.name }}
     needs: [openvmm-changes]
     if: >-
       ${{
@@ -344,7 +344,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -356,7 +356,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -370,7 +370,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -382,7 +382,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -411,6 +411,204 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
+
+      - name: Report sccache
+        if: always()
+        uses: ./.github/actions/sccache
+        with:
+          operation: stop
+
+      - name: Save OpenVMM inputs on Linux
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os != 'Windows' &&
+          steps.restore-openvmm-inputs-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save OpenVMM inputs on Windows
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os == 'Windows' &&
+          steps.restore-openvmm-inputs-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save shared Cargo cache on Linux
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os != 'Windows' &&
+          steps.restore-openvmm-cargo-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+
+      - name: Save shared Cargo cache on Windows
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os == 'Windows' &&
+          steps.restore-openvmm-cargo-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+
+  openvmm-unit-tests:
+    name: OpenVMM unit tests / ${{ matrix.name }}
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / KVM
+            backend: kvm
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
+          - name: Linux / MSHV
+            backend: mshv
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
+          - name: Windows / WHP
+            backend: whp
+            runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Validate NVX CLI
+        uses: ./.github/actions/validate-nvx
+
+      - name: Checkout OpenVMM
+        id: openvmm
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Set up retrying curl
+        uses: ./.github/actions/setup-curl
+
+      - name: Prepare Windows cache tools
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py setup-cross-os-cache
+
+      - name: Prepare Linux cache tools
+        id: cache-tools-linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore OpenVMM inputs on Linux
+        id: restore-openvmm-inputs-linux
+        if: runner.os != 'Windows'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore OpenVMM inputs on Windows
+        id: restore-openvmm-inputs-windows
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore shared Cargo cache on Linux
+        id: restore-openvmm-cargo-linux
+        if: runner.os != 'Windows'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: |
+            openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore shared Cargo cache on Windows
+        id: restore-openvmm-cargo-windows
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: |
+            openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare sccache
+        uses: ./.github/actions/sccache
+        with:
+          operation: start
 
       - name: Run OpenVMM unit tests on Linux
         if: runner.os != 'Windows'
@@ -442,7 +640,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save OpenVMM inputs on Windows
         if: >-
@@ -456,7 +654,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save shared Cargo cache on Linux
         if: >-
@@ -472,7 +670,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
       - name: Save shared Cargo cache on Windows
         if: >-
@@ -486,7 +684,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
   nvx-microvm-tests:
     name: NVX microVM tests / ${{ matrix.name }}
@@ -727,7 +925,12 @@ jobs:
 
   release:
     name: Publish development release
-    needs: [quality, openvmm-tests, nvx-microvm-tests, platform]
+    needs:
+      - quality
+      - openvmm-vmm-tests
+      - openvmm-unit-tests
+      - nvx-microvm-tests
+      - platform
     if: >-
       ${{
         always() &&
@@ -736,8 +939,12 @@ jobs:
         !cancelled() &&
         needs.quality.result == 'success' &&
         (
-          needs.openvmm-tests.result == 'success' ||
-          needs.openvmm-tests.result == 'skipped'
+          needs.openvmm-vmm-tests.result == 'success' ||
+          needs.openvmm-vmm-tests.result == 'skipped'
+        ) &&
+        (
+          needs.openvmm-unit-tests.result == 'success' ||
+          needs.openvmm-unit-tests.result == 'skipped'
         ) &&
         (
           needs.nvx-microvm-tests.result == 'success' ||
@@ -788,7 +995,11 @@ jobs:
 
   performance-persist:
     name: Persist performance baseline
-    needs: [openvmm-tests, nvx-microvm-tests, platform]
+    needs:
+      - openvmm-vmm-tests
+      - openvmm-unit-tests
+      - nvx-microvm-tests
+      - platform
     if: >-
       ${{
         always() &&
@@ -796,8 +1007,12 @@ jobs:
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
         (
-          needs.openvmm-tests.result == 'success' ||
-          needs.openvmm-tests.result == 'skipped'
+          needs.openvmm-vmm-tests.result == 'success' ||
+          needs.openvmm-vmm-tests.result == 'skipped'
+        ) &&
+        (
+          needs.openvmm-unit-tests.result == 'success' ||
+          needs.openvmm-unit-tests.result == 'skipped'
         ) &&
         (
           needs.nvx-microvm-tests.result == 'success' ||

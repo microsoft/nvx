@@ -37,6 +37,20 @@ from nvx_tools import (  # noqa: E402
 )
 
 
+def _workflow_job(workflow: str, job_name: str) -> str:
+    lines = workflow.splitlines()
+    start = lines.index(f"  {job_name}:")
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start + 1 :], start + 1)
+            if len(line) > 2 and line[:2] == "  " and not line[2].isspace()
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
 def _write_release_fixture(
     root: Path,
 ) -> tuple[dict[str, Path], dict[str, object], str]:
@@ -662,8 +676,20 @@ class CiTests(unittest.TestCase):
                 ["cargo", "xtask", "fuzz", "list", "--crates"],
                 cwd=openvmm,
             )
-            self.assertEqual(run_checked.call_count, 2)
-            command = run_checked.call_args_list[0].args[0]
+            self.assertEqual(run_checked.call_count, 3)
+            self.assertEqual(
+                run_checked.call_args_list[0],
+                call(
+                    [
+                        "cargo",
+                        "xflowey",
+                        "restore-packages",
+                        "--no-compat-igvm",
+                    ],
+                    cwd=openvmm,
+                ),
+            )
+            command = run_checked.call_args_list[1].args[0]
             self.assertEqual(
                 command[:10],
                 [
@@ -692,9 +718,9 @@ class CiTests(unittest.TestCase):
                     "fuzz_beta",
                 ],
             )
-            self.assertEqual(run_checked.call_args_list[0].kwargs["cwd"], openvmm)
+            self.assertEqual(run_checked.call_args_list[1].kwargs["cwd"], openvmm)
             self.assertEqual(
-                run_checked.call_args_list[1],
+                run_checked.call_args_list[2],
                 call(
                     [
                         "cargo",
@@ -1023,10 +1049,18 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn('Join-Path $ShimDirectory "curl.exe"', action)
         self.assertIn("Get-Command rustc.exe", action)
         self.assertNotIn("curl.cmd", action)
-        self.assertEqual(
-            workflow.count("uses: ./.github/actions/setup-curl"),
-            2,
-        )
+        for job_name in (
+            "openvmm-vmm-tests",
+            "openvmm-unit-tests",
+            "nvx-microvm-tests",
+        ):
+            with self.subTest(job_name=job_name):
+                self.assertEqual(
+                    _workflow_job(workflow, job_name).count(
+                        "uses: ./.github/actions/setup-curl"
+                    ),
+                    1,
+                )
         self.assertIn("uses: ./.github/actions/setup-curl", build_action)
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific curl resolution")
@@ -1148,10 +1182,42 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("openvmm-tests-v2-", workflow)
         self.assertNotIn("Restore OpenVMM test build", workflow)
         self.assertNotIn("Save OpenVMM test build", workflow)
-        self.assertEqual(
-            workflow.count("uses: ./.github/actions/sccache"),
-            4,
-        )
+        for job_name, cache_namespace in (
+            ("openvmm-binaries", None),
+            ("openvmm-vmm-tests", "vmm-tests"),
+            ("openvmm-unit-tests", "unit-tests"),
+        ):
+            with self.subTest(job_name=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertEqual(
+                    job.count("uses: ./.github/actions/sccache"),
+                    2,
+                )
+                if cache_namespace is not None:
+                    self.assertIn(
+                        f"key: openvmm-inputs-v1-${{{{ runner.os }}}}-"
+                        f"${{{{ runner.arch }}}}-{cache_namespace}-"
+                        "${{ steps.openvmm.outputs.sha }}",
+                        job,
+                    )
+                    self.assertIn(
+                        f"key: openvmm-cargo-v1-${{{{ runner.os }}}}-"
+                        f"${{{{ runner.arch }}}}-{cache_namespace}-"
+                        "${{ hashFiles('openvmm/Cargo.lock') }}",
+                        job,
+                    )
+                    self.assertIn(
+                        "restore-keys: |\n"
+                        "            openvmm-inputs-v1-${{ runner.os }}-"
+                        "${{ runner.arch }}-",
+                        job,
+                    )
+                    self.assertIn(
+                        "restore-keys: |\n"
+                        "            openvmm-cargo-v1-${{ runner.os }}-"
+                        "${{ runner.arch }}-",
+                        job,
+                    )
         self.assertNotIn("uses: actions/cache@v5", workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
 
@@ -1159,43 +1225,42 @@ class CiConfigurationTests(unittest.TestCase):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        vmm_tests_job = _workflow_job(workflow, "openvmm-vmm-tests")
+        unit_tests_job = _workflow_job(workflow, "openvmm-unit-tests")
 
         self.assertIn(
             """      - name: Run OpenVMM unit tests on Linux
         if: runner.os != 'Windows'
         shell: bash
         run: python3 scripts/nvx.py test-openvmm-unit""",
-            workflow,
+            unit_tests_job,
         )
         self.assertIn(
             """      - name: Run OpenVMM unit tests on Windows
         if: runner.os == 'Windows'
         shell: powershell
         run: python scripts\\nvx.py test-openvmm-unit""",
-            workflow,
+            unit_tests_job,
         )
         self.assertEqual(
-            workflow.count(
+            vmm_tests_job.count(
                 'scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"'
             ),
             2,
         )
         self.assertEqual(
-            workflow.count(
+            vmm_tests_job.count(
                 'scripts\\nvx.py test-openvmm --backend "${{ matrix.backend }}"'
             ),
             1,
         )
-        self.assertEqual(workflow.count("scripts/nvx.py test-openvmm-unit"), 1)
-        self.assertEqual(workflow.count("scripts\\nvx.py test-openvmm-unit"), 1)
-        self.assertLess(
-            workflow.index("- name: Run OpenVMM tests on MSHV"),
-            workflow.index("- name: Run OpenVMM unit tests on Linux"),
+        self.assertNotIn("test-openvmm-unit", vmm_tests_job)
+        self.assertEqual(unit_tests_job.count("scripts/nvx.py test-openvmm-unit"), 1)
+        self.assertEqual(
+            unit_tests_job.count("scripts\\nvx.py test-openvmm-unit"),
+            1,
         )
-        self.assertLess(
-            workflow.index("- name: Run OpenVMM tests on Windows"),
-            workflow.index("- name: Run OpenVMM unit tests on Windows"),
-        )
+        self.assertNotIn("test-openvmm --backend", unit_tests_job)
 
     def test_runner_setup_pins_and_validates_sccache(self):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
