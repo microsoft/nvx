@@ -344,7 +344,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -356,7 +356,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -370,7 +370,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -382,7 +382,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -432,7 +432,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save OpenVMM inputs on Windows
         if: >-
@@ -446,7 +446,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save shared Cargo cache on Linux
         if: >-
@@ -462,7 +462,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
       - name: Save shared Cargo cache on Windows
         if: >-
@@ -476,7 +476,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
   openvmm-unit-tests:
     name: OpenVMM unit tests / ${{ matrix.name }}
@@ -563,7 +563,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -575,7 +575,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -589,7 +589,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -601,7 +601,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -640,7 +640,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save OpenVMM inputs on Windows
         if: >-
@@ -654,7 +654,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save shared Cargo cache on Linux
         if: >-
@@ -670,7 +670,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
       - name: Save shared Cargo cache on Windows
         if: >-
@@ -684,7 +684,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
   nvx-microvm-tests:
     name: NVX microVM tests / ${{ matrix.name }}
