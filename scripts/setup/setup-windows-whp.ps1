@@ -712,7 +712,10 @@ function Install-Toolchain {
         "toolchain", "install", $RustToolchain, "--profile", "minimal"
     )
     Invoke-Native $rustupPath @(
-        "target", "add", "x86_64-unknown-none", "--toolchain", $RustToolchain
+        "target", "add",
+        "x86_64-unknown-none",
+        "x86_64-unknown-uefi",
+        "--toolchain", $RustToolchain
     )
 
     $cargo = Join-Path $TrustedCargoHome "bin\cargo.exe"
@@ -1346,8 +1349,10 @@ function Assert-Environment {
     $installedTargets = & (Get-RequiredCommand "rustup.exe") `
         target list --installed --toolchain $RustToolchain
     Assert-LastExitCode "rustup target list"
-    if ("x86_64-unknown-none" -notin @($installedTargets)) {
-        throw "Rust target x86_64-unknown-none is not installed"
+    foreach ($target in @("x86_64-unknown-none", "x86_64-unknown-uefi")) {
+        if ($target -notin @($installedTargets)) {
+            throw "Rust target $target is not installed"
+        }
     }
     if (-not (Test-VisualStudioBuildTools)) {
         throw "Visual Studio 2022 C++ tools and Windows SDK 26100 were not found"
