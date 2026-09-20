@@ -439,7 +439,9 @@ changed lines in total, and validated with repository-defined commands.
    `/tmp/gh-aw/agent/code-improvement-pr-history.json`. Read individual files
    under `/tmp/gh-aw/agent/baseline-logs/` only for failed checks.
 3. Load `/tmp/gh-aw/cache-memory/code-improvement-history.json` when it exists.
-   Treat memory as advisory and live GitHub state as authoritative.
+   Its absence is an expected cold start; continue without prior history and do
+   not call `missing_data`. Treat memory as advisory and live GitHub state as
+   authoritative.
 4. Before proposing anything, inspect up to the 20 recent closed pull requests
    identified by the workflow marker or `[code-improvement] ` title prefix.
    For relevant entries, use read-only `gh pr view` and `gh api` calls to inspect
