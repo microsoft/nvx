@@ -8,6 +8,7 @@ on:
   skip-if-match:
     query: 'is:pr is:open ("gh-aw-workflow-id: code-improvement" in:body OR "[code-improvement] " in:title)'
     max: 1
+if: github.event_name != 'workflow_dispatch' || github.ref_name == 'dev'
 permissions:
   actions: read
   checks: read
@@ -316,6 +317,43 @@ steps:
         > /tmp/gh-aw/agent/code-improvement-pr-history.json
 safe-outputs:
   mentions: false
+  steps:
+    - name: Enforce pull request line limit
+      if: contains(needs.agent.outputs.output_types, 'create_pull_request')
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -- /tmp/gh-aw/aw-*.patch
+        if [[ "$#" -ne 1 || ! -f "$1" ]]; then
+          echo "Expected exactly one agent patch." >&2
+          exit 1
+        fi
+
+        index_file=/tmp/gh-aw/line-limit.index
+        stats_file=/tmp/gh-aw/line-limit.numstat
+        rm -f "$index_file" "$stats_file"
+        trap 'rm -f /tmp/gh-aw/line-limit.index /tmp/gh-aw/line-limit.numstat' EXIT
+        GIT_INDEX_FILE="$index_file" git read-tree HEAD
+        GIT_INDEX_FILE="$index_file" git apply --cached "$1"
+        GIT_INDEX_FILE="$index_file" git diff --cached --numstat HEAD -- > "$stats_file"
+
+        changed_lines=0
+        while IFS=$'\t' read -r added deleted _; do
+          if [[ -z "$added" ]]; then
+            continue
+          fi
+          if [[ ! "$added" =~ ^[0-9]+$ || ! "$deleted" =~ ^[0-9]+$ ]]; then
+            echo "Rejecting a non-text patch that cannot be line-counted." >&2
+            exit 1
+          fi
+          changed_lines=$((changed_lines + added + deleted))
+        done < "$stats_file"
+
+        echo "Agent patch changes ${changed_lines} lines (limit: 99)."
+        if (( changed_lines > 99 )); then
+          echo "Rejecting agent patch with 100 or more changed lines." >&2
+          exit 1
+        fi
   create-pull-request:
     title-prefix: "[code-improvement] "
     branch-prefix: "code-improvement/"
