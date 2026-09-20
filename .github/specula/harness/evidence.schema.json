@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:openvmm:native-local:normal-evidence:v1",
+  "title": "Actual normal MSHV execution evidence; no model trace records",
+  "type": "object",
+  "required": ["schema", "run_id", "status", "backend", "scenario", "memory_bytes",
+               "processes", "scope_excluded", "measurement_semantics"],
+  "properties": {
+    "schema": {"const": "native-openvmm-normal-evidence-v1"},
+    "run_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"},
+    "status": {"enum": ["incomplete", "passed", "failed"]},
+    "backend": {"const": "mshv"},
+    "scenario": {"const": "blockless-untiered-capture-two-private-restores"},
+    "memory_bytes": {"const": 134217728},
+    "error": {"type": "string"},
+    "finished_utc": {"type": "string", "format": "date-time"},
+    "scope_excluded": {"type": "array", "items": {"type": "string"}},
+    "measurement_semantics": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "source": {
+      "type": "object",
+      "required": ["path", "sha", "status_porcelain", "tracked_diff_sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "status_porcelain": {"type": "string"},
+        "tracked_diff_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "binary": {"$ref": "#/$defs/identity"},
+    "kernel": {"$ref": "#/$defs/identity"},
+    "base_initrd": {"$ref": "#/$defs/identity"},
+    "guest_init": {"$ref": "#/$defs/identity"},
+    "runtime_initrd": {"$ref": "#/$defs/identity"},
+    "initrd_derivation": {
+      "type": "object",
+      "required": ["preserved_cpio_entries", "replaced_entries"],
+      "properties": {
+        "preserved_cpio_entries": {"type": "integer", "minimum": 1},
+        "replaced_entries": {"const": ["init"]}
+      }
+    },
+    "snapshot_artifacts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["bytes", "sha256"],
+        "properties": {
+          "bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "processes": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/process"}
+    },
+    "checks": {
+      "type": "object",
+      "required": ["real_mshv_capture", "source_exited_without_continuation",
+                   "two_independent_restore_processes", "one_continuation_each",
+                   "private_marker_initially_clean_each", "private_guest_writes_each",
+                   "fresh_entropy_differs", "snapshot_artifacts_unchanged_each"],
+      "additionalProperties": {"const": true}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"enum": ["passed", "failed"]}}},
+      "then": {"required": ["finished_utc"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "failed"}}},
+      "then": {"required": ["error"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "passed"}}},
+      "then": {
+        "required": ["source", "binary", "kernel", "base_initrd", "guest_init",
+                     "runtime_initrd", "initrd_derivation", "snapshot_artifacts", "checks"],
+        "properties": {
+          "processes": {
+            "minItems": 3,
+            "prefixItems": [
+              {"properties": {"exit_code": {"const": 0}, "timed_out": {"const": false}}},
+              {"properties": {"exit_code": {"const": 37}, "timed_out": {"const": false}}},
+              {"properties": {"exit_code": {"const": 37}, "timed_out": {"const": false}}}
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "process": {
+      "type": "object",
+      "required": ["argv", "stdout", "stderr", "timeout_seconds", "started_utc",
+                   "pid", "exit_code", "timed_out", "host_elapsed_ns", "guest_lines"],
+      "properties": {
+        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+        "started_utc": {"type": "string", "format": "date-time"},
+        "pid": {"type": "integer", "minimum": 1},
+        "exit_code": {"type": "integer"},
+        "timed_out": {"type": "boolean"},
+        "host_elapsed_ns": {"type": "integer", "minimum": 0},
+        "guest_lines": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

@@ -1,0 +1,89 @@
+name: Specula release verification
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Verification operation (initialization and resume are explicit)
+        required: true
+        default: incremental
+        type: choice
+        options:
+          - incremental
+          - initialize
+          - resume
+          - preflight
+      release_tag:
+        description: Existing immutable microsoft/nvx release tag on dev ancestry
+        required: true
+        type: string
+      run_id:
+        description: Exact native run ID (required only for resume)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: specula-openvmm-mshv
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'microsoft/nvx' &&
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/dev')
+    runs-on: [specula]
+    timeout-minutes: 420
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Require the dedicated data-volume workspace
+        run: |
+          case "$(realpath -e -- "$GITHUB_WORKSPACE")" in
+            /mnt/data/openvmm-verification/native-ci/runner/_work/*) ;;
+            *)
+              echo "::error::The dedicated runner workspace must be below /mnt/data/openvmm-verification/native-ci/runner/_work."
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout trusted control code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: microsoft/nvx
+          ref: dev
+          persist-credentials: false
+
+      - name: Verify the release's pinned OpenVMM submodule
+        id: verify
+        run: |
+          python3 .github/specula/ci.py \
+            --event-file "$GITHUB_EVENT_PATH" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --request-id "nvx-gh-${GITHUB_RUN_ID}"
+
+      - name: Publish the curated job summary
+        if: ${{ always() && steps.verify.outputs.artifact_dir != '' }}
+        env:
+          SPECULA_ARTIFACT_DIR: ${{ steps.verify.outputs.artifact_dir }}
+        run: |
+          cat -- "$SPECULA_ARTIFACT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload curated verification metadata
+        if: ${{ always() && steps.verify.outputs.artifact_dir != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: specula-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.verify.outputs.artifact_dir }}/result.json
+            ${{ steps.verify.outputs.artifact_dir }}/summary.md
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 14
