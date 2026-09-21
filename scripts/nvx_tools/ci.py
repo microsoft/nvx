@@ -59,14 +59,35 @@ OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
     "flowey_core",
 )
 OPENVMM_LINUX_TEST_FILTER = "test(openvmm) | test(ttrpc)"
+
+
+def _exact_openvmm_test(test: str) -> str:
+    return f"test(/^{re.escape(test)}$/)"
+
+
+def _exclude_openvmm_tests(
+    test_filter: str,
+    excluded_tests: tuple[str, ...],
+) -> str:
+    exclusions = "".join(f" & !{_exact_openvmm_test(test)}" for test in excluded_tests)
+    return f"({test_filter}){exclusions}"
+
+
 # KVM runs Linux guests; the prepped Windows test also stages a 30 GiB VHD.
-OPENVMM_KVM_TEST_FILTER = (
-    f"({OPENVMM_LINUX_TEST_FILTER}) & !test(no_vmbus_prepped_boot_no_vmbus_windows)"
+OPENVMM_KVM_EXCLUDED_TESTS = (
+    "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
+    "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+    "multiarch::openvmm_pcat_x64_ubuntu_2404_server_x64_boot",
+    "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
+    "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
+    "x86_64_exclusive::openvmm_linux_x64_apicid_offset",
+)
+OPENVMM_KVM_TEST_FILTER = _exclude_openvmm_tests(
+    f"({OPENVMM_LINUX_TEST_FILTER})"
+    " & !test(no_vmbus_prepped_boot_no_vmbus_windows)"
     " & !test(windows_datacenter_core_2022_x64)"
-    " & !test(openvmm_pcat_x64)"
-    " & !test(virtio_net_windows)"
-    " & !test(openvmm_linux_x64_apicid_offset)"
-    " & !test(openvmm_linux_x64_legacy_xapic)"
+    " & !test(virtio_net_windows)",
+    OPENVMM_KVM_EXCLUDED_TESTS,
 )
 # MSHV runs Linux guests; its PCAT/save-restore paths fail on the runner.
 OPENVMM_MSHV_TEST_FILTER = (
@@ -119,11 +140,8 @@ def _join_openvmm_tests(
     tests: tuple[str, ...],
     excluded_tests: tuple[str, ...] = (),
 ) -> str:
-    def exact_test(test: str) -> str:
-        return f"test(/^{re.escape(test)}$/)"
-
-    test_filter = " | ".join(exact_test(test) for test in tests)
-    exclusions = "".join(f" & !{exact_test(test)}" for test in excluded_tests)
+    test_filter = " | ".join(_exact_openvmm_test(test) for test in tests)
+    exclusions = "".join(f" & !{_exact_openvmm_test(test)}" for test in excluded_tests)
     return f"({test_filter}){exclusions}"
 
 

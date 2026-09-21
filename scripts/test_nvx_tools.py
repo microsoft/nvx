@@ -950,13 +950,28 @@ class CiTests(unittest.TestCase):
             "!test(windows_datacenter_core_2022_x64)",
             ci.OPENVMM_KVM_TEST_FILTER,
         )
-        for excluded_test in (
-            "openvmm_pcat_x64",
-            "virtio_net_windows",
-            "openvmm_linux_x64_apicid_offset",
-            "openvmm_linux_x64_legacy_xapic",
-        ):
-            self.assertIn(f"!test({excluded_test})", ci.OPENVMM_KVM_TEST_FILTER)
+        self.assertIn("!test(virtio_net_windows)", ci.OPENVMM_KVM_TEST_FILTER)
+        self.assertEqual(
+            set(ci.OPENVMM_KVM_EXCLUDED_TESTS),
+            {
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_ubuntu_2404_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
+                "x86_64_exclusive::openvmm_linux_x64_apicid_offset",
+            },
+        )
+        for excluded_test in ci.OPENVMM_KVM_EXCLUDED_TESTS:
+            self.assertIn(
+                f"!{ci._exact_openvmm_test(excluded_test)}",
+                ci.OPENVMM_KVM_TEST_FILTER,
+            )
+        self.assertNotIn("!test(openvmm_pcat_x64)", ci.OPENVMM_KVM_TEST_FILTER)
+        self.assertNotIn(
+            ci._exact_openvmm_test("x86_64_exclusive::openvmm_linux_x64_legacy_xapic"),
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
         self.assertEqual(
             ci.OPENVMM_TEST_FILTERS["mshv"],
             ci.OPENVMM_MSHV_TEST_FILTER,
