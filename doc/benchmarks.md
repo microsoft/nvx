@@ -507,12 +507,25 @@ full `5 + 30` contract.
 The current workflow collects 10 measured lifecycle samples after one warmup.
 Windows CI validates the lifecycle result before starting the remaining benchmark
 suites. Snapshot-generation instability is reported with temporary-failure exit
-status 75; CI discards that lifecycle result and remeasures it once on the same
-runner. Other validation failures stop immediately, and a second unstable result
-still fails the job. The stability guard rejects a p50 more than 25% above p25 and
-also rejects an adjacent gap above 25% when at least two samples lie on each side.
+status 75; CI remeasures it once on the same runner. Each attempt is preserved in
+the benchmark artifact as `acceptance-attempt-1.json` or
+`acceptance-attempt-2.json`, including its lifecycle profiles. Only a validated
+attempt is copied to `acceptance.json` for collection; a stale accepted result is
+removed before measuring. Other validation failures stop immediately, and a second
+unstable result still fails the job. The stability guard rejects a p50 more than
+25% above p25 and also rejects an adjacent gap above 25% when at least two samples
+lie on each side.
 Singleton outliers remain tolerated, while pooled Windows runners cannot publish a
 bimodal host-stall series into topology-wide history.
+
+When investigating instability, compare each attempt's
+`snapshot_capture.whp.profile.raw_samples` with its `samples_ms`. For example, a
+slow `capture.mapped_memory_flush` with otherwise stable capture phases localizes
+the delay to host-side mapped RAM flushing, not guest boot or snapshot restore.
+Reproduce with the exact executable and guest artifact hashes on the same host
+before attributing the delay to a source change. Keep the stability thresholds and
+bounded remeasurement unchanged when collecting diagnostic evidence.
+
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10
 matching history points. A metric regresses only when it is more than 50%

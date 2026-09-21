@@ -443,6 +443,30 @@ class PerformanceTests(unittest.TestCase):
             1240.7679,
             1231.9344,
         ]
+        consecutive_stalls = [
+            778.5982,
+            770.1922,
+            1238.3559,
+            1250.9203,
+            1238.6946,
+            1260.9938,
+            1232.4539,
+            1251.3472,
+            727.1835,
+            755.3567,
+        ]
+        split_regimes = [
+            757.897,
+            739.761,
+            750.972,
+            740.019,
+            738.420,
+            977.413,
+            1255.833,
+            1271.877,
+            1266.763,
+            1232.285,
+        ]
         uniformly_slow = [1200.0 + index for index in range(10)]
         fast_outliers = [
             3.975,
@@ -476,6 +500,8 @@ class PerformanceTests(unittest.TestCase):
                 minority_fast_path,
                 r"split 2/8.*59\.8% gap.*idle host",
             ),
+            ("consecutive-stalls", consecutive_stalls, r"60\.4% above p25.*idle host"),
+            ("split-regimes", split_regimes, r"split 5/5.*29\.0% gap.*idle host"),
             ("uniform-slowdown", uniformly_slow, None),
             ("two-fast-outliers", fast_outliers, None),
             ("single-slow-outlier", single_slow_outlier, None),
