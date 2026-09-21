@@ -9,6 +9,7 @@ are build products or caches and are not part of the tracked source tree. The
 | Path | Purpose |
 | --- | --- |
 | `.github/prompts` | Copilot prompts for common development workflows |
+| `.github/specula` | Incremental formal verification adapter and runner setup |
 | `kernel` | Reproducible configs and complete Linux patch series |
 | `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
 | `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
@@ -25,6 +26,7 @@ nvx/
 |-- .github/                     GitHub automation and Copilot prompts
 |   |-- actions/                 Reusable local CI actions
 |   |-- prompts/                 Copilot development workflow prompts
+|   |-- specula/                 Incremental formal verification integration
 |   `-- workflows/ci.yml         Main build, test, and benchmark workflow
 |-- alpine/                      Files installed in the Alpine guest
 |   |-- init                     Guest PID 1 and boot sequence
@@ -94,7 +96,8 @@ defines the main CI pipeline and its job-level orchestration. The `actions/`
 directory contains the reusable implementations for validation, artifact
 builds, benchmarks, packaging, releases, and performance history management.
 The `prompts/` directory defines Copilot prompts for common development
-workflows.
+workflows. The `specula/` directory contains the adapter, tests, and dedicated
+runner setup for incremental formal verification of the pinned OpenVMM release.
 
 ### `alpine/`
 
