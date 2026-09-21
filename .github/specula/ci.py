@@ -533,17 +533,28 @@ def run_specula(
 ) -> tuple[int, str | None]:
     process = subprocess.Popen(command)
     run_id = None
+    failure: Exception | None = None
     while process.poll() is None:
-        discovered = discover_new_run(runs, before)
-        if discovered is not None and run_id is None:
-            run_id = discovered
-            on_run_id(run_id)
+        if failure is None:
+            try:
+                discovered = discover_new_run(runs, before)
+                if discovered is not None and run_id is None:
+                    run_id = discovered
+                    on_run_id(run_id)
+            except Exception as exc:
+                failure = exc
         time.sleep(0.25)
-    if run_id is None:
-        run_id = discover_new_run(runs, before)
-        if run_id is not None:
-            on_run_id(run_id)
-    return process.wait(), run_id
+    exit_code = process.wait()
+    if failure is None and run_id is None:
+        try:
+            run_id = discover_new_run(runs, before)
+            if run_id is not None:
+                on_run_id(run_id)
+        except Exception as exc:
+            failure = exc
+    if failure is not None:
+        raise failure
+    return exit_code, run_id
 
 
 def run_request(config: dict, args: argparse.Namespace) -> int:

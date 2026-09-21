@@ -436,6 +436,37 @@ class CITests(unittest.TestCase):
                 (report / "summary.md").read_text(), "incomplete summary\n"
             )
 
+    def test_callback_failure_is_raised_only_after_specula_is_reaped(self):
+        class Process:
+            returncode = 0
+
+            def __init__(self):
+                self.polls = 0
+                self.waited = False
+
+            def poll(self):
+                self.polls += 1
+                return None if self.polls == 1 else self.returncode
+
+            def wait(self):
+                self.waited = True
+                return self.returncode
+
+        process = Process()
+
+        def fail(_run_id):
+            raise OSError("publication failed")
+
+        with (
+            mock.patch.object(ci.subprocess, "Popen", return_value=process),
+            mock.patch.object(ci, "discover_new_run", return_value="run-1"),
+            mock.patch.object(ci.time, "sleep"),
+            self.assertRaisesRegex(OSError, "publication failed"),
+        ):
+            ci.run_specula(["specula"], Path("/runs"), set(), fail)
+
+        self.assertTrue(process.waited)
+
     def test_publish_report_rejects_symlinked_curated_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
