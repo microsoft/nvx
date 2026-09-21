@@ -6,13 +6,13 @@ The first `incremental` request automatically runs `--ci-init` when no current m
 
 ## Runner provisioning
 
-The runner must be a dedicated Linux x86_64 account with at least 32 GiB RAM, sufficient persistent disk, readable/writable `/dev/kvm`, and the `specula` label. Run:
+The runner must be a dedicated Linux x86_64 account in a resource-bounded VM or container with enough memory for its configured TLC budget, sufficient persistent disk, readable/writable `/dev/kvm`, and the `specula` label. The default 96 GiB TLC budget expects at least 128 GiB total memory. Run:
 
 ```bash
 bash .github/specula/setup-runner.sh
 ```
 
-The setup script installs the pinned latest Specula commit, Copilot CLI, Java, Maven, Rust, cargo-nextest, Python environments, skills, and MCP configuration. Authenticate Copilot CLI either through the repository secret `SPECULA_COPILOT_TOKEN` or by running `copilot login` as the dedicated runner account. Use a dedicated token rather than a personal administrator token.
+The setup script installs the pinned latest Specula commit, Copilot CLI, Java, Maven, Rust, cargo-nextest, Python environments, skills, and MCP configuration. Run `copilot login` as the dedicated runner account before starting the Actions service. Credentials are kept on the dedicated host and are never injected into the workflow or inherited by analyzed build scripts.
 
 Agent routing is declared in `agents.json`: Copilot GPT-6 runs analysis, specification, harness, validation, repair, classification, reviews, and the main incremental conversation; Copilot GPT-5.5 is reserved for bug confirmation and reproduction.
 
@@ -20,6 +20,8 @@ For an LXD container, enable nesting and pass KVM from the host:
 
 ```bash
 lxc config set INSTANCE security.nesting true
+lxc config set INSTANCE limits.cpu 64
+lxc config set INSTANCE limits.memory 256GiB
 lxc config device add INSTANCE kvm unix-char source=/dev/kvm path=/dev/kvm mode=0660 gid=RUNNER_GID
 ```
 

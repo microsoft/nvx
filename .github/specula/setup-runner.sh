@@ -7,7 +7,7 @@ config_value() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"
 }
 
-ROOT="${SPECULA_DATA_ROOT:-$(config_value state_root)}"
+ROOT="${SPECULA_STATE_ROOT:-$(config_value state_root)}"
 RUNNER_USER="${SPECULA_RUNNER_USER:-specula}"
 SPECULA_REPOSITORY="$(config_value specula_repository)"
 SPECULA_COMMIT="$(config_value specula_commit)"

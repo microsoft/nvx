@@ -4,21 +4,51 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SHA = re.compile(r"[0-9a-f]{40}")
 RUN_ID = re.compile(r"[A-Za-z0-9._-]+")
+EXPECTED_SPECULA_LINKS = {
+    "tools/context_control/.venv",
+    "tools/inv_checking_tool/.venv",
+    "tools/spec_analyzer/.venv",
+    "tools/tlc_tools/.venv",
+    "tools/trace_debugger/.venv",
+}
 
 
 class CIError(RuntimeError):
     pass
+
+
+def valid_id(value: str) -> bool:
+    return value not in {".", ".."} and RUN_ID.fullmatch(value) is not None
+
+
+@contextmanager
+def state_lock(config: dict) -> Iterator[None]:
+    root = Path(config["state_root"])
+    root.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(root / ".specula-ci.lock", flags, 0o600)
+    with os.fdopen(descriptor, "r+"):
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise CIError(
+                "another Specula CI operation owns the persistent state"
+            ) from exc
+        yield
 
 
 def read_json(path: Path) -> dict:
@@ -183,7 +213,7 @@ def specula_command(
         f"--agent-config={HERE / config['agent_config']}",
     ]
     if mode == "resume":
-        if not run_id or not RUN_ID.fullmatch(run_id):
+        if not run_id or not valid_id(run_id):
             raise CIError("resume requires an exact Specula run ID")
         return [binary, "run", f"--ci-dir={ci_dir}", f"--run-id={run_id}"]
     if run_id:
@@ -229,21 +259,33 @@ def check_runner(config: dict) -> None:
             )
         except (OSError, subprocess.CalledProcessError) as exc:
             raise CIError(f"runner prerequisite failed: {command[0]}") from exc
-    source = Path(config["specula_source"])
-    if (
-        git(source, "rev-parse", "HEAD") != config["specula_commit"]
-        or subprocess.run(
-            ["git", "-C", str(source), "diff", "--quiet", "--ignore-submodules=none"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode
-    ):
-        raise CIError(
-            "installed Specula tracked source differs from the configured commit"
-        )
+
+    check_specula_source(config)
     device = Path("/dev/kvm")
     if not device.is_char_device() or not os.access(device, os.R_OK | os.W_OK):
         raise CIError("runner requires readable and writable /dev/kvm")
+
+
+def check_specula_source(config: dict) -> None:
+    source = Path(config["specula_source"])
+    if git(source, "rev-parse", "HEAD") != config["specula_commit"]:
+        raise CIError(
+            "installed Specula tracked source differs from the configured commit"
+        )
+    venv = Path(config["specula_binary"]).resolve().parents[1]
+    for entry in git(
+        source, "status", "--porcelain=v1", "--untracked-files=all"
+    ).splitlines():
+        status, relative = entry[:2], entry[3:]
+        path = source / relative
+        if (
+            status == "??"
+            and relative in EXPECTED_SPECULA_LINKS
+            and path.is_symlink()
+            and path.resolve() == venv
+        ):
+            continue
+        raise CIError(f"installed Specula source has an unexpected change: {entry}")
 
 
 def publish_report(
@@ -268,6 +310,10 @@ def publish_report(
         )
         run_id = created[-1].name if created else None
     report = Path(config["state_root"]) / "reports" / request_id
+    if report.exists():
+        if report.is_symlink() or not report.is_dir():
+            raise CIError(f"report path is not a real directory: {report}")
+        shutil.rmtree(report)
     report.mkdir(parents=True, exist_ok=True)
     selected = runs / run_id if run_id else None
     for name in (
@@ -307,6 +353,46 @@ def publish_report(
     return report
 
 
+def run_request(config: dict, args: argparse.Namespace) -> int:
+    mode, tag, run_id = args.mode, args.tag, args.run_id
+    if args.event_file:
+        mode, tag, run_id = event_request(args.event_file, args.event_name or "")
+    mode = mode or "incremental"
+    if bool(tag) == bool(args.revision):
+        raise CIError("specify exactly one of --tag or --revision")
+    revision = resolve_nvx_tag(config, tag) if tag else args.revision
+    assert revision is not None
+    source = prepare_source(config, revision)
+    check_runner(config)
+    ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
+    if mode == "preflight":
+        report = publish_report(config, args.request_id, mode, revision, None, 0, set())
+        print(json.dumps({"status": "preflight_ready", "report": str(report)}))
+        return 0
+    if mode == "incremental" and not (ci_dir / "current").is_symlink():
+        mode = "initialize"
+    before = (
+        {path.name for path in (ci_dir / "runs").iterdir()}
+        if (ci_dir / "runs").is_dir()
+        else set()
+    )
+    command = specula_command(config, mode, source, revision, run_id)
+    result = subprocess.run(command)
+    report = publish_report(
+        config, args.request_id, mode, revision, run_id, result.returncode, before
+    )
+    print(
+        json.dumps(
+            {
+                "status": "complete" if result.returncode in {0, 2} else "incomplete",
+                "report": str(report),
+                "exit_code": result.returncode,
+            }
+        )
+    )
+    return result.returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -330,49 +416,10 @@ def main(argv: list[str] | None = None) -> int:
         config["specula_source"] = os.environ.get(
             "SPECULA_SOURCE", config["specula_source"]
         )
-        if not RUN_ID.fullmatch(args.request_id):
+        if not valid_id(args.request_id):
             raise CIError("request_id contains unsupported characters")
-        mode, tag, run_id = args.mode, args.tag, args.run_id
-        if args.event_file:
-            mode, tag, run_id = event_request(args.event_file, args.event_name or "")
-        mode = mode or "incremental"
-        if bool(tag) == bool(args.revision):
-            raise CIError("specify exactly one of --tag or --revision")
-        revision = resolve_nvx_tag(config, tag) if tag else args.revision
-        assert revision is not None
-        source = prepare_source(config, revision)
-        check_runner(config)
-        ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
-        if mode == "preflight":
-            report = publish_report(
-                config, args.request_id, mode, revision, None, 0, set()
-            )
-            print(json.dumps({"status": "preflight_ready", "report": str(report)}))
-            return 0
-        if mode == "incremental" and not (ci_dir / "current").is_symlink():
-            mode = "initialize"
-        before = (
-            {path.name for path in (ci_dir / "runs").iterdir()}
-            if (ci_dir / "runs").is_dir()
-            else set()
-        )
-        command = specula_command(config, mode, source, revision, run_id)
-        result = subprocess.run(command)
-        report = publish_report(
-            config, args.request_id, mode, revision, run_id, result.returncode, before
-        )
-        print(
-            json.dumps(
-                {
-                    "status": "complete"
-                    if result.returncode in {0, 2}
-                    else "incomplete",
-                    "report": str(report),
-                    "exit_code": result.returncode,
-                }
-            )
-        )
-        return result.returncode
+        with state_lock(config):
+            return run_request(config, args)
     except (CIError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Specula CI preparation failed: {exc}", file=sys.stderr)
         return 1

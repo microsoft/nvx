@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,69 @@ class CITests(unittest.TestCase):
             (repo / "HEAD").write_text("ref: refs/heads/main\n")
             (repo / "objects").mkdir()
             self.assertEqual(ci.git_repo_args(repo), [f"--git-dir={repo}"])
+
+    def test_dot_path_components_are_not_valid_ids(self):
+        self.assertFalse(ci.valid_id("."))
+        self.assertFalse(ci.valid_id(".."))
+        self.assertTrue(ci.valid_id("run-1"))
+
+    def test_state_lock_rejects_a_second_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = {"state_root": temporary}
+            with ci.state_lock(config):
+                with self.assertRaises(ci.CIError):
+                    with ci.state_lock(config):
+                        pass
+
+    def test_specula_source_rejects_staged_and_untracked_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            subprocess.run(["git", "init", "-q", source], check=True)
+            subprocess.run(
+                ["git", "-C", source, "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", source, "config", "user.name", "Test"], check=True
+            )
+            tracked = source / "tracked.txt"
+            tracked.write_text("clean\n")
+            subprocess.run(["git", "-C", source, "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", source, "commit", "-qm", "initial"], check=True
+            )
+            config = {
+                "specula_source": str(source),
+                "specula_commit": ci.git(source, "rev-parse", "HEAD"),
+                "specula_binary": str(source / "venv/bin/specula"),
+            }
+            ci.check_specula_source(config)
+            tracked.write_text("staged\n")
+            subprocess.run(["git", "-C", source, "add", "tracked.txt"], check=True)
+            with self.assertRaises(ci.CIError):
+                ci.check_specula_source(config)
+            subprocess.run(["git", "-C", source, "reset", "--hard", "-q"], check=True)
+            (source / "untracked.py").write_text("raise SystemExit\n")
+            with self.assertRaises(ci.CIError):
+                ci.check_specula_source(config)
+
+    def test_publish_report_replaces_previous_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "reports/request-1"
+            report.mkdir(parents=True)
+            (report / "stale-verdict.json").write_text("{}\n")
+            result = ci.publish_report(
+                {"state_root": str(root)},
+                "request-1",
+                "preflight",
+                self.revision,
+                None,
+                0,
+                set(),
+            )
+            self.assertFalse((result / "stale-verdict.json").exists())
+            self.assertTrue((result / "result.json").is_file())
 
     def test_incremental_command_reuses_native_ci_state(self):
         command = ci.specula_command(

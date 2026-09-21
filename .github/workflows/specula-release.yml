@@ -55,12 +55,12 @@ jobs:
           persist-credentials: false
 
       - name: Check the dedicated Specula runner
-        run: python3 .github/specula/ci.py --mode preflight --tag "${{ inputs.release_tag || github.event.release.tag_name }}" --request-id "preflight-${GITHUB_RUN_ID}"
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+        run: python3 .github/specula/ci.py --mode preflight --tag "$RELEASE_TAG" --request-id "preflight-${GITHUB_RUN_ID}"
 
       - name: Verify the release's pinned OpenVMM submodule
         id: verify
-        env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.SPECULA_COPILOT_TOKEN }}
         run: |
           python3 .github/specula/ci.py \
             --event-file "$GITHUB_EVENT_PATH" \
