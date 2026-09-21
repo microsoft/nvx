@@ -61,7 +61,9 @@ class CITests(unittest.TestCase):
 
     def test_specula_source_rejects_staged_and_untracked_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary)
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
             subprocess.run(["git", "init", "-q", source], check=True)
             subprocess.run(
                 ["git", "-C", source, "config", "user.email", "test@example.com"],
@@ -76,15 +78,139 @@ class CITests(unittest.TestCase):
             subprocess.run(
                 ["git", "-C", source, "commit", "-qm", "initial"], check=True
             )
+            minimum = ci.git(source, "rev-parse", "HEAD")
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    source,
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/specula.git",
+                ],
+                check=True,
+            )
+            binary = root / "venv/bin/specula"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nprintf 'specula 1.2.0\\n'\n")
+            binary.chmod(0o755)
             config = {
                 "specula_source": str(source),
-                "specula_commit": ci.git(source, "rev-parse", "HEAD"),
-                "specula_binary": str(source / "venv/bin/specula"),
+                "specula_repository": "https://example.test/specula.git",
+                "specula_min_commit": minimum,
+                "specula_min_version": "1.2.0",
+                "specula_max_version_exclusive": "2.0.0",
+                "specula_binary": str(binary),
             }
-            ci.check_specula_source(config)
+            tracked.write_text("descendant\n")
+            subprocess.run(["git", "-C", source, "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", source, "commit", "-qm", "descendant"], check=True
+            )
+            identity = ci.check_specula_source(config)
+            self.assertEqual(identity["commit"], ci.git(source, "rev-parse", "HEAD"))
+            self.assertEqual(identity["version"], "1.2.0")
             tracked.write_text("staged\n")
             subprocess.run(["git", "-C", source, "add", "tracked.txt"], check=True)
             with self.assertRaises(ci.CIError):
+                ci.check_specula_source(config)
+
+    def test_specula_source_rejects_incompatible_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(["git", "init", "-q", source], check=True)
+            subprocess.run(
+                ["git", "-C", source, "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", source, "config", "user.name", "Test"], check=True
+            )
+            (source / "tracked.txt").write_text("clean\n")
+            subprocess.run(["git", "-C", source, "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", source, "commit", "-qm", "initial"], check=True
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    source,
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/specula.git",
+                ],
+                check=True,
+            )
+            binary = root / "venv/bin/specula"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nprintf 'specula 2.0.0\\n'\n")
+            binary.chmod(0o755)
+            config = {
+                "specula_source": str(source),
+                "specula_repository": "https://example.test/specula.git",
+                "specula_min_commit": ci.git(source, "rev-parse", "HEAD"),
+                "specula_min_version": "1.2.0",
+                "specula_max_version_exclusive": "2.0.0",
+                "specula_binary": str(binary),
+            }
+            with self.assertRaisesRegex(ci.CIError, "compatibility range"):
+                ci.check_specula_source(config)
+
+    def test_specula_source_rejects_revision_before_minimum(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(["git", "init", "-q", source], check=True)
+            subprocess.run(
+                ["git", "-C", source, "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", source, "config", "user.name", "Test"], check=True
+            )
+            tracked = source / "tracked.txt"
+            tracked.write_text("old\n")
+            subprocess.run(["git", "-C", source, "add", "tracked.txt"], check=True)
+            subprocess.run(["git", "-C", source, "commit", "-qm", "old"], check=True)
+            old = ci.git(source, "rev-parse", "HEAD")
+            tracked.write_text("minimum\n")
+            subprocess.run(["git", "-C", source, "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", source, "commit", "-qm", "minimum"], check=True
+            )
+            minimum = ci.git(source, "rev-parse", "HEAD")
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    source,
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/specula.git",
+                ],
+                check=True,
+            )
+            subprocess.run(["git", "-C", source, "checkout", "-q", old], check=True)
+            binary = root / "venv/bin/specula"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nprintf 'specula 1.2.0\\n'\n")
+            binary.chmod(0o755)
+            config = {
+                "specula_source": str(source),
+                "specula_repository": "https://example.test/specula.git",
+                "specula_min_commit": minimum,
+                "specula_min_version": "1.2.0",
+                "specula_max_version_exclusive": "2.0.0",
+                "specula_binary": str(binary),
+            }
+            with self.assertRaisesRegex(ci.CIError, "predates or diverges"):
                 ci.check_specula_source(config)
             subprocess.run(["git", "-C", source, "reset", "--hard", "-q"], check=True)
             (source / "untracked.py").write_text("raise SystemExit\n")

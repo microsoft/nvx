@@ -10,7 +10,9 @@ config_value() {
 ROOT="${SPECULA_STATE_ROOT:-$(config_value state_root)}"
 RUNNER_USER="${SPECULA_RUNNER_USER:-specula}"
 SPECULA_REPOSITORY="$(config_value specula_repository)"
-SPECULA_COMMIT="$(config_value specula_commit)"
+SPECULA_MIN_COMMIT="$(config_value specula_min_commit)"
+SPECULA_MIN_VERSION="$(config_value specula_min_version)"
+SPECULA_MAX_VERSION_EXCLUSIVE="$(config_value specula_max_version_exclusive)"
 COPILOT_VERSION=1.0.86
 RUST_VERSION=1.95.0
 CARGO_NEXTEST_VERSION=0.9.133
@@ -29,24 +31,42 @@ sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
 if [[ ! -d "$SOURCE/.git" ]]; then
     sudo git clone "$SPECULA_REPOSITORY" "$SOURCE"
 fi
-sudo git -C "$SOURCE" fetch origin "$SPECULA_COMMIT"
-sudo git -C "$SOURCE" checkout --detach "$SPECULA_COMMIT"
+if [[ "$(sudo git -C "$SOURCE" remote get-url origin)" != "$SPECULA_REPOSITORY" ]]; then
+    echo "Specula source has an unexpected origin: $SOURCE" >&2
+    exit 1
+fi
+while IFS= read -r entry; do
+    relative="${entry:3}"
+    case "$relative" in
+        tools/context_control/.venv | tools/inv_checking_tool/.venv | tools/spec_analyzer/.venv | tools/tlc_tools/.venv | tools/trace_debugger/.venv)
+            if [[ -L "$SOURCE/$relative" && "$(readlink -f "$SOURCE/$relative")" == "$VENV" ]]; then
+                continue
+            fi
+            ;;
+    esac
+    echo "Specula source has an unexpected change: $entry" >&2
+    exit 1
+done < <(sudo git -C "$SOURCE" status --porcelain=v1 --untracked-files=all)
+sudo git -C "$SOURCE" fetch origin "$SPECULA_MIN_COMMIT"
+if ! sudo git -C "$SOURCE" merge-base --is-ancestor "$SPECULA_MIN_COMMIT" HEAD; then
+    sudo git -C "$SOURCE" checkout --detach "$SPECULA_MIN_COMMIT"
+fi
 sudo git -C "$SOURCE" submodule update --init --recursive
 if ! sudo -u "$RUNNER_USER" -H git config --global --get-all safe.directory |
     grep -Fxq "$SOURCE"; then
     sudo -u "$RUNNER_USER" -H git config --global --add safe.directory "$SOURCE"
 fi
 
-if [[ ! -x "$VENV/bin/specula" ]] ||
-    ! "$VENV/bin/python" -c 'import copilot, jsonschema, mcp, specula' 2>/dev/null; then
+if [[ ! -x "$VENV/bin/python" ]]; then
     sudo rm -rf "$VENV"
     sudo python3 -m venv "$VENV"
     sudo "$VENV/bin/pip" install --upgrade pip uv
-    sudo "$VENV/bin/pip" install -e "$SOURCE" \
-        -r "$SOURCE/tools/context_control/requirements.txt" \
-        -r "$SOURCE/tools/spec_analyzer/requirements.txt" \
-        -r "$SOURCE/tools/trace_debugger/requirements.txt"
 fi
+sudo "$VENV/bin/pip" install -e "$SOURCE" \
+    -r "$SOURCE/tools/context_control/requirements.txt" \
+    -r "$SOURCE/tools/spec_analyzer/requirements.txt" \
+    -r "$SOURCE/tools/trace_debugger/requirements.txt"
+"$VENV/bin/python" -c 'import copilot, jsonschema, mcp, specula'
 
 sudo install -d -m 0755 "$SOURCE/lib"
 if [[ ! -f "$SOURCE/lib/tla2tools.jar" ]]; then
@@ -118,7 +138,26 @@ sudo chmod 0600 "$home/.copilot/mcp-config.json"
 
 sudo -u "$RUNNER_USER" test -r /dev/kvm
 sudo -u "$RUNNER_USER" test -w /dev/kvm
-sudo -u "$RUNNER_USER" "$VENV/bin/specula" --version
+specula_version="$(sudo -u "$RUNNER_USER" "$VENV/bin/specula" --version)"
+python3 - "$specula_version" "$SPECULA_MIN_VERSION" "$SPECULA_MAX_VERSION_EXCLUSIVE" <<'PY'
+import re
+import sys
+
+
+def version(value: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"[^0-9]*(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?", value.strip())
+    if match is None:
+        raise SystemExit(f"cannot parse Specula semantic version: {value!r}")
+    return tuple(int(component) for component in match.groups())
+
+
+actual, minimum, maximum = map(version, sys.argv[1:])
+if not minimum <= actual < maximum:
+    raise SystemExit(
+        f"Specula version {actual} is outside the compatible range [{minimum}, {maximum})"
+    )
+PY
+printf '%s\n' "$specula_version"
 sudo -u "$RUNNER_USER" copilot --version
 sudo -u "$RUNNER_USER" gh --version
 sudo -u "$RUNNER_USER" java -version

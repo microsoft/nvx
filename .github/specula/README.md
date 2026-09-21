@@ -1,6 +1,6 @@
 # Specula incremental CI
 
-This integration intentionally delegates modeling, retained state, resume, publication, and incremental updates to Specula itself. NVX contains only a thin adapter that resolves an NVX release tag to its pinned `nanvix/openvmm` submodule commit, maintains one clean persistent OpenVMM checkout, and invokes the pinned Specula version.
+This integration intentionally delegates modeling, retained state, resume, publication, and incremental updates to Specula itself. NVX contains only a thin adapter that resolves an NVX release tag to its pinned `nanvix/openvmm` submodule commit, maintains one clean persistent OpenVMM checkout, and invokes a compatible Specula revision.
 
 The first `incremental` request automatically runs the complete `--ci-init` modeling and verification workflow when no current model exists. Later requests run `--incremental` against the same CI directory. Interrupted runs are resumed explicitly with their Specula run ID and selected revision. No historical model, local Docker image, kernel fixture, or machine-specific path other than the configurable state root is required.
 
@@ -12,7 +12,7 @@ The runner must be a dedicated Linux x86_64 account in a resource-bounded VM or 
 bash .github/specula/setup-runner.sh
 ```
 
-The setup script installs the pinned latest Specula commit, Copilot CLI, GitHub CLI, JDK 21, Maven, Rust, cargo-nextest, Python environments, skills, and MCP configuration. Run `copilot login` as the dedicated runner account before starting the Actions service. Credentials are kept on the dedicated host and are not injected into the workflow environment. Specula and target commands share that dedicated account, so this integration executes only the release-selected OpenVMM commit after trusted-main ancestry validation; it is not a sandbox for untrusted pull-request code.
+The setup script installs at least the configured minimum Specula commit, Copilot CLI, GitHub CLI, JDK 21, Maven, Rust, cargo-nextest, Python environments, skills, and MCP configuration. A clean installed Specula revision is accepted when the configured minimum commit is its ancestor and its semantic version is within the configured compatibility range. This preserves reviewed local or upstream descendant commits instead of downgrading them; the exact SHA and version used by each request are recorded in `result.json`. Run `copilot login` as the dedicated runner account before starting the Actions service. Credentials are kept on the dedicated host and are not injected into the workflow environment. Specula and target commands share that dedicated account, so this integration executes only the release-selected OpenVMM commit after trusted-main ancestry validation; it is not a sandbox for untrusted pull-request code.
 
 Agent routing is declared in `agents.json`: Copilot GPT-6 runs analysis, specification, harness, validation, repair, classification, reviews, and the main incremental conversation; Copilot GPT-5.5 is reserved for bug confirmation and reproduction.
 

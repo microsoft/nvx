@@ -18,6 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SHA = re.compile(r"[0-9a-f]{40}")
 RUN_ID = re.compile(r"[A-Za-z0-9._-]+")
+SEMVER = re.compile(r"^[^0-9]*(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
 EXPECTED_SPECULA_LINKS = {
     "tools/context_control/.venv",
     "tools/inv_checking_tool/.venv",
@@ -45,6 +46,13 @@ def valid_tag(value: str) -> bool:
         ).returncode
         == 0
     )
+
+
+def parse_semver(value: str) -> tuple[int, int, int]:
+    match = SEMVER.fullmatch(value.strip())
+    if match is None:
+        raise CIError(f"cannot parse semantic version: {value!r}")
+    return tuple(int(component) for component in match.groups())
 
 
 @contextmanager
@@ -261,7 +269,7 @@ def specula_command(
     raise CIError(f"unsupported mode: {mode}")
 
 
-def check_runner(config: dict) -> None:
+def check_runner(config: dict) -> dict[str, str]:
     required = [
         [config["specula_binary"], "--version"],
         ["copilot", "--version"],
@@ -282,17 +290,35 @@ def check_runner(config: dict) -> None:
         except (OSError, subprocess.CalledProcessError) as exc:
             raise CIError(f"runner prerequisite failed: {command[0]}") from exc
 
-    check_specula_source(config)
+    identity = check_specula_source(config)
     device = Path("/dev/kvm")
     if not device.is_char_device() or not os.access(device, os.R_OK | os.W_OK):
         raise CIError("runner requires readable and writable /dev/kvm")
+    return identity
 
 
-def check_specula_source(config: dict) -> None:
+def check_specula_source(config: dict) -> dict[str, str]:
     source = Path(config["specula_source"])
-    if git(source, "rev-parse", "HEAD") != config["specula_commit"]:
+    revision = git(source, "rev-parse", "HEAD")
+    minimum = config["specula_min_commit"]
+    if not SHA.fullmatch(revision) or not SHA.fullmatch(minimum):
+        raise CIError("Specula revisions must be full commit SHAs")
+    if git(source, "remote", "get-url", "origin") != config["specula_repository"]:
+        raise CIError("installed Specula source has an unexpected origin")
+    if subprocess.run(
+        [
+            "git",
+            *git_repo_args(source),
+            "merge-base",
+            "--is-ancestor",
+            minimum,
+            revision,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode:
         raise CIError(
-            "installed Specula tracked source differs from the configured commit"
+            "installed Specula revision predates or diverges from the configured minimum"
         )
     venv = Path(config["specula_binary"]).resolve().parents[1]
     for entry in git(
@@ -308,6 +334,24 @@ def check_specula_source(config: dict) -> None:
         ):
             continue
         raise CIError(f"installed Specula source has an unexpected change: {entry}")
+    try:
+        completed = subprocess.run(
+            [config["specula_binary"], "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise CIError("cannot determine installed Specula version") from exc
+    version_text = completed.stdout.strip()
+    version = parse_semver(version_text)
+    minimum_version = parse_semver(config["specula_min_version"])
+    maximum_version = parse_semver(config["specula_max_version_exclusive"])
+    if not minimum_version <= version < maximum_version:
+        raise CIError(
+            "installed Specula version is outside the configured compatibility range"
+        )
+    return {"commit": revision, "version": ".".join(str(part) for part in version)}
 
 
 def publish_report(
@@ -318,6 +362,7 @@ def publish_report(
     run_id: str | None,
     exit_code: int,
     before: set[str],
+    specula_identity: dict[str, str] | None = None,
 ) -> Path:
     ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
     runs = ci_dir / "runs"
@@ -358,6 +403,7 @@ def publish_report(
         "run_id": run_id,
         "exit_code": exit_code,
         "complete": exit_code in {0, 2},
+        "specula": specula_identity,
     }
     (report / "result.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n"
@@ -385,10 +431,19 @@ def run_request(config: dict, args: argparse.Namespace) -> int:
     revision = resolve_nvx_tag(config, tag) if tag else args.revision
     assert revision is not None
     source = prepare_source(config, revision)
-    check_runner(config)
+    specula_identity = check_runner(config)
     ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
     if mode == "preflight":
-        report = publish_report(config, args.request_id, mode, revision, None, 0, set())
+        report = publish_report(
+            config,
+            args.request_id,
+            mode,
+            revision,
+            None,
+            0,
+            set(),
+            specula_identity,
+        )
         print(json.dumps({"status": "preflight_ready", "report": str(report)}))
         return 0
     if mode == "incremental" and not (ci_dir / "current").is_symlink():
@@ -401,7 +456,14 @@ def run_request(config: dict, args: argparse.Namespace) -> int:
     command = specula_command(config, mode, source, revision, run_id)
     result = subprocess.run(command)
     report = publish_report(
-        config, args.request_id, mode, revision, run_id, result.returncode, before
+        config,
+        args.request_id,
+        mode,
+        revision,
+        run_id,
+        result.returncode,
+        before,
+        specula_identity,
     )
     print(
         json.dumps(
