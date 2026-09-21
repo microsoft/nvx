@@ -194,7 +194,12 @@ runs:
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        $AcceptanceOutput = "$RunDir/acceptance.json"
+        if (Test-Path -LiteralPath $AcceptanceOutput) {
+          Remove-Item -LiteralPath $AcceptanceOutput
+        }
         foreach ($Attempt in 1, 2) {
+          $AttemptOutput = "$RunDir/acceptance-attempt-$Attempt.json"
           python scripts\nvx.py benchmark `
             --suite e2e `
             --backend "${{ inputs.backend }}" `
@@ -206,14 +211,17 @@ runs:
             --skip-build `
             --teardown-mode "${{ inputs.teardown-mode }}" `
             --snapshot-profile `
-            --output "$RunDir/acceptance.json" `
+            --output $AttemptOutput `
             @CpuArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts\nvx.py performance validate-openvmm `
             --platform "${{ inputs.platform }}" `
-            --input "$RunDir/acceptance.json"
+            --input $AttemptOutput
           $ValidationStatus = $LASTEXITCODE
-          if ($ValidationStatus -eq 0) { break }
+          if ($ValidationStatus -eq 0) {
+            Copy-Item -LiteralPath $AttemptOutput -Destination $AcceptanceOutput
+            break
+          }
           if ($ValidationStatus -ne 75 -or $Attempt -eq 2) {
             exit $ValidationStatus
           }

@@ -51,6 +51,21 @@ def _workflow_job(workflow: str, job_name: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def _composite_action_script(action: str, step_name: str) -> str:
+    lines = action.splitlines()
+    step = lines.index(f"    - name: {step_name}")
+    start = lines.index("      run: |", step) + 1
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start:], start)
+            if line and not line.startswith("        ")
+        ),
+        len(lines),
+    )
+    return "\n".join(line[8:] for line in lines[start:end])
+
+
 def _write_release_fixture(
     root: Path,
 ) -> tuple[dict[str, Path], dict[str, object], str]:
@@ -1562,6 +1577,148 @@ class CiConfigurationTests(unittest.TestCase):
             1,
         )
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_cli_validation_stops_at_each_failed_command(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "validate-nvx" / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(action, "Validate NVX CLI on Windows")
+        command_count = sum(line.startswith("python ") for line in script.splitlines())
+        self.assertGreater(command_count, 0)
+        stub = """
+$CommandCount = 0
+function python {
+    $script:CommandCount += 1
+    Write-Output "python-$script:CommandCount"
+    $global:LASTEXITCODE = 0
+    if ($script:CommandCount -eq $script:FailureAt) {
+        $global:LASTEXITCODE = 37
+    }
+}
+"""
+        for failure_at in range(command_count + 1):
+            with self.subTest(failure_at=failure_at):
+                result = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        f"$FailureAt = {failure_at}\n{stub}\n{script}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode, 37 if failure_at else 0, result.stderr
+                )
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [
+                        f"python-{index}"
+                        for index in range(1, (failure_at or command_count) + 1)
+                    ],
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_acceptance_preserves_attempts_and_publishes_only_valid_data(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(action, "Run Windows acceptance test")
+        for name, value in (
+            ("backend", "whp"),
+            ("platform", "windows-whp-virtual-machine"),
+            ("warmups", "1"),
+            ("runs", "10"),
+            ("teardown-mode", "guest-exit"),
+        ):
+            script = script.replace("${{ inputs." + name + " }}", value)
+        stub = """
+$BenchmarkCount = 0
+$ValidationCount = 0
+function python {
+    if ($args[1] -eq "benchmark") {
+        $script:BenchmarkCount += 1
+        $output = $args[[Array]::IndexOf($args, "--output") + 1]
+        New-Item -ItemType Directory -Path (Split-Path $output) -Force | Out-Null
+        Set-Content -LiteralPath $output -Encoding UTF8 -Value (
+            '{"attempt":' + $script:BenchmarkCount + '}'
+        )
+        $global:LASTEXITCODE = $script:BenchmarkStatus
+    }
+    elseif ($args[1] -eq "performance") {
+        $global:LASTEXITCODE = $script:ValidationStatuses[$script:ValidationCount]
+        $script:ValidationCount += 1
+    }
+    else {
+        throw "unexpected command: $args"
+    }
+}
+"""
+        for name, statuses, benchmark_status in (
+            ("first-success", (0,), 0),
+            ("remeasured-success", (75, 0), 0),
+            ("both-unstable", (75, 75), 0),
+            ("invalid-data", (1,), 0),
+            ("benchmark-failure", (0,), 42),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                output = (
+                    root
+                    / "data"
+                    / "runs"
+                    / "windows-whp-virtual-machine"
+                    / "microvm-v2"
+                    / "1vcpu"
+                )
+                output.mkdir(parents=True)
+                accepted = output / "acceptance.json"
+                accepted.write_text('{"attempt":"stale"}', encoding="utf-8")
+                setup = (
+                    "$ValidationStatuses = @("
+                    + ", ".join(str(status) for status in statuses)
+                    + f")\n$BenchmarkStatus = {benchmark_status}\n"
+                )
+                result = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        setup + stub + script,
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                expected_status = benchmark_status or statuses[-1]
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                self.assertEqual(
+                    sorted(path.name for path in output.glob("acceptance-attempt-*")),
+                    [
+                        f"acceptance-attempt-{index}.json"
+                        for index in range(1, len(statuses) + 1)
+                    ],
+                )
+                for index in range(1, len(statuses) + 1):
+                    attempt = output / f"acceptance-attempt-{index}.json"
+                    self.assertEqual(
+                        json.loads(attempt.read_text(encoding="utf-8-sig")),
+                        {"attempt": index},
+                    )
+                self.assertEqual(accepted.exists(), expected_status == 0)
+                if expected_status == 0:
+                    self.assertEqual(
+                        json.loads(accepted.read_text(encoding="utf-8-sig")),
+                        {"attempt": len(statuses)},
+                    )
+
 
 class BuildTests(unittest.TestCase):
     def test_records_openvmm_revision_cleanliness_and_executable_hash(self):
@@ -2089,7 +2246,7 @@ class SandboxTests(unittest.TestCase):
 
     def test_managed_lifecycle_start_requests_openvmm_outcome(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             layer_path = root / "distro.erofs"
             scratch_path = root / "scratch.ext4"
             layer_path.write_bytes(b"layer")
@@ -4133,7 +4290,7 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_device_io_defaults_to_dedicated_abi_v2_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
+            repository = Path(temporary).resolve()
             backend = "whp" if os.name == "nt" else "kvm"
             platform = "windows-whp" if os.name == "nt" else "linux-kvm"
             args = nvx.parse_args(
@@ -4834,7 +4991,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_publication_failure_restores_existing_release(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             destination = root / "dist" / "release"
             destination.mkdir(parents=True)
             (destination / "prior.txt").write_text("prior", encoding="utf-8")
@@ -4870,7 +5027,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_failed_rollback_preserves_prior_backup_and_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             destination = root / "dist" / "release"
             destination.mkdir(parents=True)
             (destination / "prior.txt").write_text("prior", encoding="utf-8")

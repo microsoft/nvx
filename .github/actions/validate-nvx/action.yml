@@ -22,11 +22,20 @@ runs:
       if: runner.os == 'Windows'
       shell: powershell
       run: |
+        $ErrorActionPreference = "Stop"
         python -m compileall -q scripts
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python .github\skills\nvx-host-connect\scripts\test_hosts.py -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py --help
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py test-openvmm-unit --help
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py test-openvmm --help
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py test-microvm --help
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py benchmark --help
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
