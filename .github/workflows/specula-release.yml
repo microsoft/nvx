@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: specula-openvmm-mshv
+  group: specula-openvmm-snapshot-restore
   cancel-in-progress: false
 
 jobs:
@@ -37,23 +37,16 @@ jobs:
       github.repository == 'microsoft/nvx' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/dev')
     runs-on: [specula]
-    timeout-minutes: 420
+    timeout-minutes: 720
     defaults:
       run:
         shell: bash
     env:
       PYTHONDONTWRITEBYTECODE: "1"
+      SPECULA_STATE_ROOT: ${{ vars.SPECULA_STATE_ROOT || '/mnt/data/openvmm-verification' }}
+      SPECULA_TLC_MEMORY_LIMIT: ${{ vars.SPECULA_TLC_MEMORY_LIMIT || '96G' }}
+      SPECULA_TLC_WORKER_LIMIT: ${{ vars.SPECULA_TLC_WORKER_LIMIT || '16' }}
     steps:
-      - name: Require the dedicated data-volume workspace
-        run: |
-          case "$(realpath -e -- "$GITHUB_WORKSPACE")" in
-            /mnt/data/openvmm-verification/native-ci/runner/_work/*) ;;
-            *)
-              echo "::error::The dedicated runner workspace must be below /mnt/data/openvmm-verification/native-ci/runner/_work."
-              exit 1
-              ;;
-          esac
-
       - name: Checkout trusted control code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -61,8 +54,13 @@ jobs:
           ref: dev
           persist-credentials: false
 
+      - name: Check the dedicated Specula runner
+        run: python3 .github/specula/ci.py --mode preflight --tag "${{ inputs.release_tag || github.event.release.tag_name }}" --request-id "preflight-${GITHUB_RUN_ID}"
+
       - name: Verify the release's pinned OpenVMM submodule
         id: verify
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.SPECULA_COPILOT_TOKEN }}
         run: |
           python3 .github/specula/ci.py \
             --event-file "$GITHUB_EVENT_PATH" \
@@ -82,8 +80,7 @@ jobs:
         with:
           name: specula-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ steps.verify.outputs.artifact_dir }}/result.json
-            ${{ steps.verify.outputs.artifact_dir }}/summary.md
+            ${{ steps.verify.outputs.artifact_dir }}
           if-no-files-found: error
           include-hidden-files: false
           retention-days: 14

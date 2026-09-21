@@ -1,30 +1,17 @@
 {
   "version": 1,
   "repository": "microsoft/nvx",
-  "release_source": {
-    "url": "https://github.com/microsoft/nvx.git",
-    "trusted_branch": "dev",
-    "submodule": "openvmm"
-  },
+  "trusted_branch": "dev",
+  "submodule": "openvmm",
   "source_url": "https://github.com/nanvix/openvmm.git",
-  "trusted_branch": "main",
-  "root": "/mnt/data/openvmm-verification/native-ci",
-  "work": "/mnt/data/openvmm-verification/native-ci/work/release-ci",
-  "image": "sha256:5877080beb16b88abc332d3b61a10b47cb1c027ae9fa7ab6279af37d3908f797",
-  "environment_id": "native-088049c-protoc27-policy2-transient3-v4",
+  "source_branch": "main",
+  "state_root": "/mnt/data/openvmm-verification",
+  "specula_binary": "/opt/specula-venv/bin/specula",
+  "specula_source": "/opt/specula-src",
+  "specula_repository": "https://github.com/specula-org/Specula.git",
   "specula_commit": "088049c5b3474340213cded2664cdb674bff1e1a",
-  "target": "pedro-microvm|nanvix/openvmm|Rust|Pedro guest-requested microVM snapshot and restore",
-  "kernel": "/mnt/data/nvx/build/vmlinux",
-  "kernel_sha256": "b2fdef133b4d75ea093abb69e97012eef0f5603b03a6157c5736d3afa1270cca",
-  "initramfs": "/mnt/data/nvx/build/initramfs.cpio.gz",
-  "initramfs_sha256": "68aa21364eff8cd16f8cf1fb303172f46764a20d78580bbc57a95c18f4747faa",
-  "authorization": "/mnt/data/openvmm-verification/private/specula-execution-authorization.json",
-  "policy_incident": "0CC0:231742:15E8CB0:1C09E9A:6AAA40B3",
-  "timeout_seconds": 21600,
-  "bootstrap_revision": "1107ec002603e262a23e5437235b81cd8bcbb377",
-  "initialization_seed": {
-    "path": "/mnt/data/openvmm-verification/native-ci/work/ci/runs/20260916-061854-c314/ci-init/baselines/435f0a9a4600d4ebb76bf1e57fd63a59/.specula-output",
-    "manifest": "/mnt/data/openvmm-verification/native-ci/work/ci/runs/20260916-061854-c314/ci-init/baselines/435f0a9a4600d4ebb76bf1e57fd63a59/ci-baseline.json",
-    "manifest_sha256": "bddfe0c98dced2499aff3e612092434d7e54a46c7808758cc418a53e8757ffad"
-  }
+  "agent": "copilot-cli",
+  "model": "gpt-5.6-sol-fast",
+  "effort": "xhigh",
+  "target": "pedro-microvm|nanvix/openvmm|Rust|NVX guest-requested microVM snapshot and restore"
 }
