@@ -29,22 +29,30 @@ runs:
           mvdan/shfmt@sha256:307d265ffd25ce832899ae17c93ed5062fc3375c514bba8f52cbf52792735c4d
       run: |
         set -euo pipefail
-        python -m ruff check scripts
+        python -m ruff check scripts .github/specula
+        python -m compileall -q .github/specula
         ${SHELLCHECK} --shell=sh \
           alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
           alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
+        ${SHELLCHECK} --shell=bash .github/specula/setup-runner.sh
         python -m pyright --pythonplatform Linux
         python -m pyright --pythonplatform Windows
-        python -m ruff format --check scripts
+        python -m ruff format --check scripts .github/specula
         ${SHFMT} -d -ln posix -i 4 -ci \
           alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
           alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
           alpine/nvx-snapshot alpine/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
+        ${SHFMT} -d -ln bash -i 4 -ci .github/specula/setup-runner.sh
+
+    - name: Test Specula CI wiring
+      shell: bash
+      working-directory: .github/specula
+      run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q
 
     - name: Check PowerShell syntax
       shell: pwsh
