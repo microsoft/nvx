@@ -32,6 +32,7 @@ from pathlib import Path
 from string import Template
 from typing import TextIO, TypedDict, cast
 
+from . import common
 from .common import sha256_file
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
@@ -568,9 +569,10 @@ def append_network_arguments(
 
 def require_file(path: Path, description: str) -> Path:
     path = path.resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"{description} not found: {path}")
-    return path
+    try:
+        return common.require_file(path, description)
+    except common.ScriptError as error:
+        raise FileNotFoundError(str(error)) from error
 
 
 def parse_cpu_set(spec: str) -> set[int]:
