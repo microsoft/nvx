@@ -12,7 +12,6 @@ import contextlib
 import ctypes
 import datetime as dt
 import errno
-import hashlib
 import io
 import ipaddress
 import json
@@ -32,6 +31,8 @@ from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 from string import Template
 from typing import TextIO, TypedDict, cast
+
+from .common import sha256_file
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
@@ -3734,14 +3735,6 @@ def _git_status(repository: Path) -> list[str] | None:
         return None
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _device_io_helper_provenance(
     args: argparse.Namespace, initrd: Path
 ) -> dict[str, str]:
@@ -3762,7 +3755,7 @@ def _device_io_helper_provenance(
         raise ValueError(
             f"invalid nvx-device-io provenance in {manifest_path}"
         ) from error
-    actual_source_sha256 = _sha256_file(source)
+    actual_source_sha256 = sha256_file(source)
     if source_sha256 != actual_source_sha256:
         raise ValueError(
             "initramfs device I/O helper source does not match the current checkout"
@@ -3852,10 +3845,10 @@ def write_benchmark_metadata(
     }
     if device_io:
         document["artifact_sha256"] = {
-            "openvmm": _sha256_file(executable),
-            "kernel": _sha256_file(kernel),
-            "initrd": _sha256_file(initrd),
-            "benchmark_coordinator": _sha256_file(Path(__file__)),
+            "openvmm": sha256_file(executable),
+            "kernel": sha256_file(kernel),
+            "initrd": sha256_file(initrd),
+            "benchmark_coordinator": sha256_file(Path(__file__)),
         }
         document["device_io_helper"] = _device_io_helper_provenance(args, initrd)
     path = output_dir / BENCHMARK_METADATA_FILENAME
