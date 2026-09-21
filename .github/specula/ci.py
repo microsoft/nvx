@@ -35,6 +35,18 @@ def valid_id(value: str) -> bool:
     return value not in {".", ".."} and RUN_ID.fullmatch(value) is not None
 
 
+def valid_tag(value: str) -> bool:
+    return (
+        bool(value)
+        and subprocess.run(
+            ["git", "check-ref-format", f"refs/tags/{value}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
 @contextmanager
 def state_lock(config: dict) -> Iterator[None]:
     root = Path(config["state_root"])
@@ -88,6 +100,8 @@ def ensure_bare(path: Path, url: str) -> None:
 
 
 def resolve_nvx_tag(config: dict, tag: str) -> str:
+    if not valid_tag(tag):
+        raise CIError("NVX tag is not a valid Git tag name")
     root = Path(config["state_root"])
     cache = root / "repos/nvx.git"
     ensure_bare(cache, f"https://github.com/{config['repository']}.git")
@@ -98,7 +112,7 @@ def resolve_nvx_tag(config: dict, tag: str) -> str:
         "--prune",
         "origin",
         f"+refs/heads/{config['trusted_branch']}:refs/remotes/origin/{config['trusted_branch']}",
-        "+refs/tags/*:refs/tags/*",
+        f"refs/tags/{tag}:refs/tags/{tag}",
     )
     revision = git(cache, "rev-parse", f"refs/tags/{tag}^{{commit}}")
     if not SHA.fullmatch(revision):
@@ -215,7 +229,13 @@ def specula_command(
     if mode == "resume":
         if not run_id or not valid_id(run_id):
             raise CIError("resume requires an exact Specula run ID")
-        return [binary, "run", f"--ci-dir={ci_dir}", f"--run-id={run_id}"]
+        return [
+            binary,
+            "run",
+            f"--ci-dir={ci_dir}",
+            f"--run-id={run_id}",
+            f"--revision={revision}",
+        ]
     if run_id:
         raise CIError("run_id is valid only in resume mode")
     source_args = [f"--artifact={source}", f"--revision={revision}"]
@@ -245,7 +265,9 @@ def check_runner(config: dict) -> None:
     required = [
         [config["specula_binary"], "--version"],
         ["copilot", "--version"],
+        ["gh", "--version"],
         ["java", "-version"],
+        ["javac", "-version"],
         ["rustc", "--version"],
         ["cargo", "--version"],
     ]
@@ -299,7 +321,7 @@ def publish_report(
 ) -> Path:
     ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
     runs = ci_dir / "runs"
-    if run_id is None and runs.is_dir():
+    if mode != "preflight" and run_id is None and runs.is_dir():
         created = sorted(
             (
                 path

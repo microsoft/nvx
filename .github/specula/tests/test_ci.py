@@ -45,6 +45,12 @@ class CITests(unittest.TestCase):
         self.assertFalse(ci.valid_id(".."))
         self.assertTrue(ci.valid_id("run-1"))
 
+    def test_tag_names_must_be_exact_git_refs(self):
+        self.assertTrue(ci.valid_tag("v1.2.3"))
+        self.assertFalse(ci.valid_tag(""))
+        self.assertFalse(ci.valid_tag("release:refs/tags/other"))
+        self.assertFalse(ci.valid_tag("../release"))
+
     def test_state_lock_rejects_a_second_owner(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = {"state_root": temporary}
@@ -103,6 +109,26 @@ class CITests(unittest.TestCase):
             self.assertFalse((result / "stale-verdict.json").exists())
             self.assertTrue((result / "result.json").is_file())
 
+    def test_preflight_report_does_not_select_an_old_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = (
+                root
+                / "state/openvmm-snapshot-restore/runs/old/pedro-microvm/.specula-output"
+            )
+            old.mkdir(parents=True)
+            (old / "summary.md").write_text("stale verification\n")
+            report = ci.publish_report(
+                {"state_root": str(root)},
+                "preflight-1",
+                "preflight",
+                self.revision,
+                None,
+                0,
+                set(),
+            )
+            self.assertNotIn("stale verification", (report / "summary.md").read_text())
+
     def test_incremental_command_reuses_native_ci_state(self):
         command = ci.specula_command(
             self.config, "incremental", self.source, self.revision, None
@@ -123,6 +149,7 @@ class CITests(unittest.TestCase):
                 "run",
                 "--ci-dir=/data/specula/state/openvmm-snapshot-restore",
                 "--run-id=run-1",
+                f"--revision={self.revision}",
             ],
         )
         with self.assertRaises(ci.CIError):

@@ -22,7 +22,8 @@ COMMUNITY_MODULES_SHA256=044e8ecdfbca92d51d7eb4469422c2a7da1fe25dc8ad39c4a90e662
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bc binutils bison build-essential ca-certificates clang cmake cpio curl flex git gzip \
-    libarchive-tools libelf-dev libssl-dev lld make maven ninja-build nodejs npm patch perl \
+    gh libarchive-tools libelf-dev libssl-dev lld make maven ninja-build nodejs npm \
+    openjdk-21-jdk-headless patch perl \
     pkg-config python3 python3-pip python3-venv rsync tar xz-utils zstd
 
 if [[ ! -d "$SOURCE/.git" ]]; then
@@ -115,9 +116,12 @@ EOF
 sudo chown "$RUNNER_USER:$gid" "$home/.copilot/mcp-config.json"
 sudo chmod 0600 "$home/.copilot/mcp-config.json"
 
-sudo -u "$RUNNER_USER" test -r /dev/kvm -a -w /dev/kvm
+sudo -u "$RUNNER_USER" test -r /dev/kvm
+sudo -u "$RUNNER_USER" test -w /dev/kvm
 sudo -u "$RUNNER_USER" "$VENV/bin/specula" --version
 sudo -u "$RUNNER_USER" copilot --version
+sudo -u "$RUNNER_USER" gh --version
 sudo -u "$RUNNER_USER" java -version
+sudo -u "$RUNNER_USER" javac -version
 sudo -u "$RUNNER_USER" rustc --version
 printf 'Specula runner provisioning complete for %s.\n' "$RUNNER_USER"
