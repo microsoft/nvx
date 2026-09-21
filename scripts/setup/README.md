@@ -52,6 +52,9 @@ and records the expected label set in a protected local marker.
 Runner services receive an explicit tool PATH. On Windows, the Rust toolchain
 is read-only to the service account while Cargo registry and Git caches use the
 runner's per-job temporary directory.
+Windows runner provisioning also enables the full Hyper-V feature so the
+licensed in-box PCAT and SVGA firmware required by OpenVMM VMM tests is
+available under `System32`.
 On both platforms, runner and toolchain executables are administrator-owned and
 read-only to jobs, automatic runner updates are disabled, and writable runner
 state is confined to `_work`.
@@ -118,7 +121,8 @@ separate `build-guest` invocation without provisioning or rebuilding the host.
 Run the complete bootstrap from an elevated Windows PowerShell session. It uses
 WinGet to install missing tools, installs stable Rust 1.95 or newer and
 cargo-nextest 0.9.133, enables Windows Hypervisor Platform, and builds OpenVMM.
-It never reboots automatically.
+Runner-only provisioning additionally enables Hyper-V for its in-box PCAT and
+SVGA firmware. The script never reboots automatically.
 
 Pass a guest bundle produced on Linux to complete the build validation:
 

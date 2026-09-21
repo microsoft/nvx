@@ -1030,7 +1030,17 @@ class CiTests(unittest.TestCase):
             "x86_64::microvm::openvmm_microvm_test_pvh_x64_phase_1_lifecycle",
         ):
             self.assertIn(existing_test, ci.OPENVMM_WHP_TESTS)
-        self.assertEqual(len(ci.OPENVMM_WHP_EXCLUDED_TESTS), 3)
+        self.assertEqual(
+            set(ci.OPENVMM_WHP_EXCLUDED_TESTS),
+            {
+                "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
+                "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
+            },
+        )
+        self.assertNotIn(
+            "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
+        )
         self.assertNotIn(
             "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
             ci.OPENVMM_WHP_EXCLUDED_TESTS,
@@ -1675,6 +1685,23 @@ class CiConfigurationTests(unittest.TestCase):
                 "perl-lib",
             ):
                 self.assertIn(package, configuration)
+
+    def test_windows_runner_requires_inbox_pcat_firmware(self):
+        windows_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+        validate_runner = (
+            common.REPO_ROOT / ".github" / "actions" / "validate-runner" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"Microsoft-Hyper-V"', windows_setup)
+        for configuration in (windows_setup, validate_runner):
+            for firmware in (
+                "vmfirmwarepcat.dll",
+                "vmfirmware.dll",
+                "VmEmulatedDevices.dll",
+            ):
+                self.assertIn(firmware, configuration)
 
     def test_runner_setups_install_backend_native_openvmm_targets(self):
         linux_setup = (
