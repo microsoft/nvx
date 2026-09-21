@@ -238,6 +238,7 @@ class CITests(unittest.TestCase):
                 None,
                 0,
                 set(),
+                reset_report=True,
             )
             self.assertFalse((result / "stale-verdict.json").exists())
             self.assertTrue((result / "result.json").is_file())
@@ -397,6 +398,43 @@ class CITests(unittest.TestCase):
             )
             self.assertEqual(result["run_id"], "run-1")
             self.assertTrue(result["complete"])
+
+    def test_run_id_survives_curated_report_copy_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = (
+                root
+                / "state/openvmm-snapshot-restore/runs/run-1/target/.specula-output"
+            )
+            output.mkdir(parents=True)
+            (output / "summary.md").write_text("completed summary\n")
+            report = root / "reports/request-1"
+            report.mkdir(parents=True)
+            (report / "summary.md").write_text("incomplete summary\n")
+            (report / "result.json").write_text('{"run_id": null}\n')
+
+            with (
+                mock.patch.object(
+                    ci, "atomic_copy", side_effect=OSError("interrupted")
+                ),
+                self.assertRaisesRegex(OSError, "interrupted"),
+            ):
+                ci.publish_report(
+                    {"state_root": str(root)},
+                    "request-1",
+                    "incremental",
+                    self.revision,
+                    "run-1",
+                    130,
+                    set(),
+                )
+
+            result = json.loads((report / "result.json").read_text())
+            self.assertEqual(result["run_id"], "run-1")
+            self.assertFalse(result["complete"])
+            self.assertEqual(
+                (report / "summary.md").read_text(), "incomplete summary\n"
+            )
 
     def test_publish_report_rejects_symlinked_curated_file(self):
         with tempfile.TemporaryDirectory() as temporary:

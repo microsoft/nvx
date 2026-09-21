@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -420,6 +421,34 @@ def safe_curated_file(selected: Path, path: Path) -> bool:
     return stat.S_ISREG(mode) and not path.is_symlink()
 
 
+def atomic_write_text(path: Path, content: str) -> None:
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def atomic_copy(source: Path, destination: Path) -> None:
+    descriptor, temporary = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary)
+    try:
+        shutil.copy2(source, temporary_path)
+        os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def publish_report(
     config: dict,
     request_id: str,
@@ -429,6 +458,7 @@ def publish_report(
     exit_code: int,
     before: set[str],
     specula_identity: dict[str, str] | None = None,
+    reset_report: bool = False,
 ) -> Path:
     ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
     runs = ci_dir / "runs"
@@ -439,11 +469,31 @@ def publish_report(
     if report.exists():
         if report.is_symlink() or not report.is_dir():
             raise CIError(f"report path is not a real directory: {report}")
-        shutil.rmtree(report)
-    report.mkdir(parents=True, exist_ok=True)
+    else:
+        report.mkdir(parents=True)
+    if reset_report:
+        for entry in report.iterdir():
+            if entry.is_symlink() or not entry.is_dir():
+                entry.unlink()
+            else:
+                shutil.rmtree(entry)
     selected = None
     if run_id:
         selected = safe_run_directory(runs, run_id)
+    result = {
+        "version": 1,
+        "mode": mode,
+        "revision": revision,
+        "run_id": run_id,
+        "exit_code": exit_code,
+        "complete": exit_code in {0, 2},
+        "specula": specula_identity,
+    }
+    atomic_write_text(
+        report / "result.json",
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+    )
+    copied_summary = False
     for name in (
         "summary.md",
         "ci-report.md",
@@ -459,24 +509,14 @@ def publish_report(
         if unsafe:
             raise CIError(f"unsafe curated report file: {unsafe[0]}")
         if matches:
-            shutil.copy2(matches[0], report / name)
-    result = {
-        "version": 1,
-        "mode": mode,
-        "revision": revision,
-        "run_id": run_id,
-        "exit_code": exit_code,
-        "complete": exit_code in {0, 2},
-        "specula": specula_identity,
-    }
-    (report / "result.json").write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n"
-    )
-    if not (report / "summary.md").exists():
-        (report / "summary.md").write_text(
+            atomic_copy(matches[0], report / name)
+            copied_summary = copied_summary or name == "summary.md"
+    if not copied_summary:
+        atomic_write_text(
+            report / "summary.md",
             "# Specula OpenVMM verification\n\n"
             f"- Mode: `{mode}`\n- Revision: `{revision}`\n"
-            f"- Run: `{run_id or 'not started'}`\n- Exit code: `{exit_code}`\n"
+            f"- Run: `{run_id or 'not started'}`\n- Exit code: `{exit_code}`\n",
         )
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
@@ -528,6 +568,7 @@ def run_request(config: dict, args: argparse.Namespace) -> int:
             0,
             set(),
             specula_identity,
+            reset_report=True,
         )
         print(json.dumps({"status": "preflight_ready", "report": str(report)}))
         return 0
@@ -550,6 +591,7 @@ def run_request(config: dict, args: argparse.Namespace) -> int:
         130,
         before,
         specula_identity,
+        reset_report=True,
     )
     if mode == "resume":
         exit_code = subprocess.run(command).returncode
