@@ -969,7 +969,7 @@ class CiTests(unittest.TestCase):
             )
         self.assertNotIn("!test(openvmm_pcat_x64)", ci.OPENVMM_KVM_TEST_FILTER)
         self.assertNotIn(
-            ci._exact_openvmm_test("x86_64_exclusive::openvmm_linux_x64_legacy_xapic"),
+            "openvmm_linux_x64_legacy_xapic",
             ci.OPENVMM_KVM_TEST_FILTER,
         )
         self.assertEqual(
