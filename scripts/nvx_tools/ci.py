@@ -89,13 +89,19 @@ OPENVMM_KVM_TEST_FILTER = _exclude_openvmm_tests(
     " & !test(virtio_net_windows)",
     OPENVMM_KVM_EXCLUDED_TESTS,
 )
-# MSHV runs Linux guests; its PCAT/save-restore paths fail on the runner.
-OPENVMM_MSHV_TEST_FILTER = (
-    f"({OPENVMM_LINUX_TEST_FILTER}) & !test(windows_datacenter_core_2022_x64)"
-    " & !test(openvmm_pcat_x64)"
-    " & !test(openvmm_linux_x64_pcie_save_restore)"
-    " & !test(test_ttrpc_interface)"
-    " & !test(openvmm_linux_x64_virtio_blk_device)"
+# MSHV runs Linux guests; the remaining exact exclusions fail on the runner.
+OPENVMM_MSHV_EXCLUDED_TESTS = (
+    "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
+    "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+    "multiarch::openvmm_pcat_x64_ubuntu_2404_server_x64_boot",
+    "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
+    "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
+    "multiarch::pcie::openvmm_linux_x64_pcie_save_restore",
+    "x86_64::openvmm_linux_x64_virtio_blk_device",
+)
+OPENVMM_MSHV_TEST_FILTER = _exclude_openvmm_tests(
+    f"({OPENVMM_LINUX_TEST_FILTER}) & !test(windows_datacenter_core_2022_x64)",
+    OPENVMM_MSHV_EXCLUDED_TESTS,
 )
 OPENVMM_WHP_TESTS = (
     "multiarch::hibernate::openvmm_uefi_x64_guest_test_x64_hibernate_halts",
