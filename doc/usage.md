@@ -269,13 +269,13 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,device-io,network-snapshot,performance,shell-snapshot,shell-snapshot-restore,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
+| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,device-io,device-restore-profile,network-snapshot,performance,shell-snapshot,shell-snapshot-restore,snapshot-restore-memory,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
 | `--backend {whp,kvm,mshv,both}` | `both` on Windows; `kvm` elsewhere | Select the hypervisor backend. |
 | `--platform NAME` | inferred OS/backend | Record the host-typed performance series. |
 | `--openvmm-dir PATH` | `openvmm/` | Select the OpenVMM repository. |
 | `--nvx-dir PATH` | repository root | Select the NVX repository containing guest artifacts. |
-| `--warmups N` | `5` for `device-io`; `3` otherwise | Set the number of excluded warmup attempts; zero is allowed. |
-| `--runs N` | `30` for `device-io`; `11` otherwise | Set the number of retained attempts. |
+| `--warmups N` | `5` for `device-io`; `1` for `device-restore-profile`; `3` otherwise | Set the number of excluded warmup attempts; zero is allowed. |
+| `--runs N` | `30` for `device-io`; `5` for `device-restore-profile`; `11` otherwise | Set the number of retained attempts. |
 | `--memory-mib MIB` | `128` | Set guest memory for the general suites. |
 | `--processors {1,2,4,8}` | `1` | Run every cold, capture, restore, and workload launch with this microVM count. |
 | `--virtfs-runs N` | `3` | Set the number of virtio-fs workload samples. |
@@ -283,6 +283,8 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--payload-mib MIB` | `64` | Set the virtio-fs sequential I/O payload size. |
 | `--shell-memories MIB [MIB ...]` | `64 128 256 512` | Set the guest memory sizes for shell snapshot measurements. |
 | `--network-memory-mib MIB` | `256` | Set guest memory for the network snapshot workload. |
+| `--restore-devices {console,net,virtiofs} [...]` | all three devices | Select devices for the `device-restore-profile` suite. |
+| `--restore-modes {active,deferred} [...]` | both modes | Select activation modes for the `device-restore-profile` suite. |
 | `--device-io-duration-seconds SECONDS` | `10` | Set each storage-operation or UDP round-trip measurement window. |
 | `--device-io-size-mib MIB` | `512` | Set the virtio-blk and virtio-fs backing-object size. |
 | `--device-io-port PORT` | `5201` | Set the same-host UDP echo port. |
@@ -293,6 +295,8 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--timeout SECONDS` | `10` | Set the time allowed for each boot marker. |
 | `--teardown-mode {guest-exit,host-terminate,host-sigterm}` | `guest-exit` | Select how to stop a measured VM; `host-sigterm` is a deprecated alias. |
 | `--skip-build` | off | Reuse existing release binaries. |
+| `--snapshot-profile` | off | Retain OpenVMM lifecycle phase samples and host counters; implied by the `snapshot-profile` suite. |
+| `--cache-state {warm,cold,both}` | `both` | Select artifact cache states for the `snapshot-profile` suite. |
 | `--output PATH` | none | Write the benchmark result as JSON. |
 | `--output-dir PATH` | none | Write canonical workload logs to a directory. |
 | `--keep-kvm-stage` | off | Keep temporary staged KVM benchmark binaries. |
