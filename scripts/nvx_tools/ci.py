@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from .common import (
@@ -30,6 +31,43 @@ OPENVMM_RUST_TOOLCHAIN = "stable"
 OPENVMM_GUEST_RUST_TARGET = "x86_64-unknown-none"
 OPENVMM_UEFI_RUST_TARGET = "x86_64-unknown-uefi"
 OPENVMM_LINUX_MUSL_RUST_TARGET = "x86_64-unknown-linux-musl"
+REQUIRED_CI_RESULT_ENVIRONMENTS = {
+    "quality": "QUALITY_RESULT",
+    "openvmm-changes": "CHANGES_RESULT",
+    "artifacts": "ARTIFACTS_RESULT",
+    "build-openvmm-linux-gnu": "BUILD_LINUX_GNU_RESULT",
+    "build-openvmm-linux-musl": "BUILD_LINUX_MUSL_RESULT",
+    "build-openvmm-windows-msvc": "BUILD_WINDOWS_MSVC_RESULT",
+    "openvmm-vmm-tests": "VMM_TESTS_RESULT",
+    "openvmm-unit-tests": "UNIT_TESTS_RESULT",
+    "nvx-microvm-tests-kvm": "MICROVM_KVM_RESULT",
+    "nvx-microvm-tests-mshv": "MICROVM_MSHV_RESULT",
+    "nvx-microvm-tests-whp": "MICROVM_WHP_RESULT",
+    "platform-kvm": "PLATFORM_KVM_RESULT",
+    "platform-mshv": "PLATFORM_MSHV_RESULT",
+    "platform-whp": "PLATFORM_WHP_RESULT",
+    "performance-gate": "PERFORMANCE_GATE_RESULT",
+}
+REQUIRED_CI_BUILD_JOBS = (
+    "build-openvmm-linux-gnu",
+    "build-openvmm-linux-musl",
+    "build-openvmm-windows-msvc",
+)
+REQUIRED_CI_OPENVMM_TEST_JOBS = (
+    "openvmm-vmm-tests",
+    "openvmm-unit-tests",
+)
+REQUIRED_CI_MICROVM_TEST_JOBS = (
+    "nvx-microvm-tests-kvm",
+    "nvx-microvm-tests-mshv",
+    "nvx-microvm-tests-whp",
+)
+REQUIRED_CI_ARTIFACT_JOB = "artifacts"
+REQUIRED_CI_PLATFORM_JOBS = (
+    "platform-kvm",
+    "platform-mshv",
+    "platform-whp",
+)
 OPENVMM_RUST_TARGETS = {
     "kvm": (
         OPENVMM_GUEST_RUST_TARGET,
@@ -59,6 +97,86 @@ OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
     "flowey_core",
 )
 OPENVMM_LINUX_TEST_FILTER = "test(openvmm) | test(ttrpc)"
+
+
+def required_ci_expected_results(
+    event_name: str,
+    *,
+    same_repository: bool,
+    run_tests: bool,
+    run_workloads: bool,
+) -> dict[str, str]:
+    if event_name not in ("pull_request", "push"):
+        raise ValueError(f"unsupported CI event {event_name!r}")
+
+    repository_jobs_enabled = event_name == "push" or same_repository
+    expected = {
+        "quality": "success",
+        "openvmm-changes": "success",
+        REQUIRED_CI_ARTIFACT_JOB: "success" if run_workloads else "skipped",
+        "performance-gate": (
+            "success"
+            if event_name == "pull_request"
+            and repository_jobs_enabled
+            and run_workloads
+            else "skipped"
+        ),
+    }
+    expected.update(
+        {
+            job: (
+                "success"
+                if repository_jobs_enabled and (run_tests or run_workloads)
+                else "skipped"
+            )
+            for job in REQUIRED_CI_BUILD_JOBS
+        }
+    )
+    expected.update(
+        {
+            job: ("success" if repository_jobs_enabled and run_tests else "skipped")
+            for job in REQUIRED_CI_OPENVMM_TEST_JOBS
+        }
+    )
+    expected.update(
+        {
+            job: (
+                "success"
+                if repository_jobs_enabled and run_tests and run_workloads
+                else "skipped"
+            )
+            for job in REQUIRED_CI_MICROVM_TEST_JOBS
+        }
+    )
+    expected.update(
+        {
+            job: ("success" if repository_jobs_enabled and run_workloads else "skipped")
+            for job in REQUIRED_CI_PLATFORM_JOBS
+        }
+    )
+    return expected
+
+
+def required_ci_failures(
+    event_name: str,
+    *,
+    same_repository: bool,
+    run_tests: bool,
+    run_workloads: bool,
+    results: Mapping[str, str],
+) -> list[str]:
+    expected = required_ci_expected_results(
+        event_name,
+        same_repository=same_repository,
+        run_tests=run_tests,
+        run_workloads=run_workloads,
+    )
+    failures: list[str] = []
+    for job, expected_result in expected.items():
+        actual_result = results.get(job) or "missing"
+        if actual_result != expected_result:
+            failures.append(f"{job}: expected {expected_result}, got {actual_result}")
+    return failures
 
 
 def _exact_openvmm_test(test: str) -> str:

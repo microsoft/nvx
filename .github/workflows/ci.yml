@@ -980,6 +980,66 @@ jobs:
           regression-threshold: ${{ env.PERFORMANCE_REGRESSION_THRESHOLD }}
           absolute-tolerance-ms: ${{ env.PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS }}
 
+  required-status-check:
+    name: Required status check
+    needs:
+      - quality
+      - openvmm-changes
+      - artifacts
+      - build-openvmm-linux-gnu
+      - build-openvmm-linux-musl
+      - build-openvmm-windows-msvc
+      - openvmm-vmm-tests
+      - openvmm-unit-tests
+      - nvx-microvm-tests-kvm
+      - nvx-microvm-tests-mshv
+      - nvx-microvm-tests-whp
+      - platform-kvm
+      - platform-mshv
+      - platform-whp
+      - performance-gate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Verify required jobs
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        shell: bash
+        env:
+          SAME_REPOSITORY: >-
+            ${{
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            }}
+          RUN_TESTS: ${{ needs.openvmm-changes.outputs.run-tests }}
+          RUN_WORKLOADS: ${{ needs.openvmm-changes.outputs.run-workloads }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          CHANGES_RESULT: ${{ needs.openvmm-changes.result }}
+          ARTIFACTS_RESULT: ${{ needs.artifacts.result }}
+          BUILD_LINUX_GNU_RESULT: ${{ needs.build-openvmm-linux-gnu.result }}
+          BUILD_LINUX_MUSL_RESULT: ${{ needs.build-openvmm-linux-musl.result }}
+          BUILD_WINDOWS_MSVC_RESULT: ${{ needs.build-openvmm-windows-msvc.result }}
+          VMM_TESTS_RESULT: ${{ needs.openvmm-vmm-tests.result }}
+          UNIT_TESTS_RESULT: ${{ needs.openvmm-unit-tests.result }}
+          MICROVM_KVM_RESULT: ${{ needs.nvx-microvm-tests-kvm.result }}
+          MICROVM_MSHV_RESULT: ${{ needs.nvx-microvm-tests-mshv.result }}
+          MICROVM_WHP_RESULT: ${{ needs.nvx-microvm-tests-whp.result }}
+          PLATFORM_KVM_RESULT: ${{ needs.platform-kvm.result }}
+          PLATFORM_MSHV_RESULT: ${{ needs.platform-mshv.result }}
+          PLATFORM_WHP_RESULT: ${{ needs.platform-whp.result }}
+          PERFORMANCE_GATE_RESULT: ${{ needs.performance-gate.result }}
+        run: >-
+          python3 scripts/nvx.py check-required-ci
+          --event-name "${{ github.event_name }}"
+          --same-repository "${SAME_REPOSITORY}"
+          --run-tests "${RUN_TESTS}"
+          --run-workloads "${RUN_WORKLOADS}"
+
   performance-persist:
     name: Persist performance baseline
     needs:
@@ -1024,13 +1084,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout dev
         uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          ssh-key: ${{ secrets.PERFORMANCE_PERSIST_DEPLOY_KEY }}
 
       - name: Persist results on dev
         uses: ./.github/actions/persist-performance-results
