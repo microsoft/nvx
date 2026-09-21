@@ -179,7 +179,7 @@ class ControlSessionTests(unittest.TestCase):
         client, server = socket.socketpair()
         session = control_session.ControlSession(control_session._SocketStream(client))
 
-        for timeout in (0.0, -1.0, float("nan")):
+        for timeout in (0.0, -1.0, float("nan"), float("inf")):
             with (
                 self.subTest(timeout=timeout),
                 self.assertRaisesRegex(ValueError, "response timeout"),
