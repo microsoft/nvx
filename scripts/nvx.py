@@ -25,6 +25,8 @@ from nvx_tools.build import (
 )
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
+    REQUIRED_CI_RESULT_ENVIRONMENTS,
+    required_ci_failures,
     run_openvmm_tests,
     run_openvmm_unit_tests,
     setup_cross_os_cache,
@@ -130,6 +132,24 @@ def command_materialize_kernel_provenance_inputs(_: argparse.Namespace) -> None:
 
 def command_setup_cross_os_cache(_: argparse.Namespace) -> None:
     setup_cross_os_cache()
+
+
+def command_check_required_ci(args: argparse.Namespace) -> None:
+    results = {
+        job: os.environ.get(environment, "")
+        for job, environment in REQUIRED_CI_RESULT_ENVIRONMENTS.items()
+    }
+    failures = required_ci_failures(
+        args.event_name,
+        same_repository=args.same_repository == "true",
+        run_tests=args.run_tests == "true",
+        run_workloads=args.run_workloads == "true",
+        results=results,
+    )
+    if failures:
+        for failure in failures:
+            print(f"::error::{failure}")
+        raise ScriptError(f"{len(failures)} required CI job result(s) did not match")
 
 
 def command_test_openvmm(args: argparse.Namespace) -> None:
@@ -468,6 +488,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="install GNU tar and zstd for GitHub Actions cross-OS caches",
     )
     cache.set_defaults(handler=command_setup_cross_os_cache)
+
+    required_ci = subparsers.add_parser(
+        "check-required-ci",
+        help="validate required GitHub Actions job results",
+    )
+    required_ci.add_argument(
+        "--event-name",
+        choices=("pull_request", "push"),
+        required=True,
+    )
+    required_ci.add_argument(
+        "--same-repository",
+        choices=("false", "true"),
+        required=True,
+    )
+    required_ci.add_argument("--run-tests", required=True)
+    required_ci.add_argument("--run-workloads", required=True)
+    required_ci.set_defaults(handler=command_check_required_ci)
 
     openvmm_unit_tests = subparsers.add_parser(
         "test-openvmm-unit",

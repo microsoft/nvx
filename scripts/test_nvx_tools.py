@@ -1066,6 +1066,181 @@ class CiTests(unittest.TestCase):
 
 
 class CiConfigurationTests(unittest.TestCase):
+    def test_required_ci_result_policy(self):
+        always_successful = {"quality", "openvmm-changes"}
+        builds = set(ci.REQUIRED_CI_BUILD_JOBS)
+        openvmm_tests = set(ci.REQUIRED_CI_OPENVMM_TEST_JOBS)
+        microvm_tests = set(ci.REQUIRED_CI_MICROVM_TEST_JOBS)
+        artifacts = {ci.REQUIRED_CI_ARTIFACT_JOB}
+        platforms = set(ci.REQUIRED_CI_PLATFORM_JOBS)
+        cases = (
+            ("pull_request", True, False, False, always_successful),
+            (
+                "pull_request",
+                True,
+                False,
+                True,
+                always_successful
+                | artifacts
+                | builds
+                | platforms
+                | {"performance-gate"},
+            ),
+            (
+                "pull_request",
+                True,
+                True,
+                False,
+                always_successful | builds | openvmm_tests,
+            ),
+            (
+                "pull_request",
+                True,
+                True,
+                True,
+                always_successful
+                | builds
+                | openvmm_tests
+                | microvm_tests
+                | artifacts
+                | platforms
+                | {"performance-gate"},
+            ),
+            ("pull_request", False, False, False, always_successful),
+            (
+                "pull_request",
+                False,
+                False,
+                True,
+                always_successful | artifacts,
+            ),
+            ("pull_request", False, True, False, always_successful),
+            (
+                "pull_request",
+                False,
+                True,
+                True,
+                always_successful | artifacts,
+            ),
+            ("push", True, False, False, always_successful),
+            (
+                "push",
+                True,
+                False,
+                True,
+                always_successful | artifacts | builds | platforms,
+            ),
+            (
+                "push",
+                True,
+                True,
+                False,
+                always_successful | builds | openvmm_tests,
+            ),
+            (
+                "push",
+                True,
+                True,
+                True,
+                always_successful
+                | artifacts
+                | builds
+                | openvmm_tests
+                | microvm_tests
+                | platforms,
+            ),
+        )
+
+        for (
+            event_name,
+            same_repository,
+            run_tests,
+            run_workloads,
+            successful_jobs,
+        ) in cases:
+            with self.subTest(
+                event_name=event_name,
+                same_repository=same_repository,
+                run_tests=run_tests,
+                run_workloads=run_workloads,
+            ):
+                expected = ci.required_ci_expected_results(
+                    event_name,
+                    same_repository=same_repository,
+                    run_tests=run_tests,
+                    run_workloads=run_workloads,
+                )
+                self.assertEqual(
+                    {job for job, result in expected.items() if result == "success"},
+                    successful_jobs,
+                )
+                self.assertEqual(
+                    ci.required_ci_failures(
+                        event_name,
+                        same_repository=same_repository,
+                        run_tests=run_tests,
+                        run_workloads=run_workloads,
+                        results=expected,
+                    ),
+                    [],
+                )
+
+                for job, expected_result in expected.items():
+                    unexpected = expected.copy()
+                    unexpected[job] = (
+                        "skipped" if expected_result == "success" else "success"
+                    )
+                    with self.subTest(job=job, actual=unexpected[job]):
+                        self.assertEqual(
+                            ci.required_ci_failures(
+                                event_name,
+                                same_repository=same_repository,
+                                run_tests=run_tests,
+                                run_workloads=run_workloads,
+                                results=unexpected,
+                            ),
+                            [
+                                f"{job}: expected {expected_result}, "
+                                f"got {unexpected[job]}"
+                            ],
+                        )
+
+                for job in expected:
+                    failed = expected.copy()
+                    failed[job] = "failure"
+                    with self.subTest(job=job, actual="failure"):
+                        self.assertEqual(
+                            ci.required_ci_failures(
+                                event_name,
+                                same_repository=same_repository,
+                                run_tests=run_tests,
+                                run_workloads=run_workloads,
+                                results=failed,
+                            ),
+                            [f"{job}: expected {expected[job]}, got failure"],
+                        )
+
+    def test_required_ci_job_uses_tested_policy(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        job = _workflow_job(workflow, "required-status-check")
+
+        self.assertIn("python3 scripts/nvx.py check-required-ci", job)
+        self.assertIn('--same-repository "${SAME_REPOSITORY}"', job)
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            job,
+        )
+        self.assertLess(
+            job.index("uses: actions/checkout@v5"),
+            job.index("python3 scripts/nvx.py check-required-ci"),
+        )
+        self.assertIn("persist-credentials: false", job)
+        for environment in ci.REQUIRED_CI_RESULT_ENVIRONMENTS.values():
+            with self.subTest(environment=environment):
+                self.assertIn(f"          {environment}:", job)
+
     def test_flowey_downloads_use_retrying_curl(self):
         action = (
             common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "action.yml"
