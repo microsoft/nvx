@@ -1613,13 +1613,7 @@ def collect_results(
 def _validate_current_results(path: Path, results: Sequence[Result]) -> None:
     seen: set[tuple[str, int, int, str, str]] = set()
     for result in results:
-        key = (
-            result.platform,
-            result.microvm_abi_version,
-            result.processors,
-            result.commit,
-            result.metric,
-        )
+        key = _result_identity(result)
         if key in seen:
             raise PerformanceError(
                 f"duplicate platform/ABI/processors/commit/metric row in {path}: "
@@ -1629,19 +1623,25 @@ def _validate_current_results(path: Path, results: Sequence[Result]) -> None:
         seen.add(key)
 
 
+def _result_identity(
+    result: Result, fallback_platform: str = ""
+) -> tuple[str, int, int, str, str]:
+    return (
+        result.platform or fallback_platform,
+        result.microvm_abi_version,
+        result.processors,
+        result.commit,
+        result.metric,
+    )
+
+
 def _validate_result_files(
     files: Sequence[Path], loaded: dict[Path, list[Result]]
 ) -> None:
     seen: dict[tuple[str, int, int, str, str], Path] = {}
     for path in files:
         for result in loaded[path]:
-            key = (
-                result.platform or path.stem,
-                result.microvm_abi_version,
-                result.processors,
-                result.commit,
-                result.metric,
-            )
+            key = _result_identity(result, path.stem)
             previous = seen.get(key)
             if previous is not None:
                 raise PerformanceError(
@@ -1731,27 +1731,11 @@ def persist_results(
                     f"{expected} -> {actual}"
                 )
 
-        existing_keys = {
-            (
-                result.platform,
-                result.microvm_abi_version,
-                result.processors,
-                result.commit,
-                result.metric,
-            )
-            for result in existing
-        }
+        existing_keys = {_result_identity(result) for result in existing}
         new_results = [
             result
             for result in current
-            if (
-                result.platform,
-                result.microvm_abi_version,
-                result.processors,
-                result.commit,
-                result.metric,
-            )
-            not in existing_keys
+            if _result_identity(result) not in existing_keys
         ]
         if not new_results:
             print(f"No new performance rows to persist for {source_path.name}")
