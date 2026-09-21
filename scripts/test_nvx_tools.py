@@ -2446,6 +2446,19 @@ class SandboxTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_require_file_preserves_resolved_path_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing = root / "nested" / ".." / "missing"
+
+            with self.assertRaises(FileNotFoundError) as raised:
+                benchmark.require_file(missing, "benchmark artifact")
+
+            self.assertEqual(
+                str(raised.exception),
+                f"benchmark artifact not found: {root / 'missing'}",
+            )
+
     def test_snapshot_profile_records_are_parsed_and_summarized(self):
         record = benchmark.parse_snapshot_profile_line(
             b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=restore "
