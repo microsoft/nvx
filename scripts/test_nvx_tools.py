@@ -1624,6 +1624,35 @@ class CiConfigurationTests(unittest.TestCase):
         )
         self.assertNotIn("test-openvmm --backend", unit_tests_job)
 
+    def test_ci_preserves_failed_openvmm_test_diagnostics(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        job = _workflow_job(workflow, "openvmm-vmm-tests")
+        step_name = "      - name: Upload OpenVMM test diagnostics"
+        self.assertIn(step_name, job)
+        upload = job.split(step_name, 1)[1].split("\n      - name:", 1)[0]
+
+        self.assertIn("\n        if: failure()", upload)
+        self.assertIn("uses: actions/upload-artifact@v7", upload)
+        self.assertIn(
+            "name: openvmm-vmm-tests-${{ runner.os }}-${{ matrix.backend }}-"
+            "${{ github.run_id }}-${{ github.run_attempt }}",
+            upload,
+        )
+        self.assertIn(
+            "path: ${{ runner.os == 'Windows' && "
+            "format('{0}/{1}/test_results', runner.temp, matrix.backend) || "
+            "'openvmm/target/vmm_tests/test_results' }}",
+            upload,
+        )
+        self.assertIn("if-no-files-found: warn", upload)
+        self.assertIn("retention-days: 7", upload)
+        self.assertLess(
+            job.index(step_name),
+            job.index("      - name: Report sccache"),
+        )
+
     def test_runner_setup_pins_and_validates_sccache(self):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"

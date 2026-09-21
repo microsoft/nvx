@@ -413,6 +413,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
 
+      - name: Upload OpenVMM test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openvmm-vmm-tests-${{ runner.os }}-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.os == 'Windows' && format('{0}/{1}/test_results', runner.temp, matrix.backend) || 'openvmm/target/vmm_tests/test_results' }}
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Report sccache
         if: always()
         uses: ./.github/actions/sccache
