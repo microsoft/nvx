@@ -2450,13 +2450,14 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             missing = root / "nested" / ".." / "missing"
+            resolved_missing = missing.resolve()
 
             with self.assertRaises(FileNotFoundError) as raised:
                 benchmark.require_file(missing, "benchmark artifact")
 
             self.assertEqual(
                 str(raised.exception),
-                f"benchmark artifact not found: {root / 'missing'}",
+                f"benchmark artifact not found: {resolved_missing}",
             )
 
     def test_snapshot_profile_records_are_parsed_and_summarized(self):
