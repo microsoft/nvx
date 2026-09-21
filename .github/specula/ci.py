@@ -28,10 +28,20 @@ def read_json(path: Path) -> dict:
     return value
 
 
+def git_repo_args(repo: Path) -> list[str]:
+    if (
+        (repo / "HEAD").is_file()
+        and (repo / "objects").is_dir()
+        and not (repo / ".git").exists()
+    ):
+        return [f"--git-dir={repo}"]
+    return ["-C", str(repo)]
+
+
 def git(repo: Path | None, *args: str) -> str:
     command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper="]
     if repo is not None:
-        command += ["-C", str(repo)]
+        command += git_repo_args(repo)
     result = subprocess.run(command + list(args), text=True, capture_output=True)
     if result.returncode:
         raise CIError(f"git {args[0]} failed: {result.stderr.strip()[:500]}")
@@ -66,8 +76,7 @@ def resolve_nvx_tag(config: dict, tag: str) -> str:
     if subprocess.run(
         [
             "git",
-            "-C",
-            str(cache),
+            *git_repo_args(cache),
             "merge-base",
             "--is-ancestor",
             revision,
@@ -112,7 +121,7 @@ def prepare_source(config: dict, revision: str) -> Path:
         f"+refs/heads/{config['source_branch']}:refs/remotes/origin/{config['source_branch']}",
     )
     if subprocess.run(
-        ["git", "-C", str(cache), "cat-file", "-e", f"{revision}^{{commit}}"],
+        ["git", *git_repo_args(cache), "cat-file", "-e", f"{revision}^{{commit}}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode:
@@ -120,8 +129,7 @@ def prepare_source(config: dict, revision: str) -> Path:
     if subprocess.run(
         [
             "git",
-            "-C",
-            str(cache),
+            *git_repo_args(cache),
             "merge-base",
             "--is-ancestor",
             revision,
@@ -172,9 +180,7 @@ def specula_command(
         binary,
         "run",
         f"--ci-dir={ci_dir}",
-        f"--agent={config['agent']}",
-        f"--model={config['model']}",
-        f"--effort={config['effort']}",
+        f"--agent-config={HERE / config['agent_config']}",
     ]
     if mode == "resume":
         if not run_id or not RUN_ID.fullmatch(run_id):

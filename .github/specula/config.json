@@ -9,9 +9,7 @@
   "specula_binary": "/opt/specula-venv/bin/specula",
   "specula_source": "/opt/specula-src",
   "specula_repository": "https://github.com/specula-org/Specula.git",
-  "specula_commit": "088049c5b3474340213cded2664cdb674bff1e1a",
-  "agent": "copilot-cli",
-  "model": "gpt-5.6-sol-fast",
-  "effort": "xhigh",
+  "specula_commit": "ffb2442eb69024b195f9971908e9a321bba04517",
+  "agent_config": "agents.json",
   "target": "pedro-microvm|nanvix/openvmm|Rust|NVX guest-requested microVM snapshot and restore"
 }

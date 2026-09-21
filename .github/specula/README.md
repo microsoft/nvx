@@ -12,7 +12,9 @@ The runner must be a dedicated Linux x86_64 account with at least 32 GiB RAM, su
 bash .github/specula/setup-runner.sh
 ```
 
-The setup script installs the pinned Specula commit, Copilot CLI, Java, Maven, Rust, cargo-nextest, Python environments, skills, and MCP configuration. Authenticate Copilot CLI either through the repository secret `SPECULA_COPILOT_TOKEN` or by running `copilot login` as the dedicated runner account. Use a dedicated token rather than a personal administrator token.
+The setup script installs the pinned latest Specula commit, Copilot CLI, Java, Maven, Rust, cargo-nextest, Python environments, skills, and MCP configuration. Authenticate Copilot CLI either through the repository secret `SPECULA_COPILOT_TOKEN` or by running `copilot login` as the dedicated runner account. Use a dedicated token rather than a personal administrator token.
+
+Agent routing is declared in `agents.json`: Copilot GPT-6 runs analysis, specification, harness, validation, repair, classification, reviews, and the main incremental conversation; Copilot GPT-5.5 is reserved for bug confirmation and reproduction.
 
 For an LXD container, enable nesting and pass KVM from the host:
 

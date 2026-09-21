@@ -15,9 +15,7 @@ class CITests(unittest.TestCase):
         self.config = {
             "specula_binary": "/opt/specula-venv/bin/specula",
             "state_root": "/data/specula",
-            "agent": "copilot-cli",
-            "model": "gpt-5.6-sol-fast",
-            "effort": "xhigh",
+            "agent_config": "agents.json",
             "target": "snapshot|owner/repo|Rust|scope",
         }
         self.source = Path("/data/specula/source/openvmm")
@@ -30,8 +28,16 @@ class CITests(unittest.TestCase):
         self.assertIn("--ci-init", command)
         self.assertIn(f"--artifact={self.source}", command)
         self.assertIn(f"--revision={self.revision}", command)
+        self.assertIn(f"--agent-config={ROOT / 'agents.json'}", command)
         self.assertTrue(any(arg.startswith("--guidance=") for arg in command))
         self.assertEqual(command[-1], self.config["target"])
+
+    def test_bare_repository_is_addressed_explicitly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            (repo / "HEAD").write_text("ref: refs/heads/main\n")
+            (repo / "objects").mkdir()
+            self.assertEqual(ci.git_repo_args(repo), [f"--git-dir={repo}"])
 
     def test_incremental_command_reuses_native_ci_state(self):
         command = ci.specula_command(
