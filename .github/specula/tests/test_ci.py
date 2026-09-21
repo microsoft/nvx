@@ -238,6 +238,7 @@ class CITests(unittest.TestCase):
                 None,
                 0,
                 set(),
+                reset_report=True,
             )
             self.assertFalse((result / "stale-verdict.json").exists())
             self.assertTrue((result / "result.json").is_file())
@@ -302,7 +303,7 @@ class CITests(unittest.TestCase):
                     set(),
                 )
 
-    def test_incomplete_report_can_precede_run_directory(self):
+    def test_incomplete_report_can_precede_native_run_discovery(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             report = ci.publish_report(
@@ -310,16 +311,31 @@ class CITests(unittest.TestCase):
                 "request-1",
                 "initialize",
                 self.revision,
-                "run-1",
+                None,
                 130,
                 set(),
-                allow_missing_run=True,
             )
             result = json.loads((report / "result.json").read_text())
-            self.assertEqual(result["run_id"], "run-1")
+            self.assertIsNone(result["run_id"])
             self.assertFalse(result["complete"])
 
-    def test_run_request_publishes_run_id_before_launch(self):
+    def test_native_run_discovery_accepts_latest_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary) / "runs"
+            selected = runs / "run-1"
+            selected.mkdir(parents=True)
+            (runs / "latest").symlink_to("run-1", target_is_directory=True)
+            self.assertEqual(ci.discover_new_run(runs, set()), "run-1")
+
+    def test_native_run_discovery_tolerates_existing_latest_during_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runs = Path(temporary) / "runs"
+            (runs / "old").mkdir(parents=True)
+            (runs / "run-1").mkdir()
+            (runs / "latest").symlink_to("old", target_is_directory=True)
+            self.assertEqual(ci.discover_new_run(runs, {"old", "latest"}), "run-1")
+
+    def test_run_request_publishes_native_run_id_after_launch(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = {**self.config, "state_root": temporary}
             args = SimpleNamespace(
@@ -332,14 +348,38 @@ class CITests(unittest.TestCase):
                 request_id="request-1",
             )
 
+            testcase = self
+
+            class Process:
+                returncode = 0
+
+                def __init__(self, command):
+                    self.command = command
+                    self.polls = 0
+
+                def poll(self):
+                    self.polls += 1
+                    if self.polls == 1:
+                        result_path = Path(temporary) / "reports/request-1/result.json"
+                        result = json.loads(result_path.read_text())
+                        testcase.assertIsNone(result["run_id"])
+                        testcase.assertFalse(result["complete"])
+                        run = (
+                            Path(temporary)
+                            / "state/openvmm-snapshot-restore/runs/run-1"
+                        )
+                        run.mkdir(parents=True)
+                        return None
+                    return self.returncode
+
+                def wait(self):
+                    return self.returncode
+
             def launch(command):
                 result_path = Path(temporary) / "reports/request-1/result.json"
-                result = json.loads(result_path.read_text())
-                self.assertEqual(result["run_id"], "run-1")
-                self.assertFalse(result["complete"])
-                run = Path(temporary) / "state/openvmm-snapshot-restore/runs/run-1"
-                run.mkdir(parents=True)
-                return subprocess.CompletedProcess(command, 0)
+                self.assertTrue(result_path.exists())
+                self.assertNotIn("--run-id=run-1", command)
+                return Process(command)
 
             with (
                 mock.patch.object(ci, "prepare_source", return_value=self.source),
@@ -348,11 +388,84 @@ class CITests(unittest.TestCase):
                     "check_runner",
                     return_value={"commit": self.revision, "version": "1.2.0"},
                 ),
-                mock.patch.object(ci, "new_run_id", return_value="run-1"),
-                mock.patch.object(ci.subprocess, "run", side_effect=launch) as run,
+                mock.patch.object(ci.subprocess, "Popen", side_effect=launch) as popen,
+                mock.patch.object(ci.time, "sleep"),
             ):
                 self.assertEqual(ci.run_request(config, args), 0)
-            run.assert_called_once()
+            popen.assert_called_once()
+            result = json.loads(
+                (Path(temporary) / "reports/request-1/result.json").read_text()
+            )
+            self.assertEqual(result["run_id"], "run-1")
+            self.assertTrue(result["complete"])
+
+    def test_run_id_survives_curated_report_copy_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = (
+                root
+                / "state/openvmm-snapshot-restore/runs/run-1/target/.specula-output"
+            )
+            output.mkdir(parents=True)
+            (output / "summary.md").write_text("completed summary\n")
+            report = root / "reports/request-1"
+            report.mkdir(parents=True)
+            (report / "summary.md").write_text("incomplete summary\n")
+            (report / "result.json").write_text('{"run_id": null}\n')
+
+            with (
+                mock.patch.object(
+                    ci, "atomic_copy", side_effect=OSError("interrupted")
+                ),
+                self.assertRaisesRegex(OSError, "interrupted"),
+            ):
+                ci.publish_report(
+                    {"state_root": str(root)},
+                    "request-1",
+                    "incremental",
+                    self.revision,
+                    "run-1",
+                    130,
+                    set(),
+                )
+
+            result = json.loads((report / "result.json").read_text())
+            self.assertEqual(result["run_id"], "run-1")
+            self.assertFalse(result["complete"])
+            self.assertEqual(
+                (report / "summary.md").read_text(), "incomplete summary\n"
+            )
+
+    def test_callback_failure_is_raised_only_after_specula_is_reaped(self):
+        class Process:
+            returncode = 0
+
+            def __init__(self):
+                self.polls = 0
+                self.waited = False
+
+            def poll(self):
+                self.polls += 1
+                return None if self.polls == 1 else self.returncode
+
+            def wait(self):
+                self.waited = True
+                return self.returncode
+
+        process = Process()
+
+        def fail(_run_id):
+            raise OSError("publication failed")
+
+        with (
+            mock.patch.object(ci.subprocess, "Popen", return_value=process),
+            mock.patch.object(ci, "discover_new_run", return_value="run-1"),
+            mock.patch.object(ci.time, "sleep"),
+            self.assertRaisesRegex(OSError, "publication failed"),
+        ):
+            ci.run_specula(["specula"], Path("/runs"), set(), fail)
+
+        self.assertTrue(process.waited)
 
     def test_publish_report_rejects_symlinked_curated_file(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -385,11 +498,11 @@ class CITests(unittest.TestCase):
         self.assertFalse(any(arg.startswith("--guidance=") for arg in command))
         self.assertNotIn(self.config["target"], command)
 
-    def test_new_run_command_accepts_preassigned_id(self):
-        command = ci.specula_command(
-            self.config, "incremental", self.source, self.revision, "run-1"
-        )
-        self.assertIn("--run-id=run-1", command)
+    def test_new_run_command_rejects_preassigned_id(self):
+        with self.assertRaisesRegex(ci.CIError, "only in resume"):
+            ci.specula_command(
+                self.config, "incremental", self.source, self.revision, "run-1"
+            )
 
     def test_resume_only_uses_saved_run_configuration(self):
         command = ci.specula_command(
