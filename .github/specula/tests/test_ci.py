@@ -255,6 +255,47 @@ class CITests(unittest.TestCase):
             )
             self.assertNotIn("stale verification", (report / "summary.md").read_text())
 
+    def test_publish_report_rejects_symlinked_run_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runs = root / "state/openvmm-snapshot-restore/runs"
+            outside = root / "outside"
+            outside.mkdir()
+            runs.mkdir(parents=True)
+            (runs / "run-1").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ci.CIError, "not a real directory"):
+                ci.publish_report(
+                    {"state_root": str(root)},
+                    "request-1",
+                    "resume",
+                    self.revision,
+                    "run-1",
+                    0,
+                    set(),
+                )
+
+    def test_publish_report_rejects_symlinked_curated_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = (
+                root
+                / "state/openvmm-snapshot-restore/runs/run-1/target/.specula-output"
+            )
+            output.mkdir(parents=True)
+            secret = root / "secret"
+            secret.write_text("do not upload\n")
+            (output / "summary.md").symlink_to(secret)
+            with self.assertRaisesRegex(ci.CIError, "unsafe curated report file"):
+                ci.publish_report(
+                    {"state_root": str(root)},
+                    "request-1",
+                    "resume",
+                    self.revision,
+                    "run-1",
+                    0,
+                    set(),
+                )
+
     def test_incremental_command_reuses_native_ci_state(self):
         command = ci.specula_command(
             self.config, "incremental", self.source, self.revision, None

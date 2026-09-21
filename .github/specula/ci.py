@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -354,6 +355,30 @@ def check_specula_source(config: dict) -> dict[str, str]:
     return {"commit": revision, "version": ".".join(str(part) for part in version)}
 
 
+def safe_run_directory(runs: Path, run_id: str) -> Path:
+    if not valid_id(run_id):
+        raise CIError("selected Specula run has an invalid ID")
+    selected = runs / run_id
+    if selected.is_symlink() or not selected.is_dir():
+        raise CIError(f"selected Specula run is not a real directory: {selected}")
+    try:
+        selected.resolve(strict=True).relative_to(runs.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise CIError(
+            f"selected Specula run escapes the runs directory: {selected}"
+        ) from exc
+    return selected
+
+
+def safe_curated_file(selected: Path, path: Path) -> bool:
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+        path.resolve(strict=True).relative_to(selected.resolve(strict=True))
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(mode) and not path.is_symlink()
+
+
 def publish_report(
     config: dict,
     request_id: str,
@@ -367,12 +392,11 @@ def publish_report(
     ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
     runs = ci_dir / "runs"
     if mode != "preflight" and run_id is None and runs.is_dir():
+        new_entries = [path for path in runs.iterdir() if path.name not in before]
+        if any(path.is_symlink() for path in new_entries):
+            raise CIError("new Specula run entry must not be a symlink")
         created = sorted(
-            (
-                path
-                for path in runs.iterdir()
-                if path.is_dir() and path.name not in before
-            ),
+            (path for path in new_entries if path.is_dir()),
             key=lambda path: path.stat().st_mtime_ns,
         )
         run_id = created[-1].name if created else None
@@ -382,7 +406,7 @@ def publish_report(
             raise CIError(f"report path is not a real directory: {report}")
         shutil.rmtree(report)
     report.mkdir(parents=True, exist_ok=True)
-    selected = runs / run_id if run_id else None
+    selected = safe_run_directory(runs, run_id) if run_id else None
     for name in (
         "summary.md",
         "ci-report.md",
@@ -391,9 +415,12 @@ def publish_report(
     ):
         matches = (
             sorted(selected.rglob(name), key=lambda path: len(path.parts))
-            if selected and selected.is_dir()
+            if selected
             else []
         )
+        unsafe = [path for path in matches if not safe_curated_file(selected, path)]
+        if unsafe:
+            raise CIError(f"unsafe curated report file: {unsafe[0]}")
         if matches:
             shutil.copy2(matches[0], report / name)
     result = {
