@@ -80,7 +80,6 @@ OPENVMM_KVM_EXCLUDED_TESTS = (
     "multiarch::openvmm_pcat_x64_ubuntu_2404_server_x64_boot",
     "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
     "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
-    "x86_64_exclusive::openvmm_linux_x64_apicid_offset",
 )
 OPENVMM_KVM_TEST_FILTER = _exclude_openvmm_tests(
     f"({OPENVMM_LINUX_TEST_FILTER})"
