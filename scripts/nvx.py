@@ -515,7 +515,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     openvmm_tests = subparsers.add_parser(
         "test-openvmm",
-        help="run OpenVMM microVM integration tests",
+        help="run OpenVMM Petri VMM tests",
     )
     openvmm_tests.add_argument(
         "--backend",
