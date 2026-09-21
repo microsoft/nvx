@@ -102,6 +102,20 @@ runs:
         if ($jobSid -ne "S-1-5-20") {
           throw "Actions job uses SID $jobSid, expected Network Service"
         }
+        $system32 = Join-Path $env:SystemRoot "System32"
+        $pcatFirmware = @(
+          (Join-Path $system32 "vmfirmwarepcat.dll"),
+          (Join-Path $system32 "vmfirmware.dll")
+        )
+        if (@($pcatFirmware | Where-Object {
+              Test-Path -LiteralPath $_ -PathType Leaf
+            }).Count -eq 0) {
+          throw "Hyper-V PCAT firmware was not found under $system32"
+        }
+        $svgaFirmware = Join-Path $system32 "VmEmulatedDevices.dll"
+        if (-not (Test-Path -LiteralPath $svgaFirmware -PathType Leaf)) {
+          throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
+        }
 
     - name: Validate KVM
       if: inputs.backend == 'kvm'

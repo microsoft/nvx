@@ -1263,18 +1263,43 @@ function Build-Nvx {
 }
 
 function Enable-Whp {
-    $feature = Get-WindowsOptionalFeature `
-        -Online `
-        -FeatureName HypervisorPlatform
-    if ($feature.State -eq "Enabled") {
-        return $false
+    $features = @("HypervisorPlatform")
+    if ($RunnerOnly) {
+        $features += "Microsoft-Hyper-V"
     }
-    $result = Enable-WindowsOptionalFeature `
-        -Online `
-        -FeatureName HypervisorPlatform `
-        -All `
-        -NoRestart
-    return [bool]$result.RestartNeeded
+    $restartNeeded = $false
+    foreach ($featureName in $features) {
+        $feature = Get-WindowsOptionalFeature `
+            -Online `
+            -FeatureName $featureName
+        if ($feature.State -eq "Enabled") {
+            continue
+        }
+        $result = Enable-WindowsOptionalFeature `
+            -Online `
+            -FeatureName $featureName `
+            -All `
+            -NoRestart
+        $restartNeeded = [bool]$result.RestartNeeded -or $restartNeeded
+    }
+    return $restartNeeded
+}
+
+function Assert-PcatFirmware {
+    $system32 = Join-Path $env:SystemRoot "System32"
+    $pcatFirmware = @(
+        (Join-Path $system32 "vmfirmwarepcat.dll"),
+        (Join-Path $system32 "vmfirmware.dll")
+    )
+    if (@($pcatFirmware | Where-Object {
+                Test-Path -LiteralPath $_ -PathType Leaf
+            }).Count -eq 0) {
+        throw "Hyper-V PCAT firmware was not found under $system32"
+    }
+    $svgaFirmware = Join-Path $system32 "VmEmulatedDevices.dll"
+    if (-not (Test-Path -LiteralPath $svgaFirmware -PathType Leaf)) {
+        throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
+    }
 }
 
 function Assert-Environment {
@@ -1363,6 +1388,15 @@ function Assert-Environment {
         -FeatureName HypervisorPlatform
     if ($feature.State -ne "Enabled") {
         throw "Windows Hypervisor Platform is not enabled"
+    }
+    if ($RunnerOnly) {
+        $feature = Get-WindowsOptionalFeature `
+            -Online `
+            -FeatureName Microsoft-Hyper-V
+        if ($feature.State -ne "Enabled") {
+            throw "Hyper-V is not enabled"
+        }
+        Assert-PcatFirmware
     }
 
     if ($SkipWorkspace) {
