@@ -349,6 +349,8 @@ class ControlSession:
         timeout_ms: int,
         response_timeout: float,
     ) -> ManagedExecResult:
+        if not response_timeout > 0:
+            raise ValueError("managed exec response timeout must be positive")
         if not 1 <= len(arguments) <= APP_MAX_ARGUMENTS:
             raise ValueError("managed exec requires 1 through 64 arguments")
         encoded: list[bytes] = []

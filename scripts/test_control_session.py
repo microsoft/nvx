@@ -175,6 +175,27 @@ class ControlSessionTests(unittest.TestCase):
         session.close()
         server.close()
 
+    def test_exec_rejects_invalid_response_timeout_before_sending(self):
+        client, server = socket.socketpair()
+        session = control_session.ControlSession(control_session._SocketStream(client))
+
+        for timeout in (0.0, -1.0, float("nan")):
+            with (
+                self.subTest(timeout=timeout),
+                self.assertRaisesRegex(ValueError, "response timeout"),
+            ):
+                session.exec(
+                    ("/bin/true",),
+                    timeout_ms=0,
+                    response_timeout=timeout,
+                )
+
+        server.setblocking(False)
+        with self.assertRaises(BlockingIOError):
+            server.recv(1)
+        session.close()
+        server.close()
+
     def test_exec_rejects_unknown_exit_category(self):
         client, server = socket.socketpair()
         instance = bytes.fromhex("22" * 16)
