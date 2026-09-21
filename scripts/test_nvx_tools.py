@@ -365,6 +365,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(openvmm_tests.backend, "mshv")
         self.assertIs(openvmm_tests.handler, nvx.command_test_openvmm)
 
+    def test_openvmm_help_describes_petri_vmm_tests(self):
+        with (
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+            self.assertRaises(SystemExit) as exit_context,
+        ):
+            nvx.parse_args(["--help"])
+
+        self.assertEqual(exit_context.exception.code, 0)
+        help_text = output.getvalue()
+        self.assertIn("run OpenVMM Petri VMM tests", help_text)
+        self.assertNotIn("run OpenVMM microVM integration tests", help_text)
+
     def test_sandbox_command_parses_typed_launch_contract(self):
         args = nvx.parse_args(
             [
