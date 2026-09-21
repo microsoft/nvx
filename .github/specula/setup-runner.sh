@@ -15,6 +15,8 @@ SPECULA_MIN_VERSION="$(config_value specula_min_version)"
 SPECULA_MAX_VERSION_EXCLUSIVE="$(config_value specula_max_version_exclusive)"
 COPILOT_VERSION=1.0.86
 RUST_VERSION=1.95.0
+RUSTUP_VERSION=1.29.1
+RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 CARGO_NEXTEST_VERSION=0.9.133
 SOURCE="$(config_value specula_source)"
 VENV="$(dirname -- "$(dirname -- "$(config_value specula_binary)")")"
@@ -25,7 +27,7 @@ sudo env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bc binutils bison build-essential ca-certificates clang cmake cpio curl flex git gzip \
     gh libarchive-tools libelf-dev libssl-dev lld make maven ninja-build nodejs npm \
-    openjdk-21-jdk-headless patch perl \
+    openjdk-21-jdk-headless patch perl protobuf-compiler \
     pkg-config python3 python3-pip python3-venv rsync tar xz-utils zstd
 
 if [[ ! -d "$SOURCE/.git" ]]; then
@@ -95,11 +97,21 @@ if [[ ! -x /usr/local/bin/copilot ]] ||
 fi
 
 home="$(getent passwd "$RUNNER_USER" | cut -d: -f6)"
+if ! sudo -u "$RUNNER_USER" -H bash -lc "command -v rustup >/dev/null 2>&1"; then
+    rustup_installer="$(mktemp)"
+    trap 'rm -f "$rustup_installer"' EXIT
+    curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+        --output "$rustup_installer" \
+        "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"
+    printf '%s  %s\n' "$RUSTUP_SHA256" "$rustup_installer" |
+        sha256sum --check --strict
+    chmod 0755 "$rustup_installer"
+    sudo -u "$RUNNER_USER" -H "$rustup_installer" \
+        -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION"
+    rm -f "$rustup_installer"
+    trap - EXIT
+fi
 sudo -u "$RUNNER_USER" -H bash -lc "
-    if ! command -v rustup >/dev/null 2>&1; then
-        curl --fail --proto '=https' --tlsv1.2 --silent --show-error https://sh.rustup.rs |
-            sh -s -- -y --profile minimal --default-toolchain '$RUST_VERSION'
-    fi
     export PATH=\"\$HOME/.cargo/bin:\$PATH\"
     rustup toolchain install '$RUST_VERSION' --profile minimal
     rustup default '$RUST_VERSION'
@@ -145,7 +157,7 @@ import sys
 
 
 def version(value: str) -> tuple[int, int, int]:
-    match = re.fullmatch(r"[^0-9]*(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?", value.strip())
+    match = re.fullmatch(r"[^0-9]*(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?", value.strip())
     if match is None:
         raise SystemExit(f"cannot parse Specula semantic version: {value!r}")
     return tuple(int(component) for component in match.groups())

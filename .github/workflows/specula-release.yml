@@ -61,6 +61,7 @@ jobs:
 
       - name: Verify the release's pinned OpenVMM submodule
         id: verify
+        timeout-minutes: 700
         run: |
           python3 .github/specula/ci.py \
             --event-file "$GITHUB_EVENT_PATH" \

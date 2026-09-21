@@ -8,10 +8,12 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,7 +21,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SHA = re.compile(r"[0-9a-f]{40}")
 RUN_ID = re.compile(r"[A-Za-z0-9._-]+")
-SEMVER = re.compile(r"^[^0-9]*(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
+SEMVER = re.compile(r"^[^0-9]*(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$")
 EXPECTED_SPECULA_LINKS = {
     "tools/context_control/.venv",
     "tools/inv_checking_tool/.venv",
@@ -54,6 +56,10 @@ def parse_semver(value: str) -> tuple[int, int, int]:
     if match is None:
         raise CIError(f"cannot parse semantic version: {value!r}")
     return tuple(int(component) for component in match.groups())
+
+
+def new_run_id() -> str:
+    return f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{secrets.token_hex(2)}"
 
 
 @contextmanager
@@ -245,8 +251,10 @@ def specula_command(
             f"--run-id={run_id}",
             f"--revision={revision}",
         ]
+    if run_id and not valid_id(run_id):
+        raise CIError("new Specula run ID contains unsupported characters")
     if run_id:
-        raise CIError("run_id is valid only in resume mode")
+        common.append(f"--run-id={run_id}")
     source_args = [f"--artifact={source}", f"--revision={revision}"]
     if mode == "initialize":
         return common + [
@@ -355,9 +363,23 @@ def check_specula_source(config: dict) -> dict[str, str]:
     return {"commit": revision, "version": ".".join(str(part) for part in version)}
 
 
+def real_runs_directory(runs: Path) -> bool:
+    try:
+        mode = runs.stat(follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise CIError(f"Specula runs directory is unavailable: {runs}") from exc
+    if not stat.S_ISDIR(mode) or runs.is_symlink():
+        raise CIError(f"Specula runs path is not a real directory: {runs}")
+    return True
+
+
 def safe_run_directory(runs: Path, run_id: str) -> Path:
     if not valid_id(run_id):
         raise CIError("selected Specula run has an invalid ID")
+    if not real_runs_directory(runs):
+        raise CIError(f"Specula runs directory is unavailable: {runs}")
     selected = runs / run_id
     if selected.is_symlink() or not selected.is_dir():
         raise CIError(f"selected Specula run is not a real directory: {selected}")
@@ -388,10 +410,12 @@ def publish_report(
     exit_code: int,
     before: set[str],
     specula_identity: dict[str, str] | None = None,
+    allow_missing_run: bool = False,
 ) -> Path:
     ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
     runs = ci_dir / "runs"
-    if mode != "preflight" and run_id is None and runs.is_dir():
+    runs_exists = real_runs_directory(runs)
+    if mode != "preflight" and run_id is None and runs_exists:
         new_entries = [path for path in runs.iterdir() if path.name not in before]
         if any(path.is_symlink() for path in new_entries):
             raise CIError("new Specula run entry must not be a symlink")
@@ -406,7 +430,11 @@ def publish_report(
             raise CIError(f"report path is not a real directory: {report}")
         shutil.rmtree(report)
     report.mkdir(parents=True, exist_ok=True)
-    selected = safe_run_directory(runs, run_id) if run_id else None
+    selected = None
+    if run_id:
+        candidate = runs / run_id
+        if not allow_missing_run or candidate.exists() or candidate.is_symlink():
+            selected = safe_run_directory(runs, run_id)
     for name in (
         "summary.md",
         "ci-report.md",
@@ -475,12 +503,26 @@ def run_request(config: dict, args: argparse.Namespace) -> int:
         return 0
     if mode == "incremental" and not (ci_dir / "current").is_symlink():
         mode = "initialize"
+    if mode != "resume":
+        if run_id:
+            raise CIError("run_id is valid only in resume mode")
+        run_id = new_run_id()
+    runs = ci_dir / "runs"
     before = (
-        {path.name for path in (ci_dir / "runs").iterdir()}
-        if (ci_dir / "runs").is_dir()
-        else set()
+        {path.name for path in runs.iterdir()} if real_runs_directory(runs) else set()
     )
     command = specula_command(config, mode, source, revision, run_id)
+    publish_report(
+        config,
+        args.request_id,
+        mode,
+        revision,
+        run_id,
+        130,
+        before,
+        specula_identity,
+        allow_missing_run=True,
+    )
     result = subprocess.run(command)
     report = publish_report(
         config,

@@ -4,6 +4,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -50,6 +52,11 @@ class CITests(unittest.TestCase):
         self.assertFalse(ci.valid_tag(""))
         self.assertFalse(ci.valid_tag("release:refs/tags/other"))
         self.assertFalse(ci.valid_tag("../release"))
+
+    def test_semver_rejects_prereleases(self):
+        self.assertEqual(ci.parse_semver("specula 1.2.0+local"), (1, 2, 0))
+        with self.assertRaises(ci.CIError):
+            ci.parse_semver("specula 1.2.0-alpha")
 
     def test_state_lock_rejects_a_second_owner(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -274,6 +281,79 @@ class CITests(unittest.TestCase):
                     set(),
                 )
 
+    def test_publish_report_rejects_symlinked_runs_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state/openvmm-snapshot-restore"
+            outside = root / "outside"
+            outside.mkdir()
+            state.mkdir(parents=True)
+            (state / "runs").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(
+                ci.CIError, "runs path is not a real directory"
+            ):
+                ci.publish_report(
+                    {"state_root": str(root)},
+                    "request-1",
+                    "resume",
+                    self.revision,
+                    "run-1",
+                    0,
+                    set(),
+                )
+
+    def test_incomplete_report_can_precede_run_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = ci.publish_report(
+                {"state_root": str(root)},
+                "request-1",
+                "initialize",
+                self.revision,
+                "run-1",
+                130,
+                set(),
+                allow_missing_run=True,
+            )
+            result = json.loads((report / "result.json").read_text())
+            self.assertEqual(result["run_id"], "run-1")
+            self.assertFalse(result["complete"])
+
+    def test_run_request_publishes_run_id_before_launch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = {**self.config, "state_root": temporary}
+            args = SimpleNamespace(
+                mode="incremental",
+                tag=None,
+                revision=self.revision,
+                run_id=None,
+                event_file=None,
+                event_name=None,
+                request_id="request-1",
+            )
+
+            def launch(command):
+                result_path = Path(temporary) / "reports/request-1/result.json"
+                result = json.loads(result_path.read_text())
+                self.assertEqual(result["run_id"], "run-1")
+                self.assertFalse(result["complete"])
+                run = Path(temporary) / "state/openvmm-snapshot-restore/runs/run-1"
+                run.mkdir(parents=True)
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                mock.patch.object(ci, "prepare_source", return_value=self.source),
+                mock.patch.object(
+                    ci,
+                    "check_runner",
+                    return_value={"commit": self.revision, "version": "1.2.0"},
+                ),
+                mock.patch.object(ci, "new_run_id", return_value="run-1"),
+                mock.patch.object(ci.subprocess, "run", side_effect=launch) as run,
+            ):
+                self.assertEqual(ci.run_request(config, args), 0)
+            run.assert_called_once()
+
     def test_publish_report_rejects_symlinked_curated_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -304,6 +384,12 @@ class CITests(unittest.TestCase):
         self.assertNotIn("--ci-init", command)
         self.assertFalse(any(arg.startswith("--guidance=") for arg in command))
         self.assertNotIn(self.config["target"], command)
+
+    def test_new_run_command_accepts_preassigned_id(self):
+        command = ci.specula_command(
+            self.config, "incremental", self.source, self.revision, "run-1"
+        )
+        self.assertIn("--run-id=run-1", command)
 
     def test_resume_only_uses_saved_run_configuration(self):
         command = ci.specula_command(
