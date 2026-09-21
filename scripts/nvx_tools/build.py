@@ -77,45 +77,37 @@ class ApkPackage(TypedDict):
     build_time: str | None
 
 
-def _assert_virtio_console_kernel_config(path: Path) -> None:
+def _assert_kernel_config(
+    path: Path, required: tuple[str, ...], error_prefix: str
+) -> None:
     configured = set(path.read_text(encoding="utf-8").splitlines())
-    missing = [
-        setting
-        for setting in REQUIRED_VIRTIO_CONSOLE_CONFIG
-        if setting not in configured
-    ]
+    missing = [setting for setting in required if setting not in configured]
     if missing:
-        raise ScriptError(
-            "kernel configuration cannot provide /dev/hvc1: " + ", ".join(missing)
-        )
+        raise ScriptError(error_prefix + ", ".join(missing))
+
+
+def _assert_virtio_console_kernel_config(path: Path) -> None:
+    _assert_kernel_config(
+        path,
+        REQUIRED_VIRTIO_CONSOLE_CONFIG,
+        "kernel configuration cannot provide /dev/hvc1: ",
+    )
 
 
 def _assert_sandbox_kernel_config(path: Path) -> None:
-    configured = set(path.read_text(encoding="utf-8").splitlines())
-    missing = [
-        setting
-        for setting in REQUIRED_SANDBOX_KERNEL_CONFIG
-        if setting not in configured
-    ]
-    if missing:
-        raise ScriptError(
-            "kernel configuration cannot support sandbox workloads: "
-            + ", ".join(missing)
-        )
+    _assert_kernel_config(
+        path,
+        REQUIRED_SANDBOX_KERNEL_CONFIG,
+        "kernel configuration cannot support sandbox workloads: ",
+    )
 
 
 def _assert_shared_status_kernel_config(path: Path) -> None:
-    configured = set(path.read_text(encoding="utf-8").splitlines())
-    missing = [
-        setting
-        for setting in REQUIRED_SHARED_STATUS_KERNEL_CONFIG
-        if setting not in configured
-    ]
-    if missing:
-        raise ScriptError(
-            "kernel configuration cannot consume shared virtio interrupt status: "
-            + ", ".join(missing)
-        )
+    _assert_kernel_config(
+        path,
+        REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+        "kernel configuration cannot consume shared virtio interrupt status: ",
+    )
 
 
 def assert_required_kernel_config(path: Path) -> None:
