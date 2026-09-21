@@ -8,13 +8,12 @@ import fcntl
 import json
 import os
 import re
-import secrets
 import shutil
 import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -56,10 +55,6 @@ def parse_semver(value: str) -> tuple[int, int, int]:
     if match is None:
         raise CIError(f"cannot parse semantic version: {value!r}")
     return tuple(int(component) for component in match.groups())
-
-
-def new_run_id() -> str:
-    return f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{secrets.token_hex(2)}"
 
 
 @contextmanager
@@ -251,10 +246,8 @@ def specula_command(
             f"--run-id={run_id}",
             f"--revision={revision}",
         ]
-    if run_id and not valid_id(run_id):
-        raise CIError("new Specula run ID contains unsupported characters")
     if run_id:
-        common.append(f"--run-id={run_id}")
+        raise CIError("run_id is valid only in resume mode")
     source_args = [f"--artifact={source}", f"--revision={revision}"]
     if mode == "initialize":
         return common + [
@@ -392,6 +385,32 @@ def safe_run_directory(runs: Path, run_id: str) -> Path:
     return selected
 
 
+def discover_new_run(runs: Path, before: set[str]) -> str | None:
+    if not real_runs_directory(runs):
+        return None
+    new_entries = [path for path in runs.iterdir() if path.name not in before]
+    unexpected_links = [
+        path for path in new_entries if path.is_symlink() and path.name != "latest"
+    ]
+    if unexpected_links:
+        raise CIError("new Specula run entry must not be a symlink")
+    created = [path for path in new_entries if not path.is_symlink() and path.is_dir()]
+    if len(created) > 1:
+        raise CIError("multiple new Specula run directories were created")
+    if not created:
+        return None
+    run_id = created[0].name
+    selected = safe_run_directory(runs, run_id)
+    latest = runs / "latest"
+    if "latest" not in before and latest.is_symlink():
+        try:
+            if latest.resolve(strict=True) != selected.resolve(strict=True):
+                raise CIError("Specula latest link does not select the new run")
+        except OSError as exc:
+            raise CIError("Specula latest link is unavailable") from exc
+    return run_id
+
+
 def safe_curated_file(selected: Path, path: Path) -> bool:
     try:
         mode = path.stat(follow_symlinks=False).st_mode
@@ -410,20 +429,12 @@ def publish_report(
     exit_code: int,
     before: set[str],
     specula_identity: dict[str, str] | None = None,
-    allow_missing_run: bool = False,
 ) -> Path:
     ci_dir = Path(config["state_root"]) / "state/openvmm-snapshot-restore"
     runs = ci_dir / "runs"
     runs_exists = real_runs_directory(runs)
     if mode != "preflight" and run_id is None and runs_exists:
-        new_entries = [path for path in runs.iterdir() if path.name not in before]
-        if any(path.is_symlink() for path in new_entries):
-            raise CIError("new Specula run entry must not be a symlink")
-        created = sorted(
-            (path for path in new_entries if path.is_dir()),
-            key=lambda path: path.stat().st_mtime_ns,
-        )
-        run_id = created[-1].name if created else None
+        run_id = discover_new_run(runs, before)
     report = Path(config["state_root"]) / "reports" / request_id
     if report.exists():
         if report.is_symlink() or not report.is_dir():
@@ -432,9 +443,7 @@ def publish_report(
     report.mkdir(parents=True, exist_ok=True)
     selected = None
     if run_id:
-        candidate = runs / run_id
-        if not allow_missing_run or candidate.exists() or candidate.is_symlink():
-            selected = safe_run_directory(runs, run_id)
+        selected = safe_run_directory(runs, run_id)
     for name in (
         "summary.md",
         "ci-report.md",
@@ -476,6 +485,27 @@ def publish_report(
     return report
 
 
+def run_specula(
+    command: list[str],
+    runs: Path,
+    before: set[str],
+    on_run_id: Callable[[str], object],
+) -> tuple[int, str | None]:
+    process = subprocess.Popen(command)
+    run_id = None
+    while process.poll() is None:
+        discovered = discover_new_run(runs, before)
+        if discovered is not None and run_id is None:
+            run_id = discovered
+            on_run_id(run_id)
+        time.sleep(0.25)
+    if run_id is None:
+        run_id = discover_new_run(runs, before)
+        if run_id is not None:
+            on_run_id(run_id)
+    return process.wait(), run_id
+
+
 def run_request(config: dict, args: argparse.Namespace) -> int:
     mode, tag, run_id = args.mode, args.tag, args.run_id
     if args.event_file:
@@ -506,7 +536,6 @@ def run_request(config: dict, args: argparse.Namespace) -> int:
     if mode != "resume":
         if run_id:
             raise CIError("run_id is valid only in resume mode")
-        run_id = new_run_id()
     runs = ci_dir / "runs"
     before = (
         {path.name for path in runs.iterdir()} if real_runs_directory(runs) else set()
@@ -521,29 +550,45 @@ def run_request(config: dict, args: argparse.Namespace) -> int:
         130,
         before,
         specula_identity,
-        allow_missing_run=True,
     )
-    result = subprocess.run(command)
+    if mode == "resume":
+        exit_code = subprocess.run(command).returncode
+    else:
+        exit_code, run_id = run_specula(
+            command,
+            runs,
+            before,
+            lambda discovered: publish_report(
+                config,
+                args.request_id,
+                mode,
+                revision,
+                discovered,
+                130,
+                before,
+                specula_identity,
+            ),
+        )
     report = publish_report(
         config,
         args.request_id,
         mode,
         revision,
         run_id,
-        result.returncode,
+        exit_code,
         before,
         specula_identity,
     )
     print(
         json.dumps(
             {
-                "status": "complete" if result.returncode in {0, 2} else "incomplete",
+                "status": "complete" if exit_code in {0, 2} else "incomplete",
                 "report": str(report),
-                "exit_code": result.returncode,
+                "exit_code": exit_code,
             }
         )
     )
-    return result.returncode
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:

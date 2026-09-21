@@ -2,7 +2,7 @@
 
 This integration intentionally delegates modeling, retained state, resume, publication, and incremental updates to Specula itself. NVX contains only a thin adapter that resolves an NVX release tag to its pinned `nanvix/openvmm` submodule commit, maintains one clean persistent OpenVMM checkout, and invokes a compatible Specula revision.
 
-The first `incremental` request automatically runs the complete `--ci-init` modeling and verification workflow when no current model exists. Later requests run `--incremental` against the same CI directory. Before launching Specula, the adapter assigns the run ID and publishes incomplete metadata so a step timeout still leaves the exact ID needed for explicit resume with the selected revision. No historical model, local Docker image, kernel fixture, or machine-specific path other than the configurable state root is required.
+The first `incremental` request automatically runs the complete `--ci-init` modeling and verification workflow when no current model exists. Later requests run `--incremental` against the same CI directory. Before launching Specula, the adapter publishes incomplete metadata, then records Specula's native run ID as soon as its run directory appears so a later step timeout leaves the exact ID needed for explicit resume with the selected revision. No historical model, local Docker image, kernel fixture, or machine-specific path other than the configurable state root is required.
 
 ## Runner provisioning
 
