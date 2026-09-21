@@ -15,7 +15,7 @@ COPILOT_VERSION=1.0.86
 RUST_VERSION=1.95.0
 CARGO_NEXTEST_VERSION=0.9.133
 SOURCE="$(config_value specula_source)"
-VENV="$(dirname -- "$(config_value specula_binary)")"
+VENV="$(dirname -- "$(dirname -- "$(config_value specula_binary)")")"
 TLA2TOOLS_SHA256=9d36716ffb5e49d1ba8fae4651eba59f3189887e12eb90e204a42d2e6e993fef
 COMMUNITY_MODULES_SHA256=044e8ecdfbca92d51d7eb4469422c2a7da1fe25dc8ad39c4a90e6622d6da4d99
 
