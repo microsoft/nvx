@@ -980,14 +980,26 @@ class CiTests(unittest.TestCase):
             "!test(windows_datacenter_core_2022_x64)",
             ci.OPENVMM_MSHV_TEST_FILTER,
         )
-        self.assertIn("!test(openvmm_pcat_x64)", ci.OPENVMM_MSHV_TEST_FILTER)
-        self.assertIn(
-            "!test(openvmm_linux_x64_pcie_save_restore)",
-            ci.OPENVMM_MSHV_TEST_FILTER,
+        self.assertEqual(
+            set(ci.OPENVMM_MSHV_EXCLUDED_TESTS),
+            {
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_ubuntu_2404_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
+                "multiarch::pcie::openvmm_linux_x64_pcie_save_restore",
+                "x86_64::openvmm_linux_x64_virtio_blk_device",
+            },
         )
-        self.assertIn("!test(test_ttrpc_interface)", ci.OPENVMM_MSHV_TEST_FILTER)
-        self.assertIn(
-            "!test(openvmm_linux_x64_virtio_blk_device)",
+        for excluded_test in ci.OPENVMM_MSHV_EXCLUDED_TESTS:
+            self.assertIn(
+                f"!{ci._exact_openvmm_test(excluded_test)}",
+                ci.OPENVMM_MSHV_TEST_FILTER,
+            )
+        self.assertNotIn("!test(openvmm_pcat_x64)", ci.OPENVMM_MSHV_TEST_FILTER)
+        self.assertNotIn(
+            "test_ttrpc_interface",
             ci.OPENVMM_MSHV_TEST_FILTER,
         )
         self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 29)
