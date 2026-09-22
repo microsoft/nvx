@@ -87,7 +87,8 @@ python3 scripts/nvx.py build-guest
 
 By default, builds the guest kernel and initramfs with Docker. `--native`
 builds the selected artifacts directly on Linux instead. Alpine is the
-default. Azure Linux uses Docker. `--guest all` also builds the Ubuntu EROFS distro layer.
+default. Azure Linux does not support `--native` and always builds through
+Docker. `--guest all` also builds the Ubuntu EROFS distro layer.
 
 ### `build-kernel`
 

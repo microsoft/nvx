@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         binutils \
         bison \
         build-essential \
+        busybox-static \
         ca-certificates \
         cpio \
         curl \
@@ -56,8 +57,8 @@ RUN python3 scripts/nvx.py verify-guest-determinism \
 FROM base AS azurelinux-helpers
 RUN set -eux; \
     mkdir /out; \
-    for source in nvx-reseed nvx-mmio-write nvx-port-io nvx-console-pending nvx-managed-agent; do \
-        cc -static -Os -s -Wall -Wextra -Werror -o "/out/$source" "/repo/guest/common/$source.c"; \
+    for helper in nvx-reseed nvx-mmio-write nvx-port-io nvx-console-pending nvx-managed-agent; do \
+        cc -static -Os -s -Wall -Wextra -Werror -o "/out/$helper" "/repo/guest/common/$helper.c"; \
     done; \
     cc -nostdlib -static -Os -fno-builtin -fno-pie -fno-stack-protector -no-pie \
         -Wl,--build-id=none -Wl,-z,noexecstack -s -o /out/nvx-device-io \
@@ -68,16 +69,17 @@ FROM ${AZURELINUX_IMAGE} AS azurelinux-rootfs
 FROM base AS azurelinux-initramfs
 COPY --from=azurelinux-rootfs / /rootfs/
 COPY --from=azurelinux-helpers /out/ /rootfs/sbin/
-ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+COPY --from=base /bin/busybox /rootfs/bin/busybox
 RUN set -eux; \
-    chroot /rootfs tdnf install -y e2fsprogs iproute net-tools util-linux; \
-    chroot /rootfs tdnf clean all; \
     install -m 0755 /repo/guest/common/init /rootfs/init; \
     install -m 0755 /repo/guest/common/nvx-exit \
         /repo/guest/common/nvx-hostmount \
         /repo/guest/common/nvx-identity-probe \
         /repo/guest/common/nvx-snapshot \
         /repo/guest/common/nvx-virtio-restore-probe /rootfs/sbin/; \
+    for utility in ifconfig ip mount mdev blkid losetup mkfs.ext4 mountpoint flock; do \
+        ln -sf busybox "/rootfs/bin/$utility"; \
+    done; \
     cd /rootfs; \
     find . -print0 | sort -z | cpio --null --quiet --reproducible \
         --owner=0:0 -o -H newc | gzip -n -9 > /tmp/initramfs-azurelinux.cpio.gz; \
@@ -90,7 +92,8 @@ RUN set -eux; \
         '  "distribution": "Azure Linux",' \
         '  "version": "3.0",' \
         '  "architecture": "x86_64",' \
-        '  "packages": ["e2fsprogs", "iproute", "net-tools", "util-linux"],' \
+        '  "package_manifest_format": "azurelinux-v1",' \
+        '  "packages": [],' \
         '  "helpers": {' \
         '    "nvx-device-io": {' \
         "      \"source_sha256\": \"$source_sha256\"," \

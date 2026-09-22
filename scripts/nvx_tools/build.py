@@ -699,7 +699,7 @@ def _prepare_guest_root(
 ) -> Path:
     if descriptor.name == "alpine":
         return _prepare_alpine_root(config)
-    if descriptor.name in ("ubuntu", "azurelinux"):
+    if descriptor.name == "ubuntu":
         return ubuntu.prepare_root(config.work)
     if descriptor.name == "azurelinux":
         raise ScriptError("Azure Linux initramfs builds require Docker")

@@ -2457,6 +2457,8 @@ class BuildTests(unittest.TestCase):
             azurelinux_guest.initramfs_name,
             "initramfs-azurelinux.cpio.gz",
         )
+        self.assertEqual(azurelinux_guest.default_memory_mib, 128)
+        self.assertFalse(azurelinux_guest.sandbox_control)
 
     def test_ubuntu_manifest_and_package_lock_match_build_pins(self):
         manifest = json.loads(

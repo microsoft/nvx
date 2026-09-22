@@ -15,8 +15,6 @@ mount --make-rprivate /
 rm -rf "$tools"
 mkdir -p \
     "$tools" \
-    "$rootfs/dev/pts" \
-    "$rootfs/dev/shm" \
     "$rootfs/proc" \
     "$rootfs/sys"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$tools"
@@ -25,7 +23,9 @@ cp /bin/setpriv "$tools/setpriv"
 ldd /bin/setpriv \
     | sed -n '/=>/ { s/.*=> \(\/[^ ]*\).*/\1/; p; d; }; s/^[[:space:]]*\(\/[^ ]*\).*/\1/p' \
     | while IFS= read -r library; do
-        [ "$library" = "$loader" ] && continue
+        if [ "$library" = "$loader" ]; then
+            continue
+        fi
         cp -L "$library" "$tools/$(basename "$library")"
     done
 chmod 0555 "$tools"/*
