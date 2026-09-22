@@ -56,10 +56,23 @@ def _workflow_job(workflow: str, job_name: str) -> str:
     return "\n".join(lines[start:end])
 
 
-def _composite_action_script(action: str, step_name: str) -> str:
+def _composite_action_step(action: str, step_name: str) -> str:
     lines = action.splitlines()
-    step = lines.index(f"    - name: {step_name}")
-    start = lines.index("      run: |", step) + 1
+    start = lines.index(f"    - name: {step_name}")
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start + 1 :], start + 1)
+            if line.startswith("    - ")
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _composite_action_script(action: str, step_name: str) -> str:
+    lines = _composite_action_step(action, step_name).splitlines()
+    start = lines.index("      run: |") + 1
     end = next(
         (
             index
@@ -2090,6 +2103,68 @@ class CiConfigurationTests(unittest.TestCase):
 
         self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
         self.assertNotRegex(configurations, r"actions/download-artifact@v[1-6]\b")
+
+    def test_benchmark_diagnostics_preserve_each_workflow_attempt(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+        ).read_text(encoding="utf-8")
+        diagnostics = _composite_action_step(action, "Upload benchmark diagnostics")
+        name = (
+            "benchmark-diagnostics-${{ inputs.platform }}-${{ github.run_id }}"
+            "-attempt-${{ github.run_attempt }}"
+        )
+
+        self.assertIn("      if: always()", diagnostics)
+        self.assertIn("      uses: actions/upload-artifact@v7", diagnostics)
+        self.assertIn("        path: data/runs/${{ inputs.platform }}", diagnostics)
+        self.assertIn(f"        name: {name}", diagnostics)
+        self.assertIn("        if-no-files-found: error", diagnostics)
+        self.assertIn("        overwrite: false", diagnostics)
+        self.assertIn("        retention-days: 1", diagnostics)
+        self.assertLess(
+            action.index("- name: Upload benchmark diagnostics"),
+            action.index("- name: Upload benchmark results"),
+        )
+
+        artifacts: dict[str, tuple[str, int]] = {}
+        for attempt in (1, 2):
+            for platform in (
+                "linux-kvm-virtual-machine",
+                "linux-mshv-virtual-machine",
+                "windows-whp-virtual-machine",
+            ):
+                artifact = (
+                    name.replace("${{ inputs.platform }}", platform)
+                    .replace("${{ github.run_id }}", "35771477786")
+                    .replace("${{ github.run_attempt }}", str(attempt))
+                )
+                self.assertNotIn("${{", artifact)
+                self.assertNotIn(artifact, artifacts)
+                artifacts[artifact] = (platform, attempt)
+        self.assertEqual(len(artifacts), 6)
+
+    def test_benchmark_result_handoff_keeps_run_scoped_names(self):
+        actions = common.REPO_ROOT / ".github" / "actions"
+        action = (actions / "run-benchmark" / "action.yml").read_text(encoding="utf-8")
+        prepare = (actions / "prepare-performance-results" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        results = _composite_action_step(action, "Upload benchmark results")
+        name = "benchmark-${{ inputs.platform }}-${{ github.run_id }}"
+
+        self.assertIn(f"        name: {name}", results)
+        self.assertIn("        path: data/runs/${{ inputs.platform }}", results)
+        self.assertIn("        overwrite: true", results)
+        self.assertNotIn("github.run_attempt", results)
+        self.assertNotIn("github.run_attempt", prepare)
+        for platform in (
+            "linux-kvm-virtual-machine",
+            "linux-mshv-virtual-machine",
+            "windows-whp-virtual-machine",
+        ):
+            with self.subTest(platform=platform):
+                artifact = name.replace("${{ inputs.platform }}", platform)
+                self.assertIn(f"        name: {artifact}", prepare)
 
     def test_windows_ci_remeasures_only_unstable_lifecycle_results(self):
         action = (
