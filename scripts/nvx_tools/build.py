@@ -705,8 +705,15 @@ def _write_ubuntu_manifest(
     helpers: dict[str, dict[str, str]],
 ) -> None:
     manifest = output.with_name(f"{output.name}.packages.json")
+    document = ubuntu.package_manifest(root, helpers)
+    document.update(
+        {
+            "artifact": output.name,
+            "artifact_sha256": sha256_file(output),
+        }
+    )
     manifest.write_text(
-        json.dumps(ubuntu.package_manifest(root, helpers), indent=2) + "\n",
+        json.dumps(document, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -747,10 +754,11 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
     helpers = _install_guest_files(config, root, descriptor)
     if descriptor.name == "ubuntu":
         ubuntu.apply_metadata_policy(root)
-        _write_ubuntu_manifest(root, output, helpers)
     else:
         _write_apk_manifest(root, output, helpers)
     _pack_initramfs(root, output)
+    if descriptor.name == "ubuntu":
+        _write_ubuntu_manifest(root, output, helpers)
     if (
         provenance_inputs is not None
         and initramfs_provenance_inputs() != provenance_inputs

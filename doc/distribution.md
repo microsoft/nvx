@@ -46,11 +46,13 @@ deduplicates exact source package name/version pairs from both Ubuntu
 manifests, downloads the matching `.dsc` and source members from Canonical's
 archive, verifies each source index through its signed `InRelease` file and the
 pinned Ubuntu archive keyring, and then verifies the indexed SHA-256 metadata
-before packaging. Exact versions that have left the live suite indexes are
-located through Canonical's Launchpad publishing history and resolved from a
-signed historical `snapshot.ubuntu.com` index. The signed release metadata,
-keyring, and raw Launchpad responses are retained with their URLs and SHA-256
-digests. Newer source versions are never substituted.
+before packaging. Source collection and release staging also require each
+Ubuntu artifact to match the artifact name and SHA-256 embedded in its companion
+manifest. Exact versions that have left the live suite indexes are located
+through Canonical's Launchpad publishing history and resolved from a signed
+historical `snapshot.ubuntu.com` index. The signed release metadata, keyring,
+and raw Launchpad responses are retained with their URLs and SHA-256 digests.
+Newer source versions are never substituted.
 
 OpenVMM is MIT licensed: retain its notice, but its source does not have to be
 published merely because it is aggregated with Linux. See

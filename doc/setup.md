@@ -166,16 +166,24 @@ python3 -m ruff check scripts benchmarks
 shellcheck --shell=sh \
   guest/common/init guest/alpine/nvx-container-enter \
   guest/alpine/nvx-container-launch guest/common/nvx-exit \
-  guest/common/nvx-hostmount guest/common/nvx-init-agent \
-  guest/common/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+  guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
+  guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
+  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+shellcheck --shell=bash \
+  .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 python3 -m pyright --pythonplatform Linux
 python3 -m pyright --pythonplatform Windows
 python3 -m ruff format --check scripts benchmarks
 shfmt -d -ln posix -i 4 -ci \
   guest/common/init guest/alpine/nvx-container-enter \
   guest/alpine/nvx-container-launch guest/common/nvx-exit \
-  guest/common/nvx-hostmount guest/common/nvx-init-agent \
-  guest/common/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+  guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
+  guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
+  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+shfmt -d -ln bash -i 4 -ci \
+  .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 ```
 
 Pyright runs in strict mode for both Linux and Windows platform APIs.
@@ -209,6 +217,10 @@ python3 -m ruff format scripts benchmarks
 shfmt -w -ln posix -i 4 -ci \
   guest/common/init guest/alpine/nvx-container-enter \
   guest/alpine/nvx-container-launch guest/common/nvx-exit \
-  guest/common/nvx-hostmount guest/common/nvx-init-agent \
-  guest/common/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+  guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
+  guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
+  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+shfmt -w -ln bash -i 4 -ci \
+  .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 ```

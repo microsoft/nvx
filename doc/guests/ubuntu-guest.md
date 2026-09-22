@@ -531,9 +531,11 @@ systemd requires a separate compatibility profile with:
 - stop-signal and shutdown handling; and
 - additional agent supervision semantics.
 
-That profile must be designed and tested independently. Detecting `/sbin/init`
-or a systemd package in an image must not silently relax the current sandbox
-security policy.
+That profile must be designed and tested independently. The current sandbox
+allows non-systemd `/sbin/init` implementations, but rejects canonical systemd
+executables and manifest-bound distro layers that contain the `systemd`
+package. Image metadata must not silently relax the current sandbox security
+policy.
 
 ## Package provenance and corresponding source
 

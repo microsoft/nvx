@@ -836,6 +836,22 @@ def _guest_release_inputs() -> tuple[list[str], list[Path], list[Path]]:
         artifact_path("initramfs-ubuntu.cpio.gz.packages.json"),
         artifact_path("ubuntu-distro.erofs.manifest.json"),
     ]
+    for artifact_name, manifest in zip(
+        ("initramfs-ubuntu.cpio.gz", "ubuntu-distro.erofs"),
+        ubuntu_manifests,
+        strict=True,
+    ):
+        artifact = artifact_path(artifact_name)
+        document = _read_json_object(manifest, f"{artifact_name} manifest")
+        if (
+            document.get("format") != 1
+            or document.get("guest") != "ubuntu"
+            or document.get("artifact") != artifact.name
+            or document.get("artifact_sha256") != sha256_file(artifact)
+        ):
+            raise ScriptError(
+                f"Ubuntu artifact manifest does not match {artifact_name}"
+            )
     return guest_names, alpine_manifests, ubuntu_manifests
 
 

@@ -1911,6 +1911,7 @@ class MicrovmTests(unittest.TestCase):
             "console-snapshot",
             "sandbox-blocks",
             "scratch-snapshot",
+            "snapshot-tiers",
         ):
             with self.subTest(scenario=scenario):
                 args = nvx.parse_args(

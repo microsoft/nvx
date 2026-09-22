@@ -91,6 +91,26 @@ def _write_release_fixture(
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(path.name.encode("ascii"))
+    for artifact_name, manifest_name in (
+        (
+            "initramfs-ubuntu.cpio.gz",
+            "initramfs-ubuntu.cpio.gz.packages.json",
+        ),
+        ("ubuntu-distro.erofs", "ubuntu-distro.erofs.manifest.json"),
+    ):
+        artifact = build_dir / artifact_name
+        (build_dir / manifest_name).write_text(
+            json.dumps(
+                {
+                    "format": 1,
+                    "guest": "ubuntu",
+                    "artifact": artifact.name,
+                    "artifact_sha256": common.sha256_file(artifact),
+                    "packages": [],
+                }
+            ),
+            encoding="utf-8",
+        )
     generated_config = build_dir / "vmlinux.config"
     generated_config.write_text(
         "\n".join(
@@ -479,19 +499,85 @@ class CliTests(unittest.TestCase):
             nvx.command_run(args)
 
     def test_sandbox_rejects_systemd_entrypoint(self):
-        args = nvx.parse_args(
-            [
-                "sandbox",
-                "--entrypoint",
-                "/sbin/init",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-            ]
-        )
-        with self.assertRaisesRegex(common.ScriptError, "systemd entrypoints"):
-            nvx.command_sandbox(args)
+        for entrypoint in nvx.SYSTEMD_ENTRYPOINTS:
+            with self.subTest(entrypoint=entrypoint):
+                args = nvx.parse_args(
+                    [
+                        "sandbox",
+                        "--entrypoint",
+                        entrypoint,
+                        "--layer",
+                        "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+                        "--scratch",
+                        "scratch.ext4",
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "systemd entrypoints",
+                ):
+                    nvx.command_sandbox(args)
+
+    def test_sandbox_allows_non_systemd_sbin_init(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            layer.write_bytes(b"distro")
+            scratch.write_bytes(b"scratch")
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "--entrypoint",
+                    "/sbin/init",
+                    "--layer",
+                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
+                    "--scratch",
+                    str(scratch),
+                    "--dry-run",
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(nvx, "require_file", side_effect=require),
+                patch.object(nvx, "_format_command", return_value="formatted"),
+            ):
+                nvx.command_sandbox(args)
+
+    def test_sandbox_rejects_systemd_from_bound_distro_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            layer.write_bytes(b"distro")
+            scratch.write_bytes(b"scratch")
+            layer.with_name(f"{layer.name}.manifest.json").write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "artifact": layer.name,
+                        "artifact_sha256": common.sha256_file(layer),
+                        "packages": [{"name": "systemd"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "--entrypoint",
+                    "/sbin/init",
+                    "--layer",
+                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
+                    "--scratch",
+                    str(scratch),
+                ]
+            )
+            with self.assertRaisesRegex(common.ScriptError, "systemd images"):
+                nvx.command_sandbox(args)
 
     def test_sandbox_command_parses_typed_launch_contract(self):
         args = nvx.parse_args(
@@ -2408,13 +2494,37 @@ class BuildTests(unittest.TestCase):
                 resolver.size = len(payload)
                 archive_file.addfile(resolver, io.BytesIO(payload))
 
-            with self.assertRaisesRegex(common.ScriptError, "escapes|non-directory"):
+            with self.assertRaisesRegex(common.ScriptError, "escapes"):
                 ubuntu.safe_extract_tar(
                     archive_path,
                     root / "extracted",
                     label="test archive",
                 )
             self.assertFalse((root / "outside").exists())
+
+    def test_ubuntu_safe_extractor_roots_absolute_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "absolute-symlink.tar"
+            with tarfile.open(archive_path, "w") as archive_file:
+                target = tarfile.TarInfo("run")
+                target.type = tarfile.DIRTYPE
+                archive_file.addfile(target)
+                symlink = tarfile.TarInfo("var/run")
+                symlink.type = tarfile.SYMTYPE
+                symlink.linkname = "/run"
+                archive_file.addfile(symlink)
+
+            destination = root / "extracted"
+            ubuntu.safe_extract_tar(
+                archive_path,
+                destination,
+                label="test archive",
+            )
+
+            link = destination / "var" / "run"
+            self.assertEqual(os.readlink(link), "../run")
+            self.assertEqual(link.resolve(), (destination / "run").resolve())
 
     def test_ubuntu_safe_extractor_rejects_absolute_and_parent_paths(self):
         for member_name in ("/absolute", "../parent"):
@@ -2521,6 +2631,29 @@ class BuildTests(unittest.TestCase):
                 self.assertRaisesRegex(common.ScriptError, "refusing to replace"),
             ):
                 build.build_distro_layer(build.DistroLayerBuildConfig(output=output))
+
+    def test_ubuntu_initramfs_manifest_binds_artifact_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "initramfs-ubuntu.cpio.gz"
+            output.write_bytes(b"ubuntu initramfs")
+            with patch.object(
+                ubuntu,
+                "package_manifest",
+                return_value={"format": 1, "guest": "ubuntu"},
+            ):
+                build._write_ubuntu_manifest(root, output, {})
+
+            manifest = json.loads(
+                output.with_name(f"{output.name}.packages.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["artifact"], output.name)
+            self.assertEqual(
+                manifest["artifact_sha256"],
+                common.sha256_file(output),
+            )
 
     def test_ubuntu_source_requirements_deduplicate_binary_manifests(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -5880,6 +6013,32 @@ class ReleaseTests(unittest.TestCase):
                     package_manifest,
                     paths["build"] / build.INITRAMFS_PROVENANCE_NAME,
                 )
+
+    def test_guest_release_inputs_reject_stale_ubuntu_artifacts(self):
+        for artifact_name in (
+            "initramfs-ubuntu.cpio.gz",
+            "ubuntu-distro.erofs",
+        ):
+            with (
+                self.subTest(artifact=artifact_name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                paths, _kernel_inputs, _revision = _write_release_fixture(root)
+                build_dir = paths["build"]
+                (build_dir / artifact_name).write_bytes(b"stale artifact")
+                with (
+                    patch.object(
+                        release,
+                        "artifact_path",
+                        side_effect=build_dir.joinpath,
+                    ),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "Ubuntu artifact manifest does not match",
+                    ),
+                ):
+                    release._guest_release_inputs()
 
     def test_package_rejects_tampered_source_metadata_without_replacing_output(self):
         cases: tuple[tuple[str, str, object, str], ...] = (

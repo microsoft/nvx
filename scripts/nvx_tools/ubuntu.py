@@ -8,6 +8,7 @@ import io
 import json
 import lzma
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -228,9 +229,10 @@ def _normalize_archive_path(raw_name: str, label: str) -> PurePosixPath:
     return PurePosixPath(*parts)
 
 
-def _virtual_symlink_target(path: PurePosixPath, linkname: str, label: str) -> None:
+def _virtual_symlink_target(path: PurePosixPath, linkname: str, label: str) -> str:
     target = PurePosixPath(linkname)
-    parts = [] if target.is_absolute() else list(path.parent.parts)
+    absolute = target.is_absolute()
+    parts = [] if absolute else list(path.parent.parts)
     for part in target.parts:
         if part in ("", ".", "/"):
             continue
@@ -240,6 +242,13 @@ def _virtual_symlink_target(path: PurePosixPath, linkname: str, label: str) -> N
             parts.pop()
         else:
             parts.append(part)
+    if not absolute:
+        return linkname
+    rooted_target = PurePosixPath(*parts)
+    return posixpath.relpath(
+        rooted_target.as_posix(),
+        path.parent.as_posix() or ".",
+    )
 
 
 def _member_kind(member: tarfile.TarInfo) -> str:
@@ -281,6 +290,7 @@ def _safe_extract_open_tar(
 ) -> tuple[PurePosixPath, ...]:
     members: dict[PurePosixPath, tarfile.TarInfo] = {}
     member_kinds: dict[PurePosixPath, str] = {}
+    symlink_targets: dict[PurePosixPath, str] = {}
     for member in archive.getmembers():
         path = _normalize_archive_path(member.name, label)
         if not path.parts:
@@ -298,7 +308,11 @@ def _safe_extract_open_tar(
         members[path] = member
         member_kinds[path] = kind
         if kind == "symlink":
-            _virtual_symlink_target(path, member.linkname, label)
+            symlink_targets[path] = _virtual_symlink_target(
+                path,
+                member.linkname,
+                label,
+            )
         elif kind == "hardlink":
             _normalize_archive_path(member.linkname, label)
 
@@ -338,7 +352,7 @@ def _safe_extract_open_tar(
             raise ScriptError(f"{label} member conflicts with existing path {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
         if kind == "symlink":
-            os.symlink(member.linkname, target)
+            os.symlink(symlink_targets[path], target)
             continue
         source = archive.extractfile(member)
         if source is None:

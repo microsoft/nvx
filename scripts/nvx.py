@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from nvx_tools import sandbox_lifecycle
 from nvx_tools.adversarial import configure_parser as configure_adversarial_parser
@@ -49,6 +51,7 @@ from nvx_tools.common import (
     artifact_path,
     openvmm_binary_path,
     require_file,
+    sha256_file,
 )
 from nvx_tools.create_linux_source_archive import (
     configure_parser as configure_linux_source_archive_parser,
@@ -68,12 +71,57 @@ from nvx_tools.sandbox import SandboxLaunch, SandboxLayer, parse_workload_identi
 DEFAULT_RELEASE_REPOSITORY = "microsoft/nvx"
 HYPERVISORS = ("auto", "whp", "kvm", "mshv")
 NETWORK_PROFILES = ("portable",)
+SYSTEMD_ENTRYPOINTS = frozenset(("/usr/lib/systemd/systemd", "/lib/systemd/systemd"))
 
 
 def _run(args: list[str | os.PathLike[str]], *, cwd: Path = REPO_ROOT) -> None:
     command = [os.fspath(arg) for arg in args]
     print(f">> {shlex.join(command)}")
     subprocess.run(command, cwd=cwd, check=True)
+
+
+def _validate_sandbox_systemd_policy(launch: SandboxLaunch) -> None:
+    if launch.entrypoint in SYSTEMD_ENTRYPOINTS:
+        raise ScriptError(
+            "systemd entrypoints are unsupported by the sandbox security profile"
+        )
+    distro = next(
+        (layer for layer in launch.layers if layer.role == "distro"),
+        None,
+    )
+    if distro is None:
+        return
+    manifest = distro.path.with_name(f"{distro.path.name}.manifest.json")
+    if not manifest.exists():
+        return
+    try:
+        document: object = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        raise ScriptError(f"invalid sandbox distro manifest: {error}") from error
+    if not isinstance(document, dict):
+        raise ScriptError("invalid sandbox distro manifest: expected a JSON object")
+    manifest_document = cast(dict[str, object], document)
+    if (
+        manifest_document.get("format") != 1
+        or manifest_document.get("artifact") != distro.path.name
+        or manifest_document.get("artifact_sha256") != sha256_file(distro.path)
+    ):
+        raise ScriptError("sandbox distro manifest does not match its artifact")
+    raw_packages = manifest_document.get("packages")
+    if not isinstance(raw_packages, list):
+        raise ScriptError("sandbox distro manifest has invalid package metadata")
+    packages: list[dict[str, object]] = []
+    for raw_package in cast(list[object], raw_packages):
+        if not isinstance(raw_package, dict):
+            raise ScriptError("sandbox distro manifest has invalid package metadata")
+        package = cast(dict[str, object], raw_package)
+        if not isinstance(package.get("name"), str):
+            raise ScriptError("sandbox distro manifest has invalid package metadata")
+        packages.append(package)
+    if any(package["name"] == "systemd" for package in packages):
+        raise ScriptError(
+            "systemd images are unsupported by the sandbox security profile"
+        )
 
 
 def command_init(_: argparse.Namespace) -> None:
@@ -328,7 +376,9 @@ def command_run(args: argparse.Namespace) -> None:
 
 def command_sandbox(args: argparse.Namespace) -> None:
     operation = args.sandbox_operation
-    if args.entrypoint in ("/sbin/init", "/usr/lib/systemd/systemd"):
+    if operation in ("run", "provision", "exec") and (
+        args.entrypoint in SYSTEMD_ENTRYPOINTS
+    ):
         raise ScriptError(
             "systemd entrypoints are unsupported by the sandbox security profile"
         )
@@ -351,6 +401,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
             memory_max=args.memory_max,
             pids_max=args.pids_max,
         ).validated()
+        _validate_sandbox_systemd_policy(launch)
     else:
         launch = None
 

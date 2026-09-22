@@ -357,8 +357,8 @@ def configure_parser(
         default=None,
         metavar="MIB",
         help=(
-            "snapshot memory sizes (default: 64 128 256 512, or "
-            "64 128 256 512 1024 for --suite snapshot-profile)"
+            "snapshot memory sizes (default: 128 256 512, or "
+            "128 256 512 1024 for --suite snapshot-profile)"
         ),
     )
     parser.add_argument(
