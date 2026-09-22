@@ -214,7 +214,6 @@ OPENVMM_MSHV_EXCLUDED_TESTS = (
     "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
     "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
     "multiarch::pcie::openvmm_linux_x64_pcie_save_restore",
-    "x86_64::openvmm_linux_x64_virtio_blk_device",
 )
 OPENVMM_MSHV_TEST_FILTER = _exclude_openvmm_tests(
     f"({OPENVMM_LINUX_TEST_FILTER}) & !test(windows_datacenter_core_2022_x64)",
