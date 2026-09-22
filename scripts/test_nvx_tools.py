@@ -1032,8 +1032,11 @@ class CiTests(unittest.TestCase):
                 "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
                 "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
                 "multiarch::pcie::openvmm_linux_x64_pcie_save_restore",
-                "x86_64::openvmm_linux_x64_virtio_blk_device",
             },
+        )
+        self.assertNotIn(
+            "x86_64::openvmm_linux_x64_virtio_blk_device",
+            ci.OPENVMM_MSHV_EXCLUDED_TESTS,
         )
         for excluded_test in ci.OPENVMM_MSHV_EXCLUDED_TESTS:
             self.assertIn(
