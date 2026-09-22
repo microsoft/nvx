@@ -6464,7 +6464,7 @@ class ReleaseTests(unittest.TestCase):
             (alpine_dir / "manifest.json").write_text("{", encoding="utf-8")
 
             with (
-                patch.object(release, "SOURCE_DIR", source_dir),
+                patch.object(BuildConstants, "SOURCE_DIR", source_dir),
                 self.assertRaisesRegex(
                     common.ScriptError,
                     "invalid collected Alpine source manifest",
