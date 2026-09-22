@@ -80,3 +80,28 @@ Persistent runners accept pushes and same-repository pull requests only. Fork
 pull requests run the GitHub-hosted validation jobs but do not execute code on
 the Azure runner fleet. A maintainer must stage an external contribution on a
 trusted repository branch before running the backend matrices.
+
+## Adversarial campaigns
+
+The separate
+[`adversarial.yml`](../.github/workflows/adversarial.yml) workflow runs
+Copilot-driven campaigns only on trusted manual dispatches or schedules from
+`dev`. It is not part of pull-request CI. The workflow's dedicated
+`nvx-adversarial-controller` runner must already have an authenticated Copilot
+CLI and an administrator-owned executor wrapper named by the
+`NVX_ADVERSARIAL_EXECUTOR` repository variable. The workflow does not install
+Copilot or initiate login.
+
+The wrapper provisions a distinct disposable KVM, MSHV, or WHP target with no
+production or GitHub credentials and forwards only the typed executor
+protocol. Existing persistent microVM and performance runners are not valid
+adversarial targets. Loss of the target heartbeat, a policy oracle, or a
+teardown/post-campaign boot failure fails the job and requires quarantine and
+reimage.
+
+Normal Actions artifacts contain only the guest-text-free public summary,
+catalogued case identifiers, and replay manifest. The external provisioner
+must collect controller transcripts and complete target logs into
+access-controlled security storage. See
+[Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
+for the architecture and operational contract.

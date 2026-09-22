@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from nvx_tools import sandbox_lifecycle
+from nvx_tools.adversarial import configure_parser as configure_adversarial_parser
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
     AlpineBuildConfig,
@@ -529,6 +530,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="run NVX-owned OpenVMM microVM correctness tests",
     )
     configure_microvm_test_parser(microvm_tests)
+
+    adversarial_tests = subparsers.add_parser(
+        "test-adversarial",
+        help="run a brokered Copilot-driven adversarial campaign",
+    )
+    configure_adversarial_parser(adversarial_tests)
 
     build = subparsers.add_parser("build", help="build guest artifacts and OpenVMM")
     _add_guest_options(build)

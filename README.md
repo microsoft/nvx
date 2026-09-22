@@ -70,6 +70,8 @@ python scripts\nvx.py run
 - [Design](doc/design.md) - Current microVM architecture and ABI.
 - [Project structure](doc/project-structure.md) - Overview of the NVX repository layout.
 - [Continuous integration](doc/ci.md) - Instructions for running and maintaining NVX CI.
+- [Copilot-driven adversarial testing](doc/design/copilot-adversarial-testing.md) - Bounded
+  adaptive stress and containment campaigns.
 - [Package and source delivery](doc/distribution.md) - Instructions for packaging and distributing
 	NVX.
 - [Contributing](doc/contribute.md) - Guidelines for contributing to NVX.

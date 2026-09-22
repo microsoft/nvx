@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import argparse
+import json
 import queue
 import shutil
 import socket
@@ -409,6 +410,125 @@ class MicrovmTests(unittest.TestCase):
         active.send_line.assert_called_once_with(
             "printf 'sensitive-output-value\\n'; /sbin/nvx-exit 37"
         )
+
+    def test_structured_outcome_preserves_invalid_primary_report(self):
+        report = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "guest-exit",
+                "status_code": 37,
+            },
+            policy={
+                "status": "applied",
+                "status_code": 0,
+                "mode": "rules",
+                "allow_rule_count": 2,
+                "deny_rule_count": 1,
+                "host_loopback": "deny",
+            },
+        )
+        teardown = cast(dict[str, object], report["teardown"])
+        teardown[next(iter(teardown))] = False
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with (
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests,
+                    "_read_outcome_report",
+                    return_value=report,
+                ),
+            ):
+                active = process.return_value.__enter__.return_value
+                active.wait.return_value = openvmm_process.OpenvmmProcessResult(
+                    37, b"sensitive-output-value\n"
+                )
+                with self.assertRaisesRegex(RuntimeError, "incomplete teardown"):
+                    microvm_tests.run_structured_outcome(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=40,
+                        output_dir=output,
+                    )
+            preserved = json.loads(
+                (output / "structured-outcome.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(preserved, report)
+
+    def test_structured_outcome_preserves_invalid_rejection_report(self):
+        applied = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "guest-exit",
+                "status_code": 37,
+            },
+            policy={
+                "status": "applied",
+                "status_code": 0,
+                "mode": "rules",
+                "allow_rule_count": 2,
+                "deny_rule_count": 1,
+                "host_loopback": "deny",
+            },
+        )
+        rejected = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "vmm-failure",
+                "status_code": 1,
+            },
+            policy={
+                "status": "failed",
+                "status_code": 1,
+                "mode": "rules",
+                "allow_rule_count": 1,
+                "deny_rule_count": 0,
+                "host_loopback": "allow",
+            },
+        )
+        teardown = cast(dict[str, object], rejected["teardown"])
+        teardown[next(iter(teardown))] = False
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with (
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests,
+                    "_read_outcome_report",
+                    side_effect=(applied, rejected),
+                ),
+            ):
+                active = process.return_value.__enter__.return_value
+                active.wait.side_effect = (
+                    openvmm_process.OpenvmmProcessResult(
+                        37, b"sensitive-output-value\n"
+                    ),
+                    openvmm_process.OpenvmmProcessResult(
+                        2, b"--network-egress is required\n"
+                    ),
+                )
+                with self.assertRaisesRegex(RuntimeError, "leaked host resources"):
+                    microvm_tests.run_structured_outcome(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=40,
+                        output_dir=output,
+                    )
+            preserved = json.loads(
+                (output / "structured-outcome-rejected.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(preserved, rejected)
 
     def test_console_exit_preserves_full_output_and_guest_status(self):
         expected = (

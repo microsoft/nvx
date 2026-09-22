@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "campaign": "snapshot-isolation",
+  "description": "Low-level capture and restore probes under console, storage, filesystem, network, and SMP activity.",
+  "cases": [
+    {
+      "id": "snapshot-core-boundary",
+      "scenario": "snapshot-core",
+      "description": "Verify the capture boundary, immutable snapshot artifacts, repeated restore, and state divergence.",
+      "coverage": [
+        "capture-boundary",
+        "artifact-immutability",
+        "repeated-restore",
+        "state-divergence"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 4
+    },
+    {
+      "id": "snapshot-console-boundary",
+      "scenario": "console-snapshot",
+      "description": "Exercise queued console receive and transmit state across capture and restore.",
+      "coverage": [
+        "console-rx",
+        "console-tx",
+        "queue-boundary",
+        "console-restore"
+      ],
+      "repetitions": 2,
+      "timeout_multiplier": 4
+    },
+    {
+      "id": "snapshot-filesystem-boundary",
+      "scenario": "filesystem-snapshot",
+      "description": "Exercise filesystem activity, attachment revalidation, and read-only host state across restore.",
+      "coverage": [
+        "virtio-fs",
+        "filesystem-activity",
+        "disk-io-churn",
+        "inode-churn",
+        "attachment-revalidation",
+        "read-only-host-state"
+      ],
+      "repetitions": 2,
+      "timeout_multiplier": 5
+    },
+    {
+      "id": "snapshot-scratch-boundary",
+      "scenario": "scratch-snapshot",
+      "description": "Probe scratch publication, replacement, missing media, corruption, and truncation paths.",
+      "coverage": [
+        "scratch-publication",
+        "scratch-replacement",
+        "corrupt-artifact",
+        "missing-artifact",
+        "truncated-artifact"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 5
+    },
+    {
+      "id": "snapshot-network-boundary",
+      "scenario": "network-snapshot",
+      "description": "Exercise active network traffic and endpoint state across capture and restore.",
+      "coverage": [
+        "network-activity",
+        "endpoint-state",
+        "network-restore"
+      ],
+      "repetitions": 2,
+      "timeout_multiplier": 5
+    },
+    {
+      "id": "snapshot-policy-boundary",
+      "scenario": "endpoint-policy-snapshot",
+      "description": "Verify endpoint and network policy remains immutable and enforced after restore.",
+      "coverage": [
+        "endpoint-policy",
+        "policy-immutability",
+        "post-restore-policy"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 4
+    },
+    {
+      "id": "snapshot-smp-boundary",
+      "scenario": "smp-snapshot",
+      "description": "Exercise capture and repeated restore while multiple virtual processors make progress.",
+      "coverage": [
+        "smp-capture",
+        "vcpu-state",
+        "interrupt-state",
+        "smp-restore"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 6
+    },
+    {
+      "id": "snapshot-memory-boundary",
+      "scenario": "restore-memory",
+      "description": "Exercise bounded memory growth, saved RAM validation, and repeated restore at supported capacities.",
+      "coverage": [
+        "memory-load",
+        "memory-expansion",
+        "saved-ram-validation",
+        "memory-restore"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 8
+    },
+    {
+      "id": "snapshot-processor-prefix-boundary",
+      "scenario": "restore-processors",
+      "description": "Exercise saved virtual-processor inventory and repeated restore across supported active prefixes.",
+      "coverage": [
+        "processor-load",
+        "processor-prefix",
+        "saved-vp-validation",
+        "processor-restore"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 8
+    },
+    {
+      "id": "snapshot-tier-boundary",
+      "scenario": "snapshot-tiers",
+      "description": "Exercise policy-tier dispatch and cross-instance state isolation across restores.",
+      "coverage": [
+        "snapshot-tiers",
+        "cross-instance-isolation",
+        "tier-validation"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 6
+    }
+  ]
+}

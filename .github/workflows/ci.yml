@@ -158,6 +158,7 @@ jobs:
             build/vmlinux.provenance.json
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
+            build/initramfs.provenance.json
           if-no-files-found: error
           retention-days: 1
 
