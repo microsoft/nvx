@@ -250,9 +250,7 @@ OPENVMM_WHP_TESTS = (
     "x86_64::openvmm_uefi_x64_guest_test_x64_crash_dump_on_triple_fault",
     "x86_64::openvmm_uefi_x64_windows_datacenter_core_2022_x64_battery_capacity",
 )
-OPENVMM_WHP_EXCLUDED_TESTS = (
-    "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
-)
+OPENVMM_WHP_EXCLUDED_TESTS: tuple[str, ...] = ()
 
 
 def _join_openvmm_tests(
