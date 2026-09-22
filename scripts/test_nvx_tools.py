@@ -6720,6 +6720,24 @@ class SharedFileTests(unittest.TestCase):
 
 
 class DownloadTests(unittest.TestCase):
+    def test_rejects_nonpositive_attempts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.tar.xz"
+            with (
+                patch("nvx_tools.common.urllib.request.urlopen") as urlopen,
+                self.assertRaisesRegex(
+                    common.ScriptError, "download attempts must be positive"
+                ),
+            ):
+                common.download(
+                    "https://example.invalid/archive.tar.xz",
+                    destination,
+                    attempts=0,
+                )
+
+            urlopen.assert_not_called()
+            self.assertFalse(destination.exists())
+
     def test_retries_checksum_mismatch(self):
         payload = b"verified archive"
         expected_sha256 = hashlib.sha256(payload).hexdigest()
