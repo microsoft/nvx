@@ -93,12 +93,6 @@ NETWORK_LOG = """
 """
 
 SHELL_SNAPSHOT_LOG = """
-== 64 MiB ==
-    cold boot           : median   510.0 ms   (min 500.0, max 1,510.0, n=5)
-             fast path   505.0 ms (n=4)  |  slow path  1510.0 ms (n=1, +~1005 ms TSC PIT-calib)
-    snapshot restore    : median     5.0 ms   (min 4.8, max 5.2, n=5)
-    speedup             : 101x (fast-path cold) .. 102x (median cold) faster via snapshot
-
 == 128 MiB ==
     cold boot           : median   520.0 ms   (min 510.0, max 530.0, n=5)
     snapshot restore    : median     5.5 ms   (min 5.3, max 5.7, n=5)
@@ -772,15 +766,18 @@ class PerformanceTests(unittest.TestCase):
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 31)
+            self.assertEqual(len(results), 29)
             by_metric = {result.metric: result for result in results}
             self.assertEqual(by_metric["cold_start_base"].p50, 101.0)
             self.assertEqual(by_metric["cold_start_cryptomgr_notests"].p50, 109.0)
             self.assertEqual(by_metric["virtfs_live_read"].p50, 1200.0)
             self.assertEqual(by_metric["virtfs_live_read"].direction, "higher")
             self.assertEqual(by_metric["network_snapshot_restore"].p50, 40.0)
-            self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].p50, 510.0)
-            self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].direction, "lower")
+            self.assertEqual(by_metric["shell_snapshot_cold_128_mib"].p50, 520.0)
+            self.assertEqual(
+                by_metric["shell_snapshot_cold_128_mib"].direction,
+                "lower",
+            )
             self.assertEqual(by_metric["shell_snapshot_restore_512_mib"].p50, 7.0)
             self.assertEqual(by_metric["openvmm_snapshot_generation"].p50, 31.0)
             self.assertEqual(
@@ -789,7 +786,7 @@ class PerformanceTests(unittest.TestCase):
             )
             markdown = (root / "summary.md").read_text(encoding="utf-8")
             self.assertIn("## Linux / KVM benchmark results", markdown)
-            self.assertEqual(markdown.count("\n| `"), 31)
+            self.assertEqual(markdown.count("\n| `"), 29)
             self.assertIn(
                 "| `virtfs_live_read` | 1200.00 MB/s | Higher is better |", markdown
             )
@@ -822,7 +819,7 @@ class PerformanceTests(unittest.TestCase):
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 23)
+            self.assertEqual(len(results), 21)
             self.assertIn(
                 "network_snapshot_restore",
                 {result.metric for result in results},
@@ -842,7 +839,7 @@ class PerformanceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 performance.PerformanceError,
-                r"exactly 23 metrics \(missing: network_snapshot_cold",
+                r"exactly 21 metrics \(missing: network_snapshot_cold",
             ):
                 performance.collect_results(
                     "linux-kvm",
@@ -1779,7 +1776,7 @@ class PerformanceTests(unittest.TestCase):
                 "virtfs_measured_runs": 10,
                 "payload_mib": 64,
                 "virtfs_memory_mib": 512,
-                "shell_memories_mib": [64, 128, 256, 512],
+                "shell_memories_mib": [128, 256, 512],
                 "network_memory_mib": 256,
             }
             (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(

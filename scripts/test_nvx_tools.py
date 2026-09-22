@@ -2506,10 +2506,11 @@ class BuildTests(unittest.TestCase):
                 patch.object(ubuntu, "_clear_directory"),
                 patch.object(ubuntu, "_validate_accounts"),
                 patch.object(ubuntu, "_validate_usr_merge"),
+                patch.object(ubuntu, "_ensure_symlink") as ensure_symlink,
             ):
                 ubuntu._customize_root(root)
 
-            self.assertEqual(os.readlink(root / "usr" / "bin" / "wget"), "busybox")
+            ensure_symlink.assert_any_call(root, "usr/bin/wget", "busybox")
 
     def test_distro_layer_refuses_existing_output_without_replace(self):
         with tempfile.TemporaryDirectory() as temporary:
