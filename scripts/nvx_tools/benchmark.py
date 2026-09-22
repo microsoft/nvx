@@ -3766,7 +3766,7 @@ def _device_io_helper_provenance(
     args: argparse.Namespace, initrd: Path
 ) -> dict[str, str]:
     source = require_file(
-        args.nvx_dir.resolve() / "alpine" / "nvx-device-io.c",
+        args.nvx_dir.resolve() / "guest" / "common" / "nvx-device-io.c",
         "device I/O helper source",
     )
     manifest_path = require_file(

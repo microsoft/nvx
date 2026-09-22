@@ -1832,35 +1832,82 @@ class MicrovmTests(unittest.TestCase):
         )
         self.assertEqual(run_guest_boot.call_args.kwargs["memory_mib"], 256)
 
-    def test_runner_rejects_ubuntu_sandbox_control_scenarios(self):
-        args = nvx.parse_args(
-            [
-                "test-microvm",
-                "--backend",
-                "whp",
-                "--guest",
-                "ubuntu",
-                "--scenario",
-                "sandbox-blocks",
-            ]
-        )
-
+    def test_runner_omits_console_snapshot_from_ubuntu_defaults(self):
         def require(path: Path, _description: str) -> Path:
             return path
 
-        with (
-            patch.object(microvm_tests, "validate_openvmm_test_backend"),
-            patch.object(
-                microvm_tests,
-                "require_file",
-                side_effect=require,
-            ),
-            self.assertRaisesRegex(
-                common.ScriptError,
-                "Ubuntu guest does not support",
-            ),
+        with tempfile.TemporaryDirectory() as temporary:
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--guest",
+                    "ubuntu",
+                    "--output-dir",
+                    temporary,
+                ]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(
+                    microvm_tests,
+                    "MICROVM_TEST_SCENARIOS",
+                    ("console-snapshot", "guest-boot"),
+                ),
+                patch.object(
+                    microvm_tests,
+                    "require_file",
+                    side_effect=require,
+                ),
+                patch.object(microvm_tests, "run_guest_boot") as guest_boot,
+                patch.object(
+                    microvm_tests,
+                    "run_console_snapshot",
+                ) as console_snapshot,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+
+        guest_boot.assert_called_once()
+        console_snapshot.assert_not_called()
+
+    def test_runner_rejects_ubuntu_unsupported_scenarios(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        for scenario in (
+            "console-snapshot",
+            "sandbox-blocks",
+            "scratch-snapshot",
         ):
-            microvm_tests.run(args)
+            with self.subTest(scenario=scenario):
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "whp",
+                        "--guest",
+                        "ubuntu",
+                        "--scenario",
+                        scenario,
+                    ]
+                )
+                with (
+                    patch.object(
+                        microvm_tests,
+                        "validate_openvmm_test_backend",
+                    ),
+                    patch.object(
+                        microvm_tests,
+                        "require_file",
+                        side_effect=require,
+                    ),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "Ubuntu guest does not support",
+                    ),
+                ):
+                    microvm_tests.run(args)
 
     def test_runner_keeps_restore_tsc_logs_separate_from_processor_restore(self):
         def require(path: Path, _description: str) -> Path:

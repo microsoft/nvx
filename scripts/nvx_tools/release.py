@@ -70,6 +70,7 @@ from .ubuntu import (
     DEFAULT_UBUNTU_VERSION,
     UBUNTU_PACKAGE_LOCK,
     UBUNTU_EROFS_FORMAT,
+    package_lock_sha256,
 )
 
 PROJECT_SOURCE_PATHS = (
@@ -1130,7 +1131,7 @@ def _validate_source_manifest_metadata(
         "base_url": DEFAULT_UBUNTU_BASE_URL,
         "base_sha256": DEFAULT_UBUNTU_BASE_SHA256,
         "package_lock": "ubuntu/packages.lock.json",
-        "package_lock_sha256": sha256_file(UBUNTU_PACKAGE_LOCK),
+        "package_lock_sha256": package_lock_sha256(),
         "guest_sources": [
             "guest/common",
             "guest/ubuntu",

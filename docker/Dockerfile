@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-ARG DEBIAN_IMAGE=debian:12-slim
+ARG DEBIAN_IMAGE=debian:12-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+ARG EROFS_UTILS_VERSION=1.5-1
 
 FROM ${DEBIAN_IMAGE} AS base
+ARG EROFS_UTILS_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bc \
         binutils \
@@ -11,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         cpio \
         curl \
-        erofs-utils \
+        erofs-utils=${EROFS_UTILS_VERSION} \
         flex \
         gzip \
         libelf-dev \

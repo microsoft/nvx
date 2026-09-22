@@ -76,7 +76,9 @@ Pass `--replace` only when intentionally rebuilding that path. The native
 Ubuntu build requires `zstd`, and EROFS conversion additionally requires
 `mkfs.erofs` from `erofs-utils`. The builder verifies Ubuntu Base and every
 supplemental `.deb` before safe extraction and never executes binaries or
-maintainer scripts from the Ubuntu root.
+maintainer scripts from the Ubuntu root. The Docker builder pins its Debian
+base image by digest and installs an exact `erofs-utils` version so clean EROFS
+builds use the same encoder.
 
 Check both Ubuntu outputs for deterministic rebuilds with:
 

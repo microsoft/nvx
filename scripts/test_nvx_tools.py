@@ -2363,7 +2363,11 @@ class BuildTests(unittest.TestCase):
         )
         self.assertEqual(
             ubuntu_manifest["package_lock_sha256"],
-            common.sha256_file(ubuntu.UBUNTU_PACKAGE_LOCK),
+            ubuntu.package_lock_sha256(),
+        )
+        self.assertEqual(
+            ubuntu_manifest["package_lock_sha256"],
+            "fcdd30223b96fc26e24fcf4b6763a4a2504e9cd25882e68e89fbf6bf45277ef0",
         )
         packages = ubuntu.load_package_lock()
         self.assertEqual(
@@ -2442,6 +2446,45 @@ class BuildTests(unittest.TestCase):
                 ubuntu.erofs_uuid(first_digest),
                 ubuntu.erofs_uuid(second_digest),
             )
+
+    def test_ubuntu_prepare_root_normalizes_root_directory_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            work = temporary_root / "work"
+            expected_root = work / "root"
+
+            def extract(
+                archive: Path,
+                destination: Path,
+                *,
+                label: str,
+            ) -> None:
+                self.assertEqual(
+                    archive.name,
+                    f"ubuntu-base-{ubuntu.DEFAULT_UBUNTU_VERSION}-base-amd64.tar.gz",
+                )
+                self.assertEqual(label, "Ubuntu Base archive")
+                status = destination / "var" / "lib" / "dpkg" / "status"
+                status.parent.mkdir(parents=True)
+                status.write_text("", encoding="utf-8")
+
+            with (
+                patch.object(
+                    ubuntu,
+                    "cache_root",
+                    return_value=temporary_root / "cache",
+                ),
+                patch.object(ubuntu, "download_verified"),
+                patch.object(ubuntu, "safe_extract_tar", side_effect=extract),
+                patch.object(ubuntu, "_validate_ubuntu_identity"),
+                patch.object(ubuntu, "load_package_lock", return_value=()),
+                patch.object(ubuntu, "_validate_package_closure"),
+                patch.object(ubuntu, "_customize_root"),
+                patch.object(ubuntu.Path, "chmod", autospec=True) as chmod,
+            ):
+                self.assertEqual(ubuntu.prepare_root(work), expected_root)
+
+            chmod.assert_called_once_with(expected_root, 0o755)
 
     def test_distro_layer_refuses_existing_output_without_replace(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2534,6 +2577,131 @@ class BuildTests(unittest.TestCase):
             ):
                 collect_ubuntu_sources._validate_dsc(dsc, record)
 
+    def test_launchpad_source_record_retains_verifiable_raw_metadata(self):
+        source_payload = b"source archive"
+        source_sha256 = hashlib.sha256(source_payload).hexdigest()
+        dsc_text = (
+            "-----BEGIN PGP SIGNED MESSAGE-----\n"
+            "Hash: SHA256\n"
+            "\n"
+            "Source: example\n"
+            "Version: 1.0\n"
+            "Checksums-Sha256:\n"
+            f" {source_sha256} {len(source_payload)} example_1.0.orig.tar.xz\n"
+            "-----BEGIN PGP SIGNATURE-----\n"
+            "test\n"
+            "-----END PGP SIGNATURE-----\n"
+        )
+        self_link = f"{collect_ubuntu_sources._LAUNCHPAD_ARCHIVE_API}/+sourcepub/123"
+        query = {
+            "entries": [
+                {
+                    "source_package_name": "example",
+                    "source_package_version": "1.0",
+                    "status": "Superseded",
+                    "date_published": "2026-01-01T00:00:00Z",
+                    "self_link": self_link,
+                }
+            ]
+        }
+        source_urls = [
+            "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/"
+            "example/1.0/example_1.0.dsc",
+            "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/"
+            "example/1.0/example_1.0.orig.tar.xz",
+        ]
+
+        def download_json(url: str, destination: Path) -> object:
+            document: object = source_urls if "sourceFileUrls" in url else query
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(
+                json.dumps(document, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            return document
+
+        def download_source(url: str, destination: Path) -> None:
+            self.assertTrue(url.endswith(".dsc"))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(dsc_text, encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.object(
+                    collect_ubuntu_sources,
+                    "_download_json",
+                    side_effect=download_json,
+                ),
+                patch.object(
+                    collect_ubuntu_sources,
+                    "download",
+                    side_effect=download_source,
+                ),
+            ):
+                record, metadata = collect_ubuntu_sources._launchpad_source_record(
+                    root / "cache",
+                    "example",
+                    "1.0",
+                )
+
+            self.assertEqual(record["index_url"], metadata[0]["url"])
+            self.assertEqual(record["index_sha256"], metadata[0]["sha256"])
+            self.assertEqual(
+                [item["role"] for item in metadata],
+                [
+                    "launchpad-publishing-history",
+                    "launchpad-source-file-urls",
+                ],
+            )
+            for item in metadata:
+                self.assertIsNotNone(item["cache_path"])
+                self.assertEqual(
+                    item["sha256"],
+                    common.sha256_file(cast(Path, item["cache_path"])),
+                )
+
+            output = root / "output"
+            output.mkdir()
+            manifest_metadata = collect_ubuntu_sources._materialize_source_metadata(
+                output,
+                metadata,
+            )
+            for item, manifest_item in zip(
+                metadata,
+                manifest_metadata,
+                strict=True,
+            ):
+                retained = output / manifest_item["path"]
+                self.assertEqual(
+                    retained.read_bytes(),
+                    cast(Path, item["cache_path"]).read_bytes(),
+                )
+                self.assertEqual(
+                    common.sha256_file(retained),
+                    manifest_item["sha256"],
+                )
+
+    def test_ubuntu_source_collection_rejects_unexpected_output_entries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            output.mkdir()
+            stale = output / "unrelated.txt"
+            stale.write_text("do not archive", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "unexpected entries: unrelated.txt",
+            ):
+                collect_ubuntu_sources.collect_ubuntu_sources(
+                    [],
+                    output,
+                    root / "cache",
+                )
+
+            self.assertEqual(stale.read_text(encoding="utf-8"), "do not archive")
+
     def test_ci_kernel_cache_key_includes_patches(self):
         action = (
             build.REPO_ROOT
@@ -2560,6 +2728,31 @@ class BuildTests(unittest.TestCase):
             "kernel/config-microvm text eol=lf",
             attributes.splitlines(),
         )
+
+    def test_ci_guest_cache_keys_include_shared_build_modules(self):
+        action = (
+            build.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        for variable in ("ALPINE_INPUT_HASH", "UBUNTU_INPUT_HASH"):
+            assignment = next(line for line in action.splitlines() if variable in line)
+            self.assertIn("'scripts/nvx_tools/common.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/guests.py'", assignment)
+
+    def test_docker_guest_builder_pins_erofs_toolchain(self):
+        dockerfile = (build.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "ARG DEBIAN_IMAGE=debian:12-slim@sha256:"
+            "3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+            dockerfile,
+        )
+        self.assertIn("ARG EROFS_UTILS_VERSION=1.5-1", dockerfile)
+        self.assertIn("erofs-utils=${EROFS_UTILS_VERSION}", dockerfile)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")
@@ -2617,6 +2810,40 @@ class BuildTests(unittest.TestCase):
                 provenance["binary_sha256"], common.sha256_file(destination)
             )
             self.assertEqual(len(provenance["source_sha256"]), 64)
+
+    def test_device_io_provenance_uses_shared_helper_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "nvx"
+            source = checkout / "guest" / "common" / "nvx-device-io.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"shared helper source")
+            initrd = root / "initramfs.cpio.gz"
+            manifest = initrd.with_name(f"{initrd.name}.packages.json")
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "helpers": {
+                            "nvx-device-io": {
+                                "source_sha256": common.sha256_file(source),
+                                "binary_sha256": "1" * 64,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            provenance = benchmark._device_io_helper_provenance(
+                argparse.Namespace(nvx_dir=checkout),
+                initrd,
+            )
+
+            self.assertEqual(provenance["source"], str(source))
+            self.assertEqual(
+                provenance["source_sha256"],
+                common.sha256_file(source),
+            )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
         with tempfile.TemporaryDirectory() as temporary:

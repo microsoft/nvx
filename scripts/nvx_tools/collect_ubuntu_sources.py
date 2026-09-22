@@ -90,6 +90,14 @@ class SourceRecord(TypedDict):
     files: list[SourceFile]
 
 
+class SourceMetadata(TypedDict):
+    role: str
+    url: str
+    sha256: str
+    cache_path: Path | None
+    output_name: str | None
+
+
 def _source_requirements(manifests: list[Path]) -> tuple[SourceRequirement, ...]:
     requirements: dict[tuple[str, str], SourceRequirement] = {}
     for path in manifests:
@@ -169,16 +177,24 @@ def _index_cache_name(url: str) -> str:
 def _load_source_records(
     cache: Path,
     requirements: Sequence[SourceRequirement] = (),
-) -> tuple[dict[tuple[str, str], SourceRecord], list[dict[str, str]]]:
+) -> tuple[dict[tuple[str, str], SourceRecord], list[SourceMetadata]]:
     cache.mkdir(parents=True, exist_ok=True)
     records: dict[tuple[str, str], SourceRecord] = {}
-    indexes: list[dict[str, str]] = []
+    indexes: list[SourceMetadata] = []
     for index_url, archive_url in UBUNTU_SOURCE_INDEXES:
         index_path = cache / _index_cache_name(index_url)
         print(f">> downloading Ubuntu source index {index_url}")
         download(index_url, index_path)
         index_sha256 = sha256_file(index_path)
-        indexes.append({"url": index_url, "sha256": index_sha256})
+        indexes.append(
+            {
+                "role": "ubuntu-source-index",
+                "url": index_url,
+                "sha256": index_sha256,
+                "cache_path": None,
+                "output_name": None,
+            }
+        )
         try:
             contents = lzma.decompress(index_path.read_bytes()).decode("utf-8")
         except (lzma.LZMAError, UnicodeDecodeError) as error:
@@ -257,7 +273,7 @@ def _load_source_records(
             continue
         record, metadata = _launchpad_source_record(cache, *key)
         records[key] = record
-        indexes.append(metadata)
+        indexes.extend(metadata)
     return records, indexes
 
 
@@ -327,7 +343,7 @@ def _launchpad_source_record(
     cache: Path,
     name: str,
     version: str,
-) -> tuple[SourceRecord, dict[str, str]]:
+) -> tuple[SourceRecord, tuple[SourceMetadata, SourceMetadata]]:
     key = _encoded_package_directory(name, version)
     query_url = f"{_LAUNCHPAD_ARCHIVE_API}?" + urllib.parse.urlencode(
         {
@@ -340,6 +356,7 @@ def _launchpad_source_record(
     )
     query_path = cache / f"launchpad-{key}-query.json"
     raw_query = _download_json(query_url, query_path)
+    query_sha256 = sha256_file(query_path)
     if not isinstance(raw_query, dict):
         raise ScriptError(f"Launchpad returned invalid publishing data for {name}")
     query = cast(dict[str, object], raw_query)
@@ -378,6 +395,7 @@ def _launchpad_source_record(
     urls_url = f"{self_link}?ws.op=sourceFileUrls"
     urls_path = cache / f"launchpad-{key}-urls.json"
     raw_urls = _download_json(urls_url, urls_path)
+    urls_sha256 = sha256_file(urls_path)
     if not isinstance(raw_urls, list) or not raw_urls:
         raise ScriptError(f"Launchpad returned no source files for {name}={version}")
     urls: dict[str, str] = {}
@@ -431,31 +449,31 @@ def _launchpad_source_record(
             + ", ".join(extra_urls)
         )
 
-    metadata_path = cache / f"launchpad-{key}-metadata.json"
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "query_url": query_url,
-                "query": query,
-                "source_urls_url": urls_url,
-                "source_urls": raw_urls,
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    metadata_sha256 = sha256_file(metadata_path)
     return (
         {
             "source_name": name,
             "source_version": version,
             "directory": self_link,
-            "index_url": urls_url,
-            "index_sha256": metadata_sha256,
+            "index_url": query_url,
+            "index_sha256": query_sha256,
             "files": sorted(files, key=lambda item: item["name"]),
         },
-        {"url": urls_url, "sha256": metadata_sha256},
+        (
+            {
+                "role": "launchpad-publishing-history",
+                "url": query_url,
+                "sha256": query_sha256,
+                "cache_path": query_path,
+                "output_name": f"launchpad-{key}-publishing.json",
+            },
+            {
+                "role": "launchpad-source-file-urls",
+                "url": urls_url,
+                "sha256": urls_sha256,
+                "cache_path": urls_path,
+                "output_name": f"launchpad-{key}-source-urls.json",
+            },
+        ),
     )
 
 
@@ -463,11 +481,84 @@ def _encoded_package_directory(name: str, version: str) -> str:
     return f"{urllib.parse.quote(name, safe='')}_{urllib.parse.quote(version, safe='')}"
 
 
+_GENERATED_OUTPUT_ENTRIES = frozenset(
+    ("manifest.json", "metadata", "packages", "SHA256SUMS")
+)
+
+
+def _validate_source_output(output: Path) -> None:
+    if output.is_symlink() or (output.exists() and not output.is_dir()):
+        raise ScriptError(f"Ubuntu source output is not a directory: {output}")
+    if not output.exists():
+        return
+    unexpected = sorted(
+        path.name
+        for path in output.iterdir()
+        if path.name not in _GENERATED_OUTPUT_ENTRIES
+    )
+    if unexpected:
+        raise ScriptError(
+            "Ubuntu source output contains unexpected entries: " + ", ".join(unexpected)
+        )
+
+
+def _reset_source_output(output: Path) -> None:
+    for generated in (output / "packages", output / "metadata"):
+        if generated.is_symlink() or (generated.exists() and not generated.is_dir()):
+            raise ScriptError(
+                f"Ubuntu source generated path is not a directory: {generated}"
+            )
+        if generated.exists():
+            shutil.rmtree(generated)
+    for generated in (output / "manifest.json", output / "SHA256SUMS"):
+        if generated.is_symlink() or (generated.exists() and not generated.is_file()):
+            raise ScriptError(
+                f"Ubuntu source generated path is not a file: {generated}"
+            )
+        generated.unlink(missing_ok=True)
+
+
+def _materialize_source_metadata(
+    output: Path,
+    indexes: Sequence[SourceMetadata],
+) -> list[dict[str, str]]:
+    manifest_indexes: list[dict[str, str]] = []
+    metadata_root = output / "metadata"
+    for index in indexes:
+        manifest_index = {
+            "role": index["role"],
+            "url": index["url"],
+            "sha256": index["sha256"],
+        }
+        cache_path = index["cache_path"]
+        output_name = index["output_name"]
+        if (cache_path is None) != (output_name is None):
+            raise ScriptError("Ubuntu source metadata path is incomplete")
+        if cache_path is not None and output_name is not None:
+            metadata_root.mkdir(parents=True, exist_ok=True)
+            destination = metadata_root / output_name
+            if destination.exists():
+                raise ScriptError(
+                    f"duplicate Ubuntu source metadata output: {destination}"
+                )
+            shutil.copyfile(cache_path, destination)
+            actual_sha256 = sha256_file(destination)
+            if actual_sha256 != index["sha256"]:
+                raise ScriptError(
+                    f"Ubuntu source metadata changed while collecting: {cache_path}"
+                )
+            manifest_index["path"] = destination.relative_to(output).as_posix()
+        manifest_indexes.append(manifest_index)
+    return manifest_indexes
+
+
 def collect_ubuntu_sources(
     manifests: list[Path],
     output: Path,
     cache: Path,
 ) -> None:
+    output = output.resolve()
+    _validate_source_output(output)
     requirements = _source_requirements(manifests)
     records, indexes = _load_source_records(cache, requirements)
     missing = [
@@ -485,12 +576,8 @@ def collect_ubuntu_sources(
             + ", ".join(missing)
         )
 
-    output = output.resolve()
+    _reset_source_output(output)
     packages_root = output / "packages"
-    if packages_root.exists():
-        shutil.rmtree(packages_root)
-    for generated in (output / "manifest.json", output / "SHA256SUMS"):
-        generated.unlink(missing_ok=True)
     packages_root.mkdir(parents=True, exist_ok=True)
 
     collected: list[dict[str, object]] = []
@@ -540,7 +627,7 @@ def collect_ubuntu_sources(
             }
         )
 
-    output.mkdir(parents=True, exist_ok=True)
+    source_indexes = _materialize_source_metadata(output, indexes)
     (output / "manifest.json").write_text(
         json.dumps(
             {
@@ -548,7 +635,7 @@ def collect_ubuntu_sources(
                 "release": DEFAULT_UBUNTU_VERSION,
                 "codename": DEFAULT_UBUNTU_CODENAME,
                 "architecture": DEFAULT_UBUNTU_ARCHITECTURE,
-                "source_indexes": indexes,
+                "source_indexes": source_indexes,
                 "packages": collected,
             },
             indent=2,

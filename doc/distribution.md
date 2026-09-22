@@ -46,7 +46,9 @@ deduplicates exact source package name/version pairs from both Ubuntu
 manifests, downloads the matching `.dsc` and source members from Canonical's
 archive, and verifies the SHA-256 metadata before packaging. Exact versions
 that have left the live suite indexes are resolved through Canonical's
-Launchpad publishing history; newer source versions are never substituted.
+Launchpad publishing history; the raw publishing and source-file URL responses
+are retained with their URLs and SHA-256 digests. Newer source versions are
+never substituted.
 
 OpenVMM is MIT licensed: retain its notice, but its source does not have to be
 published merely because it is aggregated with Linux. See

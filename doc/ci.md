@@ -53,9 +53,10 @@ process exits, so delayed final output chunks cannot create a false failure.
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
 separate cache keys. Ubuntu keys include the Canonical archive pin,
-supplemental package lock, common guest sources, converter implementation, and
-Dockerfile. Artifact upload retains the Alpine filenames and adds the distinct
-Ubuntu filenames. Each backend also boots the Ubuntu initramfs and runs
+supplemental package lock, common guest sources, shared download and guest
+descriptor modules, converter implementation, and Dockerfile. Artifact upload
+retains the Alpine filenames and adds the distinct Ubuntu filenames. Each
+backend also boots the Ubuntu initramfs and runs
 `/sbin/nvx-sandbox-smoke` from the Ubuntu EROFS layer as UID/GID 65534 over a
 fresh ext4 scratch copy. Linux/KVM runs the broader Ubuntu SMP, managed
 lifecycle, network snapshot, blockless snapshot, and workload-identity set.

@@ -47,7 +47,7 @@
     "base_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-amd64.tar.gz",
     "base_sha256": "a496a960472ce474a59590b8987d3a1135d3cbef1991f3b1abe8cacfea8bf85a",
     "package_lock": "ubuntu/packages.lock.json",
-    "package_lock_sha256": "7d1796fa60c067d45bae9bcbd96dc523224515a9a6292925a9fd96f0a0fa78fa",
+    "package_lock_sha256": "fcdd30223b96fc26e24fcf4b6763a4a2504e9cd25882e68e89fbf6bf45277ef0",
     "guest_sources": [
       "guest/common",
       "guest/ubuntu",

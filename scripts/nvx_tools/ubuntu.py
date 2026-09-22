@@ -207,6 +207,13 @@ def load_package_lock(
     return tuple(packages)
 
 
+def package_lock_sha256(path: Path = UBUNTU_PACKAGE_LOCK) -> str:
+    contents = path.read_bytes().replace(b"\r\n", b"\n")
+    if b"\r" in contents:
+        raise ScriptError(f"{path} contains unsupported carriage returns")
+    return hashlib.sha256(contents).hexdigest()
+
+
 def _normalize_archive_path(raw_name: str, label: str) -> PurePosixPath:
     path = PurePosixPath(raw_name)
     if path.is_absolute():
@@ -777,6 +784,7 @@ def prepare_root(work: Path) -> Path:
     if root.exists():
         shutil.rmtree(root)
     root.mkdir()
+    root.chmod(0o755)
     safe_extract_tar(archive, root, label="Ubuntu Base archive")
     _validate_ubuntu_identity(root)
 

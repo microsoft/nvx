@@ -77,7 +77,9 @@ MICROVM_TEST_SCENARIOS = (
     "virtio-net",
     "workload-identity",
 )
-UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("sandbox-blocks", "scratch-snapshot"))
+UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(
+    ("console-snapshot", "sandbox-blocks", "scratch-snapshot")
+)
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
