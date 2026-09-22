@@ -6456,6 +6456,22 @@ AUTHORIZATION_VALUE = "Bearer placeholder-value"
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_alpine_source_validation_rejects_malformed_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_dir = Path(temporary)
+            alpine_dir = source_dir / "alpine"
+            alpine_dir.mkdir()
+            (alpine_dir / "manifest.json").write_text("{", encoding="utf-8")
+
+            with (
+                patch.object(release, "SOURCE_DIR", source_dir),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "invalid collected Alpine source manifest",
+                ),
+            ):
+                release._validate_alpine_sources([])
+
     def test_selects_latest_matching_prerelease_asset(self):
         releases = [
             {
