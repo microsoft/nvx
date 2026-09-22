@@ -143,9 +143,7 @@ def _write_release_fixture(
             "base_url": ubuntu.DEFAULT_UBUNTU_BASE_URL,
             "base_sha256": ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
             "package_lock": "ubuntu/packages.lock.json",
-            "package_lock_sha256": common.sha256_file(
-                ubuntu.UBUNTU_PACKAGE_LOCK
-            ),
+            "package_lock_sha256": ubuntu.package_lock_sha256(),
             "guest_sources": [
                 "guest/common",
                 "guest/ubuntu",
