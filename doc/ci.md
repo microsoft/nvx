@@ -76,8 +76,10 @@ GNU, musl, or MSVC without probing runtime devices. CI therefore retains its
 musl build for MSHV without maintaining a separate shell build path.
 
 The kernel and initramfs cache keys include
-[`build_config.py`](../scripts/nvx_tools/build_config.py), so shared build
-configuration changes invalidate cached guest artifacts and their provenance.
+[`build_config.py`](../scripts/nvx_tools/build_config.py) and
+[`build_constants.py`](../scripts/nvx_tools/build_constants.py), so shared build
+configuration or constant changes invalidate cached guest artifacts and their
+provenance. The Ubuntu distro layer shares the Ubuntu input hash.
 
 The producer handoff uses one-day workflow artifacts rather than caches. Each
 consumer downloads both the normalized executable and its build provenance,

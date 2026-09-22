@@ -33,6 +33,12 @@ from string import Template
 from typing import TextIO, TypedDict, cast
 
 from . import common
+from .build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+    KernelBuildConstants,
+    OpenVMMBuildConstants,
+)
 from .common import sha256_file
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
@@ -122,7 +128,6 @@ PERFORMANCE_LOG_FILENAMES = (
 )
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
-MICROVM_ABI_VERSION = 2
 
 
 class ProfiledResult(TypedDict, total=False):
@@ -3770,7 +3775,7 @@ def _device_io_helper_provenance(
         "device I/O helper source",
     )
     manifest_path = require_file(
-        initrd.with_name(f"{initrd.name}.packages.json"),
+        initrd.with_name(f"{initrd.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"),
         "initramfs package manifest",
     )
     try:
@@ -3808,7 +3813,7 @@ def write_benchmark_metadata(
 ) -> Path:
     platform = args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
     device_io = args.suite == "device-io"
-    microvm_abi_version = MICROVM_ABI_VERSION
+    microvm_abi_version = OpenVMMBuildConstants.MICROVM_ABI_VERSION
     processors = 1 if device_io else args.processors
     effective_network = (
         args.net or "10.0.0.2/24"
@@ -3935,7 +3940,7 @@ def run_workload_benchmarks(
                 args.nvx_dir.resolve()
                 / "data"
                 / "runs"
-                / f"{platform}-microvm-v{MICROVM_ABI_VERSION}-{args.processors}vcpu"
+                / f"{platform}-microvm-v{OpenVMMBuildConstants.MICROVM_ABI_VERSION}-{args.processors}vcpu"
             )
     if args.suite == "device-restore-profile" and output_dir is None:
         raise ValueError("device-restore-profile requires --output-dir")
@@ -4834,7 +4839,7 @@ def build_whp(openvmm_dir: Path) -> Path:
         cwd=openvmm_dir,
     )
     return require_file(
-        openvmm_dir / "target" / "release" / "openvmm.exe",
+        openvmm_dir / "target" / "release" / OpenVMMBuildConstants.WINDOWS_BINARY_NAME,
         "native OpenVMM release binary",
     )
 
@@ -5090,9 +5095,9 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         "--memory",
         f"{args.memory_mib}M",
         "--kernel",
-        str(stage / "vmlinux"),
+        str(stage / KernelBuildConstants.BINARY_NAME),
         "--initrd",
-        str(stage / "initramfs.cpio.gz"),
+        str(stage / AlpineBuildConstants.INITRAMFS_NAME),
         "--cmdline",
         f"clocksource=kvm-clock {BASE_TUNING}",
     ]
@@ -5190,7 +5195,7 @@ def result_document(
             "memory_mib": args.memory_mib,
             "platform": args.platform,
             "backend": backend or args.backend,
-            "microvm_abi_version": MICROVM_ABI_VERSION,
+            "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
             "processors": args.processors,
             "artifact_revisions": {
                 "nvx": _git_revision(args.nvx_dir.resolve()),
@@ -5286,9 +5291,11 @@ def run_native_linux(args: argparse.Namespace) -> int:
     executable = None
     if run_guest:
         artifact_dir = args.nvx_dir.resolve() / "build"
-        kernel = require_file(artifact_dir / "vmlinux", "NVX PVH kernel")
+        kernel = require_file(
+            artifact_dir / KernelBuildConstants.BINARY_NAME, "NVX PVH kernel"
+        )
         initrd = require_file(
-            artifact_dir / "initramfs.cpio.gz",
+            artifact_dir / AlpineBuildConstants.INITRAMFS_NAME,
             "NVX initramfs",
         )
         executable = (
@@ -5707,9 +5714,11 @@ def run(args: argparse.Namespace) -> int:
     initrd = None
     if run_guest:
         nvx_dir = args.nvx_dir.resolve()
-        kernel = require_file(nvx_dir / "build" / "vmlinux", "NVX PVH kernel")
+        kernel = require_file(
+            nvx_dir / "build" / KernelBuildConstants.BINARY_NAME, "NVX PVH kernel"
+        )
         initrd = require_file(
-            nvx_dir / "build" / "initramfs.cpio.gz",
+            nvx_dir / "build" / AlpineBuildConstants.INITRAMFS_NAME,
             "NVX initramfs",
         )
     cpus = parse_cpu_set(args.cpus)
@@ -5727,7 +5736,10 @@ def run(args: argparse.Namespace) -> int:
     if args.skip_build:
         if run_guest and "whp" in selected:
             boot_binaries["whp"] = require_file(
-                openvmm_dir / "target" / "release" / "openvmm.exe",
+                openvmm_dir
+                / "target"
+                / "release"
+                / OpenVMMBuildConstants.WINDOWS_BINARY_NAME,
                 "native OpenVMM release binary",
             )
         if run_guest and "kvm" in selected:

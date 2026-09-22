@@ -6,9 +6,12 @@ import argparse
 from pathlib import Path
 
 from nvx_tools.archive import create_reproducible_tar_gz
-from nvx_tools.build import DEFAULT_KERNEL_VERSION, prepare_kernel_source
+from nvx_tools.build import prepare_kernel_source
 from nvx_tools.build_config import KernelBuildConfig
-from nvx_tools.common import REPO_ROOT
+from nvx_tools.build_constants import (
+    BuildConstants,
+    KernelBuildConstants,
+)
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> None:
@@ -26,17 +29,23 @@ def command_create_linux_source_archive(args: argparse.Namespace) -> None:
         )
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    root = f"nvx-linux-source-{DEFAULT_KERNEL_VERSION}"
+    root = KernelBuildConstants.SOURCE_ARCHIVE_ROOT
     inputs = (
-        (source, f"{root}/linux-{DEFAULT_KERNEL_VERSION}"),
-        (generated_config, f"{root}/vmlinux.config"),
-        (REPO_ROOT / "kernel", f"{root}/kernel"),
-        (REPO_ROOT / "scripts", f"{root}/scripts"),
-        (REPO_ROOT / "docker", f"{root}/docker"),
-        (REPO_ROOT / "README.md", f"{root}/README.md"),
-        (REPO_ROOT / "SOURCE-MANIFEST.json", f"{root}/SOURCE-MANIFEST.json"),
-        (REPO_ROOT / "THIRD_PARTY_NOTICES.md", f"{root}/THIRD_PARTY_NOTICES.md"),
-        (REPO_ROOT / "LICENSE", f"{root}/LICENSE"),
+        (source, f"{root}/{KernelBuildConstants.SOURCE_NAME}"),
+        (generated_config, f"{root}/{KernelBuildConstants.CONFIG_NAME}"),
+        (BuildConstants.REPO_ROOT / "kernel", f"{root}/kernel"),
+        (BuildConstants.REPO_ROOT / "scripts", f"{root}/scripts"),
+        (BuildConstants.REPO_ROOT / "docker", f"{root}/docker"),
+        (BuildConstants.REPO_ROOT / "README.md", f"{root}/README.md"),
+        (
+            BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json",
+            f"{root}/SOURCE-MANIFEST.json",
+        ),
+        (
+            BuildConstants.REPO_ROOT / "THIRD_PARTY_NOTICES.md",
+            f"{root}/THIRD_PARTY_NOTICES.md",
+        ),
+        (BuildConstants.REPO_ROOT / "LICENSE", f"{root}/LICENSE"),
     )
     create_reproducible_tar_gz(output, inputs)
     print(f">> created {output}")

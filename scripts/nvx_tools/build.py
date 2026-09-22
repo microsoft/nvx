@@ -23,8 +23,16 @@ from .build_config import (
     OpenVmmBuildConfig,
     OpenVmmPlatform,
 )
+from .build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+    DockerBuildConstants,
+    InitramfsBuildConstants,
+    KernelBuildConstants,
+    OpenVMMBuildConstants,
+    UbuntuBuildConstants,
+)
 from .common import (
-    REPO_ROOT,
     ScriptError,
     artifact_path,
     download_verified,
@@ -37,45 +45,6 @@ from .common import (
     sha256_file,
 )
 from .guests import GuestDescriptor, guest_descriptor
-
-DEFAULT_KERNEL_VERSION = "6.18.38"
-DEFAULT_KERNEL_URL = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz"
-DEFAULT_KERNEL_SHA256 = (
-    "ac26e508abd56e9f8b89872b6e10c49fc823bcc70d8068a5d8504c1a7c4ff045"
-)
-DEFAULT_ALPINE_VERSION = "3.24.1"
-DEFAULT_ALPINE_BRANCH = "v3.24"
-DEFAULT_ALPINE_MINIROOTFS_SHA256 = (
-    "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081"
-)
-MICROVM_ABI_VERSION = 2
-CONTROL_SESSION_PROTOCOL_VERSION = 1
-CONTROL_CONTRACT_REVISION = "nvx-microvm-v2-control-v1"
-OPENVMM_PROVENANCE_NAME = "openvmm.provenance.json"
-KERNEL_PROVENANCE_NAME = "vmlinux.provenance.json"
-INITRAMFS_PROVENANCE_NAME = "initramfs.provenance.json"
-REQUIRED_VIRTIO_CONSOLE_CONFIG = (
-    "CONFIG_HVC_DRIVER=y",
-    "CONFIG_VIRTIO=y",
-    "CONFIG_VIRTIO_CONSOLE=y",
-    "CONFIG_VIRTIO_MMIO=y",
-    "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
-)
-REQUIRED_SHARED_STATUS_KERNEL_CONFIG = ("CONFIG_VIRTIO_MMIO_SHARED_STATUS=y",)
-REQUIRED_SANDBOX_KERNEL_CONFIG = (
-    "CONFIG_BPF_SYSCALL=y",
-    "CONFIG_CGROUP_BPF=y",
-    "CONFIG_EROFS_FS=y",
-    "CONFIG_EROFS_FS_ZIP=y",
-    "CONFIG_EROFS_FS_ZIP_ZSTD=y",
-    "CONFIG_EXT4_FS=y",
-    "CONFIG_MEMCG=y",
-    "CONFIG_OVERLAY_FS=y",
-    "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
-    "CONFIG_SECCOMP_FILTER=y",
-    "CONFIG_UNIX=y",
-    "CONFIG_VIRTIO_BLK=y",
-)
 
 
 class ApkPackage(TypedDict):
@@ -118,7 +87,7 @@ def _assert_kernel_config(
 def _assert_virtio_console_kernel_config(path: Path) -> None:
     _assert_kernel_config(
         path,
-        REQUIRED_VIRTIO_CONSOLE_CONFIG,
+        KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
         "kernel configuration cannot provide /dev/hvc1: ",
     )
 
@@ -126,7 +95,7 @@ def _assert_virtio_console_kernel_config(path: Path) -> None:
 def _assert_sandbox_kernel_config(path: Path) -> None:
     _assert_kernel_config(
         path,
-        REQUIRED_SANDBOX_KERNEL_CONFIG,
+        KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
         "kernel configuration cannot support sandbox workloads: ",
     )
 
@@ -134,7 +103,7 @@ def _assert_sandbox_kernel_config(path: Path) -> None:
 def _assert_shared_status_kernel_config(path: Path) -> None:
     _assert_kernel_config(
         path,
-        REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+        KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
         "kernel configuration cannot consume shared virtio interrupt status: ",
     )
 
@@ -154,11 +123,17 @@ def _require_linux(workflow: str) -> None:
 
 
 def _alpine_tarball(config: InitramfsBuildConfig) -> Path:
-    return config.work / f"alpine-minirootfs-{DEFAULT_ALPINE_VERSION}-x86_64.tar.gz"
+    return config.work / AlpineBuildConstants.MINIROOTFS_NAME
 
 
 def _kernel_patch_files() -> tuple[Path, ...]:
-    patches = tuple(sorted((REPO_ROOT / "kernel" / "patches").glob("*.patch")))
+    patches = tuple(
+        sorted(
+            (BuildConstants.REPO_ROOT / KernelBuildConstants.PATCH_DIRECTORY).glob(
+                "*.patch"
+            )
+        )
+    )
     if not patches:
         raise ScriptError("no kernel patches were found")
     return patches
@@ -175,20 +150,21 @@ def materialize_kernel_provenance_inputs() -> None:
             "--name-only",
             "HEAD",
             "--",
-            "kernel/config-microvm",
-            "kernel/patches",
+            KernelBuildConstants.INPUT_CONFIG.as_posix(),
+            KernelBuildConstants.PATCH_DIRECTORY.as_posix(),
         ],
-        cwd=REPO_ROOT,
+        cwd=BuildConstants.REPO_ROOT,
     )
     require_success(tracked, "run-head kernel provenance input query")
     tree_paths = tuple(
         path for path in tracked.stdout.decode("utf-8").split("\0") if path
     )
-    config_path = "kernel/config-microvm"
+    config_path = KernelBuildConstants.INPUT_CONFIG.as_posix()
     patch_paths = tuple(
         path
         for path in tree_paths
-        if path.startswith("kernel/patches/") and path.endswith(".patch")
+        if path.startswith(f"{KernelBuildConstants.PATCH_DIRECTORY.as_posix()}/")
+        and path.endswith(".patch")
     )
     if config_path not in tree_paths:
         raise ScriptError("kernel config is missing from the run head")
@@ -197,8 +173,10 @@ def materialize_kernel_provenance_inputs() -> None:
 
     head_patch_paths = set(patch_paths)
     worktree_patch_paths = {
-        path.relative_to(REPO_ROOT).as_posix(): path
-        for path in (REPO_ROOT / "kernel" / "patches").glob("*.patch")
+        path.relative_to(BuildConstants.REPO_ROOT).as_posix(): path
+        for path in (
+            BuildConstants.REPO_ROOT / KernelBuildConstants.PATCH_DIRECTORY
+        ).glob("*.patch")
     }
     for relative in sorted(worktree_patch_paths.keys() - head_patch_paths):
         worktree_patch_paths[relative].unlink()
@@ -207,22 +185,22 @@ def materialize_kernel_provenance_inputs() -> None:
     for relative in (config_path, *patch_paths):
         blob = run_capture(
             ["git", "cat-file", "blob", f"HEAD:{relative}"],
-            cwd=REPO_ROOT,
+            cwd=BuildConstants.REPO_ROOT,
         )
         require_success(blob, f"run-head kernel provenance input read for {relative}")
-        (REPO_ROOT / relative).write_bytes(blob.stdout)
+        (BuildConstants.REPO_ROOT / relative).write_bytes(blob.stdout)
         print(f">> materialized {relative} from the run head")
 
 
 def _kernel_source_fingerprint() -> str:
     return json.dumps(
         {
-            "version": DEFAULT_KERNEL_VERSION,
-            "upstream_url": DEFAULT_KERNEL_URL,
-            "upstream_archive_sha256": DEFAULT_KERNEL_SHA256,
+            "version": KernelBuildConstants.VERSION,
+            "upstream_url": KernelBuildConstants.URL,
+            "upstream_archive_sha256": KernelBuildConstants.SHA256,
             "patches": [
                 {
-                    "path": patch.relative_to(REPO_ROOT).as_posix(),
+                    "path": patch.relative_to(BuildConstants.REPO_ROOT).as_posix(),
                     "sha256": sha256_file(patch),
                 }
                 for patch in _kernel_patch_files()
@@ -239,7 +217,7 @@ def _kernel_provenance_inputs(
     return {
         "source": json.loads(source_fingerprint),
         "input_config": {
-            "path": "kernel/config-microvm",
+            "path": KernelBuildConstants.INPUT_CONFIG.as_posix(),
             "sha256": input_config_sha256,
         },
     }
@@ -249,31 +227,29 @@ def kernel_provenance_inputs() -> dict[str, object]:
     """Return the current source and input-config identity for a kernel build."""
     return _kernel_provenance_inputs(
         _kernel_source_fingerprint(),
-        sha256_file(REPO_ROOT / "kernel" / "config-microvm"),
+        sha256_file(BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG),
     )
 
 
 def _initramfs_source_files() -> tuple[Path, ...]:
     sources = [
-        REPO_ROOT / "docker" / "Dockerfile",
-        REPO_ROOT / "scripts" / "nvx_tools" / "build.py",
-        REPO_ROOT / "scripts" / "nvx_tools" / "build_config.py",
-        REPO_ROOT / "scripts" / "nvx_tools" / "common.py",
-        REPO_ROOT / "scripts" / "nvx_tools" / "guests.py",
+        BuildConstants.REPO_ROOT / DockerBuildConstants.DOCKERFILE,
+        BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build.py",
+        BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build_config.py",
+        BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build_constants.py",
+        BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "common.py",
+        BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "guests.py",
         *(
             path
-            for root in (
-                REPO_ROOT / "guest" / "common",
-                REPO_ROOT / "guest" / "alpine",
-            )
-            for path in root.rglob("*")
+            for directory in AlpineBuildConstants.GUEST_SOURCE_DIRECTORIES
+            for path in (BuildConstants.REPO_ROOT / directory).rglob("*")
             if path.is_file()
         ),
     ]
     return tuple(
         sorted(
             (require_file(path, "initramfs provenance input") for path in sources),
-            key=lambda path: path.relative_to(REPO_ROOT).as_posix(),
+            key=lambda path: path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
         )
     )
 
@@ -282,13 +258,13 @@ def initramfs_provenance_inputs() -> dict[str, object]:
     """Return the current source identity for an initramfs build."""
     return {
         "alpine": {
-            "version": DEFAULT_ALPINE_VERSION,
-            "branch": DEFAULT_ALPINE_BRANCH,
-            "minirootfs_sha256": DEFAULT_ALPINE_MINIROOTFS_SHA256,
+            "version": AlpineBuildConstants.VERSION,
+            "branch": AlpineBuildConstants.BRANCH,
+            "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
         },
         "source_files": [
             {
-                "path": path.relative_to(REPO_ROOT).as_posix(),
+                "path": path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
                 "sha256": sha256_file(path),
             }
             for path in _initramfs_source_files()
@@ -300,7 +276,9 @@ def record_openvmm_provenance(config: OpenVmmBuildConfig) -> None:
     """Bind an OpenVMM executable to the checked-out submodule revision."""
     head = run_capture(["git", "-C", config.directory, "rev-parse", "HEAD"])
     require_success(head, "OpenVMM revision query")
-    gitlink = run_capture(["git", "-C", REPO_ROOT, "rev-parse", ":openvmm"])
+    gitlink = run_capture(
+        ["git", "-C", BuildConstants.REPO_ROOT, "rev-parse", ":openvmm"]
+    )
     require_success(gitlink, "OpenVMM gitlink query")
     status = run_capture(["git", "-C", config.directory, "status", "--porcelain"])
     require_success(status, "OpenVMM status query")
@@ -312,12 +290,12 @@ def record_openvmm_provenance(config: OpenVmmBuildConfig) -> None:
         )
     executable = require_file(config.output, "OpenVMM release binary")
     provenance = {
-        "format": 1,
+        "format": OpenVMMBuildConstants.PROVENANCE_FORMAT,
         "source_revision": source_revision,
         "source_clean": not status.stdout.strip(),
         "executable_sha256": sha256_file(executable),
     }
-    path = config.build_directory / OPENVMM_PROVENANCE_NAME
+    path = config.build_directory / OpenVMMBuildConstants.PROVENANCE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
 
@@ -352,7 +330,7 @@ def _build_openvmm_musl(
 ) -> None:
     target = config.openvmm_target(platform)
     _run_openvmm_command(["rustup", "target", "add", target])
-    sysroot = config.directory.resolve() / ".packages" / "extracted" / "x86_64-sysroot"
+    sysroot = config.directory.resolve() / OpenVMMBuildConstants.MUSL_SYSROOT
     require_file(
         sysroot / "lib" / "libsymcrypt.a",
         "restored OpenVMM musl SymCrypt library",
@@ -375,9 +353,9 @@ def _build_openvmm_musl(
             "--target",
             target,
             "-p",
-            "openvmm",
+            OpenVMMBuildConstants.PACKAGE_NAME,
             "--bin",
-            "openvmm",
+            OpenVMMBuildConstants.BINARY_NAME,
         ],
         cwd=config.directory,
         env=environment,
@@ -400,7 +378,15 @@ def build_openvmm(
         _build_openvmm_musl(config, selected)
     else:
         _run_openvmm_command(
-            ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
+            [
+                "cargo",
+                "build",
+                "--release",
+                "-p",
+                OpenVMMBuildConstants.PACKAGE_NAME,
+                "--bin",
+                OpenVMMBuildConstants.BINARY_NAME,
+            ],
             cwd=config.directory,
         )
     source = require_file(
@@ -434,20 +420,20 @@ def build_all(config: BuildConfig) -> None:
 
 def prepare_kernel_source(config: KernelBuildConfig) -> tuple[Path, str]:
     """Download, verify, extract, and patch the pinned Linux source."""
-    version = DEFAULT_KERNEL_VERSION
+    version = KernelBuildConstants.VERSION
     for tool in ("patch", "tar"):
         require_tool(tool)
     cache = config.cache_directory
-    downloads = cache / "downloads"
-    source_parent = cache / "linux"
-    tarball = downloads / f"linux-{version}.tar.xz"
-    source = source_parent / f"linux-{version}"
-    stamp = source_parent / f"linux-{version}.nvx-source.json"
+    downloads = cache / BuildConstants.DOWNLOAD_DIRECTORY_NAME
+    source_parent = cache / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+    tarball = downloads / KernelBuildConstants.UPSTREAM_ARCHIVE_NAME
+    source = source_parent / KernelBuildConstants.SOURCE_NAME
+    stamp = source_parent / KernelBuildConstants.SOURCE_STAMP_NAME
     fingerprint = _kernel_source_fingerprint()
 
     downloads.mkdir(parents=True, exist_ok=True)
     source_parent.mkdir(parents=True, exist_ok=True)
-    download_verified(DEFAULT_KERNEL_URL, tarball, DEFAULT_KERNEL_SHA256)
+    download_verified(KernelBuildConstants.URL, tarball, KernelBuildConstants.SHA256)
 
     cached_fingerprint = stamp.read_text(encoding="utf-8") if stamp.is_file() else None
     if source.is_dir() and cached_fingerprint != fingerprint:
@@ -472,25 +458,17 @@ def _prepare_alpine_root(config: InitramfsBuildConfig) -> Path:
     config.work.mkdir(parents=True, exist_ok=True)
     tarball = _alpine_tarball(config)
     download_verified(
-        "https://dl-cdn.alpinelinux.org/alpine/"
-        f"{DEFAULT_ALPINE_BRANCH}/releases/x86_64/{tarball.name}",
+        AlpineBuildConstants.MINIROOTFS_URL,
         tarball,
-        DEFAULT_ALPINE_MINIROOTFS_SHA256,
+        AlpineBuildConstants.MINIROOTFS_SHA256,
     )
-    root = config.work / "root"
+    root = config.work / InitramfsBuildConstants.ROOT_DIRECTORY_NAME
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)
     require_tool("tar")
     run_checked(["tar", "-xzf", tarball, "-C", root])
     print(">> installing sandbox utilities into the Alpine rootfs")
-    _apk_add(
-        root,
-        "blkid",
-        "busybox-extras",
-        "e2fsprogs",
-        "util-linux",
-        "util-linux-misc",
-    )
+    _apk_add(root, *AlpineBuildConstants.PACKAGES)
     resolver = root / "etc" / "resolv.conf"
     resolver.unlink(missing_ok=True)
     resolver.touch()
@@ -516,12 +494,7 @@ def _build_static_helper(
     run_checked(
         [
             compiler,
-            "-static",
-            "-Os",
-            "-s",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
+            *InitramfsBuildConstants.STATIC_HELPER_CFLAGS,
             "-o",
             output,
             source,
@@ -537,21 +510,12 @@ def _build_static_helper(
 
 def _build_device_io_helper(work: Path, destination: Path) -> dict[str, str]:
     compiler = require_tool("cc")
-    source = REPO_ROOT / "guest" / "common" / "nvx-device-io.c"
+    source = BuildConstants.REPO_ROOT / "guest" / "common" / "nvx-device-io.c"
     output = work / "nvx-device-io"
     run_checked(
         [
             compiler,
-            "-nostdlib",
-            "-static",
-            "-Os",
-            "-fno-builtin",
-            "-fno-pie",
-            "-fno-stack-protector",
-            "-no-pie",
-            "-Wl,--build-id=none",
-            "-Wl,-z,noexecstack",
-            "-s",
+            *InitramfsBuildConstants.DEVICE_IO_CFLAGS,
             "-o",
             output,
             source,
@@ -591,7 +555,11 @@ def _normalize_initramfs_metadata(root: Path) -> None:
     (root / "var" / "log" / "apk.log").unlink(missing_ok=True)
     for path in (*root.rglob("*"), root):
         try:
-            os.utime(path, (0, 0), follow_symlinks=False)
+            os.utime(
+                path,
+                (InitramfsBuildConstants.TIMESTAMP, InitramfsBuildConstants.TIMESTAMP),
+                follow_symlinks=False,
+            )
         except (NotImplementedError, OSError) as error:
             if not path.is_symlink():
                 raise ScriptError(
@@ -631,7 +599,7 @@ def _pack_initramfs(root: Path, output: Path) -> None:
                 "--owner=0:0",
                 "-o",
                 "-H",
-                "newc",
+                InitramfsBuildConstants.CPIO_FORMAT,
             ],
             cwd=root,
             stdin=sorter.stdout,
@@ -639,7 +607,11 @@ def _pack_initramfs(root: Path, output: Path) -> None:
         )
         sorter.stdout.close()
         assert cpio.stdout is not None
-        gzip = subprocess.Popen(["gzip", "-n", "-9"], stdin=cpio.stdout, stdout=archive)
+        gzip = subprocess.Popen(
+            ["gzip", "-n", f"-{InitramfsBuildConstants.GZIP_COMPRESSION_LEVEL}"],
+            stdin=cpio.stdout,
+            stdout=archive,
+        )
         cpio.stdout.close()
         gzip_code = gzip.wait()
         cpio_code = cpio.wait()
@@ -682,14 +654,16 @@ def _write_apk_manifest(
             }
         )
     packages.sort(key=lambda package: package["name"])
-    manifest = output.with_name(f"{output.name}.packages.json")
+    manifest = output.with_name(
+        f"{output.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
+    )
     manifest.write_text(
         json.dumps(
             {
-                "format": 1,
-                "alpine_version": DEFAULT_ALPINE_VERSION,
-                "alpine_branch": DEFAULT_ALPINE_BRANCH,
-                "architecture": "x86_64",
+                "format": AlpineBuildConstants.PACKAGE_MANIFEST_VERSION,
+                "alpine_version": AlpineBuildConstants.VERSION,
+                "alpine_branch": AlpineBuildConstants.BRANCH,
+                "architecture": AlpineBuildConstants.ARCHITECTURE,
                 "packages": packages,
                 "helpers": helpers,
             },
@@ -705,7 +679,7 @@ def _install_guest_files(
     root: Path,
     descriptor: GuestDescriptor,
 ) -> dict[str, dict[str, str]]:
-    common = REPO_ROOT / "guest" / "common"
+    common = BuildConstants.REPO_ROOT / BuildConstants.COMMON_GUEST_DIRECTORY
     helpers: dict[str, dict[str, str]] = {}
     scripts = [
         ("init", common / "init", root / "init"),
@@ -737,7 +711,7 @@ def _install_guest_files(
         ),
     ]
     if descriptor.sandbox_control:
-        alpine = REPO_ROOT / "guest" / "alpine"
+        alpine = BuildConstants.REPO_ROOT / AlpineBuildConstants.GUEST_DIRECTORY
         scripts.extend(
             [
                 (
@@ -761,7 +735,9 @@ def _install_guest_files(
         scripts.append(
             (
                 "nvx-bashrc",
-                REPO_ROOT / "guest" / "ubuntu" / "nvx-bashrc",
+                BuildConstants.REPO_ROOT
+                / UbuntuBuildConstants.GUEST_DIRECTORY
+                / "nvx-bashrc",
                 root / "etc" / "nvx-bashrc",
             )
         )
@@ -770,13 +746,7 @@ def _install_guest_files(
         if name == "nvx-bashrc":
             destination.chmod(0o644)
 
-    for name in (
-        "nvx-reseed",
-        "nvx-mmio-write",
-        "nvx-port-io",
-        "nvx-console-pending",
-        "nvx-managed-agent",
-    ):
+    for name in InitramfsBuildConstants.STATIC_HELPERS:
         helpers[name] = _build_static_helper(
             config.work,
             common / f"{name}.c",
@@ -806,7 +776,9 @@ def _write_ubuntu_manifest(
     helpers: dict[str, dict[str, str]],
     input_sha256: str,
 ) -> None:
-    manifest = output.with_name(f"{output.name}.packages.json")
+    manifest = output.with_name(
+        f"{output.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
+    )
     document = ubuntu.package_manifest(root, helpers)
     document.update(
         {
@@ -826,12 +798,16 @@ def _guest_customization_files(descriptor: GuestDescriptor) -> tuple[Path, ...]:
         return ubuntu.customization_files()
     common = tuple(
         path
-        for path in sorted((REPO_ROOT / "guest" / "common").iterdir())
+        for path in sorted(
+            (BuildConstants.REPO_ROOT / BuildConstants.COMMON_GUEST_DIRECTORY).iterdir()
+        )
         if path.is_file()
     )
     alpine = tuple(
         path
-        for path in sorted((REPO_ROOT / "guest" / "alpine").iterdir())
+        for path in sorted(
+            (BuildConstants.REPO_ROOT / AlpineBuildConstants.GUEST_DIRECTORY).iterdir()
+        )
         if path.is_file()
     )
     return (*common, *alpine)
@@ -841,11 +817,13 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
     _require_linux("build-initramfs")
     descriptor = guest_descriptor(config.guest)
     output = config.output or artifact_path(descriptor.initramfs_name)
-    package_manifest = output.with_name(f"{output.name}.packages.json")
+    package_manifest = output.with_name(
+        f"{output.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
+    )
     provenance_inputs = (
         initramfs_provenance_inputs() if descriptor.name == "alpine" else None
     )
-    provenance_path = output.with_name(INITRAMFS_PROVENANCE_NAME)
+    provenance_path = output.with_name(InitramfsBuildConstants.PROVENANCE_NAME)
     if provenance_inputs is not None:
         provenance_path.unlink(missing_ok=True)
     root = _prepare_guest_root(config, descriptor)
@@ -873,7 +851,7 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
         provenance_path.write_text(
             json.dumps(
                 {
-                    "format": 1,
+                    "format": InitramfsBuildConstants.PROVENANCE_FORMAT,
                     "inputs": provenance_inputs,
                     "initramfs_sha256": sha256_file(output),
                     "package_manifest_sha256": sha256_file(package_manifest),
@@ -892,7 +870,7 @@ def build_distro_layer(config: DistroLayerBuildConfig) -> None:
     if descriptor.name != "ubuntu":
         raise ScriptError("build-distro-layer currently supports only --guest ubuntu")
     output = config.output.resolve()
-    manifest = output.with_name(f"{output.name}.manifest.json")
+    manifest = output.with_name(f"{output.name}{BuildConstants.DISTRO_MANIFEST_SUFFIX}")
     existing = [str(path) for path in (output, manifest) if path.exists()]
     if existing and not config.replace:
         raise ScriptError(
@@ -920,10 +898,10 @@ def build_distro_layer(config: DistroLayerBuildConfig) -> None:
     document.update(
         {
             "artifact": output.name,
-            "converter_format": ubuntu.UBUNTU_EROFS_FORMAT,
+            "converter_format": UbuntuBuildConstants.EROFS_FORMAT,
             "input_sha256": input_sha256,
             "uuid": filesystem_uuid,
-            "compression": "lz4hc",
+            "compression": UbuntuBuildConstants.EROFS_COMPRESSION,
         }
     )
 
@@ -943,11 +921,11 @@ def build_distro_layer(config: DistroLayerBuildConfig) -> None:
                 "--quiet",
                 "--all-root",
                 "-T",
-                "0",
+                str(UbuntuBuildConstants.EROFS_TIMESTAMP),
                 "-U",
                 filesystem_uuid,
                 "-z",
-                "lz4hc",
+                UbuntuBuildConstants.EROFS_COMPRESSION,
                 temporary_output,
                 root,
             ]
@@ -975,8 +953,8 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
     artifact_names = (
         descriptor.initramfs_name,
         descriptor.package_manifest_name,
-        "ubuntu-distro.erofs",
-        "ubuntu-distro.erofs.manifest.json",
+        UbuntuBuildConstants.DISTRO_NAME,
+        UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
     )
     attempts: list[Path] = []
     digests: list[dict[str, str]] = []
@@ -988,15 +966,21 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
         build_initramfs(
             InitramfsBuildConfig(
                 guest=descriptor.name,
-                work=attempt_root / "initramfs-work",
+                work=(
+                    attempt_root
+                    / InitramfsBuildConstants.DETERMINISM_INITRAMFS_WORK_DIRECTORY_NAME
+                ),
                 output=attempt_root / descriptor.initramfs_name,
             )
         )
         build_distro_layer(
             DistroLayerBuildConfig(
                 guest=descriptor.name,
-                work=attempt_root / "distro-work",
-                output=attempt_root / "ubuntu-distro.erofs",
+                work=(
+                    attempt_root
+                    / InitramfsBuildConstants.DETERMINISM_DISTRO_WORK_DIRECTORY_NAME
+                ),
+                output=attempt_root / UbuntuBuildConstants.DISTRO_NAME,
             )
         )
         attempts.append(attempt_root)
@@ -1005,10 +989,14 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
         )
     if digests[0] != digests[1]:
         first_inventory = ubuntu.rootfs_inventory(
-            attempts[0] / "initramfs-work" / "root"
+            attempts[0]
+            / InitramfsBuildConstants.DETERMINISM_INITRAMFS_WORK_DIRECTORY_NAME
+            / InitramfsBuildConstants.ROOT_DIRECTORY_NAME
         )
         second_inventory = ubuntu.rootfs_inventory(
-            attempts[1] / "initramfs-work" / "root"
+            attempts[1]
+            / InitramfsBuildConstants.DETERMINISM_INITRAMFS_WORK_DIRECTORY_NAME
+            / InitramfsBuildConstants.ROOT_DIRECTORY_NAME
         )
         differing_paths = sorted(
             path
@@ -1036,7 +1024,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     for tool in ("make", "readelf"):
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config)
-    input_config = REPO_ROOT / "kernel" / "config-microvm"
+    input_config = BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG
     input_config_sha256 = sha256_file(input_config)
     provenance_inputs = _kernel_provenance_inputs(
         source_fingerprint,
@@ -1049,7 +1037,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
         },
         sort_keys=True,
     )
-    build_stamp = config.work / ".nvx-build.json"
+    build_stamp = config.work / KernelBuildConstants.BUILD_STAMP_NAME
     cached_build_fingerprint = (
         build_stamp.read_text(encoding="utf-8") if build_stamp.is_file() else None
     )
@@ -1057,8 +1045,8 @@ def build_kernel(config: KernelBuildConfig) -> None:
         shutil.rmtree(config.work)
     config.work.mkdir(parents=True, exist_ok=True)
     build_stamp.write_text(build_fingerprint, encoding="utf-8")
-    kernel_config = config.work / ".config"
-    provenance_path = config.output.with_name(KERNEL_PROVENANCE_NAME)
+    kernel_config = config.work / KernelBuildConstants.BUILD_CONFIG_NAME
+    provenance_path = config.output.with_name(KernelBuildConstants.PROVENANCE_NAME)
     provenance_path.unlink(missing_ok=True)
     shutil.copy2(input_config, kernel_config)
     if sha256_file(kernel_config) != input_config_sha256:
@@ -1068,9 +1056,9 @@ def build_kernel(config: KernelBuildConfig) -> None:
     assert_required_kernel_config(kernel_config)
     jobs = os.cpu_count() or 1
     print(f">> building vmlinux with {jobs} jobs")
-    run_checked([*make, f"-j{jobs}", "vmlinux"])
+    run_checked([*make, f"-j{jobs}", KernelBuildConstants.BINARY_NAME])
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config.work / "vmlinux", config.output)
+    shutil.copy2(config.work / KernelBuildConstants.BINARY_NAME, config.output)
     generated_config = config.output.with_name(f"{config.output.name}.config")
     shutil.copy2(kernel_config, generated_config)
     print(f">> built {config.output}")
@@ -1090,7 +1078,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
         generated_config.unlink(missing_ok=True)
         raise ScriptError("kernel source inputs changed during the build")
     provenance = {
-        "format": 1,
+        "format": KernelBuildConstants.PROVENANCE_FORMAT,
         **provenance_inputs,
         "kernel_sha256": sha256_file(config.output),
         "config_sha256": sha256_file(generated_config),
@@ -1104,7 +1092,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:
     configured_destination = (
         config.linux_source_destination
-        if target == "linux-source-artifacts"
+        if target == DockerBuildConstants.LINUX_SOURCE_TARGET
         else config.artifact_destination
     )
     destination = _docker_destination(configured_destination)
@@ -1112,15 +1100,15 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
         "docker",
         "build",
         "-f",
-        REPO_ROOT / "docker" / "Dockerfile",
+        BuildConstants.REPO_ROOT / DockerBuildConstants.DOCKERFILE,
         "--target",
         target,
     ]
     command.extend(
         [
             "--output",
-            f"type=local,dest={destination}",
-            REPO_ROOT,
+            f"type={DockerBuildConstants.OUTPUT_TYPE},dest={destination}",
+            BuildConstants.REPO_ROOT,
         ]
     )
     return command
@@ -1128,7 +1116,7 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
 
 def _docker_destination(destination: Path) -> Path:
     if not destination.is_absolute():
-        destination = REPO_ROOT / destination
+        destination = BuildConstants.REPO_ROOT / destination
     return destination.resolve()
 
 
@@ -1141,10 +1129,10 @@ def build_docker_linux_source(config: DockerBuildConfig) -> Path:
     destination = _docker_destination(config.linux_source_destination)
     print(f">> building Linux corresponding source into '{destination}'")
     run_checked(
-        docker_build_command(config, "linux-source-artifacts"),
-        cwd=REPO_ROOT,
+        docker_build_command(config, DockerBuildConstants.LINUX_SOURCE_TARGET),
+        cwd=BuildConstants.REPO_ROOT,
     )
-    archive = destination / f"nvx-linux-source-{DEFAULT_KERNEL_VERSION}.tar.gz"
+    archive = destination / KernelBuildConstants.SOURCE_ARCHIVE_NAME
     if not archive.is_file():
         raise ScriptError(f"Docker build did not produce {archive.name}")
     print(f">> built {archive} ({format_size(archive.stat().st_size)})")
@@ -1153,7 +1141,7 @@ def build_docker_linux_source(config: DockerBuildConfig) -> Path:
 
 def build_docker_artifacts(
     config: DockerBuildConfig,
-    guest: str = "alpine",
+    guest: str = InitramfsBuildConstants.DEFAULT_GUEST,
 ) -> None:
     require_tool(
         "docker",
@@ -1161,40 +1149,31 @@ def build_docker_artifacts(
     )
     destination = _docker_destination(config.artifact_destination)
     if guest == "all":
-        target = "all-guest-artifacts"
-        expected = (
-            "vmlinux",
-            "vmlinux.config",
-            KERNEL_PROVENANCE_NAME,
-            "initramfs.cpio.gz",
-            "initramfs.cpio.gz.packages.json",
-            INITRAMFS_PROVENANCE_NAME,
-            "initramfs-ubuntu.cpio.gz",
-            "initramfs-ubuntu.cpio.gz.packages.json",
-            "ubuntu-distro.erofs",
-            "ubuntu-distro.erofs.manifest.json",
-        )
+        target = DockerBuildConstants.ALL_GUESTS_TARGET
+        expected = DockerBuildConstants.ALL_GUEST_ARTIFACT_NAMES
         guest_label = "Alpine and Ubuntu"
     else:
         descriptor = guest_descriptor(guest)
         target = (
-            "artifacts" if descriptor.name == "alpine" else "ubuntu-guest-artifacts"
+            DockerBuildConstants.ALPINE_TARGET
+            if descriptor.name == AlpineBuildConstants.GUEST_NAME
+            else DockerBuildConstants.UBUNTU_TARGET
         )
         expected = (
-            "vmlinux",
-            "vmlinux.config",
-            KERNEL_PROVENANCE_NAME,
+            KernelBuildConstants.BINARY_NAME,
+            KernelBuildConstants.CONFIG_NAME,
+            KernelBuildConstants.PROVENANCE_NAME,
             descriptor.initramfs_name,
             descriptor.package_manifest_name,
         )
         if descriptor.name == "alpine":
-            expected = (*expected, INITRAMFS_PROVENANCE_NAME)
+            expected = (*expected, InitramfsBuildConstants.PROVENANCE_NAME)
         guest_label = descriptor.distribution
     print(
         f">> building Linux artifacts into '{destination}' "
-        f"(kernel {DEFAULT_KERNEL_VERSION}, {guest_label})"
+        f"(kernel {KernelBuildConstants.VERSION}, {guest_label})"
     )
-    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
+    run_checked(docker_build_command(config, target), cwd=BuildConstants.REPO_ROOT)
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:
         raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")

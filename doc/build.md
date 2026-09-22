@@ -68,11 +68,25 @@ musl builds normalize the newly built executable to that destination before
 recording its provenance. Host OS detection and backend validation live in
 [`build.py`](../scripts/nvx_tools/build.py), not in the configuration object.
 
+Fixed build inputs and defaults live in
+[`build_constants.py`](../scripts/nvx_tools/build_constants.py). Its namespace
+classes group kernel, OpenVMM, Alpine, Ubuntu, initramfs, Docker, cache-tool,
+and release settings. For example, Python callers use
+`KernelBuildConstants.VERSION` and `AlpineBuildConstants.MINIROOTFS_SHA256`;
+the previous module-level constants are not re-exported. Shared repository
+and artifact directories belong to `BuildConstants`.
+
+Keep per-invocation choices and overrides in the existing build configuration
+objects. Environment-dependent cache locations and host-dependent executable
+selection are still resolved by their helpers when a configuration is created,
+not frozen into the constants module.
+
 The provenance sidecars bind the kernel to its pinned archive, patch set,
 input configuration, generated configuration, and output hash; bind the
 initramfs and package manifest to the pinned Alpine inputs and source files;
 and bind OpenVMM to the exact clean gitlink revision and executable hash.
-Packaging rejects missing, dirty, stale, or mismatched provenance.
+The Alpine source-file inputs include the constants module. Packaging rejects
+missing, dirty, stale, or mismatched provenance.
 
 Ubuntu adds:
 

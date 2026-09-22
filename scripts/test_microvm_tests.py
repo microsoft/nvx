@@ -23,6 +23,9 @@ from nvx_tools import (  # noqa: E402
     microvm_tests,
     openvmm_process,
 )
+from nvx_tools.build_constants import (  # noqa: E402
+    BuildConstants,
+)
 
 
 def _posix_shell() -> str | None:
@@ -1859,7 +1862,7 @@ class MicrovmTests(unittest.TestCase):
                 self.assertEqual(microvm_tests.run(args), 0)
 
         self.assertIn(
-            common.BUILD_DIR / "initramfs-ubuntu.cpio.gz",
+            BuildConstants.BUILD_DIR / "initramfs-ubuntu.cpio.gz",
             requested,
         )
         self.assertEqual(run_guest_boot.call_args.kwargs["memory_mib"], 256)

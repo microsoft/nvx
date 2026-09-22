@@ -31,9 +31,15 @@ from nvx_tools.build_config import (
     BuildConfig,
     DistroLayerBuildConfig,
     DockerBuildConfig,
-    InitramfsBuildConfig,
     KernelBuildConfig,
     OpenVmmBuildConfig,
+)
+from nvx_tools.build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+    InitramfsBuildConstants,
+    KernelBuildConstants,
+    UbuntuBuildConstants,
 )
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
@@ -50,8 +56,6 @@ from nvx_tools.collect_ubuntu_sources import (
     configure_parser as configure_ubuntu_sources_parser,
 )
 from nvx_tools.common import (
-    BUILD_DIR,
-    REPO_ROOT,
     ScriptError,
     artifact_path,
     openvmm_binary_path,
@@ -79,7 +83,9 @@ NETWORK_PROFILES = ("portable",)
 SYSTEMD_ENTRYPOINTS = frozenset(("/usr/lib/systemd/systemd", "/lib/systemd/systemd"))
 
 
-def _run(args: list[str | os.PathLike[str]], *, cwd: Path = REPO_ROOT) -> None:
+def _run(
+    args: list[str | os.PathLike[str]], *, cwd: Path = BuildConstants.REPO_ROOT
+) -> None:
     command = [os.fspath(arg) for arg in args]
     print(f">> {shlex.join(command)}")
     subprocess.run(command, cwd=cwd, check=True)
@@ -96,7 +102,9 @@ def _validate_sandbox_systemd_policy(launch: SandboxLaunch) -> None:
     )
     if distro is None:
         return
-    manifest = distro.path.with_name(f"{distro.path.name}.manifest.json")
+    manifest = distro.path.with_name(
+        f"{distro.path.name}{BuildConstants.DISTRO_MANIFEST_SUFFIX}"
+    )
     if not manifest.exists():
         return
     try:
@@ -142,7 +150,7 @@ def _openvmm_build_config(args: argparse.Namespace) -> OpenVmmBuildConfig:
 
 def _build_config(args: argparse.Namespace) -> BuildConfig:
     return BuildConfig(
-        guest=getattr(args, "guest", "alpine"),
+        guest=getattr(args, "guest", InitramfsBuildConstants.DEFAULT_GUEST),
         native_guest=getattr(args, "native", False),
         openvmm=_openvmm_build_config(args),
     )
@@ -157,20 +165,19 @@ def command_build_kernel(_: argparse.Namespace) -> None:
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
-    build_initramfs(
-        InitramfsBuildConfig(
-            guest=args.guest,
-            work=BUILD_DIR / f"initramfs-{args.guest}-work",
-            output=artifact_path(guest_descriptor(args.guest).initramfs_name),
-        )
-    )
+    build_initramfs(BuildConfig.initramfs_config(args.guest))
 
 
 def command_build_distro_layer(args: argparse.Namespace) -> None:
     build_distro_layer(
         DistroLayerBuildConfig(
             guest=args.guest,
-            work=BUILD_DIR / f"{args.guest}-distro-work",
+            work=(
+                BuildConstants.BUILD_DIR
+                / InitramfsBuildConstants.DISTRO_WORK_DIRECTORY_TEMPLATE.format(
+                    guest=args.guest
+                )
+            ),
             output=args.output,
             replace=args.replace,
         )
@@ -304,7 +311,9 @@ def command_run(args: argparse.Namespace) -> None:
         if args.restore_ready_path is not None:
             command.extend(["--restore-ready-path", str(args.restore_ready_path)])
     else:
-        kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+        kernel = require_file(
+            artifact_path(KernelBuildConstants.BINARY_NAME), "PVH kernel"
+        )
         initrd = require_file(
             artifact_path(descriptor.initramfs_name),
             f"{descriptor.distribution} initramfs",
@@ -444,9 +453,9 @@ def command_sandbox(args: argparse.Namespace) -> None:
     assert operation == "run"
     assert launch is not None
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
+    kernel = require_file(artifact_path(KernelBuildConstants.BINARY_NAME), "PVH kernel")
     initrd = require_file(
-        artifact_path("initramfs.cpio.gz"),
+        artifact_path(AlpineBuildConstants.INITRAMFS_NAME),
         "initramfs",
     )
     command = [
@@ -519,8 +528,11 @@ def _add_guest_options(
     parser.add_argument(
         "--guest",
         choices=choices,
-        default="alpine",
-        help="guest userland to build (default: alpine)",
+        default=InitramfsBuildConstants.DEFAULT_GUEST,
+        help=(
+            "guest userland to build "
+            f"(default: {InitramfsBuildConstants.DEFAULT_GUEST})"
+        ),
     )
     parser.add_argument(
         "--native",
@@ -565,8 +577,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     initramfs.add_argument(
         "--guest",
         choices=GUEST_NAMES,
-        default="alpine",
-        help="guest userland to build (default: alpine)",
+        default=InitramfsBuildConstants.DEFAULT_GUEST,
+        help=(
+            "guest userland to build "
+            f"(default: {InitramfsBuildConstants.DEFAULT_GUEST})"
+        ),
     )
     initramfs.set_defaults(handler=command_build_initramfs)
 
@@ -578,7 +593,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     distro_layer.add_argument(
         "--output",
         type=Path,
-        default=artifact_path("ubuntu-distro.erofs"),
+        default=artifact_path(UbuntuBuildConstants.DISTRO_NAME),
     )
     distro_layer.add_argument("--replace", action="store_true")
     distro_layer.set_defaults(handler=command_build_distro_layer)
@@ -591,7 +606,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     determinism.add_argument(
         "--work-dir",
         type=Path,
-        default=BUILD_DIR / "guest-determinism",
+        default=(
+            BuildConstants.BUILD_DIR
+            / InitramfsBuildConstants.DETERMINISM_DIRECTORY_NAME
+        ),
     )
     determinism.set_defaults(handler=command_verify_guest_determinism)
 
@@ -800,7 +818,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "benchmark",
         help="run the OpenVMM-native benchmark coordinator",
     )
-    configure_benchmark_parser(benchmark, REPO_ROOT)
+    configure_benchmark_parser(benchmark, BuildConstants.REPO_ROOT)
 
     performance = subparsers.add_parser(
         "performance",

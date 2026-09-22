@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+    UbuntuBuildConstants,
+)
 from .common import ScriptError
 
 
@@ -22,32 +27,32 @@ class GuestDescriptor:
 
     @property
     def package_manifest_name(self) -> str:
-        return f"{self.initramfs_name}.packages.json"
+        return f"{self.initramfs_name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
 
 
 ALPINE_GUEST = GuestDescriptor(
-    name="alpine",
-    distribution="Alpine Linux",
-    release="3.24.1",
-    architecture="x86_64",
-    initramfs_name="initramfs.cpio.gz",
-    package_manifest_format="apk-v1",
+    name=AlpineBuildConstants.GUEST_NAME,
+    distribution=AlpineBuildConstants.DISTRIBUTION,
+    release=AlpineBuildConstants.VERSION,
+    architecture=AlpineBuildConstants.ARCHITECTURE,
+    initramfs_name=AlpineBuildConstants.INITRAMFS_NAME,
+    package_manifest_format=AlpineBuildConstants.PACKAGE_MANIFEST_FORMAT,
     default_memory_mib=128,
     boot_marker=b"NVX-GUEST-BOOT-OK: alpine",
     sandbox_control=True,
-    os_release_id="alpine",
+    os_release_id=AlpineBuildConstants.GUEST_NAME,
 )
 UBUNTU_GUEST = GuestDescriptor(
-    name="ubuntu",
-    distribution="Ubuntu Base",
-    release="26.04.1",
-    architecture="amd64",
-    initramfs_name="initramfs-ubuntu.cpio.gz",
-    package_manifest_format="ubuntu-v1",
+    name=UbuntuBuildConstants.GUEST_NAME,
+    distribution=UbuntuBuildConstants.DISTRIBUTION,
+    release=UbuntuBuildConstants.VERSION,
+    architecture=UbuntuBuildConstants.ARCHITECTURE,
+    initramfs_name=UbuntuBuildConstants.INITRAMFS_NAME,
+    package_manifest_format=UbuntuBuildConstants.PACKAGE_MANIFEST_FORMAT,
     default_memory_mib=256,
     boot_marker=b"NVX-GUEST-BOOT-OK: ubuntu",
     sandbox_control=False,
-    os_release_id="ubuntu",
+    os_release_id=UbuntuBuildConstants.GUEST_NAME,
 )
 GUEST_DESCRIPTORS = {
     descriptor.name: descriptor for descriptor in (ALPINE_GUEST, UBUNTU_GUEST)
