@@ -1,15 +1,12 @@
 name: Build OpenVMM
-description: Checkout and cache or build one reusable OpenVMM binary target
+description: Checkout and cache or build one reusable OpenVMM binary
 
 inputs:
   ssh-key:
     description: SSH deploy key used to checkout OpenVMM
     required: true
-  target:
-    description: Rust target used to build and cache the OpenVMM binary
-    required: true
-  build-mode:
-    description: OpenVMM build mode (native or musl)
+  backend:
+    description: Validated NVX backend used to select and cache the build
     required: true
   binary-path:
     description: Normalized OpenVMM binary path produced by the build
@@ -88,7 +85,7 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v6-${{ inputs.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore OpenVMM binary on Windows
       id: restore-openvmm-binary-windows
@@ -98,7 +95,7 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v6-${{ inputs.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore shared Cargo cache on Linux
       id: restore-cargo-linux
@@ -126,47 +123,19 @@ runs:
         restore-keys: |
           openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
 
-    - name: Build native OpenVMM on Linux
-      if: runner.os != 'Windows' && inputs.build-mode == 'native' && steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true'
+    - name: Build OpenVMM on Linux
+      if: runner.os != 'Windows' && steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-      run: python3 scripts/nvx.py build-openvmm
-
-    - name: Build musl OpenVMM on MSHV
-      if: inputs.build-mode == 'musl' && steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        if [ ! -f openvmm/.packages/extracted/x86_64-sysroot/lib/libsymcrypt.a ]; then
-          (cd openvmm && cargo xflowey restore-packages --no-compat-igvm)
-        fi
-        rustup target add "${{ inputs.target }}"
-        sysroot="$(cd openvmm && pwd)/.packages/extracted/x86_64-sysroot"
-        export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR="${sysroot}"
-        export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR=1
-        export X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC=1
-        export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_LIB_PATH="${sysroot}/lib"
-        export X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_STATIC=1
-        (cd openvmm && cargo build \
-          --release \
-          --target "${{ inputs.target }}" \
-          -p openvmm \
-          --bin openvmm)
-        mkdir -p openvmm/target/release
-        cp "openvmm/target/${{ inputs.target }}/release/openvmm" \
-          openvmm/target/release/openvmm
-        chmod +x openvmm/target/release/openvmm
-        python3 scripts/nvx.py record-openvmm-provenance
+      run: python3 scripts/nvx.py build-openvmm --backend "${{ inputs.backend }}"
 
     - name: Build OpenVMM on Windows
-      if: runner.os == 'Windows' && inputs.build-mode == 'native' && steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
+      if: runner.os == 'Windows' && steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
       shell: powershell
       env:
         GH_TOKEN: ${{ github.token }}
-      run: python scripts\nvx.py build-openvmm
+      run: python scripts\nvx.py build-openvmm --backend "${{ inputs.backend }}"
 
     - name: Verify OpenVMM binary on Linux
       if: runner.os != 'Windows'
@@ -208,7 +177,7 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v6-${{ inputs.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Save OpenVMM binary on Windows
       if: >-
@@ -222,4 +191,4 @@ runs:
         path: |
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
-        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        key: openvmm-binary-v6-${{ inputs.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}

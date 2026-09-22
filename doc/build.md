@@ -23,6 +23,20 @@ The OpenVMM restore step excludes the compatibility IGVM artifact, which NVX
 does not build or package, so builds do not depend on unrelated upstream
 workflow artifacts.
 
+OpenVMM builds do not require access to runtime hypervisor devices. By default,
+Windows builds the native MSVC executable and Linux builds the native GNU
+target. Both `build-openvmm` and `build` accept `--backend`: `kvm` selects GNU,
+`mshv` selects the statically linked musl target on Linux, and `whp` selects
+MSVC on Windows. For example, this builds musl without requiring `/dev/mshv`:
+
+```bash
+python3 scripts/nvx.py build-openvmm --backend mshv
+```
+
+The combined `build` command rejects unsupported OS/backend combinations before
+producing guest artifacts. Guest-only and source-only commands do not select an
+OpenVMM build target.
+
 OpenVMM's microVM tests build their own minimal Xen PVH guest from source in
 the OpenVMM checkout. They do not consume `build/vmlinux` or
 `build/initramfs.cpio.gz`. NVX uses those two artifacts only for its Linux and
@@ -47,6 +61,12 @@ build/initramfs.provenance.json
 build/openvmm.provenance.json
 openvmm/target/release/openvmm[.exe]
 ```
+
+Programmatic callers can select the backend and override the output destination
+through [`OpenVmmBuildConfig`](../scripts/nvx_tools/build_config.py). Native and
+musl builds normalize the newly built executable to that destination before
+recording its provenance. Host OS detection and backend validation live in
+[`build.py`](../scripts/nvx_tools/build.py), not in the configuration object.
 
 The provenance sidecars bind the kernel to its pinned archive, patch set,
 input configuration, generated configuration, and output hash; bind the

@@ -37,12 +37,12 @@ from .build import (
     MICROVM_ABI_VERSION,
     OPENVMM_PROVENANCE_NAME,
     REQUIRED_SANDBOX_KERNEL_CONFIG,
-    DockerBuildConfig,
     assert_required_kernel_config,
     build_docker_linux_source,
     initramfs_provenance_inputs,
     kernel_provenance_inputs,
 )
+from .build_config import DockerBuildConfig
 from .collect_alpine_sources import collect_alpine_sources
 from .collect_ubuntu_sources import (
     UBUNTU_ARCHIVE_KEYRING_SHA256,
@@ -1226,7 +1226,7 @@ def _publish_release_directory(
         shutil.rmtree(backup)
 
 
-def collect_release_sources() -> None:
+def collect_release_sources(config: DockerBuildConfig) -> None:
     _guest_names, alpine_manifests, ubuntu_manifests = _guest_release_inputs()
     collect_alpine_sources(
         alpine_manifests,
@@ -1238,7 +1238,7 @@ def collect_release_sources() -> None:
         SOURCE_DIR / "ubuntu",
         REPO_ROOT / ".cache" / "ubuntu-source-indexes",
     )
-    build_docker_linux_source(DockerBuildConfig(destination=SOURCE_DIR / "linux"))
+    build_docker_linux_source(config)
     print(f">> collected release sources under {SOURCE_DIR}")
 
 
