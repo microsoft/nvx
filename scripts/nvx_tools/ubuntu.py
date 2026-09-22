@@ -1005,6 +1005,22 @@ def package_manifest(
     }
 
 
+def customization_files() -> tuple[Path, ...]:
+    return (
+        *(
+            path
+            for path in sorted((REPO_ROOT / "guest" / "common").iterdir())
+            if path.is_file()
+        ),
+        *(
+            path
+            for path in sorted((REPO_ROOT / "guest" / "ubuntu").iterdir())
+            if path.is_file()
+        ),
+        UBUNTU_PACKAGE_LOCK,
+    )
+
+
 def converter_input_sha256(customization_files: Sequence[Path]) -> str:
     lock = load_package_lock()
     document = {

@@ -703,6 +703,7 @@ def _write_ubuntu_manifest(
     root: Path,
     output: Path,
     helpers: dict[str, dict[str, str]],
+    input_sha256: str,
 ) -> None:
     manifest = output.with_name(f"{output.name}.packages.json")
     document = ubuntu.package_manifest(root, helpers)
@@ -710,6 +711,7 @@ def _write_ubuntu_manifest(
         {
             "artifact": output.name,
             "artifact_sha256": sha256_file(output),
+            "input_sha256": input_sha256,
         }
     )
     manifest.write_text(
@@ -719,18 +721,13 @@ def _write_ubuntu_manifest(
 
 
 def _guest_customization_files(descriptor: GuestDescriptor) -> tuple[Path, ...]:
+    if descriptor.name == "ubuntu":
+        return ubuntu.customization_files()
     common = tuple(
         path
         for path in sorted((REPO_ROOT / "guest" / "common").iterdir())
         if path.is_file()
     )
-    if descriptor.name == "ubuntu":
-        ubuntu_sources = tuple(
-            path
-            for path in sorted((REPO_ROOT / "guest" / "ubuntu").iterdir())
-            if path.is_file()
-        )
-        return (*common, *ubuntu_sources, ubuntu.UBUNTU_PACKAGE_LOCK)
     alpine = tuple(
         path
         for path in sorted((REPO_ROOT / "guest" / "alpine").iterdir())
@@ -758,7 +755,12 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
         _write_apk_manifest(root, output, helpers)
     _pack_initramfs(root, output)
     if descriptor.name == "ubuntu":
-        _write_ubuntu_manifest(root, output, helpers)
+        _write_ubuntu_manifest(
+            root,
+            output,
+            helpers,
+            ubuntu.converter_input_sha256(ubuntu.customization_files()),
+        )
     if (
         provenance_inputs is not None
         and initramfs_provenance_inputs() != provenance_inputs

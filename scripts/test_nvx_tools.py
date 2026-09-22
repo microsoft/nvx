@@ -20,7 +20,7 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 from unittest.mock import MagicMock, call, patch
 
@@ -99,6 +99,7 @@ def _write_release_fixture(
         ("ubuntu-distro.erofs", "ubuntu-distro.erofs.manifest.json"),
     ):
         artifact = build_dir / artifact_name
+        input_sha256 = ubuntu.converter_input_sha256(ubuntu.customization_files())
         (build_dir / manifest_name).write_text(
             json.dumps(
                 {
@@ -106,6 +107,7 @@ def _write_release_fixture(
                     "guest": "ubuntu",
                     "artifact": artifact.name,
                     "artifact_sha256": common.sha256_file(artifact),
+                    "input_sha256": input_sha256,
                     "packages": [],
                 }
             ),
@@ -2503,28 +2505,22 @@ class BuildTests(unittest.TestCase):
             self.assertFalse((root / "outside").exists())
 
     def test_ubuntu_safe_extractor_roots_absolute_symlinks(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            archive_path = root / "absolute-symlink.tar"
-            with tarfile.open(archive_path, "w") as archive_file:
-                target = tarfile.TarInfo("run")
-                target.type = tarfile.DIRTYPE
-                archive_file.addfile(target)
-                symlink = tarfile.TarInfo("var/run")
-                symlink.type = tarfile.SYMTYPE
-                symlink.linkname = "/run"
-                archive_file.addfile(symlink)
-
-            destination = root / "extracted"
-            ubuntu.safe_extract_tar(
-                archive_path,
-                destination,
-                label="test archive",
-            )
-
-            link = destination / "var" / "run"
-            self.assertEqual(os.readlink(link), "../run")
-            self.assertEqual(link.resolve(), (destination / "run").resolve())
+        self.assertEqual(
+            ubuntu._virtual_symlink_target(
+                PurePosixPath("var/run"),
+                "/run",
+                "test archive",
+            ),
+            "../run",
+        )
+        self.assertEqual(
+            ubuntu._virtual_symlink_target(
+                PurePosixPath("etc/alternatives/awk"),
+                "/usr/bin/mawk",
+                "test archive",
+            ),
+            "../../usr/bin/mawk",
+        )
 
     def test_ubuntu_safe_extractor_rejects_absolute_and_parent_paths(self):
         for member_name in ("/absolute", "../parent"):
@@ -2642,7 +2638,7 @@ class BuildTests(unittest.TestCase):
                 "package_manifest",
                 return_value={"format": 1, "guest": "ubuntu"},
             ):
-                build._write_ubuntu_manifest(root, output, {})
+                build._write_ubuntu_manifest(root, output, {}, "a" * 64)
 
             manifest = json.loads(
                 output.with_name(f"{output.name}.packages.json").read_text(
@@ -2654,6 +2650,7 @@ class BuildTests(unittest.TestCase):
                 manifest["artifact_sha256"],
                 common.sha256_file(output),
             )
+            self.assertEqual(manifest["input_sha256"], "a" * 64)
 
     def test_ubuntu_source_requirements_deduplicate_binary_manifests(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -6039,6 +6036,28 @@ class ReleaseTests(unittest.TestCase):
                     ),
                 ):
                     release._guest_release_inputs()
+
+    def test_guest_release_inputs_reject_stale_ubuntu_source_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            manifest_path = build_dir / "initramfs-ubuntu.cpio.gz.packages.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["input_sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Ubuntu artifact manifest does not match",
+                ),
+            ):
+                release._guest_release_inputs()
 
     def test_package_rejects_tampered_source_metadata_without_replacing_output(self):
         cases: tuple[tuple[str, str, object, str], ...] = (

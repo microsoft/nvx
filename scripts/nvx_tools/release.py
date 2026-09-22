@@ -74,6 +74,8 @@ from .ubuntu import (
     DEFAULT_UBUNTU_VERSION,
     UBUNTU_EROFS_FORMAT,
     UBUNTU_PACKAGE_LOCK,
+    converter_input_sha256,
+    customization_files,
     package_lock_sha256,
 )
 
@@ -836,6 +838,7 @@ def _guest_release_inputs() -> tuple[list[str], list[Path], list[Path]]:
         artifact_path("initramfs-ubuntu.cpio.gz.packages.json"),
         artifact_path("ubuntu-distro.erofs.manifest.json"),
     ]
+    expected_input_sha256 = converter_input_sha256(customization_files())
     for artifact_name, manifest in zip(
         ("initramfs-ubuntu.cpio.gz", "ubuntu-distro.erofs"),
         ubuntu_manifests,
@@ -848,6 +851,7 @@ def _guest_release_inputs() -> tuple[list[str], list[Path], list[Path]]:
             or document.get("guest") != "ubuntu"
             or document.get("artifact") != artifact.name
             or document.get("artifact_sha256") != sha256_file(artifact)
+            or document.get("input_sha256") != expected_input_sha256
         ):
             raise ScriptError(
                 f"Ubuntu artifact manifest does not match {artifact_name}"
