@@ -408,8 +408,8 @@ runs:
             echo "::error::Missing benchmark result ${result}"
             exit 1
           }
-          if [[ "${processors}" == 1 ]] && [[ "$(wc -l < "${result}")" -ne 37 ]]; then
-            echo "::error::Expected 36 microVM one-vCPU metrics in ${result}"
+          if [[ "${processors}" == 1 ]] && [[ "$(wc -l < "${result}")" -ne 35 ]]; then
+            echo "::error::Expected 34 microVM one-vCPU metrics in ${result}"
             exit 1
           elif [[ "${processors}" != 1 ]] &&
             { [[ "$(wc -l < "${result}")" -ne 2 ]] ||
@@ -430,8 +430,8 @@ runs:
             throw "Missing benchmark result $Result"
           }
           if ($Processors -eq 1) {
-            if (@(Import-Csv $Result).Count -ne 36) {
-              throw "Expected 36 microVM one-vCPU metrics in $Result"
+            if (@(Import-Csv $Result).Count -ne 34) {
+              throw "Expected 34 microVM one-vCPU metrics in $Result"
             }
           } else {
             $Rows = @(Import-Csv $Result)

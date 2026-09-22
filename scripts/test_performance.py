@@ -195,6 +195,26 @@ def lifecycle_document(
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_ci_one_vcpu_metric_count_matches_collectors(self):
+        expected = len(
+            performance.SHARED_METRICS | performance.LIFECYCLE_METRICS
+        ) + len(performance.DEVICE_IO_METRIC_NAMES)
+        action = (
+            Path(__file__).parents[1]
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(expected, 34)
+        self.assertIn("-ne 35 ]]", action)
+        self.assertIn("Count -ne 34", action)
+        self.assertEqual(
+            action.count("Expected 34 microVM one-vCPU metrics"),
+            2,
+        )
+
     def test_collect_cli_accepts_lifecycle_input(self):
         args = nvx.parse_args(
             [
