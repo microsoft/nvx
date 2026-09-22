@@ -42,6 +42,7 @@ COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
 FROM scratch AS initramfs-artifacts
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
 COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
+COPY --from=initramfs /repo/build/initramfs.provenance.json /initramfs.provenance.json
 
 FROM kernel AS linux-source-archive
 RUN mkdir -p /out \
@@ -55,6 +56,7 @@ COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
 COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz
 COPY --from=initramfs /repo/build/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
+COPY --from=initramfs /repo/build/initramfs.provenance.json /initramfs.provenance.json
 
 FROM scratch AS linux-source-artifacts
 COPY --from=linux-source-archive /out/nvx-linux-source-6.18.38.tar.gz /nvx-linux-source-6.18.38.tar.gz

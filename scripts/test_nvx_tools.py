@@ -179,6 +179,19 @@ def _write_release_fixture(
         ),
         encoding="utf-8",
     )
+    (build_dir / build.INITRAMFS_PROVENANCE_NAME).write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "inputs": build.initramfs_provenance_inputs(),
+                "initramfs_sha256": common.sha256_file(build_dir / "initramfs.cpio.gz"),
+                "package_manifest_sha256": common.sha256_file(
+                    build_dir / "initramfs.cpio.gz.packages.json"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
     paths = {
         "build": build_dir,
         "source": source_dir,
@@ -2227,10 +2240,12 @@ class BuildTests(unittest.TestCase):
             "kernel/config-microvm",
             "kernel/patches/**",
             "scripts/nvx_tools/build.py",
+            "scripts/nvx_tools/common.py",
         ):
             self.assertIn(cache_input, action)
         self.assertIn("linux-kernel-v1-", action)
         self.assertEqual(action.count("build/vmlinux.provenance.json"), 2)
+        self.assertEqual(action.count("build/initramfs.provenance.json"), 2)
 
     def test_kernel_input_config_uses_canonical_lf_line_endings(self):
         attributes = (build.REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
@@ -5022,6 +5037,9 @@ class ReleaseTests(unittest.TestCase):
             self.assertTrue(
                 (destination / "provenance" / build.KERNEL_PROVENANCE_NAME).is_file()
             )
+            self.assertTrue(
+                (destination / "provenance" / build.INITRAMFS_PROVENANCE_NAME).is_file()
+            )
             manifest = json.loads(
                 (destination / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
             )
@@ -5098,6 +5116,40 @@ class ReleaseTests(unittest.TestCase):
                     kernel,
                     paths["build"] / "vmlinux.config",
                     paths["build"] / build.KERNEL_PROVENANCE_NAME,
+                )
+
+    def test_package_rejects_stale_initramfs_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            initramfs = paths["build"] / "initramfs.cpio.gz"
+            initramfs.write_bytes(b"new initramfs bytes")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "initramfs build provenance",
+            ):
+                release._validate_initramfs_provenance(
+                    initramfs,
+                    paths["build"] / "initramfs.cpio.gz.packages.json",
+                    paths["build"] / build.INITRAMFS_PROVENANCE_NAME,
+                )
+
+    def test_package_rejects_stale_initramfs_package_manifest_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            package_manifest = paths["build"] / "initramfs.cpio.gz.packages.json"
+            package_manifest.write_bytes(b"new package manifest bytes")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "initramfs build provenance",
+            ):
+                release._validate_initramfs_provenance(
+                    paths["build"] / "initramfs.cpio.gz",
+                    package_manifest,
+                    paths["build"] / build.INITRAMFS_PROVENANCE_NAME,
                 )
 
     def test_package_rejects_tampered_source_metadata_without_replacing_output(self):

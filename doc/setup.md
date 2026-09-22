@@ -178,6 +178,28 @@ shfmt -d -ln posix -i 4 -ci \
 
 Pyright runs in strict mode for both Linux and Windows platform APIs.
 
+### Adversarial campaign controller
+
+The optional `test-adversarial` command additionally requires GitHub Copilot
+CLI to be installed and authenticated before the run. Validate the controller
+without changing authentication:
+
+```bash
+copilot --version
+```
+
+The harness performs its own non-interactive authenticated smoke prompt and
+fails preflight if it cannot complete. It deliberately does not install
+Copilot CLI or run `copilot login`. The repository's
+`.github/workflows/copilot-setup-steps.yml` installs `gh-aw`; it does not
+satisfy this prerequisite.
+
+Production campaigns also require an administrator-owned, no-argument
+executor wrapper that provisions a separate disposable target and forwards
+the bounded executor protocol. See
+[Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
+for the containment and credential requirements.
+
 Apply the configured Python and POSIX shell formatters with:
 
 ```bash

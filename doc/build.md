@@ -35,14 +35,16 @@ build/vmlinux.config
 build/vmlinux.provenance.json
 build/initramfs.cpio.gz
 build/initramfs.cpio.gz.packages.json
+build/initramfs.provenance.json
 build/openvmm.provenance.json
 openvmm/target/release/openvmm[.exe]
 ```
 
 The provenance sidecars bind the kernel to its pinned archive, patch set,
-input configuration, generated configuration, and output hash, and bind
-OpenVMM to the exact clean gitlink revision and executable hash. Packaging
-rejects missing, dirty, stale, or mismatched provenance.
+input configuration, generated configuration, and output hash; bind the
+initramfs and package manifest to the pinned Alpine inputs and source files;
+and bind OpenVMM to the exact clean gitlink revision and executable hash.
+Packaging rejects missing, dirty, stale, or mismatched provenance.
 
 Run the two test layers separately:
 
@@ -92,6 +94,7 @@ guest/vmlinux.config
 guest/initramfs.cpio.gz
 guest/initramfs.cpio.gz.packages.json
 provenance/openvmm.provenance.json
+provenance/initramfs.provenance.json
 provenance/vmlinux.provenance.json
 licenses/LICENSE-OPENVMM
 licenses/COPYING-LINUX

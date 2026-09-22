@@ -41,6 +41,7 @@ CONTROL_SESSION_PROTOCOL_VERSION = 1
 CONTROL_CONTRACT_REVISION = "nvx-microvm-v2-control-v1"
 OPENVMM_PROVENANCE_NAME = "openvmm.provenance.json"
 KERNEL_PROVENANCE_NAME = "vmlinux.provenance.json"
+INITRAMFS_PROVENANCE_NAME = "initramfs.provenance.json"
 REQUIRED_VIRTIO_CONSOLE_CONFIG = (
     "CONFIG_HVC_DRIVER=y",
     "CONFIG_VIRTIO=y",
@@ -270,6 +271,39 @@ def kernel_provenance_inputs() -> dict[str, object]:
     )
 
 
+def _initramfs_source_files() -> tuple[Path, ...]:
+    sources = [
+        REPO_ROOT / "docker" / "Dockerfile",
+        REPO_ROOT / "scripts" / "nvx_tools" / "build.py",
+        REPO_ROOT / "scripts" / "nvx_tools" / "common.py",
+        *(path for path in (REPO_ROOT / "alpine").rglob("*") if path.is_file()),
+    ]
+    return tuple(
+        sorted(
+            (require_file(path, "initramfs provenance input") for path in sources),
+            key=lambda path: path.relative_to(REPO_ROOT).as_posix(),
+        )
+    )
+
+
+def initramfs_provenance_inputs() -> dict[str, object]:
+    """Return the current source identity for an initramfs build."""
+    return {
+        "alpine": {
+            "version": DEFAULT_ALPINE_VERSION,
+            "branch": DEFAULT_ALPINE_BRANCH,
+            "minirootfs_sha256": DEFAULT_ALPINE_MINIROOTFS_SHA256,
+        },
+        "source_files": [
+            {
+                "path": path.relative_to(REPO_ROOT).as_posix(),
+                "sha256": sha256_file(path),
+            }
+            for path in _initramfs_source_files()
+        ],
+    }
+
+
 def record_openvmm_provenance(executable: Path) -> None:
     """Bind an OpenVMM executable to the checked-out submodule revision."""
     head = run_capture(["git", "-C", OPENVMM_DIR, "rev-parse", "HEAD"])
@@ -336,10 +370,14 @@ def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, 
 
 
 def _prepare_alpine_root(config: AlpineBuildConfig) -> Path:
-    if config.version != DEFAULT_ALPINE_VERSION:
+    if (
+        config.version != DEFAULT_ALPINE_VERSION
+        or config.branch != DEFAULT_ALPINE_BRANCH
+    ):
         raise ScriptError(
             "this source tree pins Alpine "
-            f"{DEFAULT_ALPINE_VERSION}; requested {config.version}"
+            f"{DEFAULT_ALPINE_VERSION} ({DEFAULT_ALPINE_BRANCH}); requested "
+            f"{config.version} ({config.branch})"
         )
     config.work.mkdir(parents=True, exist_ok=True)
     tarball = _alpine_tarball(config)
@@ -551,6 +589,10 @@ def _write_apk_manifest(
 
 def build_initramfs(config: AlpineBuildConfig) -> None:
     _require_linux("build-initramfs")
+    provenance_inputs = initramfs_provenance_inputs()
+    package_manifest = config.output.with_name(f"{config.output.name}.packages.json")
+    provenance_path = config.output.with_name(INITRAMFS_PROVENANCE_NAME)
+    provenance_path.unlink(missing_ok=True)
     root = _prepare_alpine_root(config)
     print(">> installing sandbox utilities into the rootfs")
     _apk_add(
@@ -625,6 +667,23 @@ def build_initramfs(config: AlpineBuildConfig) -> None:
         {"nvx-device-io": device_io},
     )
     _pack_initramfs(root, config.output)
+    if initramfs_provenance_inputs() != provenance_inputs:
+        config.output.unlink(missing_ok=True)
+        package_manifest.unlink(missing_ok=True)
+        raise ScriptError("initramfs source inputs changed during the build")
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "inputs": provenance_inputs,
+                "initramfs_sha256": sha256_file(config.output),
+                "package_manifest_sha256": sha256_file(package_manifest),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     print(f">> built {config.output} ({format_size(config.output.stat().st_size)})")
 
 
@@ -771,6 +830,8 @@ def build_docker_artifacts(
         "vmlinux.config",
         KERNEL_PROVENANCE_NAME,
         "initramfs.cpio.gz",
+        "initramfs.cpio.gz.packages.json",
+        INITRAMFS_PROVENANCE_NAME,
     )
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:

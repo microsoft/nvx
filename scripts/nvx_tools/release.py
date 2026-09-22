@@ -32,6 +32,7 @@ from .build import (
     DEFAULT_KERNEL_SHA256,
     DEFAULT_KERNEL_URL,
     DEFAULT_KERNEL_VERSION,
+    INITRAMFS_PROVENANCE_NAME,
     KERNEL_PROVENANCE_NAME,
     MICROVM_ABI_VERSION,
     OPENVMM_PROVENANCE_NAME,
@@ -39,6 +40,7 @@ from .build import (
     DockerBuildConfig,
     assert_required_kernel_config,
     build_docker_linux_source,
+    initramfs_provenance_inputs,
     kernel_provenance_inputs,
 )
 from .collect_alpine_sources import collect_alpine_sources
@@ -61,6 +63,7 @@ from .common import (
 )
 
 PROJECT_SOURCE_PATHS = (
+    ".github/agents/nvx-adversary.md",
     "alpine",
     "data/linux-kvm-virtual-machine.csv",
     "data/linux-mshv-virtual-machine.csv",
@@ -829,6 +832,64 @@ def _validate_kernel_provenance(
     return provenance
 
 
+def _validate_initramfs_provenance(
+    initramfs: Path,
+    package_manifest: Path,
+    provenance_path: Path,
+) -> dict[str, object]:
+    provenance = _read_json_object(
+        provenance_path,
+        "initramfs build provenance",
+    )
+    if (
+        provenance.get("format") != 1
+        or provenance.get("inputs") != initramfs_provenance_inputs()
+        or provenance.get("initramfs_sha256") != sha256_file(initramfs)
+        or provenance.get("package_manifest_sha256") != sha256_file(package_manifest)
+    ):
+        raise ScriptError(
+            "initramfs build provenance does not match the current source, "
+            "package manifest, and initramfs"
+        )
+    return provenance
+
+
+def validate_runtime_artifact_provenance() -> None:
+    binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
+    kernel = require_file(artifact_path("vmlinux"), "required guest artifact vmlinux")
+    initramfs = require_file(
+        artifact_path("initramfs.cpio.gz"),
+        "required guest artifact initramfs.cpio.gz",
+    )
+    package_manifest = require_file(
+        artifact_path("initramfs.cpio.gz.packages.json"),
+        "initramfs package manifest",
+    )
+    kernel_config = require_file(
+        artifact_path("vmlinux.config"),
+        "required guest artifact vmlinux.config",
+    )
+    openvmm_provenance_path = require_file(
+        artifact_path(OPENVMM_PROVENANCE_NAME),
+        "OpenVMM build provenance",
+    )
+    kernel_provenance_path = require_file(
+        artifact_path(KERNEL_PROVENANCE_NAME),
+        "kernel build provenance",
+    )
+    initramfs_provenance_path = require_file(
+        artifact_path(INITRAMFS_PROVENANCE_NAME),
+        "initramfs build provenance",
+    )
+    _validate_openvmm_provenance(binary, openvmm_provenance_path)
+    _validate_kernel_provenance(kernel, kernel_config, kernel_provenance_path)
+    _validate_initramfs_provenance(
+        initramfs,
+        package_manifest,
+        initramfs_provenance_path,
+    )
+
+
 def _packaged_source_manifest(
     root_manifest: dict[str, object],
     release_version: str,
@@ -1065,6 +1126,14 @@ def package_release(
         artifact_path("vmlinux.config"),
         "required guest artifact vmlinux.config",
     )
+    initramfs = require_file(
+        artifact_path("initramfs.cpio.gz"),
+        "required guest artifact initramfs.cpio.gz",
+    )
+    package_manifest = require_file(
+        artifact_path("initramfs.cpio.gz.packages.json"),
+        "initramfs package manifest",
+    )
     openvmm_provenance_path = require_file(
         artifact_path(OPENVMM_PROVENANCE_NAME),
         "OpenVMM build provenance",
@@ -1072,6 +1141,10 @@ def package_release(
     kernel_provenance_path = require_file(
         artifact_path(KERNEL_PROVENANCE_NAME),
         "kernel build provenance",
+    )
+    initramfs_provenance_path = require_file(
+        artifact_path(INITRAMFS_PROVENANCE_NAME),
+        "initramfs build provenance",
     )
     openvmm_provenance = _validate_openvmm_provenance(
         binary,
@@ -1081,6 +1154,11 @@ def package_release(
         kernel,
         kernel_config,
         kernel_provenance_path,
+    )
+    initramfs_provenance = _validate_initramfs_provenance(
+        initramfs,
+        package_manifest,
+        initramfs_provenance_path,
     )
     root_manifest_path = require_file(
         REPO_ROOT / "SOURCE-MANIFEST.json",
@@ -1113,6 +1191,10 @@ def package_release(
             kernel_provenance_path,
             staging / "provenance" / KERNEL_PROVENANCE_NAME,
         )
+        _copy_release_file(
+            initramfs_provenance_path,
+            staging / "provenance" / INITRAMFS_PROVENANCE_NAME,
+        )
         for name in ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"):
             _copy_release_file(REPO_ROOT / name, staging / name)
         _copy_release_file(
@@ -1142,8 +1224,15 @@ def package_release(
         packaged_binary = staging / "bin" / binary.name
         packaged_kernel = staging / "guest" / "vmlinux"
         packaged_config = staging / "guest" / "vmlinux.config"
+        packaged_initramfs = staging / "guest" / "initramfs.cpio.gz"
+        packaged_package_manifest = (
+            staging / "guest" / "initramfs.cpio.gz.packages.json"
+        )
         packaged_openvmm_provenance = staging / "provenance" / OPENVMM_PROVENANCE_NAME
         packaged_kernel_provenance = staging / "provenance" / KERNEL_PROVENANCE_NAME
+        packaged_initramfs_provenance = (
+            staging / "provenance" / INITRAMFS_PROVENANCE_NAME
+        )
         if sha256_file(packaged_binary) != openvmm_provenance["executable_sha256"]:
             raise ScriptError(
                 "packaged OpenVMM executable does not match its build provenance"
@@ -1153,6 +1242,14 @@ def package_release(
         if sha256_file(packaged_config) != kernel_provenance["config_sha256"]:
             raise ScriptError(
                 "packaged kernel config does not match its build provenance"
+            )
+        if (
+            sha256_file(packaged_initramfs) != initramfs_provenance["initramfs_sha256"]
+            or sha256_file(packaged_package_manifest)
+            != initramfs_provenance["package_manifest_sha256"]
+        ):
+            raise ScriptError(
+                "packaged initramfs artifacts do not match their build provenance"
             )
         if (
             _read_json_object(
@@ -1170,6 +1267,14 @@ def package_release(
             != kernel_provenance
         ):
             raise ScriptError("packaged kernel provenance changed while staging")
+        if (
+            _read_json_object(
+                packaged_initramfs_provenance,
+                "packaged initramfs build provenance",
+            )
+            != initramfs_provenance
+        ):
+            raise ScriptError("packaged initramfs provenance changed while staging")
         (staging / "SOURCE-MANIFEST.json").write_bytes(
             _packaged_source_manifest(
                 root_manifest,

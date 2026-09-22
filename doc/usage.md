@@ -31,6 +31,7 @@ python3 scripts/nvx.py performance gate --help
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
 | `test-microvm` | Run NVX Linux and device correctness tests through OpenVMM. |
+| `test-adversarial` | Run a brokered Copilot-driven adversarial campaign. |
 | `build` | Build the guest artifacts and OpenVMM. |
 | `download` | Download and install the latest matching GitHub release. |
 | `run` | Run an OpenVMM microVM. |
@@ -157,6 +158,63 @@ Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
 it, every scenario runs. The command requires `build/vmlinux`,
 `build/initramfs.cpio.gz`, and `openvmm/target/release/openvmm[.exe]`.
+
+### `test-adversarial`
+
+```text
+python3 scripts/nvx.py test-adversarial
+    --backend {kvm,mshv,whp}
+    --campaign {workload-isolation,guest-isolation,snapshot-isolation}
+    [--budget-seconds SECONDS]
+    [--budget-actions COUNT]
+    [--budget-ai-credits CREDITS]
+    [--seed SEED]
+    [--output-dir PATH]
+    [--replay ACTIONS.jsonl]
+    [--model MODEL]
+    [--host-type {baremetal,virtual-machine}]
+    [--memory-mib MIB]
+    [--phase-timeout SECONDS]
+    [--action-timeout SECONDS]
+    [--executor-command PATH]
+    [--no-minimize]
+    [--minimize-attempts COUNT]
+```
+
+Runs a bounded adaptive campaign in which an already installed and
+authenticated Copilot CLI selects one deterministic primitive at a time.
+Copilot has no tools or direct NVX access. The typed broker validates and
+records every action, while a credential-free executor and independent
+watchdog own VM operation, canaries, teardown checks, and the clean
+post-campaign boot.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--backend` | required | Select KVM or MSHV on Linux, or WHP on Windows. |
+| `--campaign` | required | Select workload, privileged-guest, or snapshot boundary probes. |
+| `--budget-seconds` | `900` | Bound preflight, actions, canary boot, and minimization wall time. |
+| `--budget-actions` | `8` | Bound accepted and executed broker actions. |
+| `--budget-ai-credits` | `300` | Bound charged Copilot usage; the minimum is 60 credits so authentication preflight and at least one action each retain a 30-credit CLI cap. |
+| `--seed` | `0` | Seed deterministic candidate ordering and synthetic canary data. |
+| `--output-dir` | backend-specific path under `build/test-results` | Parent for a unique campaign run directory. |
+| `--replay` | none | Replay an `actions.jsonl` bound to its sibling `replay-manifest.json`, without invoking Copilot. |
+| `--model` | Copilot auto routing | Select the strategist model. |
+| `--host-type` | `NVX_HOST_TYPE` or `unspecified` | Record whether the executor is bare metal or a virtual machine. |
+| `--memory-mib` | `256` | Set memory for deterministic microVM scenarios. |
+| `--phase-timeout` | `60` | Set each underlying deterministic scenario phase timeout. |
+| `--action-timeout` | `600` | Set the outer limit for one action or canary boot. |
+| `--executor-command` | local child executor | Select one trusted no-argument wrapper for a separate disposable target. |
+| `--no-minimize` | off | Disable fresh-target shorter-prefix replay after an anomaly. |
+| `--minimize-attempts` | `3` | Bound shorter-prefix attempts within the campaign time budget. |
+
+Missing or unauthenticated Copilot CLI is a preflight failure in adaptive
+mode. Replay mode has no Copilot prerequisite. Production and CI campaigns
+must use a separate disposable executor through `--executor-command`; local
+mode cannot reliably classify a target-host crash. Local target logs are kept
+under the short `build/adv` state root to avoid Windows path-length failures;
+the run summary records their absolute location. See
+[Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
+for the trust boundary, wrapper contract, artifacts, and CI policy.
 
 ## Download and run
 

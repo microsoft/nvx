@@ -1254,6 +1254,12 @@ class InteractiveProcess:
                 stderr=subprocess.STDOUT,
                 env=environment,
             )
+        try:
+            record_adversarial_openvmm_pid(self.process.pid, environment)
+        except BaseException:
+            terminate(self.process)
+            self.close()
+            raise
 
     def read_output(self, chunks: queue.Queue[bytes | None]) -> None:
         try:
@@ -1290,6 +1296,24 @@ class InteractiveProcess:
         if self.terminal_fd is not None:
             os.close(self.terminal_fd)
             self.terminal_fd = None
+
+
+def record_adversarial_openvmm_pid(
+    pid: int,
+    environment: dict[str, str],
+) -> None:
+    pid_journal = environment.get("NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL")
+    if pid_journal is None:
+        return
+    with Path(pid_journal).open("a", encoding="utf-8", newline="\n") as stream:
+        record = json.dumps(
+            {"pid": pid, "recorded_at_ns": time.time_ns()},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        stream.write(f"{record}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def cleanup_managed_tap(pid: int) -> None:

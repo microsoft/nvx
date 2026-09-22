@@ -24,6 +24,7 @@ from .benchmark import (
     measure_once,
     positive_float,
     positive_int,
+    record_adversarial_openvmm_pid,
     run_guest_script,
     smp_probe_script,
     snapshot_restore_command,
@@ -301,6 +302,14 @@ def _read_outcome_report(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], raw)
 
 
+def _preserve_outcome_report(path: Path, report: dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def _count_line_suffix(output: bytes, marker: bytes) -> int:
     return sum(line.endswith(marker) for line in _output_lines(output))
 
@@ -556,6 +565,7 @@ def run_managed_lifecycle(
                     stderr=subprocess.STDOUT,
                     env=environment,
                 )
+                record_adversarial_openvmm_pid(process.pid, environment)
                 if process.stdin is None:
                     raise RuntimeError("failed to create control capability pipe")
                 process.stdin.write(capability)
@@ -620,6 +630,10 @@ def run_managed_lifecycle(
                         f"managed OpenVMM process exited with status {result}"
                     )
                 report = _read_outcome_report(report_path)
+                _preserve_outcome_report(
+                    output_dir / "managed-outcome.json",
+                    report,
+                )
                 if report["backend"] != backend or report["outcome"] != {
                     "operation": "managed",
                     "category": "success",
@@ -724,6 +738,10 @@ def run_structured_outcome(
             raise RuntimeError("structured outcome run lost the guest exit result")
 
         report = _read_outcome_report(report_path)
+        _preserve_outcome_report(
+            output_dir / "structured-outcome.json",
+            report,
+        )
         if report["backend"] != backend or report["outcome"] != {
             "operation": "run",
             "category": "guest-exit",
@@ -753,7 +771,6 @@ def run_structured_outcome(
                 raise RuntimeError(
                     f"structured outcome exposed sensitive value {forbidden!r}"
                 )
-
         rejected_path = root / "rejected.json"
         rejected = workload_boot_command(
             executable,
@@ -782,6 +799,10 @@ def run_structured_outcome(
                 "structured policy rejection did not fail before guest boot"
             )
         rejected_report = _read_outcome_report(rejected_path)
+        _preserve_outcome_report(
+            output_dir / "structured-outcome-rejected.json",
+            rejected_report,
+        )
         if rejected_report["outcome"] != {
             "operation": "run",
             "category": "vmm-failure",

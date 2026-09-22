@@ -11,11 +11,13 @@ runs:
         set -euo pipefail
         python3 -m compileall -q scripts
         python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py -v
+        python3 scripts/test_adversarial.py -v
         python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
         python3 scripts/nvx.py --help
         python3 scripts/nvx.py test-openvmm-unit --help
         python3 scripts/nvx.py test-openvmm --help
         python3 scripts/nvx.py test-microvm --help
+        python3 scripts/nvx.py test-adversarial --help
         python3 scripts/nvx.py benchmark --help
 
     - name: Validate NVX CLI on Windows
@@ -27,6 +29,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python scripts\test_adversarial.py -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python .github\skills\nvx-host-connect\scripts\test_hosts.py -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py --help
@@ -36,6 +40,8 @@ runs:
         python scripts\nvx.py test-openvmm --help
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py test-microvm --help
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python scripts\nvx.py test-adversarial --help
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py benchmark --help
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

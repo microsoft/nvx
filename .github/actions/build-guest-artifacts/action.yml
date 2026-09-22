@@ -37,7 +37,7 @@ runs:
         KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
         ALPINE_VERSION: ${{ steps.guest-versions.outputs.alpine-version }}
         KERNEL_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'kernel/config-microvm', 'kernel/patches/**', 'scripts/nvx_tools/build.py') }}
-        ALPINE_INPUT_HASH: ${{ hashFiles('alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py') }}
+        ALPINE_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/common.py') }}
       run: |
         set -euo pipefail
         {
@@ -63,6 +63,7 @@ runs:
         path: |
           build/initramfs.cpio.gz
           build/initramfs.cpio.gz.packages.json
+          build/initramfs.provenance.json
         key: ${{ steps.guest-cache-keys.outputs.alpine }}
         enableCrossOsArchive: true
 
@@ -104,5 +105,6 @@ runs:
         path: |
           build/initramfs.cpio.gz
           build/initramfs.cpio.gz.packages.json
+          build/initramfs.provenance.json
         key: ${{ steps.guest-cache-keys.outputs.alpine }}
         enableCrossOsArchive: true

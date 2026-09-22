@@ -9,6 +9,7 @@ are build products or caches and are not part of the tracked source tree. The
 | Path | Purpose |
 | --- | --- |
 | `.github/prompts` | Copilot prompts for common development workflows |
+| `.github/agents` | Bounded Copilot strategist definitions |
 | `.github/specula` | Incremental formal verification adapter and runner setup |
 | `kernel` | Reproducible configs and complete Linux patch series |
 | `alpine` | PID 1, lifecycle helpers, virtio-fs integration, and workloads |
@@ -16,6 +17,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
 | `scripts/nvx.py` | Canonical build, run, benchmark, and packaging CLI |
+| `scripts/nvx_adversarial_executor.py` | Credential-free adversarial executor protocol entry point |
 | `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
 | `build/sources` | Generated Linux and Alpine release sources; ignored by Git |
 
@@ -25,8 +27,10 @@ are build products or caches and are not part of the tracked source tree. The
 nvx/
 |-- .github/                     GitHub automation and Copilot prompts
 |   |-- actions/                 Reusable local CI actions
+|   |-- agents/                  Bounded Copilot strategist definitions
 |   |-- prompts/                 Copilot development workflow prompts
 |   |-- specula/                 Incremental formal verification integration
+|   |-- workflows/adversarial.yml Trusted scheduled/manual adversarial campaigns
 |   `-- workflows/ci.yml         Main build, test, and benchmark workflow
 |-- alpine/                      Files installed in the Alpine guest
 |   |-- init                     Guest PID 1 and boot sequence
@@ -67,8 +71,14 @@ nvx/
 |   |   |-- benchmark.py         OpenVMM benchmark coordinator
 |   |   |-- benchmark_scripts/   Shell programs and benchmark templates
 |   |   |-- performance.py       Performance commands
+|   |   |-- adversarial.py       Copilot controller and campaign coordinator
+|   |   |-- adversarial_broker.py Typed action catalog and replay journal
+|   |   |-- adversarial_executor.py Credential-free target executor
+|   |   |-- adversarial_oracles.py Independent canaries and watchdog
+|   |   |-- adversarial_cases/   Deterministic campaign catalogs
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   `-- create_linux_source_archive.py Linux source packaging
+|   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
 |   |-- nvx.py                   Supported command-line entry point
 |   `-- test_*.py                Python tooling tests
 |-- .dockerignore                Docker build-context exclusions
@@ -142,8 +152,12 @@ Host-side Python tooling. `nvx.py` is the public entry point; command
 implementations live in `nvx_tools/`. Standalone benchmark shell programs and
 parameterized guest templates live in `nvx_tools/benchmark_scripts/`.
 Source-collection scripts assemble corresponding-source archives for Linux and
-Alpine. Performance scripts analyze benchmark outputs, with adjacent
-`test_*.py` files covering those utilities.
+Alpine. The adversarial controller, typed broker, credential-free executor,
+watchdog, and tracked deterministic catalogs also live in `nvx_tools/`;
+`nvx_adversarial_executor.py` is the restricted protocol entry point used by
+local children and administrator-owned remote wrappers. Performance scripts
+analyze benchmark outputs, with adjacent `test_*.py` files covering those
+utilities.
 
 ## Root files
 
