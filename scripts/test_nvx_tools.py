@@ -2106,7 +2106,11 @@ class CiConfigurationTests(unittest.TestCase):
 
     def test_benchmark_diagnostics_preserve_each_workflow_attempt(self):
         action = (
-            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+            Path(__file__).parents[1]
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
         ).read_text(encoding="utf-8")
         diagnostics = _composite_action_step(action, "Upload benchmark diagnostics")
         name = (
@@ -2144,7 +2148,7 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertEqual(len(artifacts), 6)
 
     def test_benchmark_result_handoff_keeps_run_scoped_names(self):
-        actions = common.REPO_ROOT / ".github" / "actions"
+        actions = Path(__file__).parents[1] / ".github" / "actions"
         action = (actions / "run-benchmark" / "action.yml").read_text(encoding="utf-8")
         prepare = (actions / "prepare-performance-results" / "action.yml").read_text(
             encoding="utf-8"
