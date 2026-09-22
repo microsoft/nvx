@@ -15,14 +15,6 @@ on:
         description: NVX backend provided by the build runner
         required: true
         type: string
-      target:
-        description: Rust target used to build OpenVMM
-        required: true
-        type: string
-      build-mode:
-        description: OpenVMM build mode
-        required: true
-        type: string
       artifact:
         description: Base name for the executable and provenance artifacts
         required: true
@@ -64,8 +56,7 @@ jobs:
         uses: ./.github/actions/build-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-          target: ${{ inputs.target }}
-          build-mode: ${{ inputs.build-mode }}
+          backend: ${{ inputs.backend }}
           binary-path: ${{ inputs.binary }}
 
       - name: Report sccache

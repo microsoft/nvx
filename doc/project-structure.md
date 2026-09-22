@@ -153,15 +153,18 @@ made in that repository and then recorded here by updating the submodule pin.
 ### `scripts/`
 
 Host-side Python tooling. `nvx.py` is the public entry point; command
-implementations live in `nvx_tools/`. Standalone benchmark shell programs and
-parameterized guest templates live in `nvx_tools/benchmark_scripts/`.
-Source-collection scripts assemble corresponding-source archives for Linux,
-Alpine, and Ubuntu. Performance scripts analyze benchmark outputs, with adjacent
-`test_*.py` files covering those utilities. The adversarial controller, typed
-broker, credential-free executor, watchdog, and tracked deterministic catalogs
-also live in `nvx_tools/`; `nvx_adversarial_executor.py` is the restricted
-protocol entry point used by local children and administrator-owned remote
-wrappers.
+implementations live in `nvx_tools/`, and `nvx_tools/build_config.py` carries
+the aggregate runtime configuration plus specialized Docker, initramfs,
+distro-layer, kernel, and OpenVMM build configurations consumed by each
+workflow. Standalone benchmark shell programs and parameterized guest templates
+live in `nvx_tools/benchmark_scripts/`.
+Source-collection scripts assemble corresponding-source archives for Linux and
+Alpine, and Ubuntu. The adversarial controller, typed broker, credential-free
+executor, watchdog, and tracked deterministic catalogs also live in
+`nvx_tools/`; `nvx_adversarial_executor.py` is the restricted protocol entry
+point used by local children and administrator-owned remote wrappers.
+Performance scripts analyze benchmark outputs, with adjacent `test_*.py` files
+covering those utilities.
 
 ## Root files
 

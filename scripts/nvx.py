@@ -17,17 +17,23 @@ from nvx_tools import sandbox_lifecycle
 from nvx_tools.adversarial import configure_parser as configure_adversarial_parser
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
+    build_all,
+    build_distro_layer,
+    build_guest,
+    build_initramfs,
+    build_kernel,
+    build_openvmm,
+    materialize_kernel_provenance_inputs,
+    record_openvmm_provenance,
+    verify_guest_determinism,
+)
+from nvx_tools.build_config import (
+    BuildConfig,
     DistroLayerBuildConfig,
     DockerBuildConfig,
     InitramfsBuildConfig,
     KernelBuildConfig,
-    build_distro_layer,
-    build_docker_artifacts,
-    build_initramfs,
-    build_kernel,
-    materialize_kernel_provenance_inputs,
-    record_openvmm_provenance,
-    verify_guest_determinism,
+    OpenVmmBuildConfig,
 )
 from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
@@ -45,7 +51,6 @@ from nvx_tools.collect_ubuntu_sources import (
 )
 from nvx_tools.common import (
     BUILD_DIR,
-    OPENVMM_DIR,
     REPO_ROOT,
     ScriptError,
     artifact_path,
@@ -128,53 +133,37 @@ def command_init(_: argparse.Namespace) -> None:
     _run(["git", "submodule", "update", "--init", "--recursive"])
 
 
-def _native_kernel() -> None:
-    build_kernel(
-        KernelBuildConfig(
-            work=BUILD_DIR / "linux",
-            output=artifact_path("vmlinux"),
-        )
+def _openvmm_build_config(args: argparse.Namespace) -> OpenVmmBuildConfig:
+    return OpenVmmBuildConfig(
+        skip_restore=getattr(args, "skip_restore", False),
+        backend=getattr(args, "backend", None),
     )
 
 
-def _native_initramfs(guest: str) -> None:
-    descriptor = guest_descriptor(guest)
-    build_initramfs(
-        InitramfsBuildConfig(
-            guest=descriptor.name,
-            work=BUILD_DIR / f"initramfs-{descriptor.name}-work",
-            output=artifact_path(descriptor.initramfs_name),
-        )
+def _build_config(args: argparse.Namespace) -> BuildConfig:
+    return BuildConfig(
+        guest=getattr(args, "guest", "alpine"),
+        native_guest=getattr(args, "native", False),
+        openvmm=_openvmm_build_config(args),
     )
 
 
 def command_build_guest(args: argparse.Namespace) -> None:
-    if args.native:
-        _native_kernel()
-        selected = GUEST_NAMES if args.guest == "all" else (args.guest,)
-        for guest in selected:
-            _native_initramfs(guest)
-        if args.guest == "all":
-            build_distro_layer(
-                DistroLayerBuildConfig(
-                    guest="ubuntu",
-                    work=BUILD_DIR / "ubuntu-distro-work",
-                    output=artifact_path("ubuntu-distro.erofs"),
-                    replace=True,
-                )
-            )
-        return
-
-    config = DockerBuildConfig(destination=BUILD_DIR)
-    build_docker_artifacts(config, args.guest)
+    build_guest(_build_config(args))
 
 
 def command_build_kernel(_: argparse.Namespace) -> None:
-    _native_kernel()
+    build_kernel(KernelBuildConfig())
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
-    _native_initramfs(args.guest)
+    build_initramfs(
+        InitramfsBuildConfig(
+            guest=args.guest,
+            work=BUILD_DIR / f"initramfs-{args.guest}-work",
+            output=artifact_path(guest_descriptor(args.guest).initramfs_name),
+        )
+    )
 
 
 def command_build_distro_layer(args: argparse.Namespace) -> None:
@@ -193,21 +182,11 @@ def command_verify_guest_determinism(args: argparse.Namespace) -> None:
 
 
 def command_build_openvmm(args: argparse.Namespace) -> None:
-    require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
-    if not args.skip_restore:
-        _run(
-            ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
-            cwd=OPENVMM_DIR,
-        )
-    _run(
-        ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
-        cwd=OPENVMM_DIR,
-    )
-    record_openvmm_provenance(openvmm_binary_path())
+    build_openvmm(_openvmm_build_config(args))
 
 
 def command_record_openvmm_provenance(_: argparse.Namespace) -> None:
-    record_openvmm_provenance(openvmm_binary_path())
+    record_openvmm_provenance(OpenVmmBuildConfig())
 
 
 def command_materialize_kernel_provenance_inputs(_: argparse.Namespace) -> None:
@@ -245,8 +224,7 @@ def command_test_openvmm_unit(_: argparse.Namespace) -> None:
 
 
 def command_build(args: argparse.Namespace) -> None:
-    command_build_guest(args)
-    command_build_openvmm(args)
+    build_all(_build_config(args))
 
 
 def _hypervisor(selected: str) -> str:
@@ -512,7 +490,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
 
 
 def command_collect_sources(_: argparse.Namespace) -> None:
-    collect_release_sources()
+    collect_release_sources(DockerBuildConfig())
 
 
 def command_package(args: argparse.Namespace) -> None:
@@ -548,6 +526,18 @@ def _add_guest_options(
         "--native",
         action="store_true",
         help="build directly on Linux instead of using Docker",
+    )
+
+
+def _add_openvmm_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--skip-restore", action="store_true")
+    parser.add_argument(
+        "--backend",
+        choices=OPENVMM_TEST_BACKENDS,
+        help=(
+            "select build target: kvm=GNU, mshv=musl, whp=MSVC "
+            "(default: native target for the host OS)"
+        ),
     )
 
 
@@ -606,7 +596,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     determinism.set_defaults(handler=command_verify_guest_determinism)
 
     openvmm = subparsers.add_parser("build-openvmm", help="build OpenVMM")
-    openvmm.add_argument("--skip-restore", action="store_true")
+    _add_openvmm_options(openvmm)
     openvmm.set_defaults(handler=command_build_openvmm)
 
     provenance = subparsers.add_parser(
@@ -676,7 +666,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     build = subparsers.add_parser("build", help="build guest artifacts and OpenVMM")
     _add_guest_options(build, allow_all=True)
-    build.add_argument("--skip-restore", action="store_true")
+    _add_openvmm_options(build)
     build.set_defaults(handler=command_build)
 
     download = subparsers.add_parser(

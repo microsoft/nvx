@@ -69,6 +69,16 @@ and WHP workloads consume the Windows MSVC artifact. Each workload can start
 after its compatible OpenVMM producer and the shared guest-artifact job finish,
 without waiting for unrelated OpenVMM targets.
 
+All three producers call the same Python build workflow, passing the validated
+runner backend explicitly through `build-openvmm --backend`. The backend is
+carried in `OpenVmmBuildConfig`; the build workflow maps KVM, MSHV, or WHP to
+GNU, musl, or MSVC without probing runtime devices. CI therefore retains its
+musl build for MSHV without maintaining a separate shell build path.
+
+The kernel and initramfs cache keys include
+[`build_config.py`](../scripts/nvx_tools/build_config.py), so shared build
+configuration changes invalidate cached guest artifacts and their provenance.
+
 The producer handoff uses one-day workflow artifacts rather than caches. Each
 consumer downloads both the normalized executable and its build provenance,
 then restores executable permissions on Linux. Once the required artifacts are

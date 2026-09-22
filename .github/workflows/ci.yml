@@ -193,8 +193,6 @@ jobs:
       display-name: Linux GNU
       runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
       backend: kvm
-      target: x86_64-unknown-linux-gnu
-      build-mode: native
       artifact: openvmm-linux-gnu
       binary: openvmm/target/release/openvmm
     secrets:
@@ -226,8 +224,6 @@ jobs:
       display-name: Linux musl
       runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
       backend: mshv
-      target: x86_64-unknown-linux-musl
-      build-mode: musl
       artifact: openvmm-linux-musl
       binary: openvmm/target/release/openvmm
     secrets:
@@ -259,8 +255,6 @@ jobs:
       display-name: Windows MSVC
       runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
       backend: whp
-      target: x86_64-pc-windows-msvc
-      build-mode: native
       artifact: openvmm-windows-msvc
       binary: openvmm/target/release/openvmm.exe
     secrets:
