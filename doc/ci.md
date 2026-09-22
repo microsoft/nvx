@@ -10,6 +10,13 @@ probe entirely from the OpenVMM checkout and exercises OpenVMM lifecycle,
 TTRPC, and snapshot contracts without restoring NVX guest artifacts.
 `openvmm-unit-tests` runs the OpenVMM unit and documentation tests independently
 on the same backend matrix.
+Failed `openvmm-vmm-tests` jobs upload Petri's `test_results` directory,
+including guest and VMM logs, screenshots, and watchdog inspection data.
+These seven-day artifacts are named
+`openvmm-vmm-tests-<os>-<backend>-<run-id>-<run-attempt>`, so a successful rerun
+does not replace the failed attempt's diagnostics. Linux collects them from
+`openvmm/target/vmm_tests/test_results`; Windows uses
+`<runner-temp>/<backend>/test_results`.
 The `nvx-microvm-tests-{kvm,mshv,whp}` jobs consume the NVX Linux kernel and
 Alpine initramfs and exercise Linux, SMP, virtio, sandbox, and snapshot behavior
 through the public OpenVMM CLI. Failure logs from the NVX layer are uploaded per
