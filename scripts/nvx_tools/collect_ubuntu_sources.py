@@ -9,7 +9,9 @@ import re
 import shutil
 import urllib.parse
 from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import TypedDict, cast
 
 from .common import (
@@ -17,6 +19,8 @@ from .common import (
     ScriptError,
     download,
     download_verified,
+    require_tool,
+    run_checked,
     sha256_file,
     write_sha256_sums,
 )
@@ -27,38 +31,53 @@ from .ubuntu import (
     parse_deb822,
 )
 
+UBUNTU_ARCHIVE_KEYRING_URL = (
+    "https://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg"
+)
+UBUNTU_ARCHIVE_KEYRING_SHA256 = (
+    "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
+)
+UBUNTU_SNAPSHOT_ARCHIVE_URL = "https://snapshot.ubuntu.com/ubuntu"
 UBUNTU_SOURCE_INDEXES = (
     (
-        "https://archive.ubuntu.com/ubuntu/dists/"
-        f"{DEFAULT_UBUNTU_CODENAME}-updates/main/source/Sources.xz",
         "https://archive.ubuntu.com/ubuntu",
+        f"{DEFAULT_UBUNTU_CODENAME}-updates",
+        "main",
     ),
     (
-        "https://archive.ubuntu.com/ubuntu/dists/"
-        f"{DEFAULT_UBUNTU_CODENAME}-updates/universe/source/Sources.xz",
         "https://archive.ubuntu.com/ubuntu",
+        f"{DEFAULT_UBUNTU_CODENAME}-updates",
+        "universe",
     ),
     (
-        "https://security.ubuntu.com/ubuntu/dists/"
-        f"{DEFAULT_UBUNTU_CODENAME}-security/main/source/Sources.xz",
         "https://security.ubuntu.com/ubuntu",
+        f"{DEFAULT_UBUNTU_CODENAME}-security",
+        "main",
     ),
     (
-        "https://security.ubuntu.com/ubuntu/dists/"
-        f"{DEFAULT_UBUNTU_CODENAME}-security/universe/source/Sources.xz",
         "https://security.ubuntu.com/ubuntu",
+        f"{DEFAULT_UBUNTU_CODENAME}-security",
+        "universe",
     ),
     (
-        "https://archive.ubuntu.com/ubuntu/dists/"
-        f"{DEFAULT_UBUNTU_CODENAME}/main/source/Sources.xz",
         "https://archive.ubuntu.com/ubuntu",
+        DEFAULT_UBUNTU_CODENAME,
+        "main",
     ),
     (
-        "https://archive.ubuntu.com/ubuntu/dists/"
-        f"{DEFAULT_UBUNTU_CODENAME}/universe/source/Sources.xz",
         "https://archive.ubuntu.com/ubuntu",
+        DEFAULT_UBUNTU_CODENAME,
+        "universe",
     ),
 )
+_UBUNTU_POCKET_SUITES = {
+    "Release": DEFAULT_UBUNTU_CODENAME,
+    "Updates": f"{DEFAULT_UBUNTU_CODENAME}-updates",
+    "Security": f"{DEFAULT_UBUNTU_CODENAME}-security",
+    "Backports": f"{DEFAULT_UBUNTU_CODENAME}-backports",
+    "Proposed": f"{DEFAULT_UBUNTU_CODENAME}-proposed",
+}
+_UBUNTU_COMPONENTS = frozenset(("main", "restricted", "universe", "multiverse"))
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LAUNCHPAD_ARCHIVE_API = "https://api.launchpad.net/1.0/ubuntu/+archive/primary"
 _LAUNCHPAD_SERIES_API = (
@@ -87,6 +106,8 @@ class SourceRecord(TypedDict):
     directory: str
     index_url: str
     index_sha256: str
+    index_release_url: str
+    index_release_sha256: str
     files: list[SourceFile]
 
 
@@ -96,6 +117,7 @@ class SourceMetadata(TypedDict):
     sha256: str
     cache_path: Path | None
     output_name: str | None
+    authenticated_by: str | None
 
 
 def _source_requirements(manifests: list[Path]) -> tuple[SourceRequirement, ...]:
@@ -174,96 +196,235 @@ def _index_cache_name(url: str) -> str:
     return f"{parsed.netloc}-{stem}"
 
 
+def _release_checksum(
+    document: dict[str, str],
+    relative: str,
+    label: str,
+) -> SourceChecksum:
+    value = document.get("SHA256")
+    if value is None:
+        raise ScriptError(f"{label} has no SHA256 metadata")
+    matches: list[SourceChecksum] = []
+    for line in value.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != 3:
+            raise ScriptError(f"{label} has malformed SHA256 metadata")
+        digest, raw_size, name = fields
+        path = PurePosixPath(name)
+        if (
+            _SHA256.fullmatch(digest) is None
+            or path.is_absolute()
+            or "\\" in name
+            or "." in path.parts
+            or ".." in path.parts
+            or path.as_posix() != name
+        ):
+            raise ScriptError(f"{label} has invalid release member {name!r}")
+        try:
+            size = int(raw_size, 10)
+        except ValueError as error:
+            raise ScriptError(f"{label} has invalid size for {name}") from error
+        if size < 0:
+            raise ScriptError(f"{label} has negative size for {name}")
+        if name == relative:
+            matches.append({"name": name, "size": size, "sha256": digest})
+    if len(matches) != 1:
+        raise ScriptError(
+            f"{label} contains {len(matches)} SHA256 records for {relative}"
+        )
+    return matches[0]
+
+
+def _verify_inrelease(
+    path: Path,
+    keyring: Path,
+    suite: str,
+) -> dict[str, str]:
+    gpgv = require_tool(
+        "gpgv",
+        "gpgv was not found on PATH; install it to authenticate Ubuntu sources",
+    )
+    with TemporaryDirectory(prefix="nvx-gpgv-") as homedir:
+        run_checked([gpgv, "--homedir", homedir, "--keyring", keyring, path])
+    payload = _clearsigned_payload(path.read_text(encoding="utf-8"), path.name)
+    documents = parse_deb822(payload)
+    if len(documents) != 1:
+        raise ScriptError(f"{path} has invalid Ubuntu release metadata")
+    document = documents[0]
+    if (
+        document.get("Origin") != "Ubuntu"
+        or document.get("Codename") != DEFAULT_UBUNTU_CODENAME
+        or document.get("Suite") != suite
+    ):
+        raise ScriptError(f"{path} identifies the wrong Ubuntu suite")
+    return document
+
+
+def _source_record_payload(record: SourceRecord) -> dict[str, object]:
+    return {
+        "directory": record["directory"],
+        "files": [
+            {
+                "name": source_file["name"],
+                "size": source_file["size"],
+                "sha256": source_file["sha256"],
+            }
+            for source_file in record["files"]
+        ],
+    }
+
+
+def _merge_source_records(
+    destination: dict[tuple[str, str], SourceRecord],
+    incoming: dict[tuple[str, str], SourceRecord],
+) -> None:
+    for key, record in incoming.items():
+        previous = destination.get(key)
+        if previous is not None:
+            if _source_record_payload(previous) != _source_record_payload(record):
+                raise ScriptError(
+                    "Ubuntu source indexes disagree about "
+                    f"{record['source_name']}-{record['source_version']}"
+                )
+            continue
+        destination[key] = record
+
+
+def _load_authenticated_source_index(
+    cache: Path,
+    keyring: Path,
+    archive_url: str,
+    suite: str,
+    component: str,
+) -> tuple[dict[tuple[str, str], SourceRecord], list[SourceMetadata]]:
+    if component not in _UBUNTU_COMPONENTS:
+        raise ScriptError(f"unsupported Ubuntu archive component: {component}")
+    archive_url = archive_url.rstrip("/")
+    release_url = f"{archive_url}/dists/{suite}/InRelease"
+    release_path = cache / _index_cache_name(release_url)
+    print(f">> downloading Ubuntu signed release {release_url}")
+    download(release_url, release_path)
+    release_document = _verify_inrelease(release_path, keyring, suite)
+    release_sha256 = sha256_file(release_path)
+
+    relative = f"{component}/source/Sources.xz"
+    expected = _release_checksum(release_document, relative, release_url)
+    index_url = f"{archive_url}/dists/{suite}/{relative}"
+    index_path = cache / _index_cache_name(index_url)
+    print(f">> downloading Ubuntu source index {index_url}")
+    download_verified(index_url, index_path, expected["sha256"])
+    actual_size = index_path.stat().st_size
+    if actual_size != expected["size"]:
+        raise ScriptError(
+            f"{index_path.name} is {actual_size} bytes, expected {expected['size']}"
+        )
+    try:
+        contents = lzma.decompress(index_path.read_bytes()).decode("utf-8")
+    except (lzma.LZMAError, UnicodeDecodeError) as error:
+        raise ScriptError(
+            f"invalid Ubuntu source index {index_url}: {error}"
+        ) from error
+
+    records: dict[tuple[str, str], SourceRecord] = {}
+    for package in parse_deb822(contents):
+        name = package.get("Package")
+        version = package.get("Version")
+        directory = package.get("Directory")
+        checksums = package.get("Checksums-Sha256")
+        if not name or not version or not directory or not checksums:
+            continue
+        directory_path = PurePosixPath(directory)
+        if (
+            directory_path.is_absolute()
+            or "." in directory_path.parts
+            or ".." in directory_path.parts
+            or directory_path.as_posix() != directory
+        ):
+            raise ScriptError(
+                f"Ubuntu source index has invalid directory {directory!r}"
+            )
+        source_files = [
+            cast(
+                SourceFile,
+                {
+                    **source_file,
+                    "url": f"{archive_url}/{directory}/{source_file['name']}",
+                },
+            )
+            for source_file in _checksum_records(
+                checksums,
+                f"{name}-{version} in {index_url}",
+            )
+        ]
+        record: SourceRecord = {
+            "source_name": name,
+            "source_version": version,
+            "directory": directory,
+            "index_url": index_url,
+            "index_sha256": expected["sha256"],
+            "index_release_url": release_url,
+            "index_release_sha256": release_sha256,
+            "files": source_files,
+        }
+        _merge_source_records(records, {(name, version): record})
+
+    return (
+        records,
+        [
+            {
+                "role": "ubuntu-inrelease",
+                "url": release_url,
+                "sha256": release_sha256,
+                "cache_path": release_path,
+                "output_name": _index_cache_name(release_url),
+                "authenticated_by": UBUNTU_ARCHIVE_KEYRING_URL,
+            },
+            {
+                "role": "ubuntu-source-index",
+                "url": index_url,
+                "sha256": expected["sha256"],
+                "cache_path": None,
+                "output_name": None,
+                "authenticated_by": release_url,
+            },
+        ],
+    )
+
+
 def _load_source_records(
     cache: Path,
     requirements: Sequence[SourceRequirement] = (),
 ) -> tuple[dict[tuple[str, str], SourceRecord], list[SourceMetadata]]:
     cache.mkdir(parents=True, exist_ok=True)
+    keyring = cache / "ubuntu-archive-keyring.gpg"
+    download_verified(
+        UBUNTU_ARCHIVE_KEYRING_URL,
+        keyring,
+        UBUNTU_ARCHIVE_KEYRING_SHA256,
+    )
     records: dict[tuple[str, str], SourceRecord] = {}
-    indexes: list[SourceMetadata] = []
-    for index_url, archive_url in UBUNTU_SOURCE_INDEXES:
-        index_path = cache / _index_cache_name(index_url)
-        print(f">> downloading Ubuntu source index {index_url}")
-        download(index_url, index_path)
-        index_sha256 = sha256_file(index_path)
-        indexes.append(
-            {
-                "role": "ubuntu-source-index",
-                "url": index_url,
-                "sha256": index_sha256,
-                "cache_path": None,
-                "output_name": None,
-            }
+    indexes: list[SourceMetadata] = [
+        {
+            "role": "ubuntu-archive-keyring",
+            "url": UBUNTU_ARCHIVE_KEYRING_URL,
+            "sha256": UBUNTU_ARCHIVE_KEYRING_SHA256,
+            "cache_path": keyring,
+            "output_name": keyring.name,
+            "authenticated_by": None,
+        }
+    ]
+    for archive_url, suite, component in UBUNTU_SOURCE_INDEXES:
+        loaded, metadata = _load_authenticated_source_index(
+            cache,
+            keyring,
+            archive_url,
+            suite,
+            component,
         )
-        try:
-            contents = lzma.decompress(index_path.read_bytes()).decode("utf-8")
-        except (lzma.LZMAError, UnicodeDecodeError) as error:
-            raise ScriptError(
-                f"invalid Ubuntu source index {index_url}: {error}"
-            ) from error
-        for package in parse_deb822(contents):
-            name = package.get("Package")
-            version = package.get("Version")
-            directory = package.get("Directory")
-            checksums = package.get("Checksums-Sha256")
-            if not name or not version or not directory or not checksums:
-                continue
-            if directory.startswith("/") or ".." in Path(directory).parts:
-                raise ScriptError(
-                    f"Ubuntu source index has invalid directory {directory!r}"
-                )
-            key = (name, version)
-            source_files = [
-                cast(
-                    SourceFile,
-                    {
-                        **source_file,
-                        "url": (f"{archive_url}/{directory}/{source_file['name']}"),
-                    },
-                )
-                for source_file in _checksum_records(
-                    checksums,
-                    f"{name}-{version} in {index_url}",
-                )
-            ]
-            record: SourceRecord = {
-                "source_name": name,
-                "source_version": version,
-                "directory": directory,
-                "index_url": index_url,
-                "index_sha256": index_sha256,
-                "files": source_files,
-            }
-            previous = records.get(key)
-            if previous is not None:
-                comparable = {
-                    "directory": record["directory"],
-                    "files": [
-                        {
-                            "name": source_file["name"],
-                            "size": source_file["size"],
-                            "sha256": source_file["sha256"],
-                        }
-                        for source_file in record["files"]
-                    ],
-                }
-                previous_comparable = {
-                    "directory": previous["directory"],
-                    "files": [
-                        {
-                            "name": source_file["name"],
-                            "size": source_file["size"],
-                            "sha256": source_file["sha256"],
-                        }
-                        for source_file in previous["files"]
-                    ],
-                }
-                if comparable != previous_comparable:
-                    raise ScriptError(
-                        f"Ubuntu source indexes disagree about {name}-{version}"
-                    )
-                continue
-            records[key] = record
+        _merge_source_records(records, loaded)
+        indexes.extend(metadata)
     for requirement in requirements:
         key = (
             requirement["source_name"],
@@ -271,7 +432,7 @@ def _load_source_records(
         )
         if key in records:
             continue
-        record, metadata = _launchpad_source_record(cache, *key)
+        record, metadata = _launchpad_source_record(cache, keyring, *key)
         records[key] = record
         indexes.extend(metadata)
     return records, indexes
@@ -292,6 +453,7 @@ def _clearsigned_payload(text: str, label: str) -> str:
 
 
 def _dsc_document(path: Path) -> dict[str, str]:
+    # The signed Release -> Sources.xz -> .dsc digest chain authenticates this file.
     payload = _clearsigned_payload(
         path.read_text(encoding="utf-8"),
         path.name,
@@ -339,11 +501,65 @@ def _download_json(url: str, path: Path) -> object:
         raise ScriptError(f"invalid Launchpad response from {url}: {error}") from error
 
 
+def _launchpad_timestamp(entry: dict[str, object], field: str) -> datetime | None:
+    raw_value = entry.get(field)
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise ScriptError(f"Launchpad returned an invalid {field}")
+    try:
+        value = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ScriptError(f"Launchpad returned an invalid {field}") from error
+    if value.tzinfo is None:
+        raise ScriptError(f"Launchpad returned a timezone-free {field}")
+    return value.astimezone(timezone.utc)
+
+
+def _snapshot_source_index(
+    entry: dict[str, object],
+) -> tuple[str, str, str]:
+    pocket = entry.get("pocket")
+    component = entry.get("component_name")
+    if not isinstance(pocket, str) or pocket not in _UBUNTU_POCKET_SUITES:
+        raise ScriptError(f"Launchpad returned an unsupported pocket: {pocket!r}")
+    if not isinstance(component, str) or component not in _UBUNTU_COMPONENTS:
+        raise ScriptError(f"Launchpad returned an unsupported component: {component!r}")
+    published = _launchpad_timestamp(entry, "date_published")
+    if published is None:
+        raise ScriptError("Launchpad source publication has no publication date")
+    end = next(
+        (
+            value
+            for field in (
+                "date_superseded",
+                "date_removed",
+                "scheduled_deletion_date",
+            )
+            if (value := _launchpad_timestamp(entry, field)) is not None
+        ),
+        None,
+    )
+    if end is not None:
+        if end <= published:
+            raise ScriptError("Launchpad source publication has an invalid lifetime")
+        snapshot_time = published + (end - published) / 2
+    else:
+        snapshot_time = published + timedelta(days=1)
+    snapshot_id = snapshot_time.strftime("%Y%m%dT%H%M%SZ")
+    return (
+        f"{UBUNTU_SNAPSHOT_ARCHIVE_URL}/{snapshot_id}",
+        _UBUNTU_POCKET_SUITES[pocket],
+        component,
+    )
+
+
 def _launchpad_source_record(
     cache: Path,
+    keyring: Path,
     name: str,
     version: str,
-) -> tuple[SourceRecord, tuple[SourceMetadata, SourceMetadata]]:
+) -> tuple[SourceRecord, tuple[SourceMetadata, ...]]:
     key = _encoded_package_directory(name, version)
     query_url = f"{_LAUNCHPAD_ARCHIVE_API}?" + urllib.parse.urlencode(
         {
@@ -384,13 +600,28 @@ def _launchpad_source_record(
             str(entry.get("date_published", "")),
         )
     )
-    self_link = entries[0].get("self_link")
+    selected = entries[0]
+    self_link = selected.get("self_link")
     if not isinstance(self_link, str) or not self_link.startswith(
         f"{_LAUNCHPAD_ARCHIVE_API}/+sourcepub/"
     ):
         raise ScriptError(
             f"Launchpad returned an invalid source publication for {name}"
         )
+
+    snapshot_archive, snapshot_suite, snapshot_component = _snapshot_source_index(
+        selected
+    )
+    snapshot_records, snapshot_metadata = _load_authenticated_source_index(
+        cache,
+        keyring,
+        snapshot_archive,
+        snapshot_suite,
+        snapshot_component,
+    )
+    record = snapshot_records.get((name, version))
+    if record is None:
+        raise ScriptError(f"signed Ubuntu snapshot does not contain {name}={version}")
 
     urls_url = f"{self_link}?ws.op=sourceFileUrls"
     urls_path = cache / f"launchpad-{key}-urls.json"
@@ -413,58 +644,33 @@ def _launchpad_source_record(
         ):
             raise ScriptError(f"Launchpad returned unsafe source URL {raw_url!r}")
         urls[filename] = raw_url
-    dsc_names = sorted(filename for filename in urls if filename.endswith(".dsc"))
-    if len(dsc_names) != 1:
-        raise ScriptError(f"Launchpad returned {len(dsc_names)} .dsc files for {name}")
-    dsc_name = dsc_names[0]
-    dsc_path = cache / "launchpad-dsc" / key / dsc_name
-    download(urls[dsc_name], dsc_path)
-    dsc_text = dsc_path.read_text(encoding="utf-8")
-    if not dsc_text.startswith("-----BEGIN PGP SIGNED MESSAGE-----\n"):
-        raise ScriptError(f"Launchpad source metadata is not clear-signed: {dsc_name}")
-    document = _dsc_document(dsc_path)
-    if document.get("Source") != name or document.get("Version") != version:
-        raise ScriptError(f"Launchpad returned the wrong .dsc for {name}={version}")
-    checksums = document.get("Checksums-Sha256")
-    if checksums is None:
-        raise ScriptError(f"Launchpad .dsc has no SHA-256 metadata: {dsc_name}")
-    files: list[SourceFile] = [
-        {
-            "name": dsc_name,
-            "size": dsc_path.stat().st_size,
-            "sha256": sha256_file(dsc_path),
-            "url": urls[dsc_name],
-        }
-    ]
-    for checksum in _checksum_records(checksums, dsc_name):
-        filename = checksum["name"]
-        url = urls.get(filename)
-        if url is None:
-            raise ScriptError(f"Launchpad omitted {filename} referenced by {dsc_name}")
-        files.append(cast(SourceFile, {**checksum, "url": url}))
-    extra_urls = sorted(set(urls) - {source_file["name"] for source_file in files})
-    if extra_urls:
+    expected_names = {source_file["name"] for source_file in record["files"]}
+    if set(urls) != expected_names:
         raise ScriptError(
-            f"Launchpad returned unreferenced source files for {name}: "
-            + ", ".join(extra_urls)
+            f"Launchpad source files disagree with the signed snapshot for "
+            f"{name}={version}"
+        )
+    dsc_names = sorted(
+        source_file["name"]
+        for source_file in record["files"]
+        if source_file["name"].endswith(".dsc")
+    )
+    if len(dsc_names) != 1:
+        raise ScriptError(
+            f"signed Ubuntu snapshot contains {len(dsc_names)} .dsc files for {name}"
         )
 
     return (
-        {
-            "source_name": name,
-            "source_version": version,
-            "directory": self_link,
-            "index_url": query_url,
-            "index_sha256": query_sha256,
-            "files": sorted(files, key=lambda item: item["name"]),
-        },
+        record,
         (
+            *snapshot_metadata,
             {
                 "role": "launchpad-publishing-history",
                 "url": query_url,
                 "sha256": query_sha256,
                 "cache_path": query_path,
                 "output_name": f"launchpad-{key}-publishing.json",
+                "authenticated_by": None,
             },
             {
                 "role": "launchpad-source-file-urls",
@@ -472,6 +678,7 @@ def _launchpad_source_record(
                 "sha256": urls_sha256,
                 "cache_path": urls_path,
                 "output_name": f"launchpad-{key}-source-urls.json",
+                "authenticated_by": None,
             },
         ),
     )
@@ -524,12 +731,29 @@ def _materialize_source_metadata(
 ) -> list[dict[str, str]]:
     manifest_indexes: list[dict[str, str]] = []
     metadata_root = output / "metadata"
+    seen: dict[tuple[str, str], tuple[str, str | None, str | None]] = {}
     for index in indexes:
+        identity = (index["role"], index["url"])
+        value = (
+            index["sha256"],
+            index["authenticated_by"],
+            index["output_name"],
+        )
+        previous = seen.get(identity)
+        if previous is not None:
+            if previous != value:
+                raise ScriptError(
+                    f"Ubuntu source metadata disagrees for {index['url']}"
+                )
+            continue
+        seen[identity] = value
         manifest_index = {
             "role": index["role"],
             "url": index["url"],
             "sha256": index["sha256"],
         }
+        if index["authenticated_by"] is not None:
+            manifest_index["authenticated_by"] = index["authenticated_by"]
         cache_path = index["cache_path"]
         output_name = index["output_name"]
         if (cache_path is None) != (output_name is None):
@@ -557,6 +781,7 @@ def collect_ubuntu_sources(
     output: Path,
     cache: Path,
 ) -> None:
+    _validate_source_output(output)
     output = output.resolve()
     _validate_source_output(output)
     requirements = _source_requirements(manifests)
@@ -622,6 +847,8 @@ def collect_ubuntu_sources(
                 "directory": record["directory"],
                 "index_url": record["index_url"],
                 "index_sha256": record["index_sha256"],
+                "index_release_url": record["index_release_url"],
+                "index_release_sha256": record["index_release_sha256"],
                 "dsc": dsc_path.relative_to(output).as_posix(),
                 "files": downloaded,
             }

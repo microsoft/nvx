@@ -536,9 +536,10 @@ python3 scripts/nvx.py collect-ubuntu-sources MANIFEST [MANIFEST ...]
 | `--output PATH` | `build/sources/ubuntu` | Select the output directory. |
 | `--cache PATH` | `.cache/ubuntu-source-indexes` | Select the downloaded source-index cache. |
 
-The collector deduplicates source package name/version pairs, verifies source
-index SHA-256 metadata, validates each `.dsc`, and downloads every referenced
-source member.
+The collector requires `gpgv`, deduplicates source package name/version pairs,
+authenticates live or historical Ubuntu source indexes through signed
+`InRelease` metadata and the pinned Ubuntu archive keyring, validates each
+`.dsc`, and downloads every referenced source member.
 
 ### `create-linux-source-archive`
 

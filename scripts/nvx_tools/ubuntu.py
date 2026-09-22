@@ -744,6 +744,7 @@ def _customize_root(root: Path) -> None:
             host_key.unlink()
     _ensure_symlink(root, "usr/bin/nc", "nc.openbsd")
     _ensure_symlink(root, "usr/bin/netcat", "nc.openbsd")
+    _ensure_symlink(root, "usr/bin/wget", "busybox")
     _ensure_symlink(root, "usr/sbin/mdev", "../bin/busybox")
     _validate_accounts(root)
     _validate_usr_merge(root)

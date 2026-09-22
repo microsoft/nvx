@@ -46,6 +46,8 @@
     "architecture": "amd64",
     "base_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-amd64.tar.gz",
     "base_sha256": "a496a960472ce474a59590b8987d3a1135d3cbef1991f3b1abe8cacfea8bf85a",
+    "archive_keyring_url": "https://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg",
+    "archive_keyring_sha256": "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31",
     "package_lock": "ubuntu/packages.lock.json",
     "package_lock_sha256": "fcdd30223b96fc26e24fcf4b6763a4a2504e9cd25882e68e89fbf6bf45277ef0",
     "guest_sources": [

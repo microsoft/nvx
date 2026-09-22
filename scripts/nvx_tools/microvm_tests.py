@@ -528,6 +528,7 @@ def run_guest_boot(
     run_guest_script(
         command,
         (
+            "set -e\n"
             f"grep -Fqx 'ID={descriptor.os_release_id}' /etc/os-release\n"
             f"grep -Fq '{descriptor.release}' /etc/os-release\n"
             "echo NVX-GUEST-BOOT-CHECK-OK\n"
@@ -561,6 +562,7 @@ def run_guest_identity(
     run_guest_script(
         command,
         (
+            "set -e\n"
             f"grep -Fqx 'ID={descriptor.os_release_id}' /etc/os-release\n"
             f"grep -Fq '{descriptor.release}' /etc/os-release\n"
             "echo NVX-GUEST-IDENTITY-OK\n"

@@ -148,7 +148,7 @@ python3 scripts/nvx.py benchmark --suite snapshot-profile --backend kvm --warmup
 python scripts\nvx.py benchmark --suite snapshot-profile --backend whp --warmups 1 --runs 5 --output data\runs\windows-whp-baremetal\snapshot-profile.json
 ```
 
-The default matrix profiles 64, 128, 256, 512, and 1024 MiB snapshots with both warm and cold
+The default matrix profiles 128, 256, 512, and 1024 MiB snapshots with both warm and cold
 restore artifacts. Use `--shell-memories` to select sizes and `--cache-state warm`, `cold`, or
 `both` to select cache conditions. The suite enables OpenVMM profiling for these diagnostic runs;
 other paths leave full profiling disabled unless `--snapshot-profile` is explicit.

@@ -44,7 +44,11 @@ from .build import (
     kernel_provenance_inputs,
 )
 from .collect_alpine_sources import collect_alpine_sources
-from .collect_ubuntu_sources import collect_ubuntu_sources
+from .collect_ubuntu_sources import (
+    UBUNTU_ARCHIVE_KEYRING_SHA256,
+    UBUNTU_ARCHIVE_KEYRING_URL,
+    collect_ubuntu_sources,
+)
 from .common import (
     OPENVMM_DIR,
     REPO_ROOT,
@@ -1130,6 +1134,8 @@ def _validate_source_manifest_metadata(
         "architecture": DEFAULT_UBUNTU_ARCHITECTURE,
         "base_url": DEFAULT_UBUNTU_BASE_URL,
         "base_sha256": DEFAULT_UBUNTU_BASE_SHA256,
+        "archive_keyring_url": UBUNTU_ARCHIVE_KEYRING_URL,
+        "archive_keyring_sha256": UBUNTU_ARCHIVE_KEYRING_SHA256,
         "package_lock": "ubuntu/packages.lock.json",
         "package_lock_sha256": package_lock_sha256(),
         "guest_sources": [

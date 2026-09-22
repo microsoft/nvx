@@ -34,7 +34,8 @@ runs:
         ${SHELLCHECK} --shell=sh \
           guest/common/init guest/alpine/nvx-container-enter \
           guest/alpine/nvx-container-launch guest/common/nvx-exit \
-          guest/common/nvx-hostmount guest/common/nvx-init-agent \
+          guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+          guest/common/nvx-init-agent \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \
@@ -47,7 +48,8 @@ runs:
         ${SHFMT} -d -ln posix -i 4 -ci \
           guest/common/init guest/alpine/nvx-container-enter \
           guest/alpine/nvx-container-launch guest/common/nvx-exit \
-          guest/common/nvx-hostmount guest/common/nvx-init-agent \
+          guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+          guest/common/nvx-init-agent \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \

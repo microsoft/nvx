@@ -83,6 +83,38 @@ class MicrovmTestParserTests(unittest.TestCase):
         self.assertIsNone(args.memory_mib)
 
 
+class GuestIdentityScriptTests(unittest.TestCase):
+    def test_guest_identity_checks_fail_before_success_markers(self):
+        descriptor = microvm_tests.guest_descriptor("ubuntu")
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm"],
+            ),
+            patch.object(microvm_tests, "run_guest_script") as run_guest_script,
+        ):
+            for runner in (
+                microvm_tests.run_guest_boot,
+                microvm_tests.run_guest_identity,
+            ):
+                with self.subTest(runner=runner.__name__):
+                    runner(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        descriptor,
+                        memory_mib=256,
+                        timeout=60,
+                        log_path=Path("guest.log"),
+                    )
+                    self.assertTrue(
+                        run_guest_script.call_args.args[1].startswith("set -e\n")
+                    )
+                    run_guest_script.reset_mock()
+
+
 class ControlSessionTests(unittest.TestCase):
     def test_named_pipe_connect_retries_transient_invalid_argument(self):
         error = OSError(control_session.errno.EINVAL, "Invalid argument")

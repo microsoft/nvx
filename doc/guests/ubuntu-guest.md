@@ -579,9 +579,12 @@ Add an Ubuntu source collector that:
 1. reads every Ubuntu package manifest in the release;
 2. deduplicates exact source package name/version pairs;
 3. downloads the matching `.dsc` and referenced source members;
-4. verifies every checksum recorded in the `.dsc`;
-5. records the Ubuntu archive location and source metadata, retaining raw
-   Launchpad publishing-history responses used for superseded versions;
+4. authenticates each source index through signed `InRelease` metadata and a
+   pinned Ubuntu archive keyring, then verifies every checksum recorded in the
+   `.dsc`;
+5. records the Ubuntu archive location and source metadata, retaining signed
+   historical snapshot metadata and raw Launchpad publishing-history responses
+   used for superseded versions;
 6. includes repository-owned guest scripts and lock files in the project
    source archive; and
 7. writes a deterministic Ubuntu source bundle and `SHA256SUMS`.

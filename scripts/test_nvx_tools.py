@@ -7,6 +7,7 @@ import http.client
 import http.server
 import io
 import json
+import lzma
 import os
 import queue
 import shutil
@@ -142,6 +143,10 @@ def _write_release_fixture(
             "architecture": ubuntu.DEFAULT_UBUNTU_ARCHITECTURE,
             "base_url": ubuntu.DEFAULT_UBUNTU_BASE_URL,
             "base_sha256": ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
+            "archive_keyring_url": (collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL),
+            "archive_keyring_sha256": (
+                collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_SHA256
+            ),
             "package_lock": "ubuntu/packages.lock.json",
             "package_lock_sha256": ubuntu.package_lock_sha256(),
             "guest_sources": [
@@ -341,7 +346,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.suite, "snapshot-profile")
         self.assertIsNone(args.shell_memories)
         benchmark.apply_benchmark_suite_defaults(args)
-        self.assertEqual(args.shell_memories, [64, 128, 256, 512, 1024])
+        self.assertEqual(args.shell_memories, [128, 256, 512, 1024])
         self.assertEqual(args.cache_state, "cold")
         self.assertFalse(args.snapshot_profile)
         self.assertIs(args.handler, benchmark.run)
@@ -351,7 +356,7 @@ class CliTests(unittest.TestCase):
 
         benchmark.apply_benchmark_suite_defaults(args)
 
-        self.assertEqual(args.shell_memories, [64, 128, 256, 512])
+        self.assertEqual(args.shell_memories, [128, 256, 512])
 
     def test_release_commands_keep_their_cli_contract(self):
         download = nvx.parse_args(
@@ -2360,6 +2365,14 @@ class BuildTests(unittest.TestCase):
             ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
         )
         self.assertEqual(
+            ubuntu_manifest["archive_keyring_url"],
+            collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL,
+        )
+        self.assertEqual(
+            ubuntu_manifest["archive_keyring_sha256"],
+            collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_SHA256,
+        )
+        self.assertEqual(
             ubuntu_manifest["package_lock_sha256"],
             ubuntu.package_lock_sha256(),
         )
@@ -2484,6 +2497,20 @@ class BuildTests(unittest.TestCase):
 
             chmod.assert_called_once_with(expected_root, 0o755)
 
+    def test_ubuntu_customization_installs_busybox_wget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in ("etc", "usr/bin", "usr/sbin"):
+                (root / relative).mkdir(parents=True)
+            with (
+                patch.object(ubuntu, "_clear_directory"),
+                patch.object(ubuntu, "_validate_accounts"),
+                patch.object(ubuntu, "_validate_usr_merge"),
+            ):
+                ubuntu._customize_root(root)
+
+            self.assertEqual(os.readlink(root / "usr" / "bin" / "wget"), "busybox")
+
     def test_distro_layer_refuses_existing_output_without_replace(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "ubuntu.erofs"
@@ -2551,6 +2578,8 @@ class BuildTests(unittest.TestCase):
                 "directory": "pool/main/e/example",
                 "index_url": "https://archive.invalid/Sources.xz",
                 "index_sha256": "0" * 64,
+                "index_release_url": "https://archive.invalid/InRelease",
+                "index_release_sha256": "1" * 64,
                 "files": [
                     {
                         "name": "example_1.0.dsc",
@@ -2575,21 +2604,99 @@ class BuildTests(unittest.TestCase):
             ):
                 collect_ubuntu_sources._validate_dsc(dsc, record)
 
-    def test_launchpad_source_record_retains_verifiable_raw_metadata(self):
-        source_payload = b"source archive"
-        source_sha256 = hashlib.sha256(source_payload).hexdigest()
-        dsc_text = (
+    def test_ubuntu_source_index_is_authenticated_by_signed_release(self):
+        dsc_payload = b"dsc"
+        source_payload = b"source"
+        sources = (
+            "Package: example\n"
+            "Version: 1.0\n"
+            "Directory: pool/main/e/example\n"
+            "Checksums-Sha256:\n"
+            f" {hashlib.sha256(dsc_payload).hexdigest()} "
+            f"{len(dsc_payload)} example_1.0.dsc\n"
+            f" {hashlib.sha256(source_payload).hexdigest()} "
+            f"{len(source_payload)} example_1.0.orig.tar.xz\n"
+        ).encode()
+        compressed = lzma.compress(sources)
+        index_sha256 = hashlib.sha256(compressed).hexdigest()
+        inrelease = (
             "-----BEGIN PGP SIGNED MESSAGE-----\n"
             "Hash: SHA256\n"
             "\n"
-            "Source: example\n"
-            "Version: 1.0\n"
-            "Checksums-Sha256:\n"
-            f" {source_sha256} {len(source_payload)} example_1.0.orig.tar.xz\n"
+            "Origin: Ubuntu\n"
+            f"Codename: {ubuntu.DEFAULT_UBUNTU_CODENAME}\n"
+            f"Suite: {ubuntu.DEFAULT_UBUNTU_CODENAME}\n"
+            "SHA256:\n"
+            f" {index_sha256} {len(compressed)} main/source/Sources.xz\n"
             "-----BEGIN PGP SIGNATURE-----\n"
             "test\n"
             "-----END PGP SIGNATURE-----\n"
         )
+
+        def download_release(_url: str, destination: Path) -> None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(inrelease, encoding="utf-8")
+
+        def download_index(
+            _url: str,
+            destination: Path,
+            expected_sha256: str,
+        ) -> None:
+            self.assertEqual(expected_sha256, index_sha256)
+            destination.write_bytes(compressed)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            keyring = root / "ubuntu-archive-keyring.gpg"
+            keyring.write_bytes(b"keyring")
+            with (
+                patch.object(
+                    collect_ubuntu_sources,
+                    "download",
+                    side_effect=download_release,
+                ),
+                patch.object(
+                    collect_ubuntu_sources,
+                    "download_verified",
+                    side_effect=download_index,
+                ),
+                patch.object(
+                    collect_ubuntu_sources,
+                    "require_tool",
+                    return_value="gpgv",
+                ),
+                patch.object(collect_ubuntu_sources, "run_checked") as run_checked,
+            ):
+                records, metadata = (
+                    collect_ubuntu_sources._load_authenticated_source_index(
+                        root / "cache",
+                        keyring,
+                        "https://archive.invalid/ubuntu",
+                        ubuntu.DEFAULT_UBUNTU_CODENAME,
+                        "main",
+                    )
+                )
+
+        run_checked.assert_called_once()
+        self.assertEqual(run_checked.call_args.args[0][0], "gpgv")
+        self.assertIn("--homedir", run_checked.call_args.args[0])
+        record = records[("example", "1.0")]
+        self.assertEqual(
+            record["index_release_url"],
+            "https://archive.invalid/ubuntu/dists/resolute/InRelease",
+        )
+        self.assertEqual(
+            [item["role"] for item in metadata],
+            ["ubuntu-inrelease", "ubuntu-source-index"],
+        )
+        self.assertEqual(
+            metadata[1]["authenticated_by"],
+            record["index_release_url"],
+        )
+
+    def test_launchpad_source_record_retains_verifiable_raw_metadata(self):
+        source_payload = b"source archive"
+        source_sha256 = hashlib.sha256(source_payload).hexdigest()
         self_link = f"{collect_ubuntu_sources._LAUNCHPAD_ARCHIVE_API}/+sourcepub/123"
         query = {
             "entries": [
@@ -2598,6 +2705,9 @@ class BuildTests(unittest.TestCase):
                     "source_package_version": "1.0",
                     "status": "Superseded",
                     "date_published": "2026-01-01T00:00:00Z",
+                    "date_superseded": "2026-01-03T00:00:00Z",
+                    "pocket": "Updates",
+                    "component_name": "main",
                     "self_link": self_link,
                 }
             ]
@@ -2618,13 +2728,68 @@ class BuildTests(unittest.TestCase):
             )
             return document
 
-        def download_source(url: str, destination: Path) -> None:
-            self.assertTrue(url.endswith(".dsc"))
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(dsc_text, encoding="utf-8")
-
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            snapshot_release = root / "cache" / "snapshot.InRelease"
+            snapshot_release.parent.mkdir(parents=True)
+            snapshot_release.write_text("signed release", encoding="utf-8")
+            snapshot_record: collect_ubuntu_sources.SourceRecord = {
+                "source_name": "example",
+                "source_version": "1.0",
+                "directory": "pool/main/e/example",
+                "index_url": (
+                    "https://snapshot.ubuntu.com/ubuntu/20260102T000000Z/"
+                    "dists/resolute-updates/main/source/Sources.xz"
+                ),
+                "index_sha256": "2" * 64,
+                "index_release_url": (
+                    "https://snapshot.ubuntu.com/ubuntu/20260102T000000Z/"
+                    "dists/resolute-updates/InRelease"
+                ),
+                "index_release_sha256": common.sha256_file(snapshot_release),
+                "files": [
+                    {
+                        "name": "example_1.0.dsc",
+                        "size": 3,
+                        "sha256": "4" * 64,
+                        "url": (
+                            "https://snapshot.ubuntu.com/ubuntu/"
+                            "20260102T000000Z/pool/main/e/example/"
+                            "example_1.0.dsc"
+                        ),
+                    },
+                    {
+                        "name": "example_1.0.orig.tar.xz",
+                        "size": len(source_payload),
+                        "sha256": source_sha256,
+                        "url": (
+                            "https://snapshot.ubuntu.com/ubuntu/"
+                            "20260102T000000Z/pool/main/e/example/"
+                            "example_1.0.orig.tar.xz"
+                        ),
+                    },
+                ],
+            }
+            snapshot_metadata: list[collect_ubuntu_sources.SourceMetadata] = [
+                {
+                    "role": "ubuntu-inrelease",
+                    "url": snapshot_record["index_release_url"],
+                    "sha256": snapshot_record["index_release_sha256"],
+                    "cache_path": snapshot_release,
+                    "output_name": "snapshot.InRelease",
+                    "authenticated_by": (
+                        collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL
+                    ),
+                },
+                {
+                    "role": "ubuntu-source-index",
+                    "url": snapshot_record["index_url"],
+                    "sha256": snapshot_record["index_sha256"],
+                    "cache_path": None,
+                    "output_name": None,
+                    "authenticated_by": snapshot_record["index_release_url"],
+                },
+            ]
             with (
                 patch.object(
                     collect_ubuntu_sources,
@@ -2633,30 +2798,36 @@ class BuildTests(unittest.TestCase):
                 ),
                 patch.object(
                     collect_ubuntu_sources,
-                    "download",
-                    side_effect=download_source,
+                    "_load_authenticated_source_index",
+                    return_value=(
+                        {("example", "1.0"): snapshot_record},
+                        snapshot_metadata,
+                    ),
                 ),
             ):
                 record, metadata = collect_ubuntu_sources._launchpad_source_record(
                     root / "cache",
+                    root / "ubuntu-archive-keyring.gpg",
                     "example",
                     "1.0",
                 )
 
-            self.assertEqual(record["index_url"], metadata[0]["url"])
-            self.assertEqual(record["index_sha256"], metadata[0]["sha256"])
+            self.assertEqual(record, snapshot_record)
             self.assertEqual(
                 [item["role"] for item in metadata],
                 [
+                    "ubuntu-inrelease",
+                    "ubuntu-source-index",
                     "launchpad-publishing-history",
                     "launchpad-source-file-urls",
                 ],
             )
             for item in metadata:
-                self.assertIsNotNone(item["cache_path"])
+                if item["cache_path"] is None:
+                    continue
                 self.assertEqual(
                     item["sha256"],
-                    common.sha256_file(cast(Path, item["cache_path"])),
+                    common.sha256_file(item["cache_path"]),
                 )
 
             output = root / "output"
@@ -2665,15 +2836,14 @@ class BuildTests(unittest.TestCase):
                 output,
                 metadata,
             )
-            for item, manifest_item in zip(
-                metadata,
-                manifest_metadata,
-                strict=True,
-            ):
+            for item, manifest_item in zip(metadata, manifest_metadata, strict=True):
+                if item["cache_path"] is None:
+                    self.assertNotIn("path", manifest_item)
+                    continue
                 retained = output / manifest_item["path"]
                 self.assertEqual(
                     retained.read_bytes(),
-                    cast(Path, item["cache_path"]).read_bytes(),
+                    item["cache_path"].read_bytes(),
                 )
                 self.assertEqual(
                     common.sha256_file(retained),
@@ -2699,6 +2869,25 @@ class BuildTests(unittest.TestCase):
                 )
 
             self.assertEqual(stale.read_text(encoding="utf-8"), "do not archive")
+
+    def test_ubuntu_source_collection_validates_output_before_resolving(self):
+        output = MagicMock(spec=Path)
+        with patch.object(
+            collect_ubuntu_sources,
+            "_validate_source_output",
+        ) as validate:
+
+            def resolve() -> Path:
+                validate.assert_called_once_with(output)
+                raise RuntimeError("stop after ordering assertion")
+
+            output.resolve.side_effect = resolve
+            with self.assertRaisesRegex(RuntimeError, "ordering assertion"):
+                collect_ubuntu_sources.collect_ubuntu_sources(
+                    [],
+                    output,
+                    Path("cache"),
+                )
 
     def test_ci_kernel_cache_key_includes_patches(self):
         action = (
@@ -2739,6 +2928,13 @@ class BuildTests(unittest.TestCase):
             assignment = next(line for line in action.splitlines() if variable in line)
             self.assertIn("'scripts/nvx_tools/common.py'", assignment)
             self.assertIn("'scripts/nvx_tools/guests.py'", assignment)
+
+    def test_quality_checks_include_shared_identity_probe(self):
+        action = (
+            build.REPO_ROOT / ".github" / "actions" / "check-quality" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(action.count("guest/common/nvx-identity-probe"), 2)
 
     def test_docker_guest_builder_pins_erofs_toolchain(self):
         dockerfile = (build.REPO_ROOT / "docker" / "Dockerfile").read_text(
@@ -2837,7 +3033,7 @@ class BuildTests(unittest.TestCase):
                 initrd,
             )
 
-            self.assertEqual(provenance["source"], str(source))
+            self.assertEqual(provenance["source"], str(source.resolve()))
             self.assertEqual(
                 provenance["source_sha256"],
                 common.sha256_file(source),

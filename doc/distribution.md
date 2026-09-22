@@ -44,11 +44,13 @@ manifests automatically.
 Ubuntu artifacts use Ubuntu userland with the NVX kernel. The collector
 deduplicates exact source package name/version pairs from both Ubuntu
 manifests, downloads the matching `.dsc` and source members from Canonical's
-archive, and verifies the SHA-256 metadata before packaging. Exact versions
-that have left the live suite indexes are resolved through Canonical's
-Launchpad publishing history; the raw publishing and source-file URL responses
-are retained with their URLs and SHA-256 digests. Newer source versions are
-never substituted.
+archive, verifies each source index through its signed `InRelease` file and the
+pinned Ubuntu archive keyring, and then verifies the indexed SHA-256 metadata
+before packaging. Exact versions that have left the live suite indexes are
+located through Canonical's Launchpad publishing history and resolved from a
+signed historical `snapshot.ubuntu.com` index. The signed release metadata,
+keyring, and raw Launchpad responses are retained with their URLs and SHA-256
+digests. Newer source versions are never substituted.
 
 OpenVMM is MIT licensed: retain its notice, but its source does not have to be
 published merely because it is aggregated with Linux. See
