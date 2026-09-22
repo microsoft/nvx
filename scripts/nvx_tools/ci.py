@@ -252,7 +252,6 @@ OPENVMM_WHP_TESTS = (
     "x86_64::openvmm_uefi_x64_windows_datacenter_core_2022_x64_battery_capacity",
 )
 OPENVMM_WHP_EXCLUDED_TESTS = (
-    "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
     "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
 )
 

@@ -1058,9 +1058,12 @@ class CiTests(unittest.TestCase):
         self.assertEqual(
             set(ci.OPENVMM_WHP_EXCLUDED_TESTS),
             {
-                "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
                 "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
             },
+        )
+        self.assertNotIn(
+            "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
         )
         self.assertNotIn(
             "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
