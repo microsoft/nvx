@@ -66,6 +66,9 @@ nvx/
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
 |   |   |-- benchmark.py         OpenVMM benchmark coordinator
 |   |   |-- benchmark_scripts/   Shell programs and benchmark templates
+|   |   |-- build.py             Artifact build workflows
+|   |   |-- build_config.py      Per-invocation build configuration
+|   |   |-- build_constants.py   Grouped build pins, paths, and fixed defaults
 |   |   |-- performance.py       Performance commands
 |   |   |-- adversarial.py       Copilot controller and campaign coordinator
 |   |   |-- adversarial_broker.py Typed action catalog and replay journal
@@ -156,7 +159,11 @@ Host-side Python tooling. `nvx.py` is the public entry point; command
 implementations live in `nvx_tools/`, and `nvx_tools/build_config.py` carries
 the aggregate runtime configuration plus specialized Docker, initramfs,
 distro-layer, kernel, and OpenVMM build configurations consumed by each
-workflow. Standalone benchmark shell programs and parameterized guest templates
+workflow. Fixed inputs and defaults live in
+[`nvx_tools/build_constants.py`](../scripts/nvx_tools/build_constants.py), using
+class-qualified constants such as `KernelBuildConstants.VERSION`. The constants
+module has no dependencies on the workflow or configuration modules.
+Standalone benchmark shell programs and parameterized guest templates
 live in `nvx_tools/benchmark_scripts/`.
 Source-collection scripts assemble corresponding-source archives for Linux and
 Alpine, and Ubuntu. The adversarial controller, typed broker, credential-free

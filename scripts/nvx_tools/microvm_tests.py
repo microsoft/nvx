@@ -36,9 +36,12 @@ from .benchmark import (
 from .benchmark import (
     run_guest_script as _run_guest_script,
 )
+from .build_constants import (
+    BuildConstants,
+    KernelBuildConstants,
+)
 from .ci import OPENVMM_TEST_BACKENDS, validate_openvmm_test_backend
 from .common import (
-    BUILD_DIR,
     ScriptError,
     artifact_path,
     openvmm_binary_path,
@@ -190,7 +193,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=BUILD_DIR / "test-results" / "microvm",
+        default=BuildConstants.BUILD_DIR / "test-results" / "microvm",
         help="directory for complete per-scenario OpenVMM logs",
     )
     parser.set_defaults(handler=run)
@@ -3524,7 +3527,9 @@ def run(args: argparse.Namespace) -> int:
     if args.memory_mib is None:
         args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "microVM PVH kernel")
+    kernel = require_file(
+        artifact_path(KernelBuildConstants.BINARY_NAME), "microVM PVH kernel"
+    )
     initrd = require_file(
         artifact_path(descriptor.initramfs_name),
         f"microVM {descriptor.distribution} initramfs",

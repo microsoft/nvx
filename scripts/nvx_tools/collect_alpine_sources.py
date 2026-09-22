@@ -10,10 +10,11 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-from .common import REPO_ROOT, write_sha256_sums
-
-APORTS_URL = "https://gitlab.alpinelinux.org/alpine/aports.git"
-REPOSITORIES = ("main", "community", "testing")
+from .build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+)
+from .common import write_sha256_sums
 
 
 class SourceError(RuntimeError):
@@ -43,7 +44,7 @@ def _package_metadata(
         "license": str(package.get("license") or "unknown"),
         "commit": commit,
         "package_url": (
-            "https://pkgs.alpinelinux.org/packages"
+            f"{AlpineBuildConstants.PACKAGE_INDEX_URL}"
             f"?name={name}&branch={branch}&arch={architecture}"
         ),
     }
@@ -55,8 +56,10 @@ def _load_packages(paths: list[Path]) -> tuple[str, str, list[dict[str, object]]
     packages: dict[tuple[str, str], dict[str, object]] = {}
     for path in paths:
         document = json.loads(path.read_text(encoding="utf-8"))
-        current_branch = document.get("alpine_branch", "v3.24")
-        current_architecture = document.get("architecture", "x86_64")
+        current_branch = document.get("alpine_branch", AlpineBuildConstants.BRANCH)
+        current_architecture = document.get(
+            "architecture", AlpineBuildConstants.ARCHITECTURE
+        )
         if branch not in (None, current_branch):
             raise SourceError("package manifests use different Alpine branches")
         if architecture not in (None, current_architecture):
@@ -68,7 +71,11 @@ def _load_packages(paths: list[Path]) -> tuple[str, str, list[dict[str, object]]
             packages[key] = package
     if not packages:
         raise SourceError("package manifests contain no packages")
-    return branch or "v3.24", architecture or "x86_64", list(packages.values())
+    return (
+        branch or AlpineBuildConstants.BRANCH,
+        architecture or AlpineBuildConstants.ARCHITECTURE,
+        list(packages.values()),
+    )
 
 
 def _run(
@@ -101,7 +108,7 @@ def _prepare_aports(cache: Path, branch: str) -> None:
                 "--single-branch",
                 "--branch",
                 stable_branch,
-                APORTS_URL,
+                AlpineBuildConstants.APORTS_URL,
                 cache,
             ]
         )
@@ -129,7 +136,7 @@ def _extract_recipe(cache: Path, output: Path, metadata: dict[str, str]) -> str:
         metadata["repository"],
         *(
             repository
-            for repository in REPOSITORIES
+            for repository in AlpineBuildConstants.REPOSITORIES
             if repository != metadata["repository"]
         ),
     )
@@ -228,12 +235,16 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "build" / "sources" / "alpine",
+        default=BuildConstants.SOURCE_DIR / AlpineBuildConstants.GUEST_NAME,
     )
     parser.add_argument(
         "--cache",
         type=Path,
-        default=REPO_ROOT / ".cache" / "aports",
+        default=(
+            BuildConstants.REPO_ROOT
+            / BuildConstants.CACHE_DIRECTORY_NAME
+            / AlpineBuildConstants.APORTS_CACHE_DIRECTORY_NAME
+        ),
     )
     parser.add_argument(
         "--skip-upstream",
@@ -260,7 +271,7 @@ def collect_alpine_sources(
     for item in metadata:
         item["recipe"] = _extract_recipe(cache, output, item)
     manifest: dict[str, object] = {
-        "format": 1,
+        "format": AlpineBuildConstants.SOURCE_MANIFEST_FORMAT,
         "alpine_branch": branch,
         "architecture": architecture,
         "packages": metadata,

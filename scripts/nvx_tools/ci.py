@@ -9,8 +9,11 @@ import zipfile
 from collections.abc import Mapping
 from pathlib import Path
 
+from .build_constants import (
+    OpenVMMBuildConstants,
+    ZstdBuildConstants,
+)
 from .common import (
-    OPENVMM_DIR,
     ScriptError,
     download,
     require_file,
@@ -20,17 +23,7 @@ from .common import (
     run_checked,
 )
 
-ZSTD_VERSION = "1.5.7"
-ZSTD_ARCHIVE = f"zstd-v{ZSTD_VERSION}-win64.zip"
-ZSTD_URL = (
-    f"https://github.com/facebook/zstd/releases/download/v{ZSTD_VERSION}/{ZSTD_ARCHIVE}"
-)
-ZSTD_SHA256 = "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9"
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
-OPENVMM_RUST_TOOLCHAIN = "stable"
-OPENVMM_GUEST_RUST_TARGET = "x86_64-unknown-none"
-OPENVMM_UEFI_RUST_TARGET = "x86_64-unknown-uefi"
-OPENVMM_LINUX_MUSL_RUST_TARGET = "x86_64-unknown-linux-musl"
 REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "quality": "QUALITY_RESULT",
     "openvmm-changes": "CHANGES_RESULT",
@@ -68,22 +61,6 @@ REQUIRED_CI_PLATFORM_JOBS = (
     "platform-mshv",
     "platform-whp",
 )
-OPENVMM_RUST_TARGETS = {
-    "kvm": (
-        OPENVMM_GUEST_RUST_TARGET,
-        OPENVMM_UEFI_RUST_TARGET,
-        OPENVMM_LINUX_MUSL_RUST_TARGET,
-    ),
-    "mshv": (
-        OPENVMM_GUEST_RUST_TARGET,
-        OPENVMM_UEFI_RUST_TARGET,
-        OPENVMM_LINUX_MUSL_RUST_TARGET,
-    ),
-    "whp": (
-        OPENVMM_GUEST_RUST_TARGET,
-        OPENVMM_UEFI_RUST_TARGET,
-    ),
-}
 OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
     "vmm_tests",
     "cca_tests",
@@ -295,7 +272,7 @@ def _prepare_openvmm_test_environment(
     backend: str,
     rustup: str,
 ) -> dict[str, str]:
-    targets = OPENVMM_RUST_TARGETS[backend]
+    targets = OpenVMMBuildConstants.TEST_RUST_TARGETS[backend]
     installed = run_capture(
         [
             rustup,
@@ -303,26 +280,26 @@ def _prepare_openvmm_test_environment(
             "list",
             "--installed",
             "--toolchain",
-            OPENVMM_RUST_TOOLCHAIN,
+            OpenVMMBuildConstants.RUST_TOOLCHAIN,
         ]
     )
     require_success(installed, "installed Rust target query")
     installed_targets = set(installed.stdout.decode("utf-8").splitlines())
 
     environment = os.environ.copy()
-    environment["RUSTUP_TOOLCHAIN"] = OPENVMM_RUST_TOOLCHAIN
+    environment["RUSTUP_TOOLCHAIN"] = OpenVMMBuildConstants.RUST_TOOLCHAIN
     runner_temp_value = os.environ.get("RUNNER_TEMP")
     if not installed_targets.issuperset(targets):
         if runner_temp_value:
             environment["RUSTUP_HOME"] = os.fspath(
-                Path(runner_temp_value) / "openvmm-rustup"
+                Path(runner_temp_value) / OpenVMMBuildConstants.RUSTUP_DIRECTORY_NAME
             )
             run_checked(
                 [
                     rustup,
                     "toolchain",
                     "install",
-                    OPENVMM_RUST_TOOLCHAIN,
+                    OpenVMMBuildConstants.RUST_TOOLCHAIN,
                     "--profile",
                     "minimal",
                 ],
@@ -336,32 +313,34 @@ def _prepare_openvmm_test_environment(
                 "add",
                 *targets,
                 "--toolchain",
-                OPENVMM_RUST_TOOLCHAIN,
+                OpenVMMBuildConstants.RUST_TOOLCHAIN,
             ],
             env=environment,
         )
 
     if backend != "whp" and runner_temp_value:
         environment["XDG_CACHE_HOME"] = os.fspath(
-            Path(runner_temp_value) / "openvmm-cache"
+            Path(runner_temp_value) / OpenVMMBuildConstants.CACHE_DIRECTORY_NAME
         )
 
     return environment
 
 
 def run_openvmm_unit_tests() -> None:
-    require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
+    require_file(
+        OpenVMMBuildConstants.DIRECTORY / "Cargo.toml", "initialized OpenVMM submodule"
+    )
     cargo = require_tool("cargo")
 
     fuzz_crates = run_capture(
         [cargo, "xtask", "fuzz", "list", "--crates"],
-        cwd=OPENVMM_DIR,
+        cwd=OpenVMMBuildConstants.DIRECTORY,
     )
     require_success(fuzz_crates, "OpenVMM fuzz crate query")
 
     run_checked(
         [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
-        cwd=OPENVMM_DIR,
+        cwd=OpenVMMBuildConstants.DIRECTORY,
     )
     command = [
         cargo,
@@ -382,7 +361,7 @@ def run_openvmm_unit_tests() -> None:
     for package in excluded_packages:
         command.extend(("--exclude", package))
 
-    run_checked(command, cwd=OPENVMM_DIR)
+    run_checked(command, cwd=OpenVMMBuildConstants.DIRECTORY)
     run_checked(
         [
             cargo,
@@ -392,21 +371,23 @@ def run_openvmm_unit_tests() -> None:
             "--workspace",
             "--no-fail-fast",
         ],
-        cwd=OPENVMM_DIR,
+        cwd=OpenVMMBuildConstants.DIRECTORY,
     )
 
 
 def run_openvmm_tests(backend: str) -> None:
     validate_openvmm_test_backend(backend)
 
-    require_file(OPENVMM_DIR / "Cargo.toml", "initialized OpenVMM submodule")
+    require_file(
+        OpenVMMBuildConstants.DIRECTORY / "Cargo.toml", "initialized OpenVMM submodule"
+    )
     cargo = require_tool("cargo")
     rustup = require_tool("rustup")
 
     rust_environment = _prepare_openvmm_test_environment(backend, rustup)
     run_checked(
         [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
-        cwd=OPENVMM_DIR,
+        cwd=OpenVMMBuildConstants.DIRECTORY,
         env=rust_environment,
     )
     command = [
@@ -428,7 +409,7 @@ def run_openvmm_tests(backend: str) -> None:
                 ),
             )
         )
-    run_checked(command, cwd=OPENVMM_DIR, env=rust_environment)
+    run_checked(command, cwd=OpenVMMBuildConstants.DIRECTORY, env=rust_environment)
 
 
 def setup_cross_os_cache() -> None:
@@ -447,14 +428,14 @@ def setup_cross_os_cache() -> None:
     gnu_tar = git.parent.parent / "usr" / "bin" / "tar.exe"
     require_file(gnu_tar, "Git for Windows GNU tar")
 
-    archive = runner_temp / ZSTD_ARCHIVE
-    download(ZSTD_URL, archive, expected_sha256=ZSTD_SHA256)
+    archive = runner_temp / ZstdBuildConstants.ARCHIVE_NAME
+    download(ZstdBuildConstants.URL, archive, expected_sha256=ZstdBuildConstants.SHA256)
 
-    destination = runner_temp / f"zstd-v{ZSTD_VERSION}-win64"
+    destination = runner_temp / ZstdBuildConstants.DIRECTORY_NAME
     shutil.rmtree(destination, ignore_errors=True)
     with zipfile.ZipFile(archive) as package:
         package.extractall(destination)
-    zstd = destination / f"zstd-v{ZSTD_VERSION}-win64" / "zstd.exe"
+    zstd = destination / ZstdBuildConstants.DIRECTORY_NAME / "zstd.exe"
     require_file(zstd, "zstd.exe")
 
     with github_path.open("a", encoding="utf-8", newline="") as output:

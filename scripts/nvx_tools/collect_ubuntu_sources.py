@@ -14,8 +14,11 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import TypedDict, cast
 
+from .build_constants import (
+    BuildConstants,
+    UbuntuBuildConstants,
+)
 from .common import (
-    REPO_ROOT,
     ScriptError,
     download,
     download_verified,
@@ -24,65 +27,9 @@ from .common import (
     sha256_file,
     write_sha256_sums,
 )
-from .ubuntu import (
-    DEFAULT_UBUNTU_ARCHITECTURE,
-    DEFAULT_UBUNTU_CODENAME,
-    DEFAULT_UBUNTU_VERSION,
-    parse_deb822,
-)
+from .ubuntu import parse_deb822
 
-UBUNTU_ARCHIVE_KEYRING_URL = (
-    "https://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg"
-)
-UBUNTU_ARCHIVE_KEYRING_SHA256 = (
-    "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
-)
-UBUNTU_SNAPSHOT_ARCHIVE_URL = "https://snapshot.ubuntu.com/ubuntu"
-UBUNTU_SOURCE_INDEXES = (
-    (
-        "https://archive.ubuntu.com/ubuntu",
-        f"{DEFAULT_UBUNTU_CODENAME}-updates",
-        "main",
-    ),
-    (
-        "https://archive.ubuntu.com/ubuntu",
-        f"{DEFAULT_UBUNTU_CODENAME}-updates",
-        "universe",
-    ),
-    (
-        "https://security.ubuntu.com/ubuntu",
-        f"{DEFAULT_UBUNTU_CODENAME}-security",
-        "main",
-    ),
-    (
-        "https://security.ubuntu.com/ubuntu",
-        f"{DEFAULT_UBUNTU_CODENAME}-security",
-        "universe",
-    ),
-    (
-        "https://archive.ubuntu.com/ubuntu",
-        DEFAULT_UBUNTU_CODENAME,
-        "main",
-    ),
-    (
-        "https://archive.ubuntu.com/ubuntu",
-        DEFAULT_UBUNTU_CODENAME,
-        "universe",
-    ),
-)
-_UBUNTU_POCKET_SUITES = {
-    "Release": DEFAULT_UBUNTU_CODENAME,
-    "Updates": f"{DEFAULT_UBUNTU_CODENAME}-updates",
-    "Security": f"{DEFAULT_UBUNTU_CODENAME}-security",
-    "Backports": f"{DEFAULT_UBUNTU_CODENAME}-backports",
-    "Proposed": f"{DEFAULT_UBUNTU_CODENAME}-proposed",
-}
-_UBUNTU_COMPONENTS = frozenset(("main", "restricted", "universe", "multiverse"))
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_LAUNCHPAD_ARCHIVE_API = "https://api.launchpad.net/1.0/ubuntu/+archive/primary"
-_LAUNCHPAD_SERIES_API = (
-    f"https://api.launchpad.net/1.0/ubuntu/{DEFAULT_UBUNTU_CODENAME}"
-)
 
 
 class SourceRequirement(TypedDict):
@@ -129,8 +76,8 @@ def _source_requirements(manifests: list[Path]) -> tuple[SourceRequirement, ...]
         document = cast(dict[str, object], raw_document)
         if (
             document.get("guest") != "ubuntu"
-            or document.get("release") != DEFAULT_UBUNTU_VERSION
-            or document.get("architecture") != DEFAULT_UBUNTU_ARCHITECTURE
+            or document.get("release") != UbuntuBuildConstants.VERSION
+            or document.get("architecture") != UbuntuBuildConstants.ARCHITECTURE
         ):
             raise ScriptError(f"{path} is not a pinned Ubuntu package manifest")
         raw_packages = document.get("packages")
@@ -255,7 +202,7 @@ def _verify_inrelease(
     document = documents[0]
     if (
         document.get("Origin") != "Ubuntu"
-        or document.get("Codename") != DEFAULT_UBUNTU_CODENAME
+        or document.get("Codename") != UbuntuBuildConstants.CODENAME
         or document.get("Suite") != suite
     ):
         raise ScriptError(f"{path} identifies the wrong Ubuntu suite")
@@ -299,7 +246,7 @@ def _load_authenticated_source_index(
     suite: str,
     component: str,
 ) -> tuple[dict[tuple[str, str], SourceRecord], list[SourceMetadata]]:
-    if component not in _UBUNTU_COMPONENTS:
+    if component not in UbuntuBuildConstants.COMPONENTS:
         raise ScriptError(f"unsupported Ubuntu archive component: {component}")
     archive_url = archive_url.rstrip("/")
     release_url = f"{archive_url}/dists/{suite}/InRelease"
@@ -379,7 +326,7 @@ def _load_authenticated_source_index(
                 "sha256": release_sha256,
                 "cache_path": release_path,
                 "output_name": _index_cache_name(release_url),
-                "authenticated_by": UBUNTU_ARCHIVE_KEYRING_URL,
+                "authenticated_by": UbuntuBuildConstants.ARCHIVE_KEYRING_URL,
             },
             {
                 "role": "ubuntu-source-index",
@@ -400,22 +347,22 @@ def _load_source_records(
     cache.mkdir(parents=True, exist_ok=True)
     keyring = cache / "ubuntu-archive-keyring.gpg"
     download_verified(
-        UBUNTU_ARCHIVE_KEYRING_URL,
+        UbuntuBuildConstants.ARCHIVE_KEYRING_URL,
         keyring,
-        UBUNTU_ARCHIVE_KEYRING_SHA256,
+        UbuntuBuildConstants.ARCHIVE_KEYRING_SHA256,
     )
     records: dict[tuple[str, str], SourceRecord] = {}
     indexes: list[SourceMetadata] = [
         {
             "role": "ubuntu-archive-keyring",
-            "url": UBUNTU_ARCHIVE_KEYRING_URL,
-            "sha256": UBUNTU_ARCHIVE_KEYRING_SHA256,
+            "url": UbuntuBuildConstants.ARCHIVE_KEYRING_URL,
+            "sha256": UbuntuBuildConstants.ARCHIVE_KEYRING_SHA256,
             "cache_path": keyring,
             "output_name": keyring.name,
             "authenticated_by": None,
         }
     ]
-    for archive_url, suite, component in UBUNTU_SOURCE_INDEXES:
+    for archive_url, suite, component in UbuntuBuildConstants.SOURCE_INDEXES:
         loaded, metadata = _load_authenticated_source_index(
             cache,
             keyring,
@@ -521,9 +468,12 @@ def _snapshot_source_index(
 ) -> tuple[str, str, str]:
     pocket = entry.get("pocket")
     component = entry.get("component_name")
-    if not isinstance(pocket, str) or pocket not in _UBUNTU_POCKET_SUITES:
+    if not isinstance(pocket, str) or pocket not in UbuntuBuildConstants.POCKET_SUITES:
         raise ScriptError(f"Launchpad returned an unsupported pocket: {pocket!r}")
-    if not isinstance(component, str) or component not in _UBUNTU_COMPONENTS:
+    if (
+        not isinstance(component, str)
+        or component not in UbuntuBuildConstants.COMPONENTS
+    ):
         raise ScriptError(f"Launchpad returned an unsupported component: {component!r}")
     published = _launchpad_timestamp(entry, "date_published")
     if published is None:
@@ -548,8 +498,8 @@ def _snapshot_source_index(
         snapshot_time = published + timedelta(days=1)
     snapshot_id = snapshot_time.strftime("%Y%m%dT%H%M%SZ")
     return (
-        f"{UBUNTU_SNAPSHOT_ARCHIVE_URL}/{snapshot_id}",
-        _UBUNTU_POCKET_SUITES[pocket],
+        f"{UbuntuBuildConstants.SNAPSHOT_ARCHIVE_URL}/{snapshot_id}",
+        UbuntuBuildConstants.POCKET_SUITES[pocket],
         component,
     )
 
@@ -561,14 +511,17 @@ def _launchpad_source_record(
     version: str,
 ) -> tuple[SourceRecord, tuple[SourceMetadata, ...]]:
     key = _encoded_package_directory(name, version)
-    query_url = f"{_LAUNCHPAD_ARCHIVE_API}?" + urllib.parse.urlencode(
-        {
-            "ws.op": "getPublishedSources",
-            "source_name": name,
-            "version": version,
-            "exact_match": "true",
-            "distro_series": _LAUNCHPAD_SERIES_API,
-        }
+    query_url = (
+        f"{UbuntuBuildConstants.LAUNCHPAD_ARCHIVE_API}?"
+        + urllib.parse.urlencode(
+            {
+                "ws.op": "getPublishedSources",
+                "source_name": name,
+                "version": version,
+                "exact_match": "true",
+                "distro_series": UbuntuBuildConstants.LAUNCHPAD_SERIES_API,
+            }
+        )
     )
     query_path = cache / f"launchpad-{key}-query.json"
     raw_query = _download_json(query_url, query_path)
@@ -603,7 +556,7 @@ def _launchpad_source_record(
     selected = entries[0]
     self_link = selected.get("self_link")
     if not isinstance(self_link, str) or not self_link.startswith(
-        f"{_LAUNCHPAD_ARCHIVE_API}/+sourcepub/"
+        f"{UbuntuBuildConstants.LAUNCHPAD_ARCHIVE_API}/+sourcepub/"
     ):
         raise ScriptError(
             f"Launchpad returned an invalid source publication for {name}"
@@ -688,11 +641,6 @@ def _encoded_package_directory(name: str, version: str) -> str:
     return f"{urllib.parse.quote(name, safe='')}_{urllib.parse.quote(version, safe='')}"
 
 
-_GENERATED_OUTPUT_ENTRIES = frozenset(
-    ("manifest.json", "metadata", "packages", "SHA256SUMS")
-)
-
-
 def _validate_source_output(output: Path) -> None:
     if output.is_symlink() or (output.exists() and not output.is_dir()):
         raise ScriptError(f"Ubuntu source output is not a directory: {output}")
@@ -701,7 +649,7 @@ def _validate_source_output(output: Path) -> None:
     unexpected = sorted(
         path.name
         for path in output.iterdir()
-        if path.name not in _GENERATED_OUTPUT_ENTRIES
+        if path.name not in UbuntuBuildConstants.SOURCE_OUTPUT_ENTRIES
     )
     if unexpected:
         raise ScriptError(
@@ -858,10 +806,10 @@ def collect_ubuntu_sources(
     (output / "manifest.json").write_text(
         json.dumps(
             {
-                "format": 1,
-                "release": DEFAULT_UBUNTU_VERSION,
-                "codename": DEFAULT_UBUNTU_CODENAME,
-                "architecture": DEFAULT_UBUNTU_ARCHITECTURE,
+                "format": UbuntuBuildConstants.SOURCE_MANIFEST_FORMAT,
+                "release": UbuntuBuildConstants.VERSION,
+                "codename": UbuntuBuildConstants.CODENAME,
+                "architecture": UbuntuBuildConstants.ARCHITECTURE,
                 "source_indexes": source_indexes,
                 "packages": collected,
             },
@@ -879,12 +827,16 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "build" / "sources" / "ubuntu",
+        default=BuildConstants.SOURCE_DIR / UbuntuBuildConstants.GUEST_NAME,
     )
     parser.add_argument(
         "--cache",
         type=Path,
-        default=REPO_ROOT / ".cache" / "ubuntu-source-indexes",
+        default=(
+            BuildConstants.REPO_ROOT
+            / BuildConstants.CACHE_DIRECTORY_NAME
+            / UbuntuBuildConstants.SOURCE_CACHE_DIRECTORY_NAME
+        ),
     )
     parser.set_defaults(handler=command_collect_ubuntu_sources)
 

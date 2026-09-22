@@ -19,8 +19,12 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TypedDict, cast
 
+from .build_constants import (
+    BuildConstants,
+    InitramfsBuildConstants,
+    UbuntuBuildConstants,
+)
 from .common import (
-    REPO_ROOT,
     ScriptError,
     cache_root,
     download_verified,
@@ -28,27 +32,8 @@ from .common import (
     sha256_file,
 )
 
-DEFAULT_UBUNTU_VERSION = "26.04.1"
-DEFAULT_UBUNTU_CODENAME = "resolute"
-DEFAULT_UBUNTU_ARCHITECTURE = "amd64"
-DEFAULT_UBUNTU_BASE_URL = (
-    "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/"
-    "ubuntu-base-26.04.1-base-amd64.tar.gz"
-)
-DEFAULT_UBUNTU_BASE_SHA256 = (
-    "a496a960472ce474a59590b8987d3a1135d3cbef1991f3b1abe8cacfea8bf85a"
-)
-UBUNTU_PACKAGE_LOCK = REPO_ROOT / "ubuntu" / "packages.lock.json"
-UBUNTU_EROFS_FORMAT = 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9+.-]*")
-_KNOWN_PACKAGE_CONTROL_ACTIONS = {
-    "iputils-ping": frozenset({"postinst"}),
-    "libcap2": frozenset({"triggers"}),
-    "libidn2-0": frozenset({"triggers"}),
-    "libunistring5": frozenset({"triggers"}),
-    "netcat-openbsd": frozenset({"postinst", "prerm"}),
-}
 
 
 class UbuntuLockedPackage(TypedDict):
@@ -122,17 +107,17 @@ def _required_string(
 
 
 def load_package_lock(
-    path: Path = UBUNTU_PACKAGE_LOCK,
+    path: Path = UbuntuBuildConstants.PACKAGE_LOCK,
 ) -> tuple[UbuntuLockedPackage, ...]:
     raw_document = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw_document, dict):
         raise ScriptError(f"{path} must contain a JSON object")
     document = cast(dict[str, object], raw_document)
     expected_header = {
-        "format": 1,
-        "release": DEFAULT_UBUNTU_VERSION,
-        "codename": DEFAULT_UBUNTU_CODENAME,
-        "architecture": DEFAULT_UBUNTU_ARCHITECTURE,
+        "format": UbuntuBuildConstants.PACKAGE_LOCK_FORMAT,
+        "release": UbuntuBuildConstants.VERSION,
+        "codename": UbuntuBuildConstants.CODENAME,
+        "architecture": UbuntuBuildConstants.ARCHITECTURE,
     }
     for field, expected in expected_header.items():
         if document.get(field) != expected:
@@ -191,7 +176,7 @@ def load_package_lock(
                 "pre_depends": str(package_document.get("pre_depends", "")),
             },
         )
-        if package["architecture"] != DEFAULT_UBUNTU_ARCHITECTURE:
+        if package["architecture"] != UbuntuBuildConstants.ARCHITECTURE:
             raise ScriptError(
                 f"{path} package {name} has unsupported architecture "
                 f"{package['architecture']}"
@@ -208,7 +193,7 @@ def load_package_lock(
     return tuple(packages)
 
 
-def package_lock_sha256(path: Path = UBUNTU_PACKAGE_LOCK) -> str:
+def package_lock_sha256(path: Path = UbuntuBuildConstants.PACKAGE_LOCK) -> str:
     contents = path.read_bytes().replace(b"\r\n", b"\n")
     if b"\r" in contents:
         raise ScriptError(f"{path} contains unsupported carriage returns")
@@ -618,7 +603,7 @@ def _install_deb(
     actions = frozenset(control_files) & frozenset(
         {"preinst", "postinst", "prerm", "postrm", "triggers"}
     )
-    allowed_actions = _KNOWN_PACKAGE_CONTROL_ACTIONS.get(
+    allowed_actions = UbuntuBuildConstants.KNOWN_PACKAGE_CONTROL_ACTIONS.get(
         package["name"],
         frozenset(),
     )
@@ -776,9 +761,9 @@ def _validate_ubuntu_identity(root: Path) -> None:
         if separator:
             os_release[key] = value.strip('"')
     if (
-        os_release.get("ID") != "ubuntu"
-        or DEFAULT_UBUNTU_VERSION not in os_release.get("VERSION", "")
-        or os_release.get("VERSION_CODENAME") != DEFAULT_UBUNTU_CODENAME
+        os_release.get("ID") != UbuntuBuildConstants.GUEST_NAME
+        or UbuntuBuildConstants.VERSION not in os_release.get("VERSION", "")
+        or os_release.get("VERSION_CODENAME") != UbuntuBuildConstants.CODENAME
     ):
         raise ScriptError(
             "Ubuntu Base /etc/os-release does not match the pinned release"
@@ -787,15 +772,15 @@ def _validate_ubuntu_identity(root: Path) -> None:
 
 def prepare_root(work: Path) -> Path:
     work.mkdir(parents=True, exist_ok=True)
-    downloads = cache_root() / "downloads"
+    downloads = cache_root() / BuildConstants.DOWNLOAD_DIRECTORY_NAME
     downloads.mkdir(parents=True, exist_ok=True)
-    archive = downloads / f"ubuntu-base-{DEFAULT_UBUNTU_VERSION}-base-amd64.tar.gz"
+    archive = downloads / UbuntuBuildConstants.BASE_ARCHIVE_NAME
     download_verified(
-        DEFAULT_UBUNTU_BASE_URL,
+        UbuntuBuildConstants.BASE_URL,
         archive,
-        DEFAULT_UBUNTU_BASE_SHA256,
+        UbuntuBuildConstants.BASE_SHA256,
     )
-    root = work / "root"
+    root = work / InitramfsBuildConstants.ROOT_DIRECTORY_NAME
     if root.exists():
         shutil.rmtree(root)
     root.mkdir()
@@ -820,7 +805,7 @@ def prepare_root(work: Path) -> Path:
         )
     _validate_package_closure(base_packages, packages)
 
-    package_downloads = downloads / "ubuntu-packages"
+    package_downloads = downloads / UbuntuBuildConstants.PACKAGE_CACHE_DIRECTORY_NAME
     package_downloads.mkdir(exist_ok=True)
     for package in packages:
         filename = package["url"].rsplit("/", maxsplit=1)[-1]
@@ -946,7 +931,7 @@ def package_records(root: Path) -> list[UbuntuPackageRecord]:
             or not version
             or architecture
             not in (
-                DEFAULT_UBUNTU_ARCHITECTURE,
+                UbuntuBuildConstants.ARCHITECTURE,
                 "all",
             )
         ):
@@ -995,10 +980,10 @@ def package_manifest(
     helpers: HelperProvenance,
 ) -> dict[str, object]:
     return {
-        "format": 1,
-        "guest": "ubuntu",
-        "release": DEFAULT_UBUNTU_VERSION,
-        "architecture": DEFAULT_UBUNTU_ARCHITECTURE,
+        "format": UbuntuBuildConstants.PACKAGE_MANIFEST_VERSION,
+        "guest": UbuntuBuildConstants.GUEST_NAME,
+        "release": UbuntuBuildConstants.VERSION,
+        "architecture": UbuntuBuildConstants.ARCHITECTURE,
         "rootfs_sha256": rootfs_sha256(root),
         "packages": package_records(root),
         "helpers": helpers,
@@ -1009,32 +994,40 @@ def customization_files() -> tuple[Path, ...]:
     return (
         *(
             path
-            for path in sorted((REPO_ROOT / "guest" / "common").iterdir())
+            for path in sorted(
+                (
+                    BuildConstants.REPO_ROOT / BuildConstants.COMMON_GUEST_DIRECTORY
+                ).iterdir()
+            )
             if path.is_file()
         ),
         *(
             path
-            for path in sorted((REPO_ROOT / "guest" / "ubuntu").iterdir())
+            for path in sorted(
+                (
+                    BuildConstants.REPO_ROOT / UbuntuBuildConstants.GUEST_DIRECTORY
+                ).iterdir()
+            )
             if path.is_file()
         ),
-        UBUNTU_PACKAGE_LOCK,
+        UbuntuBuildConstants.PACKAGE_LOCK,
     )
 
 
 def converter_input_sha256(customization_files: Sequence[Path]) -> str:
     lock = load_package_lock()
     document = {
-        "domain": "nvx-ubuntu-erofs",
-        "format": UBUNTU_EROFS_FORMAT,
-        "release": DEFAULT_UBUNTU_VERSION,
-        "architecture": DEFAULT_UBUNTU_ARCHITECTURE,
-        "base_sha256": DEFAULT_UBUNTU_BASE_SHA256,
+        "domain": UbuntuBuildConstants.EROFS_DIGEST_DOMAIN,
+        "format": UbuntuBuildConstants.EROFS_FORMAT,
+        "release": UbuntuBuildConstants.VERSION,
+        "architecture": UbuntuBuildConstants.ARCHITECTURE,
+        "base_sha256": UbuntuBuildConstants.BASE_SHA256,
         "supplemental_packages": [
             {"name": package["name"], "sha256": package["sha256"]} for package in lock
         ],
         "customization_files": [
             {
-                "path": path.relative_to(REPO_ROOT).as_posix(),
+                "path": path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
                 "sha256": sha256_file(path),
             }
             for path in sorted(customization_files)

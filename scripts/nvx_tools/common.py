@@ -17,10 +17,10 @@ from http.client import HTTPMessage
 from pathlib import Path, PurePosixPath
 from typing import IO
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-BUILD_DIR = REPO_ROOT / "build"
-SOURCE_DIR = BUILD_DIR / "sources"
-OPENVMM_DIR = REPO_ROOT / "openvmm"
+from .build_constants import (
+    BuildConstants,
+    OpenVMMBuildConstants,
+)
 
 
 class ScriptError(RuntimeError):
@@ -28,21 +28,30 @@ class ScriptError(RuntimeError):
 
 
 def artifact_path(name: str) -> Path:
-    return BUILD_DIR / name
+    return BuildConstants.BUILD_DIR / name
 
 
 def cache_root() -> Path:
-    configured = os.environ.get("NVX_CACHE_DIR")
+    configured = os.environ.get(BuildConstants.CACHE_ENVIRONMENT_VARIABLE)
     return (
         Path(configured).expanduser().resolve()
         if configured
-        else (REPO_ROOT / ".cache").resolve()
+        else (BuildConstants.REPO_ROOT / BuildConstants.CACHE_DIRECTORY_NAME).resolve()
     )
 
 
 def openvmm_binary_path() -> Path:
-    suffix = ".exe" if os.name == "nt" else ""
-    return OPENVMM_DIR / "target" / "release" / f"openvmm{suffix}"
+    executable = (
+        OpenVMMBuildConstants.WINDOWS_BINARY_NAME
+        if os.name == "nt"
+        else OpenVMMBuildConstants.BINARY_NAME
+    )
+    return (
+        OpenVMMBuildConstants.DIRECTORY
+        / OpenVMMBuildConstants.TARGET_DIRECTORY_NAME
+        / OpenVMMBuildConstants.BUILD_PROFILE
+        / executable
+    )
 
 
 @dataclass(frozen=True)

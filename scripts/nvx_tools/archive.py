@@ -10,10 +10,12 @@ import zipfile
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
+from .build_constants import (
+    ReleaseBuildConstants,
+)
 from .common import ScriptError
 
 ArchiveInput = tuple[Path, str]
-_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 def _normalize_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -24,7 +26,7 @@ def _normalize_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
     member.gid = 0
     member.uname = ""
     member.gname = ""
-    member.mtime = 0
+    member.mtime = ReleaseBuildConstants.TAR_TIMESTAMP
     return member
 
 
@@ -39,7 +41,12 @@ def create_reproducible_tar_gz(
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+        with gzip.GzipFile(
+            filename="",
+            mode="wb",
+            fileobj=raw,
+            mtime=ReleaseBuildConstants.TAR_TIMESTAMP,
+        ) as compressed:
             with tarfile.open(fileobj=compressed, mode="w") as archive:
                 for source, arcname in inputs:
                     archive.add(
@@ -100,7 +107,7 @@ def create_reproducible_release_archive(source: Path, output: Path) -> None:
                 filename="",
                 mode="wb",
                 fileobj=raw,
-                mtime=0,
+                mtime=ReleaseBuildConstants.TAR_TIMESTAMP,
             ) as gzip_file:
                 with tarfile.open(fileobj=gzip_file, mode="w") as archive:
                     for path, name, mode, is_directory in members:
@@ -110,7 +117,7 @@ def create_reproducible_release_archive(source: Path, output: Path) -> None:
                         info.gid = 0
                         info.uname = ""
                         info.gname = ""
-                        info.mtime = 0
+                        info.mtime = ReleaseBuildConstants.TAR_TIMESTAMP
                         if is_directory:
                             info.type = tarfile.DIRTYPE
                             archive.addfile(info)
@@ -124,11 +131,13 @@ def create_reproducible_release_archive(source: Path, output: Path) -> None:
             output,
             "w",
             compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
+            compresslevel=ReleaseBuildConstants.ZIP_COMPRESSION_LEVEL,
         ) as archive:
             for path, name, mode, is_directory in members:
                 member_name = f"{name}/" if is_directory else name
-                info = zipfile.ZipInfo(member_name, date_time=_ZIP_TIMESTAMP)
+                info = zipfile.ZipInfo(
+                    member_name, date_time=ReleaseBuildConstants.ZIP_TIMESTAMP
+                )
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
                 file_type = stat.S_IFDIR if is_directory else stat.S_IFREG

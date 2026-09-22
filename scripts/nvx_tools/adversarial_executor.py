@@ -30,10 +30,14 @@ from nvx_tools.adversarial_oracles import (
     sha256_file,
     write_process_metadata,
 )
-from nvx_tools.build import INITRAMFS_PROVENANCE_NAME
+from nvx_tools.build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+    InitramfsBuildConstants,
+    KernelBuildConstants,
+    OpenVMMBuildConstants,
+)
 from nvx_tools.common import (
-    BUILD_DIR,
-    REPO_ROOT,
     ScriptError,
     artifact_path,
     openvmm_binary_path,
@@ -136,7 +140,7 @@ def _string(
 
 def _git(*arguments: str) -> str:
     completed = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *arguments],
+        ["git", "-C", str(BuildConstants.REPO_ROOT), *arguments],
         check=True,
         capture_output=True,
         text=True,
@@ -155,7 +159,7 @@ def _target_metadata() -> dict[str, object]:
     ).splitlines()
     openvmm_status = _git(
         "-C",
-        str(REPO_ROOT / "openvmm"),
+        str(OpenVMMBuildConstants.DIRECTORY),
         "status",
         "--porcelain",
         "--untracked-files=normal",
@@ -166,7 +170,7 @@ def _target_metadata() -> dict[str, object]:
         "nvx_status": nvx_status,
         "openvmm_commit": _git(
             "-C",
-            str(REPO_ROOT / "openvmm"),
+            str(OpenVMMBuildConstants.DIRECTORY),
             "rev-parse",
             "HEAD",
         ),
@@ -181,17 +185,19 @@ def _target_metadata() -> dict[str, object]:
 
 def _artifact_metadata() -> dict[str, object]:
     paths = {
-        "kernel": require_file(artifact_path("vmlinux"), "PVH kernel"),
+        "kernel": require_file(
+            artifact_path(KernelBuildConstants.BINARY_NAME), "PVH kernel"
+        ),
         "initramfs": require_file(
-            artifact_path("initramfs.cpio.gz"),
+            artifact_path(AlpineBuildConstants.INITRAMFS_NAME),
             "initramfs",
         ),
         "initramfs_package_manifest": require_file(
-            artifact_path("initramfs.cpio.gz.packages.json"),
+            artifact_path(AlpineBuildConstants.PACKAGE_MANIFEST_NAME),
             "initramfs package manifest",
         ),
         "initramfs_provenance": require_file(
-            BUILD_DIR / INITRAMFS_PROVENANCE_NAME,
+            BuildConstants.BUILD_DIR / InitramfsBuildConstants.PROVENANCE_NAME,
             "initramfs provenance",
         ),
         "openvmm": require_file(
@@ -199,11 +205,11 @@ def _artifact_metadata() -> dict[str, object]:
             "OpenVMM release binary",
         ),
         "kernel_provenance": require_file(
-            BUILD_DIR / "vmlinux.provenance.json",
+            BuildConstants.BUILD_DIR / KernelBuildConstants.PROVENANCE_NAME,
             "kernel provenance",
         ),
         "openvmm_provenance": require_file(
-            BUILD_DIR / "openvmm.provenance.json",
+            BuildConstants.BUILD_DIR / OpenVMMBuildConstants.PROVENANCE_NAME,
             "OpenVMM provenance",
         ),
     }
@@ -443,7 +449,7 @@ class _InitializedSession:
                 break
             command = [
                 sys.executable,
-                str(REPO_ROOT / "scripts" / "nvx.py"),
+                str(BuildConstants.REPO_ROOT / "scripts" / "nvx.py"),
                 "test-microvm",
                 "--backend",
                 self.backend,
@@ -465,7 +471,7 @@ class _InitializedSession:
             environment["NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL"] = str(pid_journal)
             result = run_bounded_process(
                 command,
-                cwd=REPO_ROOT,
+                cwd=BuildConstants.REPO_ROOT,
                 output_dir=repetition_root / "process",
                 timeout=process_timeout,
                 environment=environment,
@@ -588,7 +594,7 @@ class _InitializedSession:
             }
         command = [
             sys.executable,
-            str(REPO_ROOT / "scripts" / "nvx.py"),
+            str(BuildConstants.REPO_ROOT / "scripts" / "nvx.py"),
             "test-microvm",
             "--backend",
             self.backend,
@@ -608,7 +614,7 @@ class _InitializedSession:
         environment["NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL"] = str(pid_journal)
         result = run_bounded_process(
             command,
-            cwd=REPO_ROOT,
+            cwd=BuildConstants.REPO_ROOT,
             output_dir=root / "process",
             timeout=timeout,
             environment=environment,
@@ -801,10 +807,10 @@ class AdversarialExecutor:
             verification = run_bounded_process(
                 [
                     sys.executable,
-                    str(REPO_ROOT / "scripts" / "nvx.py"),
+                    str(BuildConstants.REPO_ROOT / "scripts" / "nvx.py"),
                     "verify",
                 ],
-                cwd=REPO_ROOT,
+                cwd=BuildConstants.REPO_ROOT,
                 output_dir=root / "verify",
                 timeout=min(120.0, baseline_timeout),
                 environment=sanitized_environment(),
@@ -1068,7 +1074,7 @@ def serve(state_root: Path | None = None) -> int:
         configured_root = (
             Path(value)
             if value
-            else BUILD_DIR / "test-results" / "adversarial-executor"
+            else BuildConstants.BUILD_DIR / "test-results" / "adversarial-executor"
         )
     executor = AdversarialExecutor(configured_root)
     while line := sys.stdin.buffer.readline(MAX_PROTOCOL_LINE_BYTES + 1):

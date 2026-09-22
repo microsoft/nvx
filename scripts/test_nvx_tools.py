@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import argparse
+import ast
 import hashlib
 import http.client
 import http.server
@@ -32,6 +33,7 @@ from nvx_tools import (  # noqa: E402
     build,
     build_config,
     ci,
+    collect_alpine_sources,
     collect_ubuntu_sources,
     common,
     guests,
@@ -39,6 +41,17 @@ from nvx_tools import (  # noqa: E402
     sandbox,
     sandbox_lifecycle,
     ubuntu,
+)
+from nvx_tools.build_constants import (  # noqa: E402
+    AlpineBuildConstants,
+    BuildConstants,
+    DockerBuildConstants,
+    InitramfsBuildConstants,
+    KernelBuildConstants,
+    OpenVMMBuildConstants,
+    ReleaseBuildConstants,
+    UbuntuBuildConstants,
+    ZstdBuildConstants,
 )
 
 
@@ -80,7 +93,14 @@ def _write_release_fixture(
     binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
     binary = openvmm_dir / "target" / "release" / binary_name
     revision = "0bc357bbcf3a654b63dfb51f1103c5751bf3d31f"
-    guest_names = release.GUEST_RELEASE_NAMES
+    guest_names = ReleaseBuildConstants.GUEST_ARTIFACT_NAMES
+    source_files = set(build._initramfs_source_files()) | set(
+        ubuntu.customization_files()
+    )
+    for source in source_files:
+        destination = root / source.relative_to(BuildConstants.REPO_ROOT)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
     for path in (
         binary,
         *(build_dir / name for name in guest_names),
@@ -118,9 +138,9 @@ def _write_release_fixture(
     generated_config.write_text(
         "\n".join(
             (
-                *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
-                *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
-                *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+                *KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                *KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
+                *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
             )
         )
         + "\n",
@@ -139,7 +159,7 @@ def _write_release_fixture(
             "upstream_url": (
                 "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz"
             ),
-            "upstream_archive_sha256": build.DEFAULT_KERNEL_SHA256,
+            "upstream_archive_sha256": KernelBuildConstants.SHA256,
             "source_cache": ".cache/linux/linux-6.18.38",
             "source_archive": ("build/sources/linux/nvx-linux-source-6.18.38.tar.gz"),
             "generated_final_config": "build/vmlinux.config",
@@ -154,22 +174,20 @@ def _write_release_fixture(
                 "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/"
                 "x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz"
             ),
-            "minirootfs_sha256": build.DEFAULT_ALPINE_MINIROOTFS_SHA256,
+            "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
             "guest_sources": ["guest/common", "guest/alpine"],
             "package_manifests": ["build/initramfs.cpio.gz.packages.json"],
             "source_output": "build/sources/alpine",
         },
         "ubuntu": {
             "distribution": "Ubuntu Base",
-            "version": ubuntu.DEFAULT_UBUNTU_VERSION,
-            "codename": ubuntu.DEFAULT_UBUNTU_CODENAME,
-            "architecture": ubuntu.DEFAULT_UBUNTU_ARCHITECTURE,
-            "base_url": ubuntu.DEFAULT_UBUNTU_BASE_URL,
-            "base_sha256": ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
-            "archive_keyring_url": (collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL),
-            "archive_keyring_sha256": (
-                collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_SHA256
-            ),
+            "version": UbuntuBuildConstants.VERSION,
+            "codename": UbuntuBuildConstants.CODENAME,
+            "architecture": UbuntuBuildConstants.ARCHITECTURE,
+            "base_url": UbuntuBuildConstants.BASE_URL,
+            "base_sha256": UbuntuBuildConstants.BASE_SHA256,
+            "archive_keyring_url": (UbuntuBuildConstants.ARCHIVE_KEYRING_URL),
+            "archive_keyring_sha256": (UbuntuBuildConstants.ARCHIVE_KEYRING_SHA256),
             "package_lock": "ubuntu/packages.lock.json",
             "package_lock_sha256": ubuntu.package_lock_sha256(),
             "guest_sources": [
@@ -182,7 +200,7 @@ def _write_release_fixture(
                 "build/ubuntu-distro.erofs.manifest.json",
             ],
             "source_output": "build/sources/ubuntu",
-            "erofs_converter_format": ubuntu.UBUNTU_EROFS_FORMAT,
+            "erofs_converter_format": UbuntuBuildConstants.EROFS_FORMAT,
         },
     }
     (root / "SOURCE-MANIFEST.json").write_text(
@@ -204,7 +222,7 @@ def _write_release_fixture(
             "sha256": "1" * 64,
         },
     }
-    (build_dir / build.OPENVMM_PROVENANCE_NAME).write_text(
+    (build_dir / OpenVMMBuildConstants.PROVENANCE_NAME).write_text(
         json.dumps(
             {
                 "format": 1,
@@ -215,7 +233,7 @@ def _write_release_fixture(
         ),
         encoding="utf-8",
     )
-    (build_dir / build.KERNEL_PROVENANCE_NAME).write_text(
+    (build_dir / KernelBuildConstants.PROVENANCE_NAME).write_text(
         json.dumps(
             {
                 "format": 1,
@@ -226,7 +244,7 @@ def _write_release_fixture(
         ),
         encoding="utf-8",
     )
-    (build_dir / build.INITRAMFS_PROVENANCE_NAME).write_text(
+    (build_dir / InitramfsBuildConstants.PROVENANCE_NAME).write_text(
         json.dumps(
             {
                 "format": 1,
@@ -947,7 +965,7 @@ class CiTests(unittest.TestCase):
             )
 
             with (
-                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm),
                 patch.object(ci, "require_tool", return_value="cargo"),
                 patch.object(ci, "run_capture", return_value=fuzz_crates) as capture,
                 patch.object(ci, "run_checked") as run_checked,
@@ -1029,7 +1047,7 @@ class CiTests(unittest.TestCase):
             )
 
             with (
-                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm),
                 patch.object(ci, "require_tool", return_value="cargo"),
                 patch.object(ci, "run_capture", return_value=failed_query),
                 patch.object(ci, "run_checked") as run_checked,
@@ -1052,12 +1070,14 @@ class CiTests(unittest.TestCase):
             installed_targets = common.CommandResult(
                 args=("rustup", "target", "list"),
                 returncode=0,
-                stdout=("\n".join(ci.OPENVMM_RUST_TARGETS[backend]) + "\n").encode(),
+                stdout=(
+                    "\n".join(OpenVMMBuildConstants.TEST_RUST_TARGETS[backend]) + "\n"
+                ).encode(),
                 stderr=b"",
             )
 
             with (
-                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
@@ -1086,7 +1106,7 @@ class CiTests(unittest.TestCase):
                     "list",
                     "--installed",
                     "--toolchain",
-                    ci.OPENVMM_RUST_TOOLCHAIN,
+                    OpenVMMBuildConstants.RUST_TOOLCHAIN,
                 ]
             )
             self.assertEqual(run_checked.call_count, 2)
@@ -1098,7 +1118,7 @@ class CiTests(unittest.TestCase):
             environment = restore.kwargs["env"]
             self.assertEqual(
                 environment["RUSTUP_TOOLCHAIN"],
-                ci.OPENVMM_RUST_TOOLCHAIN,
+                OpenVMMBuildConstants.RUST_TOOLCHAIN,
             )
             if os.name == "nt":
                 self.assertNotIn("XDG_CACHE_HOME", environment)
@@ -1126,7 +1146,9 @@ class CiTests(unittest.TestCase):
         installed_targets = common.CommandResult(
             args=("rustup", "target", "list"),
             returncode=0,
-            stdout=("\n".join(ci.OPENVMM_RUST_TARGETS["whp"]) + "\n").encode(),
+            stdout=(
+                "\n".join(OpenVMMBuildConstants.TEST_RUST_TARGETS["whp"]) + "\n"
+            ).encode(),
             stderr=b"",
         )
 
@@ -1139,7 +1161,7 @@ class CiTests(unittest.TestCase):
 
         self.assertEqual(
             environment,
-            {"RUSTUP_TOOLCHAIN": ci.OPENVMM_RUST_TOOLCHAIN},
+            {"RUSTUP_TOOLCHAIN": OpenVMMBuildConstants.RUST_TOOLCHAIN},
         )
         run_checked.assert_not_called()
 
@@ -1153,12 +1175,12 @@ class CiTests(unittest.TestCase):
             installed_targets = common.CommandResult(
                 args=("rustup", "target", "list"),
                 returncode=0,
-                stdout=f"{ci.OPENVMM_GUEST_RUST_TARGET}\n".encode(),
+                stdout=f"{OpenVMMBuildConstants.GUEST_RUST_TARGET}\n".encode(),
                 stderr=b"",
             )
 
             with (
-                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
@@ -1179,7 +1201,7 @@ class CiTests(unittest.TestCase):
             )
             self.assertEqual(
                 environment["RUSTUP_TOOLCHAIN"],
-                ci.OPENVMM_RUST_TOOLCHAIN,
+                OpenVMMBuildConstants.RUST_TOOLCHAIN,
             )
             if os.name != "nt":
                 self.assertEqual(
@@ -1192,7 +1214,7 @@ class CiTests(unittest.TestCase):
                     "rustup",
                     "toolchain",
                     "install",
-                    ci.OPENVMM_RUST_TOOLCHAIN,
+                    OpenVMMBuildConstants.RUST_TOOLCHAIN,
                     "--profile",
                     "minimal",
                 ],
@@ -1203,9 +1225,9 @@ class CiTests(unittest.TestCase):
                     "rustup",
                     "target",
                     "add",
-                    *ci.OPENVMM_RUST_TARGETS[backend],
+                    *OpenVMMBuildConstants.TEST_RUST_TARGETS[backend],
                     "--toolchain",
-                    ci.OPENVMM_RUST_TOOLCHAIN,
+                    OpenVMMBuildConstants.RUST_TOOLCHAIN,
                 ],
             )
             for command in (install_targets, restore, tests):
@@ -1217,7 +1239,7 @@ class CiTests(unittest.TestCase):
             set(ci.OPENVMM_TEST_BACKENDS),
         )
         self.assertEqual(
-            set(ci.OPENVMM_RUST_TARGETS),
+            set(OpenVMMBuildConstants.TEST_RUST_TARGETS),
             set(ci.OPENVMM_TEST_BACKENDS),
         )
         self.assertEqual(
@@ -1503,9 +1525,9 @@ class CiConfigurationTests(unittest.TestCase):
                         )
 
     def test_required_ci_job_uses_tested_policy(self):
-        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
         job = _workflow_job(workflow, "required-status-check")
 
         self.assertIn("python3 scripts/nvx.py check-required-ci", job)
@@ -1525,19 +1547,34 @@ class CiConfigurationTests(unittest.TestCase):
 
     def test_flowey_downloads_use_retrying_curl(self):
         action = (
-            common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "setup-curl"
+            / "action.yml"
         ).read_text(encoding="utf-8")
         windows_shim = (
-            common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "curl-shim.rs"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "setup-curl"
+            / "curl-shim.rs"
         ).read_text(encoding="utf-8")
-        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
         microvm_workflow = (
-            common.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "run-nvx-microvm-tests.yml"
         ).read_text(encoding="utf-8")
         build_action = (
-            common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-openvmm"
+            / "action.yml"
         ).read_text(encoding="utf-8")
 
         for option in (
@@ -1610,7 +1647,7 @@ class CiConfigurationTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 shim = Path(directory) / "curl.exe"
                 shim_source = (
-                    common.REPO_ROOT
+                    BuildConstants.REPO_ROOT
                     / ".github"
                     / "actions"
                     / "setup-curl"
@@ -1657,20 +1694,30 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertEqual(RetryHandler.request_count, 2)
 
     def test_ci_shares_openvmm_inputs_and_binary_artifacts(self):
-        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
         build_workflow = (
-            common.REPO_ROOT / ".github" / "workflows" / "build-openvmm-binary.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "build-openvmm-binary.yml"
         ).read_text(encoding="utf-8")
         microvm_workflow = (
-            common.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "run-nvx-microvm-tests.yml"
         ).read_text(encoding="utf-8")
         platform_workflow = (
-            common.REPO_ROOT / ".github" / "workflows" / "run-platform.yml"
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "run-platform.yml"
         ).read_text(encoding="utf-8")
         build_action = (
-            common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-openvmm"
+            / "action.yml"
         ).read_text(encoding="utf-8")
 
         for configuration in (workflow, build_action):
@@ -1877,9 +1924,9 @@ class CiConfigurationTests(unittest.TestCase):
             self.assertIn(f"needs.{job_name}.result", performance_gate_job)
 
     def test_ci_runs_openvmm_tests_and_unit_tests_on_each_backend(self):
-        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
         vmm_tests_job = _workflow_job(workflow, "openvmm-vmm-tests")
         unit_tests_job = _workflow_job(workflow, "openvmm-unit-tests")
 
@@ -1918,9 +1965,9 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotIn("test-openvmm --backend", unit_tests_job)
 
     def test_ci_preserves_failed_openvmm_test_diagnostics(self):
-        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
         job = _workflow_job(workflow, "openvmm-vmm-tests")
         step_name = "      - name: Upload OpenVMM test diagnostics"
         self.assertIn(step_name, job)
@@ -1947,20 +1994,24 @@ class CiConfigurationTests(unittest.TestCase):
         )
 
     def test_runner_setup_pins_and_validates_sccache(self):
-        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
         action = (
-            common.REPO_ROOT / ".github" / "actions" / "sccache" / "action.yml"
+            BuildConstants.REPO_ROOT / ".github" / "actions" / "sccache" / "action.yml"
         ).read_text(encoding="utf-8")
         validate_runner = (
-            common.REPO_ROOT / ".github" / "actions" / "validate-runner" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-runner"
+            / "action.yml"
         ).read_text(encoding="utf-8")
         windows_setup = (
-            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
         ).read_text(encoding="utf-8")
         linux_setup = (
-            common.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
         ).read_text(encoding="utf-8")
 
         self.assertIn('$SccacheVersion = "0.18.0"', windows_setup)
@@ -1993,7 +2044,7 @@ class CiConfigurationTests(unittest.TestCase):
         )
 
     def test_linux_setup_installs_openvmm_perl_modules(self):
-        setup_directory = common.REPO_ROOT / "scripts" / "setup"
+        setup_directory = BuildConstants.REPO_ROOT / "scripts" / "setup"
         configurations = (
             (setup_directory / "setup-linux-runner.sh").read_text(encoding="utf-8"),
             (setup_directory / "setup-linux-mshv.sh").read_text(encoding="utf-8"),
@@ -2010,10 +2061,14 @@ class CiConfigurationTests(unittest.TestCase):
 
     def test_windows_runner_requires_inbox_pcat_firmware(self):
         windows_setup = (
-            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
         ).read_text(encoding="utf-8")
         validate_runner = (
-            common.REPO_ROOT / ".github" / "actions" / "validate-runner" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-runner"
+            / "action.yml"
         ).read_text(encoding="utf-8")
 
         self.assertIn('"Microsoft-Hyper-V"', windows_setup)
@@ -2027,10 +2082,10 @@ class CiConfigurationTests(unittest.TestCase):
 
     def test_runner_setups_install_backend_native_openvmm_targets(self):
         linux_setup = (
-            common.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
         ).read_text(encoding="utf-8")
         windows_setup = (
-            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
         ).read_text(encoding="utf-8")
 
         for target in (
@@ -2051,10 +2106,14 @@ class CiConfigurationTests(unittest.TestCase):
 
     def test_release_actions_use_deterministic_immutable_tooling(self):
         package_action = (
-            common.REPO_ROOT / ".github" / "actions" / "package-release" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "package-release"
+            / "action.yml"
         ).read_text(encoding="utf-8")
         publish_action = (
-            common.REPO_ROOT
+            BuildConstants.REPO_ROOT
             / ".github"
             / "actions"
             / "publish-development-release"
@@ -2085,7 +2144,7 @@ class CiConfigurationTests(unittest.TestCase):
         configurations = "\n".join(
             path.read_text(encoding="utf-8")
             for pattern in ("*.yml", "*.yaml")
-            for path in (common.REPO_ROOT / ".github").rglob(pattern)
+            for path in (BuildConstants.REPO_ROOT / ".github").rglob(pattern)
         )
 
         self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
@@ -2093,7 +2152,11 @@ class CiConfigurationTests(unittest.TestCase):
 
     def test_windows_ci_remeasures_only_unstable_lifecycle_results(self):
         action = (
-            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
         ).read_text(encoding="utf-8")
 
         self.assertEqual(action.count("performance validate-openvmm"), 1)
@@ -2108,7 +2171,11 @@ class CiConfigurationTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_cli_validation_stops_at_each_failed_command(self):
         action = (
-            common.REPO_ROOT / ".github" / "actions" / "validate-nvx" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-nvx"
+            / "action.yml"
         ).read_text(encoding="utf-8")
         script = _composite_action_script(action, "Validate NVX CLI on Windows")
         command_count = sum(line.startswith("python ") for line in script.splitlines())
@@ -2153,7 +2220,11 @@ function python {
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_acceptance_preserves_attempts_and_publishes_only_valid_data(self):
         action = (
-            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
         ).read_text(encoding="utf-8")
         script = _composite_action_script(action, "Run Windows acceptance test")
         for name, value in (
@@ -2248,6 +2319,274 @@ function python {
                     )
 
 
+class BuildConstantsTests(unittest.TestCase):
+    def test_constants_are_grouped_class_namespaces(self):
+        for namespace in (
+            BuildConstants,
+            KernelBuildConstants,
+            OpenVMMBuildConstants,
+            AlpineBuildConstants,
+            UbuntuBuildConstants,
+            InitramfsBuildConstants,
+            DockerBuildConstants,
+            ZstdBuildConstants,
+            ReleaseBuildConstants,
+        ):
+            with self.subTest(namespace=namespace.__name__):
+                self.assertEqual(namespace.__module__, "nvx_tools.build_constants")
+                self.assertTrue(
+                    all(
+                        name.isupper()
+                        for name in vars(namespace)
+                        if not name.startswith("__")
+                    )
+                )
+
+    def test_build_pins_and_artifact_names_have_one_literal_owner(self):
+        centralized = {
+            KernelBuildConstants.VERSION,
+            KernelBuildConstants.URL,
+            KernelBuildConstants.SHA256,
+            KernelBuildConstants.BINARY_NAME,
+            KernelBuildConstants.CONFIG_NAME,
+            KernelBuildConstants.PROVENANCE_NAME,
+            OpenVMMBuildConstants.GNU_RUST_TARGET,
+            OpenVMMBuildConstants.MUSL_RUST_TARGET,
+            OpenVMMBuildConstants.WINDOWS_RUST_TARGET,
+            OpenVMMBuildConstants.PROVENANCE_NAME,
+            OpenVMMBuildConstants.CONTROL_CONTRACT_REVISION,
+            AlpineBuildConstants.VERSION,
+            AlpineBuildConstants.BRANCH,
+            AlpineBuildConstants.MINIROOTFS_SHA256,
+            AlpineBuildConstants.INITRAMFS_NAME,
+            AlpineBuildConstants.PACKAGE_MANIFEST_NAME,
+            UbuntuBuildConstants.VERSION,
+            UbuntuBuildConstants.BASE_URL,
+            UbuntuBuildConstants.BASE_SHA256,
+            UbuntuBuildConstants.INITRAMFS_NAME,
+            UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
+            UbuntuBuildConstants.DISTRO_NAME,
+            UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+            InitramfsBuildConstants.PROVENANCE_NAME,
+            ZstdBuildConstants.VERSION,
+            ZstdBuildConstants.SHA256,
+        }
+        duplicates: list[tuple[str, int, str]] = []
+        for path in (BuildConstants.REPO_ROOT / "scripts").rglob("*.py"):
+            if path.name == "build_constants.py" or path.name.startswith("test_"):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            duplicates.extend(
+                (path.name, node.lineno, node.value)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value in centralized
+            )
+        self.assertEqual(duplicates, [])
+
+    def test_old_module_level_constants_are_not_reexported(self):
+        names = (
+            "REPO_ROOT",
+            "BUILD_DIR",
+            "SOURCE_DIR",
+            "OPENVMM_DIR",
+            "DEFAULT_KERNEL_VERSION",
+            "DEFAULT_KERNEL_URL",
+            "DEFAULT_KERNEL_SHA256",
+            "DEFAULT_ALPINE_VERSION",
+            "DEFAULT_ALPINE_BRANCH",
+            "DEFAULT_ALPINE_MINIROOTFS_SHA256",
+            "DEFAULT_UBUNTU_VERSION",
+            "DEFAULT_UBUNTU_CODENAME",
+            "DEFAULT_UBUNTU_ARCHITECTURE",
+            "DEFAULT_UBUNTU_BASE_URL",
+            "DEFAULT_UBUNTU_BASE_SHA256",
+            "UBUNTU_PACKAGE_LOCK",
+            "UBUNTU_EROFS_FORMAT",
+            "MICROVM_ABI_VERSION",
+            "CONTROL_SESSION_PROTOCOL_VERSION",
+            "CONTROL_CONTRACT_REVISION",
+            "OPENVMM_PROVENANCE_NAME",
+            "KERNEL_PROVENANCE_NAME",
+            "INITRAMFS_PROVENANCE_NAME",
+            "REQUIRED_VIRTIO_CONSOLE_CONFIG",
+            "REQUIRED_SHARED_STATUS_KERNEL_CONFIG",
+            "REQUIRED_SANDBOX_KERNEL_CONFIG",
+            "ZSTD_VERSION",
+            "ZSTD_ARCHIVE",
+            "ZSTD_URL",
+            "ZSTD_SHA256",
+            "OPENVMM_RUST_TOOLCHAIN",
+            "OPENVMM_GUEST_RUST_TARGET",
+            "OPENVMM_UEFI_RUST_TARGET",
+            "OPENVMM_LINUX_MUSL_RUST_TARGET",
+            "OPENVMM_RUST_TARGETS",
+            "APORTS_URL",
+            "REPOSITORIES",
+            "UBUNTU_ARCHIVE_KEYRING_URL",
+            "UBUNTU_ARCHIVE_KEYRING_SHA256",
+            "UBUNTU_SNAPSHOT_ARCHIVE_URL",
+            "UBUNTU_SOURCE_INDEXES",
+            "_UBUNTU_POCKET_SUITES",
+            "_UBUNTU_COMPONENTS",
+            "_LAUNCHPAD_ARCHIVE_API",
+            "_LAUNCHPAD_SERIES_API",
+            "_GENERATED_OUTPUT_ENTRIES",
+            "_KNOWN_PACKAGE_CONTROL_ACTIONS",
+            "PROJECT_SOURCE_PATHS",
+            "GUEST_RELEASE_NAMES",
+            "_ZIP_TIMESTAMP",
+        )
+        for module in (
+            build,
+            build_config,
+            common,
+            ubuntu,
+            ci,
+            collect_alpine_sources,
+            collect_ubuntu_sources,
+            release,
+            benchmark,
+            archive,
+        ):
+            with self.subTest(module=module.__name__):
+                self.assertFalse(set(names).intersection(vars(module)))
+
+    def test_guest_descriptors_and_source_manifest_share_build_pins(self):
+        manifest = json.loads(
+            (BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(KernelBuildConstants.VERSION, manifest["linux"]["version"])
+        self.assertEqual(KernelBuildConstants.URL, manifest["linux"]["upstream_url"])
+        self.assertEqual(
+            KernelBuildConstants.SHA256,
+            manifest["linux"]["upstream_archive_sha256"],
+        )
+        self.assertEqual(
+            AlpineBuildConstants.MINIROOTFS_URL, manifest["alpine"]["minirootfs_url"]
+        )
+        self.assertEqual(
+            AlpineBuildConstants.MINIROOTFS_SHA256,
+            manifest["alpine"]["minirootfs_sha256"],
+        )
+        for descriptor in (guests.ALPINE_GUEST, guests.UBUNTU_GUEST):
+            with self.subTest(guest=descriptor.name):
+                pinned = manifest[descriptor.name]
+                self.assertEqual(descriptor.release, pinned["version"])
+                self.assertEqual(descriptor.architecture, pinned["architecture"])
+                self.assertEqual(
+                    f"build/{descriptor.package_manifest_name}",
+                    pinned["package_manifests"][0],
+                )
+        self.assertEqual(
+            OpenVMMBuildConstants.MICROVM_ABI_VERSION,
+            manifest["openvmm"]["microvm_abi_version"],
+        )
+        self.assertEqual(
+            OpenVMMBuildConstants.CONTROL_SESSION_PROTOCOL_VERSION,
+            manifest["openvmm"]["control_session_protocol_version"],
+        )
+        self.assertEqual(
+            OpenVMMBuildConstants.CONTROL_CONTRACT_REVISION,
+            manifest["openvmm"]["control_contract_revision"],
+        )
+
+    def test_cache_defaults_are_resolved_for_each_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for configured in ("", str(root / "first"), str(root / "second")):
+                with (
+                    self.subTest(configured=configured),
+                    patch.dict(os.environ, {"NVX_CACHE_DIR": configured}),
+                ):
+                    expected = (
+                        Path(configured)
+                        if configured
+                        else BuildConstants.REPO_ROOT / ".cache"
+                    ).resolve()
+                    self.assertEqual(
+                        build_config.KernelBuildConfig().cache_directory, expected
+                    )
+                    self.assertEqual(common.cache_root(), expected)
+                    self.assertEqual(
+                        build_config.KernelBuildConfig(
+                            cache_directory=root / "explicit"
+                        ).cache_directory,
+                        root / "explicit",
+                    )
+
+    def test_openvmm_executable_default_is_resolved_at_configuration_time(self):
+        for host, binary in (("nt", "openvmm.exe"), ("posix", "openvmm")):
+            expected = OpenVMMBuildConstants.DIRECTORY / "target" / "release" / binary
+            with self.subTest(host=host), patch.object(common.os, "name", host):
+                self.assertEqual(common.openvmm_binary_path(), expected)
+                self.assertEqual(build_config.OpenVmmBuildConfig().output, expected)
+
+    def test_initramfs_provenance_tracks_constants_source(self):
+        relative = "scripts/nvx_tools/build_constants.py"
+        source = BuildConstants.REPO_ROOT / relative
+        original = build.initramfs_provenance_inputs()
+        records = cast(list[dict[str, str]], original["source_files"])
+        self.assertEqual(
+            [record for record in records if record["path"] == relative],
+            [{"path": relative, "sha256": common.sha256_file(source)}],
+        )
+
+        def changed_sha256(path: Path) -> str:
+            return "f" * 64 if path == source else common.sha256_file(path)
+
+        with patch.object(build, "sha256_file", side_effect=changed_sha256):
+            changed = build.initramfs_provenance_inputs()
+        self.assertNotEqual(original, changed)
+        self.assertEqual(original["alpine"], changed["alpine"])
+
+    def test_constants_are_in_docker_and_release_source_inputs(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("COPY scripts/ /repo/scripts/", dockerfile)
+        self.assertIn("scripts", ReleaseBuildConstants.PROJECT_SOURCE_PATHS)
+        self.assertTrue(
+            (
+                BuildConstants.REPO_ROOT
+                / "scripts"
+                / "nvx_tools"
+                / "build_constants.py"
+            ).is_file()
+        )
+
+    def test_constants_consumers_import_in_either_order(self):
+        modules = (
+            "nvx_tools.build_constants",
+            "nvx_tools.guests",
+            "nvx_tools.common",
+            "nvx_tools.build_config",
+            "nvx_tools.build",
+            "nvx_tools.release",
+            "nvx",
+        )
+        for ordered in (modules, tuple(reversed(modules))):
+            with self.subTest(first=ordered[0]):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import importlib, sys; "
+                        "[importlib.import_module(name) for name in sys.argv[1:]]",
+                        *ordered,
+                    ],
+                    cwd=BuildConstants.REPO_ROOT / "scripts",
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class BuildTests(unittest.TestCase):
     def test_build_config_owns_standard_runtime_paths(self):
         config = build_config.BuildConfig()
@@ -2263,28 +2602,28 @@ class BuildTests(unittest.TestCase):
         self.assertIsInstance(distro, build_config.DistroLayerBuildConfig)
         self.assertIsNone(config.openvmm.backend)
         self.assertEqual(config.selected_guests(), ("alpine",))
-        self.assertEqual(config.kernel.work, common.BUILD_DIR / "linux")
-        self.assertEqual(config.kernel.output, common.BUILD_DIR / "vmlinux")
+        self.assertEqual(config.kernel.work, BuildConstants.BUILD_DIR / "linux")
+        self.assertEqual(config.kernel.output, BuildConstants.BUILD_DIR / "vmlinux")
         self.assertEqual(
             alpine.work,
-            common.BUILD_DIR / "initramfs-alpine-work",
+            BuildConstants.BUILD_DIR / "initramfs-alpine-work",
         )
         self.assertEqual(
             alpine.output,
-            common.BUILD_DIR / "initramfs.cpio.gz",
+            BuildConstants.BUILD_DIR / "initramfs.cpio.gz",
         )
         self.assertEqual(
             ubuntu_config.output,
-            common.BUILD_DIR / "initramfs-ubuntu.cpio.gz",
+            BuildConstants.BUILD_DIR / "initramfs-ubuntu.cpio.gz",
         )
         self.assertEqual(
             distro.output,
-            common.BUILD_DIR / "ubuntu-distro.erofs",
+            BuildConstants.BUILD_DIR / "ubuntu-distro.erofs",
         )
-        self.assertEqual(config.docker.artifact_destination, common.BUILD_DIR)
+        self.assertEqual(config.docker.artifact_destination, BuildConstants.BUILD_DIR)
         self.assertEqual(
             config.docker.linux_source_destination,
-            common.SOURCE_DIR / "linux",
+            BuildConstants.SOURCE_DIR / "linux",
         )
 
     def test_detects_openvmm_build_platform_without_runtime_devices(self):
@@ -2481,7 +2820,8 @@ class BuildTests(unittest.TestCase):
                     self.assertEqual(output.read_bytes(), binary)
                     provenance = json.loads(
                         (
-                            config.build_directory / build.OPENVMM_PROVENANCE_NAME
+                            config.build_directory
+                            / OpenVMMBuildConstants.PROVENANCE_NAME
                         ).read_text(encoding="utf-8")
                     )
                     self.assertEqual(
@@ -2720,7 +3060,7 @@ class BuildTests(unittest.TestCase):
             ]
 
             with (
-                patch.object(build, "REPO_ROOT", root),
+                patch.object(BuildConstants, "REPO_ROOT", root),
                 patch.object(build, "run_capture", side_effect=results),
             ):
                 build.record_openvmm_provenance(
@@ -2732,7 +3072,7 @@ class BuildTests(unittest.TestCase):
                 )
 
             provenance = json.loads(
-                (root / "build" / build.OPENVMM_PROVENANCE_NAME).read_text(
+                (root / "build" / OpenVMMBuildConstants.PROVENANCE_NAME).read_text(
                     encoding="utf-8"
                 )
             )
@@ -2751,9 +3091,9 @@ class BuildTests(unittest.TestCase):
             input_config.write_text(
                 "\n".join(
                     (
-                        *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
-                        *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
-                        *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+                        *KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                        *KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
+                        *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
                     )
                 )
                 + "\n",
@@ -2766,11 +3106,11 @@ class BuildTests(unittest.TestCase):
             source.mkdir()
             work = root / "work"
             output = root / "output" / "vmlinux"
-            prior_provenance = output.with_name(build.KERNEL_PROVENANCE_NAME)
+            prior_provenance = output.with_name(KernelBuildConstants.PROVENANCE_NAME)
             prior_provenance.parent.mkdir()
             prior_provenance.write_text("stale", encoding="utf-8")
 
-            with patch.object(build, "REPO_ROOT", root):
+            with patch.object(BuildConstants, "REPO_ROOT", root):
                 source_fingerprint = build._kernel_source_fingerprint()
 
             def run_build(command: object, **_kwargs: object) -> None:
@@ -2785,7 +3125,7 @@ class BuildTests(unittest.TestCase):
                 b"",
             )
             with (
-                patch.object(build, "REPO_ROOT", root),
+                patch.object(BuildConstants, "REPO_ROOT", root),
                 patch.object(build, "_require_linux"),
                 patch.object(build, "require_tool", return_value="tool"),
                 patch.object(
@@ -2927,7 +3267,7 @@ class BuildTests(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, git_environment, clear=True),
-                patch.object(build, "REPO_ROOT", root),
+                patch.object(BuildConstants, "REPO_ROOT", root),
             ):
                 build.materialize_kernel_provenance_inputs()
 
@@ -2937,12 +3277,14 @@ class BuildTests(unittest.TestCase):
 
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
-            (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            (BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(
+                encoding="utf-8"
+            )
         )
         self.assertEqual(
             manifest["linux"]["patches"],
             [
-                path.relative_to(build.REPO_ROOT).as_posix()
+                path.relative_to(BuildConstants.REPO_ROOT).as_posix()
                 for path in build._kernel_patch_files()
             ],
         )
@@ -2972,28 +3314,30 @@ class BuildTests(unittest.TestCase):
 
     def test_ubuntu_manifest_and_package_lock_match_build_pins(self):
         manifest = json.loads(
-            (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            (BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(
+                encoding="utf-8"
+            )
         )
         ubuntu_manifest = manifest["ubuntu"]
         self.assertEqual(
             ubuntu_manifest["version"],
-            ubuntu.DEFAULT_UBUNTU_VERSION,
+            UbuntuBuildConstants.VERSION,
         )
         self.assertEqual(
             ubuntu_manifest["base_url"],
-            ubuntu.DEFAULT_UBUNTU_BASE_URL,
+            UbuntuBuildConstants.BASE_URL,
         )
         self.assertEqual(
             ubuntu_manifest["base_sha256"],
-            ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
+            UbuntuBuildConstants.BASE_SHA256,
         )
         self.assertEqual(
             ubuntu_manifest["archive_keyring_url"],
-            collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL,
+            UbuntuBuildConstants.ARCHIVE_KEYRING_URL,
         )
         self.assertEqual(
             ubuntu_manifest["archive_keyring_sha256"],
-            collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_SHA256,
+            UbuntuBuildConstants.ARCHIVE_KEYRING_SHA256,
         )
         self.assertEqual(
             ubuntu_manifest["package_lock_sha256"],
@@ -3113,7 +3457,7 @@ class BuildTests(unittest.TestCase):
             ) -> None:
                 self.assertEqual(
                     archive.name,
-                    f"ubuntu-base-{ubuntu.DEFAULT_UBUNTU_VERSION}-base-amd64.tar.gz",
+                    f"ubuntu-base-{UbuntuBuildConstants.VERSION}-base-amd64.tar.gz",
                 )
                 self.assertEqual(label, "Ubuntu Base archive")
                 status = destination / "var" / "lib" / "dpkg" / "status"
@@ -3199,8 +3543,8 @@ class BuildTests(unittest.TestCase):
                     json.dumps(
                         {
                             "guest": "ubuntu",
-                            "release": ubuntu.DEFAULT_UBUNTU_VERSION,
-                            "architecture": ubuntu.DEFAULT_UBUNTU_ARCHITECTURE,
+                            "release": UbuntuBuildConstants.VERSION,
+                            "architecture": UbuntuBuildConstants.ARCHITECTURE,
                             "packages": [
                                 {
                                     "source_name": "glibc",
@@ -3292,8 +3636,8 @@ class BuildTests(unittest.TestCase):
             "Hash: SHA256\n"
             "\n"
             "Origin: Ubuntu\n"
-            f"Codename: {ubuntu.DEFAULT_UBUNTU_CODENAME}\n"
-            f"Suite: {ubuntu.DEFAULT_UBUNTU_CODENAME}\n"
+            f"Codename: {UbuntuBuildConstants.CODENAME}\n"
+            f"Suite: {UbuntuBuildConstants.CODENAME}\n"
             "SHA256:\n"
             f" {index_sha256} {len(compressed)} main/source/Sources.xz\n"
             "-----BEGIN PGP SIGNATURE-----\n"
@@ -3340,7 +3684,7 @@ class BuildTests(unittest.TestCase):
                         root / "cache",
                         keyring,
                         "https://archive.invalid/ubuntu",
-                        ubuntu.DEFAULT_UBUNTU_CODENAME,
+                        UbuntuBuildConstants.CODENAME,
                         "main",
                     )
                 )
@@ -3365,7 +3709,7 @@ class BuildTests(unittest.TestCase):
     def test_launchpad_source_record_retains_verifiable_raw_metadata(self):
         source_payload = b"source archive"
         source_sha256 = hashlib.sha256(source_payload).hexdigest()
-        self_link = f"{collect_ubuntu_sources._LAUNCHPAD_ARCHIVE_API}/+sourcepub/123"
+        self_link = f"{UbuntuBuildConstants.LAUNCHPAD_ARCHIVE_API}/+sourcepub/123"
         query = {
             "entries": [
                 {
@@ -3445,9 +3789,7 @@ class BuildTests(unittest.TestCase):
                     "sha256": snapshot_record["index_release_sha256"],
                     "cache_path": snapshot_release,
                     "output_name": "snapshot.InRelease",
-                    "authenticated_by": (
-                        collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL
-                    ),
+                    "authenticated_by": (UbuntuBuildConstants.ARCHIVE_KEYRING_URL),
                 },
                 {
                     "role": "ubuntu-source-index",
@@ -3559,7 +3901,7 @@ class BuildTests(unittest.TestCase):
 
     def test_ci_kernel_cache_key_includes_patches(self):
         action = (
-            build.REPO_ROOT
+            BuildConstants.REPO_ROOT
             / ".github"
             / "actions"
             / "build-guest-artifacts"
@@ -3579,7 +3921,7 @@ class BuildTests(unittest.TestCase):
 
     def test_ci_guest_cache_keys_include_build_configuration(self):
         action = (
-            build.REPO_ROOT
+            BuildConstants.REPO_ROOT
             / ".github"
             / "actions"
             / "build-guest-artifacts"
@@ -3597,9 +3939,12 @@ class BuildTests(unittest.TestCase):
                     if line.strip().startswith(f"{cache_name}:")
                 )
                 self.assertIn("'scripts/nvx_tools/build_config.py'", cache_input)
+                self.assertIn("'scripts/nvx_tools/build_constants.py'", cache_input)
 
     def test_kernel_input_config_uses_canonical_lf_line_endings(self):
-        attributes = (build.REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        attributes = (BuildConstants.REPO_ROOT / ".gitattributes").read_text(
+            encoding="utf-8"
+        )
         self.assertIn(
             "kernel/config-microvm text eol=lf",
             attributes.splitlines(),
@@ -3607,7 +3952,7 @@ class BuildTests(unittest.TestCase):
 
     def test_ci_guest_cache_keys_include_shared_build_modules(self):
         action = (
-            build.REPO_ROOT
+            BuildConstants.REPO_ROOT
             / ".github"
             / "actions"
             / "build-guest-artifacts"
@@ -3620,13 +3965,17 @@ class BuildTests(unittest.TestCase):
 
     def test_quality_checks_include_shared_identity_probe(self):
         action = (
-            build.REPO_ROOT / ".github" / "actions" / "check-quality" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "check-quality"
+            / "action.yml"
         ).read_text(encoding="utf-8")
 
         self.assertEqual(action.count("guest/common/nvx-identity-probe"), 2)
 
     def test_docker_guest_builder_pins_erofs_toolchain(self):
-        dockerfile = (build.REPO_ROOT / "docker" / "Dockerfile").read_text(
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
         self.assertIn(
@@ -3732,17 +4081,17 @@ class BuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / ".config"
             config.write_text(
-                "\n".join(build.REQUIRED_SANDBOX_KERNEL_CONFIG) + "\n",
+                "\n".join(KernelBuildConstants.REQUIRED_SANDBOX_CONFIG) + "\n",
                 encoding="utf-8",
             )
             build._assert_sandbox_kernel_config(config)
 
-            for missing in build.REQUIRED_SANDBOX_KERNEL_CONFIG:
+            for missing in KernelBuildConstants.REQUIRED_SANDBOX_CONFIG:
                 with self.subTest(missing=missing):
                     config.write_text(
                         "\n".join(
                             setting
-                            for setting in build.REQUIRED_SANDBOX_KERNEL_CONFIG
+                            for setting in KernelBuildConstants.REQUIRED_SANDBOX_CONFIG
                             if setting != missing
                         )
                         + "\n",
@@ -3752,7 +4101,7 @@ class BuildTests(unittest.TestCase):
                         build._assert_sandbox_kernel_config(config)
 
     def test_checked_in_config_preserves_generic_sandbox_capabilities(self):
-        config = build.REPO_ROOT / "kernel" / "config-microvm"
+        config = BuildConstants.REPO_ROOT / "kernel" / "config-microvm"
         build._assert_sandbox_kernel_config(config)
         configured = config.read_text(encoding="utf-8").splitlines()
         for setting in (
@@ -3766,7 +4115,7 @@ class BuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / ".config"
             config.write_text(
-                "\n".join(build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG) + "\n",
+                "\n".join(KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG) + "\n",
                 encoding="utf-8",
             )
             build._assert_shared_status_kernel_config(config)
@@ -3774,7 +4123,7 @@ class BuildTests(unittest.TestCase):
             config.write_text("", encoding="utf-8")
             with self.assertRaisesRegex(
                 common.ScriptError,
-                build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG[0],
+                KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG[0],
             ):
                 build._assert_shared_status_kernel_config(config)
 
@@ -6429,9 +6778,14 @@ class ReleaseTests(unittest.TestCase):
                 return build_dir / name
 
             with (
-                patch.object(release, "REPO_ROOT", root),
-                patch.object(release, "SOURCE_DIR", source_dir),
-                patch.object(release, "OPENVMM_DIR", openvmm_dir),
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(BuildConstants, "SOURCE_DIR", source_dir),
+                patch.object(
+                    UbuntuBuildConstants,
+                    "PACKAGE_LOCK",
+                    root / "ubuntu" / "packages.lock.json",
+                ),
+                patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm_dir),
                 patch.object(
                     release,
                     "artifact_path",
@@ -6458,16 +6812,22 @@ class ReleaseTests(unittest.TestCase):
                 )
 
             self.assertTrue((destination / "bin" / binary.name).is_file())
-            for name in release.GUEST_RELEASE_NAMES:
+            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
                 self.assertTrue((destination / "guest" / name).is_file())
             self.assertTrue(
-                (destination / "provenance" / build.OPENVMM_PROVENANCE_NAME).is_file()
+                (
+                    destination / "provenance" / OpenVMMBuildConstants.PROVENANCE_NAME
+                ).is_file()
             )
             self.assertTrue(
-                (destination / "provenance" / build.KERNEL_PROVENANCE_NAME).is_file()
+                (
+                    destination / "provenance" / KernelBuildConstants.PROVENANCE_NAME
+                ).is_file()
             )
             self.assertTrue(
-                (destination / "provenance" / build.INITRAMFS_PROVENANCE_NAME).is_file()
+                (
+                    destination / "provenance" / InitramfsBuildConstants.PROVENANCE_NAME
+                ).is_file()
             )
             manifest = json.loads(
                 (destination / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
@@ -6520,7 +6880,7 @@ class ReleaseTests(unittest.TestCase):
             ):
                 release._validate_openvmm_provenance(
                     paths["binary"],
-                    paths["build"] / build.OPENVMM_PROVENANCE_NAME,
+                    paths["build"] / OpenVMMBuildConstants.PROVENANCE_NAME,
                 )
 
     def test_package_rejects_stale_kernel_provenance(self):
@@ -6544,7 +6904,7 @@ class ReleaseTests(unittest.TestCase):
                 release._validate_kernel_provenance(
                     kernel,
                     paths["build"] / "vmlinux.config",
-                    paths["build"] / build.KERNEL_PROVENANCE_NAME,
+                    paths["build"] / KernelBuildConstants.PROVENANCE_NAME,
                 )
 
     def test_package_rejects_stale_initramfs_provenance(self):
@@ -6561,7 +6921,7 @@ class ReleaseTests(unittest.TestCase):
                 release._validate_initramfs_provenance(
                     initramfs,
                     paths["build"] / "initramfs.cpio.gz.packages.json",
-                    paths["build"] / build.INITRAMFS_PROVENANCE_NAME,
+                    paths["build"] / InitramfsBuildConstants.PROVENANCE_NAME,
                 )
 
     def test_package_rejects_stale_initramfs_package_manifest_provenance(self):
@@ -6578,7 +6938,7 @@ class ReleaseTests(unittest.TestCase):
                 release._validate_initramfs_provenance(
                     paths["build"] / "initramfs.cpio.gz",
                     package_manifest,
-                    paths["build"] / build.INITRAMFS_PROVENANCE_NAME,
+                    paths["build"] / InitramfsBuildConstants.PROVENANCE_NAME,
                 )
 
     def test_guest_release_inputs_reject_stale_ubuntu_artifacts(self):
@@ -6675,9 +7035,14 @@ class ReleaseTests(unittest.TestCase):
                     return build_dir / name
 
                 with (
-                    patch.object(release, "REPO_ROOT", root),
-                    patch.object(release, "SOURCE_DIR", paths["source"]),
-                    patch.object(release, "OPENVMM_DIR", paths["openvmm"]),
+                    patch.object(BuildConstants, "REPO_ROOT", root),
+                    patch.object(BuildConstants, "SOURCE_DIR", paths["source"]),
+                    patch.object(
+                        UbuntuBuildConstants,
+                        "PACKAGE_LOCK",
+                        root / "ubuntu" / "packages.lock.json",
+                    ),
+                    patch.object(OpenVMMBuildConstants, "DIRECTORY", paths["openvmm"]),
                     patch.object(
                         release,
                         "artifact_path",
@@ -6737,9 +7102,14 @@ class ReleaseTests(unittest.TestCase):
                     target.write_bytes(b"corrupt")
 
             with (
-                patch.object(release, "REPO_ROOT", root),
-                patch.object(release, "SOURCE_DIR", paths["source"]),
-                patch.object(release, "OPENVMM_DIR", paths["openvmm"]),
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(BuildConstants, "SOURCE_DIR", paths["source"]),
+                patch.object(
+                    UbuntuBuildConstants,
+                    "PACKAGE_LOCK",
+                    root / "ubuntu" / "packages.lock.json",
+                ),
+                patch.object(OpenVMMBuildConstants, "DIRECTORY", paths["openvmm"]),
                 patch.object(release, "artifact_path", side_effect=artifact_path),
                 patch.object(
                     release,
@@ -6796,7 +7166,7 @@ class ReleaseTests(unittest.TestCase):
                 return original_replace(source, target)
 
             with (
-                patch.object(release, "REPO_ROOT", root),
+                patch.object(BuildConstants, "REPO_ROOT", root),
                 patch.object(Path, "replace", new=fail_staging_replace),
                 self.assertRaisesRegex(
                     common.ScriptError,
@@ -6832,7 +7202,7 @@ class ReleaseTests(unittest.TestCase):
                 return original_replace(source, target)
 
             with (
-                patch.object(release, "REPO_ROOT", root),
+                patch.object(BuildConstants, "REPO_ROOT", root),
                 patch.object(Path, "replace", new=fail_publication_and_restore),
                 self.assertRaisesRegex(
                     common.ScriptError,
@@ -6893,7 +7263,7 @@ class ReleaseTests(unittest.TestCase):
             (staging / "new.txt").write_text("new", encoding="utf-8")
 
             with (
-                patch.object(release, "REPO_ROOT", root),
+                patch.object(BuildConstants, "REPO_ROOT", root),
                 self.assertRaisesRegex(
                     common.ScriptError,
                     "below dist",
@@ -6919,13 +7289,13 @@ class ReleaseTests(unittest.TestCase):
             binary = package_root / "bin" / binary_name
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b"openvmm")
-            for name in release.GUEST_RELEASE_NAMES:
+            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
                 guest = package_root / "guest" / name
                 guest.parent.mkdir(parents=True, exist_ok=True)
                 guest.write_bytes(name.encode("ascii"))
             for name in (
-                build.OPENVMM_PROVENANCE_NAME,
-                build.KERNEL_PROVENANCE_NAME,
+                OpenVMMBuildConstants.PROVENANCE_NAME,
+                KernelBuildConstants.PROVENANCE_NAME,
             ):
                 provenance = package_root / "provenance" / name
                 provenance.parent.mkdir(parents=True, exist_ok=True)
@@ -6965,14 +7335,14 @@ class ReleaseTests(unittest.TestCase):
                 release._install_release_archive(archive_path)
 
             self.assertEqual(binary_destination.read_bytes(), b"openvmm")
-            for name in release.GUEST_RELEASE_NAMES:
+            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
                 self.assertEqual(
                     (build_dir / name).read_bytes(),
                     name.encode("ascii"),
                 )
             for name in (
-                build.OPENVMM_PROVENANCE_NAME,
-                build.KERNEL_PROVENANCE_NAME,
+                OpenVMMBuildConstants.PROVENANCE_NAME,
+                KernelBuildConstants.PROVENANCE_NAME,
             ):
                 self.assertEqual(
                     (build_dir / name).read_bytes(),
