@@ -183,6 +183,14 @@ def _write_release_fixture(
             "source_output": "build/sources/ubuntu",
             "erofs_converter_format": ubuntu.UBUNTU_EROFS_FORMAT,
         },
+        "azurelinux": {
+            "distribution": "Azure Linux",
+            "version": build.DEFAULT_AZURELINUX_VERSION,
+            "architecture": "x86_64",
+            "image": build.DEFAULT_AZURELINUX_IMAGE,
+            "guest_sources": ["guest/common"],
+            "package_manifests": ["build/initramfs-azurelinux.cpio.gz.packages.json"],
+        },
     }
     (root / "SOURCE-MANIFEST.json").write_text(
         json.dumps(manifest),
@@ -251,7 +259,10 @@ class CliTests(unittest.TestCase):
     def test_guest_selection_includes_azure_linux(self):
         args = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
         self.assertEqual(args.guest, "azurelinux")
-        self.assertEqual(guests.guest_descriptor(args.guest).initramfs_name, "initramfs-azurelinux.cpio.gz")
+        self.assertEqual(
+            guests.guest_descriptor(args.guest).initramfs_name,
+            "initramfs-azurelinux.cpio.gz",
+        )
 
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
@@ -2428,9 +2439,10 @@ class BuildTests(unittest.TestCase):
             },
         )
 
-    def test_guest_descriptors_preserve_alpine_and_select_ubuntu_outputs(self):
+    def test_guest_descriptors_preserve_alpine_and_select_guest_outputs(self):
         alpine = guests.guest_descriptor("alpine")
         ubuntu_guest = guests.guest_descriptor("ubuntu")
+        azurelinux_guest = guests.guest_descriptor("azurelinux")
 
         self.assertEqual(alpine.initramfs_name, "initramfs.cpio.gz")
         self.assertEqual(alpine.default_memory_mib, 128)
@@ -2441,6 +2453,10 @@ class BuildTests(unittest.TestCase):
         )
         self.assertEqual(ubuntu_guest.default_memory_mib, 256)
         self.assertFalse(ubuntu_guest.sandbox_control)
+        self.assertEqual(
+            azurelinux_guest.initramfs_name,
+            "initramfs-azurelinux.cpio.gz",
+        )
 
     def test_ubuntu_manifest_and_package_lock_match_build_pins(self):
         manifest = json.loads(

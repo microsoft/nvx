@@ -24,13 +24,13 @@ from typing import cast
 
 from .archive import create_reproducible_release_archive, create_reproducible_tar_gz
 from .build import (
-    DEFAULT_AZURELINUX_IMAGE,
-    DEFAULT_AZURELINUX_VERSION,
     CONTROL_CONTRACT_REVISION,
     CONTROL_SESSION_PROTOCOL_VERSION,
     DEFAULT_ALPINE_BRANCH,
     DEFAULT_ALPINE_MINIROOTFS_SHA256,
     DEFAULT_ALPINE_VERSION,
+    DEFAULT_AZURELINUX_IMAGE,
+    DEFAULT_AZURELINUX_VERSION,
     DEFAULT_KERNEL_SHA256,
     DEFAULT_KERNEL_URL,
     DEFAULT_KERNEL_VERSION,
@@ -1177,18 +1177,17 @@ def _validate_source_manifest_metadata(
             raise ScriptError(
                 f"SOURCE-MANIFEST.json Ubuntu {field} does not match the build pin"
             )
-    azurelinux = manifest.get("azurelinux")
-    if not isinstance(azurelinux, dict):
+    azurelinux_value = manifest.get("azurelinux")
+    if not isinstance(azurelinux_value, dict):
         raise ScriptError("SOURCE-MANIFEST.json Azure Linux metadata is missing")
+    azurelinux = cast(dict[str, object], azurelinux_value)
     expected_azurelinux: dict[str, object] = {
         "distribution": "Azure Linux",
         "version": DEFAULT_AZURELINUX_VERSION,
         "architecture": "x86_64",
         "image": DEFAULT_AZURELINUX_IMAGE,
         "guest_sources": ["guest/common"],
-        "package_manifests": [
-            "build/initramfs-azurelinux.cpio.gz.packages.json"
-        ],
+        "package_manifests": ["build/initramfs-azurelinux.cpio.gz.packages.json"],
     }
     for field, expected in expected_azurelinux.items():
         if azurelinux.get(field) != expected:
