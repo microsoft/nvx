@@ -244,6 +244,8 @@ def download(
     headers: Mapping[str, str] | None = None,
     opener: urllib.request.OpenerDirector | None = None,
 ) -> None:
+    if attempts < 1:
+        raise ScriptError("download attempts must be positive")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.part")
     for attempt in range(1, attempts + 1):
