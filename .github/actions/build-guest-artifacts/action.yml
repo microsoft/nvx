@@ -44,9 +44,9 @@ runs:
         KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
         ALPINE_VERSION: ${{ steps.guest-versions.outputs.alpine-version }}
         UBUNTU_VERSION: ${{ steps.guest-versions.outputs.ubuntu-version }}
-        KERNEL_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'kernel/config-microvm', 'kernel/patches/**', 'scripts/nvx_tools/build.py') }}
-        ALPINE_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py') }}
-        UBUNTU_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/ubuntu/**', 'ubuntu/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py', 'scripts/nvx_tools/ubuntu.py') }}
+        KERNEL_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'kernel/config-microvm', 'kernel/patches/**', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py') }}
+        ALPINE_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/alpine/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py') }}
+        UBUNTU_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/ubuntu/**', 'ubuntu/**', 'docker/Dockerfile', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py', 'scripts/nvx_tools/ubuntu.py') }}
       run: |
         set -euo pipefail
         {

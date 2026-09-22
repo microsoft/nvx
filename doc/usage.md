@@ -135,12 +135,17 @@ normalized rootfs entry when one exists.
 ### `build-openvmm`
 
 ```text
-python3 scripts/nvx.py build-openvmm [--skip-restore]
+python3 scripts/nvx.py build-openvmm [--skip-restore] [--backend {kvm,mshv,whp}]
 ```
 
 Builds the `openvmm` release binary. Before building, the command runs
 `cargo xflowey restore-packages`; use `--skip-restore` when those packages are
-already restored.
+already restored. Without `--backend`, Windows builds the native MSVC target
+and Linux builds the native GNU target. On Linux, `--backend kvm` selects GNU
+and `--backend mshv` selects musl; Windows accepts `--backend whp`. Build-target
+selection does not probe `/dev/kvm` or `/dev/mshv`, so compilation also works
+on build-only hosts and hosts exposing both devices. Unsupported OS/backend
+combinations are rejected.
 
 ### `build`
 
@@ -149,9 +154,10 @@ python3 scripts/nvx.py build
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
     [--skip-restore]
+    [--backend {kvm,mshv,whp}]
 ```
 
-Runs `build-guest` followed by `build-openvmm`. The two options have the same
+Runs `build-guest` followed by `build-openvmm`. The options have the same
 meaning as on those individual commands.
 
 See [Build](build.md) for dependencies, outputs, and native build details.

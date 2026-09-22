@@ -162,7 +162,7 @@ to match the versions enforced in CI.
 Run all lint and formatting checks before submitting a change:
 
 ```bash
-python3 -m ruff check scripts benchmarks
+python3 -m ruff check scripts .github/specula
 shellcheck --shell=sh \
   guest/common/init guest/alpine/nvx-container-enter \
   guest/alpine/nvx-container-launch guest/common/nvx-exit \
@@ -174,7 +174,7 @@ shellcheck --shell=bash \
   .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 python3 -m pyright --pythonplatform Linux
 python3 -m pyright --pythonplatform Windows
-python3 -m ruff format --check scripts benchmarks
+python3 -m ruff format --check scripts .github/specula
 shfmt -d -ln posix -i 4 -ci \
   guest/common/init guest/alpine/nvx-container-enter \
   guest/alpine/nvx-container-launch guest/common/nvx-exit \
@@ -213,7 +213,7 @@ for the containment and credential requirements.
 Apply the configured Python and POSIX shell formatters with:
 
 ```bash
-python3 -m ruff format scripts benchmarks
+python3 -m ruff format scripts .github/specula
 shfmt -w -ln posix -i 4 -ci \
   guest/common/init guest/alpine/nvx-container-enter \
   guest/alpine/nvx-container-launch guest/common/nvx-exit \

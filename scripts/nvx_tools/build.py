@@ -1,24 +1,32 @@
-"""Linux-native and Docker-backed artifact build workflows."""
+"""OpenVMM, Linux-native, and Docker-backed artifact build workflows."""
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import ssl
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
 from . import ubuntu
+from .build_config import (
+    BuildConfig,
+    DistroLayerBuildConfig,
+    DockerBuildConfig,
+    InitramfsBuildConfig,
+    KernelBuildConfig,
+    OpenVmmBackend,
+    OpenVmmBuildConfig,
+    OpenVmmPlatform,
+)
 from .common import (
-    OPENVMM_DIR,
     REPO_ROOT,
     ScriptError,
     artifact_path,
-    cache_root,
     download_verified,
     format_size,
     require_file,
@@ -87,6 +95,22 @@ class ApkPackage(TypedDict):
     build_time: str | None
 
 
+def _run_openvmm_command(
+    args: list[str | os.PathLike[str]],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    command = [os.fspath(arg) for arg in args]
+    print(f">> {shlex.join(command)}")
+    if cwd is None and env is None:
+        run_checked(command)
+    elif env is None:
+        run_checked(command, cwd=cwd)
+    else:
+        run_checked(command, cwd=cwd, env=env)
+
+
 def _assert_kernel_config(
     path: Path, required: tuple[str, ...], error_prefix: str
 ) -> None:
@@ -125,37 +149,6 @@ def assert_required_kernel_config(path: Path) -> None:
     _assert_virtio_console_kernel_config(path)
     _assert_sandbox_kernel_config(path)
     _assert_shared_status_kernel_config(path)
-
-
-@dataclass(frozen=True)
-class InitramfsBuildConfig:
-    guest: str = "alpine"
-    work: Path = Path.home() / "build" / "initramfs"
-    output: Path | None = None
-
-
-@dataclass(frozen=True)
-class DistroLayerBuildConfig:
-    guest: str = "ubuntu"
-    work: Path = Path.home() / "build" / "distro-layer"
-    output: Path = Path.home() / "build" / "ubuntu-distro.erofs"
-    replace: bool = False
-
-
-@dataclass(frozen=True)
-class KernelBuildConfig:
-    version: str = DEFAULT_KERNEL_VERSION
-    work: Path = Path.home() / "build" / "kernel"
-    output: Path = Path.home() / "build" / "vmlinux"
-
-
-@dataclass(frozen=True)
-class DockerBuildConfig:
-    destination: Path = Path("build")
-    kernel_version: str = DEFAULT_KERNEL_VERSION
-    alpine_version: str = DEFAULT_ALPINE_VERSION
-    alpine_branch: str = DEFAULT_ALPINE_BRANCH
-    ubuntu_version: str = ubuntu.DEFAULT_UBUNTU_VERSION
 
 
 def _require_linux(workflow: str) -> None:
@@ -269,6 +262,7 @@ def _initramfs_source_files() -> tuple[Path, ...]:
     sources = [
         REPO_ROOT / "docker" / "Dockerfile",
         REPO_ROOT / "scripts" / "nvx_tools" / "build.py",
+        REPO_ROOT / "scripts" / "nvx_tools" / "build_config.py",
         REPO_ROOT / "scripts" / "nvx_tools" / "common.py",
         REPO_ROOT / "scripts" / "nvx_tools" / "guests.py",
         *(
@@ -307,13 +301,13 @@ def initramfs_provenance_inputs() -> dict[str, object]:
     }
 
 
-def record_openvmm_provenance(executable: Path) -> None:
+def record_openvmm_provenance(config: OpenVmmBuildConfig) -> None:
     """Bind an OpenVMM executable to the checked-out submodule revision."""
-    head = run_capture(["git", "-C", OPENVMM_DIR, "rev-parse", "HEAD"])
+    head = run_capture(["git", "-C", config.directory, "rev-parse", "HEAD"])
     require_success(head, "OpenVMM revision query")
     gitlink = run_capture(["git", "-C", REPO_ROOT, "rev-parse", ":openvmm"])
     require_success(gitlink, "OpenVMM gitlink query")
-    status = run_capture(["git", "-C", OPENVMM_DIR, "status", "--porcelain"])
+    status = run_capture(["git", "-C", config.directory, "status", "--porcelain"])
     require_success(status, "OpenVMM status query")
     source_revision = head.stdout.decode("ascii").strip()
     expected_revision = gitlink.stdout.decode("ascii").strip()
@@ -321,27 +315,144 @@ def record_openvmm_provenance(executable: Path) -> None:
         raise ScriptError(
             f"OpenVMM submodule is at {source_revision}, expected {expected_revision}"
         )
-    require_file(executable, "OpenVMM release binary")
+    executable = require_file(config.output, "OpenVMM release binary")
     provenance = {
         "format": 1,
         "source_revision": source_revision,
         "source_clean": not status.stdout.strip(),
         "executable_sha256": sha256_file(executable),
     }
-    path = REPO_ROOT / "build" / OPENVMM_PROVENANCE_NAME
+    path = config.build_directory / OPENVMM_PROVENANCE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
 
 
-def prepare_kernel_source(version: str = DEFAULT_KERNEL_VERSION) -> tuple[Path, str]:
-    """Download, verify, extract, and patch the pinned Linux source."""
-    if version != DEFAULT_KERNEL_VERSION:
-        raise ScriptError(
-            f"this source tree pins Linux {DEFAULT_KERNEL_VERSION}; requested {version}"
+def detect_openvmm_platform(backend: OpenVmmBackend | None = None) -> OpenVmmPlatform:
+    """Select a build target without requiring runtime hypervisor access."""
+    if sys.platform == "win32":
+        if backend in (None, "whp"):
+            return "windows-msvc"
+    elif sys.platform == "linux":
+        if backend in (None, "kvm"):
+            return "linux-gnu"
+        if backend == "mshv":
+            return "linux-musl"
+    else:
+        raise ScriptError(f"OpenVMM builds are unsupported on {sys.platform}")
+    raise ScriptError(f"OpenVMM backend {backend!r} is unsupported on {sys.platform}")
+
+
+def _restore_openvmm_packages(config: OpenVmmBuildConfig) -> None:
+    if config.skip_restore:
+        return
+    _run_openvmm_command(
+        ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
+        cwd=config.directory,
+    )
+
+
+def _build_openvmm_musl(
+    config: OpenVmmBuildConfig,
+    platform: OpenVmmPlatform,
+) -> None:
+    target = config.openvmm_target(platform)
+    _run_openvmm_command(["rustup", "target", "add", target])
+    sysroot = config.directory.resolve() / ".packages" / "extracted" / "x86_64-sysroot"
+    require_file(
+        sysroot / "lib" / "libsymcrypt.a",
+        "restored OpenVMM musl SymCrypt library",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR": os.fspath(sysroot),
+            "X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR": "1",
+            "X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC": "1",
+            "X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_LIB_PATH": os.fspath(sysroot / "lib"),
+            "X86_64_UNKNOWN_LINUX_MUSL_SYMCRYPT_STATIC": "1",
+        }
+    )
+    _run_openvmm_command(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "--target",
+            target,
+            "-p",
+            "openvmm",
+            "--bin",
+            "openvmm",
+        ],
+        cwd=config.directory,
+        env=environment,
+    )
+
+
+def build_openvmm(
+    config: OpenVmmBuildConfig,
+    *,
+    platform: OpenVmmPlatform | None = None,
+) -> None:
+    require_file(
+        config.directory / "Cargo.toml",
+        "initialized OpenVMM submodule",
+    )
+    selected = platform or detect_openvmm_platform(config.backend)
+    mode = config.openvmm_build_mode(selected)
+    _restore_openvmm_packages(config)
+    if mode == "musl":
+        _build_openvmm_musl(config, selected)
+    else:
+        _run_openvmm_command(
+            ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
+            cwd=config.directory,
         )
+    source = require_file(
+        config.openvmm_target_output(selected),
+        f"OpenVMM {config.openvmm_target(selected)} release binary",
+    )
+    if not config.output.exists() or not source.samefile(config.output):
+        config.output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, config.output)
+    if mode == "musl":
+        config.output.chmod(config.output.stat().st_mode | 0o111)
+    record_openvmm_provenance(config)
+
+
+def build_guest(config: BuildConfig) -> None:
+    if config.native_guest:
+        unsupported = [
+            guest
+            for guest in config.selected_guests()
+            if not guest_descriptor(guest).native_build_supported
+        ]
+        if unsupported:
+            raise ScriptError(
+                f"{guest_descriptor(unsupported[0]).distribution} initramfs builds "
+                "require Docker"
+            )
+        build_kernel(config.kernel)
+        for guest in config.selected_guests():
+            build_initramfs(config.initramfs_config(guest))
+        if config.guest == "all":
+            build_distro_layer(config.distro_layer_config())
+        return
+    build_docker_artifacts(config.docker, config.guest)
+
+
+def build_all(config: BuildConfig) -> None:
+    platform = detect_openvmm_platform(config.openvmm.backend)
+    build_guest(config)
+    build_openvmm(config.openvmm, platform=platform)
+
+
+def prepare_kernel_source(config: KernelBuildConfig) -> tuple[Path, str]:
+    """Download, verify, extract, and patch the pinned Linux source."""
+    version = DEFAULT_KERNEL_VERSION
     for tool in ("patch", "tar"):
         require_tool(tool)
-    cache = cache_root()
+    cache = config.cache_directory
     downloads = cache / "downloads"
     source_parent = cache / "linux"
     tarball = downloads / f"linux-{version}.tar.xz"
@@ -941,7 +1052,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     _require_linux("build-kernel")
     for tool in ("make", "readelf"):
         require_tool(tool)
-    source, source_fingerprint = prepare_kernel_source(config.version)
+    source, source_fingerprint = prepare_kernel_source(config)
     input_config = REPO_ROOT / "kernel" / "config-microvm"
     input_config_sha256 = sha256_file(input_config)
     provenance_inputs = _kernel_provenance_inputs(
@@ -1008,19 +1119,12 @@ def build_kernel(config: KernelBuildConfig) -> None:
 
 
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:
-    if (
-        config.kernel_version != DEFAULT_KERNEL_VERSION
-        or config.alpine_version != DEFAULT_ALPINE_VERSION
-        or config.alpine_branch != DEFAULT_ALPINE_BRANCH
-        or config.ubuntu_version != ubuntu.DEFAULT_UBUNTU_VERSION
-    ):
-        raise ScriptError(
-            "Docker builds are pinned to Linux "
-            f"{DEFAULT_KERNEL_VERSION} and Alpine {DEFAULT_ALPINE_VERSION} "
-            f"({DEFAULT_ALPINE_BRANCH}) and Ubuntu "
-            f"{ubuntu.DEFAULT_UBUNTU_VERSION}"
-        )
-    destination = _docker_destination(config.destination)
+    configured_destination = (
+        config.linux_source_destination
+        if target == "linux-source-artifacts"
+        else config.artifact_destination
+    )
+    destination = _docker_destination(configured_destination)
     command: list[str | Path] = [
         "docker",
         "build",
@@ -1055,7 +1159,7 @@ def build_docker_linux_source(config: DockerBuildConfig) -> Path:
         "docker",
         "docker was not found on PATH; install Docker with the Linux engine first",
     )
-    destination = _docker_destination(config.destination)
+    destination = _docker_destination(config.linux_source_destination)
     print(f">> building Linux corresponding source into '{destination}'")
     run_checked(
         docker_build_command(config, "linux-source-artifacts"),
@@ -1078,7 +1182,7 @@ def _build_docker_target(
         "docker",
         "docker was not found on PATH; install Docker with the Linux engine first",
     )
-    destination = _docker_destination(config.destination)
+    destination = _docker_destination(config.artifact_destination)
     print(f">> building {description} into '{destination}'")
     run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
     missing = [name for name in expected if not (destination / name).is_file()]
@@ -1128,7 +1232,7 @@ def build_docker_artifacts(
         config,
         target,
         expected,
-        f"Linux artifacts (kernel {config.kernel_version}, {guest_label})",
+        f"Linux artifacts (kernel {DEFAULT_KERNEL_VERSION}, {guest_label})",
     )
 
 
