@@ -1031,6 +1031,10 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
     ]
     command.extend(
         [
+            "--build-arg",
+            f"AZURELINUX_IMAGE={DEFAULT_AZURELINUX_IMAGE}",
+            "--build-arg",
+            f"AZURELINUX_VERSION={DEFAULT_AZURELINUX_VERSION}",
             "--output",
             f"type=local,dest={destination}",
             REPO_ROOT,
@@ -1064,15 +1068,32 @@ def build_docker_linux_source(config: DockerBuildConfig) -> Path:
     return archive
 
 
-def build_docker_artifacts(
+def _build_docker_target(
     config: DockerBuildConfig,
-    guest: str = "alpine",
+    target: str,
+    expected: tuple[str, ...],
+    description: str,
 ) -> None:
     require_tool(
         "docker",
         "docker was not found on PATH; install Docker with the Linux engine first",
     )
     destination = _docker_destination(config.destination)
+    print(f">> building {description} into '{destination}'")
+    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
+    missing = [name for name in expected if not (destination / name).is_file()]
+    if missing:
+        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
+    print(">> done:")
+    for name in expected:
+        path = destination / name
+        print(f"  {path} ({format_size(path.stat().st_size)})")
+
+
+def build_docker_artifacts(
+    config: DockerBuildConfig,
+    guest: str = "alpine",
+) -> None:
     if guest == "all":
         target = "all-guest-artifacts"
         expected = (
@@ -1103,18 +1124,12 @@ def build_docker_artifacts(
         if descriptor.name == "alpine":
             expected = (*expected, INITRAMFS_PROVENANCE_NAME)
         guest_label = descriptor.distribution
-    print(
-        f">> building Linux artifacts into '{destination}' "
-        f"(kernel {config.kernel_version}, {guest_label})"
+    _build_docker_target(
+        config,
+        target,
+        expected,
+        f"Linux artifacts (kernel {config.kernel_version}, {guest_label})",
     )
-    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
-    missing = [name for name in expected if not (destination / name).is_file()]
-    if missing:
-        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
-    print(">> done:")
-    for name in expected:
-        path = destination / name
-        print(f"  {path} ({format_size(path.stat().st_size)})")
 
 
 def build_docker_initramfs(config: DockerBuildConfig, guest: str) -> None:
@@ -1123,21 +1138,10 @@ def build_docker_initramfs(config: DockerBuildConfig, guest: str) -> None:
         raise ScriptError(
             f"{descriptor.distribution} initramfs builds do not require Docker"
         )
-    require_tool(
-        "docker",
-        "docker was not found on PATH; install Docker with the Linux engine first",
-    )
-    destination = _docker_destination(config.destination)
     target = descriptor.docker_initramfs_artifacts_target
     if target is None:
-        raise AssertionError(f"missing Docker initramfs target for {descriptor.name}")
+        raise ScriptError(f"missing Docker initramfs target for {descriptor.name}")
     expected = (descriptor.initramfs_name, descriptor.package_manifest_name)
-    print(f">> building {descriptor.distribution} initramfs into '{destination}'")
-    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
-    missing = [name for name in expected if not (destination / name).is_file()]
-    if missing:
-        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
-    print(">> done:")
-    for name in expected:
-        path = destination / name
-        print(f"  {path} ({format_size(path.stat().st_size)})")
+    _build_docker_target(
+        config, target, expected, f"{descriptor.distribution} initramfs"
+    )

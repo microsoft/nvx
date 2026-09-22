@@ -140,8 +140,6 @@ def _native_kernel() -> None:
 
 def _native_initramfs(guest: str) -> None:
     descriptor = guest_descriptor(guest)
-    if not descriptor.native_build_supported:
-        raise ScriptError(f"{descriptor.distribution} initramfs builds require Docker")
     build_initramfs(
         InitramfsBuildConfig(
             guest=descriptor.name,
