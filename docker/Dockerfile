@@ -80,8 +80,11 @@ RUN set -eux; \
         /repo/guest/common/nvx-hostmount \
         /repo/guest/common/nvx-identity-probe \
         /repo/guest/common/nvx-snapshot \
-        /repo/guest/common/nvx-virtio-restore-probe /rootfs/sbin/; \
-    for utility in ifconfig ip mount mdev blkid losetup mkfs.ext4 mountpoint flock; do \
+        /repo/guest/common/nvx-virtio-restore-probe \
+        /repo/guest/common/nvx-container-enter-azurelinux /rootfs/sbin/; \
+    install -m 0755 /repo/guest/common/nvx-container-launch-azurelinux \
+        /rootfs/sbin/nvx-container-launch; \
+    for utility in awk chroot ifconfig ip mdev mount ping blkid losetup mkfs.ext4 mountpoint flock unshare; do \
         ln -sf busybox "/rootfs/bin/$utility"; \
     done; \
     cd /rootfs; \

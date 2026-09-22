@@ -320,14 +320,15 @@ case "$guest_id" in
         echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
         ;;
     ubuntu) ;;
+    azurelinux) ;;
     *) fatal "unsupported guest identity: ${guest_id:-missing}" ;;
 esac
 echo " uname: $(uname -a)"
 echo "=========================================="
 echo
-if [ "$guest_id" = alpine ]; then
-    echo "NVX-GUEST-BOOT-OK: alpine"
-fi
+case "$guest_id" in
+    alpine | azurelinux) echo "NVX-GUEST-BOOT-OK: $guest_id" ;;
+esac
 restore_probe=$(sed -n 's/.*nvx_virtio_restore_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$restore_probe" ]; then
     case "$restore_probe" in

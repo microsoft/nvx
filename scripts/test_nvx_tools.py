@@ -469,7 +469,7 @@ class CliTests(unittest.TestCase):
         with patch("nvx.build_docker_initramfs") as build_docker_initramfs:
             nvx.command_build_initramfs(azurelinux_initramfs)
         build_docker_initramfs.assert_called_once_with(
-            build.DockerBuildConfig(destination=nvx.BUILD_DIR),
+            build.DockerBuildConfig(artifact_destination=nvx.BUILD_DIR),
             "azurelinux",
         )
 
@@ -498,7 +498,7 @@ class CliTests(unittest.TestCase):
 
     def test_docker_initramfs_requires_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
-            config = build.DockerBuildConfig(destination=Path(temporary))
+            config = build.DockerBuildConfig(artifact_destination=Path(temporary))
             with (
                 patch.object(build, "require_tool"),
                 patch.object(build, "run_checked") as run_checked,
@@ -2693,16 +2693,14 @@ class BuildTests(unittest.TestCase):
             patch.object(build, "build_distro_layer") as distro,
         ):
             all_guests = build_config.BuildConfig(guest="all", native_guest=True)
-            build.build_guest(all_guests)
-            kernel.assert_called_once_with(all_guests.kernel)
-            self.assertEqual(
-                initramfs.call_args_list,
-                [
-                    call(all_guests.initramfs_config("alpine")),
-                    call(all_guests.initramfs_config("ubuntu")),
-                ],
-            )
-            distro.assert_called_once_with(all_guests.distro_layer_config())
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "Azure Linux initramfs builds require Docker",
+            ):
+                build.build_guest(all_guests)
+            kernel.assert_not_called()
+            initramfs.assert_not_called()
+            distro.assert_not_called()
 
     def test_combined_build_passes_explicit_backend_to_openvmm_build(self):
         config = build_config.BuildConfig(
