@@ -1,6 +1,6 @@
 #!/bin/sh
-# PID 1 for the RAM initramfs. Mounts the pseudo-filesystems, prints a recognizable
-# boot-completion banner (used as the cold-start marker), and drops to an interactive shell.
+# PID 1 for an NVX RAM initramfs. Mounts the pseudo-filesystems, prints a
+# recognizable boot-completion banner, and drops to an interactive shell.
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
@@ -181,6 +181,8 @@ if [ -n "$nip" ]; then
     fi
 fi
 if [ "$sandbox_mode" = true ]; then
+    [ -x /sbin/nvx-init-agent ] ||
+        workload_fatal "selected guest cannot act as sandbox control"
     exec /sbin/nvx-init-agent
 fi
 case "$workload_lifecycle" in
@@ -312,10 +314,20 @@ case " $(cat /proc/cmdline) " in
 esac
 echo
 echo "=========================================="
-echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
+guest_id=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null | tr -d '"')
+case "$guest_id" in
+    alpine)
+        echo " ALPINE-MICROVM-BOOT-OK: $(cat /etc/alpine-release 2>/dev/null)"
+        ;;
+    ubuntu) ;;
+    *) fatal "unsupported guest identity: ${guest_id:-missing}" ;;
+esac
 echo " uname: $(uname -a)"
 echo "=========================================="
 echo
+if [ "$guest_id" = alpine ]; then
+    echo "NVX-GUEST-BOOT-OK: alpine"
+fi
 restore_probe=$(sed -n 's/.*nvx_virtio_restore_probe=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$restore_probe" ]; then
     case "$restore_probe" in
@@ -342,4 +354,7 @@ case " $(cat /proc/cmdline) " in
         echo "SNAP-RESTORE-OK"
         ;;
 esac
+if [ "$guest_id" = ubuntu ]; then
+    exec /bin/bash --noprofile --rcfile /etc/nvx-bashrc -i
+fi
 exec /bin/sh

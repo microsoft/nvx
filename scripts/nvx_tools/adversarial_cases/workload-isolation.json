@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "campaign": "workload-isolation",
+  "description": "Managed workload probes for identity, namespace, storage, control-channel, and network-policy isolation.",
+  "cases": [
+    {
+      "id": "workload-identity-boundary",
+      "scenario": "workload-identity",
+      "description": "Verify the fixed non-root identity, empty capabilities, no_new_privs, namespaces, and private device view.",
+      "coverage": [
+        "identity",
+        "capabilities",
+        "no-new-privileges",
+        "namespaces",
+        "device-isolation"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 2
+    },
+    {
+      "id": "managed-control-lifecycle",
+      "scenario": "managed-lifecycle",
+      "description": "Exercise authenticated reconnect, repeated exec, cancellation, timeout, and orderly managed teardown.",
+      "coverage": [
+        "control-authentication",
+        "reconnect",
+        "exec-timeout",
+        "cancellation",
+        "teardown"
+      ],
+      "repetitions": 2,
+      "timeout_multiplier": 3
+    },
+    {
+      "id": "managed-exec-churn",
+      "scenario": "managed-lifecycle",
+      "description": "Repeat managed sessions, exec completion, timeout, cancellation, and reconnect paths as bounded process and signal churn.",
+      "coverage": [
+        "process-churn",
+        "signal-churn",
+        "repeated-exec",
+        "timeout-recovery",
+        "output-bounds"
+      ],
+      "repetitions": 4,
+      "timeout_multiplier": 3
+    },
+    {
+      "id": "filesystem-alias-boundary",
+      "scenario": "denied-filesystem-paths",
+      "description": "Probe direct, parent-relative, symlink, junction, and secondary-mount path-policy bypasses.",
+      "coverage": [
+        "path-traversal",
+        "symlink-aliasing",
+        "junction-aliasing",
+        "mount-policy",
+        "read-only-layers"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 3
+    },
+    {
+      "id": "sandbox-storage-boundary",
+      "scenario": "sandbox-blocks",
+      "description": "Exercise immutable lower layers, private scratch, block drain, and invalid-media rejection.",
+      "coverage": [
+        "overlay-storage",
+        "scratch-isolation",
+        "block-drain",
+        "media-validation"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 4
+    },
+    {
+      "id": "directional-network-boundary",
+      "scenario": "directional-network-policy",
+      "description": "Verify ingress and egress directionality, including complete egress denial.",
+      "coverage": [
+        "network-egress",
+        "network-ingress",
+        "default-deny"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 3
+    },
+    {
+      "id": "loopback-network-boundary",
+      "scenario": "host-loopback-policy",
+      "description": "Probe host-loopback denial, exact proxy exceptions, and explicit forwarding.",
+      "coverage": [
+        "host-loopback",
+        "proxy-exception",
+        "port-forwarding"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 3
+    },
+    {
+      "id": "l3-l4-network-boundary",
+      "scenario": "l3-l4-egress-policy",
+      "description": "Probe TCP and UDP port rules, overlapping deny precedence, and malformed-rule rejection.",
+      "coverage": [
+        "tcp-policy",
+        "udp-policy",
+        "deny-precedence",
+        "rule-validation"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 3
+    }
+  ]
+}

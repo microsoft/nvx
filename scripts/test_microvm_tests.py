@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import argparse
+import json
 import queue
 import shutil
 import socket
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
 from nvx_tools import (  # noqa: E402
     benchmark,
+    common,
     control_session,
     microvm_tests,
     openvmm_process,
@@ -39,7 +41,8 @@ class MicrovmTestParserTests(unittest.TestCase):
 
         self.assertIsNone(args.scenario)
         self.assertEqual(args.processors, [1, 2, 4, 8])
-        self.assertEqual(args.memory_mib, 128)
+        self.assertEqual(args.guest, "alpine")
+        self.assertIsNone(args.memory_mib)
         self.assertEqual(args.timeout, 60.0)
         self.assertIs(args.handler, microvm_tests.run)
 
@@ -62,6 +65,54 @@ class MicrovmTestParserTests(unittest.TestCase):
         self.assertEqual(args.scenario, ["smp"])
         self.assertEqual(args.processors, [2, 8])
         self.assertEqual(args.output_dir, Path("results"))
+
+    def test_parser_accepts_ubuntu_guest_profile(self):
+        args = nvx.parse_args(
+            [
+                "test-microvm",
+                "--backend",
+                "whp",
+                "--guest",
+                "ubuntu",
+                "--scenario",
+                "guest-boot",
+            ]
+        )
+
+        self.assertEqual(args.guest, "ubuntu")
+        self.assertIsNone(args.memory_mib)
+
+
+class GuestIdentityScriptTests(unittest.TestCase):
+    def test_guest_identity_checks_fail_before_success_markers(self):
+        descriptor = microvm_tests.guest_descriptor("ubuntu")
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm"],
+            ),
+            patch.object(microvm_tests, "run_guest_script") as run_guest_script,
+        ):
+            for runner in (
+                microvm_tests.run_guest_boot,
+                microvm_tests.run_guest_identity,
+            ):
+                with self.subTest(runner=runner.__name__):
+                    runner(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        descriptor,
+                        memory_mib=256,
+                        timeout=60,
+                        log_path=Path("guest.log"),
+                    )
+                    self.assertTrue(
+                        run_guest_script.call_args.args[1].startswith("set -e\n")
+                    )
+                    run_guest_script.reset_mock()
 
 
 class ControlSessionTests(unittest.TestCase):
@@ -410,6 +461,125 @@ class MicrovmTests(unittest.TestCase):
             "printf 'sensitive-output-value\\n'; /sbin/nvx-exit 37"
         )
 
+    def test_structured_outcome_preserves_invalid_primary_report(self):
+        report = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "guest-exit",
+                "status_code": 37,
+            },
+            policy={
+                "status": "applied",
+                "status_code": 0,
+                "mode": "rules",
+                "allow_rule_count": 2,
+                "deny_rule_count": 1,
+                "host_loopback": "deny",
+            },
+        )
+        teardown = cast(dict[str, object], report["teardown"])
+        teardown[next(iter(teardown))] = False
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with (
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests,
+                    "_read_outcome_report",
+                    return_value=report,
+                ),
+            ):
+                active = process.return_value.__enter__.return_value
+                active.wait.return_value = openvmm_process.OpenvmmProcessResult(
+                    37, b"sensitive-output-value\n"
+                )
+                with self.assertRaisesRegex(RuntimeError, "incomplete teardown"):
+                    microvm_tests.run_structured_outcome(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=40,
+                        output_dir=output,
+                    )
+            preserved = json.loads(
+                (output / "structured-outcome.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(preserved, report)
+
+    def test_structured_outcome_preserves_invalid_rejection_report(self):
+        applied = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "guest-exit",
+                "status_code": 37,
+            },
+            policy={
+                "status": "applied",
+                "status_code": 0,
+                "mode": "rules",
+                "allow_rule_count": 2,
+                "deny_rule_count": 1,
+                "host_loopback": "deny",
+            },
+        )
+        rejected = self._outcome_report(
+            "whp",
+            outcome={
+                "operation": "run",
+                "category": "vmm-failure",
+                "status_code": 1,
+            },
+            policy={
+                "status": "failed",
+                "status_code": 1,
+                "mode": "rules",
+                "allow_rule_count": 1,
+                "deny_rule_count": 0,
+                "host_loopback": "allow",
+            },
+        )
+        teardown = cast(dict[str, object], rejected["teardown"])
+        teardown[next(iter(teardown))] = False
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with (
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests,
+                    "_read_outcome_report",
+                    side_effect=(applied, rejected),
+                ),
+            ):
+                active = process.return_value.__enter__.return_value
+                active.wait.side_effect = (
+                    openvmm_process.OpenvmmProcessResult(
+                        37, b"sensitive-output-value\n"
+                    ),
+                    openvmm_process.OpenvmmProcessResult(
+                        2, b"--network-egress is required\n"
+                    ),
+                )
+                with self.assertRaisesRegex(RuntimeError, "leaked host resources"):
+                    microvm_tests.run_structured_outcome(
+                        Path("openvmm"),
+                        Path("kernel"),
+                        Path("initrd"),
+                        "whp",
+                        memory_mib=128,
+                        timeout=40,
+                        output_dir=output,
+                    )
+            preserved = json.loads(
+                (output / "structured-outcome-rejected.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(preserved, rejected)
+
     def test_console_exit_preserves_full_output_and_guest_status(self):
         expected = (
             b"x" * microvm_tests.CONSOLE_EXIT_PAYLOAD_BYTES
@@ -544,9 +714,9 @@ class MicrovmTests(unittest.TestCase):
         interaction.assert_not_called()
 
     def test_snapshot_restore_uses_batched_port_io_and_zero_expansion_path(self):
-        snapshot = (Path(__file__).parents[1] / "alpine" / "nvx-snapshot").read_text(
-            encoding="utf-8"
-        )
+        snapshot = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
+        ).read_text(encoding="utf-8")
 
         self.assertIn(
             '/sbin/nvx-port-io read-restore-packet 233 234 "$restore_packet"',
@@ -1623,6 +1793,7 @@ class MicrovmTests(unittest.TestCase):
             output_dir = Path(temporary) / "logs"
             args = argparse.Namespace(
                 backend="whp",
+                guest="alpine",
                 scenario=["smp", "smp", "smp-lapic", "smp-lapic"],
                 processors=[2, 2, 8],
                 memory_mib=128,
@@ -1658,6 +1829,118 @@ class MicrovmTests(unittest.TestCase):
             [entry.kwargs["force_lapic_timer"] for entry in run_smp.call_args_list],
             [False, False, True, True],
         )
+
+    def test_runner_uses_ubuntu_artifact_and_default_memory(self):
+        requested: list[Path] = []
+
+        def require(path: Path, _description: str) -> Path:
+            requested.append(path)
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--guest",
+                    "ubuntu",
+                    "--scenario",
+                    "guest-boot",
+                    "--output-dir",
+                    temporary,
+                ]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_guest_boot") as run_guest_boot,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+
+        self.assertIn(
+            common.BUILD_DIR / "initramfs-ubuntu.cpio.gz",
+            requested,
+        )
+        self.assertEqual(run_guest_boot.call_args.kwargs["memory_mib"], 256)
+
+    def test_runner_omits_console_snapshot_from_ubuntu_defaults(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--guest",
+                    "ubuntu",
+                    "--output-dir",
+                    temporary,
+                ]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(
+                    microvm_tests,
+                    "MICROVM_TEST_SCENARIOS",
+                    ("console-snapshot", "guest-boot"),
+                ),
+                patch.object(
+                    microvm_tests,
+                    "require_file",
+                    side_effect=require,
+                ),
+                patch.object(microvm_tests, "run_guest_boot") as guest_boot,
+                patch.object(
+                    microvm_tests,
+                    "run_console_snapshot",
+                ) as console_snapshot,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+
+        guest_boot.assert_called_once()
+        console_snapshot.assert_not_called()
+
+    def test_runner_rejects_ubuntu_unsupported_scenarios(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        for scenario in (
+            "console-snapshot",
+            "sandbox-blocks",
+            "scratch-snapshot",
+            "snapshot-tiers",
+        ):
+            with self.subTest(scenario=scenario):
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "whp",
+                        "--guest",
+                        "ubuntu",
+                        "--scenario",
+                        scenario,
+                    ]
+                )
+                with (
+                    patch.object(
+                        microvm_tests,
+                        "validate_openvmm_test_backend",
+                    ),
+                    patch.object(
+                        microvm_tests,
+                        "require_file",
+                        side_effect=require,
+                    ),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "Ubuntu guest does not support",
+                    ),
+                ):
+                    microvm_tests.run(args)
 
     def test_runner_keeps_restore_tsc_logs_separate_from_processor_restore(self):
         def require(path: Path, _description: str) -> Path:
@@ -1703,6 +1986,7 @@ class MicrovmTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             args = argparse.Namespace(
                 backend="kvm",
+                guest="alpine",
                 scenario=["console-exit", "console-exit"],
                 processors=[1, 2, 2, 4, 8],
                 memory_mib=128,

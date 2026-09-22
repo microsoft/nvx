@@ -194,20 +194,39 @@ runs:
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
-        python scripts\nvx.py benchmark `
-          --suite e2e `
-          --backend "${{ inputs.backend }}" `
-          --platform "${{ inputs.platform }}" `
-          --processors 1 `
-          --warmups "${{ inputs.warmups }}" `
-          --runs "${{ inputs.runs }}" `
-          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
-          --skip-build `
-          --teardown-mode "${{ inputs.teardown-mode }}" `
-          --snapshot-profile `
-          --output "$RunDir/acceptance.json" `
-          @CpuArgs
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $AcceptanceOutput = "$RunDir/acceptance.json"
+        if (Test-Path -LiteralPath $AcceptanceOutput) {
+          Remove-Item -LiteralPath $AcceptanceOutput
+        }
+        foreach ($Attempt in 1, 2) {
+          $AttemptOutput = "$RunDir/acceptance-attempt-$Attempt.json"
+          python scripts\nvx.py benchmark `
+            --suite e2e `
+            --backend "${{ inputs.backend }}" `
+            --platform "${{ inputs.platform }}" `
+            --processors 1 `
+            --warmups "${{ inputs.warmups }}" `
+            --runs "${{ inputs.runs }}" `
+            --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+            --skip-build `
+            --teardown-mode "${{ inputs.teardown-mode }}" `
+            --snapshot-profile `
+            --output $AttemptOutput `
+            @CpuArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts\nvx.py performance validate-openvmm `
+            --platform "${{ inputs.platform }}" `
+            --input $AttemptOutput
+          $ValidationStatus = $LASTEXITCODE
+          if ($ValidationStatus -eq 0) {
+            Copy-Item -LiteralPath $AttemptOutput -Destination $AcceptanceOutput
+            break
+          }
+          if ($ValidationStatus -ne 75 -or $Attempt -eq 2) {
+            exit $ValidationStatus
+          }
+          Write-Output "::warning::Lifecycle snapshot generation was unstable on attempt $Attempt; remeasuring once"
+        }
 
     - name: Run Windows performance suite
       if: runner.os == 'Windows'
@@ -389,8 +408,8 @@ runs:
             echo "::error::Missing benchmark result ${result}"
             exit 1
           }
-          if [[ "${processors}" == 1 ]] && [[ "$(wc -l < "${result}")" -ne 37 ]]; then
-            echo "::error::Expected 36 microVM one-vCPU metrics in ${result}"
+          if [[ "${processors}" == 1 ]] && [[ "$(wc -l < "${result}")" -ne 35 ]]; then
+            echo "::error::Expected 34 microVM one-vCPU metrics in ${result}"
             exit 1
           elif [[ "${processors}" != 1 ]] &&
             { [[ "$(wc -l < "${result}")" -ne 2 ]] ||
@@ -411,8 +430,8 @@ runs:
             throw "Missing benchmark result $Result"
           }
           if ($Processors -eq 1) {
-            if (@(Import-Csv $Result).Count -ne 36) {
-              throw "Expected 36 microVM one-vCPU metrics in $Result"
+            if (@(Import-Csv $Result).Count -ne 34) {
+              throw "Expected 34 microVM one-vCPU metrics in $Result"
             }
           } else {
             $Rows = @(Import-Csv $Result)

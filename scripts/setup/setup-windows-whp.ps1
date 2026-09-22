@@ -45,17 +45,24 @@ $MinimumRustVersion = [version]"1.95.0"
 $RustupVersion = "1.29.1"
 $RustupSha256 = "6f4bef66261261fcb43131be8720bab817d403a09edec7455c371974b90bdb7e"
 $CargoNextestVersion = "0.9.133"
+$SccacheVersion = "0.18.0"
+$SccacheSha256 = "1a63c1be2beab3f04d27e4cc145443e092e02d3dd83a51030989829d7023091b"
 $RunnerVersion = "2.337.0"
 $RunnerSha256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 $ToolRoot = Join-Path $env:ProgramData "nvx"
 $TrustedCargoHome = Join-Path $ToolRoot "cargo"
 $CargoHome = Join-Path $RunnerDirectory "_work\_temp\cargo-home"
+$SccacheDirectory = Join-Path $RunnerDirectory "_work\_sccache"
 $RustupHome = Join-Path $ToolRoot "rustup"
 $RequiredGuestArtifacts = @(
     "vmlinux",
     "vmlinux.config",
     "initramfs.cpio.gz",
-    "initramfs.cpio.gz.packages.json"
+    "initramfs.cpio.gz.packages.json",
+    "initramfs-ubuntu.cpio.gz",
+    "initramfs-ubuntu.cpio.gz.packages.json",
+    "ubuntu-distro.erofs",
+    "ubuntu-distro.erofs.manifest.json"
 )
 
 function Assert-LastExitCode {
@@ -290,7 +297,8 @@ function Assert-ActionsRunnerWritablePaths {
             $workDirectory,
             (Join-Path $RunnerDirectory "_work\_temp"),
             (Join-Path $RunnerDirectory "_work\_diag"),
-            $CargoHome
+            $CargoHome,
+            $SccacheDirectory
         )) {
         $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         if ($null -eq $item) {
@@ -445,7 +453,12 @@ function Protect-ActionsRunner {
     Assert-ActionsRunnerWritablePaths
     New-Item `
         -ItemType Directory `
-        -Path $workDirectory, $temporaryDirectory, $diagnosticsTarget, $CargoHome `
+        -Path `
+        $workDirectory, `
+        $temporaryDirectory, `
+        $diagnosticsTarget, `
+        $CargoHome, `
+        $SccacheDirectory `
         -Force |
     Out-Null
 
@@ -483,7 +496,8 @@ function Protect-ActionsRunner {
             $workDirectory,
             $temporaryDirectory,
             $diagnosticsTarget,
-            $CargoHome
+            $CargoHome,
+            $SccacheDirectory
         )) {
         Set-ServiceDirectoryAcl `
             -Path $path `
@@ -702,7 +716,10 @@ function Install-Toolchain {
         "toolchain", "install", $RustToolchain, "--profile", "minimal"
     )
     Invoke-Native $rustupPath @(
-        "target", "add", "x86_64-unknown-none", "--toolchain", $RustToolchain
+        "target", "add",
+        "x86_64-unknown-none",
+        "x86_64-unknown-uefi",
+        "--toolchain", $RustToolchain
     )
 
     $cargo = Join-Path $TrustedCargoHome "bin\cargo.exe"
@@ -721,11 +738,86 @@ function Install-Toolchain {
         )
     }
 
+    $sccache = Join-Path $TrustedCargoHome "bin\sccache.exe"
+    $installSccache = -not (Test-Path -LiteralPath $sccache -PathType Leaf)
+    if (-not $installSccache) {
+        $installedSccacheVersion = & $sccache --version
+        Assert-LastExitCode "sccache --version"
+        $installSccache = ($installedSccacheVersion -join "`n") -notmatch `
+            "sccache $([regex]::Escape($SccacheVersion))"
+    }
+    if ($installSccache) {
+        $archive = Join-Path $ToolRoot `
+            "sccache-v$SccacheVersion-x86_64-pc-windows-msvc-$([guid]::NewGuid().ToString('N')).tar.gz"
+        $extractDirectory = Join-Path $ToolRoot `
+            "sccache-v$SccacheVersion-$([guid]::NewGuid().ToString('N'))"
+        try {
+            Invoke-WebRequest `
+                -UseBasicParsing `
+                -Uri "https://github.com/mozilla/sccache/releases/download/v$SccacheVersion/sccache-v$SccacheVersion-x86_64-pc-windows-msvc.tar.gz" `
+                -OutFile $archive
+            $actualHash = (Get-FileHash `
+                    -LiteralPath $archive `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $SccacheSha256) {
+                throw "sccache archive checksum mismatch: $actualHash"
+            }
+            New-Item `
+                -ItemType Directory `
+                -Path $extractDirectory `
+                -Force |
+            Out-Null
+            Invoke-Native (Get-RequiredCommand "tar.exe") @(
+                "-xzf", $archive, "-C", $extractDirectory
+            )
+            $extracted = Join-Path `
+                $extractDirectory `
+                "sccache-v$SccacheVersion-x86_64-pc-windows-msvc\sccache.exe"
+            if (-not (Test-Path -LiteralPath $extracted -PathType Leaf)) {
+                throw "sccache executable was not found after extraction"
+            }
+            Copy-Item -LiteralPath $extracted -Destination $sccache -Force
+        }
+        finally {
+            Remove-Item `
+                -LiteralPath $archive, $extractDirectory `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+
     Set-ServiceDirectoryAcl `
         -Path $ToolRoot `
         -ServiceRights "ReadAndExecute" `
         -AllowInternalLinks
     $env:CARGO_HOME = $CargoHome
+}
+
+function Configure-SccacheEnvironment {
+    New-Item -ItemType Directory -Path $SccacheDirectory -Force |
+    Out-Null
+    Set-ServiceDirectoryAcl `
+        -Path $SccacheDirectory `
+        -ServiceRights "Modify" `
+        -SkipChildren
+    foreach ($entry in @{
+            CARGO_INCREMENTAL   = "0"
+            RUSTC_WRAPPER       = "sccache"
+            SCCACHE_CACHE_SIZE  = "10G"
+            SCCACHE_DIR         = $SccacheDirectory
+        }.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable(
+            $entry.Key,
+            $entry.Value,
+            "Machine"
+        )
+        [Environment]::SetEnvironmentVariable(
+            $entry.Key,
+            $entry.Value,
+            "Process"
+        )
+    }
 }
 
 function Get-RelativePackageFiles {
@@ -855,7 +947,13 @@ function Install-ActionsRunner {
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     $serviceFile = Join-Path $RunnerDirectory ".service"
     $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-    $labels = "windows,whp,virtual-machine,$RunnerName"
+    $labels = "windows,whp,virtual-machine"
+    $runnerNameValidated = $false
+    if (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) {
+        $configuration = Get-Content -LiteralPath $runnerConfiguration -Raw |
+        ConvertFrom-Json
+        $runnerNameValidated = $configuration.agentName -eq $RunnerName
+    }
     $serviceInstalled = $false
     if (Test-Path -LiteralPath $serviceFile -PathType Leaf) {
         $serviceName = (Get-Content -LiteralPath $serviceFile -Raw).Trim()
@@ -869,6 +967,7 @@ function Install-ActionsRunner {
     (Get-Content -LiteralPath $labelsFile -Raw).Trim() -eq $labels
     $registrationRequired = `
         -not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) -or
+    -not $runnerNameValidated -or
     -not $serviceInstalled -or
     -not $labelsValidated
     if ($registrationRequired) {
@@ -1033,7 +1132,7 @@ function Assert-ActionsRunner {
     }
     if (-not [string]::IsNullOrWhiteSpace($RunnerName)) {
         $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-        $expectedLabels = "windows,whp,virtual-machine,$RunnerName"
+        $expectedLabels = "windows,whp,virtual-machine"
         if (-not (Test-Path -LiteralPath $labelsFile -PathType Leaf) -or
             (Get-Content -LiteralPath $labelsFile -Raw).Trim() -ne
             $expectedLabels) {
@@ -1168,18 +1267,43 @@ function Build-Nvx {
 }
 
 function Enable-Whp {
-    $feature = Get-WindowsOptionalFeature `
-        -Online `
-        -FeatureName HypervisorPlatform
-    if ($feature.State -eq "Enabled") {
-        return $false
+    $features = @("HypervisorPlatform")
+    if ($RunnerOnly) {
+        $features += "Microsoft-Hyper-V"
     }
-    $result = Enable-WindowsOptionalFeature `
-        -Online `
-        -FeatureName HypervisorPlatform `
-        -All `
-        -NoRestart
-    return [bool]$result.RestartNeeded
+    $restartNeeded = $false
+    foreach ($featureName in $features) {
+        $feature = Get-WindowsOptionalFeature `
+            -Online `
+            -FeatureName $featureName
+        if ($feature.State -eq "Enabled") {
+            continue
+        }
+        $result = Enable-WindowsOptionalFeature `
+            -Online `
+            -FeatureName $featureName `
+            -All `
+            -NoRestart
+        $restartNeeded = [bool]$result.RestartNeeded -or $restartNeeded
+    }
+    return $restartNeeded
+}
+
+function Assert-PcatFirmware {
+    $system32 = Join-Path $env:SystemRoot "System32"
+    $pcatFirmware = @(
+        (Join-Path $system32 "vmfirmwarepcat.dll"),
+        (Join-Path $system32 "vmfirmware.dll")
+    )
+    if (@($pcatFirmware | Where-Object {
+                Test-Path -LiteralPath $_ -PathType Leaf
+            }).Count -eq 0) {
+        throw "Hyper-V PCAT firmware was not found under $system32"
+    }
+    $svgaFirmware = Join-Path $system32 "VmEmulatedDevices.dll"
+    if (-not (Test-Path -LiteralPath $svgaFirmware -PathType Leaf)) {
+        throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
+    }
 }
 
 function Assert-Environment {
@@ -1204,7 +1328,13 @@ function Assert-Environment {
     }
     Assert-TrustedToolchainAcl
     $python = Get-PythonCommand
-    foreach ($command in @("git.exe", "rustup.exe", "cargo.exe", "cargo-nextest.exe")) {
+    foreach ($command in @(
+            "git.exe",
+            "rustup.exe",
+            "cargo.exe",
+            "cargo-nextest.exe",
+            "sccache.exe"
+        )) {
         [void](Get-RequiredCommand $command)
     }
 
@@ -1222,11 +1352,36 @@ function Assert-Environment {
             "cargo-nextest $([regex]::Escape($CargoNextestVersion))") {
         throw "cargo-nextest $CargoNextestVersion is not installed"
     }
+    $installedSccacheVersion = & (Get-RequiredCommand "sccache.exe") --version
+    Assert-LastExitCode "sccache --version"
+    if (($installedSccacheVersion -join "`n") -notmatch `
+            "sccache $([regex]::Escape($SccacheVersion))") {
+        throw "sccache $SccacheVersion is not installed"
+    }
+    if ($RunnerOnly) {
+        $expectedEnvironment = @{
+            CARGO_INCREMENTAL  = "0"
+            RUSTC_WRAPPER      = "sccache"
+            SCCACHE_CACHE_SIZE = "10G"
+            SCCACHE_DIR        = $SccacheDirectory
+        }
+        foreach ($entry in $expectedEnvironment.GetEnumerator()) {
+            if ([Environment]::GetEnvironmentVariable(
+                    $entry.Key,
+                    "Machine"
+                ) -ne $entry.Value) {
+                throw "machine $($entry.Key) is not configured"
+            }
+        }
+        Assert-ServiceDirectoryAcl -Path $SccacheDirectory -Writable
+    }
     $installedTargets = & (Get-RequiredCommand "rustup.exe") `
         target list --installed --toolchain $RustToolchain
     Assert-LastExitCode "rustup target list"
-    if ("x86_64-unknown-none" -notin @($installedTargets)) {
-        throw "Rust target x86_64-unknown-none is not installed"
+    foreach ($target in @("x86_64-unknown-none", "x86_64-unknown-uefi")) {
+        if ($target -notin @($installedTargets)) {
+            throw "Rust target $target is not installed"
+        }
     }
     if (-not (Test-VisualStudioBuildTools)) {
         throw "Visual Studio 2022 C++ tools and Windows SDK 26100 were not found"
@@ -1237,6 +1392,15 @@ function Assert-Environment {
         -FeatureName HypervisorPlatform
     if ($feature.State -ne "Enabled") {
         throw "Windows Hypervisor Platform is not enabled"
+    }
+    if ($RunnerOnly) {
+        $feature = Get-WindowsOptionalFeature `
+            -Online `
+            -FeatureName Microsoft-Hyper-V
+        if ($feature.State -ne "Enabled") {
+            throw "Hyper-V is not enabled"
+        }
+        Assert-PcatFirmware
     }
 
     if ($SkipWorkspace) {
@@ -1291,6 +1455,9 @@ if ($CheckOnly) {
 
 Assert-Administrator
 Install-Toolchain
+if ($RunnerOnly) {
+    Configure-SccacheEnvironment
+}
 $restartNeeded = Enable-Whp
 
 if ($restartNeeded) {

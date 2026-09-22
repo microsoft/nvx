@@ -36,16 +36,25 @@ $token = $null
 ```
 
 Both scripts pin and verify the Actions runner package. Linux runner labels are
-`linux`, the selected backend, `virtual-machine`, and the runner name. Windows
-labels are `windows`, `whp`, `virtual-machine`, and the runner name.
+`linux`, the selected backend, and `virtual-machine`. Windows labels are
+`windows`, `whp`, and `virtual-machine`. Runner names remain unique identities
+but are not registered as labels.
 Rustup bootstrap binaries are versioned and SHA-256 verified before execution;
 Linux provisioning also installs `zstd` for native Actions cache archives.
+Both runner setup scripts install a pinned, SHA-256-verified `sccache` binary.
+Runner services use a persistent `_work/_sccache` directory with a 10-GiB
+limit, disable Cargo incremental compilation, and expose `sccache` through
+`RUSTC_WRAPPER`. CI uses clean Cargo target directories and reports per-job
+cache statistics instead of restoring compiled `target/` trees.
 Supply a fresh registration token again when migrating an existing runner or
 changing its name, backend, or labels; provisioning replaces the registration
 and records the expected label set in a protected local marker.
 Runner services receive an explicit tool PATH. On Windows, the Rust toolchain
 is read-only to the service account while Cargo registry and Git caches use the
 runner's per-job temporary directory.
+Windows runner provisioning also enables the full Hyper-V feature so the
+licensed in-box PCAT and SVGA firmware required by OpenVMM VMM tests is
+available under `System32`.
 On both platforms, runner and toolchain executables are administrator-owned and
 read-only to jobs, automatic runner updates are disabled, and writable runner
 state is confined to `_work`.
@@ -112,7 +121,8 @@ separate `build-guest` invocation without provisioning or rebuilding the host.
 Run the complete bootstrap from an elevated Windows PowerShell session. It uses
 WinGet to install missing tools, installs stable Rust 1.95 or newer and
 cargo-nextest 0.9.133, enables Windows Hypervisor Platform, and builds OpenVMM.
-It never reboots automatically.
+Runner-only provisioning additionally enables Hyper-V for its in-box PCAT and
+SVGA firmware. The script never reboots automatically.
 
 Pass a guest bundle produced on Linux to complete the build validation:
 

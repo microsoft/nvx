@@ -43,8 +43,6 @@ SHARED_METRICS = frozenset(
         "virtfs_live_write",
         "virtfs_live_read",
         "virtfs_live_roundtrip",
-        "shell_snapshot_cold_64_mib",
-        "shell_snapshot_restore_64_mib",
         "shell_snapshot_cold_128_mib",
         "shell_snapshot_restore_128_mib",
         "shell_snapshot_cold_256_mib",
@@ -74,10 +72,13 @@ LIFECYCLE_BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
 LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 LIFECYCLE_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
 LIFECYCLE_STABILITY_MINIMUM_SAMPLES = 10
+LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES = 2
 LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 = 1.25
+LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP = 1.25
+UNSTABLE_LIFECYCLE_EXIT_CODE = 75
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
+SHELL_SNAPSHOT_MEMORIES_MIB = (128, 256, 512)
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
 DEVICE_IO_RESULT_PREFIX = "NVX_DEVICE_IO_RESULT="
 DEVICE_IO_OPERATIONS = {
@@ -102,6 +103,10 @@ SHELL_SNAPSHOT_SECTION = re.compile(
 
 class PerformanceError(RuntimeError):
     """Raised when benchmark data is missing or malformed."""
+
+
+class UnstablePerformanceError(PerformanceError):
+    """Raised when benchmark samples expose temporary host instability."""
 
 
 @dataclass(frozen=True)
@@ -938,11 +943,34 @@ def _validate_snapshot_generation_stability(
     p50 = statistics.median(ordered)
     ratio = p50 / p25
     if ratio > LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25:
-        raise PerformanceError(
+        raise UnstablePerformanceError(
             f"unstable snapshot generation at {source}:snapshot_capture."
             f"{backend}.samples_ms: p50 {p50:.3f} ms is "
             f"{(ratio - 1) * 100:.1f}% above p25 {p25:.3f} ms "
             f"(limit {(LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 - 1) * 100:.1f}%); "
+            "rerun on an idle host"
+        )
+
+    cluster_gaps = (
+        (
+            ordered[split_index] / ordered[split_index - 1],
+            split_index,
+            ordered[split_index - 1],
+            ordered[split_index],
+        )
+        for split_index in range(
+            LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES,
+            len(ordered) - LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES + 1,
+        )
+    )
+    gap_ratio, split_index, lower, upper = max(cluster_gaps)
+    if gap_ratio > LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP:
+        raise UnstablePerformanceError(
+            f"unstable snapshot generation at {source}:snapshot_capture."
+            f"{backend}.samples_ms: samples split {split_index}/"
+            f"{len(ordered) - split_index} between {lower:.3f} ms and "
+            f"{upper:.3f} ms ({(gap_ratio - 1) * 100:.1f}% gap, "
+            f"limit {(LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP - 1) * 100:.1f}%); "
             "rerun on an idle host"
         )
 
@@ -1476,7 +1504,7 @@ def collect_results(
                 workload_controls = {
                     "payload_mib": 64,
                     "virtfs_memory_mib": 512,
-                    "shell_memories_mib": [64, 128, 256, 512],
+                    "shell_memories_mib": [128, 256, 512],
                     "network_memory_mib": 256,
                     "network": "10.0.0.2/24",
                 }
@@ -1583,13 +1611,7 @@ def collect_results(
 def _validate_current_results(path: Path, results: Sequence[Result]) -> None:
     seen: set[tuple[str, int, int, str, str]] = set()
     for result in results:
-        key = (
-            result.platform,
-            result.microvm_abi_version,
-            result.processors,
-            result.commit,
-            result.metric,
-        )
+        key = _result_identity(result)
         if key in seen:
             raise PerformanceError(
                 f"duplicate platform/ABI/processors/commit/metric row in {path}: "
@@ -1599,19 +1621,25 @@ def _validate_current_results(path: Path, results: Sequence[Result]) -> None:
         seen.add(key)
 
 
+def _result_identity(
+    result: Result, fallback_platform: str = ""
+) -> tuple[str, int, int, str, str]:
+    return (
+        result.platform or fallback_platform,
+        result.microvm_abi_version,
+        result.processors,
+        result.commit,
+        result.metric,
+    )
+
+
 def _validate_result_files(
     files: Sequence[Path], loaded: dict[Path, list[Result]]
 ) -> None:
     seen: dict[tuple[str, int, int, str, str], Path] = {}
     for path in files:
         for result in loaded[path]:
-            key = (
-                result.platform or path.stem,
-                result.microvm_abi_version,
-                result.processors,
-                result.commit,
-                result.metric,
-            )
+            key = _result_identity(result, path.stem)
             previous = seen.get(key)
             if previous is not None:
                 raise PerformanceError(
@@ -1701,27 +1729,11 @@ def persist_results(
                     f"{expected} -> {actual}"
                 )
 
-        existing_keys = {
-            (
-                result.platform,
-                result.microvm_abi_version,
-                result.processors,
-                result.commit,
-                result.metric,
-            )
-            for result in existing
-        }
+        existing_keys = {_result_identity(result) for result in existing}
         new_results = [
             result
             for result in current
-            if (
-                result.platform,
-                result.microvm_abi_version,
-                result.processors,
-                result.commit,
-                result.metric,
-            )
-            not in existing_keys
+            if _result_identity(result) not in existing_keys
         ]
         if not new_results:
             print(f"No new performance rows to persist for {source_path.name}")
@@ -1956,6 +1968,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     collect.add_argument("--summary", type=Path)
 
+    validate_openvmm = commands.add_parser(
+        "validate-openvmm", help="validate an OpenVMM benchmark JSON result"
+    )
+    validate_openvmm.add_argument("--platform", required=True)
+    validate_openvmm.add_argument("--input", type=Path, required=True)
+
     collect_openvmm = commands.add_parser(
         "collect-openvmm", help="convert an OpenVMM benchmark JSON result to p50 CSV"
     )
@@ -2027,6 +2045,13 @@ def command_performance(args: argparse.Namespace) -> int:
                     args.require_shell_snapshot_restore_512
                 ),
             )
+            return 0
+        if args.performance_command == "validate-openvmm":
+            try:
+                read_lifecycle_data(args.platform, args.input)
+            except UnstablePerformanceError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return UNSTABLE_LIFECYCLE_EXIT_CODE
             return 0
         if args.performance_command == "collect-openvmm":
             collect_openvmm_results(

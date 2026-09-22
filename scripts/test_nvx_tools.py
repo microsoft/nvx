@@ -7,6 +7,7 @@ import http.client
 import http.server
 import io
 import json
+import lzma
 import os
 import queue
 import shutil
@@ -19,7 +20,7 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 from unittest.mock import MagicMock, call, patch
 
@@ -30,101 +31,227 @@ from nvx_tools import (  # noqa: E402
     benchmark,
     build,
     ci,
-    collect_alpine_sources,
+    collect_ubuntu_sources,
     common,
+    guests,
     release,
     sandbox,
     sandbox_lifecycle,
+    ubuntu,
 )
+
+
+def _workflow_job(workflow: str, job_name: str) -> str:
+    lines = workflow.splitlines()
+    start = lines.index(f"  {job_name}:")
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start + 1 :], start + 1)
+            if len(line) > 2 and line[:2] == "  " and not line[2].isspace()
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _composite_action_script(action: str, step_name: str) -> str:
+    lines = action.splitlines()
+    step = lines.index(f"    - name: {step_name}")
+    start = lines.index("      run: |", step) + 1
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines[start:], start)
+            if line and not line.startswith("        ")
+        ),
+        len(lines),
+    )
+    return "\n".join(line[8:] for line in lines[start:end])
+
+
+def _write_release_fixture(
+    root: Path,
+) -> tuple[dict[str, Path], dict[str, object], str]:
+    build_dir = root / "build"
+    source_dir = build_dir / "sources"
+    openvmm_dir = root / "openvmm"
+    binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+    binary = openvmm_dir / "target" / "release" / binary_name
+    revision = "0bc357bbcf3a654b63dfb51f1103c5751bf3d31f"
+    guest_names = release.GUEST_RELEASE_NAMES
+    for path in (
+        binary,
+        *(build_dir / name for name in guest_names),
+        root / "LICENSE",
+        root / "README.md",
+        root / "THIRD_PARTY_NOTICES.md",
+        openvmm_dir / "LICENSE",
+        root / "kernel" / "COPYING-LINUX",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(path.name.encode("ascii"))
+    for artifact_name, manifest_name in (
+        (
+            "initramfs-ubuntu.cpio.gz",
+            "initramfs-ubuntu.cpio.gz.packages.json",
+        ),
+        ("ubuntu-distro.erofs", "ubuntu-distro.erofs.manifest.json"),
+    ):
+        artifact = build_dir / artifact_name
+        input_sha256 = ubuntu.converter_input_sha256(ubuntu.customization_files())
+        (build_dir / manifest_name).write_text(
+            json.dumps(
+                {
+                    "format": 1,
+                    "guest": "ubuntu",
+                    "artifact": artifact.name,
+                    "artifact_sha256": common.sha256_file(artifact),
+                    "input_sha256": input_sha256,
+                    "packages": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+    generated_config = build_dir / "vmlinux.config"
+    generated_config.write_text(
+        "\n".join(
+            (
+                *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "format": 1,
+        "distribution": {"name": "nvx", "version": "0.1.0"},
+        "openvmm": {
+            "microvm_abi_version": 2,
+            "control_session_protocol_version": 1,
+            "control_contract_revision": "nvx-microvm-v2-control-v1",
+        },
+        "linux": {
+            "version": "6.18.38",
+            "upstream_url": (
+                "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.38.tar.xz"
+            ),
+            "upstream_archive_sha256": build.DEFAULT_KERNEL_SHA256,
+            "source_cache": ".cache/linux/linux-6.18.38",
+            "source_archive": ("build/sources/linux/nvx-linux-source-6.18.38.tar.gz"),
+            "generated_final_config": "build/vmlinux.config",
+            "input_config": "kernel/config-microvm",
+            "patches": ["kernel/patches/example.patch"],
+        },
+        "alpine": {
+            "version": "3.24.1",
+            "branch": "v3.24",
+            "architecture": "x86_64",
+            "minirootfs_url": (
+                "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/"
+                "x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz"
+            ),
+            "minirootfs_sha256": build.DEFAULT_ALPINE_MINIROOTFS_SHA256,
+            "guest_sources": ["guest/common", "guest/alpine"],
+            "package_manifests": ["build/initramfs.cpio.gz.packages.json"],
+            "source_output": "build/sources/alpine",
+        },
+        "ubuntu": {
+            "distribution": "Ubuntu Base",
+            "version": ubuntu.DEFAULT_UBUNTU_VERSION,
+            "codename": ubuntu.DEFAULT_UBUNTU_CODENAME,
+            "architecture": ubuntu.DEFAULT_UBUNTU_ARCHITECTURE,
+            "base_url": ubuntu.DEFAULT_UBUNTU_BASE_URL,
+            "base_sha256": ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
+            "archive_keyring_url": (collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL),
+            "archive_keyring_sha256": (
+                collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_SHA256
+            ),
+            "package_lock": "ubuntu/packages.lock.json",
+            "package_lock_sha256": ubuntu.package_lock_sha256(),
+            "guest_sources": [
+                "guest/common",
+                "guest/ubuntu",
+                "ubuntu/packages.lock.json",
+            ],
+            "package_manifests": [
+                "build/initramfs-ubuntu.cpio.gz.packages.json",
+                "build/ubuntu-distro.erofs.manifest.json",
+            ],
+            "source_output": "build/sources/ubuntu",
+            "erofs_converter_format": ubuntu.UBUNTU_EROFS_FORMAT,
+        },
+    }
+    (root / "SOURCE-MANIFEST.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    kernel_inputs: dict[str, object] = {
+        "source": {
+            "version": "6.18.38",
+            "patches": [
+                {
+                    "path": "kernel/patches/example.patch",
+                    "sha256": "2" * 64,
+                }
+            ],
+        },
+        "input_config": {
+            "path": "kernel/config-microvm",
+            "sha256": "1" * 64,
+        },
+    }
+    (build_dir / build.OPENVMM_PROVENANCE_NAME).write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "source_revision": revision,
+                "source_clean": True,
+                "executable_sha256": common.sha256_file(binary),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (build_dir / build.KERNEL_PROVENANCE_NAME).write_text(
+        json.dumps(
+            {
+                "format": 1,
+                **kernel_inputs,
+                "kernel_sha256": common.sha256_file(build_dir / "vmlinux"),
+                "config_sha256": common.sha256_file(generated_config),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (build_dir / build.INITRAMFS_PROVENANCE_NAME).write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "inputs": build.initramfs_provenance_inputs(),
+                "initramfs_sha256": common.sha256_file(build_dir / "initramfs.cpio.gz"),
+                "package_manifest_sha256": common.sha256_file(
+                    build_dir / "initramfs.cpio.gz.packages.json"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = {
+        "build": build_dir,
+        "source": source_dir,
+        "openvmm": openvmm_dir,
+        "binary": binary,
+    }
+    return paths, kernel_inputs, revision
 
 
 class CliTests(unittest.TestCase):
     def test_guest_selection_includes_azure_linux(self):
-        guest = nvx.parse_args(["build-guest", "--guest", "azurelinux"])
-        self.assertEqual(guest.guest, "azurelinux")
-
-        initramfs = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
-        self.assertEqual(initramfs.guest, "azurelinux")
-
-    def test_azure_linux_uses_its_artifact_target(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            destination = Path(temporary) / "artifacts"
-            config = build.DockerBuildConfig(
-                destination=destination,
-                guest="azurelinux",
-            )
-
-            def export_artifacts(*_args: object, **_kwargs: object) -> None:
-                destination.mkdir()
-                (destination / "vmlinux").write_bytes(b"kernel")
-                (destination / "initramfs.cpio.gz").write_bytes(b"initramfs")
-
-            with (
-                patch.object(build, "require_tool"),
-                patch.object(
-                    build,
-                    "run_checked",
-                    side_effect=export_artifacts,
-                ) as run_checked,
-            ):
-                build.build_docker_artifacts(config)
-
-            run_checked.assert_called_once()
-            command = run_checked.call_args.args[0]
-            self.assertEqual(run_checked.call_args.kwargs["cwd"], build.REPO_ROOT)
-            self.assertIn("--target", command)
-            self.assertEqual(
-                command[command.index("--target") + 1],
-                "azurelinux-guest-artifacts",
-            )
-            self.assertIn(
-                f"type=local,dest={destination.resolve()}",
-                command,
-            )
-            self.assertIn(
-                f"AZURELINUX_IMAGE={build.DEFAULT_AZURELINUX_IMAGE}",
-                command,
-            )
-
-    def test_native_azure_linux_rejected_before_kernel_build(self):
-        args = argparse.Namespace(native=True, guest="azurelinux")
-
-        with (
-            patch.object(nvx, "_native_kernel") as native_kernel,
-            self.assertRaises(nvx.ScriptError) as context,
-        ):
-            nvx.command_build_guest(args)
-
-        self.assertEqual(
-            str(context.exception),
-            "native initramfs builds currently support Alpine only",
-        )
-        native_kernel.assert_not_called()
-
-    def test_alpine_source_collection_rejects_azurelinux_manifest(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            manifest_path = Path(tempdir) / "initramfs.cpio.gz.packages.json"
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "format": 1,
-                        "distribution": "azurelinux",
-                        "version": "3.0",
-                        "architecture": "x86_64",
-                        "packages": ["e2fsprogs", "iproute", "net-tools"],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with self.assertRaises(collect_alpine_sources.SourceError) as context:
-                collect_alpine_sources.collect_alpine_sources(
-                    [manifest_path],
-                    Path(tempdir) / "output",
-                    Path(tempdir) / "cache",
-                )
-
-        self.assertIn("azurelinux", str(context.exception))
+        args = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
+        self.assertEqual(args.guest, "azurelinux")
+        self.assertEqual(guests.guest_descriptor(args.guest).initramfs_name, "initramfs-azurelinux.cpio.gz")
 
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
@@ -246,7 +373,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.suite, "snapshot-profile")
         self.assertIsNone(args.shell_memories)
         benchmark.apply_benchmark_suite_defaults(args)
-        self.assertEqual(args.shell_memories, [64, 128, 256, 512, 1024])
+        self.assertEqual(args.shell_memories, [128, 256, 512, 1024])
         self.assertEqual(args.cache_state, "cold")
         self.assertFalse(args.snapshot_profile)
         self.assertIs(args.handler, benchmark.run)
@@ -256,7 +383,7 @@ class CliTests(unittest.TestCase):
 
         benchmark.apply_benchmark_suite_defaults(args)
 
-        self.assertEqual(args.shell_memories, [64, 128, 256, 512])
+        self.assertEqual(args.shell_memories, [128, 256, 512])
 
     def test_release_commands_keep_their_cli_contract(self):
         download = nvx.parse_args(
@@ -294,9 +421,170 @@ class CliTests(unittest.TestCase):
         self.assertEqual(verify.command, "verify")
         self.assertIs(verify.handler, nvx.command_verify)
 
+        openvmm_unit_tests = nvx.parse_args(["test-openvmm-unit"])
+        self.assertEqual(openvmm_unit_tests.command, "test-openvmm-unit")
+        self.assertIs(openvmm_unit_tests.handler, nvx.command_test_openvmm_unit)
+
         openvmm_tests = nvx.parse_args(["test-openvmm", "--backend", "mshv"])
         self.assertEqual(openvmm_tests.backend, "mshv")
         self.assertIs(openvmm_tests.handler, nvx.command_test_openvmm)
+
+    def test_openvmm_help_describes_petri_vmm_tests(self):
+        with (
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+            self.assertRaises(SystemExit) as exit_context,
+        ):
+            nvx.parse_args(["--help"])
+
+        self.assertEqual(exit_context.exception.code, 0)
+        help_text = output.getvalue()
+        self.assertIn("run OpenVMM Petri VMM tests", help_text)
+        self.assertNotIn("run OpenVMM microVM integration tests", help_text)
+
+    def test_guest_selection_cli_contract(self):
+        default_build = nvx.parse_args(["build-guest"])
+        self.assertEqual(default_build.guest, "alpine")
+
+        all_guests = nvx.parse_args(["build-guest", "--guest", "all"])
+        self.assertEqual(all_guests.guest, "all")
+
+        ubuntu_initramfs = nvx.parse_args(["build-initramfs", "--guest", "ubuntu"])
+        self.assertEqual(ubuntu_initramfs.guest, "ubuntu")
+
+        distro = nvx.parse_args(
+            [
+                "build-distro-layer",
+                "--guest",
+                "ubuntu",
+                "--output",
+                "ubuntu.erofs",
+                "--replace",
+            ]
+        )
+        self.assertEqual(distro.guest, "ubuntu")
+        self.assertEqual(distro.output, Path("ubuntu.erofs"))
+        self.assertTrue(distro.replace)
+
+        with self.assertRaises(SystemExit):
+            nvx.parse_args(["run", "--guest", "all"])
+
+    def test_ubuntu_run_selects_artifact_and_default_memory(self):
+        args = nvx.parse_args(["run", "--guest", "ubuntu", "--dry-run"])
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with (
+            patch.object(nvx, "require_file", side_effect=require),
+            patch.object(
+                nvx,
+                "_format_command",
+                return_value="formatted",
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[command.index("--memory") + 1], "256M")
+        self.assertEqual(
+            Path(command[command.index("--initrd") + 1]).name,
+            "initramfs-ubuntu.cpio.gz",
+        )
+
+    def test_restore_rejects_ubuntu_guest_selection(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--guest",
+                "ubuntu",
+                "--restore-snapshot",
+                "snapshot",
+                "--dry-run",
+            ]
+        )
+        with self.assertRaisesRegex(common.ScriptError, "snapshot already fixes"):
+            nvx.command_run(args)
+
+    def test_sandbox_rejects_systemd_entrypoint(self):
+        for entrypoint in nvx.SYSTEMD_ENTRYPOINTS:
+            with self.subTest(entrypoint=entrypoint):
+                args = nvx.parse_args(
+                    [
+                        "sandbox",
+                        "--entrypoint",
+                        entrypoint,
+                        "--layer",
+                        "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+                        "--scratch",
+                        "scratch.ext4",
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "systemd entrypoints",
+                ):
+                    nvx.command_sandbox(args)
+
+    def test_sandbox_allows_non_systemd_sbin_init(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            layer.write_bytes(b"distro")
+            scratch.write_bytes(b"scratch")
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "--entrypoint",
+                    "/sbin/init",
+                    "--layer",
+                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
+                    "--scratch",
+                    str(scratch),
+                    "--dry-run",
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(nvx, "require_file", side_effect=require),
+                patch.object(nvx, "_format_command", return_value="formatted"),
+            ):
+                nvx.command_sandbox(args)
+
+    def test_sandbox_rejects_systemd_from_bound_distro_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            layer.write_bytes(b"distro")
+            scratch.write_bytes(b"scratch")
+            layer.with_name(f"{layer.name}.manifest.json").write_text(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "artifact": layer.name,
+                        "artifact_sha256": common.sha256_file(layer),
+                        "packages": [{"name": "systemd"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "--entrypoint",
+                    "/sbin/init",
+                    "--layer",
+                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
+                    "--scratch",
+                    str(scratch),
+                ]
+            )
+            with self.assertRaisesRegex(common.ScriptError, "systemd images"):
+                nvx.command_sandbox(args)
 
     def test_sandbox_command_parses_typed_launch_contract(self):
         args = nvx.parse_args(
@@ -576,6 +864,7 @@ class CliTests(unittest.TestCase):
         with (
             patch.object(nvx, "require_file"),
             patch.object(nvx, "_run") as run,
+            patch.object(nvx, "record_openvmm_provenance") as provenance,
         ):
             nvx.command_build_openvmm(argparse.Namespace(skip_restore=False))
 
@@ -591,9 +880,122 @@ class CliTests(unittest.TestCase):
                 cwd=common.OPENVMM_DIR,
             ),
         )
+        provenance.assert_called_once_with(common.openvmm_binary_path())
+
+    def test_record_openvmm_provenance_command_is_exposed(self):
+        args = nvx.parse_args(["record-openvmm-provenance"])
+        self.assertIs(args.handler, nvx.command_record_openvmm_provenance)
 
 
 class CiTests(unittest.TestCase):
+    def test_openvmm_unit_tests_run_nextest_and_doctests(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            openvmm = Path(temporary) / "openvmm"
+            openvmm.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            fuzz_crates = common.CommandResult(
+                args=("cargo", "xtask", "fuzz", "list", "--crates"),
+                returncode=0,
+                stdout=b"fuzz_alpha\nfuzz_beta\n",
+                stderr=b"",
+            )
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "run_capture", return_value=fuzz_crates) as capture,
+                patch.object(ci, "run_checked") as run_checked,
+            ):
+                ci.run_openvmm_unit_tests()
+
+            capture.assert_called_once_with(
+                ["cargo", "xtask", "fuzz", "list", "--crates"],
+                cwd=openvmm,
+            )
+            self.assertEqual(run_checked.call_count, 3)
+            self.assertEqual(
+                run_checked.call_args_list[0],
+                call(
+                    [
+                        "cargo",
+                        "xflowey",
+                        "restore-packages",
+                        "--no-compat-igvm",
+                    ],
+                    cwd=openvmm,
+                ),
+            )
+            command = run_checked.call_args_list[1].args[0]
+            self.assertEqual(
+                command[:10],
+                [
+                    "cargo",
+                    "nextest",
+                    "run",
+                    "--profile",
+                    "agent",
+                    "--workspace",
+                    "--tests",
+                    "--bins",
+                    "--features",
+                    "ci",
+                ],
+            )
+            excluded_packages = [
+                command[index + 1]
+                for index, argument in enumerate(command)
+                if argument == "--exclude"
+            ]
+            self.assertEqual(
+                excluded_packages,
+                [
+                    *ci.OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES,
+                    "fuzz_alpha",
+                    "fuzz_beta",
+                ],
+            )
+            self.assertEqual(run_checked.call_args_list[1].kwargs["cwd"], openvmm)
+            self.assertEqual(
+                run_checked.call_args_list[2],
+                call(
+                    [
+                        "cargo",
+                        "test",
+                        "--locked",
+                        "--doc",
+                        "--workspace",
+                        "--no-fail-fast",
+                    ],
+                    cwd=openvmm,
+                ),
+            )
+
+    def test_openvmm_unit_tests_stop_when_fuzz_crate_query_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            openvmm = Path(temporary) / "openvmm"
+            openvmm.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            failed_query = common.CommandResult(
+                args=("cargo", "xtask", "fuzz", "list", "--crates"),
+                returncode=2,
+                stdout=b"",
+                stderr=b"query failed",
+            )
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci, "require_tool", return_value="cargo"),
+                patch.object(ci, "run_capture", return_value=failed_query),
+                patch.object(ci, "run_checked") as run_checked,
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "OpenVMM fuzz crate query exited 2",
+                ),
+            ):
+                ci.run_openvmm_unit_tests()
+
+            run_checked.assert_not_called()
+
     def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -601,12 +1003,23 @@ class CiTests(unittest.TestCase):
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
             backend = "whp" if os.name == "nt" else "kvm"
+            installed_targets = common.CommandResult(
+                args=("rustup", "target", "list"),
+                returncode=0,
+                stdout=("\n".join(ci.OPENVMM_RUST_TARGETS[backend]) + "\n").encode(),
+                stderr=b"",
+            )
 
             with (
                 patch.object(ci, "OPENVMM_DIR", openvmm),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
+                patch.object(
+                    ci,
+                    "run_capture",
+                    return_value=installed_targets,
+                ) as run_capture,
                 patch.object(ci, "run_checked") as run_checked,
                 patch.dict(
                     os.environ,
@@ -620,31 +1033,268 @@ class CiTests(unittest.TestCase):
             ):
                 ci.run_openvmm_tests(backend)
 
-            self.assertEqual(run_checked.call_count, 3)
-            install_target, restore, tests = run_checked.call_args_list
-            self.assertEqual(
-                install_target.args[0],
-                ["rustup", "target", "add", "x86_64-unknown-none"],
+            run_capture.assert_called_once_with(
+                [
+                    "rustup",
+                    "target",
+                    "list",
+                    "--installed",
+                    "--toolchain",
+                    ci.OPENVMM_RUST_TOOLCHAIN,
+                ]
             )
+            self.assertEqual(run_checked.call_count, 2)
+            restore, tests = run_checked.call_args_list
             self.assertEqual(
                 restore.args[0],
                 ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
             )
+            environment = restore.kwargs["env"]
+            self.assertEqual(
+                environment["RUSTUP_TOOLCHAIN"],
+                ci.OPENVMM_RUST_TOOLCHAIN,
+            )
+            if os.name == "nt":
+                self.assertNotIn("XDG_CACHE_HOME", environment)
+            else:
+                self.assertEqual(
+                    environment["XDG_CACHE_HOME"],
+                    os.fspath(root / "openvmm-cache"),
+                )
             command = tests.args[0]
             self.assertEqual(command[:3], ["cargo", "xflowey", "vmm-tests-run"])
             filter_index = command.index("--filter")
-            self.assertEqual(command[filter_index + 1], ci.OPENVMM_MICROVM_TEST_FILTER)
-            self.assertIn(
-                "test_ttrpc_microvm_pvh_snapshot",
-                ci.OPENVMM_MICROVM_TEST_FILTER,
+            self.assertEqual(
+                command[filter_index + 1],
+                ci.OPENVMM_TEST_FILTERS[backend],
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
-            self.assertNotIn("env", tests.kwargs)
+            self.assertIs(tests.kwargs["env"], environment)
             if os.name == "nt":
                 self.assertEqual(
                     command[command.index("--dir") + 1],
                     os.fspath(root / backend),
                 )
+
+    def test_openvmm_tests_pin_stable_toolchain_without_runner_temp(self):
+        installed_targets = common.CommandResult(
+            args=("rustup", "target", "list"),
+            returncode=0,
+            stdout=("\n".join(ci.OPENVMM_RUST_TARGETS["whp"]) + "\n").encode(),
+            stderr=b"",
+        )
+
+        with (
+            patch.object(ci, "run_capture", return_value=installed_targets),
+            patch.object(ci, "run_checked") as run_checked,
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            environment = ci._prepare_openvmm_test_environment("whp", "rustup")
+
+        self.assertEqual(
+            environment,
+            {"RUSTUP_TOOLCHAIN": ci.OPENVMM_RUST_TOOLCHAIN},
+        )
+        run_checked.assert_not_called()
+
+    def test_openvmm_tests_prepare_job_local_toolchain_for_missing_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            openvmm = root / "openvmm"
+            openvmm.mkdir()
+            (openvmm / "Cargo.toml").touch()
+            backend = "whp" if os.name == "nt" else "kvm"
+            installed_targets = common.CommandResult(
+                args=("rustup", "target", "list"),
+                returncode=0,
+                stdout=f"{ci.OPENVMM_GUEST_RUST_TARGET}\n".encode(),
+                stderr=b"",
+            )
+
+            with (
+                patch.object(ci, "OPENVMM_DIR", openvmm),
+                patch.object(ci.os, "access", return_value=True),
+                patch.object(ci.Path, "exists", return_value=False),
+                patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
+                patch.object(ci, "run_capture", return_value=installed_targets),
+                patch.object(ci, "run_checked") as run_checked,
+                patch.dict(os.environ, {"RUNNER_TEMP": os.fspath(root)}),
+            ):
+                ci.run_openvmm_tests(backend)
+
+            self.assertEqual(run_checked.call_count, 4)
+            install_toolchain, install_targets, restore, tests = (
+                run_checked.call_args_list
+            )
+            environment = install_toolchain.kwargs["env"]
+            self.assertEqual(
+                environment["RUSTUP_HOME"],
+                os.fspath(root / "openvmm-rustup"),
+            )
+            self.assertEqual(
+                environment["RUSTUP_TOOLCHAIN"],
+                ci.OPENVMM_RUST_TOOLCHAIN,
+            )
+            if os.name != "nt":
+                self.assertEqual(
+                    environment["XDG_CACHE_HOME"],
+                    os.fspath(root / "openvmm-cache"),
+                )
+            self.assertEqual(
+                install_toolchain.args[0],
+                [
+                    "rustup",
+                    "toolchain",
+                    "install",
+                    ci.OPENVMM_RUST_TOOLCHAIN,
+                    "--profile",
+                    "minimal",
+                ],
+            )
+            self.assertEqual(
+                install_targets.args[0],
+                [
+                    "rustup",
+                    "target",
+                    "add",
+                    *ci.OPENVMM_RUST_TARGETS[backend],
+                    "--toolchain",
+                    ci.OPENVMM_RUST_TOOLCHAIN,
+                ],
+            )
+            for command in (install_targets, restore, tests):
+                self.assertIs(command.kwargs["env"], environment)
+
+    def test_openvmm_tests_define_each_backend_filter(self):
+        self.assertEqual(
+            set(ci.OPENVMM_TEST_FILTERS),
+            set(ci.OPENVMM_TEST_BACKENDS),
+        )
+        self.assertEqual(
+            set(ci.OPENVMM_RUST_TARGETS),
+            set(ci.OPENVMM_TEST_BACKENDS),
+        )
+        self.assertEqual(
+            ci.OPENVMM_TEST_FILTERS["kvm"],
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        self.assertIn(
+            "!test(no_vmbus_prepped_boot_no_vmbus_windows)",
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        self.assertIn(
+            "!test(windows_datacenter_core_2022_x64)",
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        self.assertIn("!test(virtio_net_windows)", ci.OPENVMM_KVM_TEST_FILTER)
+        self.assertEqual(
+            set(ci.OPENVMM_KVM_EXCLUDED_TESTS),
+            {
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_ubuntu_2404_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
+            },
+        )
+        for excluded_test in ci.OPENVMM_KVM_EXCLUDED_TESTS:
+            self.assertIn(
+                f"!{ci._exact_openvmm_test(excluded_test)}",
+                ci.OPENVMM_KVM_TEST_FILTER,
+            )
+        self.assertNotIn("!test(openvmm_pcat_x64)", ci.OPENVMM_KVM_TEST_FILTER)
+        self.assertNotIn(
+            "openvmm_linux_x64_apicid_offset",
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        self.assertNotIn(
+            "openvmm_linux_x64_legacy_xapic",
+            ci.OPENVMM_KVM_TEST_FILTER,
+        )
+        self.assertEqual(
+            ci.OPENVMM_TEST_FILTERS["mshv"],
+            ci.OPENVMM_MSHV_TEST_FILTER,
+        )
+        self.assertIn(
+            "!test(windows_datacenter_core_2022_x64)",
+            ci.OPENVMM_MSHV_TEST_FILTER,
+        )
+        self.assertEqual(
+            set(ci.OPENVMM_MSHV_EXCLUDED_TESTS),
+            {
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+                "multiarch::openvmm_pcat_x64_ubuntu_2404_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot",
+                "multiarch::openvmm_pcat_x64_ubuntu_2504_server_x64_boot_heavy",
+                "multiarch::pcie::openvmm_linux_x64_pcie_save_restore",
+            },
+        )
+        self.assertNotIn(
+            "x86_64::openvmm_linux_x64_virtio_blk_device",
+            ci.OPENVMM_MSHV_EXCLUDED_TESTS,
+        )
+        for excluded_test in ci.OPENVMM_MSHV_EXCLUDED_TESTS:
+            self.assertIn(
+                f"!{ci._exact_openvmm_test(excluded_test)}",
+                ci.OPENVMM_MSHV_TEST_FILTER,
+            )
+        self.assertNotIn("!test(openvmm_pcat_x64)", ci.OPENVMM_MSHV_TEST_FILTER)
+        self.assertNotIn(
+            "test_ttrpc_interface",
+            ci.OPENVMM_MSHV_TEST_FILTER,
+        )
+        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 29)
+        self.assertEqual(
+            len(set(ci.OPENVMM_WHP_TESTS)),
+            len(ci.OPENVMM_WHP_TESTS),
+        )
+        for existing_test in (
+            "ttrpc::test_ttrpc_microvm_pvh_snapshot",
+            "x86_64::microvm::openvmm_microvm_test_pvh_x64_phase_1_lifecycle",
+        ):
+            self.assertIn(existing_test, ci.OPENVMM_WHP_TESTS)
+        self.assertEqual(ci.OPENVMM_WHP_EXCLUDED_TESTS, ())
+        self.assertNotIn(
+            "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
+        )
+        self.assertNotIn(
+            "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
+        )
+        self.assertNotIn(
+            "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
+        )
+        self.assertNotIn(
+            "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
+        )
+        self.assertNotIn(
+            "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_nvme_boot",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
+        )
+        self.assertTrue(
+            set(ci.OPENVMM_WHP_EXCLUDED_TESTS).issubset(ci.OPENVMM_WHP_TESTS)
+        )
+        self.assertEqual(
+            ci.OPENVMM_TEST_FILTERS["whp"],
+            ci._join_openvmm_tests(
+                ci.OPENVMM_WHP_TESTS,
+                ci.OPENVMM_WHP_EXCLUDED_TESTS,
+            ),
+        )
+        self.assertEqual(
+            ci._join_openvmm_tests(
+                ("suite::boot", "suite::boot_heavy"),
+                ("suite::boot_heavy",),
+            ),
+            (
+                "(test(/^suite::boot$/) | test(/^suite::boot_heavy$/))"
+                " & !test(/^suite::boot_heavy$/)"
+            ),
+        )
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
@@ -652,6 +1302,181 @@ class CiTests(unittest.TestCase):
 
 
 class CiConfigurationTests(unittest.TestCase):
+    def test_required_ci_result_policy(self):
+        always_successful = {"quality", "openvmm-changes"}
+        builds = set(ci.REQUIRED_CI_BUILD_JOBS)
+        openvmm_tests = set(ci.REQUIRED_CI_OPENVMM_TEST_JOBS)
+        microvm_tests = set(ci.REQUIRED_CI_MICROVM_TEST_JOBS)
+        artifacts = {ci.REQUIRED_CI_ARTIFACT_JOB}
+        platforms = set(ci.REQUIRED_CI_PLATFORM_JOBS)
+        cases = (
+            ("pull_request", True, False, False, always_successful),
+            (
+                "pull_request",
+                True,
+                False,
+                True,
+                always_successful
+                | artifacts
+                | builds
+                | platforms
+                | {"performance-gate"},
+            ),
+            (
+                "pull_request",
+                True,
+                True,
+                False,
+                always_successful | builds | openvmm_tests,
+            ),
+            (
+                "pull_request",
+                True,
+                True,
+                True,
+                always_successful
+                | builds
+                | openvmm_tests
+                | microvm_tests
+                | artifacts
+                | platforms
+                | {"performance-gate"},
+            ),
+            ("pull_request", False, False, False, always_successful),
+            (
+                "pull_request",
+                False,
+                False,
+                True,
+                always_successful | artifacts,
+            ),
+            ("pull_request", False, True, False, always_successful),
+            (
+                "pull_request",
+                False,
+                True,
+                True,
+                always_successful | artifacts,
+            ),
+            ("push", True, False, False, always_successful),
+            (
+                "push",
+                True,
+                False,
+                True,
+                always_successful | artifacts | builds | platforms,
+            ),
+            (
+                "push",
+                True,
+                True,
+                False,
+                always_successful | builds | openvmm_tests,
+            ),
+            (
+                "push",
+                True,
+                True,
+                True,
+                always_successful
+                | artifacts
+                | builds
+                | openvmm_tests
+                | microvm_tests
+                | platforms,
+            ),
+        )
+
+        for (
+            event_name,
+            same_repository,
+            run_tests,
+            run_workloads,
+            successful_jobs,
+        ) in cases:
+            with self.subTest(
+                event_name=event_name,
+                same_repository=same_repository,
+                run_tests=run_tests,
+                run_workloads=run_workloads,
+            ):
+                expected = ci.required_ci_expected_results(
+                    event_name,
+                    same_repository=same_repository,
+                    run_tests=run_tests,
+                    run_workloads=run_workloads,
+                )
+                self.assertEqual(
+                    {job for job, result in expected.items() if result == "success"},
+                    successful_jobs,
+                )
+                self.assertEqual(
+                    ci.required_ci_failures(
+                        event_name,
+                        same_repository=same_repository,
+                        run_tests=run_tests,
+                        run_workloads=run_workloads,
+                        results=expected,
+                    ),
+                    [],
+                )
+
+                for job, expected_result in expected.items():
+                    unexpected = expected.copy()
+                    unexpected[job] = (
+                        "skipped" if expected_result == "success" else "success"
+                    )
+                    with self.subTest(job=job, actual=unexpected[job]):
+                        self.assertEqual(
+                            ci.required_ci_failures(
+                                event_name,
+                                same_repository=same_repository,
+                                run_tests=run_tests,
+                                run_workloads=run_workloads,
+                                results=unexpected,
+                            ),
+                            [
+                                f"{job}: expected {expected_result}, "
+                                f"got {unexpected[job]}"
+                            ],
+                        )
+
+                for job in expected:
+                    failed = expected.copy()
+                    failed[job] = "failure"
+                    with self.subTest(job=job, actual="failure"):
+                        self.assertEqual(
+                            ci.required_ci_failures(
+                                event_name,
+                                same_repository=same_repository,
+                                run_tests=run_tests,
+                                run_workloads=run_workloads,
+                                results=failed,
+                            ),
+                            [f"{job}: expected {expected[job]}, got failure"],
+                        )
+
+    def test_required_ci_job_uses_tested_policy(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        job = _workflow_job(workflow, "required-status-check")
+
+        self.assertIn("python3 scripts/nvx.py check-required-ci", job)
+        self.assertIn('--same-repository "${SAME_REPOSITORY}"', job)
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            job,
+        )
+        self.assertLess(
+            job.index("uses: actions/checkout@v5"),
+            job.index("python3 scripts/nvx.py check-required-ci"),
+        )
+        self.assertIn("persist-credentials: false", job)
+        for environment in ci.REQUIRED_CI_RESULT_ENVIRONMENTS.values():
+            with self.subTest(environment=environment):
+                self.assertIn(f"          {environment}:", job)
+
     def test_flowey_downloads_use_retrying_curl(self):
         action = (
             common.REPO_ROOT / ".github" / "actions" / "setup-curl" / "action.yml"
@@ -662,6 +1487,9 @@ class CiConfigurationTests(unittest.TestCase):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        microvm_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
+        ).read_text(encoding="utf-8")
         build_action = (
             common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
         ).read_text(encoding="utf-8")
@@ -688,9 +1516,20 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn('Join-Path $ShimDirectory "curl.exe"', action)
         self.assertIn("Get-Command rustc.exe", action)
         self.assertNotIn("curl.cmd", action)
+        for job_name in (
+            "openvmm-vmm-tests",
+            "openvmm-unit-tests",
+        ):
+            with self.subTest(job_name=job_name):
+                self.assertEqual(
+                    _workflow_job(workflow, job_name).count(
+                        "uses: ./.github/actions/setup-curl"
+                    ),
+                    1,
+                )
         self.assertEqual(
-            workflow.count("uses: ./.github/actions/setup-curl"),
-            2,
+            microvm_workflow.count("uses: ./.github/actions/setup-curl"),
+            1,
         )
         self.assertIn("uses: ./.github/actions/setup-curl", build_action)
 
@@ -749,7 +1588,7 @@ class CiConfigurationTests(unittest.TestCase):
                 port = server.server_address[1]
                 result = subprocess.run(
                     [
-                        "curl",
+                        os.fspath(shim),
                         "--fail",
                         "-L",
                         f"http://127.0.0.1:{port}/asset",
@@ -775,6 +1614,15 @@ class CiConfigurationTests(unittest.TestCase):
         workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        build_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "build-openvmm-binary.yml"
+        ).read_text(encoding="utf-8")
+        microvm_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
+        ).read_text(encoding="utf-8")
+        platform_workflow = (
+            common.REPO_ROOT / ".github" / "workflows" / "run-platform.yml"
+        ).read_text(encoding="utf-8")
         build_action = (
             common.REPO_ROOT / ".github" / "actions" / "build-openvmm" / "action.yml"
         ).read_text(encoding="utf-8")
@@ -792,15 +1640,379 @@ class CiConfigurationTests(unittest.TestCase):
                 "openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-",
                 configuration,
             )
-        self.assertIn("openvmm-binaries:", workflow)
-        self.assertIn("artifact: openvmm-linux-gnu", workflow)
-        self.assertIn("artifact: openvmm-linux-musl", workflow)
-        self.assertIn("artifact: openvmm-windows-msvc", workflow)
-        self.assertIn("uses: actions/download-artifact@v8", workflow)
+        producers = {
+            "build-openvmm-linux-gnu": (
+                "x86_64-unknown-linux-gnu",
+                "openvmm-linux-gnu",
+            ),
+            "build-openvmm-linux-musl": (
+                "x86_64-unknown-linux-musl",
+                "openvmm-linux-musl",
+            ),
+            "build-openvmm-windows-msvc": (
+                "x86_64-pc-windows-msvc",
+                "openvmm-windows-msvc",
+            ),
+        }
+        self.assertEqual(
+            workflow.count("uses: ./.github/workflows/build-openvmm-binary.yml"),
+            len(producers),
+        )
+        for job_name, (target, artifact) in producers.items():
+            with self.subTest(producer=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn(f"target: {target}", job)
+                self.assertIn(f"artifact: {artifact}", job)
+                self.assertNotIn("strategy:", job)
+
+        consumers = {
+            "nvx-microvm-tests-kvm": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "nvx-microvm-tests-mshv": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "nvx-microvm-tests-whp": (
+                "build-openvmm-windows-msvc",
+                "openvmm-windows-msvc",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "platform-kvm": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-platform.yml",
+            ),
+            "platform-mshv": (
+                "build-openvmm-linux-musl",
+                "openvmm-linux-musl",
+                "run-platform.yml",
+            ),
+            "platform-whp": (
+                "build-openvmm-windows-msvc",
+                "openvmm-windows-msvc",
+                "run-platform.yml",
+            ),
+        }
+        for job_name, (producer, artifact, reusable_workflow) in consumers.items():
+            with self.subTest(consumer=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn(
+                    f"needs: [artifacts, {producer}, openvmm-changes]",
+                    job,
+                )
+                self.assertIn(f"needs.{producer}.result == 'success'", job)
+                self.assertIn(f"uses: ./.github/workflows/{reusable_workflow}", job)
+                self.assertIn(f"openvmm-artifact: {artifact}", job)
+                for unrelated_producer in producers.keys() - {producer}:
+                    self.assertNotIn(unrelated_producer, job)
+
+        self.assertIn("build/openvmm.provenance.json", build_workflow)
+        self.assertIn(
+            "name: ${{ inputs.artifact }}-executable",
+            build_workflow,
+        )
+        self.assertIn(
+            "name: ${{ inputs.artifact }}-provenance",
+            build_workflow,
+        )
+        self.assertEqual(
+            build_workflow.count("uses: ./.github/actions/build-openvmm"),
+            1,
+        )
+        self.assertEqual(build_workflow.count("overwrite: true"), 2)
+        self.assertEqual(build_workflow.count("retention-days: 1"), 2)
+        for consumer_workflow, download_count in (
+            (microvm_workflow, 3),
+            (platform_workflow, 2),
+        ):
+            self.assertIn("path: openvmm/target/release", consumer_workflow)
+            self.assertIn("path: build", consumer_workflow)
+            self.assertEqual(
+                consumer_workflow.count("uses: actions/download-artifact@v8"),
+                download_count,
+            )
+            self.assertIn(
+                "run: chmod +x openvmm/target/release/openvmm",
+                consumer_workflow,
+            )
+        for configuration in (
+            workflow,
+            build_workflow,
+            microvm_workflow,
+            platform_workflow,
+        ):
+            self.assertNotIn("path: .", configuration)
+        self.assertIn("openvmm-binary-v5-", build_action)
+        self.assertNotIn("openvmm-binary-v4-", build_action)
+        self.assertIn("Verify OpenVMM provenance on Linux", build_action)
+        self.assertIn("Verify OpenVMM provenance on Windows", build_action)
         self.assertNotIn("nvx-microvm-tests-v1", workflow)
         self.assertNotIn("cargo-v2-", build_action)
+        self.assertNotIn("openvmm-tests-v2-", workflow)
+        self.assertNotIn("Restore OpenVMM test build", workflow)
+        self.assertNotIn("Save OpenVMM test build", workflow)
+        self.assertEqual(
+            build_workflow.count("uses: ./.github/actions/sccache"),
+            2,
+        )
+        for job_name, cache_namespace in (
+            ("openvmm-vmm-tests", "vmm-tests"),
+            ("openvmm-unit-tests", "unit-tests"),
+        ):
+            with self.subTest(job_name=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertEqual(
+                    job.count("uses: ./.github/actions/sccache"),
+                    2,
+                )
+                self.assertIn(
+                    f"key: openvmm-inputs-v1-${{{{ runner.os }}}}-"
+                    f"${{{{ runner.arch }}}}-{cache_namespace}-"
+                    "${{ steps.openvmm.outputs.sha }}",
+                    job,
+                )
+                self.assertIn(
+                    f"key: openvmm-cargo-v1-${{{{ runner.os }}}}-"
+                    f"${{{{ runner.arch }}}}-{cache_namespace}-"
+                    "${{ hashFiles('openvmm/Cargo.lock') }}",
+                    job,
+                )
+                self.assertIn(
+                    "restore-keys: |\n"
+                    "            openvmm-inputs-v1-${{ runner.os }}-"
+                    "${{ runner.arch }}-",
+                    job,
+                )
+                self.assertIn(
+                    "restore-keys: |\n"
+                    "            openvmm-cargo-v1-${{ runner.os }}-"
+                    "${{ runner.arch }}-",
+                    job,
+                )
         self.assertNotIn("uses: actions/cache@v5", workflow)
+        self.assertNotIn("uses: actions/cache@v5", build_workflow)
         self.assertNotIn("uses: actions/cache@v5", build_action)
+
+        release_job = _workflow_job(workflow, "release")
+        performance_gate_job = _workflow_job(workflow, "performance-gate")
+        performance_persist_job = _workflow_job(workflow, "performance-persist")
+        for job_name in consumers:
+            self.assertIn(f"      - {job_name}", release_job)
+            self.assertIn(f"needs.{job_name}.result", release_job)
+            self.assertIn(f"      - {job_name}", performance_persist_job)
+            self.assertIn(f"needs.{job_name}.result", performance_persist_job)
+        for job_name in ("platform-kvm", "platform-mshv", "platform-whp"):
+            self.assertIn(job_name, performance_gate_job)
+            self.assertIn(f"needs.{job_name}.result", performance_gate_job)
+
+    def test_ci_runs_openvmm_tests_and_unit_tests_on_each_backend(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        vmm_tests_job = _workflow_job(workflow, "openvmm-vmm-tests")
+        unit_tests_job = _workflow_job(workflow, "openvmm-unit-tests")
+
+        self.assertIn(
+            """      - name: Run OpenVMM unit tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/nvx.py test-openvmm-unit""",
+            unit_tests_job,
+        )
+        self.assertIn(
+            """      - name: Run OpenVMM unit tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\\nvx.py test-openvmm-unit""",
+            unit_tests_job,
+        )
+        self.assertEqual(
+            vmm_tests_job.count(
+                'scripts/nvx.py test-openvmm --backend "${{ matrix.backend }}"'
+            ),
+            2,
+        )
+        self.assertEqual(
+            vmm_tests_job.count(
+                'scripts\\nvx.py test-openvmm --backend "${{ matrix.backend }}"'
+            ),
+            1,
+        )
+        self.assertNotIn("test-openvmm-unit", vmm_tests_job)
+        self.assertEqual(unit_tests_job.count("scripts/nvx.py test-openvmm-unit"), 1)
+        self.assertEqual(
+            unit_tests_job.count("scripts\\nvx.py test-openvmm-unit"),
+            1,
+        )
+        self.assertNotIn("test-openvmm --backend", unit_tests_job)
+
+    def test_ci_preserves_failed_openvmm_test_diagnostics(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        job = _workflow_job(workflow, "openvmm-vmm-tests")
+        step_name = "      - name: Upload OpenVMM test diagnostics"
+        self.assertIn(step_name, job)
+        upload = job.split(step_name, 1)[1].split("\n      - name:", 1)[0]
+
+        self.assertIn("\n        if: failure()", upload)
+        self.assertIn("uses: actions/upload-artifact@v7", upload)
+        self.assertIn(
+            "name: openvmm-vmm-tests-${{ runner.os }}-${{ matrix.backend }}-"
+            "${{ github.run_id }}-${{ github.run_attempt }}",
+            upload,
+        )
+        self.assertIn(
+            "path: ${{ runner.os == 'Windows' && "
+            "format('{0}/{1}/test_results', runner.temp, matrix.backend) || "
+            "'openvmm/target/vmm_tests/test_results' }}",
+            upload,
+        )
+        self.assertIn("if-no-files-found: warn", upload)
+        self.assertIn("retention-days: 7", upload)
+        self.assertLess(
+            job.index(step_name),
+            job.index("      - name: Report sccache"),
+        )
+
+    def test_runner_setup_pins_and_validates_sccache(self):
+        workflow = (common.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "sccache" / "action.yml"
+        ).read_text(encoding="utf-8")
+        validate_runner = (
+            common.REPO_ROOT / ".github" / "actions" / "validate-runner" / "action.yml"
+        ).read_text(encoding="utf-8")
+        windows_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+        linux_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('$SccacheVersion = "0.18.0"', windows_setup)
+        self.assertIn(
+            '$SccacheSha256 = "1a63c1be2beab3f04d27e4cc145443e092e02d3dd83a51030989829d7023091b"',
+            windows_setup,
+        )
+        self.assertIn("SCCACHE_VERSION=0.18.0", linux_setup)
+        self.assertIn(
+            "SCCACHE_SHA256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89",
+            linux_setup,
+        )
+        for configuration in (windows_setup, linux_setup):
+            self.assertIn("RUSTC_WRAPPER", configuration)
+            self.assertIn("CARGO_INCREMENTAL", configuration)
+            self.assertIn("SCCACHE_DIR", configuration)
+            self.assertIn("SCCACHE_CACHE_SIZE", configuration)
+        self.assertIn("sccache --zero-stats", action)
+        self.assertIn("sccache --show-stats", action)
+        self.assertIn("sccache --stop-server", action)
+        self.assertIn("SCCACHE_IDLE_TIMEOUT", action)
+        self.assertIn("sccache --version", validate_runner)
+        self.assertNotRegex(
+            workflow,
+            r"(?m)^\s+path: openvmm/target\s*$",
+        )
+        self.assertLess(
+            linux_setup.index('test -f "${runner_directory}/.runner"'),
+            linux_setup.index('test -w "$runner_sccache_dir"'),
+        )
+
+    def test_linux_setup_installs_openvmm_perl_modules(self):
+        setup_directory = common.REPO_ROOT / "scripts" / "setup"
+        configurations = (
+            (setup_directory / "setup-linux-runner.sh").read_text(encoding="utf-8"),
+            (setup_directory / "setup-linux-mshv.sh").read_text(encoding="utf-8"),
+        )
+
+        for configuration in configurations:
+            for package in (
+                "perl-FindBin",
+                "perl-IPC-Cmd",
+                "perl-Time-Piece",
+                "perl-lib",
+            ):
+                self.assertIn(package, configuration)
+
+    def test_windows_runner_requires_inbox_pcat_firmware(self):
+        windows_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+        validate_runner = (
+            common.REPO_ROOT / ".github" / "actions" / "validate-runner" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"Microsoft-Hyper-V"', windows_setup)
+        for configuration in (windows_setup, validate_runner):
+            for firmware in (
+                "vmfirmwarepcat.dll",
+                "vmfirmware.dll",
+                "VmEmulatedDevices.dll",
+            ):
+                self.assertIn(firmware, configuration)
+
+    def test_runner_setups_install_backend_native_openvmm_targets(self):
+        linux_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+        ).read_text(encoding="utf-8")
+        windows_setup = (
+            common.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+
+        for target in (
+            "x86_64-unknown-none",
+            "x86_64-unknown-uefi",
+        ):
+            self.assertIn(target, linux_setup)
+            self.assertIn(target, windows_setup)
+        self.assertIn("x86_64-unknown-linux-musl", linux_setup)
+        for cross_platform_tool in (
+            "x86_64-pc-windows-gnu",
+            "gcc-mingw-w64-x86-64-win32",
+            "mingw64-gcc",
+            "x86_64-w64-mingw32-gcc",
+            "x86_64-w64-mingw32-dlltool",
+        ):
+            self.assertNotIn(cross_platform_tool, linux_setup)
+
+    def test_release_actions_use_deterministic_immutable_tooling(self):
+        package_action = (
+            common.REPO_ROOT / ".github" / "actions" / "package-release" / "action.yml"
+        ).read_text(encoding="utf-8")
+        publish_action = (
+            common.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "publish-development-release"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(package_action.count("archive-release"), 2)
+        self.assertIn(
+            "python scripts\\nvx.py materialize-kernel-provenance-inputs",
+            package_action,
+        )
+        self.assertLess(
+            package_action.index(
+                "python scripts\\nvx.py materialize-kernel-provenance-inputs"
+            ),
+            package_action.index("- name: Package Windows release"),
+        )
+        self.assertNotIn("git checkout-index", package_action)
+        self.assertNotIn("tar -czf", package_action)
+        self.assertNotIn("Compress-Archive", package_action)
+        self.assertIn(
+            "python3 -u scripts/publish_development_release.py",
+            publish_action,
+        )
+        self.assertNotIn("--clobber", publish_action)
 
     def test_ci_artifact_actions_use_node24(self):
         configurations = "\n".join(
@@ -812,8 +2024,389 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertNotRegex(configurations, r"actions/upload-artifact@v[1-5]\b")
         self.assertNotRegex(configurations, r"actions/download-artifact@v[1-6]\b")
 
+    def test_windows_ci_remeasures_only_unstable_lifecycle_results(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(action.count("performance validate-openvmm"), 1)
+        self.assertNotIn("for attempt in 1 2", action)
+        self.assertEqual(action.count("foreach ($Attempt in 1, 2)"), 1)
+        self.assertEqual(action.count("$ValidationStatus -ne 75"), 1)
+        self.assertEqual(
+            action.count("Lifecycle snapshot generation was unstable"),
+            1,
+        )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_cli_validation_stops_at_each_failed_command(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "validate-nvx" / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(action, "Validate NVX CLI on Windows")
+        command_count = sum(line.startswith("python ") for line in script.splitlines())
+        self.assertGreater(command_count, 0)
+        stub = """
+$CommandCount = 0
+function python {
+    $script:CommandCount += 1
+    Write-Output "python-$script:CommandCount"
+    $global:LASTEXITCODE = 0
+    if ($script:CommandCount -eq $script:FailureAt) {
+        $global:LASTEXITCODE = 37
+    }
+}
+"""
+        for failure_at in range(command_count + 1):
+            with self.subTest(failure_at=failure_at):
+                result = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        f"$FailureAt = {failure_at}\n{stub}\n{script}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode, 37 if failure_at else 0, result.stderr
+                )
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [
+                        f"python-{index}"
+                        for index in range(1, (failure_at or command_count) + 1)
+                    ],
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_acceptance_preserves_attempts_and_publishes_only_valid_data(self):
+        action = (
+            common.REPO_ROOT / ".github" / "actions" / "run-benchmark" / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(action, "Run Windows acceptance test")
+        for name, value in (
+            ("backend", "whp"),
+            ("platform", "windows-whp-virtual-machine"),
+            ("warmups", "1"),
+            ("runs", "10"),
+            ("teardown-mode", "guest-exit"),
+        ):
+            script = script.replace("${{ inputs." + name + " }}", value)
+        stub = """
+$BenchmarkCount = 0
+$ValidationCount = 0
+function python {
+    if ($args[1] -eq "benchmark") {
+        $script:BenchmarkCount += 1
+        $output = $args[[Array]::IndexOf($args, "--output") + 1]
+        New-Item -ItemType Directory -Path (Split-Path $output) -Force | Out-Null
+        Set-Content -LiteralPath $output -Encoding UTF8 -Value (
+            '{"attempt":' + $script:BenchmarkCount + '}'
+        )
+        $global:LASTEXITCODE = $script:BenchmarkStatus
+    }
+    elseif ($args[1] -eq "performance") {
+        $global:LASTEXITCODE = $script:ValidationStatuses[$script:ValidationCount]
+        $script:ValidationCount += 1
+    }
+    else {
+        throw "unexpected command: $args"
+    }
+}
+"""
+        for name, statuses, benchmark_status in (
+            ("first-success", (0,), 0),
+            ("remeasured-success", (75, 0), 0),
+            ("both-unstable", (75, 75), 0),
+            ("invalid-data", (1,), 0),
+            ("benchmark-failure", (0,), 42),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                output = (
+                    root
+                    / "data"
+                    / "runs"
+                    / "windows-whp-virtual-machine"
+                    / "microvm-v2"
+                    / "1vcpu"
+                )
+                output.mkdir(parents=True)
+                accepted = output / "acceptance.json"
+                accepted.write_text('{"attempt":"stale"}', encoding="utf-8")
+                setup = (
+                    "$ValidationStatuses = @("
+                    + ", ".join(str(status) for status in statuses)
+                    + f")\n$BenchmarkStatus = {benchmark_status}\n"
+                )
+                result = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        setup + stub + script,
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                expected_status = benchmark_status or statuses[-1]
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                self.assertEqual(
+                    sorted(path.name for path in output.glob("acceptance-attempt-*")),
+                    [
+                        f"acceptance-attempt-{index}.json"
+                        for index in range(1, len(statuses) + 1)
+                    ],
+                )
+                for index in range(1, len(statuses) + 1):
+                    attempt = output / f"acceptance-attempt-{index}.json"
+                    self.assertEqual(
+                        json.loads(attempt.read_text(encoding="utf-8-sig")),
+                        {"attempt": index},
+                    )
+                self.assertEqual(accepted.exists(), expected_status == 0)
+                if expected_status == 0:
+                    self.assertEqual(
+                        json.loads(accepted.read_text(encoding="utf-8-sig")),
+                        {"attempt": len(statuses)},
+                    )
+
 
 class BuildTests(unittest.TestCase):
+    def test_records_openvmm_revision_cleanliness_and_executable_hash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            openvmm_dir = root / "openvmm"
+            executable = openvmm_dir / "target" / "release" / "openvmm"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"openvmm")
+            revision = b"0bc357bbcf3a654b63dfb51f1103c5751bf3d31f\n"
+            results = [
+                common.CommandResult(("git",), 0, revision, b""),
+                common.CommandResult(("git",), 0, revision, b""),
+                common.CommandResult(("git",), 0, b" M src/main.rs\n", b""),
+            ]
+
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "OPENVMM_DIR", openvmm_dir),
+                patch.object(build, "run_capture", side_effect=results),
+            ):
+                build.record_openvmm_provenance(executable)
+
+            provenance = json.loads(
+                (root / "build" / build.OPENVMM_PROVENANCE_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(provenance["source_revision"], revision.decode().strip())
+            self.assertFalse(provenance["source_clean"])
+            self.assertEqual(
+                provenance["executable_sha256"],
+                hashlib.sha256(b"openvmm").hexdigest(),
+            )
+
+    def test_kernel_build_rejects_input_config_mutation_during_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_config = root / "kernel" / "config-microvm"
+            input_config.parent.mkdir(parents=True)
+            input_config.write_text(
+                "\n".join(
+                    (
+                        *build.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                        *build.REQUIRED_SHARED_STATUS_KERNEL_CONFIG,
+                        *build.REQUIRED_SANDBOX_KERNEL_CONFIG,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            patch_path = root / "kernel" / "patches" / "example.patch"
+            patch_path.parent.mkdir()
+            patch_path.write_text("patch", encoding="utf-8")
+            source = root / "source"
+            source.mkdir()
+            work = root / "work"
+            output = root / "output" / "vmlinux"
+            prior_provenance = output.with_name(build.KERNEL_PROVENANCE_NAME)
+            prior_provenance.parent.mkdir()
+            prior_provenance.write_text("stale", encoding="utf-8")
+
+            with patch.object(build, "REPO_ROOT", root):
+                source_fingerprint = build._kernel_source_fingerprint()
+
+            def run_build(command: object, **_kwargs: object) -> None:
+                if isinstance(command, list) and command[-1] == "vmlinux":
+                    (work / "vmlinux").write_bytes(b"kernel")
+                    input_config.write_text("CONFIG_CHANGED=y\n", encoding="utf-8")
+
+            notes = common.CommandResult(
+                ("readelf",),
+                0,
+                b"Xen 0x00000012",
+                b"",
+            )
+            with (
+                patch.object(build, "REPO_ROOT", root),
+                patch.object(build, "_require_linux"),
+                patch.object(build, "require_tool", return_value="tool"),
+                patch.object(
+                    build,
+                    "prepare_kernel_source",
+                    return_value=(source, source_fingerprint),
+                ),
+                patch.object(build, "run_checked", side_effect=run_build),
+                patch.object(build, "run_capture", return_value=notes),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "inputs changed during the build",
+                ),
+            ):
+                build.build_kernel(
+                    build.KernelBuildConfig(
+                        work=work,
+                        output=output,
+                    )
+                )
+
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_name("vmlinux.config").exists())
+            self.assertFalse(prior_provenance.exists())
+
+    def test_materialize_kernel_provenance_inputs_bypasses_mutable_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_CONFIG_")
+            }
+            config = root / "kernel" / "config-microvm"
+            patch_path = root / "kernel" / "patches" / "example.patch"
+            stale_patch = root / "kernel" / "patches" / "stale.patch"
+            config.parent.mkdir(parents=True)
+            patch_path.parent.mkdir()
+            config.write_bytes(b"CONFIG_EXAMPLE=y\n")
+            patch_path.write_bytes(b"patch\n")
+            (root / ".gitattributes").write_text(
+                "\n".join(
+                    (
+                        "kernel/config-microvm text eol=lf",
+                        "kernel/patches/*.patch text eol=lf",
+                    )
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            subprocess.run(
+                ["git", "init", "-q"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "NVX Tests"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "nvx-tests@example.com"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    ".gitattributes",
+                    "kernel/config-microvm",
+                    "kernel/patches/example.patch",
+                ],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-qm", "kernel provenance fixture"],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            git_dir = Path(
+                subprocess.run(
+                    ["git", "rev-parse", "--git-dir"],
+                    cwd=root,
+                    env=git_environment,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            (root / git_dir / "info" / "attributes").write_text(
+                "\n".join(
+                    (
+                        "kernel/config-microvm -text",
+                        "kernel/patches/*.patch -text",
+                    )
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            config.write_bytes(b"CONFIG_EXAMPLE=y\r\n")
+            patch_path.write_bytes(b"patch\r\n")
+            stale_patch.write_bytes(b"stale\r\n")
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "kernel/config-microvm",
+                    "kernel/patches/example.patch",
+                    "kernel/patches/stale.patch",
+                ],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "checkout-index",
+                    "--force",
+                    "--",
+                    "kernel/config-microvm",
+                    "kernel/patches/example.patch",
+                    "kernel/patches/stale.patch",
+                ],
+                cwd=root,
+                env=git_environment,
+                check=True,
+            )
+            self.assertEqual(config.read_bytes(), b"CONFIG_EXAMPLE=y\r\n")
+            self.assertEqual(patch_path.read_bytes(), b"patch\r\n")
+            self.assertEqual(stale_patch.read_bytes(), b"stale\r\n")
+
+            with (
+                patch.dict(os.environ, git_environment, clear=True),
+                patch.object(build, "REPO_ROOT", root),
+            ):
+                build.materialize_kernel_provenance_inputs()
+
+            self.assertEqual(config.read_bytes(), b"CONFIG_EXAMPLE=y\n")
+            self.assertEqual(patch_path.read_bytes(), b"patch\n")
+            self.assertFalse(stale_patch.exists())
+
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
             (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
@@ -825,6 +2418,614 @@ class BuildTests(unittest.TestCase):
                 for path in build._kernel_patch_files()
             ],
         )
+        self.assertNotIn("guest_agent", manifest)
+        self.assertEqual(
+            manifest["openvmm"],
+            {
+                "microvm_abi_version": 2,
+                "control_session_protocol_version": 1,
+                "control_contract_revision": "nvx-microvm-v2-control-v1",
+            },
+        )
+
+    def test_guest_descriptors_preserve_alpine_and_select_ubuntu_outputs(self):
+        alpine = guests.guest_descriptor("alpine")
+        ubuntu_guest = guests.guest_descriptor("ubuntu")
+
+        self.assertEqual(alpine.initramfs_name, "initramfs.cpio.gz")
+        self.assertEqual(alpine.default_memory_mib, 128)
+        self.assertTrue(alpine.sandbox_control)
+        self.assertEqual(
+            ubuntu_guest.initramfs_name,
+            "initramfs-ubuntu.cpio.gz",
+        )
+        self.assertEqual(ubuntu_guest.default_memory_mib, 256)
+        self.assertFalse(ubuntu_guest.sandbox_control)
+
+    def test_ubuntu_manifest_and_package_lock_match_build_pins(self):
+        manifest = json.loads(
+            (build.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+        )
+        ubuntu_manifest = manifest["ubuntu"]
+        self.assertEqual(
+            ubuntu_manifest["version"],
+            ubuntu.DEFAULT_UBUNTU_VERSION,
+        )
+        self.assertEqual(
+            ubuntu_manifest["base_url"],
+            ubuntu.DEFAULT_UBUNTU_BASE_URL,
+        )
+        self.assertEqual(
+            ubuntu_manifest["base_sha256"],
+            ubuntu.DEFAULT_UBUNTU_BASE_SHA256,
+        )
+        self.assertEqual(
+            ubuntu_manifest["archive_keyring_url"],
+            collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL,
+        )
+        self.assertEqual(
+            ubuntu_manifest["archive_keyring_sha256"],
+            collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_SHA256,
+        )
+        self.assertEqual(
+            ubuntu_manifest["package_lock_sha256"],
+            ubuntu.package_lock_sha256(),
+        )
+        self.assertEqual(
+            ubuntu_manifest["package_lock_sha256"],
+            "fcdd30223b96fc26e24fcf4b6763a4a2504e9cd25882e68e89fbf6bf45277ef0",
+        )
+        packages = ubuntu.load_package_lock()
+        self.assertEqual(
+            [package["name"] for package in packages],
+            [
+                "busybox-static",
+                "iputils-ping",
+                "libcap2",
+                "libidn2-0",
+                "libunistring5",
+                "net-tools",
+                "netcat-openbsd",
+            ],
+        )
+
+    def test_ubuntu_safe_extractor_rejects_archive_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "unsafe.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive_file:
+                symlink = tarfile.TarInfo("etc")
+                symlink.type = tarfile.SYMTYPE
+                symlink.linkname = "../../outside"
+                archive_file.addfile(symlink)
+                payload = b"nameserver 192.0.2.1\n"
+                resolver = tarfile.TarInfo("etc/resolv.conf")
+                resolver.size = len(payload)
+                archive_file.addfile(resolver, io.BytesIO(payload))
+
+            with self.assertRaisesRegex(common.ScriptError, "escapes"):
+                ubuntu.safe_extract_tar(
+                    archive_path,
+                    root / "extracted",
+                    label="test archive",
+                )
+            self.assertFalse((root / "outside").exists())
+
+    def test_ubuntu_safe_extractor_roots_absolute_symlinks(self):
+        self.assertEqual(
+            ubuntu._virtual_symlink_target(
+                PurePosixPath("var/run"),
+                "/run",
+                "test archive",
+            ),
+            "../run",
+        )
+        self.assertEqual(
+            ubuntu._virtual_symlink_target(
+                PurePosixPath("etc/alternatives/awk"),
+                "/usr/bin/mawk",
+                "test archive",
+            ),
+            "../../usr/bin/mawk",
+        )
+
+    def test_ubuntu_safe_extractor_rejects_absolute_and_parent_paths(self):
+        for member_name in ("/absolute", "../parent"):
+            with self.subTest(member_name=member_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    archive_path = root / "unsafe.tar"
+                    with tarfile.open(archive_path, "w") as archive_file:
+                        payload = b"x"
+                        member = tarfile.TarInfo(member_name)
+                        member.size = len(payload)
+                        archive_file.addfile(member, io.BytesIO(payload))
+                    with self.assertRaisesRegex(
+                        common.ScriptError,
+                        "absolute path|path traversal",
+                    ):
+                        ubuntu.safe_extract_tar(
+                            archive_path,
+                            root / "extracted",
+                            label="test archive",
+                        )
+
+    def test_ubuntu_rootfs_digest_and_erofs_uuid_are_deterministic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            for directory in (first, second):
+                (directory / "etc").mkdir(parents=True)
+                (directory / "etc" / "os-release").write_text(
+                    "ID=ubuntu\n",
+                    encoding="ascii",
+                )
+            os.utime(second / "etc" / "os-release", (1234, 1234))
+
+            first_digest = ubuntu.rootfs_sha256(first)
+            second_digest = ubuntu.rootfs_sha256(second)
+            self.assertEqual(first_digest, second_digest)
+            self.assertEqual(
+                ubuntu.erofs_uuid(first_digest),
+                ubuntu.erofs_uuid(second_digest),
+            )
+
+    def test_ubuntu_prepare_root_normalizes_root_directory_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            work = temporary_root / "work"
+            expected_root = work / "root"
+
+            def extract(
+                archive: Path,
+                destination: Path,
+                *,
+                label: str,
+            ) -> None:
+                self.assertEqual(
+                    archive.name,
+                    f"ubuntu-base-{ubuntu.DEFAULT_UBUNTU_VERSION}-base-amd64.tar.gz",
+                )
+                self.assertEqual(label, "Ubuntu Base archive")
+                status = destination / "var" / "lib" / "dpkg" / "status"
+                status.parent.mkdir(parents=True)
+                status.write_text("", encoding="utf-8")
+
+            with (
+                patch.object(
+                    ubuntu,
+                    "cache_root",
+                    return_value=temporary_root / "cache",
+                ),
+                patch.object(ubuntu, "download_verified"),
+                patch.object(ubuntu, "safe_extract_tar", side_effect=extract),
+                patch.object(ubuntu, "_validate_ubuntu_identity"),
+                patch.object(ubuntu, "load_package_lock", return_value=()),
+                patch.object(ubuntu, "_validate_package_closure"),
+                patch.object(ubuntu, "_customize_root"),
+                patch.object(ubuntu.Path, "chmod", autospec=True) as chmod,
+            ):
+                self.assertEqual(ubuntu.prepare_root(work), expected_root)
+
+            chmod.assert_called_once_with(expected_root, 0o755)
+
+    def test_ubuntu_customization_installs_busybox_wget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in ("etc", "usr/bin", "usr/sbin"):
+                (root / relative).mkdir(parents=True)
+            with (
+                patch.object(ubuntu, "_clear_directory"),
+                patch.object(ubuntu, "_validate_accounts"),
+                patch.object(ubuntu, "_validate_usr_merge"),
+                patch.object(ubuntu, "_ensure_symlink") as ensure_symlink,
+            ):
+                ubuntu._customize_root(root)
+
+            ensure_symlink.assert_any_call(root, "usr/bin/wget", "busybox")
+
+    def test_distro_layer_refuses_existing_output_without_replace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ubuntu.erofs"
+            output.touch()
+            with (
+                patch.object(build.sys, "platform", "linux"),
+                self.assertRaisesRegex(common.ScriptError, "refusing to replace"),
+            ):
+                build.build_distro_layer(build.DistroLayerBuildConfig(output=output))
+
+    def test_ubuntu_initramfs_manifest_binds_artifact_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "initramfs-ubuntu.cpio.gz"
+            output.write_bytes(b"ubuntu initramfs")
+            with patch.object(
+                ubuntu,
+                "package_manifest",
+                return_value={"format": 1, "guest": "ubuntu"},
+            ):
+                build._write_ubuntu_manifest(root, output, {}, "a" * 64)
+
+            manifest = json.loads(
+                output.with_name(f"{output.name}.packages.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["artifact"], output.name)
+            self.assertEqual(
+                manifest["artifact_sha256"],
+                common.sha256_file(output),
+            )
+            self.assertEqual(manifest["input_sha256"], "a" * 64)
+
+    def test_ubuntu_source_requirements_deduplicate_binary_manifests(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifests: list[Path] = []
+            for name in ("initramfs.json", "layer.json"):
+                path = root / name
+                path.write_text(
+                    json.dumps(
+                        {
+                            "guest": "ubuntu",
+                            "release": ubuntu.DEFAULT_UBUNTU_VERSION,
+                            "architecture": ubuntu.DEFAULT_UBUNTU_ARCHITECTURE,
+                            "packages": [
+                                {
+                                    "source_name": "glibc",
+                                    "source_version": "2.43-2ubuntu2.3",
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                manifests.append(path)
+
+            requirements = collect_ubuntu_sources._source_requirements(manifests)
+
+        self.assertEqual(
+            requirements,
+            (
+                {
+                    "source_name": "glibc",
+                    "source_version": "2.43-2ubuntu2.3",
+                },
+            ),
+        )
+
+    def test_ubuntu_dsc_validation_matches_source_index(self):
+        payload = b"source"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            dsc = Path(temporary) / "example_1.0.dsc"
+            dsc.write_text(
+                (
+                    "Format: 3.0 (quilt)\n"
+                    "Source: example\n"
+                    "Version: 1.0\n"
+                    "Checksums-Sha256:\n"
+                    f" {digest} {len(payload)} example_1.0.orig.tar.xz\n"
+                ),
+                encoding="utf-8",
+            )
+            record: collect_ubuntu_sources.SourceRecord = {
+                "source_name": "example",
+                "source_version": "1.0",
+                "directory": "pool/main/e/example",
+                "index_url": "https://archive.invalid/Sources.xz",
+                "index_sha256": "0" * 64,
+                "index_release_url": "https://archive.invalid/InRelease",
+                "index_release_sha256": "1" * 64,
+                "files": [
+                    {
+                        "name": "example_1.0.dsc",
+                        "size": dsc.stat().st_size,
+                        "sha256": common.sha256_file(dsc),
+                        "url": "https://archive.invalid/example_1.0.dsc",
+                    },
+                    {
+                        "name": "example_1.0.orig.tar.xz",
+                        "size": len(payload),
+                        "sha256": digest,
+                        "url": "https://archive.invalid/example_1.0.orig.tar.xz",
+                    },
+                ],
+            }
+
+            collect_ubuntu_sources._validate_dsc(dsc, record)
+            record["files"][1]["sha256"] = "f" * 64
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "do not match",
+            ):
+                collect_ubuntu_sources._validate_dsc(dsc, record)
+
+    def test_ubuntu_source_index_is_authenticated_by_signed_release(self):
+        dsc_payload = b"dsc"
+        source_payload = b"source"
+        sources = (
+            "Package: example\n"
+            "Version: 1.0\n"
+            "Directory: pool/main/e/example\n"
+            "Checksums-Sha256:\n"
+            f" {hashlib.sha256(dsc_payload).hexdigest()} "
+            f"{len(dsc_payload)} example_1.0.dsc\n"
+            f" {hashlib.sha256(source_payload).hexdigest()} "
+            f"{len(source_payload)} example_1.0.orig.tar.xz\n"
+        ).encode()
+        compressed = lzma.compress(sources)
+        index_sha256 = hashlib.sha256(compressed).hexdigest()
+        inrelease = (
+            "-----BEGIN PGP SIGNED MESSAGE-----\n"
+            "Hash: SHA256\n"
+            "\n"
+            "Origin: Ubuntu\n"
+            f"Codename: {ubuntu.DEFAULT_UBUNTU_CODENAME}\n"
+            f"Suite: {ubuntu.DEFAULT_UBUNTU_CODENAME}\n"
+            "SHA256:\n"
+            f" {index_sha256} {len(compressed)} main/source/Sources.xz\n"
+            "-----BEGIN PGP SIGNATURE-----\n"
+            "test\n"
+            "-----END PGP SIGNATURE-----\n"
+        )
+
+        def download_release(_url: str, destination: Path) -> None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(inrelease, encoding="utf-8")
+
+        def download_index(
+            _url: str,
+            destination: Path,
+            expected_sha256: str,
+        ) -> None:
+            self.assertEqual(expected_sha256, index_sha256)
+            destination.write_bytes(compressed)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            keyring = root / "ubuntu-archive-keyring.gpg"
+            keyring.write_bytes(b"keyring")
+            with (
+                patch.object(
+                    collect_ubuntu_sources,
+                    "download",
+                    side_effect=download_release,
+                ),
+                patch.object(
+                    collect_ubuntu_sources,
+                    "download_verified",
+                    side_effect=download_index,
+                ),
+                patch.object(
+                    collect_ubuntu_sources,
+                    "require_tool",
+                    return_value="gpgv",
+                ),
+                patch.object(collect_ubuntu_sources, "run_checked") as run_checked,
+            ):
+                records, metadata = (
+                    collect_ubuntu_sources._load_authenticated_source_index(
+                        root / "cache",
+                        keyring,
+                        "https://archive.invalid/ubuntu",
+                        ubuntu.DEFAULT_UBUNTU_CODENAME,
+                        "main",
+                    )
+                )
+
+        run_checked.assert_called_once()
+        self.assertEqual(run_checked.call_args.args[0][0], "gpgv")
+        self.assertIn("--homedir", run_checked.call_args.args[0])
+        record = records[("example", "1.0")]
+        self.assertEqual(
+            record["index_release_url"],
+            "https://archive.invalid/ubuntu/dists/resolute/InRelease",
+        )
+        self.assertEqual(
+            [item["role"] for item in metadata],
+            ["ubuntu-inrelease", "ubuntu-source-index"],
+        )
+        self.assertEqual(
+            metadata[1]["authenticated_by"],
+            record["index_release_url"],
+        )
+
+    def test_launchpad_source_record_retains_verifiable_raw_metadata(self):
+        source_payload = b"source archive"
+        source_sha256 = hashlib.sha256(source_payload).hexdigest()
+        self_link = f"{collect_ubuntu_sources._LAUNCHPAD_ARCHIVE_API}/+sourcepub/123"
+        query = {
+            "entries": [
+                {
+                    "source_package_name": "example",
+                    "source_package_version": "1.0",
+                    "status": "Superseded",
+                    "date_published": "2026-01-01T00:00:00Z",
+                    "date_superseded": "2026-01-03T00:00:00Z",
+                    "pocket": "Updates",
+                    "component_name": "main",
+                    "self_link": self_link,
+                }
+            ]
+        }
+        source_urls = [
+            "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/"
+            "example/1.0/example_1.0.dsc",
+            "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/"
+            "example/1.0/example_1.0.orig.tar.xz",
+        ]
+
+        def download_json(url: str, destination: Path) -> object:
+            document: object = source_urls if "sourceFileUrls" in url else query
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(
+                json.dumps(document, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            return document
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot_release = root / "cache" / "snapshot.InRelease"
+            snapshot_release.parent.mkdir(parents=True)
+            snapshot_release.write_text("signed release", encoding="utf-8")
+            snapshot_record: collect_ubuntu_sources.SourceRecord = {
+                "source_name": "example",
+                "source_version": "1.0",
+                "directory": "pool/main/e/example",
+                "index_url": (
+                    "https://snapshot.ubuntu.com/ubuntu/20260102T000000Z/"
+                    "dists/resolute-updates/main/source/Sources.xz"
+                ),
+                "index_sha256": "2" * 64,
+                "index_release_url": (
+                    "https://snapshot.ubuntu.com/ubuntu/20260102T000000Z/"
+                    "dists/resolute-updates/InRelease"
+                ),
+                "index_release_sha256": common.sha256_file(snapshot_release),
+                "files": [
+                    {
+                        "name": "example_1.0.dsc",
+                        "size": 3,
+                        "sha256": "4" * 64,
+                        "url": (
+                            "https://snapshot.ubuntu.com/ubuntu/"
+                            "20260102T000000Z/pool/main/e/example/"
+                            "example_1.0.dsc"
+                        ),
+                    },
+                    {
+                        "name": "example_1.0.orig.tar.xz",
+                        "size": len(source_payload),
+                        "sha256": source_sha256,
+                        "url": (
+                            "https://snapshot.ubuntu.com/ubuntu/"
+                            "20260102T000000Z/pool/main/e/example/"
+                            "example_1.0.orig.tar.xz"
+                        ),
+                    },
+                ],
+            }
+            snapshot_metadata: list[collect_ubuntu_sources.SourceMetadata] = [
+                {
+                    "role": "ubuntu-inrelease",
+                    "url": snapshot_record["index_release_url"],
+                    "sha256": snapshot_record["index_release_sha256"],
+                    "cache_path": snapshot_release,
+                    "output_name": "snapshot.InRelease",
+                    "authenticated_by": (
+                        collect_ubuntu_sources.UBUNTU_ARCHIVE_KEYRING_URL
+                    ),
+                },
+                {
+                    "role": "ubuntu-source-index",
+                    "url": snapshot_record["index_url"],
+                    "sha256": snapshot_record["index_sha256"],
+                    "cache_path": None,
+                    "output_name": None,
+                    "authenticated_by": snapshot_record["index_release_url"],
+                },
+            ]
+            with (
+                patch.object(
+                    collect_ubuntu_sources,
+                    "_download_json",
+                    side_effect=download_json,
+                ),
+                patch.object(
+                    collect_ubuntu_sources,
+                    "_load_authenticated_source_index",
+                    return_value=(
+                        {("example", "1.0"): snapshot_record},
+                        snapshot_metadata,
+                    ),
+                ),
+            ):
+                record, metadata = collect_ubuntu_sources._launchpad_source_record(
+                    root / "cache",
+                    root / "ubuntu-archive-keyring.gpg",
+                    "example",
+                    "1.0",
+                )
+
+            self.assertEqual(record, snapshot_record)
+            self.assertEqual(
+                [item["role"] for item in metadata],
+                [
+                    "ubuntu-inrelease",
+                    "ubuntu-source-index",
+                    "launchpad-publishing-history",
+                    "launchpad-source-file-urls",
+                ],
+            )
+            for item in metadata:
+                if item["cache_path"] is None:
+                    continue
+                self.assertEqual(
+                    item["sha256"],
+                    common.sha256_file(item["cache_path"]),
+                )
+
+            output = root / "output"
+            output.mkdir()
+            manifest_metadata = collect_ubuntu_sources._materialize_source_metadata(
+                output,
+                metadata,
+            )
+            for item, manifest_item in zip(metadata, manifest_metadata, strict=True):
+                if item["cache_path"] is None:
+                    self.assertNotIn("path", manifest_item)
+                    continue
+                retained = output / manifest_item["path"]
+                self.assertEqual(
+                    retained.read_bytes(),
+                    item["cache_path"].read_bytes(),
+                )
+                self.assertEqual(
+                    common.sha256_file(retained),
+                    manifest_item["sha256"],
+                )
+
+    def test_ubuntu_source_collection_rejects_unexpected_output_entries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            output.mkdir()
+            stale = output / "unrelated.txt"
+            stale.write_text("do not archive", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "unexpected entries: unrelated.txt",
+            ):
+                collect_ubuntu_sources.collect_ubuntu_sources(
+                    [],
+                    output,
+                    root / "cache",
+                )
+
+            self.assertEqual(stale.read_text(encoding="utf-8"), "do not archive")
+
+    def test_ubuntu_source_collection_validates_output_before_resolving(self):
+        output = MagicMock(spec=Path)
+        with patch.object(
+            collect_ubuntu_sources,
+            "_validate_source_output",
+        ) as validate:
+
+            def resolve() -> Path:
+                validate.assert_called_once_with(output)
+                raise RuntimeError("stop after ordering assertion")
+
+            output.resolve.side_effect = resolve
+            with self.assertRaisesRegex(RuntimeError, "ordering assertion"):
+                collect_ubuntu_sources.collect_ubuntu_sources(
+                    [],
+                    output,
+                    Path("cache"),
+                )
 
     def test_ci_kernel_cache_key_includes_patches(self):
         action = (
@@ -834,10 +3035,56 @@ class BuildTests(unittest.TestCase):
             / "build-guest-artifacts"
             / "action.yml"
         ).read_text(encoding="utf-8")
+        for cache_input in (
+            "SOURCE-MANIFEST.json",
+            "kernel/config-microvm",
+            "kernel/patches/**",
+            "scripts/nvx_tools/build.py",
+            "scripts/nvx_tools/common.py",
+        ):
+            self.assertIn(cache_input, action)
+        self.assertIn("linux-kernel-v1-", action)
+        self.assertEqual(action.count("build/vmlinux.provenance.json"), 2)
+        self.assertEqual(action.count("build/initramfs.provenance.json"), 2)
+
+    def test_kernel_input_config_uses_canonical_lf_line_endings(self):
+        attributes = (build.REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
         self.assertIn(
-            "hashFiles('kernel/config-microvm', 'kernel/patches/**')",
-            action,
+            "kernel/config-microvm text eol=lf",
+            attributes.splitlines(),
         )
+
+    def test_ci_guest_cache_keys_include_shared_build_modules(self):
+        action = (
+            build.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        for variable in ("ALPINE_INPUT_HASH", "UBUNTU_INPUT_HASH"):
+            assignment = next(line for line in action.splitlines() if variable in line)
+            self.assertIn("'scripts/nvx_tools/common.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/guests.py'", assignment)
+
+    def test_quality_checks_include_shared_identity_probe(self):
+        action = (
+            build.REPO_ROOT / ".github" / "actions" / "check-quality" / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(action.count("guest/common/nvx-identity-probe"), 2)
+
+    def test_docker_guest_builder_pins_erofs_toolchain(self):
+        dockerfile = (build.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "ARG DEBIAN_IMAGE=debian:12-slim@sha256:"
+            "3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+            dockerfile,
+        )
+        self.assertIn("ARG EROFS_UTILS_VERSION=1.5-1", dockerfile)
+        self.assertIn("erofs-utils=${EROFS_UTILS_VERSION}", dockerfile)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")
@@ -896,6 +3143,40 @@ class BuildTests(unittest.TestCase):
             )
             self.assertEqual(len(provenance["source_sha256"]), 64)
 
+    def test_device_io_provenance_uses_shared_helper_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "nvx"
+            source = checkout / "guest" / "common" / "nvx-device-io.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"shared helper source")
+            initrd = root / "initramfs.cpio.gz"
+            manifest = initrd.with_name(f"{initrd.name}.packages.json")
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "helpers": {
+                            "nvx-device-io": {
+                                "source_sha256": common.sha256_file(source),
+                                "binary_sha256": "1" * 64,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            provenance = benchmark._device_io_helper_provenance(
+                argparse.Namespace(nvx_dir=checkout),
+                initrd,
+            )
+
+            self.assertEqual(provenance["source"], str(source.resolve()))
+            self.assertEqual(
+                provenance["source_sha256"],
+                common.sha256_file(source),
+            )
+
     def test_sandbox_kernel_config_requires_every_feature(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / ".config"
@@ -905,15 +3186,30 @@ class BuildTests(unittest.TestCase):
             )
             build._assert_sandbox_kernel_config(config)
 
-            config.write_text(
-                "\n".join(build.REQUIRED_SANDBOX_KERNEL_CONFIG[:-1]) + "\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(
-                common.ScriptError,
-                build.REQUIRED_SANDBOX_KERNEL_CONFIG[-1],
-            ):
-                build._assert_sandbox_kernel_config(config)
+            for missing in build.REQUIRED_SANDBOX_KERNEL_CONFIG:
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(
+                            setting
+                            for setting in build.REQUIRED_SANDBOX_KERNEL_CONFIG
+                            if setting != missing
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(common.ScriptError, missing):
+                        build._assert_sandbox_kernel_config(config)
+
+    def test_checked_in_config_preserves_generic_sandbox_capabilities(self):
+        config = build.REPO_ROOT / "kernel" / "config-microvm"
+        build._assert_sandbox_kernel_config(config)
+        configured = config.read_text(encoding="utf-8").splitlines()
+        for setting in (
+            "CONFIG_SECCOMP_FILTER=y",
+            "CONFIG_UNIX=y",
+            "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
+        ):
+            self.assertIn(setting, configured)
 
     def test_shared_status_kernel_config_is_required(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1078,7 +3374,7 @@ class SandboxTests(unittest.TestCase):
 
     def test_managed_lifecycle_start_requests_openvmm_outcome(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             layer_path = root / "distro.erofs"
             scratch_path = root / "scratch.ext4"
             layer_path.write_bytes(b"layer")
@@ -1144,6 +3440,37 @@ class SandboxTests(unittest.TestCase):
                 state / sandbox_lifecycle.OUTCOME_NAME,
             )
             session.ping.assert_called_once_with(10)
+
+    def test_versioned_json_reader_supports_custom_version_field(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "outcome.json"
+            payload = {"schema_version": sandbox_lifecycle.OUTCOME_SCHEMA_VERSION}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertEqual(
+                sandbox_lifecycle._read_json(
+                    path,
+                    "OpenVMM outcome report",
+                    version_field="schema_version",
+                    version=sandbox_lifecycle.OUTCOME_SCHEMA_VERSION,
+                ),
+                payload,
+            )
+            with self.assertRaisesRegex(common.ScriptError, "unsupported format"):
+                sandbox_lifecycle._read_json(
+                    path,
+                    "OpenVMM outcome report",
+                    version_field="schema_version",
+                    version=sandbox_lifecycle.OUTCOME_SCHEMA_VERSION + 1,
+                )
+
+    def test_versioned_json_reader_rejects_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_bytes(b"\xff")
+
+            with self.assertRaisesRegex(common.ScriptError, "failed to read"):
+                sandbox_lifecycle._read_json(path, "sandbox configuration")
 
     def test_managed_exec_outcome_excludes_workload_data(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1243,6 +3570,32 @@ class SandboxTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_kvm_worker_result_decoding(self):
+        completed = subprocess.CompletedProcess(
+            ["worker"],
+            0,
+            stdout='noise\nOPENVMM_KVM_E2E_RESULT={"p50_ms": 1.5}\n',
+            stderr="",
+        )
+        with patch.object(benchmark.subprocess, "run", return_value=completed):
+            result = benchmark._run_kvm_worker(["worker"], "e2e")
+
+        self.assertEqual(result, {"p50_ms": 1.5})
+
+    def test_require_file_preserves_resolved_path_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing = root / "nested" / ".." / "missing"
+            resolved_missing = missing.resolve()
+
+            with self.assertRaises(FileNotFoundError) as raised:
+                benchmark.require_file(missing, "benchmark artifact")
+
+            self.assertEqual(
+                str(raised.exception),
+                f"benchmark artifact not found: {resolved_missing}",
+            )
+
     def test_snapshot_profile_records_are_parsed_and_summarized(self):
         record = benchmark.parse_snapshot_profile_line(
             b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=restore "
@@ -3091,7 +5444,7 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_device_io_defaults_to_dedicated_abi_v2_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
+            repository = Path(temporary).resolve()
             backend = "whp" if os.name == "nt" else "kvm"
             platform = "windows-whp" if os.name == "nt" else "linux-kvm"
             args = nvx.parse_args(
@@ -3159,6 +5512,25 @@ class BenchmarkTests(unittest.TestCase):
             destination=Path("dist/custom"),
             include_source=False,
             force=True,
+        )
+
+    def test_archive_release_command_forwards_paths(self):
+        args = nvx.parse_args(
+            [
+                "archive-release",
+                "--source",
+                "dist/package",
+                "--destination",
+                "dist/package.zip",
+            ]
+        )
+
+        with patch.object(nvx, "create_release_archive") as create_archive:
+            args.handler(args)
+
+        create_archive.assert_called_once_with(
+            Path("dist/package"),
+            Path("dist/package.zip"),
         )
 
     def test_download_command_selects_host_release(self):
@@ -3494,31 +5866,11 @@ class ReleaseTests(unittest.TestCase):
     def test_binary_package_stages_files_and_checksums(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            build_dir = root / "build"
-            source_dir = build_dir / "sources"
-            openvmm_dir = root / "openvmm"
-            binary = openvmm_dir / "target" / "release" / "openvmm.exe"
-            guest_names = (
-                "vmlinux",
-                "vmlinux.config",
-                "initramfs.cpio.gz",
-                "initramfs.cpio.gz.packages.json",
-            )
-            release_files = (
-                "LICENSE",
-                "README.md",
-                "SOURCE-MANIFEST.json",
-                "THIRD_PARTY_NOTICES.md",
-            )
-            for path in (
-                binary,
-                *(build_dir / name for name in guest_names),
-                *(root / name for name in release_files),
-                openvmm_dir / "LICENSE",
-                root / "kernel" / "COPYING-LINUX",
-            ):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(path.name.encode("ascii"))
+            paths, kernel_inputs, revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            source_dir = paths["source"]
+            openvmm_dir = paths["openvmm"]
+            binary = paths["binary"]
             destination = root / "staged"
             stderr = io.StringIO()
 
@@ -3535,6 +5887,16 @@ class ReleaseTests(unittest.TestCase):
                     side_effect=artifact_path,
                 ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, True),
+                ),
                 patch("sys.stderr", stderr),
             ):
                 release.package_release(
@@ -3545,10 +5907,458 @@ class ReleaseTests(unittest.TestCase):
                 )
 
             self.assertTrue((destination / "bin" / binary.name).is_file())
-            for name in guest_names:
+            for name in release.GUEST_RELEASE_NAMES:
                 self.assertTrue((destination / "guest" / name).is_file())
+            self.assertTrue(
+                (destination / "provenance" / build.OPENVMM_PROVENANCE_NAME).is_file()
+            )
+            self.assertTrue(
+                (destination / "provenance" / build.KERNEL_PROVENANCE_NAME).is_file()
+            )
+            self.assertTrue(
+                (destination / "provenance" / build.INITRAMFS_PROVENANCE_NAME).is_file()
+            )
+            manifest = json.loads(
+                (destination / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["distribution"]["version"], "1.0.0")
+            self.assertNotIn("guest_agent", manifest)
+            self.assertEqual(manifest["openvmm"]["source_revision"], revision)
+            self.assertEqual(
+                manifest["openvmm"]["executable_sha256"],
+                common.sha256_file(destination / "bin" / binary.name),
+            )
+            self.assertEqual(
+                manifest["openvmm"]["microvm_abi_version"],
+                2,
+            )
+            self.assertEqual(
+                manifest["openvmm"]["control_session_protocol_version"],
+                1,
+            )
+            self.assertEqual(
+                manifest["openvmm"]["control_contract_revision"],
+                "nvx-microvm-v2-control-v1",
+            )
+            self.assertEqual(
+                manifest["linux"]["kernel_sha256"],
+                common.sha256_file(destination / "guest" / "vmlinux"),
+            )
+            self.assertEqual(
+                manifest["linux"]["config_sha256"],
+                common.sha256_file(destination / "guest" / "vmlinux.config"),
+            )
             common.verify_sha256_sums(destination)
             self.assertIn("binary-only package", stderr.getvalue())
+
+    def test_package_rejects_dirty_openvmm_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, revision = _write_release_fixture(root)
+
+            with (
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, False),
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "current clean pinned source",
+                ),
+            ):
+                release._validate_openvmm_provenance(
+                    paths["binary"],
+                    paths["build"] / build.OPENVMM_PROVENANCE_NAME,
+                )
+
+    def test_package_rejects_stale_kernel_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, kernel_inputs, _revision = _write_release_fixture(root)
+            kernel = paths["build"] / "vmlinux"
+            kernel.write_bytes(b"new kernel bytes")
+
+            with (
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "kernel build provenance",
+                ),
+            ):
+                release._validate_kernel_provenance(
+                    kernel,
+                    paths["build"] / "vmlinux.config",
+                    paths["build"] / build.KERNEL_PROVENANCE_NAME,
+                )
+
+    def test_package_rejects_stale_initramfs_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            initramfs = paths["build"] / "initramfs.cpio.gz"
+            initramfs.write_bytes(b"new initramfs bytes")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "initramfs build provenance",
+            ):
+                release._validate_initramfs_provenance(
+                    initramfs,
+                    paths["build"] / "initramfs.cpio.gz.packages.json",
+                    paths["build"] / build.INITRAMFS_PROVENANCE_NAME,
+                )
+
+    def test_package_rejects_stale_initramfs_package_manifest_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            package_manifest = paths["build"] / "initramfs.cpio.gz.packages.json"
+            package_manifest.write_bytes(b"new package manifest bytes")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "initramfs build provenance",
+            ):
+                release._validate_initramfs_provenance(
+                    paths["build"] / "initramfs.cpio.gz",
+                    package_manifest,
+                    paths["build"] / build.INITRAMFS_PROVENANCE_NAME,
+                )
+
+    def test_guest_release_inputs_reject_stale_ubuntu_artifacts(self):
+        for artifact_name in (
+            "initramfs-ubuntu.cpio.gz",
+            "ubuntu-distro.erofs",
+        ):
+            with (
+                self.subTest(artifact=artifact_name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                paths, _kernel_inputs, _revision = _write_release_fixture(root)
+                build_dir = paths["build"]
+                (build_dir / artifact_name).write_bytes(b"stale artifact")
+                with (
+                    patch.object(
+                        release,
+                        "artifact_path",
+                        side_effect=build_dir.joinpath,
+                    ),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "Ubuntu artifact manifest does not match",
+                    ),
+                ):
+                    release._guest_release_inputs()
+
+    def test_guest_release_inputs_reject_stale_ubuntu_source_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            manifest_path = build_dir / "initramfs-ubuntu.cpio.gz.packages.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["input_sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Ubuntu artifact manifest does not match",
+                ),
+            ):
+                release._guest_release_inputs()
+
+    def test_package_rejects_tampered_source_metadata_without_replacing_output(self):
+        cases: tuple[tuple[str, str, object, str], ...] = (
+            ("root", "format", 2, "format must be 1"),
+            ("linux", "version", "6.18.37", "Linux version"),
+            (
+                "linux",
+                "upstream_archive_sha256",
+                "0" * 64,
+                "Linux upstream_archive_sha256",
+            ),
+            ("linux", "patches", [], "Linux patches"),
+            (
+                "alpine",
+                "minirootfs_sha256",
+                "0" * 64,
+                "Alpine minirootfs_sha256",
+            ),
+        )
+        for section, field, invalid_value, error in cases:
+            with (
+                self.subTest(section=section, field=field),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                paths, kernel_inputs, revision = _write_release_fixture(root)
+                fixture_build_dir = paths["build"]
+                manifest_path = root / "SOURCE-MANIFEST.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if section == "root":
+                    manifest[field] = invalid_value
+                else:
+                    manifest_section = cast(dict[str, object], manifest[section])
+                    manifest_section[field] = invalid_value
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                destination = root / "dist" / "1.0.0"
+                destination.mkdir(parents=True)
+                marker = destination / "prior.txt"
+                marker.write_text("prior release", encoding="utf-8")
+
+                def artifact_path(
+                    name: str,
+                    build_dir: Path = fixture_build_dir,
+                ) -> Path:
+                    return build_dir / name
+
+                with (
+                    patch.object(release, "REPO_ROOT", root),
+                    patch.object(release, "SOURCE_DIR", paths["source"]),
+                    patch.object(release, "OPENVMM_DIR", paths["openvmm"]),
+                    patch.object(
+                        release,
+                        "artifact_path",
+                        side_effect=artifact_path,
+                    ),
+                    patch.object(
+                        release,
+                        "openvmm_binary_path",
+                        return_value=paths["binary"],
+                    ),
+                    patch.object(
+                        release,
+                        "kernel_provenance_inputs",
+                        return_value=kernel_inputs,
+                    ),
+                    patch.object(
+                        release,
+                        "_openvmm_git_state",
+                        return_value=(revision, True),
+                    ),
+                    patch("sys.stderr", io.StringIO()),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        error,
+                    ),
+                ):
+                    release.package_release(
+                        version="1.0.0",
+                        destination=destination,
+                        include_source=False,
+                        force=True,
+                    )
+
+                self.assertEqual(
+                    marker.read_text(encoding="utf-8"),
+                    "prior release",
+                )
+
+    def test_failed_staged_verification_preserves_existing_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, kernel_inputs, revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            destination = root / "dist" / "1.0.0"
+            destination.mkdir(parents=True)
+            marker = destination / "prior.txt"
+            marker.write_text("prior release", encoding="utf-8")
+
+            def artifact_path(name: str) -> Path:
+                return build_dir / name
+
+            original_copy = release._copy_release_file
+
+            def corrupt_packaged_binary(source: Path, target: Path) -> None:
+                original_copy(source, target)
+                if target.name == paths["binary"].name:
+                    target.write_bytes(b"corrupt")
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                patch.object(release, "SOURCE_DIR", paths["source"]),
+                patch.object(release, "OPENVMM_DIR", paths["openvmm"]),
+                patch.object(release, "artifact_path", side_effect=artifact_path),
+                patch.object(
+                    release,
+                    "openvmm_binary_path",
+                    return_value=paths["binary"],
+                ),
+                patch.object(
+                    release,
+                    "kernel_provenance_inputs",
+                    return_value=kernel_inputs,
+                ),
+                patch.object(
+                    release,
+                    "_openvmm_git_state",
+                    return_value=(revision, True),
+                ),
+                patch.object(
+                    release,
+                    "_copy_release_file",
+                    side_effect=corrupt_packaged_binary,
+                ),
+                patch("sys.stderr", io.StringIO()),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "packaged OpenVMM executable",
+                ),
+            ):
+                release.package_release(
+                    version="1.0.0",
+                    destination=destination,
+                    include_source=False,
+                    force=True,
+                )
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "prior release")
+            self.assertEqual(
+                [path.name for path in destination.iterdir()], ["prior.txt"]
+            )
+
+    def test_publication_failure_restores_existing_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            destination = root / "dist" / "release"
+            destination.mkdir(parents=True)
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+            original_replace = Path.replace
+
+            def fail_staging_replace(source: Path, target: Path) -> Path:
+                if source == staging:
+                    raise OSError("injected publication failure")
+                return original_replace(source, target)
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                patch.object(Path, "replace", new=fail_staging_replace),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "failed to publish staged release",
+                ),
+            ):
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=True,
+                )
+
+            self.assertEqual(
+                (destination / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertFalse(staging.exists())
+
+    def test_failed_rollback_preserves_prior_backup_and_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            destination = root / "dist" / "release"
+            destination.mkdir(parents=True)
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+            original_replace = Path.replace
+
+            def fail_publication_and_restore(source: Path, target: Path) -> Path:
+                if source == staging or source.name.startswith(".release.backup-"):
+                    raise OSError("injected rename failure")
+                return original_replace(source, target)
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                patch.object(Path, "replace", new=fail_publication_and_restore),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "prior release remains",
+                ),
+            ):
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=True,
+                )
+
+            backups = list(destination.parent.glob(".release.backup-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                (backups[0] / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertEqual(
+                (staging / "new.txt").read_text(encoding="utf-8"),
+                "new",
+            )
+
+    def test_publication_rechecks_no_force_after_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "release"
+            destination.mkdir()
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "pass --force",
+            ):
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=False,
+                )
+
+            self.assertEqual(
+                (destination / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertFalse(staging.exists())
+
+    def test_publication_rechecks_force_destination_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "outside-dist"
+            destination.mkdir()
+            (destination / "prior.txt").write_text("prior", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.txt").write_text("new", encoding="utf-8")
+
+            with (
+                patch.object(release, "REPO_ROOT", root),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "below dist",
+                ),
+            ):
+                release._publish_release_directory(
+                    staging,
+                    destination,
+                    force=True,
+                )
+
+            self.assertEqual(
+                (destination / "prior.txt").read_text(encoding="utf-8"),
+                "prior",
+            )
+            self.assertFalse(staging.exists())
 
     def test_release_archive_installs_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3562,6 +6372,13 @@ class ReleaseTests(unittest.TestCase):
                 guest = package_root / "guest" / name
                 guest.parent.mkdir(parents=True, exist_ok=True)
                 guest.write_bytes(name.encode("ascii"))
+            for name in (
+                build.OPENVMM_PROVENANCE_NAME,
+                build.KERNEL_PROVENANCE_NAME,
+            ):
+                provenance = package_root / "provenance" / name
+                provenance.parent.mkdir(parents=True, exist_ok=True)
+                provenance.write_bytes(name.encode("ascii"))
             common.write_sha256_sums(package_root)
 
             if os.name == "nt":
@@ -3602,6 +6419,14 @@ class ReleaseTests(unittest.TestCase):
                     (build_dir / name).read_bytes(),
                     name.encode("ascii"),
                 )
+            for name in (
+                build.OPENVMM_PROVENANCE_NAME,
+                build.KERNEL_PROVENANCE_NAME,
+            ):
+                self.assertEqual(
+                    (build_dir / name).read_bytes(),
+                    name.encode("ascii"),
+                )
 
 
 class SharedFileTests(unittest.TestCase):
@@ -3618,6 +6443,262 @@ class SharedFileTests(unittest.TestCase):
 
             with self.assertRaisesRegex(common.ScriptError, "checksum mismatch"):
                 common.verify_sha256_sums(root)
+
+    def test_checksum_manifest_rejects_unlisted_tampered_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "bin" / "openvmm"
+            provenance = root / "provenance" / "openvmm.provenance.json"
+            payload.parent.mkdir()
+            provenance.parent.mkdir()
+            payload.write_bytes(b"openvmm")
+            provenance.write_bytes(b"original provenance")
+            common.write_sha256_sums(root)
+            checksum_file = root / "SHA256SUMS"
+            checksum_file.write_text(
+                "\n".join(
+                    line
+                    for line in checksum_file.read_text(encoding="ascii").splitlines()
+                    if not line.endswith("provenance/openvmm.provenance.json")
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            provenance.write_bytes(b"tampered provenance")
+
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "unlisted file.*openvmm.provenance.json",
+            ):
+                common.verify_sha256_sums(root)
+
+    def test_checksum_manifest_rejects_missing_and_duplicate_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "payload"
+            payload.write_bytes(b"payload")
+            common.write_sha256_sums(root)
+            checksum_file = root / "SHA256SUMS"
+            line = checksum_file.read_text(encoding="ascii")
+
+            payload.unlink()
+            with self.assertRaisesRegex(common.ScriptError, "invalid checksum path"):
+                common.verify_sha256_sums(root)
+
+            payload.write_bytes(b"payload")
+            checksum_file.write_text(line + line, encoding="ascii")
+            with self.assertRaisesRegex(common.ScriptError, "duplicate checksum path"):
+                common.verify_sha256_sums(root)
+
+    def test_checksum_manifest_rejects_unsafe_paths_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "payload"
+            payload.write_bytes(b"payload")
+            common.write_sha256_sums(root)
+            checksum_file = root / "SHA256SUMS"
+            checksum = hashlib.sha256(b"payload").hexdigest()
+            checksum_file.write_text(
+                f"{checksum}  ../payload\n",
+                encoding="ascii",
+            )
+            with self.assertRaisesRegex(common.ScriptError, "malformed checksum line"):
+                common.verify_sha256_sums(root)
+
+            common.write_sha256_sums(root)
+            link = root / "payload-link"
+            try:
+                link.symlink_to(payload)
+            except OSError as error:
+                self.skipTest(f"symlinks are unavailable: {error}")
+            with self.assertRaisesRegex(common.ScriptError, "symlink is not allowed"):
+                common.verify_sha256_sums(root)
+
+    def test_release_archives_are_reproducible_with_fixed_layout_and_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-1.0.0-test"
+            executable = source / "bin" / "openvmm"
+            data = source / "provenance" / "openvmm.provenance.json"
+            executable.parent.mkdir(parents=True)
+            data.parent.mkdir()
+            executable.write_bytes(b"openvmm")
+            data.write_bytes(b"provenance")
+            executable.chmod(0o755)
+            data.chmod(0o644)
+            common.write_sha256_sums(source)
+
+            for suffix in (".tar.gz", ".zip"):
+                with self.subTest(suffix=suffix):
+                    first = root / f"first{suffix}"
+                    second = root / f"second{suffix}"
+                    release.create_release_archive(source, first)
+                    os.utime(executable, (1000, 1000))
+                    release.create_release_archive(source, second)
+                    self.assertEqual(first.read_bytes(), second.read_bytes())
+
+                    if suffix == ".tar.gz":
+                        with tarfile.open(first, "r:gz") as package:
+                            member_list = package.getmembers()
+                            members = {member.name: member for member in member_list}
+                        self.assertEqual(
+                            [member.name for member in member_list],
+                            sorted(member.name for member in member_list),
+                        )
+                        self.assertEqual(
+                            {member.name for member in member_list if member.isfile()},
+                            {
+                                f"{source.name}/SHA256SUMS",
+                                f"{source.name}/bin/openvmm",
+                                (f"{source.name}/provenance/openvmm.provenance.json"),
+                            },
+                        )
+                        self.assertEqual(
+                            members[f"{source.name}/bin/openvmm"].mode,
+                            0o755,
+                        )
+                        self.assertEqual(
+                            members[
+                                f"{source.name}/provenance/openvmm.provenance.json"
+                            ].mode,
+                            0o644,
+                        )
+                        self.assertTrue(
+                            all(member.mtime == 0 for member in members.values())
+                        )
+                    else:
+                        with zipfile.ZipFile(first) as package:
+                            member_list = package.infolist()
+                            members = {
+                                member.filename: member for member in member_list
+                            }
+                        self.assertEqual(
+                            [member.filename for member in member_list],
+                            sorted(member.filename for member in member_list),
+                        )
+                        self.assertEqual(
+                            {
+                                member.filename
+                                for member in member_list
+                                if not member.is_dir()
+                            },
+                            {
+                                f"{source.name}/SHA256SUMS",
+                                f"{source.name}/bin/openvmm",
+                                (f"{source.name}/provenance/openvmm.provenance.json"),
+                            },
+                        )
+                        executable_mode = (
+                            members[f"{source.name}/bin/openvmm"].external_attr >> 16
+                        ) & 0o777
+                        data_mode = (
+                            members[
+                                f"{source.name}/provenance/openvmm.provenance.json"
+                            ].external_attr
+                            >> 16
+                        ) & 0o777
+                        self.assertEqual(executable_mode, 0o755)
+                        self.assertEqual(data_mode, 0o644)
+                        self.assertTrue(
+                            all(
+                                member.date_time == (1980, 1, 1, 0, 0, 0)
+                                for member in members.values()
+                            )
+                        )
+
+    def test_release_archive_rejects_internally_inconsistent_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-1.0.0-test"
+            payload = source / "bin" / "openvmm"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"original")
+            common.write_sha256_sums(source)
+            destination = root / "release.tar.gz"
+            destination.write_bytes(b"prior archive")
+            create_archive = archive.create_reproducible_release_archive
+
+            def archive_mutated_source(source: Path, output: Path) -> None:
+                snapshot_payload = source / "bin" / "openvmm"
+                snapshot_payload.write_bytes(b"replacement")
+                create_archive(source, output)
+                snapshot_payload.write_bytes(b"original")
+
+            with (
+                patch.object(
+                    release,
+                    "create_reproducible_release_archive",
+                    side_effect=archive_mutated_source,
+                ),
+                self.assertRaisesRegex(common.ScriptError, "checksum mismatch"),
+            ):
+                release.create_release_archive(source, destination)
+
+            self.assertEqual(destination.read_bytes(), b"prior archive")
+            self.assertEqual(payload.read_bytes(), b"original")
+            self.assertEqual(
+                list(root.glob(".staging-*-release.tar.gz")),
+                [],
+            )
+
+    def test_release_snapshot_rejects_coherent_source_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-1.0.0-test"
+            payload = source / "bin" / "openvmm"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"original")
+            common.write_sha256_sums(source)
+            checksum_file = source / "SHA256SUMS"
+            original_checksum = checksum_file.read_bytes()
+            replacement = b"coherent replacement"
+            replacement_checksum = (
+                f"{hashlib.sha256(replacement).hexdigest()}  bin/openvmm\n"
+            ).encode("ascii")
+            destination = root / "release.tar.gz"
+            destination.write_bytes(b"prior archive")
+            copy_pinned_file = release._copy_pinned_regular_file
+
+            def replace_between_copies(
+                source_root: Path,
+                snapshot_root: Path,
+                relative_name: str,
+                expected_sha256: str,
+            ) -> None:
+                copy_pinned_file(
+                    source_root,
+                    snapshot_root,
+                    relative_name,
+                    expected_sha256,
+                )
+                if relative_name == "SHA256SUMS":
+                    payload.write_bytes(replacement)
+                    checksum_file.write_bytes(replacement_checksum)
+
+            try:
+                with (
+                    patch.object(
+                        release,
+                        "_copy_pinned_regular_file",
+                        side_effect=replace_between_copies,
+                    ),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "release snapshot source changed",
+                    ),
+                ):
+                    release.create_release_archive(source, destination)
+            finally:
+                if payload.exists():
+                    payload.write_bytes(b"original")
+                if checksum_file.exists():
+                    checksum_file.write_bytes(original_checksum)
+
+            self.assertEqual(destination.read_bytes(), b"prior archive")
+            self.assertEqual(payload.read_bytes(), b"original")
+            self.assertEqual(checksum_file.read_bytes(), original_checksum)
+            self.assertEqual(list(root.glob(".snapshot-*")), [])
+            self.assertEqual(list(root.glob(".staging-*-release.tar.gz")), [])
 
     def test_source_archives_are_reproducible(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3708,8 +6789,8 @@ class DownloadTests(unittest.TestCase):
                 )
                 output.write_bytes(payload)
 
-            with patch.object(build, "download", side_effect=write_verified):
-                build._download_verified(
+            with patch.object(common, "download", side_effect=write_verified):
+                common.download_verified(
                     "https://example.invalid/archive.tar.xz",
                     destination,
                     expected_sha256,

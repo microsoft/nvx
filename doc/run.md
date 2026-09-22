@@ -18,7 +18,15 @@ The CLI chooses WHP on Windows and KVM on Linux:
 python3 scripts/nvx.py run
 ```
 
-A successful boot prints `ALPINE-MICROVM-BOOT-OK` and opens a root shell.
+A successful Alpine boot prints both `ALPINE-MICROVM-BOOT-OK` and
+`NVX-GUEST-BOOT-OK: alpine`. Boot Ubuntu userland with the same NVX kernel:
+
+```bash
+python3 scripts/nvx.py run --guest ubuntu
+```
+
+Ubuntu defaults to 256 MiB and prints `NVX-GUEST-BOOT-OK: ubuntu`. It is
+Ubuntu userland with the NVX kernel, not a stock Ubuntu kernel or systemd VM.
 Exit cleanly from the guest with:
 
 ```sh
@@ -83,6 +91,11 @@ For Linux/MSHV, use the `linux-mshv` archive and replace `kvm` with `mshv`.
 If the artifacts are already installed in the repository layout, use
 `openvmm/target/release/openvmm[.exe]`, `build/vmlinux`, and
 `build/initramfs.cpio.gz` instead of the paths above.
+
+For Ubuntu userland, use 256 MiB initially and select
+`guest/initramfs-ubuntu.cpio.gz` or
+`build/initramfs-ubuntu.cpio.gz` as the initrd. The kernel path remains
+unchanged.
 
 Direct OpenVMM launches accept generic directional network defaults:
 
@@ -165,6 +178,8 @@ translations and additions:
 
 | `nvx.py run` | Direct OpenVMM option |
 | --- | --- |
+| `--guest alpine` | `--initrd .../initramfs.cpio.gz` on a fresh boot |
+| `--guest ubuntu` | `--initrd .../initramfs-ubuntu.cpio.gz` and a 256 MiB default on a fresh boot |
 | `--hypervisor auto` | `--hypervisor kvm` on Linux or `--hypervisor whp` on Windows |
 | `--memory-mib N` | `--memory NM` |
 | `--memory-capacity-mib N` | `--memory-capacity NM` on a fresh boot |
@@ -173,7 +188,8 @@ translations and additions:
 
 Always include `--single-process`. When restoring, omit `--memory`, `--kernel`,
 and `--initrd`, and add `--restore-entropy`; the wrapper adds this option
-automatically. For example:
+automatically. Do not pass `--guest ubuntu` during restore; the captured RAM
+and machine contract already identify the restored guest. For example:
 
 ```bash
 ./bin/openvmm \
@@ -273,20 +289,37 @@ The `sandbox` command launches the microVM with one to three compressed
 EROFS lower layers and one preformatted ext4 scratch image:
 
 ```bash
-python3 scripts/nvx.py sandbox \
-  --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
-  --layer runtime,/var/lib/nvx/runtime.erofs,22222222-2222-2222-2222-222222222222 \
-  --scratch /var/lib/nvx/scratch.ext4 \
-  --entrypoint /bin/workload \
-  --workload-user 65534:65534 \
-  --arg=--serve
+python3 scripts/nvx.py build-distro-layer \
+  --guest ubuntu \
+  --output build/ubuntu-distro.erofs
 ```
+
+Read the deterministic UUID from
+`build/ubuntu-distro.erofs.manifest.json`, create scratch independently with
+`mkfs.ext4`, then launch the Ubuntu workload through the existing Alpine
+control initramfs:
+
+```bash
+python3 scripts/nvx.py sandbox \
+  --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
+  --scratch /var/lib/nvx/scratch.ext4 \
+  --entrypoint /bin/sh \
+  --workload-user 65534:65534 \
+  --memory-mib 256
+```
+
+CI uses `/sbin/nvx-sandbox-smoke` as the entrypoint to verify Ubuntu identity,
+the fixed non-root account, and a scratch-backed `/tmp` write before clean
+guest exit.
 
 The layer UUID is the EROFS superblock UUID, not a content digest. The command
 validates the files before launch, orders roles independently of option order,
 attaches layers read-only, and reserves the writable slot for scratch.
-Conversion and scratch formatting stay off the start path; prepare those
-artifacts on Linux with `mkfs.erofs` and `mkfs.ext4`.
+Conversion and scratch formatting stay off the start path. The Ubuntu
+converter verifies immutable inputs, applies the deny-by-default metadata
+policy, creates `/nonexistent` for UID/GID 65534, and invokes `mkfs.erofs`.
+Systemd entrypoints are explicitly unsupported and do not relax the non-root,
+drop-all-capabilities sandbox policy.
 
 This is the cold-filesystem bootstrap described in
 [the sandbox design](design/sandbox-filesystem-and-agent-architecture.md#implemented-filesystem-bootstrap), not the final

@@ -12,7 +12,6 @@ import contextlib
 import ctypes
 import datetime as dt
 import errno
-import hashlib
 import io
 import ipaddress
 import json
@@ -32,6 +31,9 @@ from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 from string import Template
 from typing import TextIO, TypedDict, cast
+
+from . import common
+from .common import sha256_file
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
@@ -103,7 +105,7 @@ SNAPSHOT_POST_RESTORE_PATH = "/tmp/nvx-post-restore"
 SNAPSHOT_GUEST_DISPATCH_MARKER = b"NVX-SNAPSHOT-DISPATCHED"
 SNAPSHOT_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
 SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
-SHELL_SNAPSHOT_MEMORY_MIB = (64, 128, 256, 512)
+SHELL_SNAPSHOT_MEMORY_MIB = (128, 256, 512)
 SNAPSHOT_PROFILE_MEMORY_MIB = (*SHELL_SNAPSHOT_MEMORY_MIB, 1024)
 RESTORE_VCPU_TARGETS = (1, 2, 4, 8)
 RESTORE_MEMORY_BASE_MIB = 512
@@ -355,8 +357,8 @@ def configure_parser(
         default=None,
         metavar="MIB",
         help=(
-            "snapshot memory sizes (default: 64 128 256 512, or "
-            "64 128 256 512 1024 for --suite snapshot-profile)"
+            "snapshot memory sizes (default: 128 256 512, or "
+            "128 256 512 1024 for --suite snapshot-profile)"
         ),
     )
     parser.add_argument(
@@ -567,9 +569,10 @@ def append_network_arguments(
 
 def require_file(path: Path, description: str) -> Path:
     path = path.resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"{description} not found: {path}")
-    return path
+    try:
+        return common.require_file(path, description)
+    except common.ScriptError as error:
+        raise FileNotFoundError(str(error)) from error
 
 
 def parse_cpu_set(spec: str) -> set[int]:
@@ -1251,6 +1254,12 @@ class InteractiveProcess:
                 stderr=subprocess.STDOUT,
                 env=environment,
             )
+        try:
+            record_adversarial_openvmm_pid(self.process.pid, environment)
+        except BaseException:
+            terminate(self.process)
+            self.close()
+            raise
 
     def read_output(self, chunks: queue.Queue[bytes | None]) -> None:
         try:
@@ -1287,6 +1296,24 @@ class InteractiveProcess:
         if self.terminal_fd is not None:
             os.close(self.terminal_fd)
             self.terminal_fd = None
+
+
+def record_adversarial_openvmm_pid(
+    pid: int,
+    environment: dict[str, str],
+) -> None:
+    pid_journal = environment.get("NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL")
+    if pid_journal is None:
+        return
+    with Path(pid_journal).open("a", encoding="utf-8", newline="\n") as stream:
+        record = json.dumps(
+            {"pid": pid, "recorded_at_ns": time.time_ns()},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        stream.write(f"{record}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def cleanup_managed_tap(pid: int) -> None:
@@ -1898,6 +1925,7 @@ def run_guest_script(
     windows_cpus: set[int] | None = None,
     teardown_mode: str = "guest-exit",
     log_path: Path | None = None,
+    boot_marker: bytes = BOOT_MARKER,
 ) -> GuestCommandResult:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
@@ -1932,7 +1960,7 @@ def run_guest_script(
                 break
             output.extend(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
-            if not input_sent and BOOT_MARKER in output:
+            if not input_sent and boot_marker in output:
                 interaction.write_input(script.encode("utf-8"))
                 input_sent = True
             if input_sent and contains_output_line(output, completion_marker):
@@ -3734,19 +3762,11 @@ def _git_status(repository: Path) -> list[str] | None:
         return None
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _device_io_helper_provenance(
     args: argparse.Namespace, initrd: Path
 ) -> dict[str, str]:
     source = require_file(
-        args.nvx_dir.resolve() / "alpine" / "nvx-device-io.c",
+        args.nvx_dir.resolve() / "guest" / "common" / "nvx-device-io.c",
         "device I/O helper source",
     )
     manifest_path = require_file(
@@ -3762,7 +3782,7 @@ def _device_io_helper_provenance(
         raise ValueError(
             f"invalid nvx-device-io provenance in {manifest_path}"
         ) from error
-    actual_source_sha256 = _sha256_file(source)
+    actual_source_sha256 = sha256_file(source)
     if source_sha256 != actual_source_sha256:
         raise ValueError(
             "initramfs device I/O helper source does not match the current checkout"
@@ -3852,10 +3872,10 @@ def write_benchmark_metadata(
     }
     if device_io:
         document["artifact_sha256"] = {
-            "openvmm": _sha256_file(executable),
-            "kernel": _sha256_file(kernel),
-            "initrd": _sha256_file(initrd),
-            "benchmark_coordinator": _sha256_file(Path(__file__)),
+            "openvmm": sha256_file(executable),
+            "kernel": sha256_file(kernel),
+            "initrd": sha256_file(initrd),
+            "benchmark_coordinator": sha256_file(Path(__file__)),
         }
         document["device_io_helper"] = _device_io_helper_provenance(args, initrd)
     path = output_dir / BENCHMARK_METADATA_FILENAME
@@ -4103,6 +4123,7 @@ def capture_snapshot(
     profile_sink: list[dict[str, object]] | None = None,
     post_restore_script: str | None = None,
     log_path: Path | None = None,
+    boot_marker: bytes = BOOT_MARKER,
 ) -> tuple[float, float, float, int]:
     if snapshot_path.exists():
         shutil.rmtree(snapshot_path)
@@ -4188,7 +4209,7 @@ def capture_snapshot(
                 and contains_output_line(output, SNAPSHOT_GUEST_DISPATCH_MARKER)
             ):
                 snapshot_guest_dispatched_ns = time.perf_counter_ns()
-            if not boot_seen and BOOT_MARKER in output:
+            if not boot_seen and boot_marker in output:
                 boot_seen = True
                 if processors is None:
                     request_snapshot()
@@ -5447,6 +5468,29 @@ def run_native_linux(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_kvm_worker(command: Sequence[str], result_kind: str) -> object:
+    result_prefix = (
+        KVM_RESULT_PREFIX,
+        KVM_E2E_RESULT_PREFIX,
+        KVM_RESTORE_RESULT_PREFIX,
+        KVM_SNAPSHOT_RESULT_PREFIX,
+    )[("", "e2e", "restore", "snapshot").index(result_kind)]
+    worker = f"KVM {result_kind}".rstrip()
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        print(completed.stdout, end="")
+        for line in completed.stdout.splitlines():
+            if line.startswith(result_prefix):
+                return json.loads(line.removeprefix(result_prefix))
+        raise RuntimeError(f"{worker} worker did not emit a result")
+    except subprocess.CalledProcessError as error:
+        if error.stdout:
+            print(error.stdout, end="", file=sys.stderr)
+        if error.stderr:
+            print(error.stderr, end="", file=sys.stderr)
+        raise
+
+
 def benchmark_kvm(
     args: argparse.Namespace,
     executable: Path,
@@ -5487,21 +5531,7 @@ def benchmark_kvm(
     if args.net is not None:
         command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_RESULT_PREFIX):
-                return cast(
-                    BenchmarkResult,
-                    json.loads(line.removeprefix(KVM_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(BenchmarkResult, _run_kvm_worker(command, ""))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)
@@ -5547,21 +5577,7 @@ def benchmark_e2e_kvm(
     if args.net is not None:
         command.extend(("--net", args.net))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_E2E_RESULT_PREFIX):
-                return cast(
-                    KvmE2EResult,
-                    json.loads(line.removeprefix(KVM_E2E_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM e2e worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(KvmE2EResult, _run_kvm_worker(command, "e2e"))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)
@@ -5607,21 +5623,7 @@ def benchmark_snapshot_restore_kvm(
     if args.net is not None:
         command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_RESTORE_RESULT_PREFIX):
-                return cast(
-                    BenchmarkResult,
-                    json.loads(line.removeprefix(KVM_RESTORE_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM restore worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(BenchmarkResult, _run_kvm_worker(command, "restore"))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)
@@ -5665,21 +5667,7 @@ def benchmark_snapshot_kvm(
     if args.net is not None:
         command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_SNAPSHOT_RESULT_PREFIX):
-                return cast(
-                    SnapshotCaptureResult,
-                    json.loads(line.removeprefix(KVM_SNAPSHOT_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM snapshot worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(SnapshotCaptureResult, _run_kvm_worker(command, "snapshot"))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)

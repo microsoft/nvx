@@ -13,32 +13,40 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
 from .benchmark import (
-    BOOT_MARKER,
     RESTORE_MARKER,
     SMP_PROBE_COMPLETION_MARKER,
-    capture_snapshot,
+    GuestCommandResult,
     measure_once,
     positive_float,
     positive_int,
-    run_guest_script,
+    record_adversarial_openvmm_pid,
     smp_probe_script,
     snapshot_restore_command,
     whp_stable_clocksource_wait_script,
     workload_boot_command,
 )
+from .benchmark import (
+    capture_snapshot as _capture_snapshot,
+)
+from .benchmark import (
+    run_guest_script as _run_guest_script,
+)
 from .ci import OPENVMM_TEST_BACKENDS, validate_openvmm_test_backend
 from .common import (
     BUILD_DIR,
+    ScriptError,
     artifact_path,
     openvmm_binary_path,
     require_file,
     sha256_file,
 )
 from .control_session import ControlSession
+from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .openvmm_process import OpenvmmProcess, TcpConsole
 
 MICROVM_TEST_SCENARIOS = (
@@ -48,6 +56,8 @@ MICROVM_TEST_SCENARIOS = (
     "denied-filesystem-paths",
     "endpoint-policy-snapshot",
     "filesystem-snapshot",
+    "guest-boot",
+    "guest-identity",
     "host-loopback-policy",
     "lifecycle",
     "l3-l4-egress-policy",
@@ -66,6 +76,9 @@ MICROVM_TEST_SCENARIOS = (
     "structured-outcome",
     "virtio-net",
     "workload-identity",
+)
+UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(
+    ("console-snapshot", "sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
 )
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -111,6 +124,9 @@ SCRATCH_PAIRED_POST_MARKER = b"NVX-SCRATCH-PAIRED-POST-OUT"
 SCRATCH_PAIRED_RESTORED_MARKER = b"NVX-SCRATCH-PAIRED-RESTORED"
 SCRATCH_FRESH_POST_MARKER = b"NVX-SCRATCH-FRESH-POST-OUT"
 WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
+BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
+GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
+GUEST_IDENTITY_COMPLETION_MARKER = b"NVX-GUEST-IDENTITY-OK"
 OUTCOME_TOP_LEVEL_FIELDS = frozenset(
     {
         "schema_version",
@@ -144,6 +160,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         choices=OPENVMM_TEST_BACKENDS,
         required=True,
     )
+    parser.add_argument("--guest", choices=GUEST_NAMES, default="alpine")
     parser.add_argument(
         "--scenario",
         action="append",
@@ -159,7 +176,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         metavar="COUNT",
         help="processor counts for SMP and restore tests (default: 1 2 4 8)",
     )
-    parser.add_argument("--memory-mib", type=positive_int, default=128)
+    parser.add_argument(
+        "--memory-mib",
+        type=positive_int,
+        help="guest RAM; defaults to the selected guest profile",
+    )
     parser.add_argument(
         "--timeout",
         type=positive_float,
@@ -173,6 +194,62 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         help="directory for complete per-scenario OpenVMM logs",
     )
     parser.set_defaults(handler=run)
+
+
+def run_guest_script(
+    command: Sequence[str],
+    script: str,
+    completion_marker: bytes,
+    *,
+    timeout: float,
+    windows_cpus: set[int] | None = None,
+    teardown_mode: str = "guest-exit",
+    log_path: Path | None = None,
+) -> GuestCommandResult:
+    return _run_guest_script(
+        command,
+        script,
+        completion_marker,
+        timeout=timeout,
+        windows_cpus=windows_cpus,
+        teardown_mode=teardown_mode,
+        log_path=log_path,
+        boot_marker=BOOT_MARKER,
+    )
+
+
+def capture_snapshot(
+    command: Sequence[str],
+    snapshot_path: Path,
+    *,
+    backend: str,
+    timeout: float,
+    windows_cpus: set[int] | None = None,
+    processors: int | None = None,
+    teardown_mode: str = "guest-exit",
+    smp_network_gateway: str | None = None,
+    smp_ioapic_irq: int | None = None,
+    snapshot_profile: bool = False,
+    profile_sink: list[dict[str, object]] | None = None,
+    post_restore_script: str | None = None,
+    log_path: Path | None = None,
+) -> tuple[float, float, float, int]:
+    return _capture_snapshot(
+        command,
+        snapshot_path,
+        backend=backend,
+        timeout=timeout,
+        windows_cpus=windows_cpus,
+        processors=processors,
+        teardown_mode=teardown_mode,
+        smp_network_gateway=smp_network_gateway,
+        smp_ioapic_irq=smp_ioapic_irq,
+        snapshot_profile=snapshot_profile,
+        profile_sink=profile_sink,
+        post_restore_script=post_restore_script,
+        log_path=log_path,
+        boot_marker=BOOT_MARKER,
+    )
 
 
 def _read_script(name: str) -> str:
@@ -301,6 +378,14 @@ def _read_outcome_report(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], raw)
 
 
+def _preserve_outcome_report(path: Path, report: dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def _count_line_suffix(output: bytes, marker: bytes) -> int:
     return sum(line.endswith(marker) for line in _output_lines(output))
 
@@ -419,6 +504,74 @@ def _restore_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     return environment
+
+
+def run_guest_boot(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    descriptor: GuestDescriptor,
+    *,
+    memory_mib: int,
+    timeout: float,
+    log_path: Path,
+) -> None:
+    command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0",
+    )
+    run_guest_script(
+        command,
+        (
+            "set -e\n"
+            f"grep -Fqx 'ID={descriptor.os_release_id}' /etc/os-release\n"
+            f"grep -Fq '{descriptor.release}' /etc/os-release\n"
+            "echo NVX-GUEST-BOOT-CHECK-OK\n"
+            "nvx-exit 0\n"
+        ),
+        GUEST_BOOT_COMPLETION_MARKER,
+        timeout=timeout,
+        log_path=log_path,
+    )
+
+
+def run_guest_identity(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    descriptor: GuestDescriptor,
+    *,
+    memory_mib: int,
+    timeout: float,
+    log_path: Path,
+) -> None:
+    command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0",
+    )
+    run_guest_script(
+        command,
+        (
+            "set -e\n"
+            f"grep -Fqx 'ID={descriptor.os_release_id}' /etc/os-release\n"
+            f"grep -Fq '{descriptor.release}' /etc/os-release\n"
+            "echo NVX-GUEST-IDENTITY-OK\n"
+            "nvx-exit 0\n"
+        ),
+        GUEST_IDENTITY_COMPLETION_MARKER,
+        timeout=timeout,
+        log_path=log_path,
+    )
 
 
 def run_lifecycle(
@@ -556,6 +709,7 @@ def run_managed_lifecycle(
                     stderr=subprocess.STDOUT,
                     env=environment,
                 )
+                record_adversarial_openvmm_pid(process.pid, environment)
                 if process.stdin is None:
                     raise RuntimeError("failed to create control capability pipe")
                 process.stdin.write(capability)
@@ -620,6 +774,10 @@ def run_managed_lifecycle(
                         f"managed OpenVMM process exited with status {result}"
                     )
                 report = _read_outcome_report(report_path)
+                _preserve_outcome_report(
+                    output_dir / "managed-outcome.json",
+                    report,
+                )
                 if report["backend"] != backend or report["outcome"] != {
                     "operation": "managed",
                     "category": "success",
@@ -724,6 +882,10 @@ def run_structured_outcome(
             raise RuntimeError("structured outcome run lost the guest exit result")
 
         report = _read_outcome_report(report_path)
+        _preserve_outcome_report(
+            output_dir / "structured-outcome.json",
+            report,
+        )
         if report["backend"] != backend or report["outcome"] != {
             "operation": "run",
             "category": "guest-exit",
@@ -753,7 +915,6 @@ def run_structured_outcome(
                 raise RuntimeError(
                     f"structured outcome exposed sensitive value {forbidden!r}"
                 )
-
         rejected_path = root / "rejected.json"
         rejected = workload_boot_command(
             executable,
@@ -782,6 +943,10 @@ def run_structured_outcome(
                 "structured policy rejection did not fail before guest boot"
             )
         rejected_report = _read_outcome_report(rejected_path)
+        _preserve_outcome_report(
+            output_dir / "structured-outcome-rejected.json",
+            rejected_report,
+        )
         if rejected_report["outcome"] != {
             "operation": "run",
             "category": "vmm-failure",
@@ -3355,16 +3520,67 @@ def run_snapshot_tiers(
 
 def run(args: argparse.Namespace) -> int:
     validate_openvmm_test_backend(args.backend)
+    descriptor = guest_descriptor(args.guest)
+    if args.memory_mib is None:
+        args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(artifact_path("vmlinux"), "microVM PVH kernel")
     initrd = require_file(
-        artifact_path("initramfs.cpio.gz"),
-        "microVM Alpine initramfs",
+        artifact_path(descriptor.initramfs_name),
+        f"microVM {descriptor.distribution} initramfs",
     )
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    scenarios = tuple(dict.fromkeys(args.scenario or MICROVM_TEST_SCENARIOS))
+    if args.scenario is None:
+        scenarios = tuple(
+            scenario
+            for scenario in MICROVM_TEST_SCENARIOS
+            if descriptor.name != "ubuntu"
+            or scenario not in UBUNTU_UNSUPPORTED_SCENARIOS
+        )
+    else:
+        scenarios = tuple(dict.fromkeys(args.scenario))
+        unsupported: set[str] = set()
+        if descriptor.name == "ubuntu":
+            for scenario in UBUNTU_UNSUPPORTED_SCENARIOS:
+                if scenario in scenarios:
+                    unsupported.add(scenario)
+        if unsupported:
+            raise ScriptError(
+                "Ubuntu guest does not support correctness scenario(s): "
+                + ", ".join(sorted(unsupported))
+            )
 
+    if "guest-boot" in scenarios:
+        print(
+            f"Running {descriptor.distribution} initramfs boot correctness "
+            f"on OpenVMM/{args.backend}"
+        )
+        run_guest_boot(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            descriptor,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            log_path=output_dir / f"{descriptor.name}-guest-boot.log",
+        )
+    if "guest-identity" in scenarios:
+        print(
+            f"Running {descriptor.distribution} identity correctness "
+            f"on OpenVMM/{args.backend}"
+        )
+        run_guest_identity(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            descriptor,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            log_path=output_dir / f"{descriptor.name}-guest-identity.log",
+        )
     if "console-exit" in scenarios:
         for processors in dict.fromkeys(args.processors):
             print(

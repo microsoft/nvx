@@ -85,16 +85,20 @@ runs:
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
-        path: ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore OpenVMM binary on Windows
       id: restore-openvmm-binary-windows
       if: runner.os == 'Windows'
       uses: actions/cache/restore@v5
       with:
-        path: ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Restore shared Cargo cache on Linux
       id: restore-cargo-linux
@@ -155,6 +159,7 @@ runs:
         cp "openvmm/target/${{ inputs.target }}/release/openvmm" \
           openvmm/target/release/openvmm
         chmod +x openvmm/target/release/openvmm
+        python3 scripts/nvx.py record-openvmm-provenance
 
     - name: Build OpenVMM on Windows
       if: runner.os == 'Windows' && inputs.build-mode == 'native' && steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
@@ -176,6 +181,19 @@ runs:
           throw "OpenVMM binary was not produced: ${{ inputs.binary-path }}"
         }
 
+    - name: Verify OpenVMM provenance on Linux
+      if: runner.os != 'Windows'
+      shell: bash
+      run: test -f build/openvmm.provenance.json
+
+    - name: Verify OpenVMM provenance on Windows
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        if (-not (Test-Path -LiteralPath "build/openvmm.provenance.json" -PathType Leaf)) {
+          throw "OpenVMM provenance was not produced"
+        }
+
     - name: Save OpenVMM binary on Linux
       if: >-
         success() &&
@@ -187,8 +205,10 @@ runs:
       env:
         PATH: ${{ steps.cache-tools-linux.outputs.path }}
       with:
-        path: ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
 
     - name: Save OpenVMM binary on Windows
       if: >-
@@ -199,5 +219,7 @@ runs:
         steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
-        path: ${{ inputs.binary-path }}
-        key: openvmm-binary-v4-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+        path: |
+          build/openvmm.provenance.json
+          ${{ inputs.binary-path }}
+        key: openvmm-binary-v5-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}

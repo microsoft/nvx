@@ -164,26 +164,63 @@ Run all lint and formatting checks before submitting a change:
 ```bash
 python3 -m ruff check scripts benchmarks
 shellcheck --shell=sh \
-  alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-  alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/init guest/alpine/nvx-container-enter \
+  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+  guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
+  guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
+  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+shellcheck --shell=bash \
+  .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 python3 -m pyright --pythonplatform Linux
 python3 -m pyright --pythonplatform Windows
 python3 -m ruff format --check scripts benchmarks
 shfmt -d -ln posix -i 4 -ci \
-  alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-  alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/init guest/alpine/nvx-container-enter \
+  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+  guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
+  guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
+  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+shfmt -d -ln bash -i 4 -ci \
+  .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 ```
 
 Pyright runs in strict mode for both Linux and Windows platform APIs.
+
+### Adversarial campaign controller
+
+The optional `test-adversarial` command additionally requires GitHub Copilot
+CLI to be installed and authenticated before the run. Validate the controller
+without changing authentication:
+
+```bash
+copilot --version
+```
+
+The harness performs its own non-interactive authenticated smoke prompt and
+fails preflight if it cannot complete. It deliberately does not install
+Copilot CLI or run `copilot login`. The repository's
+`.github/workflows/copilot-setup-steps.yml` installs `gh-aw`; it does not
+satisfy this prerequisite.
+
+Production campaigns also require an administrator-owned, no-argument
+executor wrapper that provisions a separate disposable target and forwards
+the bounded executor protocol. See
+[Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
+for the containment and credential requirements.
 
 Apply the configured Python and POSIX shell formatters with:
 
 ```bash
 python3 -m ruff format scripts benchmarks
 shfmt -w -ln posix -i 4 -ci \
-  alpine/init alpine/nvx-container-enter alpine/nvx-container-launch \
-  alpine/nvx-exit alpine/nvx-hostmount alpine/nvx-init-agent \
-  alpine/nvx-snapshot scripts/setup/setup-linux-mshv.sh
+  guest/common/init guest/alpine/nvx-container-enter \
+  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/common/nvx-hostmount guest/common/nvx-identity-probe \
+  guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
+  guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
+  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+shfmt -w -ln bash -i 4 -ci \
+  .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 ```

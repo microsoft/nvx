@@ -30,6 +30,16 @@ runs:
             --history-dir data
           git add data/*.csv
 
+          unexpected_paths="$(
+            git diff --cached --no-renames --name-only |
+              grep -Ev '^data/[^/]+\.csv$' || true
+          )"
+          if [[ -n "${unexpected_paths}" ]]; then
+            echo "::error::Refusing to persist changes outside data/*.csv:"
+            echo "${unexpected_paths}"
+            exit 1
+          fi
+
           if git diff --cached --quiet; then
             echo "No new performance results to persist"
             exit 0

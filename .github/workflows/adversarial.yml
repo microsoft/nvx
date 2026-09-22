@@ -1,0 +1,122 @@
+name: NVX adversarial campaigns
+
+on:
+  schedule:
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Backend to exercise
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - kvm
+          - mshv
+          - whp
+      campaign:
+        description: Campaign family to exercise
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - workload-isolation
+          - guest-isolation
+          - snapshot-isolation
+      seed:
+        description: Deterministic strategist seed
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adversarial-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  campaign:
+    name: ${{ matrix.backend }} / ${{ matrix.campaign }}
+    if: >-
+      ${{
+        github.repository == 'microsoft/nvx' &&
+        github.ref == 'refs/heads/dev'
+      }}
+    runs-on: [self-hosted, nvx-adversarial-controller]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: >-
+          ${{
+            fromJSON(
+              github.event_name == 'workflow_dispatch' &&
+              inputs.backend != 'all' &&
+              format('["{0}"]', inputs.backend) ||
+              '["kvm","mshv","whp"]'
+            )
+          }}
+        campaign: >-
+          ${{
+            fromJSON(
+              github.event_name == 'workflow_dispatch' &&
+              inputs.campaign != 'all' &&
+              format('["{0}"]', inputs.campaign) ||
+              '["workload-isolation","guest-isolation","snapshot-isolation"]'
+            )
+          }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Checkout OpenVMM on the controller
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Validate preinstalled controller and executor wrapper
+        shell: bash
+        env:
+          NVX_ADVERSARIAL_EXECUTOR: ${{ vars.NVX_ADVERSARIAL_EXECUTOR }}
+        run: |
+          set -euo pipefail
+          test -n "${NVX_ADVERSARIAL_EXECUTOR}"
+          command -v "${NVX_ADVERSARIAL_EXECUTOR}"
+          command -v copilot
+          copilot --version
+          python3 scripts/nvx.py verify
+
+      - name: Run bounded adversarial campaign
+        shell: bash
+        env:
+          NVX_ADVERSARIAL_EXECUTOR: ${{ vars.NVX_ADVERSARIAL_EXECUTOR }}
+          CAMPAIGN_SEED: ${{ github.event_name == 'workflow_dispatch' && inputs.seed || github.run_id }}
+        run: >-
+          python3 scripts/nvx.py test-adversarial
+          --backend "${{ matrix.backend }}"
+          --campaign "${{ matrix.campaign }}"
+          --host-type virtual-machine
+          --budget-seconds 900
+          --budget-actions 8
+          --budget-ai-credits 300
+          --seed "${CAMPAIGN_SEED}"
+          --output-dir "build/test-results/adversarial-${{ matrix.backend }}-${{ matrix.campaign }}"
+          --executor-command "${NVX_ADVERSARIAL_EXECUTOR}"
+
+      - name: Upload public campaign metadata
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: adversarial-public-${{ matrix.backend }}-${{ matrix.campaign }}-${{ github.run_id }}
+          path: |
+            build/test-results/adversarial-${{ matrix.backend }}-${{ matrix.campaign }}/run-*/public-summary.json
+            build/test-results/adversarial-${{ matrix.backend }}-${{ matrix.campaign }}/run-*/actions.jsonl
+            build/test-results/adversarial-${{ matrix.backend }}-${{ matrix.campaign }}/run-*/replay-manifest.json
+          if-no-files-found: error
+          retention-days: 14

@@ -27,25 +27,4 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
-      run: |
-        set -euo pipefail
-        version="$(cat VERSION)"
-        short_sha="${GITHUB_SHA:0:12}"
-        tag="v${version}-dev.${short_sha}"
-        packages=(
-          "dist/nvx-${version}-linux-kvm.tar.gz"
-          "dist/nvx-${version}-linux-mshv.tar.gz"
-          "dist/nvx-${version}-windows-whp.zip"
-        )
-        for package in "${packages[@]}"; do
-          test -f "${package}"
-        done
-        if gh release view "${tag}" >/dev/null 2>&1; then
-          gh release upload "${tag}" "${packages[@]}" --clobber
-        else
-          gh release create "${tag}" "${packages[@]}" \
-            --target "${GITHUB_SHA}" \
-            --title "NVX ${version} dev ${short_sha}" \
-            --notes "Automated development release for ${GITHUB_SHA}." \
-            --prerelease
-        fi
+      run: python3 -u scripts/publish_development_release.py

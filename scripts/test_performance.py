@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # pyright: reportPrivateUsage=false
 
+import contextlib
+import io
 import json
 import statistics
 import sys
@@ -91,12 +93,6 @@ NETWORK_LOG = """
 """
 
 SHELL_SNAPSHOT_LOG = """
-== 64 MiB ==
-    cold boot           : median   510.0 ms   (min 500.0, max 1,510.0, n=5)
-             fast path   505.0 ms (n=4)  |  slow path  1510.0 ms (n=1, +~1005 ms TSC PIT-calib)
-    snapshot restore    : median     5.0 ms   (min 4.8, max 5.2, n=5)
-    speedup             : 101x (fast-path cold) .. 102x (median cold) faster via snapshot
-
 == 128 MiB ==
     cold boot           : median   520.0 ms   (min 510.0, max 530.0, n=5)
     snapshot restore    : median     5.5 ms   (min 5.3, max 5.7, n=5)
@@ -199,6 +195,26 @@ def lifecycle_document(
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_ci_one_vcpu_metric_count_matches_collectors(self):
+        expected = len(
+            performance.SHARED_METRICS | performance.LIFECYCLE_METRICS
+        ) + len(performance.DEVICE_IO_METRIC_NAMES)
+        action = (
+            Path(__file__).parents[1]
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(expected, 34)
+        self.assertIn("-ne 35 ]]", action)
+        self.assertIn("Count -ne 34", action)
+        self.assertEqual(
+            action.count("Expected 34 microVM one-vCPU metrics"),
+            2,
+        )
+
     def test_collect_cli_accepts_lifecycle_input(self):
         args = nvx.parse_args(
             [
@@ -417,6 +433,54 @@ class PerformanceTests(unittest.TestCase):
             769.0158,
             744.6426,
         ]
+        pooled_runner_stall = [
+            736.2791,
+            753.5391,
+            780.7033,
+            753.063,
+            1272.4222,
+            1260.2828,
+            1271.4175,
+            1297.1824,
+            1233.186,
+            747.7988,
+        ]
+        minority_fast_path = [
+            763.3528,
+            1219.9358,
+            1242.3189,
+            1256.6633,
+            1275.0555,
+            1274.4436,
+            737.5818,
+            1257.1264,
+            1240.7679,
+            1231.9344,
+        ]
+        consecutive_stalls = [
+            778.5982,
+            770.1922,
+            1238.3559,
+            1250.9203,
+            1238.6946,
+            1260.9938,
+            1232.4539,
+            1251.3472,
+            727.1835,
+            755.3567,
+        ]
+        split_regimes = [
+            757.897,
+            739.761,
+            750.972,
+            740.019,
+            738.420,
+            977.413,
+            1255.833,
+            1271.877,
+            1266.763,
+            1232.285,
+        ]
         uniformly_slow = [1200.0 + index for index in range(10)]
         fast_outliers = [
             3.975,
@@ -430,10 +494,31 @@ class PerformanceTests(unittest.TestCase):
             3.741,
             3.919,
         ]
-        for name, samples, rejected in (
-            ("host-stall", unstable, True),
-            ("uniform-slowdown", uniformly_slow, False),
-            ("two-fast-outliers", fast_outliers, False),
+        single_slow_outlier = [
+            809.1277,
+            805.7773,
+            1399.4701,
+            772.9118,
+            784.0111,
+            742.691,
+            760.8222,
+            762.4693,
+            746.5348,
+            733.4866,
+        ]
+        for name, samples, error_pattern in (
+            ("host-stall", unstable, r"p25.*idle host"),
+            ("pooled-runner-stall", pooled_runner_stall, r"p25.*idle host"),
+            (
+                "minority-fast-path",
+                minority_fast_path,
+                r"split 2/8.*59\.8% gap.*idle host",
+            ),
+            ("consecutive-stalls", consecutive_stalls, r"60\.4% above p25.*idle host"),
+            ("split-regimes", split_regimes, r"split 5/5.*29\.0% gap.*idle host"),
+            ("uniform-slowdown", uniformly_slow, None),
+            ("two-fast-outliers", fast_outliers, None),
+            ("single-slow-outlier", single_slow_outlier, None),
         ):
             with self.subTest(name=name):
                 document = lifecycle_document("whp")
@@ -450,10 +535,10 @@ class PerformanceTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temporary:
                     source = Path(temporary) / "acceptance.json"
                     source.write_text(json.dumps(document), encoding="utf-8")
-                    if rejected:
+                    if error_pattern is not None:
                         with self.assertRaisesRegex(
-                            performance.PerformanceError,
-                            r"unstable snapshot generation.*p25.*idle host",
+                            performance.UnstablePerformanceError,
+                            rf"unstable snapshot generation.*{error_pattern}",
                         ):
                             performance.read_lifecycle_data(
                                 "windows-whp-virtual-machine", source
@@ -462,6 +547,77 @@ class PerformanceTests(unittest.TestCase):
                         performance.read_lifecycle_data(
                             "windows-whp-virtual-machine", source
                         )
+
+    def test_unstable_snapshot_generation_uses_temporary_failure_exit_code(self):
+        samples = [
+            736.2791,
+            753.5391,
+            780.7033,
+            753.063,
+            1272.4222,
+            1260.2828,
+            1271.4175,
+            1297.1824,
+            1233.186,
+            747.7988,
+        ]
+        document = lifecycle_document("whp")
+        capture = cast(
+            dict[str, object],
+            cast(dict[str, object], document["snapshot_capture"])["whp"],
+        )
+        capture.update(
+            samples_ms=samples,
+            p50_ms=statistics.median(samples),
+            min_ms=min(samples),
+            max_ms=max(samples),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "acceptance.json"
+            source.write_text(json.dumps(document), encoding="utf-8")
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                status = nvx.main(
+                    [
+                        "performance",
+                        "validate-openvmm",
+                        "--platform",
+                        "windows-whp-virtual-machine",
+                        "--input",
+                        str(source),
+                    ]
+                )
+
+        self.assertEqual(status, performance.UNSTABLE_LIFECYCLE_EXIT_CODE)
+        self.assertEqual(status, 75)
+        self.assertIn("unstable snapshot generation", stderr.getvalue())
+
+    def test_invalid_openvmm_result_uses_regular_failure_exit_code(self):
+        document = lifecycle_document("whp")
+        controls = cast(dict[str, object], document["controls"])
+        controls["backend"] = "kvm"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "acceptance.json"
+            source.write_text(json.dumps(document), encoding="utf-8")
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                status = nvx.main(
+                    [
+                        "performance",
+                        "validate-openvmm",
+                        "--platform",
+                        "windows-whp-virtual-machine",
+                        "--input",
+                        str(source),
+                    ]
+                )
+
+        self.assertEqual(status, 2)
+        self.assertIn("does not match platform", stderr.getvalue())
 
     def test_collect_appends_ci_benchmark_table(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -630,15 +786,18 @@ class PerformanceTests(unittest.TestCase):
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 31)
+            self.assertEqual(len(results), 29)
             by_metric = {result.metric: result for result in results}
             self.assertEqual(by_metric["cold_start_base"].p50, 101.0)
             self.assertEqual(by_metric["cold_start_cryptomgr_notests"].p50, 109.0)
             self.assertEqual(by_metric["virtfs_live_read"].p50, 1200.0)
             self.assertEqual(by_metric["virtfs_live_read"].direction, "higher")
             self.assertEqual(by_metric["network_snapshot_restore"].p50, 40.0)
-            self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].p50, 510.0)
-            self.assertEqual(by_metric["shell_snapshot_cold_64_mib"].direction, "lower")
+            self.assertEqual(by_metric["shell_snapshot_cold_128_mib"].p50, 520.0)
+            self.assertEqual(
+                by_metric["shell_snapshot_cold_128_mib"].direction,
+                "lower",
+            )
             self.assertEqual(by_metric["shell_snapshot_restore_512_mib"].p50, 7.0)
             self.assertEqual(by_metric["openvmm_snapshot_generation"].p50, 31.0)
             self.assertEqual(
@@ -647,7 +806,7 @@ class PerformanceTests(unittest.TestCase):
             )
             markdown = (root / "summary.md").read_text(encoding="utf-8")
             self.assertIn("## Linux / KVM benchmark results", markdown)
-            self.assertEqual(markdown.count("\n| `"), 31)
+            self.assertEqual(markdown.count("\n| `"), 29)
             self.assertIn(
                 "| `virtfs_live_read` | 1200.00 MB/s | Higher is better |", markdown
             )
@@ -680,7 +839,7 @@ class PerformanceTests(unittest.TestCase):
             )
             results = performance.read_results(result_path)
 
-            self.assertEqual(len(results), 23)
+            self.assertEqual(len(results), 21)
             self.assertIn(
                 "network_snapshot_restore",
                 {result.metric for result in results},
@@ -700,7 +859,7 @@ class PerformanceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 performance.PerformanceError,
-                r"exactly 23 metrics \(missing: network_snapshot_cold",
+                r"exactly 21 metrics \(missing: network_snapshot_cold",
             ):
                 performance.collect_results(
                     "linux-kvm",
@@ -1637,7 +1796,7 @@ class PerformanceTests(unittest.TestCase):
                 "virtfs_measured_runs": 10,
                 "payload_mib": 64,
                 "virtfs_memory_mib": 512,
-                "shell_memories_mib": [64, 128, 256, 512],
+                "shell_memories_mib": [128, 256, 512],
                 "network_memory_mib": 256,
             }
             (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(

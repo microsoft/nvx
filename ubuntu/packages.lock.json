@@ -1,0 +1,127 @@
+{
+  "format": 1,
+  "release": "26.04.1",
+  "codename": "resolute",
+  "architecture": "amd64",
+  "packages": [
+    {
+      "name": "busybox-static",
+      "source_name": "busybox",
+      "source_version": "1:1.37.0-7ubuntu1",
+      "version": "1:1.37.0-7ubuntu1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/b/busybox/busybox-static_1.37.0-7ubuntu1_amd64.deb",
+      "sha256": "fd605342f62268753076aa7d9321ff098b36ba53e47434145a9aedc28fd141a4",
+      "license_path": "/usr/share/doc/busybox-static/copyright",
+      "required_by": [
+        "nvx-initramfs"
+      ],
+      "depends": "",
+      "pre_depends": "",
+      "component": "main",
+      "suite": "resolute"
+    },
+    {
+      "name": "iputils-ping",
+      "source_name": "iputils",
+      "source_version": "3:20250605-1ubuntu1",
+      "version": "3:20250605-1ubuntu1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/i/iputils/iputils-ping_20250605-1ubuntu1_amd64.deb",
+      "sha256": "50e2a08456351755e033ae52fd5c2a2d27af3ffe2a8a6e01d29fc58fd5529b96",
+      "license_path": "/usr/share/doc/iputils-ping/copyright",
+      "required_by": [
+        "nvx-initramfs"
+      ],
+      "depends": "libc6 (>= 2.38), libcap2 (>= 1:2.10), libidn2-0 (>= 0.6)",
+      "pre_depends": "",
+      "component": "main",
+      "suite": "resolute"
+    },
+    {
+      "name": "libcap2",
+      "source_name": "libcap2",
+      "source_version": "1:2.75-10ubuntu2",
+      "version": "1:2.75-10ubuntu2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libc/libcap2/libcap2_2.75-10ubuntu2_amd64.deb",
+      "sha256": "150603a0792b1d22aa0bde0a26c27b413018c799284003e4b43cba587a5b3a18",
+      "license_path": "/usr/share/doc/libcap2/copyright",
+      "required_by": [
+        "iputils-ping"
+      ],
+      "depends": "libc6 (>= 2.38)",
+      "pre_depends": "",
+      "component": "main",
+      "suite": "resolute"
+    },
+    {
+      "name": "libidn2-0",
+      "source_name": "libidn2",
+      "source_version": "2.3.8-4build1",
+      "version": "2.3.8-4build1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libi/libidn2/libidn2-0_2.3.8-4build1_amd64.deb",
+      "sha256": "92bdac0f443a648859d06dee3defb9c96864fd76df6cfe617ca70bb261344767",
+      "license_path": "/usr/share/doc/libidn2-0/copyright",
+      "required_by": [
+        "iputils-ping"
+      ],
+      "depends": "libc6 (>= 2.14), libunistring5 (>= 1.1)",
+      "pre_depends": "",
+      "component": "main",
+      "suite": "resolute"
+    },
+    {
+      "name": "libunistring5",
+      "source_name": "libunistring",
+      "source_version": "1.3-2build1",
+      "version": "1.3-2build1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libu/libunistring/libunistring5_1.3-2build1_amd64.deb",
+      "sha256": "88c0163f1acb384abde07641b7e13fcaea36e0a3b88fc57a653779fc429fc46a",
+      "license_path": "/usr/share/doc/libunistring5/copyright",
+      "required_by": [
+        "libidn2-0"
+      ],
+      "depends": "libc6 (>= 2.34)",
+      "pre_depends": "",
+      "component": "main",
+      "suite": "resolute"
+    },
+    {
+      "name": "net-tools",
+      "source_name": "net-tools",
+      "source_version": "2.10-2ubuntu1",
+      "version": "2.10-2ubuntu1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/n/net-tools/net-tools_2.10-2ubuntu1_amd64.deb",
+      "sha256": "b357b7f6d954c531a286d57c7f69cd9ed4f4f3648950f9fa627076f14a993d7d",
+      "license_path": "/usr/share/doc/net-tools/copyright",
+      "required_by": [
+        "nvx-initramfs"
+      ],
+      "depends": "libc6 (>= 2.38), libselinux1 (>= 3.1~)",
+      "pre_depends": "",
+      "component": "main",
+      "suite": "resolute"
+    },
+    {
+      "name": "netcat-openbsd",
+      "source_name": "netcat-openbsd",
+      "source_version": "1.234-1",
+      "version": "1.234-1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/n/netcat-openbsd/netcat-openbsd_1.234-1_amd64.deb",
+      "sha256": "a17549cec3db5cbe8c1f05117aa599499edbdc95e980db0a38086faf2a330e56",
+      "license_path": "/usr/share/doc/netcat-openbsd/copyright",
+      "required_by": [
+        "nvx-initramfs"
+      ],
+      "depends": "libbsd0 (>= 0.2.0), libc6 (>= 2.38)",
+      "pre_depends": "",
+      "component": "main",
+      "suite": "resolute"
+    }
+  ]
+}

@@ -109,7 +109,7 @@ jobs:
             run_workloads "At least one non-documentation file changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           fi
 
-          relevant_paths='^(openvmm($|/)|\.github/workflows/ci\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|kernel/|alpine/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          relevant_paths='^(openvmm($|/)|\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests|run-platform)\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|sccache|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|scripts/setup/|kernel/|alpine/|guest/|ubuntu/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
           if grep -Eq "${relevant_paths}" "${changed_files}"; then
             run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           else
@@ -155,13 +155,20 @@ jobs:
           path: |
             build/vmlinux
             build/vmlinux.config
+            build/vmlinux.provenance.json
             build/initramfs.cpio.gz
             build/initramfs.cpio.gz.packages.json
+            build/initramfs.provenance.json
+            build/initramfs-ubuntu.cpio.gz
+            build/initramfs-ubuntu.cpio.gz.packages.json
+            build/ubuntu-distro.erofs
+            build/ubuntu-distro.erofs.manifest.json
+            build/ubuntu-smoke-scratch.ext4
           if-no-files-found: error
           retention-days: 1
 
-  openvmm-binaries:
-    name: OpenVMM binary / ${{ matrix.name }}
+  build-openvmm-linux-gnu:
+    name: OpenVMM binary / Linux GNU
     needs: [openvmm-changes]
     if: >-
       ${{
@@ -181,64 +188,86 @@ jobs:
           needs.openvmm-changes.outputs.run-workloads == 'true'
         )
       }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux GNU
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-3"]'
-            backend: kvm
-            target: x86_64-unknown-linux-gnu
-            build-mode: native
-            artifact: openvmm-linux-gnu
-            binary: openvmm/target/release/openvmm
-          - name: Linux musl
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-3"]'
-            backend: mshv
-            target: x86_64-unknown-linux-musl
-            build-mode: musl
-            artifact: openvmm-linux-musl
-            binary: openvmm/target/release/openvmm
-          - name: Windows MSVC
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-3"]'
-            backend: whp
-            target: x86_64-pc-windows-msvc
-            build-mode: native
-            artifact: openvmm-windows-msvc
-            binary: openvmm/target/release/openvmm.exe
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
+    uses: ./.github/workflows/build-openvmm-binary.yml
+    with:
+      display-name: Linux GNU
+      runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
+      backend: kvm
+      target: x86_64-unknown-linux-gnu
+      build-mode: native
+      artifact: openvmm-linux-gnu
+      binary: openvmm/target/release/openvmm
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Validate runner
-        uses: ./.github/actions/validate-runner
-        with:
-          backend: ${{ matrix.backend }}
+  build-openvmm-linux-musl:
+    name: OpenVMM binary / Linux musl
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    uses: ./.github/workflows/build-openvmm-binary.yml
+    with:
+      display-name: Linux musl
+      runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
+      backend: mshv
+      target: x86_64-unknown-linux-musl
+      build-mode: musl
+      artifact: openvmm-linux-musl
+      binary: openvmm/target/release/openvmm
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Build OpenVMM
-        uses: ./.github/actions/build-openvmm
-        with:
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-          target: ${{ matrix.target }}
-          build-mode: ${{ matrix.build-mode }}
-          binary-path: ${{ matrix.binary }}
+  build-openvmm-windows-msvc:
+    name: OpenVMM binary / Windows MSVC
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    uses: ./.github/workflows/build-openvmm-binary.yml
+    with:
+      display-name: Windows MSVC
+      runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
+      backend: whp
+      target: x86_64-pc-windows-msvc
+      build-mode: native
+      artifact: openvmm-windows-msvc
+      binary: openvmm/target/release/openvmm.exe
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Upload OpenVMM binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.binary }}
-          if-no-files-found: error
-          compression-level: 0
-          overwrite: true
-          retention-days: 1
-
-  openvmm-tests:
-    name: OpenVMM tests / ${{ matrix.name }}
+  openvmm-vmm-tests:
+    name: OpenVMM vmm-tests / ${{ matrix.name }}
     needs: [openvmm-changes]
     if: >-
       ${{
@@ -265,13 +294,13 @@ jobs:
         include:
           - name: Linux / KVM
             backend: kvm
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-1"]'
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
           - name: Linux / MSHV
             backend: mshv
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-1"]'
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
           - name: Windows / WHP
             backend: whp
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-1"]'
+            runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -322,7 +351,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -334,22 +363,9 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
           restore-keys: |
             openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Restore OpenVMM test build on Linux
-        id: restore-openvmm-tests-linux
-        if: runner.os != 'Windows'
-        uses: actions/cache/restore@v5
-        env:
-          PATH: ${{ steps.cache-tools-linux.outputs.path }}
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Restore shared Cargo cache on Linux
         id: restore-openvmm-cargo-linux
@@ -361,20 +377,9 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Restore OpenVMM test build on Windows
-        id: restore-openvmm-tests-windows
-        if: runner.os == 'Windows'
-        uses: actions/cache/restore@v5
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
-          restore-keys: |
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-
-            openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Restore shared Cargo cache on Windows
         id: restore-openvmm-cargo-windows
@@ -384,9 +389,14 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
           restore-keys: |
             openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare sccache
+        uses: ./.github/actions/sccache
+        with:
+          operation: start
 
       - name: Run OpenVMM tests on KVM
         if: matrix.backend == 'kvm'
@@ -409,6 +419,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts\nvx.py test-openvmm --backend "${{ matrix.backend }}"
 
+      - name: Upload OpenVMM test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openvmm-vmm-tests-${{ runner.os }}-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.os == 'Windows' && format('{0}/{1}/test_results', runner.temp, matrix.backend) || 'openvmm/target/vmm_tests/test_results' }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Report sccache
+        if: always()
+        uses: ./.github/actions/sccache
+        with:
+          operation: stop
+
       - name: Save OpenVMM inputs on Linux
         if: >-
           success() &&
@@ -423,7 +448,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save OpenVMM inputs on Windows
         if: >-
@@ -437,21 +462,7 @@ jobs:
           path: |
             openvmm/flowey-persist/flowey_lib_common__download_gh_release
             openvmm/flowey-persist/flowey_lib_common__cache
-          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
-
-      - name: Save OpenVMM test build on Linux
-        if: >-
-          success() &&
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/dev' &&
-          runner.os != 'Windows' &&
-          steps.restore-openvmm-tests-linux.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        env:
-          PATH: ${{ steps.cache-tools-linux.outputs.path }}
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ steps.openvmm.outputs.sha }}
 
       - name: Save shared Cargo cache on Linux
         if: >-
@@ -467,19 +478,7 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
-
-      - name: Save OpenVMM test build on Windows
-        if: >-
-          success() &&
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/dev' &&
-          runner.os == 'Windows' &&
-          steps.restore-openvmm-tests-windows.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: openvmm/target
-          key: openvmm-tests-v2-${{ matrix.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}-${{ steps.openvmm.outputs.sha }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
       - name: Save shared Cargo cache on Windows
         if: >-
@@ -493,11 +492,11 @@ jobs:
           path: |
             ${{ format('{0}/cargo-home/registry', runner.temp) }}
             ${{ format('{0}/cargo-home/git', runner.temp) }}
-          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-vmm-tests-${{ hashFiles('openvmm/Cargo.lock') }}
 
-  nvx-microvm-tests:
-    name: NVX microVM tests / ${{ matrix.name }}
-    needs: [artifacts, openvmm-binaries, openvmm-changes]
+  openvmm-unit-tests:
+    name: OpenVMM unit tests / ${{ matrix.name }}
+    needs: [openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -510,8 +509,6 @@ jobs:
           github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository
         ) &&
-        needs.artifacts.result == 'success' &&
-        needs.openvmm-binaries.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-tests == 'true'
@@ -525,16 +522,13 @@ jobs:
         include:
           - name: Linux / KVM
             backend: kvm
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-2"]'
-            openvmm-artifact: openvmm-linux-gnu
+            runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
           - name: Linux / MSHV
             backend: mshv
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-2"]'
-            openvmm-artifact: openvmm-linux-gnu
+            runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
           - name: Windows / WHP
             backend: whp
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-2"]'
-            openvmm-artifact: openvmm-windows-msvc
+            runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -550,6 +544,7 @@ jobs:
         uses: ./.github/actions/validate-nvx
 
       - name: Checkout OpenVMM
+        id: openvmm
         uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
@@ -557,50 +552,159 @@ jobs:
       - name: Set up retrying curl
         uses: ./.github/actions/setup-curl
 
-      - name: Download guest artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: guest-artifacts
-          path: build
-
-      - name: Download OpenVMM binary
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ matrix.openvmm-artifact }}
-          path: openvmm/target/release
-
-      - name: Make OpenVMM executable
-        if: runner.os != 'Windows'
-        shell: bash
-        run: chmod +x openvmm/target/release/openvmm
-
-      - name: Run NVX microVM tests on Linux
-        if: runner.os != 'Windows'
-        shell: bash
-        run: >-
-          python3 scripts/nvx.py test-microvm
-          --backend "${{ matrix.backend }}"
-          --output-dir "build/test-results/microvm-${{ matrix.backend }}"
-
-      - name: Run NVX microVM tests on Windows
+      - name: Prepare Windows cache tools
         if: runner.os == 'Windows'
         shell: powershell
-        run: >-
-          python scripts\nvx.py test-microvm
-          --backend "${{ matrix.backend }}"
-          --output-dir "build/test-results/microvm-${{ matrix.backend }}"
+        run: python scripts\nvx.py setup-cross-os-cache
 
-      - name: Upload NVX microVM failure logs
-        if: failure()
-        uses: actions/upload-artifact@v7
+      - name: Prepare Linux cache tools
+        id: cache-tools-linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore OpenVMM inputs on Linux
+        id: restore-openvmm-inputs-linux
+        if: runner.os != 'Windows'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
         with:
-          name: nvx-microvm-tests-${{ matrix.backend }}
-          path: build/test-results/microvm-${{ matrix.backend }}
-          if-no-files-found: warn
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
-  platform:
-    name: Platform / ${{ matrix.name }}
-    needs: [artifacts, openvmm-binaries, openvmm-changes]
+      - name: Restore OpenVMM inputs on Windows
+        id: restore-openvmm-inputs-windows
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
+          restore-keys: |
+            openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore shared Cargo cache on Linux
+        id: restore-openvmm-cargo-linux
+        if: runner.os != 'Windows'
+        uses: actions/cache/restore@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: |
+            openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore shared Cargo cache on Windows
+        id: restore-openvmm-cargo-windows
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+          restore-keys: |
+            openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare sccache
+        uses: ./.github/actions/sccache
+        with:
+          operation: start
+
+      - name: Run OpenVMM unit tests on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/nvx.py test-openvmm-unit
+
+      - name: Run OpenVMM unit tests on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py test-openvmm-unit
+
+      - name: Report sccache
+        if: always()
+        uses: ./.github/actions/sccache
+        with:
+          operation: stop
+
+      - name: Save OpenVMM inputs on Linux
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os != 'Windows' &&
+          steps.restore-openvmm-inputs-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save OpenVMM inputs on Windows
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os == 'Windows' &&
+          steps.restore-openvmm-inputs-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            openvmm/flowey-persist/flowey_lib_common__download_gh_release
+            openvmm/flowey-persist/flowey_lib_common__cache
+          key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ steps.openvmm.outputs.sha }}
+
+      - name: Save shared Cargo cache on Linux
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os != 'Windows' &&
+          steps.restore-openvmm-cargo-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        env:
+          PATH: ${{ steps.cache-tools-linux.outputs.path }}
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+
+      - name: Save shared Cargo cache on Windows
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          runner.os == 'Windows' &&
+          steps.restore-openvmm-cargo-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ format('{0}/cargo-home/registry', runner.temp) }}
+            ${{ format('{0}/cargo-home/git', runner.temp) }}
+          key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-tests-${{ hashFiles('openvmm/Cargo.lock') }}
+
+  nvx-microvm-tests-kvm:
+    name: NVX microVM tests / Linux / KVM
+    needs: [artifacts, build-openvmm-linux-gnu, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -614,115 +718,209 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         ) &&
         needs.artifacts.result == 'success' &&
-        needs.openvmm-binaries.result == 'success' &&
+        needs.build-openvmm-linux-gnu.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: Linux / KVM
+      runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
+      backend: kvm
+      openvmm-artifact: openvmm-linux-gnu
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-tests-mshv:
+    name: NVX microVM tests / Linux / MSHV
+    needs: [artifacts, build-openvmm-linux-gnu, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-linux-gnu.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: Linux / MSHV
+      runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
+      backend: mshv
+      openvmm-artifact: openvmm-linux-gnu
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-tests-whp:
+    name: NVX microVM tests / Windows / WHP
+    needs: [artifacts, build-openvmm-windows-msvc, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-windows-msvc.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: Windows / WHP
+      runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
+      backend: whp
+      openvmm-artifact: openvmm-windows-msvc
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  platform-kvm:
+    name: Platform / Linux / KVM / Virtual machine
+    needs: [artifacts, build-openvmm-linux-gnu, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-linux-gnu.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-workloads == 'true'
         )
       }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux / KVM / Virtual machine
-            runner: '["self-hosted", "linux", "kvm", "virtual-machine", "azure-kvm-3"]'
-            backend: kvm
-            release-platform: linux-kvm
-            benchmark-platform: linux-kvm-virtual-machine
-            openvmm-artifact: openvmm-linux-gnu
-            teardown-mode: guest-exit
-            benchmark-cpus: 0-7
-            host-cpu-reserve: 0
-            marker-timeout: 40
-            package-release: true
-          - name: Linux / MSHV / Virtual machine
-            runner: '["self-hosted", "linux", "mshv", "virtual-machine", "azure-azlinux-3"]'
-            backend: mshv
-            release-platform: linux-mshv
-            benchmark-platform: linux-mshv-virtual-machine
-            openvmm-artifact: openvmm-linux-musl
-            teardown-mode: guest-exit
-            benchmark-cpus: 0-7
-            host-cpu-reserve: 0
-            marker-timeout: 40
-            package-release: true
-          - name: Windows / WHP / Virtual machine
-            runner: '["self-hosted", "windows", "whp", "virtual-machine", "azure-windows-3"]'
-            backend: whp
-            release-platform: windows-whp
-            benchmark-platform: windows-whp-virtual-machine
-            openvmm-artifact: openvmm-windows-msvc
-            teardown-mode: guest-exit
-            benchmark-cpus: 0-7
-            host-cpu-reserve: 0
-            marker-timeout: 40
-            package-release: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
+    uses: ./.github/workflows/run-platform.yml
+    with:
+      display-name: Linux / KVM / Virtual machine
+      runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
+      backend: kvm
+      release-platform: linux-kvm
+      benchmark-platform: linux-kvm-virtual-machine
+      openvmm-artifact: openvmm-linux-gnu
+      teardown-mode: guest-exit
+      benchmark-cpus: 0-7
+      host-cpu-reserve: 0
+      marker-timeout: 40
+      package-release: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Validate runner
-        uses: ./.github/actions/validate-runner
-        with:
-          backend: ${{ matrix.backend }}
+  platform-mshv:
+    name: Platform / Linux / MSHV / Virtual machine
+    needs: [artifacts, build-openvmm-linux-musl, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-linux-musl.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-platform.yml
+    with:
+      display-name: Linux / MSHV / Virtual machine
+      runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
+      backend: mshv
+      release-platform: linux-mshv
+      benchmark-platform: linux-mshv-virtual-machine
+      openvmm-artifact: openvmm-linux-musl
+      teardown-mode: guest-exit
+      benchmark-cpus: 0-7
+      host-cpu-reserve: 0
+      marker-timeout: 40
+      package-release: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Validate NVX CLI
-        uses: ./.github/actions/validate-nvx
-
-      - name: Checkout OpenVMM
-        uses: ./.github/actions/checkout-openvmm
-        with:
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
-      - name: Verify source pins on Linux
-        if: runner.os != 'Windows'
-        shell: bash
-        run: python3 scripts/nvx.py verify
-
-      - name: Verify source pins on Windows
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: python scripts\nvx.py verify
-
-      - name: Download OpenVMM binary
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ matrix.openvmm-artifact }}
-          path: openvmm/target/release
-
-      - name: Make OpenVMM executable
-        if: runner.os != 'Windows'
-        shell: bash
-        run: chmod +x openvmm/target/release/openvmm
-
-      - name: Run benchmark
-        uses: ./.github/actions/run-benchmark
-        with:
-          backend: ${{ matrix.backend }}
-          platform: ${{ matrix.benchmark-platform }}
-          runs: 10
-          warmups: 1
-          teardown-mode: ${{ matrix.teardown-mode }}
-          cpus: ${{ matrix.benchmark-cpus }}
-          host-cpu-reserve: ${{ matrix.host-cpu-reserve }}
-          marker-timeout: ${{ matrix.marker-timeout }}
-
-      - name: Package release
-        if: >-
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/dev' &&
-          matrix.package-release
-        uses: ./.github/actions/package-release
-        with:
-          platform: ${{ matrix.release-platform }}
+  platform-whp:
+    name: Platform / Windows / WHP / Virtual machine
+    needs: [artifacts, build-openvmm-windows-msvc, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-windows-msvc.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-platform.yml
+    with:
+      display-name: Windows / WHP / Virtual machine
+      runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
+      backend: whp
+      release-platform: windows-whp
+      benchmark-platform: windows-whp-virtual-machine
+      openvmm-artifact: openvmm-windows-msvc
+      teardown-mode: guest-exit
+      benchmark-cpus: 0-7
+      host-cpu-reserve: 0
+      marker-timeout: 40
+      package-release: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
   release:
     name: Publish development release
-    needs: [quality, openvmm-tests, nvx-microvm-tests, platform]
+    needs:
+      - quality
+      - openvmm-vmm-tests
+      - openvmm-unit-tests
+      - nvx-microvm-tests-kvm
+      - nvx-microvm-tests-mshv
+      - nvx-microvm-tests-whp
+      - platform-kvm
+      - platform-mshv
+      - platform-whp
     if: >-
       ${{
         always() &&
@@ -731,17 +929,31 @@ jobs:
         !cancelled() &&
         needs.quality.result == 'success' &&
         (
-          needs.openvmm-tests.result == 'success' ||
-          needs.openvmm-tests.result == 'skipped'
+          needs.openvmm-vmm-tests.result == 'success' ||
+          needs.openvmm-vmm-tests.result == 'skipped'
         ) &&
         (
-          needs.nvx-microvm-tests.result == 'success' ||
-          needs.nvx-microvm-tests.result == 'skipped'
+          needs.openvmm-unit-tests.result == 'success' ||
+          needs.openvmm-unit-tests.result == 'skipped'
         ) &&
-        needs.platform.result == 'success'
+        (
+          needs.nvx-microvm-tests-kvm.result == 'success' ||
+          needs.nvx-microvm-tests-kvm.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-tests-mshv.result == 'success' ||
+          needs.nvx-microvm-tests-mshv.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-tests-whp.result == 'success' ||
+          needs.nvx-microvm-tests-whp.result == 'skipped'
+        ) &&
+        needs.platform-kvm.result == 'success' &&
+        needs.platform-mshv.result == 'success' &&
+        needs.platform-whp.result == 'success'
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 90
     permissions:
       actions: read
       contents: write
@@ -756,13 +968,15 @@ jobs:
 
   performance-gate:
     name: Performance regression gate
-    needs: [platform]
+    needs: [platform-kvm, platform-mshv, platform-whp]
     if: >-
       ${{
         github.event_name == 'pull_request' &&
         github.event.pull_request.draft == false &&
         !cancelled() &&
-        needs.platform.result == 'success'
+        needs.platform-kvm.result == 'success' &&
+        needs.platform-mshv.result == 'success' &&
+        needs.platform-whp.result == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -781,9 +995,77 @@ jobs:
           regression-threshold: ${{ env.PERFORMANCE_REGRESSION_THRESHOLD }}
           absolute-tolerance-ms: ${{ env.PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS }}
 
+  required-status-check:
+    name: Required status check
+    needs:
+      - quality
+      - openvmm-changes
+      - artifacts
+      - build-openvmm-linux-gnu
+      - build-openvmm-linux-musl
+      - build-openvmm-windows-msvc
+      - openvmm-vmm-tests
+      - openvmm-unit-tests
+      - nvx-microvm-tests-kvm
+      - nvx-microvm-tests-mshv
+      - nvx-microvm-tests-whp
+      - platform-kvm
+      - platform-mshv
+      - platform-whp
+      - performance-gate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Verify required jobs
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        shell: bash
+        env:
+          SAME_REPOSITORY: >-
+            ${{
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            }}
+          RUN_TESTS: ${{ needs.openvmm-changes.outputs.run-tests }}
+          RUN_WORKLOADS: ${{ needs.openvmm-changes.outputs.run-workloads }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          CHANGES_RESULT: ${{ needs.openvmm-changes.result }}
+          ARTIFACTS_RESULT: ${{ needs.artifacts.result }}
+          BUILD_LINUX_GNU_RESULT: ${{ needs.build-openvmm-linux-gnu.result }}
+          BUILD_LINUX_MUSL_RESULT: ${{ needs.build-openvmm-linux-musl.result }}
+          BUILD_WINDOWS_MSVC_RESULT: ${{ needs.build-openvmm-windows-msvc.result }}
+          VMM_TESTS_RESULT: ${{ needs.openvmm-vmm-tests.result }}
+          UNIT_TESTS_RESULT: ${{ needs.openvmm-unit-tests.result }}
+          MICROVM_KVM_RESULT: ${{ needs.nvx-microvm-tests-kvm.result }}
+          MICROVM_MSHV_RESULT: ${{ needs.nvx-microvm-tests-mshv.result }}
+          MICROVM_WHP_RESULT: ${{ needs.nvx-microvm-tests-whp.result }}
+          PLATFORM_KVM_RESULT: ${{ needs.platform-kvm.result }}
+          PLATFORM_MSHV_RESULT: ${{ needs.platform-mshv.result }}
+          PLATFORM_WHP_RESULT: ${{ needs.platform-whp.result }}
+          PERFORMANCE_GATE_RESULT: ${{ needs.performance-gate.result }}
+        run: >-
+          python3 scripts/nvx.py check-required-ci
+          --event-name "${{ github.event_name }}"
+          --same-repository "${SAME_REPOSITORY}"
+          --run-tests "${RUN_TESTS}"
+          --run-workloads "${RUN_WORKLOADS}"
+
   performance-persist:
     name: Persist performance baseline
-    needs: [openvmm-tests, nvx-microvm-tests, platform]
+    needs:
+      - openvmm-vmm-tests
+      - openvmm-unit-tests
+      - nvx-microvm-tests-kvm
+      - nvx-microvm-tests-mshv
+      - nvx-microvm-tests-whp
+      - platform-kvm
+      - platform-mshv
+      - platform-whp
     if: >-
       ${{
         always() &&
@@ -791,25 +1073,40 @@ jobs:
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
         (
-          needs.openvmm-tests.result == 'success' ||
-          needs.openvmm-tests.result == 'skipped'
+          needs.openvmm-vmm-tests.result == 'success' ||
+          needs.openvmm-vmm-tests.result == 'skipped'
         ) &&
         (
-          needs.nvx-microvm-tests.result == 'success' ||
-          needs.nvx-microvm-tests.result == 'skipped'
+          needs.openvmm-unit-tests.result == 'success' ||
+          needs.openvmm-unit-tests.result == 'skipped'
         ) &&
-        needs.platform.result == 'success'
+        (
+          needs.nvx-microvm-tests-kvm.result == 'success' ||
+          needs.nvx-microvm-tests-kvm.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-tests-mshv.result == 'success' ||
+          needs.nvx-microvm-tests-mshv.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-tests-whp.result == 'success' ||
+          needs.nvx-microvm-tests-whp.result == 'skipped'
+        ) &&
+        needs.platform-kvm.result == 'success' &&
+        needs.platform-mshv.result == 'success' &&
+        needs.platform-whp.result == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout dev
         uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          ssh-key: ${{ secrets.PERFORMANCE_PERSIST_DEPLOY_KEY }}
 
       - name: Persist results on dev
         uses: ./.github/actions/persist-performance-results

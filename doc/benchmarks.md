@@ -148,7 +148,7 @@ python3 scripts/nvx.py benchmark --suite snapshot-profile --backend kvm --warmup
 python scripts\nvx.py benchmark --suite snapshot-profile --backend whp --warmups 1 --runs 5 --output data\runs\windows-whp-baremetal\snapshot-profile.json
 ```
 
-The default matrix profiles 64, 128, 256, 512, and 1024 MiB snapshots with both warm and cold
+The default matrix profiles 128, 256, 512, and 1024 MiB snapshots with both warm and cold
 restore artifacts. Use `--shell-memories` to select sizes and `--cache-state warm`, `cold`, or
 `both` to select cache conditions. The suite enables OpenVMM profiling for these diagnostic runs;
 other paths leave full profiling disabled unless `--snapshot-profile` is explicit.
@@ -183,7 +183,7 @@ reuse one fresh snapshot per scenario; compare results only on the same host und
 load and power conditions.
 
 Run one workload by selecting `cold-start`, `device-io`, `virtfs`, `shell-snapshot`, or `network-snapshot`
-instead of `performance`. Use `--shell-memories 64 128 256 512`,
+instead of `performance`. Use `--shell-memories 128 256 512`,
 `--payload-mib 64`, and
 `--net 10.0.0.2/24 --network-profile portable` to override their defaults. Run
 `python scripts/nvx.py benchmark --help` for the complete option surface.
@@ -202,13 +202,13 @@ and at least `N+2` processors for an `N`-vCPU guest. The additional processors
 cover VMM and device work. The default selector follows this policy; an
 explicit undersized `--cpus` set is rejected before measurement.
 
-The three pinned virtual-machine CI runners expose four cores as eight sibling
-logical CPUs. Their virtual-machine series deliberately use the fixed `0-7`
-set with `--host-cpu-reserve 0`, including sibling CPUs and sharing capacity
-between guest, VMM, and device work. These constrained nested-host results are
-kept separate from the bare-metal series; other runs retain the two-CPU
-reserve. CI gives the constrained series a 40-second guest-marker deadline;
-completed measurements still record their actual latency.
+The virtual-machine CI runners expose four cores as eight sibling logical
+CPUs. Their virtual-machine series deliberately use the fixed `0-7` set with
+`--host-cpu-reserve 0`, including sibling CPUs and sharing capacity between
+guest, VMM, and device work. These constrained nested-host results are kept
+separate from the bare-metal series; other runs retain the two-CPU reserve. CI
+gives the constrained series a 40-second guest-marker deadline; completed
+measurements still record their actual latency.
 
 ### MSHV lifecycle diagnostics
 
@@ -408,8 +408,6 @@ that methodology are not comparable with newly collected values.
 
 | Metric | Description |
 | --- | --- |
-| `shell_snapshot_cold_64_mib` | OpenVMM launch to a shell-ready guest with 64 MiB of memory. |
-| `shell_snapshot_restore_64_mib` | Restore process launch through lifecycle-aligned verification of a 64 MiB snapshot. |
 | `shell_snapshot_cold_128_mib` | OpenVMM launch to a shell-ready guest with 128 MiB of memory. |
 | `shell_snapshot_restore_128_mib` | Restore process launch through lifecycle-aligned verification of a 128 MiB snapshot. |
 | `shell_snapshot_cold_256_mib` | OpenVMM launch to a shell-ready guest with 256 MiB of memory. |
@@ -505,6 +503,27 @@ Both CI contracts use one-second operation windows. Canonical baseline collectio
 full `5 + 30` contract.
 
 The current workflow collects 10 measured lifecycle samples after one warmup.
+Windows CI validates the lifecycle result before starting the remaining benchmark
+suites. Snapshot-generation instability is reported with temporary-failure exit
+status 75; CI remeasures it once on the same runner. Each attempt is preserved in
+the benchmark artifact as `acceptance-attempt-1.json` or
+`acceptance-attempt-2.json`, including its lifecycle profiles. Only a validated
+attempt is copied to `acceptance.json` for collection; a stale accepted result is
+removed before measuring. Other validation failures stop immediately, and a second
+unstable result still fails the job. The stability guard rejects a p50 more than
+25% above p25 and also rejects an adjacent gap above 25% when at least two samples
+lie on each side.
+Singleton outliers remain tolerated, while pooled Windows runners cannot publish a
+bimodal host-stall series into topology-wide history.
+
+When investigating instability, compare each attempt's
+`snapshot_capture.whp.profile.raw_samples` with its `samples_ms`. For example, a
+slow `capture.mapped_memory_flush` with otherwise stable capture phases localizes
+the delay to host-side mapped RAM flushing, not guest boot or snapshot restore.
+Reproduce with the exact executable and guest artifact hashes on the same host
+before attributing the delay to a source change. Keep the stability thresholds and
+bounded remeasurement unchanged when collecting diagnostic evidence.
+
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10
 matching history points. A metric regresses only when it is more than 50%

@@ -9,6 +9,13 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Rematerialize canonical kernel inputs
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        python scripts\nvx.py materialize-kernel-provenance-inputs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: Package Linux release
       if: runner.os != 'Windows'
       shell: bash
@@ -22,7 +29,9 @@ runs:
           --version "${version}" \
           --destination "dist/${package}" \
           --binary-only
-        tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+        python3 scripts/nvx.py archive-release \
+          --source "dist/${package}" \
+          --destination "dist/${package}.tar.gz"
 
     - name: Package Windows release
       if: runner.os == 'Windows'
@@ -37,9 +46,10 @@ runs:
           --destination "dist\$Package" `
           --binary-only
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        Compress-Archive `
-          -Path "dist\$Package" `
-          -DestinationPath "dist\$Package.zip"
+        python scripts\nvx.py archive-release `
+          --source "dist\$Package" `
+          --destination "dist\$Package.zip"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Upload Linux release
       if: runner.os != 'Windows'

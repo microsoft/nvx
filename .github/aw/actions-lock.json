@@ -1,5 +1,10 @@
 {
   "entries": {
+    "actions/setup-python@v6": {
+      "repo": "actions/setup-python",
+      "version": "v6",
+      "sha": "ece7cb06caefa5fff74198d8649806c4678c61a1"
+    },
     "github/gh-aw-actions/setup@v0.88.7": {
       "repo": "github/gh-aw-actions/setup",
       "version": "v0.88.7",

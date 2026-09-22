@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "default_profile": "reasoning",
+  "profiles": {
+    "reasoning": {
+      "agent": "copilot-cli",
+      "model": "gpt-6-astra",
+      "effort": "xhigh"
+    },
+    "reproduction": {
+      "agent": "copilot-cli",
+      "model": "gpt-5.5",
+      "effort": "xhigh"
+    }
+  },
+  "phases": {
+    "confirm": "reproduction"
+  }
+}

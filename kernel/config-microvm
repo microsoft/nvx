@@ -655,6 +655,7 @@ CONFIG_ARCH_WANT_OLD_COMPAT_IPC=y
 CONFIG_HAVE_ARCH_SECCOMP=y
 CONFIG_HAVE_ARCH_SECCOMP_FILTER=y
 CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
 CONFIG_HAVE_ARCH_KSTACK_ERASE=y
 CONFIG_HAVE_STACKPROTECTOR=y
 CONFIG_STACKPROTECTOR=y
@@ -907,9 +908,10 @@ CONFIG_PT_RECLAIM=y
 # end of Memory Management options
 
 #
-# Networking support (minimal: IPv4 over a virtio-net-mmio NIC for --net)
+# Networking support (minimal: Unix sockets and IPv4 over a virtio-net-mmio NIC for --net)
 #
 CONFIG_NET=y
+CONFIG_UNIX=y
 CONFIG_INET=y
 # CONFIG_IPV6 is not set
 CONFIG_NETDEVICES=y
@@ -1691,6 +1693,7 @@ CONFIG_AUTOFS_FS=y
 CONFIG_FUSE_FS=y
 CONFIG_VIRTIO_FS=y
 CONFIG_OVERLAY_FS=y
+# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set
 
 #
 # Caches

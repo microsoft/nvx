@@ -69,8 +69,9 @@ install_packages() {
             docker-buildx docker-cli elfutils-libelf-devel findutils flex gcc \
             gcc-c++ git glibc-devel glibc-iconv gzip iproute iptables \
             kernel-headers libarchive libarchive-devel make moby-engine \
-            ninja-build openssl openssl-devel patch perl pkgconf \
-            pkgconf-pkg-config protobuf python3 rsync shadow-utils tar \
+            ninja-build openssl openssl-devel patch perl perl-FindBin \
+            perl-IPC-Cmd perl-Time-Piece perl-lib pkgconf pkgconf-pkg-config \
+            protobuf python3 rsync shadow-utils tar \
             util-linux which xz zstd
         run_as_root tdnf install -y docker-cli
     elif command -v dnf >/dev/null 2>&1; then
@@ -202,7 +203,7 @@ build_nvx() {
     docker buildx version >/dev/null 2>&1 || die "Docker Buildx is not installed"
     (
         cd "$workspace"
-        RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN python3 scripts/nvx.py build
+        RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN python3 scripts/nvx.py build --guest all
     )
 }
 
@@ -210,7 +211,9 @@ check_guest_bundle() {
     bundle_path=$1
     [ -d "$bundle_path" ] || die "guest bundle not found: $bundle_path"
     for name in vmlinux vmlinux.config initramfs.cpio.gz \
-        initramfs.cpio.gz.packages.json REVISION SHA256SUMS; do
+        initramfs.cpio.gz.packages.json initramfs-ubuntu.cpio.gz \
+        initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
+        ubuntu-distro.erofs.manifest.json REVISION SHA256SUMS; do
         [ -f "${bundle_path}/${name}" ] ||
             die "missing guest bundle file: ${bundle_path}/${name}"
     done
@@ -232,7 +235,9 @@ create_guest_bundle() {
     fi
     mkdir -p "$bundle_path"
     for name in vmlinux vmlinux.config initramfs.cpio.gz \
-        initramfs.cpio.gz.packages.json; do
+        initramfs.cpio.gz.packages.json initramfs-ubuntu.cpio.gz \
+        initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
+        ubuntu-distro.erofs.manifest.json; do
         source_path="${workspace}/build/${name}"
         [ -f "$source_path" ] || die "missing guest artifact: $source_path"
         cp "$source_path" "$bundle_path"
@@ -241,7 +246,9 @@ create_guest_bundle() {
     (
         cd "$bundle_path"
         sha256sum vmlinux vmlinux.config initramfs.cpio.gz \
-            initramfs.cpio.gz.packages.json REVISION >SHA256SUMS
+            initramfs.cpio.gz.packages.json initramfs-ubuntu.cpio.gz \
+            initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
+            ubuntu-distro.erofs.manifest.json REVISION >SHA256SUMS
     )
     check_guest_bundle "$bundle_path"
 }

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "campaign": "guest-isolation",
+  "description": "Privileged guest probes for OpenVMM process, console, interrupt, network, and outcome containment.",
+  "cases": [
+    {
+      "id": "openvmm-lifecycle-boundary",
+      "scenario": "lifecycle",
+      "description": "Exercise clean boot, control readiness, abnormal guest shutdown, and OpenVMM process teardown.",
+      "coverage": [
+        "boot-readiness",
+        "control-ping",
+        "abnormal-shutdown",
+        "process-teardown"
+      ],
+      "repetitions": 2,
+      "timeout_multiplier": 2
+    },
+    {
+      "id": "console-backpressure-boundary",
+      "scenario": "console-exit",
+      "description": "Exercise delayed host reads, bounded console output, exact exit status, and final-output drain.",
+      "coverage": [
+        "console-backpressure",
+        "output-exhaustion",
+        "exit-status",
+        "output-drain"
+      ],
+      "repetitions": 4,
+      "timeout_multiplier": 3
+    },
+    {
+      "id": "virtio-network-boundary",
+      "scenario": "virtio-net",
+      "description": "Exercise guest-controlled virtio-net traffic and packet handling through the portable profile.",
+      "coverage": [
+        "virtio-net",
+        "packet-handling",
+        "network-teardown"
+      ],
+      "repetitions": 2,
+      "timeout_multiplier": 3
+    },
+    {
+      "id": "interrupt-topology-boundary",
+      "scenario": "smp-lapic",
+      "description": "Exercise repeated interrupt and timer progress across the supported virtual processor topology.",
+      "coverage": [
+        "lapic",
+        "timer-progress",
+        "interrupt-progress",
+        "processor-topology"
+      ],
+      "repetitions": 1,
+      "timeout_multiplier": 4
+    },
+    {
+      "id": "processor-interrupt-churn",
+      "scenario": "smp-lapic",
+      "description": "Repeat bounded multi-processor scheduling, timer, and interrupt progress to expose CPU-side hangs or leaks.",
+      "coverage": [
+        "cpu-churn",
+        "interrupt-churn",
+        "timer-churn",
+        "relaunch-cleanliness"
+      ],
+      "repetitions": 4,
+      "timeout_multiplier": 4
+    },
+    {
+      "id": "structured-outcome-boundary",
+      "scenario": "structured-outcome",
+      "description": "Validate exit classification, network-policy reporting, and every structured teardown field.",
+      "coverage": [
+        "outcome-schema",
+        "exit-classification",
+        "policy-report",
+        "teardown-report"
+      ],
+      "repetitions": 2,
+      "timeout_multiplier": 3
+    }
+  ]
+}
