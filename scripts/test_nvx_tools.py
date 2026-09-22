@@ -462,6 +462,16 @@ class CliTests(unittest.TestCase):
         ubuntu_initramfs = nvx.parse_args(["build-initramfs", "--guest", "ubuntu"])
         self.assertEqual(ubuntu_initramfs.guest, "ubuntu")
 
+        azurelinux_initramfs = nvx.parse_args(
+            ["build-initramfs", "--guest", "azurelinux"]
+        )
+        with patch("nvx.build_docker_initramfs") as build_docker_initramfs:
+            nvx.command_build_initramfs(azurelinux_initramfs)
+        build_docker_initramfs.assert_called_once_with(
+            build.DockerBuildConfig(destination=nvx.BUILD_DIR),
+            "azurelinux",
+        )
+
         distro = nvx.parse_args(
             [
                 "build-distro-layer",

@@ -18,6 +18,7 @@ class GuestDescriptor:
     default_memory_mib: int
     boot_marker: bytes
     sandbox_control: bool
+    native_build_supported: bool
     os_release_id: str
 
     @property
@@ -35,6 +36,7 @@ ALPINE_GUEST = GuestDescriptor(
     default_memory_mib=128,
     boot_marker=b"NVX-GUEST-BOOT-OK: alpine",
     sandbox_control=True,
+    native_build_supported=True,
     os_release_id="alpine",
 )
 UBUNTU_GUEST = GuestDescriptor(
@@ -47,6 +49,7 @@ UBUNTU_GUEST = GuestDescriptor(
     default_memory_mib=256,
     boot_marker=b"NVX-GUEST-BOOT-OK: ubuntu",
     sandbox_control=False,
+    native_build_supported=True,
     os_release_id="ubuntu",
 )
 AZURELINUX_GUEST = GuestDescriptor(
@@ -59,6 +62,7 @@ AZURELINUX_GUEST = GuestDescriptor(
     default_memory_mib=128,
     boot_marker=b"NVX-GUEST-BOOT-OK: azurelinux",
     sandbox_control=False,
+    native_build_supported=False,
     os_release_id="azurelinux",
 )
 GUEST_DESCRIPTORS = {

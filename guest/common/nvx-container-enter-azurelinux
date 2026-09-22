@@ -15,6 +15,7 @@ mount --make-rprivate /
 rm -rf "$tools"
 mkdir -p \
     "$tools" \
+    "$rootfs/dev" \
     "$rootfs/proc" \
     "$rootfs/sys"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$tools"

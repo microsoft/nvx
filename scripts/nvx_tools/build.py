@@ -1119,3 +1119,27 @@ def build_docker_artifacts(
     for name in expected:
         path = destination / name
         print(f"  {path} ({format_size(path.stat().st_size)})")
+
+
+def build_docker_initramfs(config: DockerBuildConfig, guest: str) -> None:
+    require_tool(
+        "docker",
+        "docker was not found on PATH; install Docker with the Linux engine first",
+    )
+    descriptor = guest_descriptor(guest)
+    if descriptor.native_build_supported:
+        raise ScriptError(
+            f"{descriptor.distribution} initramfs builds do not require Docker"
+        )
+    destination = _docker_destination(config.destination)
+    target = f"{descriptor.name}-initramfs-artifacts"
+    expected = (descriptor.initramfs_name, descriptor.package_manifest_name)
+    print(f">> building {descriptor.distribution} initramfs into '{destination}'")
+    run_checked(docker_build_command(config, target), cwd=REPO_ROOT)
+    missing = [name for name in expected if not (destination / name).is_file()]
+    if missing:
+        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
+    print(">> done:")
+    for name in expected:
+        path = destination / name
+        print(f"  {path} ({format_size(path.stat().st_size)})")

@@ -23,6 +23,7 @@ from nvx_tools.build import (
     KernelBuildConfig,
     build_distro_layer,
     build_docker_artifacts,
+    build_docker_initramfs,
     build_initramfs,
     build_kernel,
     materialize_kernel_provenance_inputs,
@@ -139,8 +140,8 @@ def _native_kernel() -> None:
 
 def _native_initramfs(guest: str) -> None:
     descriptor = guest_descriptor(guest)
-    if descriptor.name == "azurelinux":
-        raise ScriptError("Azure Linux initramfs builds require Docker")
+    if not descriptor.native_build_supported:
+        raise ScriptError(f"{descriptor.distribution} initramfs builds require Docker")
     build_initramfs(
         InitramfsBuildConfig(
             guest=descriptor.name,
@@ -177,7 +178,7 @@ def command_build_kernel(_: argparse.Namespace) -> None:
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
     if args.guest == "azurelinux":
-        build_docker_artifacts(DockerBuildConfig(destination=BUILD_DIR), args.guest)
+        build_docker_initramfs(DockerBuildConfig(destination=BUILD_DIR), args.guest)
         return
     _native_initramfs(args.guest)
 
