@@ -5466,6 +5466,29 @@ def run_native_linux(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_kvm_worker(command: Sequence[str], result_kind: str) -> object:
+    result_prefix = (
+        KVM_RESULT_PREFIX,
+        KVM_E2E_RESULT_PREFIX,
+        KVM_RESTORE_RESULT_PREFIX,
+        KVM_SNAPSHOT_RESULT_PREFIX,
+    )[("", "e2e", "restore", "snapshot").index(result_kind)]
+    worker = f"KVM {result_kind}".rstrip()
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        print(completed.stdout, end="")
+        for line in completed.stdout.splitlines():
+            if line.startswith(result_prefix):
+                return json.loads(line.removeprefix(result_prefix))
+        raise RuntimeError(f"{worker} worker did not emit a result")
+    except subprocess.CalledProcessError as error:
+        if error.stdout:
+            print(error.stdout, end="", file=sys.stderr)
+        if error.stderr:
+            print(error.stderr, end="", file=sys.stderr)
+        raise
+
+
 def benchmark_kvm(
     args: argparse.Namespace,
     executable: Path,
@@ -5506,21 +5529,7 @@ def benchmark_kvm(
     if args.net is not None:
         command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_RESULT_PREFIX):
-                return cast(
-                    BenchmarkResult,
-                    json.loads(line.removeprefix(KVM_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(BenchmarkResult, _run_kvm_worker(command, ""))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)
@@ -5566,21 +5575,7 @@ def benchmark_e2e_kvm(
     if args.net is not None:
         command.extend(("--net", args.net))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_E2E_RESULT_PREFIX):
-                return cast(
-                    KvmE2EResult,
-                    json.loads(line.removeprefix(KVM_E2E_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM e2e worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(KvmE2EResult, _run_kvm_worker(command, "e2e"))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)
@@ -5626,21 +5621,7 @@ def benchmark_snapshot_restore_kvm(
     if args.net is not None:
         command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_RESTORE_RESULT_PREFIX):
-                return cast(
-                    BenchmarkResult,
-                    json.loads(line.removeprefix(KVM_RESTORE_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM restore worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(BenchmarkResult, _run_kvm_worker(command, "restore"))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)
@@ -5684,21 +5665,7 @@ def benchmark_snapshot_kvm(
     if args.net is not None:
         command.extend(("--net", args.net, "--network-profile", args.network_profile))
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        for line in completed.stdout.splitlines():
-            if line.startswith(KVM_SNAPSHOT_RESULT_PREFIX):
-                return cast(
-                    SnapshotCaptureResult,
-                    json.loads(line.removeprefix(KVM_SNAPSHOT_RESULT_PREFIX)),
-                )
-        raise RuntimeError("KVM snapshot worker did not emit a result")
-    except subprocess.CalledProcessError as error:
-        if error.stdout:
-            print(error.stdout, end="", file=sys.stderr)
-        if error.stderr:
-            print(error.stderr, end="", file=sys.stderr)
-        raise
+        return cast(SnapshotCaptureResult, _run_kvm_worker(command, "snapshot"))
     finally:
         if not args.keep_kvm_stage:
             cleanup_kvm(stage_dir)

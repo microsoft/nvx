@@ -2707,6 +2707,18 @@ class SandboxTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_kvm_worker_result_decoding(self):
+        completed = subprocess.CompletedProcess(
+            ["worker"],
+            0,
+            stdout='noise\nOPENVMM_KVM_E2E_RESULT={"p50_ms": 1.5}\n',
+            stderr="",
+        )
+        with patch.object(benchmark.subprocess, "run", return_value=completed):
+            result = benchmark._run_kvm_worker(["worker"], "e2e")
+
+        self.assertEqual(result, {"p50_ms": 1.5})
+
     def test_require_file_preserves_resolved_path_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
