@@ -1058,11 +1058,10 @@ class CiTests(unittest.TestCase):
             "x86_64::microvm::openvmm_microvm_test_pvh_x64_phase_1_lifecycle",
         ):
             self.assertIn(existing_test, ci.OPENVMM_WHP_TESTS)
-        self.assertEqual(
-            set(ci.OPENVMM_WHP_EXCLUDED_TESTS),
-            {
-                "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
-            },
+        self.assertEqual(ci.OPENVMM_WHP_EXCLUDED_TESTS, ())
+        self.assertNotIn(
+            "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
+            ci.OPENVMM_WHP_EXCLUDED_TESTS,
         )
         self.assertNotIn(
             "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
