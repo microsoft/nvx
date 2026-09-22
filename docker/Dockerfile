@@ -2,6 +2,7 @@
 
 ARG DEBIAN_IMAGE=debian:12-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 ARG EROFS_UTILS_VERSION=1.5-1
+ARG AZURELINUX_VERSION=3.0
 ARG AZURELINUX_IMAGE=mcr.microsoft.com/azurelinux/base/core@sha256:c877612270d1ee2d6ab2bc1f64bfe38ab697ac50be325154ee5129fce89c17e4
 
 FROM ${DEBIAN_IMAGE} AS base
@@ -56,20 +57,23 @@ RUN python3 scripts/nvx.py verify-guest-determinism \
 
 FROM base AS azurelinux-helpers
 RUN set -eux; \
-    mkdir /out; \
+    mkdir -p /out/helpers; \
     for helper in nvx-reseed nvx-mmio-write nvx-port-io nvx-console-pending nvx-managed-agent; do \
-        cc -static -Os -s -Wall -Wextra -Werror -o "/out/$helper" "/repo/guest/common/$helper.c"; \
+        cc -static -Os -s -Wall -Wextra -Werror -o "/out/helpers/$helper" "/repo/guest/common/$helper.c"; \
     done; \
     cc -nostdlib -static -Os -fno-builtin -fno-pie -fno-stack-protector -no-pie \
-        -Wl,--build-id=none -Wl,-z,noexecstack -s -o /out/nvx-device-io \
-        /repo/guest/common/nvx-device-io.c
+        -Wl,--build-id=none -Wl,-z,noexecstack -s -o /out/helpers/nvx-device-io \
+        /repo/guest/common/nvx-device-io.c; \
+    ! readelf -l /bin/busybox | grep -q INTERP; \
+    cp /bin/busybox /out/busybox
 
 FROM ${AZURELINUX_IMAGE} AS azurelinux-rootfs
 
 FROM base AS azurelinux-initramfs
+ARG AZURELINUX_VERSION
 COPY --from=azurelinux-rootfs / /rootfs/
-COPY --from=azurelinux-helpers /out/ /rootfs/sbin/
-COPY --from=base /bin/busybox /rootfs/bin/busybox
+COPY --from=azurelinux-helpers /out/helpers/ /rootfs/sbin/
+COPY --from=azurelinux-helpers /out/busybox /rootfs/bin/busybox
 RUN set -eux; \
     install -m 0755 /repo/guest/common/init /rootfs/init; \
     install -m 0755 /repo/guest/common/nvx-exit \
@@ -90,7 +94,7 @@ RUN set -eux; \
         '  "format": 1,' \
         '  "guest": "azurelinux",' \
         '  "distribution": "Azure Linux",' \
-        '  "version": "3.0",' \
+        "  \"version\": \"$AZURELINUX_VERSION\"," \
         '  "architecture": "x86_64",' \
         '  "package_manifest_format": "azurelinux-v1",' \
         '  "packages": [],' \

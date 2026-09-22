@@ -177,7 +177,7 @@ def command_build_kernel(_: argparse.Namespace) -> None:
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
-    if args.guest == "azurelinux":
+    if not guest_descriptor(args.guest).native_build_supported:
         build_docker_initramfs(DockerBuildConfig(destination=BUILD_DIR), args.guest)
         return
     _native_initramfs(args.guest)

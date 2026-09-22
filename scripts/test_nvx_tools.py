@@ -489,6 +489,30 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             nvx.parse_args(["run", "--guest", "all"])
 
+    def test_docker_initramfs_rejects_native_guest(self):
+        with self.assertRaisesRegex(
+            common.ScriptError, "Alpine Linux.*do not require Docker"
+        ):
+            build.build_docker_initramfs(build.DockerBuildConfig(), "alpine")
+
+    def test_docker_initramfs_requires_expected_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = build.DockerBuildConfig(destination=Path(temporary))
+            with (
+                patch.object(build, "require_tool"),
+                patch.object(build, "run_checked") as run_checked,
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "initramfs-azurelinux.cpio.gz",
+                ),
+            ):
+                build.build_docker_initramfs(config, "azurelinux")
+        command = run_checked.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--target") + 1],
+            "azurelinux-initramfs-artifacts",
+        )
+
     def test_ubuntu_run_selects_artifact_and_default_memory(self):
         args = nvx.parse_args(["run", "--guest", "ubuntu", "--dry-run"])
 

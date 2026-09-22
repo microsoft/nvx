@@ -697,12 +697,12 @@ def _prepare_guest_root(
     config: InitramfsBuildConfig,
     descriptor: GuestDescriptor,
 ) -> Path:
+    if not descriptor.native_build_supported:
+        raise ScriptError(f"{descriptor.distribution} initramfs builds require Docker")
     if descriptor.name == "alpine":
         return _prepare_alpine_root(config)
     if descriptor.name == "ubuntu":
         return ubuntu.prepare_root(config.work)
-    if descriptor.name == "azurelinux":
-        raise ScriptError("Azure Linux initramfs builds require Docker")
     raise AssertionError(f"missing rootfs preparer for {descriptor.name}")
 
 
@@ -1092,11 +1092,7 @@ def build_docker_artifacts(
         guest_label = "Alpine, Ubuntu, and Azure Linux"
     else:
         descriptor = guest_descriptor(guest)
-        target = {
-            "alpine": "artifacts",
-            "ubuntu": "ubuntu-guest-artifacts",
-            "azurelinux": "azurelinux-guest-artifacts",
-        }[descriptor.name]
+        target = descriptor.docker_artifacts_target
         expected = (
             "vmlinux",
             "vmlinux.config",
@@ -1122,17 +1118,19 @@ def build_docker_artifacts(
 
 
 def build_docker_initramfs(config: DockerBuildConfig, guest: str) -> None:
-    require_tool(
-        "docker",
-        "docker was not found on PATH; install Docker with the Linux engine first",
-    )
     descriptor = guest_descriptor(guest)
     if descriptor.native_build_supported:
         raise ScriptError(
             f"{descriptor.distribution} initramfs builds do not require Docker"
         )
+    require_tool(
+        "docker",
+        "docker was not found on PATH; install Docker with the Linux engine first",
+    )
     destination = _docker_destination(config.destination)
-    target = f"{descriptor.name}-initramfs-artifacts"
+    target = descriptor.docker_initramfs_artifacts_target
+    if target is None:
+        raise AssertionError(f"missing Docker initramfs target for {descriptor.name}")
     expected = (descriptor.initramfs_name, descriptor.package_manifest_name)
     print(f">> building {descriptor.distribution} initramfs into '{destination}'")
     run_checked(docker_build_command(config, target), cwd=REPO_ROOT)

@@ -19,6 +19,8 @@ class GuestDescriptor:
     boot_marker: bytes
     sandbox_control: bool
     native_build_supported: bool
+    docker_artifacts_target: str
+    docker_initramfs_artifacts_target: str | None
     os_release_id: str
 
     @property
@@ -37,6 +39,8 @@ ALPINE_GUEST = GuestDescriptor(
     boot_marker=b"NVX-GUEST-BOOT-OK: alpine",
     sandbox_control=True,
     native_build_supported=True,
+    docker_artifacts_target="artifacts",
+    docker_initramfs_artifacts_target=None,
     os_release_id="alpine",
 )
 UBUNTU_GUEST = GuestDescriptor(
@@ -50,6 +54,8 @@ UBUNTU_GUEST = GuestDescriptor(
     boot_marker=b"NVX-GUEST-BOOT-OK: ubuntu",
     sandbox_control=False,
     native_build_supported=True,
+    docker_artifacts_target="ubuntu-guest-artifacts",
+    docker_initramfs_artifacts_target=None,
     os_release_id="ubuntu",
 )
 AZURELINUX_GUEST = GuestDescriptor(
@@ -63,6 +69,8 @@ AZURELINUX_GUEST = GuestDescriptor(
     boot_marker=b"NVX-GUEST-BOOT-OK: azurelinux",
     sandbox_control=False,
     native_build_supported=False,
+    docker_artifacts_target="azurelinux-guest-artifacts",
+    docker_initramfs_artifacts_target="azurelinux-initramfs-artifacts",
     os_release_id="azurelinux",
 )
 GUEST_DESCRIPTORS = {

@@ -55,10 +55,10 @@ def _load_packages(paths: list[Path]) -> tuple[str, str, list[dict[str, object]]
     packages: dict[tuple[str, str], dict[str, object]] = {}
     for path in paths:
         document = json.loads(path.read_text(encoding="utf-8"))
-        distribution = document.get("distribution", "alpine")
-        if distribution != "alpine":
+        guest = document.get("guest", "alpine")
+        if guest != "alpine":
             raise SourceError(
-                f"{path} is a {distribution!r} package manifest; "
+                f"{path} is a {guest!r} guest package manifest; "
                 "Alpine source collection only supports Alpine manifests"
             )
         current_branch = document.get("alpine_branch", "v3.24")

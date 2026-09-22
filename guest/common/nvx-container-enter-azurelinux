@@ -39,8 +39,12 @@ mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$rootfs/dev/pts"
 mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$rootfs/dev/shm"
 
 workload_machine_id=/run/nvx/workload-machine-id
-[ -f "$workload_machine_id" ] && [ ! -L "$workload_machine_id" ] || exit 125
+if [ ! -f "$workload_machine_id" ] || [ -L "$workload_machine_id" ]; then
+    echo "invalid workload machine ID: $workload_machine_id" >&2
+    exit 125
+fi
 if [ -L "$rootfs/etc" ] || { [ -e "$rootfs/etc" ] && [ ! -d "$rootfs/etc" ]; }; then
+    echo "workload rootfs has an invalid /etc directory" >&2
     exit 125
 fi
 mkdir -p "$rootfs/etc"
