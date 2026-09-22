@@ -91,17 +91,23 @@ steps:
       output_dir = Path("/tmp/gh-aw/agent")
       log_dir = output_dir / "baseline-logs"
 
-      shell_files = [
-          "alpine/init",
-          "alpine/nvx-container-enter",
-          "alpine/nvx-container-launch",
-          "alpine/nvx-exit",
-          "alpine/nvx-hostmount",
-          "alpine/nvx-init-agent",
-          "alpine/nvx-snapshot",
-          "alpine/nvx-virtio-restore-probe",
+      posix_shell_files = [
+          "guest/common/init",
+          "guest/alpine/nvx-container-enter",
+          "guest/alpine/nvx-container-launch",
+          "guest/common/nvx-exit",
+          "guest/common/nvx-hostmount",
+          "guest/common/nvx-identity-probe",
+          "guest/common/nvx-init-agent",
+          "guest/common/nvx-sandbox-smoke",
+          "guest/common/nvx-snapshot",
+          "guest/common/nvx-virtio-restore-probe",
           "scripts/setup/setup-linux-mshv.sh",
           "scripts/setup/setup-linux-runner.sh",
+      ]
+      bash_shell_files = [
+          ".github/specula/setup-runner.sh",
+          "guest/ubuntu/nvx-bashrc",
       ]
       unit_tests = [
           "scripts/test_performance.py",
@@ -190,7 +196,23 @@ steps:
                   shellcheck_image,
                   "shellcheck",
                   "--shell=sh",
-                  *shell_files,
+                  *posix_shell_files,
+              ],
+          ),
+          (
+              "shellcheck-bash",
+              [
+                  "docker",
+                  "run",
+                  "--rm",
+                  "--volume",
+                  f"{root}:/workspace:ro",
+                  "--workdir",
+                  "/workspace",
+                  shellcheck_image,
+                  "shellcheck",
+                  "--shell=bash",
+                  *bash_shell_files,
               ],
           ),
           (
@@ -210,7 +232,27 @@ steps:
                   "-i",
                   "4",
                   "-ci",
-                  *shell_files,
+                  *posix_shell_files,
+              ],
+          ),
+          (
+              "shfmt-bash",
+              [
+                  "docker",
+                  "run",
+                  "--rm",
+                  "--volume",
+                  f"{root}:/workspace:ro",
+                  "--workdir",
+                  "/workspace",
+                  shfmt_image,
+                  "-d",
+                  "-ln",
+                  "bash",
+                  "-i",
+                  "4",
+                  "-ci",
+                  *bash_shell_files,
               ],
           ),
           (
@@ -383,14 +425,17 @@ safe-outputs:
       - "scripts/**/*.py"
       - "scripts/setup/*.sh"
       - "scripts/setup/*.ps1"
-      - "alpine/init"
-      - "alpine/nvx-container-enter"
-      - "alpine/nvx-container-launch"
-      - "alpine/nvx-exit"
-      - "alpine/nvx-hostmount"
-      - "alpine/nvx-init-agent"
-      - "alpine/nvx-snapshot"
-      - "alpine/nvx-virtio-restore-probe"
+      - "guest/common/init"
+      - "guest/alpine/nvx-container-enter"
+      - "guest/alpine/nvx-container-launch"
+      - "guest/common/nvx-exit"
+      - "guest/common/nvx-hostmount"
+      - "guest/common/nvx-identity-probe"
+      - "guest/common/nvx-init-agent"
+      - "guest/common/nvx-sandbox-smoke"
+      - "guest/common/nvx-snapshot"
+      - "guest/common/nvx-virtio-restore-probe"
+      - "guest/ubuntu/nvx-bashrc"
     excluded-files:
       - "openvmm"
       - "openvmm/**"

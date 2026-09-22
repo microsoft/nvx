@@ -30,8 +30,36 @@
     "architecture": "x86_64",
     "minirootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz",
     "minirootfs_sha256": "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
-    "guest_sources": "alpine",
-    "package_manifests": "build/*.packages.json",
+    "guest_sources": [
+      "guest/common",
+      "guest/alpine"
+    ],
+    "package_manifests": [
+      "build/initramfs.cpio.gz.packages.json"
+    ],
     "source_output": "build/sources/alpine"
+  },
+  "ubuntu": {
+    "distribution": "Ubuntu Base",
+    "version": "26.04.1",
+    "codename": "resolute",
+    "architecture": "amd64",
+    "base_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-amd64.tar.gz",
+    "base_sha256": "a496a960472ce474a59590b8987d3a1135d3cbef1991f3b1abe8cacfea8bf85a",
+    "archive_keyring_url": "https://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg",
+    "archive_keyring_sha256": "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31",
+    "package_lock": "ubuntu/packages.lock.json",
+    "package_lock_sha256": "fcdd30223b96fc26e24fcf4b6763a4a2504e9cd25882e68e89fbf6bf45277ef0",
+    "guest_sources": [
+      "guest/common",
+      "guest/ubuntu",
+      "ubuntu/packages.lock.json"
+    ],
+    "package_manifests": [
+      "build/initramfs-ubuntu.cpio.gz.packages.json",
+      "build/ubuntu-distro.erofs.manifest.json"
+    ],
+    "source_output": "build/sources/ubuntu",
+    "erofs_converter_format": 1
   }
 }

@@ -5,8 +5,8 @@
 NVX provides a small, versioned virtual machine for running an x86-64 Linux
 guest without firmware or a PC platform. Its design has four primary goals:
 
-- boot the same uncompressed Xen PVH kernel and Alpine initramfs on Linux and
-  Windows;
+- boot the same uncompressed Xen PVH kernel with explicitly selected Alpine or
+  Ubuntu userland on Linux and Windows;
 - keep the guest-visible machine independent of the selected hypervisor;
 - expose only a fixed, allowlisted set of devices; and
 - capture a running VM into immutable artifacts that can be restored in a new
@@ -27,7 +27,7 @@ compatibility contract.
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart TB
-   Inputs["NVX CLI<br/>PVH kernel and Alpine initramfs"]
+   Inputs["NVX CLI<br/>PVH kernel and selected guest initramfs"]
    Profile["OpenVMM microVM<br/>boot, memory, devices, and snapshots"]
    Kvm["Linux / KVM"]
    Mshv["Linux / MSHV"]

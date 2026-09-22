@@ -148,7 +148,7 @@ python3 scripts/nvx.py benchmark --suite snapshot-profile --backend kvm --warmup
 python scripts\nvx.py benchmark --suite snapshot-profile --backend whp --warmups 1 --runs 5 --output data\runs\windows-whp-baremetal\snapshot-profile.json
 ```
 
-The default matrix profiles 64, 128, 256, 512, and 1024 MiB snapshots with both warm and cold
+The default matrix profiles 128, 256, 512, and 1024 MiB snapshots with both warm and cold
 restore artifacts. Use `--shell-memories` to select sizes and `--cache-state warm`, `cold`, or
 `both` to select cache conditions. The suite enables OpenVMM profiling for these diagnostic runs;
 other paths leave full profiling disabled unless `--snapshot-profile` is explicit.
@@ -183,7 +183,7 @@ reuse one fresh snapshot per scenario; compare results only on the same host und
 load and power conditions.
 
 Run one workload by selecting `cold-start`, `device-io`, `virtfs`, `shell-snapshot`, or `network-snapshot`
-instead of `performance`. Use `--shell-memories 64 128 256 512`,
+instead of `performance`. Use `--shell-memories 128 256 512`,
 `--payload-mib 64`, and
 `--net 10.0.0.2/24 --network-profile portable` to override their defaults. Run
 `python scripts/nvx.py benchmark --help` for the complete option surface.
@@ -408,8 +408,6 @@ that methodology are not comparable with newly collected values.
 
 | Metric | Description |
 | --- | --- |
-| `shell_snapshot_cold_64_mib` | OpenVMM launch to a shell-ready guest with 64 MiB of memory. |
-| `shell_snapshot_restore_64_mib` | Restore process launch through lifecycle-aligned verification of a 64 MiB snapshot. |
 | `shell_snapshot_cold_128_mib` | OpenVMM launch to a shell-ready guest with 128 MiB of memory. |
 | `shell_snapshot_restore_128_mib` | Restore process launch through lifecycle-aligned verification of a 128 MiB snapshot. |
 | `shell_snapshot_cold_256_mib` | OpenVMM launch to a shell-ready guest with 256 MiB of memory. |

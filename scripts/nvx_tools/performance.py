@@ -43,8 +43,6 @@ SHARED_METRICS = frozenset(
         "virtfs_live_write",
         "virtfs_live_read",
         "virtfs_live_roundtrip",
-        "shell_snapshot_cold_64_mib",
-        "shell_snapshot_restore_64_mib",
         "shell_snapshot_cold_128_mib",
         "shell_snapshot_restore_128_mib",
         "shell_snapshot_cold_256_mib",
@@ -80,7 +78,7 @@ LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP = 1.25
 UNSTABLE_LIFECYCLE_EXIT_CODE = 75
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-SHELL_SNAPSHOT_MEMORIES_MIB = (64, 128, 256, 512)
+SHELL_SNAPSHOT_MEMORIES_MIB = (128, 256, 512)
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
 DEVICE_IO_RESULT_PREFIX = "NVX_DEVICE_IO_RESULT="
 DEVICE_IO_OPERATIONS = {
@@ -1506,7 +1504,7 @@ def collect_results(
                 workload_controls = {
                     "payload_mib": 64,
                     "virtfs_memory_mib": 512,
-                    "shell_memories_mib": [64, 128, 256, 512],
+                    "shell_memories_mib": [128, 256, 512],
                     "network_memory_mib": 256,
                     "network": "10.0.0.2/24",
                 }

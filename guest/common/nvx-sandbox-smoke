@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+[ "$(id -u)" = 65534 ]
+[ "$(id -g)" = 65534 ]
+[ "${HOME:-}" = /nonexistent ]
+grep -qx 'ID=ubuntu' /etc/os-release
+printf 'scratch-backed-write\n' >/tmp/nvx-ubuntu-sandbox-smoke
+[ "$(cat /tmp/nvx-ubuntu-sandbox-smoke)" = scratch-backed-write ]
+echo "NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534"
