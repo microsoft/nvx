@@ -5513,6 +5513,20 @@ def _run_kvm_worker(command: Sequence[str], result_kind: str) -> object:
         raise
 
 
+def _resolved_scratch_directory(args: argparse.Namespace) -> Path:
+    scratch = getattr(args, "scratch_dir", None)
+    if scratch is None:
+        scratch = Path(tempfile.gettempdir())
+    return Path(scratch).resolve()
+
+
+def _kvm_worker_scratch_arguments(args: argparse.Namespace) -> list[str]:
+    return [
+        "--scratch-dir",
+        windows_to_wsl(_resolved_scratch_directory(args)),
+    ]
+
+
 def benchmark_kvm(
     args: argparse.Namespace,
     executable: Path,
@@ -5531,6 +5545,7 @@ def benchmark_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "boot",
         "--warmups",
@@ -5577,6 +5592,7 @@ def benchmark_e2e_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "e2e",
         "--warmups",
@@ -5623,6 +5639,7 @@ def benchmark_snapshot_restore_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "restore",
         "--warmups",
@@ -5669,6 +5686,7 @@ def benchmark_snapshot_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "snapshot",
         "--warmups",
@@ -5706,7 +5724,7 @@ def benchmark_scratch_directory(args: argparse.Namespace) -> Generator[None]:
     if scratch_dir is None:
         yield
         return
-    scratch = scratch_dir.resolve()
+    scratch = _resolved_scratch_directory(args)
     if not scratch.is_dir():
         raise ValueError(f"benchmark scratch directory does not exist: {scratch}")
     args.scratch_dir = scratch
@@ -5719,10 +5737,7 @@ def benchmark_scratch_directory(args: argparse.Namespace) -> Generator[None]:
 
 
 def scratch_directory_control(args: argparse.Namespace) -> str:
-    scratch = getattr(args, "scratch_dir", None)
-    if scratch is None:
-        scratch = Path(tempfile.gettempdir())
-    return str(Path(scratch).resolve())
+    return str(_resolved_scratch_directory(args))
 
 
 def run(args: argparse.Namespace) -> int:

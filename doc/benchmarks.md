@@ -548,8 +548,10 @@ directory under the `NVX_BENCHMARK_SCRATCH` root that runner provisioning
 creates on the data volume. Acceptance JSON records the directory as
 `controls.scratch_directory`, and workload metadata records it as
 `scratch_directory`. When the root is not provisioned, CI warns and uses the
-system temporary directory. Use `--scratch-dir` for manual runs whose
-temporary directory shares a volume with other I/O-heavy work.
+system temporary directory. Windows-coordinated KVM workers receive the WSL
+translation of the same directory instead of falling back to WSL's `/tmp`.
+Use `--scratch-dir` for manual runs whose temporary directory shares a volume
+with other I/O-heavy work.
 
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10

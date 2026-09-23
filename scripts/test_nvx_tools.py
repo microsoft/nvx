@@ -4847,6 +4847,101 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(result, {"p50_ms": 1.5})
 
+    def test_kvm_workers_forward_translated_scratch_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary).resolve()
+            args = argparse.Namespace(
+                scratch_dir=scratch,
+                warmups=1,
+                runs=2,
+                memory_mib=128,
+                processors=4,
+                host_cpu_reserve=1,
+                cpus="0-3",
+                timeout=1.0,
+                teardown_mode="guest-exit",
+                net=None,
+                network_profile=None,
+                keep_kvm_stage=True,
+            )
+            workers = (
+                (benchmark.benchmark_kvm, ""),
+                (benchmark.benchmark_e2e_kvm, "e2e"),
+                (benchmark.benchmark_snapshot_restore_kvm, "restore"),
+                (benchmark.benchmark_snapshot_kvm, "snapshot"),
+            )
+
+            def translate(path: Path) -> str:
+                if path == benchmark.NVX_SCRIPT:
+                    return "/workspace/scripts/nvx.py"
+                self.assertEqual(path, scratch)
+                return "/mnt/data/nvx-benchmark-scratch"
+
+            with (
+                patch.object(benchmark, "stage_kvm"),
+                patch.object(
+                    benchmark,
+                    "windows_to_wsl",
+                    side_effect=translate,
+                ) as translate_path,
+                patch.object(
+                    benchmark,
+                    "_run_kvm_worker",
+                    return_value={},
+                ) as run_worker,
+            ):
+                for worker, result_kind in workers:
+                    with self.subTest(result_kind=result_kind or "boot"):
+                        translate_path.reset_mock()
+                        run_worker.reset_mock()
+                        worker(
+                            args,
+                            Path("openvmm"),
+                            Path("kernel"),
+                            Path("initrd"),
+                        )
+
+                        command = run_worker.call_args.args[0]
+                        scratch_index = command.index("--scratch-dir")
+                        self.assertEqual(
+                            command[scratch_index : scratch_index + 2],
+                            [
+                                "--scratch-dir",
+                                "/mnt/data/nvx-benchmark-scratch",
+                            ],
+                        )
+                        self.assertEqual(
+                            translate_path.call_args_list,
+                            [call(benchmark.NVX_SCRIPT), call(scratch)],
+                        )
+                        self.assertEqual(
+                            run_worker.call_args.args[1],
+                            result_kind,
+                        )
+
+    def test_kvm_worker_defaults_to_translated_system_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            system_temporary = Path(temporary).resolve()
+            args = argparse.Namespace(scratch_dir=None)
+            with (
+                patch.object(
+                    benchmark.tempfile,
+                    "gettempdir",
+                    return_value=str(system_temporary),
+                ),
+                patch.object(
+                    benchmark,
+                    "windows_to_wsl",
+                    return_value="/mnt/c/system-temp",
+                ) as translate,
+            ):
+                self.assertEqual(
+                    benchmark._kvm_worker_scratch_arguments(args),
+                    ["--scratch-dir", "/mnt/c/system-temp"],
+                )
+
+            translate.assert_called_once_with(system_temporary)
+
     def test_require_file_preserves_resolved_path_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
