@@ -516,6 +516,16 @@ lie on each side.
 Singleton outliers remain tolerated, while pooled Windows runners cannot publish a
 bimodal host-stall series into topology-wide history.
 
+Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
+uploads its raw results and lifecycle profiles to the immutable
+`benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
+after a benchmark failure. Both artifacts are retained for one day. Rerunning a
+workflow cannot overwrite an earlier attempt's diagnostics. Downstream gates still
+use the run-scoped artifact so a failed-jobs-only rerun can reuse successful
+platform results from an earlier workflow attempt. The `acceptance-attempt-N.json`
+files identify the bounded lifecycle remeasurements within one workflow attempt,
+not the workflow's `github.run_attempt`.
+
 When investigating instability, compare each attempt's
 `snapshot_capture.whp.profile.raw_samples` with its `samples_ms`. For example, a
 slow `capture.mapped_memory_flush` with otherwise stable capture phases localizes
