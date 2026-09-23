@@ -17,9 +17,11 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -2245,6 +2247,290 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertEqual(
             action.count("Lifecycle snapshot generation was unstable"),
             1,
+        )
+
+    def test_windows_benchmarks_use_provisioned_data_volume_scratch(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        setup = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+        prepare = _composite_action_step(action, "Prepare Windows benchmark scratch")
+        cleanup = _composite_action_step(action, "Remove Windows benchmark scratch")
+
+        self.assertIn('$BenchmarkScratchVariable = "NVX_BENCHMARK_SCRATCH"', setup)
+        self.assertIn(
+            '[Environment]::GetEnvironmentVariable("NVX_BENCHMARK_SCRATCH", "Machine")',
+            prepare,
+        )
+        self.assertIn('"NVX_BENCHMARK_SCRATCH_DIR=$Scratch"', prepare)
+        self.assertIn("::warning::NVX_BENCHMARK_SCRATCH is not provisioned", prepare)
+        self.assertIn("      if: always() && runner.os == 'Windows'", cleanup)
+        self.assertLess(
+            action.index("- name: Remove Windows benchmark scratch"),
+            action.index("- name: Upload benchmark diagnostics"),
+        )
+        for step in (
+            "Run Windows acceptance test",
+            "Run Windows performance suite",
+            "Run Windows multi-vCPU shell restore",
+            "Run Windows device operation rates",
+        ):
+            with self.subTest(step=step):
+                script = _composite_action_script(action, step)
+                self.assertIn(
+                    '$ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)',
+                    script,
+                )
+                self.assertIn("@ScratchArgs", script)
+                self.assertLess(
+                    action.index("- name: Prepare Windows benchmark scratch"),
+                    action.index(f"- name: {step}"),
+                )
+        self.assertIn(
+            "    Configure-SccacheEnvironment\n    Configure-BenchmarkScratch\n",
+            setup,
+        )
+        self.assertIn(
+            "Assert-ServiceDirectoryAcl -Path $SccacheDirectory -Writable\n"
+            "        Assert-BenchmarkScratch\n",
+            setup,
+        )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_acceptance_forwards_benchmark_scratch(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(action, "Run Windows acceptance test")
+        for name, value in (
+            ("backend", "whp"),
+            ("platform", "windows-whp-virtual-machine"),
+            ("warmups", "1"),
+            ("runs", "10"),
+            ("teardown-mode", "guest-exit"),
+        ):
+            script = script.replace("${{ inputs." + name + " }}", value)
+        stub = """
+function python {
+    $global:LASTEXITCODE = 0
+    if ($args[1] -ne "benchmark") {
+        return
+    }
+    $output = $args[[Array]::IndexOf($args, "--output") + 1]
+    $index = [Array]::IndexOf($args, "--scratch-dir")
+    $scratch = ""
+    if ($index -ge 0) {
+        $scratch = $args[$index + 1]
+    }
+    New-Item -ItemType Directory -Path (Split-Path $output) -Force | Out-Null
+    Set-Content -LiteralPath $output -Encoding UTF8 -Value (
+        ConvertTo-Json -Compress @{ scratch = $scratch }
+    )
+}
+"""
+        for scratch in ("", r"F:\nvx-benchmark-scratch\job"):
+            with (
+                self.subTest(scratch=scratch),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary).resolve()
+                environment = os.environ.copy()
+                environment.pop("NVX_BENCHMARK_SCRATCH_DIR", None)
+                if scratch:
+                    environment["NVX_BENCHMARK_SCRATCH_DIR"] = scratch
+                result = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        stub + script,
+                    ],
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                accepted = (
+                    root
+                    / "data"
+                    / "runs"
+                    / "windows-whp-virtual-machine"
+                    / "microvm-v2"
+                    / "1vcpu"
+                    / "acceptance.json"
+                )
+                self.assertEqual(
+                    json.loads(accepted.read_text(encoding="utf-8-sig")),
+                    {"scratch": scratch},
+                )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_benchmark_scratch_steps_manage_per_job_directories(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        machine_lookup = (
+            '[Environment]::GetEnvironmentVariable("NVX_BENCHMARK_SCRATCH", "Machine")'
+        )
+        prepare = _composite_action_script(
+            action, "Prepare Windows benchmark scratch"
+        ).replace("${{ inputs.platform }}", "windows-whp-virtual-machine")
+        cleanup = _composite_action_script(action, "Remove Windows benchmark scratch")
+        self.assertIn(machine_lookup, prepare)
+
+        def run_step(script: str, environment: dict[str, str]):
+            return subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / "scratch"
+            root.mkdir()
+            stale = root / "windows-whp-virtual-machine-1-1"
+            fresh = root / "windows-whp-virtual-machine-2-1"
+            for directory in (stale, fresh):
+                directory.mkdir()
+                (directory / "memory.bin").write_bytes(b"ram")
+            old = time.time() - 7 * 60 * 60
+            os.utime(stale, (old, old))
+            github_env = Path(temporary) / "github-env.txt"
+            github_env.write_text("", encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GITHUB_ENV": str(github_env),
+                    "GITHUB_RUN_ID": "35805840174",
+                    "GITHUB_RUN_ATTEMPT": "2",
+                }
+            )
+
+            result = run_step(
+                prepare.replace(machine_lookup, f"'{root}'"),
+                environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            scratch = root / "windows-whp-virtual-machine-35805840174-2"
+            self.assertTrue(scratch.is_dir())
+            self.assertFalse(stale.exists())
+            self.assertTrue(fresh.is_dir())
+            self.assertEqual(
+                github_env.read_text(encoding="utf-8-sig").splitlines(),
+                [f"NVX_BENCHMARK_SCRATCH_DIR={scratch}"],
+            )
+
+            locked = scratch / "locked.bin"
+            with locked.open("wb"):
+                result = run_step(
+                    cleanup,
+                    {**environment, "NVX_BENCHMARK_SCRATCH_DIR": str(scratch)},
+                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "::warning::Could not remove benchmark scratch", result.stdout
+            )
+
+            result = run_step(
+                cleanup,
+                {**environment, "NVX_BENCHMARK_SCRATCH_DIR": str(scratch)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(scratch.exists())
+
+            github_env.write_text("", encoding="utf-8")
+            result = run_step(prepare.replace(machine_lookup, "''"), environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "::warning::NVX_BENCHMARK_SCRATCH is not provisioned", result.stdout
+            )
+            self.assertEqual(github_env.read_text(encoding="utf-8"), "")
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_setup_selects_largest_data_volume_for_benchmark_scratch(self):
+        setup = BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        harness = f"""
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{setup}',
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -ne 0) {{
+    throw "setup script has parse errors"
+}}
+foreach ($name in "Test-SystemVolumePath", "Get-BenchmarkScratchDirectory") {{
+    $definition = $ast.Find({{
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $name
+        }}, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+}}
+$BenchmarkScratchVariable = "NVX_TEST_UNSET_{uuid.uuid4().hex}"
+$BenchmarkScratchName = "nvx-benchmark-scratch"
+$BenchmarkScratchDirectory = $null
+$env:SystemDrive = "C:"
+$Volumes = @(
+    [pscustomobject]@{{ DriveLetter = [char]"C"; DriveType = "Fixed"; FileSystem = "NTFS"; Size = 900GB }},
+    [pscustomobject]@{{ DriveLetter = [char]"D"; DriveType = "Fixed"; FileSystem = "NTFS"; Size = 64GB }},
+    [pscustomobject]@{{ DriveLetter = $null; DriveType = "Fixed"; FileSystem = "NTFS"; Size = 2TB }},
+    [pscustomobject]@{{ DriveLetter = [char]"E"; DriveType = "CD-ROM"; FileSystem = ""; Size = 1TB }},
+    [pscustomobject]@{{ DriveLetter = [char]"F"; DriveType = "Fixed"; FileSystem = "NTFS"; Size = 512GB }},
+    [pscustomobject]@{{ DriveLetter = [char]"G"; DriveType = "Fixed"; FileSystem = "FAT32"; Size = 1TB }}
+)
+function Get-Volume {{
+    $script:Volumes
+}}
+Write-Output (Get-BenchmarkScratchDirectory)
+$Volumes = @($Volumes[0])
+Write-Output ("none=" + ($null -eq (Get-BenchmarkScratchDirectory)))
+$BenchmarkScratchDirectory = "H:\\explicit\\scratch"
+Write-Output (Get-BenchmarkScratchDirectory)
+"""
+
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                r"F:\nvx-benchmark-scratch",
+                "none=True",
+                r"H:\explicit\scratch",
+            ],
         )
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
@@ -4561,6 +4847,101 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(result, {"p50_ms": 1.5})
 
+    def test_kvm_workers_forward_translated_scratch_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary).resolve()
+            args = argparse.Namespace(
+                scratch_dir=scratch,
+                warmups=1,
+                runs=2,
+                memory_mib=128,
+                processors=4,
+                host_cpu_reserve=1,
+                cpus="0-3",
+                timeout=1.0,
+                teardown_mode="guest-exit",
+                net=None,
+                network_profile=None,
+                keep_kvm_stage=True,
+            )
+            workers = (
+                (benchmark.benchmark_kvm, ""),
+                (benchmark.benchmark_e2e_kvm, "e2e"),
+                (benchmark.benchmark_snapshot_restore_kvm, "restore"),
+                (benchmark.benchmark_snapshot_kvm, "snapshot"),
+            )
+
+            def translate(path: Path) -> str:
+                if path == benchmark.NVX_SCRIPT:
+                    return "/workspace/scripts/nvx.py"
+                self.assertEqual(path, scratch)
+                return "/mnt/data/nvx-benchmark-scratch"
+
+            with (
+                patch.object(benchmark, "stage_kvm"),
+                patch.object(
+                    benchmark,
+                    "windows_to_wsl",
+                    side_effect=translate,
+                ) as translate_path,
+                patch.object(
+                    benchmark,
+                    "_run_kvm_worker",
+                    return_value={},
+                ) as run_worker,
+            ):
+                for worker, result_kind in workers:
+                    with self.subTest(result_kind=result_kind or "boot"):
+                        translate_path.reset_mock()
+                        run_worker.reset_mock()
+                        worker(
+                            args,
+                            Path("openvmm"),
+                            Path("kernel"),
+                            Path("initrd"),
+                        )
+
+                        command = run_worker.call_args.args[0]
+                        scratch_index = command.index("--scratch-dir")
+                        self.assertEqual(
+                            command[scratch_index : scratch_index + 2],
+                            [
+                                "--scratch-dir",
+                                "/mnt/data/nvx-benchmark-scratch",
+                            ],
+                        )
+                        self.assertEqual(
+                            translate_path.call_args_list,
+                            [call(benchmark.NVX_SCRIPT), call(scratch)],
+                        )
+                        self.assertEqual(
+                            run_worker.call_args.args[1],
+                            result_kind,
+                        )
+
+    def test_kvm_worker_defaults_to_translated_system_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            system_temporary = Path(temporary).resolve()
+            args = argparse.Namespace(scratch_dir=None)
+            with (
+                patch.object(
+                    benchmark.tempfile,
+                    "gettempdir",
+                    return_value=str(system_temporary),
+                ),
+                patch.object(
+                    benchmark,
+                    "windows_to_wsl",
+                    return_value="/mnt/c/system-temp",
+                ) as translate,
+            ):
+                self.assertEqual(
+                    benchmark._kvm_worker_scratch_arguments(args),
+                    ["--scratch-dir", "/mnt/c/system-temp"],
+                )
+
+            translate.assert_called_once_with(system_temporary)
+
     def test_require_file_preserves_resolved_path_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -5059,6 +5440,57 @@ class BenchmarkTests(unittest.TestCase):
         args.network_profile = None
         with self.assertRaisesRegex(ValueError, "--net and --network-profile"):
             benchmark.run(args)
+
+    def test_benchmark_scratch_directory_routes_temporary_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary).resolve() / "scratch"
+            scratch.mkdir()
+            args = nvx.parse_args(["benchmark", "--scratch-dir", str(scratch)])
+            previous = tempfile.tempdir
+
+            with (
+                benchmark.benchmark_scratch_directory(args),
+                patch.object(benchmark, "_git_revision", return_value="revision"),
+            ):
+                self.assertEqual(Path(tempfile.gettempdir()), scratch)
+                with tempfile.TemporaryDirectory(prefix="openvmm-e2e-") as snapshot:
+                    self.assertEqual(Path(snapshot).parent, scratch)
+                document = benchmark.result_document(args, None, None)
+
+            self.assertEqual(tempfile.tempdir, previous)
+            self.assertEqual(args.scratch_dir, scratch)
+            self.assertEqual(
+                document["controls"]["scratch_directory"],
+                str(scratch),
+            )
+
+    def test_benchmark_scratch_directory_defaults_to_system_temporary(self):
+        args = nvx.parse_args(["benchmark"])
+        previous = tempfile.tempdir
+
+        with (
+            benchmark.benchmark_scratch_directory(args),
+            patch.object(benchmark, "_git_revision", return_value="revision"),
+        ):
+            self.assertEqual(tempfile.tempdir, previous)
+            document = benchmark.result_document(args, None, None)
+
+        self.assertIsNone(args.scratch_dir)
+        self.assertEqual(
+            document["controls"]["scratch_directory"],
+            str(Path(tempfile.gettempdir()).resolve()),
+        )
+
+    def test_benchmark_scratch_directory_must_exist(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "missing"
+            args = nvx.parse_args(["benchmark", "--scratch-dir", str(missing)])
+            previous = tempfile.tempdir
+
+            with self.assertRaisesRegex(ValueError, "scratch directory does not exist"):
+                benchmark.run(args)
+
+            self.assertEqual(tempfile.tempdir, previous)
 
     def test_network_snapshot_restore_selects_portable_profile(self):
         command = benchmark.snapshot_restore_command(
@@ -6451,6 +6883,10 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(metadata["processors"], 8)
             self.assertEqual(metadata["host_affinity_set"], args.cpus)
             self.assertEqual(metadata["host_cpu_reserve"], args.host_cpu_reserve)
+            self.assertEqual(
+                metadata["scratch_directory"],
+                str(Path(tempfile.gettempdir()).resolve()),
+            )
             cold.assert_called_once()
             self.assertEqual(virtfs.call_args.kwargs["runs"], 3)
             shell.assert_called_once()

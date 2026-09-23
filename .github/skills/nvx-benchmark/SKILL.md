@@ -44,7 +44,8 @@ Use one profile and report it by name:
 - **CI-equivalent** reproduces the exact counts, affinity, timeout, and teardown mode
   from [run-benchmark](../../actions/run-benchmark/action.yml) at the selected revision.
   Read that action at runtime; CI sampling can change and must not be copied from an
-  older run or this skill.
+  older run or this skill. On a Windows runner with a machine-level
+  `NVX_BENCHMARK_SCRATCH`, also pass `--scratch-dir` with a fresh directory under it.
 - **Canonical manual** uses the complete performance workload profile documented in
   [benchmarks](../../../doc/benchmarks.md), followed by device I/O with five warmups,
   30 retained attempts, ten-second windows, and 512 MiB backing objects.

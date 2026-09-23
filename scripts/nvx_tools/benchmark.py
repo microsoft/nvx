@@ -480,6 +480,14 @@ def configure_parser(
         help="write canonical workload logs to this directory",
     )
     parser.add_argument(
+        "--scratch-dir",
+        type=Path,
+        help=(
+            "existing directory for temporary snapshots, guest RAM backing, "
+            "and workload files (default: the system temporary directory)"
+        ),
+    )
+    parser.add_argument(
         "--keep-kvm-stage",
         action="store_true",
         help="keep temporary staged KVM benchmark binaries",
@@ -3925,6 +3933,7 @@ def write_benchmark_metadata(
         "lifecycle_network": args.net,
         "host_affinity_set": args.cpus,
         "host_cpu_reserve": args.host_cpu_reserve,
+        "scratch_directory": scratch_directory_control(args),
         "memory_mib": {
             "lifecycle": args.memory_mib,
             "virtfs": args.virtfs_memory_mib,
@@ -5340,6 +5349,7 @@ def result_document(
             ),
             "snapshot_profile_environment": SNAPSHOT_PROFILE_ENV,
             "cache_state": args.cache_state,
+            "scratch_directory": scratch_directory_control(args),
         },
         "backends": {},
         "snapshot_capture": {},
@@ -5579,6 +5589,20 @@ def _run_kvm_worker(command: Sequence[str], result_kind: str) -> object:
         raise
 
 
+def _resolved_scratch_directory(args: argparse.Namespace) -> Path:
+    scratch = getattr(args, "scratch_dir", None)
+    if scratch is None:
+        scratch = Path(tempfile.gettempdir())
+    return Path(scratch).resolve()
+
+
+def _kvm_worker_scratch_arguments(args: argparse.Namespace) -> list[str]:
+    return [
+        "--scratch-dir",
+        windows_to_wsl(_resolved_scratch_directory(args)),
+    ]
+
+
 def benchmark_kvm(
     args: argparse.Namespace,
     executable: Path,
@@ -5597,6 +5621,7 @@ def benchmark_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "boot",
         "--warmups",
@@ -5643,6 +5668,7 @@ def benchmark_e2e_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "e2e",
         "--warmups",
@@ -5689,6 +5715,7 @@ def benchmark_snapshot_restore_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "restore",
         "--warmups",
@@ -5735,6 +5762,7 @@ def benchmark_snapshot_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "snapshot",
         "--warmups",
@@ -5761,7 +5789,39 @@ def benchmark_snapshot_kvm(
             cleanup_kvm(stage_dir)
 
 
+@contextlib.contextmanager
+def benchmark_scratch_directory(args: argparse.Namespace) -> Generator[None]:
+    """Creates benchmark temporary files under the requested scratch directory.
+
+    Snapshot capture writes and flushes guest RAM through these files, so the
+    selected volume's write throughput bounds snapshot generation time.
+    """
+    scratch_dir = getattr(args, "scratch_dir", None)
+    if scratch_dir is None:
+        yield
+        return
+    scratch = _resolved_scratch_directory(args)
+    if not scratch.is_dir():
+        raise ValueError(f"benchmark scratch directory does not exist: {scratch}")
+    args.scratch_dir = scratch
+    previous = tempfile.tempdir
+    tempfile.tempdir = str(scratch)
+    try:
+        yield
+    finally:
+        tempfile.tempdir = previous
+
+
+def scratch_directory_control(args: argparse.Namespace) -> str:
+    return str(_resolved_scratch_directory(args))
+
+
 def run(args: argparse.Namespace) -> int:
+    with benchmark_scratch_directory(args):
+        return run_benchmark(args)
+
+
+def run_benchmark(args: argparse.Namespace) -> int:
     apply_benchmark_suite_defaults(args)
     if (args.net is None) != (args.network_profile is None):
         raise ValueError("--net and --network-profile must be specified together")
