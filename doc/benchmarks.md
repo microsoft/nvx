@@ -19,6 +19,13 @@ reads the process high-water mark; Windows reads the cumulative peak working set
 resident guest-memory mappings. CI persists and gates p50 RSS and reports both p50 and maximum RSS
 in its lifecycle diagnostics.
 
+The coordinator samples peak RSS once, at the readiness marker, while OpenVMM is still running.
+A prequeued guest exit can end OpenVMM before that sample. The coordinator then discards and
+repeats the attempt, up to three attempts per measured sample, and reports the number of discarded
+attempts in `peak_rss_remeasured_count`. It never substitutes another reading: a sample taken
+before the marker omits the restore, Linux exit accounting includes the coordinator's pre-exec
+image, and a Windows reading after exit includes teardown.
+
 Use this page for metric names and methodology. Current historical p50 values live in
 `data/`; timings copied into old discussions or commit messages are not baselines. Bare-metal and
 virtual-machine results have separate histories and must not be compared as one regression series.
@@ -516,6 +523,16 @@ lie on each side.
 Singleton outliers remain tolerated, while pooled Windows runners cannot publish a
 bimodal host-stall series into topology-wide history.
 
+Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
+uploads its raw results and lifecycle profiles to the immutable
+`benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
+after a benchmark failure. Both artifacts are retained for one day. Rerunning a
+workflow cannot overwrite an earlier attempt's diagnostics. Downstream gates still
+use the run-scoped artifact so a failed-jobs-only rerun can reuse successful
+platform results from an earlier workflow attempt. The `acceptance-attempt-N.json`
+files identify the bounded lifecycle remeasurements within one workflow attempt,
+not the workflow's `github.run_attempt`.
+
 When investigating instability, compare each attempt's
 `snapshot_capture.whp.profile.raw_samples` with its `samples_ms`. For example, a
 slow `capture.mapped_memory_flush` with otherwise stable capture phases localizes
@@ -523,6 +540,25 @@ the delay to host-side mapped RAM flushing, not guest boot or snapshot restore.
 Reproduce with the exact executable and guest artifact hashes on the same host
 before attributing the delay to a source change. Keep the stability thresholds and
 bounded remeasurement unchanged when collecting diagnostic evidence.
+
+Snapshot generation is bounded by the write throughput of the benchmark's
+temporary directory, because capture flushes guest RAM through a backing file
+created there. The Windows backing file stays dense so restore keeps the
+captured pages cached; NTFS therefore zero-fills the unwritten range below the
+guest's top-of-RAM pages, and a 128 MiB guest writes about 150 MiB per capture.
+The Windows CI runners' 128 GiB Premium SSD system disk also holds the runner
+work tree, caches, and builds. Under load it alternates between its burst limit
+of about 173 MB/s and its baseline of about 102 MB/s in blocks of tens of
+seconds, which splits one lifecycle series into flush clusters near 0.95 and
+1.6 seconds. Windows CI therefore passes `--scratch-dir` with a per-job
+directory under the `NVX_BENCHMARK_SCRATCH` root that runner provisioning
+creates on the data volume. Acceptance JSON records the directory as
+`controls.scratch_directory`, and workload metadata records it as
+`scratch_directory`. When the root is not provisioned, CI warns and uses the
+system temporary directory. Windows-coordinated KVM workers receive the WSL
+translation of the same directory instead of falling back to WSL's `/tmp`.
+Use `--scratch-dir` for manual runs whose temporary directory shares a volume
+with other I/O-heavy work.
 
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10

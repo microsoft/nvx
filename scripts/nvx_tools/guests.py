@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .build_constants import (
+    AlpineBuildConstants,
+    AzureLinuxBuildConstants,
+    BuildConstants,
+    DockerBuildConstants,
+    UbuntuBuildConstants,
+)
 from .common import ScriptError
 
 
@@ -25,53 +32,53 @@ class GuestDescriptor:
 
     @property
     def package_manifest_name(self) -> str:
-        return f"{self.initramfs_name}.packages.json"
+        return f"{self.initramfs_name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
 
 
 ALPINE_GUEST = GuestDescriptor(
-    name="alpine",
-    distribution="Alpine Linux",
-    release="3.24.1",
-    architecture="x86_64",
-    initramfs_name="initramfs.cpio.gz",
-    package_manifest_format="apk-v1",
+    name=AlpineBuildConstants.GUEST_NAME,
+    distribution=AlpineBuildConstants.DISTRIBUTION,
+    release=AlpineBuildConstants.VERSION,
+    architecture=AlpineBuildConstants.ARCHITECTURE,
+    initramfs_name=AlpineBuildConstants.INITRAMFS_NAME,
+    package_manifest_format=AlpineBuildConstants.PACKAGE_MANIFEST_FORMAT,
     default_memory_mib=128,
     boot_marker=b"NVX-GUEST-BOOT-OK: alpine",
     sandbox_control=True,
     native_build_supported=True,
-    docker_artifacts_target="artifacts",
+    docker_artifacts_target=DockerBuildConstants.ALPINE_TARGET,
     docker_initramfs_artifacts_target=None,
-    os_release_id="alpine",
+    os_release_id=AlpineBuildConstants.GUEST_NAME,
 )
 UBUNTU_GUEST = GuestDescriptor(
-    name="ubuntu",
-    distribution="Ubuntu Base",
-    release="26.04.1",
-    architecture="amd64",
-    initramfs_name="initramfs-ubuntu.cpio.gz",
-    package_manifest_format="ubuntu-v1",
+    name=UbuntuBuildConstants.GUEST_NAME,
+    distribution=UbuntuBuildConstants.DISTRIBUTION,
+    release=UbuntuBuildConstants.VERSION,
+    architecture=UbuntuBuildConstants.ARCHITECTURE,
+    initramfs_name=UbuntuBuildConstants.INITRAMFS_NAME,
+    package_manifest_format=UbuntuBuildConstants.PACKAGE_MANIFEST_FORMAT,
     default_memory_mib=256,
     boot_marker=b"NVX-GUEST-BOOT-OK: ubuntu",
     sandbox_control=False,
     native_build_supported=True,
-    docker_artifacts_target="ubuntu-guest-artifacts",
+    docker_artifacts_target=DockerBuildConstants.UBUNTU_TARGET,
     docker_initramfs_artifacts_target=None,
-    os_release_id="ubuntu",
+    os_release_id=UbuntuBuildConstants.GUEST_NAME,
 )
 AZURELINUX_GUEST = GuestDescriptor(
-    name="azurelinux",
-    distribution="Azure Linux",
-    release="3.0",
-    architecture="x86_64",
-    initramfs_name="initramfs-azurelinux.cpio.gz",
-    package_manifest_format="azurelinux-v1",
+    name=AzureLinuxBuildConstants.GUEST_NAME,
+    distribution=AzureLinuxBuildConstants.DISTRIBUTION,
+    release=AzureLinuxBuildConstants.VERSION,
+    architecture=AzureLinuxBuildConstants.ARCHITECTURE,
+    initramfs_name=AzureLinuxBuildConstants.INITRAMFS_NAME,
+    package_manifest_format=AzureLinuxBuildConstants.PACKAGE_MANIFEST_FORMAT,
     default_memory_mib=128,
     boot_marker=b"NVX-GUEST-BOOT-OK: azurelinux",
     sandbox_control=False,
     native_build_supported=False,
-    docker_artifacts_target="azurelinux-guest-artifacts",
-    docker_initramfs_artifacts_target="azurelinux-initramfs-artifacts",
-    os_release_id="azurelinux",
+    docker_artifacts_target=DockerBuildConstants.AZURELINUX_TARGET,
+    docker_initramfs_artifacts_target=DockerBuildConstants.AZURELINUX_INITRAMFS_TARGET,
+    os_release_id=AzureLinuxBuildConstants.GUEST_NAME,
 )
 GUEST_DESCRIPTORS = {
     descriptor.name: descriptor

@@ -33,11 +33,18 @@ from string import Template
 from typing import TextIO, TypedDict, cast
 
 from . import common
+from .build_constants import (
+    AlpineBuildConstants,
+    BuildConstants,
+    KernelBuildConstants,
+    OpenVMMBuildConstants,
+)
 from .common import sha256_file
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
 TEARDOWN_TIMEOUT_SECONDS = 15.0
+PEAK_RSS_SAMPLE_ATTEMPTS = 3
 BASE_TUNING = (
     "tsc=reliable no_timer_check random.trust_cpu=on "
     "rcupdate.rcu_expedited=1 nokaslr mitigations=off "
@@ -122,7 +129,6 @@ PERFORMANCE_LOG_FILENAMES = (
 )
 LEGACY_PYTHON_LOG_FILENAMES = ("snapshot.log", "snapshot-hello.log")
 BENCHMARK_METADATA_FILENAME = "benchmark-metadata.json"
-MICROVM_ABI_VERSION = 2
 
 
 class ProfiledResult(TypedDict, total=False):
@@ -150,6 +156,7 @@ class BenchmarkResult(ProfiledResult):
     peak_rss_p50_bytes: int
     peak_rss_min_bytes: int
     peak_rss_max_bytes: int
+    peak_rss_remeasured_count: int
     teardown_samples_ms: list[float | None]
     teardown_completed_samples_ms: list[float]
     teardown_timeout_count: int
@@ -473,6 +480,14 @@ def configure_parser(
         help="write canonical workload logs to this directory",
     )
     parser.add_argument(
+        "--scratch-dir",
+        type=Path,
+        help=(
+            "existing directory for temporary snapshots, guest RAM backing, "
+            "and workload files (default: the system temporary directory)"
+        ),
+    )
+    parser.add_argument(
         "--keep-kvm-stage",
         action="store_true",
         help="keep temporary staged KVM benchmark binaries",
@@ -776,6 +791,46 @@ def peak_rss_bytes(pid: int) -> int:
     if sys.platform.startswith("linux"):
         return linux_peak_rss_bytes(pid)
     raise RuntimeError(f"peak RSS measurement is unsupported on {sys.platform}")
+
+
+def _linux_live_peak_rss_bytes(pid: int) -> int | None:
+    # The unreaped child keeps its PID, so this entry cannot be reused.
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    return _linux_status_bytes(status, "VmHWM")
+
+
+def live_peak_rss_bytes(process: subprocess.Popen[bytes]) -> int | None:
+    """Return the peak RSS of a still-running process, or None after it exits.
+
+    Exit accounting is not an equivalent sample. Linux stops publishing VmHWM
+    once the process releases its address space, and the wait4() maximum RSS
+    also covers the coordinator's pre-exec image. Windows retains a terminated
+    process's counters, but its peak working set then includes teardown.
+    """
+    if os.name == "nt":
+        try:
+            peak = windows_peak_rss_bytes(process.pid)
+        except OSError:
+            if process.poll() is not None:
+                return None
+            raise
+        # The retained Popen handle keeps a terminated process's counters
+        # readable, so accept only a sample completed while it was running.
+        if process.poll() is not None:
+            return None
+    elif sys.platform.startswith("linux"):
+        linux_peak = _linux_live_peak_rss_bytes(process.pid)
+        if linux_peak is None:
+            return None
+        peak = linux_peak
+    else:
+        raise RuntimeError(f"peak RSS measurement is unsupported on {sys.platform}")
+    if peak <= 0:
+        raise RuntimeError(f"process {process.pid} reported peak RSS {peak} bytes")
+    return peak
 
 
 def _linux_status_bytes(status: str, name: str) -> int | None:
@@ -1356,7 +1411,12 @@ def measure_once(
     snapshot_profile: bool = False,
     profile_sink: list[dict[str, object]] | None = None,
     log_path: Path | None = None,
-) -> tuple[float, int, float | None, float]:
+) -> tuple[float, int | None, float | None, float]:
+    """Measure one OpenVMM launch through ``marker`` and its teardown.
+
+    Peak RSS is None when OpenVMM exited before it could be sampled at the
+    marker, which a prequeued guest exit makes possible.
+    """
     started = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
@@ -1399,8 +1459,8 @@ def measure_once(
                 marker_reached = time.perf_counter_ns()
                 # A prequeued guest exit can terminate OpenVMM immediately
                 # after writing the marker. Sample RSS before the more detailed
-                # opt-in profile counters, and tolerate an already-gone process.
-                peak_bytes = _try_peak_rss(process, 0)
+                # opt-in profile counters.
+                peak_bytes = live_peak_rss_bytes(process)
                 if profile is not None and profile_sink is not None:
                     profile_sink.append(profile.finish_restore(marker_reached))
                 elapsed_ms = (marker_reached - started) / 1_000_000
@@ -1469,10 +1529,13 @@ def benchmark(
     environment.pop(SNAPSHOT_PROFILE_ENV, None)
     if snapshot_profile:
         environment[SNAPSHOT_PROFILE_ENV] = "1"
-    for index in range(warmups):
+
+    def measure(
+        profile_sink: list[dict[str, object]] | None = None,
+    ) -> tuple[float, int | None, float | None, float]:
         if before_each is not None:
             before_each()
-        value, peak_bytes, teardown_ms, _wall_ms = measure_once(
+        return measure_once(
             command,
             environment=environment,
             timeout=timeout,
@@ -1483,6 +1546,15 @@ def benchmark(
             guest_exit_prequeued=guest_exit_prequeued,
             cleanup_managed_network=cleanup_managed_network,
             snapshot_profile=snapshot_profile,
+            profile_sink=profile_sink,
+        )
+
+    for index in range(warmups):
+        value, peak_bytes, teardown_ms, _wall_ms = measure()
+        peak_rss = (
+            "unavailable"
+            if peak_bytes is None
+            else f"{bytes_to_mib(peak_bytes):.3f} MiB"
         )
         teardown = (
             f"{teardown_ms:.3f} ms"
@@ -1491,7 +1563,7 @@ def benchmark(
         )
         print(
             f"  warmup {index + 1}/{warmups}: {value:.3f} ms, "
-            f"peak RSS={bytes_to_mib(peak_bytes):.3f} MiB, teardown={teardown}",
+            f"peak RSS={peak_rss}, teardown={teardown}",
             flush=True,
         )
 
@@ -1500,22 +1572,33 @@ def benchmark(
     peak_rss_samples: list[int] = []
     teardown_samples: list[float | None] = []
     profile_samples: list[dict[str, object]] = []
-    for index in range(runs):
-        if before_each is not None:
-            before_each()
-        value, peak_bytes, teardown_ms, wall_ms = measure_once(
-            command,
-            environment=environment,
-            timeout=timeout,
-            marker=marker,
-            marker_must_be_line=marker_must_be_line,
-            windows_cpus=windows_cpus,
-            teardown_mode=teardown_mode,
-            guest_exit_prequeued=guest_exit_prequeued,
-            cleanup_managed_network=cleanup_managed_network,
-            snapshot_profile=snapshot_profile,
-            profile_sink=profile_samples,
+    remeasured = 0
+
+    def measure_sample(index: int) -> tuple[float, int, float | None, float]:
+        # An attempt without its marker-time RSS is incomplete. Remeasure it
+        # instead of substituting a value from after the marker.
+        nonlocal remeasured
+        for attempt in range(1, PEAK_RSS_SAMPLE_ATTEMPTS + 1):
+            attempt_profiles: list[dict[str, object]] = []
+            value, peak_bytes, teardown_ms, wall_ms = measure(attempt_profiles)
+            if peak_bytes is not None:
+                profile_samples.extend(attempt_profiles)
+                remeasured += attempt - 1
+                return value, peak_bytes, teardown_ms, wall_ms
+            print(
+                f"  sample {index + 1}/{runs}: discarded attempt "
+                f"{attempt}/{PEAK_RSS_SAMPLE_ATTEMPTS} ({value:.3f} ms); "
+                "OpenVMM exited before its peak RSS was sampled at the marker",
+                flush=True,
+            )
+        raise RuntimeError(
+            f"OpenVMM exited before its peak RSS was sampled at the marker in "
+            f"{PEAK_RSS_SAMPLE_ATTEMPTS} consecutive attempts for sample "
+            f"{index + 1}/{runs}"
         )
+
+    for index in range(runs):
+        value, peak_bytes, teardown_ms, wall_ms = measure_sample(index)
         samples.append(value)
         wall_samples.append(wall_ms)
         peak_rss_samples.append(peak_bytes)
@@ -1547,6 +1630,7 @@ def benchmark(
         "peak_rss_p50_bytes": int(statistics.median(peak_rss_samples)),
         "peak_rss_min_bytes": min(peak_rss_samples),
         "peak_rss_max_bytes": max(peak_rss_samples),
+        "peak_rss_remeasured_count": remeasured,
         "teardown_samples_ms": teardown_samples,
         "teardown_completed_samples_ms": completed_teardowns,
         "teardown_timeout_count": len(teardown_samples) - len(completed_teardowns),
@@ -2709,6 +2793,12 @@ def _device_io_attempt_record(
     return record
 
 
+def _decode_device_io_line(line: str) -> tuple[bool, object]:
+    if not line.startswith(DEVICE_IO_RESULT_PREFIX):
+        return False, None
+    return True, json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
+
+
 def _device_io_completed_attempts(path: Path | None) -> set[tuple[str, int]]:
     if path is None or not path.is_file():
         return set()
@@ -2716,14 +2806,14 @@ def _device_io_completed_attempts(path: Path | None) -> set[tuple[str, int]]:
     for line_number, line in enumerate(
         path.read_text(encoding="utf-8").splitlines(), 1
     ):
-        if not line.startswith(DEVICE_IO_RESULT_PREFIX):
-            continue
         try:
-            decoded: object = json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
+            is_record, decoded = _decode_device_io_line(line)
         except json.JSONDecodeError as error:
             raise ValueError(
                 f"invalid resumable device I/O record at {path}:{line_number}: {error}"
             ) from error
+        if not is_record:
+            continue
         if not isinstance(decoded, dict):
             raise ValueError(
                 f"resumable device I/O record at {path}:{line_number} must be an object"
@@ -2765,10 +2855,9 @@ def _append_device_io_record(path: Path | None, record: dict[str, object]) -> No
 def _read_device_io_records(path: Path) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith(DEVICE_IO_RESULT_PREFIX):
-            decoded: object = json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
-            if isinstance(decoded, dict):
-                records.append(cast(dict[str, object], decoded))
+        is_record, decoded = _decode_device_io_line(line)
+        if is_record and isinstance(decoded, dict):
+            records.append(cast(dict[str, object], decoded))
     return records
 
 
@@ -3297,6 +3386,11 @@ def benchmark_snapshot_restore_memory_workload(
                         flush=True,
                     )
                     continue
+                if peak_bytes is None:
+                    raise RuntimeError(
+                        f"OpenVMM exited before its peak RSS was sampled at "
+                        f"the target {target_mib} MiB marker"
+                    )
                 launch_samples.append(launch_ms)
                 activation_samples.append(activation_ms)
                 peak_rss_samples.append(peak_bytes)
@@ -3770,7 +3864,7 @@ def _device_io_helper_provenance(
         "device I/O helper source",
     )
     manifest_path = require_file(
-        initrd.with_name(f"{initrd.name}.packages.json"),
+        initrd.with_name(f"{initrd.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"),
         "initramfs package manifest",
     )
     try:
@@ -3808,7 +3902,7 @@ def write_benchmark_metadata(
 ) -> Path:
     platform = args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
     device_io = args.suite == "device-io"
-    microvm_abi_version = MICROVM_ABI_VERSION
+    microvm_abi_version = OpenVMMBuildConstants.MICROVM_ABI_VERSION
     processors = 1 if device_io else args.processors
     effective_network = (
         args.net or "10.0.0.2/24"
@@ -3839,6 +3933,7 @@ def write_benchmark_metadata(
         "lifecycle_network": args.net,
         "host_affinity_set": args.cpus,
         "host_cpu_reserve": args.host_cpu_reserve,
+        "scratch_directory": scratch_directory_control(args),
         "memory_mib": {
             "lifecycle": args.memory_mib,
             "virtfs": args.virtfs_memory_mib,
@@ -3935,7 +4030,7 @@ def run_workload_benchmarks(
                 args.nvx_dir.resolve()
                 / "data"
                 / "runs"
-                / f"{platform}-microvm-v{MICROVM_ABI_VERSION}-{args.processors}vcpu"
+                / f"{platform}-microvm-v{OpenVMMBuildConstants.MICROVM_ABI_VERSION}-{args.processors}vcpu"
             )
     if args.suite == "device-restore-profile" and output_dir is None:
         raise ValueError("device-restore-profile requires --output-dir")
@@ -4834,7 +4929,7 @@ def build_whp(openvmm_dir: Path) -> Path:
         cwd=openvmm_dir,
     )
     return require_file(
-        openvmm_dir / "target" / "release" / "openvmm.exe",
+        openvmm_dir / "target" / "release" / OpenVMMBuildConstants.WINDOWS_BINARY_NAME,
         "native OpenVMM release binary",
     )
 
@@ -5090,9 +5185,9 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         "--memory",
         f"{args.memory_mib}M",
         "--kernel",
-        str(stage / "vmlinux"),
+        str(stage / KernelBuildConstants.BINARY_NAME),
         "--initrd",
-        str(stage / "initramfs.cpio.gz"),
+        str(stage / AlpineBuildConstants.INITRAMFS_NAME),
         "--cmdline",
         f"clocksource=kvm-clock {BASE_TUNING}",
     ]
@@ -5190,7 +5285,7 @@ def result_document(
             "memory_mib": args.memory_mib,
             "platform": args.platform,
             "backend": backend or args.backend,
-            "microvm_abi_version": MICROVM_ABI_VERSION,
+            "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
             "processors": args.processors,
             "artifact_revisions": {
                 "nvx": _git_revision(args.nvx_dir.resolve()),
@@ -5254,6 +5349,7 @@ def result_document(
             ),
             "snapshot_profile_environment": SNAPSHOT_PROFILE_ENV,
             "cache_state": args.cache_state,
+            "scratch_directory": scratch_directory_control(args),
         },
         "backends": {},
         "snapshot_capture": {},
@@ -5286,9 +5382,11 @@ def run_native_linux(args: argparse.Namespace) -> int:
     executable = None
     if run_guest:
         artifact_dir = args.nvx_dir.resolve() / "build"
-        kernel = require_file(artifact_dir / "vmlinux", "NVX PVH kernel")
+        kernel = require_file(
+            artifact_dir / KernelBuildConstants.BINARY_NAME, "NVX Linux direct kernel"
+        )
         initrd = require_file(
-            artifact_dir / "initramfs.cpio.gz",
+            artifact_dir / AlpineBuildConstants.INITRAMFS_NAME,
             "NVX initramfs",
         )
         executable = (
@@ -5491,6 +5589,20 @@ def _run_kvm_worker(command: Sequence[str], result_kind: str) -> object:
         raise
 
 
+def _resolved_scratch_directory(args: argparse.Namespace) -> Path:
+    scratch = getattr(args, "scratch_dir", None)
+    if scratch is None:
+        scratch = Path(tempfile.gettempdir())
+    return Path(scratch).resolve()
+
+
+def _kvm_worker_scratch_arguments(args: argparse.Namespace) -> list[str]:
+    return [
+        "--scratch-dir",
+        windows_to_wsl(_resolved_scratch_directory(args)),
+    ]
+
+
 def benchmark_kvm(
     args: argparse.Namespace,
     executable: Path,
@@ -5509,6 +5621,7 @@ def benchmark_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "boot",
         "--warmups",
@@ -5555,6 +5668,7 @@ def benchmark_e2e_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "e2e",
         "--warmups",
@@ -5601,6 +5715,7 @@ def benchmark_snapshot_restore_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "restore",
         "--warmups",
@@ -5647,6 +5762,7 @@ def benchmark_snapshot_kvm(
         "--_kvm-worker",
         "--_stage-dir",
         stage_dir,
+        *_kvm_worker_scratch_arguments(args),
         "--suite",
         "snapshot",
         "--warmups",
@@ -5673,7 +5789,39 @@ def benchmark_snapshot_kvm(
             cleanup_kvm(stage_dir)
 
 
+@contextlib.contextmanager
+def benchmark_scratch_directory(args: argparse.Namespace) -> Generator[None]:
+    """Creates benchmark temporary files under the requested scratch directory.
+
+    Snapshot capture writes and flushes guest RAM through these files, so the
+    selected volume's write throughput bounds snapshot generation time.
+    """
+    scratch_dir = getattr(args, "scratch_dir", None)
+    if scratch_dir is None:
+        yield
+        return
+    scratch = _resolved_scratch_directory(args)
+    if not scratch.is_dir():
+        raise ValueError(f"benchmark scratch directory does not exist: {scratch}")
+    args.scratch_dir = scratch
+    previous = tempfile.tempdir
+    tempfile.tempdir = str(scratch)
+    try:
+        yield
+    finally:
+        tempfile.tempdir = previous
+
+
+def scratch_directory_control(args: argparse.Namespace) -> str:
+    return str(_resolved_scratch_directory(args))
+
+
 def run(args: argparse.Namespace) -> int:
+    with benchmark_scratch_directory(args):
+        return run_benchmark(args)
+
+
+def run_benchmark(args: argparse.Namespace) -> int:
     apply_benchmark_suite_defaults(args)
     if (args.net is None) != (args.network_profile is None):
         raise ValueError("--net and --network-profile must be specified together")
@@ -5707,9 +5855,12 @@ def run(args: argparse.Namespace) -> int:
     initrd = None
     if run_guest:
         nvx_dir = args.nvx_dir.resolve()
-        kernel = require_file(nvx_dir / "build" / "vmlinux", "NVX PVH kernel")
+        kernel = require_file(
+            nvx_dir / "build" / KernelBuildConstants.BINARY_NAME,
+            "NVX Linux direct kernel",
+        )
         initrd = require_file(
-            nvx_dir / "build" / "initramfs.cpio.gz",
+            nvx_dir / "build" / AlpineBuildConstants.INITRAMFS_NAME,
             "NVX initramfs",
         )
     cpus = parse_cpu_set(args.cpus)
@@ -5727,7 +5878,10 @@ def run(args: argparse.Namespace) -> int:
     if args.skip_build:
         if run_guest and "whp" in selected:
             boot_binaries["whp"] = require_file(
-                openvmm_dir / "target" / "release" / "openvmm.exe",
+                openvmm_dir
+                / "target"
+                / "release"
+                / OpenVMMBuildConstants.WINDOWS_BINARY_NAME,
                 "native OpenVMM release binary",
             )
         if run_guest and "kvm" in selected:

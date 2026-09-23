@@ -10,10 +10,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import performance  # noqa: E402
+from nvx_tools import benchmark, performance  # noqa: E402
 
 COLD_START_LOG = """
     base                     :    101.0 ms  (min 100, max 102, n=5)
@@ -282,6 +283,60 @@ class PerformanceTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(results[0].p50, 200.5)
+
+    def test_collects_restore_rss_after_remeasured_attempt(self):
+        mib = 1024 * 1024
+        attempts = [
+            (20.0, None, 5.0, 25.0),
+            *(
+                (19.0 + index / 10, (30 + index % 3) * mib, 5.0, 25.0)
+                for index in range(10)
+            ),
+        ]
+        with (
+            patch.object(benchmark, "measure_once", side_effect=attempts),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            restore = benchmark.benchmark(
+                ["openvmm"],
+                warmups=0,
+                runs=10,
+                timeout=1,
+                marker=benchmark.RESTORE_MARKER,
+                marker_must_be_line=True,
+                guest_exit_prequeued=True,
+            )
+        self.assertEqual(restore["peak_rss_remeasured_count"], 1)
+
+        document = lifecycle_document("mshv")
+        cast(dict[str, object], document["snapshot_restore"])["mshv"] = restore
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "acceptance.json"
+            source.write_text(json.dumps(document), encoding="utf-8")
+
+            result_path = performance.collect_openvmm_results(
+                "linux-mshv-virtual-machine", "abc123", source, root / "results"
+            )
+            rss = next(
+                result
+                for result in performance.read_results(result_path)
+                if result.metric == "openvmm_snapshot_restore_peak_rss"
+            )
+            self.assertEqual(rss.p50, 31.0)
+
+            samples = restore["peak_rss_samples_bytes"]
+            samples[7] = 0
+            restore["peak_rss_p50_bytes"] = int(statistics.median(samples))
+            restore["peak_rss_min_bytes"] = 0
+            source.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                r"snapshot_restore\.mshv\.peak_rss_min_bytes must be positive",
+            ):
+                performance.collect_openvmm_results(
+                    "linux-mshv-virtual-machine", "abc123", source, root / "rejected"
+                )
 
     def test_collects_openvmm_json_and_appends_diagnostics(self):
         with tempfile.TemporaryDirectory() as temporary:

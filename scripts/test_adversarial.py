@@ -58,8 +58,8 @@ from nvx_tools.adversarial_oracles import (
     run_bounded_process,
 )
 from nvx_tools.benchmark import InteractiveProcess
+from nvx_tools.build_constants import ReleaseBuildConstants
 from nvx_tools.common import ScriptError
-from nvx_tools.release import PROJECT_SOURCE_PATHS
 
 
 def _executor_result(
@@ -1473,7 +1473,10 @@ class AdversarialCampaignTests(unittest.TestCase):
 
 class CopilotContainmentTests(unittest.TestCase):
     def test_project_source_archive_includes_adversary_agent(self) -> None:
-        self.assertIn(".github/agents/nvx-adversary.md", PROJECT_SOURCE_PATHS)
+        self.assertIn(
+            ".github/agents/nvx-adversary.md",
+            ReleaseBuildConstants.PROJECT_SOURCE_PATHS,
+        )
 
     def test_nonfinite_time_budget_is_rejected(self) -> None:
         for value in ("inf", "-inf", "nan"):

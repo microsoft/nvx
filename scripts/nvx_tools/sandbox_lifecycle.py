@@ -11,6 +11,10 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+from .build_constants import (
+    AlpineBuildConstants,
+    KernelBuildConstants,
+)
 from .common import (
     ScriptError,
     artifact_path,
@@ -337,8 +341,12 @@ def start(state_path: Path, timeout: float) -> None:
     outcome_path.unlink(missing_ok=True)
     launch = _deserialize_launch(config)
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(artifact_path("vmlinux"), "PVH kernel")
-    initrd = require_file(artifact_path("initramfs.cpio.gz"), "initramfs")
+    kernel = require_file(
+        artifact_path(KernelBuildConstants.BINARY_NAME), "Linux direct kernel"
+    )
+    initrd = require_file(
+        artifact_path(AlpineBuildConstants.INITRAMFS_NAME), "initramfs"
+    )
     capability = secrets.token_bytes(32)
     if capability == bytes(32):
         raise AssertionError("secrets.token_bytes returned an all-zero capability")

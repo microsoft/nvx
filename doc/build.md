@@ -37,10 +37,10 @@ The combined `build` command rejects unsupported OS/backend combinations before
 producing guest artifacts. Guest-only and source-only commands do not select an
 OpenVMM build target.
 
-OpenVMM's microVM tests build their own minimal Xen PVH guest from source in
-the OpenVMM checkout. They do not consume `build/vmlinux` or
-`build/initramfs.cpio.gz`. NVX uses those two artifacts only for its Linux and
-device correctness tests, benchmarks, and packaged runtime.
+When invoked through NVX, OpenVMM's custom TTRPC lifecycle, SMP, and snapshot
+test uses the ACPI-free, MP-enabled `build/vmlinux` and
+`build/initramfs.cpio.gz` artifacts. The phase-1 lifecycle and TTRPC interface
+tests continue to use OpenVMM's packaged guest artifacts.
 
 On a Linux host, build either initramfs directly:
 
@@ -68,11 +68,25 @@ musl builds normalize the newly built executable to that destination before
 recording its provenance. Host OS detection and backend validation live in
 [`build.py`](../scripts/nvx_tools/build.py), not in the configuration object.
 
+Fixed build inputs and defaults live in
+[`build_constants.py`](../scripts/nvx_tools/build_constants.py). Its namespace
+classes group kernel, OpenVMM, Alpine, Ubuntu, initramfs, Docker, cache-tool,
+and release settings. For example, Python callers use
+`KernelBuildConstants.VERSION` and `AlpineBuildConstants.MINIROOTFS_SHA256`;
+the previous module-level constants are not re-exported. Shared repository
+and artifact directories belong to `BuildConstants`.
+
+Keep per-invocation choices and overrides in the existing build configuration
+objects. Environment-dependent cache locations and host-dependent executable
+selection are still resolved by their helpers when a configuration is created,
+not frozen into the constants module.
+
 The provenance sidecars bind the kernel to its pinned archive, patch set,
 input configuration, generated configuration, and output hash; bind the
 initramfs and package manifest to the pinned Alpine inputs and source files;
 and bind OpenVMM to the exact clean gitlink revision and executable hash.
-Packaging rejects missing, dirty, stale, or mismatched provenance.
+The Alpine source-file inputs include the constants module. Packaging rejects
+missing, dirty, stale, or mismatched provenance.
 
 Ubuntu adds:
 
@@ -114,8 +128,8 @@ python3 scripts/nvx.py test-microvm --backend kvm
 python3 scripts/nvx.py test-microvm --backend kvm --guest ubuntu
 ```
 
-The first command needs only the OpenVMM checkout. The second needs the
-standard build outputs above and writes complete per-scenario logs under
+Both commands need the standard guest build outputs above. The second writes
+complete per-scenario logs under
 `build/test-results/microvm` by default.
 
 The Alpine initramfs includes the sandbox PID-1 bootstrap, its container namespace
@@ -139,9 +153,11 @@ rootfs SHA-256, and NVX helper provenance.
 
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
-generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
-absent. Changing an archive hash or patch invalidates both source and object
-caches; changing the input configuration invalidates the object cache.
+generated config as `build/vmlinux.config`, and fails if ACPI is enabled,
+PVH remains enabled, or the MP-table, APIC, IOAPIC, and command-line
+virtio-mmio requirements are missing. Changing an archive hash or patch
+invalidates both source and object caches; changing the input configuration
+invalidates the object cache.
 
 Release packaging stages and verifies a complete output before replacing an
 existing `dist/` version. Its `SOURCE-MANIFEST.json` records the package

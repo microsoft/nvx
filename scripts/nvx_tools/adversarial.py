@@ -47,7 +47,11 @@ from nvx_tools.adversarial_oracles import (
     sha256_file,
     terminate_process_tree,
 )
-from nvx_tools.common import BUILD_DIR, REPO_ROOT, ScriptError
+from nvx_tools.build_constants import (
+    BuildConstants,
+    OpenVMMBuildConstants,
+)
+from nvx_tools.common import ScriptError
 from nvx_tools.release import verify_source_tree
 
 COPILOT_CREDIT_RESERVATION = 30
@@ -58,7 +62,7 @@ NANO_AI_UNITS_PER_CREDIT = 1_000_000_000
 MAX_PROMPT_OBSERVATIONS = 16
 EXECUTOR_PROTOCOL_GRACE_SECONDS = PROCESS_CLEANUP_GRACE_SECONDS + 5.0
 EXECUTOR_INITIALIZE_OVERHEAD_SECONDS = 120.0 + PROCESS_CLEANUP_GRACE_SECONDS * 2 + 5.0
-LOCAL_EXECUTOR_STATE_ROOT = BUILD_DIR / "adv"
+LOCAL_EXECUTOR_STATE_ROOT = BuildConstants.BUILD_DIR / "adv"
 _BACKENDS = ("kvm", "mshv", "whp")
 _HOST_TYPES = ("baremetal", "virtual-machine", "unspecified")
 
@@ -69,7 +73,7 @@ class ExecutorUnavailableError(ScriptError):
 
 def _git(*arguments: str) -> str:
     completed = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *arguments],
+        ["git", "-C", str(BuildConstants.REPO_ROOT), *arguments],
         check=True,
         capture_output=True,
         text=True,
@@ -88,7 +92,7 @@ def _controller_metadata() -> dict[str, object]:
     ).splitlines()
     openvmm_status = _git(
         "-C",
-        str(REPO_ROOT / "openvmm"),
+        str(OpenVMMBuildConstants.DIRECTORY),
         "status",
         "--porcelain",
         "--untracked-files=normal",
@@ -99,7 +103,7 @@ def _controller_metadata() -> dict[str, object]:
         "nvx_status": nvx_status,
         "openvmm_commit": _git(
             "-C",
-            str(REPO_ROOT / "openvmm"),
+            str(OpenVMMBuildConstants.DIRECTORY),
             "rev-parse",
             "HEAD",
         ),
@@ -487,7 +491,9 @@ class ExecutorClient:
         if command is None:
             argv = [
                 sys.executable,
-                str(REPO_ROOT / "scripts" / "nvx_adversarial_executor.py"),
+                str(
+                    BuildConstants.REPO_ROOT / "scripts" / "nvx_adversarial_executor.py"
+                ),
             ]
             environment = local_executor_environment()
             self._local = True
@@ -505,7 +511,7 @@ class ExecutorClient:
         try:
             self._process = subprocess.Popen(
                 argv,
-                cwd=REPO_ROOT,
+                cwd=BuildConstants.REPO_ROOT,
                 env=environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1375,7 +1381,9 @@ def _manifest(
         "phase_timeout_seconds": config.phase_timeout,
         "action_timeout_seconds": config.action_timeout,
         "external_executor": config.executor_command is not None,
-        "case_catalog": str(campaign_file(config.campaign).relative_to(REPO_ROOT)),
+        "case_catalog": str(
+            campaign_file(config.campaign).relative_to(BuildConstants.REPO_ROOT)
+        ),
         "case_catalog_sha256": catalog_digest(cases.values()),
         "source_replay": replay,
         "files": tracked,
@@ -1881,7 +1889,9 @@ def command_adversarial(args: argparse.Namespace) -> None:
     host_type = args.host_type or os.environ.get("NVX_HOST_TYPE", "unspecified")
     output_dir = args.output_dir
     if output_dir is None:
-        output_dir = BUILD_DIR / "test-results" / f"adversarial-{args.backend}"
+        output_dir = (
+            BuildConstants.BUILD_DIR / "test-results" / f"adversarial-{args.backend}"
+        )
     config = CampaignConfig(
         backend=args.backend,
         campaign=args.campaign,

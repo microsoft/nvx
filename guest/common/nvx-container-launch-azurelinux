@@ -13,7 +13,7 @@ shift 7
 IFS= read -r start <"$barrier"
 [ "$start" = start ] || exit 125
 
-exec unshare --mount --pid --uts --fork --kill-child \
+exec unshare --mount --pid --uts --fork \
     /sbin/nvx-container-enter-azurelinux \
     "$rootfs" "$hostname_value" "$workload_uid" "$workload_gid" \
     "$workload_name" "$workload_home" "$@"

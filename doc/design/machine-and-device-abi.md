@@ -25,11 +25,11 @@ firmware helpers, and standard-PC missing-port shims are absent.
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart TB
-   Guest["x86-64 Linux guest<br/>Xen PVH, 1/2/4/8 vCPUs"]
+   Guest["x86-64 Linux guest<br/>direct boot, 1/2/4/8 vCPUs"]
 
    subgraph Abi["microVM machine contract"]
       direction LR
-      Boot["PVH boot state<br/>and fixed RAM layout"]
+      Boot["Linux MP-table boot state<br/>and fixed RAM layout"]
       Interrupts["PIC, IOAPIC, LAPIC<br/>PIT, RTC, and VM time"]
       Pmio["PMIO devices<br/>portb, shutdown, snapshot"]
       Virtio["Fixed virtio-mmio<br/>net, fs, console, and versioned block roles"]

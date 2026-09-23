@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
@@ -22,6 +22,9 @@ from nvx_tools import (  # noqa: E402
     control_session,
     microvm_tests,
     openvmm_process,
+)
+from nvx_tools.build_constants import (  # noqa: E402
+    BuildConstants,
 )
 
 
@@ -140,6 +143,39 @@ class ControlSessionTests(unittest.TestCase):
 
 
 class MicrovmTests(unittest.TestCase):
+    def test_host_loopback_listener_pair_retries_protocol_port_conflict(self):
+        first_udp = MagicMock()
+        first_udp.getsockname.return_value = ("127.0.0.1", 50000)
+        first_tcp = MagicMock()
+        first_tcp.bind.side_effect = PermissionError("TCP port is excluded")
+        second_udp = MagicMock()
+        second_udp.getsockname.return_value = ("127.0.0.1", 50001)
+        second_tcp = MagicMock()
+
+        with patch.object(
+            microvm_tests.socket,
+            "socket",
+            side_effect=[first_udp, first_tcp, second_udp, second_tcp],
+        ) as create_socket:
+            tcp_listener, udp_listener = microvm_tests._bind_tcp_udp_listener_pair(
+                5.0, microvm_tests.NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS
+            )
+
+        self.assertIs(tcp_listener, second_tcp)
+        self.assertIs(udp_listener, second_udp)
+        self.assertEqual(create_socket.call_count, 4)
+        first_udp.bind.assert_called_once_with(("127.0.0.1", 0))
+        first_tcp.bind.assert_called_once_with(("0.0.0.0", 50000))
+        first_tcp.close.assert_called_once_with()
+        first_udp.close.assert_called_once_with()
+        second_udp.bind.assert_called_once_with(("127.0.0.1", 0))
+        second_tcp.bind.assert_called_once_with(("0.0.0.0", 50001))
+        second_tcp.listen.assert_called_once_with(1)
+        second_tcp.settimeout.assert_called_once_with(5.0)
+        second_udp.settimeout.assert_called_once_with(
+            microvm_tests.NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS
+        )
+
     def test_host_loopback_rejections_cover_generic_allow_and_explicit_denial(self):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(microvm_tests, "OpenvmmProcess") as process:
@@ -1049,7 +1085,7 @@ class MicrovmTests(unittest.TestCase):
                 if expected_returncode:
                     self.assertIn("NVX-SNAPSHOT-CORE-FAIL code=46", result.stdout)
 
-    def test_snapshot_core_waits_for_no_destination_marker_before_exit(self):
+    def test_snapshot_core_waits_for_no_destination_marker_line_before_exit(self):
         events: list[tuple[str, bytes | str | None]] = []
         marker = b"NVX-SNAPSHOT-NO-DESTINATION-OK"
 
@@ -1070,6 +1106,9 @@ class MicrovmTests(unittest.TestCase):
 
             def wait_for(self, expected: bytes, _timeout: float) -> None:
                 events.append(("wait_for", expected))
+
+            def wait_for_line(self, expected: bytes, _timeout: float) -> None:
+                events.append(("wait_for_line", expected))
 
             def send_line(self, line: str) -> None:
                 events.append(("send_line", line))
@@ -1105,7 +1144,7 @@ class MicrovmTests(unittest.TestCase):
             [
                 ("wait_for", microvm_tests.BOOT_MARKER),
                 ("send_line", "nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK"),
-                ("wait_for", marker),
+                ("wait_for_line", marker),
                 ("send_line", "nvx-exit 0"),
                 ("wait", None),
             ],
@@ -1859,7 +1898,7 @@ class MicrovmTests(unittest.TestCase):
                 self.assertEqual(microvm_tests.run(args), 0)
 
         self.assertIn(
-            common.BUILD_DIR / "initramfs-ubuntu.cpio.gz",
+            BuildConstants.BUILD_DIR / "initramfs-ubuntu.cpio.gz",
             requested,
         )
         self.assertEqual(run_guest_boot.call_args.kwargs["memory_mib"], 256)

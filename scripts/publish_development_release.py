@@ -7,7 +7,11 @@ import os
 import sys
 from pathlib import Path
 
-from nvx_tools.common import REPO_ROOT, ScriptError, require_file
+from nvx_tools.build_constants import (
+    BuildConstants,
+    ReleaseBuildConstants,
+)
+from nvx_tools.common import ScriptError, require_file
 from nvx_tools.development_release import publish_development_release
 
 
@@ -19,15 +23,15 @@ def _required_environment(name: str) -> str:
 
 
 def main() -> None:
-    version_path = require_file(REPO_ROOT / "VERSION", "NVX version")
+    version_path = require_file(BuildConstants.REPO_ROOT / "VERSION", "NVX version")
     try:
         version = version_path.read_text(encoding="ascii").strip()
     except OSError as error:
         raise ScriptError(f"failed to read {version_path}: {error}") from error
     packages = (
-        Path(f"dist/nvx-{version}-linux-kvm.tar.gz"),
-        Path(f"dist/nvx-{version}-linux-mshv.tar.gz"),
-        Path(f"dist/nvx-{version}-windows-whp.zip"),
+        Path(ReleaseBuildConstants.DIRECTORY_NAME) / f"nvx-{version}-linux-kvm.tar.gz",
+        Path(ReleaseBuildConstants.DIRECTORY_NAME) / f"nvx-{version}-linux-mshv.tar.gz",
+        Path(ReleaseBuildConstants.DIRECTORY_NAME) / f"nvx-{version}-windows-whp.zip",
     )
     publish_development_release(
         _required_environment("GH_REPO"),
