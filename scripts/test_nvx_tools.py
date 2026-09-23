@@ -4742,7 +4742,7 @@ class BenchmarkTests(unittest.TestCase):
         interaction = FakeInteraction()
         with (
             patch.object(benchmark, "InteractiveProcess", return_value=interaction),
-            patch.object(benchmark, "peak_rss_bytes", return_value=1024),
+            patch.object(benchmark, "live_peak_rss_bytes", return_value=1024),
             patch.object(benchmark, "wait_for_process_exit", return_value=0),
             patch.object(
                 benchmark.time,
@@ -4762,83 +4762,33 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result, (10.0, 1024, 7.0, 17.0))
         self.assertEqual(interaction.writes, [])
 
-    def test_measure_once_retains_rss_when_process_exits_before_marker_read(self):
+    def test_measure_once_reports_missing_rss_when_openvmm_exits_first(self):
         class FakeProcess:
             pid = 123
 
-            def __init__(self):
+            def __init__(self, status: int):
+                self.status = status
                 self.exited = False
                 self.returncode: int | None = None
 
             def poll(self):
                 if self.exited:
-                    self.returncode = 0
+                    self.returncode = self.status
                 return self.returncode
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                return self.status
 
             def terminate(self):
                 raise AssertionError("unexpected process termination")
 
         class FakeInteraction:
-            def __init__(self):
-                self.process = FakeProcess()
-
-            def read_output(self, _chunks: queue.Queue[bytes | None]):
-                pass
-
-            def write_input(self, data: bytes):
-                raise AssertionError(f"unexpected input: {data!r}")
-
-            def close(self):
-                pass
-
-        interaction = FakeInteraction()
-
-        def read_chunk(*, timeout: float) -> bytes:
-            del timeout
-            interaction.process.exited = True
-            interaction.process.returncode = 0
-            return benchmark.RESTORE_MARKER + b"\n"
-
-        def peak_rss_bytes(_pid: int):
-            if interaction.process.exited:
-                raise ProcessLookupError(3, "No such process")
-            return 1024
-
-        with (
-            patch.object(benchmark, "InteractiveProcess", return_value=interaction),
-            patch.object(benchmark.threading, "Thread"),
-            patch.object(benchmark.queue, "Queue") as queues,
-            patch.object(
-                benchmark, "peak_rss_bytes", side_effect=peak_rss_bytes
-            ) as read_peak_rss,
-            patch.object(benchmark, "wait_for_process_exit", return_value=0),
-        ):
-            queues.return_value.get.side_effect = read_chunk
-            result = benchmark.measure_once(
-                ["openvmm"],
-                environment={},
-                timeout=1,
-                marker=benchmark.RESTORE_MARKER,
-                marker_must_be_line=True,
-                guest_exit_prequeued=True,
-            )
-
-        self.assertEqual(result[1], 1024)
-        self.assertTrue(interaction.process.exited)
-        self.assertEqual(read_peak_rss.call_args_list, [call(123), call(123)])
-
-    def test_measure_once_rejects_marker_when_rss_never_available(self):
-        class FakeProcess:
-            pid = 123
-
-            def terminate(self):
-                raise AssertionError("unexpected direct process termination")
-
-        class FakeInteraction:
-            def __init__(self):
-                self.process = FakeProcess()
+            def __init__(self, status: int):
+                self.process = FakeProcess(status)
 
             def read_output(self, chunks: queue.Queue[bytes | None]):
+                self.process.exited = True
                 chunks.put(benchmark.RESTORE_MARKER + b"\n")
 
             def write_input(self, data: bytes):
@@ -4847,27 +4797,134 @@ class BenchmarkTests(unittest.TestCase):
             def close(self):
                 pass
 
-        interaction = FakeInteraction()
+        for status in (0, 1):
+            with self.subTest(status=status):
+                interaction = FakeInteraction(status)
+
+                def linux_peak_rss_bytes(
+                    pid: int, interaction: FakeInteraction = interaction
+                ) -> int | None:
+                    self.assertEqual(pid, 123)
+                    # A zombie's /proc status no longer reports VmHWM.
+                    return None if interaction.process.exited else 1024
+
+                with (
+                    patch.object(
+                        benchmark, "InteractiveProcess", return_value=interaction
+                    ),
+                    patch.object(
+                        benchmark,
+                        "_linux_live_peak_rss_bytes",
+                        side_effect=linux_peak_rss_bytes,
+                    ),
+                    patch.object(benchmark, "windows_peak_rss_bytes", return_value=1),
+                    patch.object(
+                        benchmark, "wait_for_process_exit", return_value=status
+                    ) as wait,
+                    patch.object(
+                        benchmark.time,
+                        "perf_counter_ns",
+                        side_effect=[0, 10_000_000, 17_000_000],
+                    ),
+                ):
+                    if status == 0:
+                        result = benchmark.measure_once(
+                            ["openvmm"],
+                            environment={},
+                            timeout=1,
+                            marker=benchmark.RESTORE_MARKER,
+                            marker_must_be_line=True,
+                            guest_exit_prequeued=True,
+                        )
+                        self.assertEqual(result, (10.0, None, 7.0, 17.0))
+                    else:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "status 1 during teardown"
+                        ):
+                            benchmark.measure_once(
+                                ["openvmm"],
+                                environment={},
+                                timeout=1,
+                                marker=benchmark.RESTORE_MARKER,
+                                marker_must_be_line=True,
+                                guest_exit_prequeued=True,
+                            )
+
+                wait.assert_called_once_with(
+                    interaction.process, benchmark.TEARDOWN_TIMEOUT_SECONDS
+                )
+
+    def test_live_peak_rss_samples_linux_process_without_reaping(self):
+        process = MagicMock(pid=123)
+        with (
+            patch.object(benchmark.os, "name", "posix"),
+            patch.object(benchmark.sys, "platform", "linux"),
+            patch.object(
+                benchmark, "_linux_live_peak_rss_bytes", side_effect=[4096, None, 0]
+            ) as read,
+        ):
+            self.assertEqual(benchmark.live_peak_rss_bytes(process), 4096)
+            self.assertIsNone(benchmark.live_peak_rss_bytes(process))
+            with self.assertRaisesRegex(RuntimeError, "peak RSS 0 bytes"):
+                benchmark.live_peak_rss_bytes(process)
+
+        self.assertEqual(read.call_args_list, [call(123)] * 3)
+        process.poll.assert_not_called()
+
+    def test_live_peak_rss_accepts_only_running_windows_samples(self):
+        running = MagicMock(pid=7)
+        running.poll.return_value = None
+        exited = MagicMock(pid=8)
+        exited.poll.return_value = 0
+        racing = MagicMock(pid=9)
+        racing.poll.return_value = None
+
+        def read_counters(pid: int) -> int:
+            if pid == racing.pid:
+                racing.poll.return_value = 0
+            return 8192
 
         with (
-            patch.object(benchmark, "InteractiveProcess", return_value=interaction),
-            patch.object(benchmark, "_try_peak_rss", return_value=0),
-            patch.object(benchmark, "terminate") as terminate,
-            self.assertRaisesRegex(
-                RuntimeError,
-                "OpenVMM peak RSS was unavailable at the guest marker",
+            patch.object(benchmark.os, "name", "nt"),
+            patch.object(
+                benchmark, "windows_peak_rss_bytes", side_effect=read_counters
+            ) as read,
+        ):
+            self.assertEqual(benchmark.live_peak_rss_bytes(running), 8192)
+            # A retained handle still reports counters, including teardown.
+            self.assertIsNone(benchmark.live_peak_rss_bytes(exited))
+            self.assertIsNone(benchmark.live_peak_rss_bytes(racing))
+
+        self.assertEqual(read.call_args_list, [call(7), call(8), call(9)])
+        with (
+            patch.object(benchmark.os, "name", "nt"),
+            patch.object(
+                benchmark, "windows_peak_rss_bytes", side_effect=OSError("closed")
             ),
         ):
-            benchmark.measure_once(
-                ["openvmm"],
-                environment={},
-                timeout=1,
-                marker=benchmark.RESTORE_MARKER,
-                marker_must_be_line=True,
-                guest_exit_prequeued=True,
-            )
+            self.assertIsNone(benchmark.live_peak_rss_bytes(exited))
+            with self.assertRaisesRegex(OSError, "closed"):
+                benchmark.live_peak_rss_bytes(running)
 
-        terminate.assert_called_once_with(interaction.process)
+    def test_linux_live_peak_rss_requires_process_address_space(self):
+        running = "Name:\topenvmm\nState:\tS (sleeping)\nVmHWM:\t   59008 kB\n"
+        zombie = "Name:\topenvmm\nState:\tZ (zombie)\nThreads:\t1\n"
+        with patch.object(
+            Path,
+            "read_text",
+            autospec=True,
+            side_effect=[running, zombie, FileNotFoundError(), ProcessLookupError()],
+        ) as read:
+            self.assertEqual(benchmark._linux_live_peak_rss_bytes(123), 59008 * 1024)
+            for _ in range(3):
+                self.assertIsNone(benchmark._linux_live_peak_rss_bytes(123))
+
+        self.assertEqual(read.call_args.args[0], Path("/proc/123/status"))
+        with (
+            patch.object(Path, "read_text", side_effect=PermissionError()),
+            self.assertRaises(PermissionError),
+        ):
+            benchmark._linux_live_peak_rss_bytes(123)
 
     def test_builds_isolated_workload_command(self):
         command = benchmark.workload_boot_command(
@@ -5567,6 +5624,7 @@ class BenchmarkTests(unittest.TestCase):
             "peak_rss_p50_bytes": 1,
             "peak_rss_min_bytes": 1,
             "peak_rss_max_bytes": 1,
+            "peak_rss_remeasured_count": 0,
             "teardown_samples_ms": [1.0],
             "teardown_completed_samples_ms": [1.0],
             "teardown_timeout_count": 0,
@@ -5758,6 +5816,73 @@ class BenchmarkTests(unittest.TestCase):
             ("manifest.bin", "state.bin", "memory.bin"),
         )
 
+    def test_benchmark_remeasures_attempt_without_marker_rss(self):
+        attempts = iter(
+            (
+                (5.0, None, 1.0, 6.0),
+                (10.0, None, 7.0, 17.0),
+                (11.0, 2048, 7.0, 18.0),
+                (12.0, 4096, 8.0, 20.0),
+            )
+        )
+
+        def measure_once(
+            *_args: object,
+            profile_sink: list[dict[str, object]] | None = None,
+            **_kwargs: object,
+        ) -> tuple[float, int | None, float | None, float]:
+            sample = next(attempts)
+            if profile_sink is not None:
+                profile_sink.append({"elapsed_ms": sample[0]})
+            return sample
+
+        before_each = MagicMock()
+        with (
+            patch.object(benchmark, "measure_once", side_effect=measure_once),
+            patch.object(
+                benchmark, "summarize_lifecycle_profiles", return_value={}
+            ) as summarize,
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            result = benchmark.benchmark(
+                ["openvmm"],
+                warmups=1,
+                runs=2,
+                timeout=1,
+                marker=benchmark.RESTORE_MARKER,
+                guest_exit_prequeued=True,
+                snapshot_profile=True,
+                before_each=before_each,
+            )
+
+        self.assertEqual(result["samples_ms"], [11.0, 12.0])
+        self.assertEqual(result["peak_rss_samples_bytes"], [2048, 4096])
+        self.assertEqual(result["peak_rss_min_bytes"], 2048)
+        self.assertEqual(result["peak_rss_remeasured_count"], 1)
+        self.assertEqual(result["teardown_samples_ms"], [7.0, 8.0])
+        self.assertEqual(before_each.call_count, 4)
+        summarize.assert_called_once_with([{"elapsed_ms": 11.0}, {"elapsed_ms": 12.0}])
+        self.assertIn("warmup 1/1: 5.000 ms, peak RSS=unavailable", output.getvalue())
+        self.assertIn(
+            "sample 1/2: discarded attempt 1/3 (10.000 ms)", output.getvalue()
+        )
+
+    def test_benchmark_rejects_rss_missing_from_every_attempt(self):
+        with (
+            patch.object(
+                benchmark, "measure_once", return_value=(10.0, None, 7.0, 17.0)
+            ) as measure,
+            patch("sys.stdout", new_callable=io.StringIO),
+            self.assertRaisesRegex(
+                RuntimeError,
+                f"{benchmark.PEAK_RSS_SAMPLE_ATTEMPTS} consecutive attempts "
+                "for sample 1/2",
+            ),
+        ):
+            benchmark.benchmark(["openvmm"], warmups=0, runs=2, timeout=1)
+
+        self.assertEqual(measure.call_count, benchmark.PEAK_RSS_SAMPLE_ATTEMPTS)
+
     def test_nearest_rank_percentile(self):
         self.assertEqual(benchmark.nearest_rank_percentile(range(1, 22), 95), 20)
         self.assertEqual(benchmark.nearest_rank_percentile([7.0], 95), 7.0)
@@ -5884,6 +6009,7 @@ class BenchmarkTests(unittest.TestCase):
                 "peak_rss_p50_bytes": 1024,
                 "peak_rss_min_bytes": 1024,
                 "peak_rss_max_bytes": 1024,
+                "peak_rss_remeasured_count": 0,
                 "teardown_samples_ms": [2.0],
                 "teardown_completed_samples_ms": [2.0],
                 "teardown_timeout_count": 0,
