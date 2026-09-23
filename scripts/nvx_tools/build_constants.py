@@ -48,6 +48,15 @@ class KernelBuildConstants:
         "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
     )
     REQUIRED_SHARED_STATUS_CONFIG: Final = ("CONFIG_VIRTIO_MMIO_SHARED_STATUS=y",)
+    REQUIRED_DIRECT_BOOT_CONFIG: Final = (
+        "# CONFIG_ACPI is not set",
+        "# CONFIG_PVH is not set",
+        "CONFIG_X86_MPPARSE=y",
+        "CONFIG_X86_LOCAL_APIC=y",
+        "CONFIG_X86_IO_APIC=y",
+        "CONFIG_VIRTIO_MMIO=y",
+        "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
+    )
     REQUIRED_SANDBOX_CONFIG: Final = (
         "CONFIG_BPF_SYSCALL=y",
         "CONFIG_CGROUP_BPF=y",

@@ -19,10 +19,10 @@ should provide two related but distinct Ubuntu experiences:
 2. an Ubuntu EROFS `distro` layer selected by `nvx.py sandbox`, for ordinary
    non-root Ubuntu workloads under the existing Alpine control initramfs.
 
-Both profiles use the same `build/vmlinux` artifact. That kernel contains the
-Xen PVH entry point, xe9 early and interactive consoles, fixed virtio-mmio
-discovery, shared interrupt-status support, and the microVM LAPIC-frequency
-override. Ubuntu does not provide or replace the guest kernel.
+Both profiles use the same `build/vmlinux` artifact. That ACPI-free,
+MP-enabled Linux-direct kernel contains xe9 early and interactive consoles,
+fixed virtio-mmio discovery, shared interrupt-status support, and the microVM
+LAPIC-frequency override. Ubuntu does not provide or replace the guest kernel.
 
 A conventional Ubuntu virtual machine with systemd as PID 1 and a writable
 root disk is not part of the initial feature. It needs a separate machine and
@@ -68,7 +68,7 @@ Ubuntu Base is preferable to the Ubuntu cloud disk for both artifacts. Ubuntu
 Base is a filesystem archive intended for construction of custom images. The
 cloud image is a QCow2 UEFI/GPT disk with its own kernel, initramfs, bootloader,
 cloud-init policy, and partition layout. Those assumptions do not match the
-firmwareless Xen PVH boot used by the NVX microVM.
+firmwareless Linux direct MP-table boot used by the NVX microVM.
 
 ## Goals
 
@@ -108,7 +108,7 @@ firmwareless Xen PVH boot used by the NVX microVM.
 The NVX kernel already builds the drivers required by an Ubuntu initramfs or
 ext4/EROFS root:
 
-- Xen PVH direct boot;
+- ACPI-free Linux direct boot with Intel MP tables;
 - devtmpfs, procfs, sysfs, and tmpfs;
 - virtio-mmio, virtio-blk, virtio-net, virtio-console, and virtio-fs;
 - ext4, EROFS, and overlayfs;
@@ -429,8 +429,8 @@ documents the minimum supported Ubuntu value.
 
 The Ubuntu initramfs boot remains identical to Alpine at the machine level:
 
-1. OpenVMM loads `build/vmlinux` through the Xen PVH loader.
-2. OpenVMM loads the selected Ubuntu initramfs as the optional PVH module.
+1. OpenVMM loads `build/vmlinux` through its Linux direct MP-table loader.
+2. OpenVMM loads the selected Ubuntu initramfs as the Linux direct initrd.
 3. OpenVMM prepends its xe9/hvc console parameters and fixed virtio-mmio
    discovery.
 4. `/init` mounts procfs, sysfs, devtmpfs, and tmpfs.

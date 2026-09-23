@@ -186,7 +186,7 @@ def _target_metadata() -> dict[str, object]:
 def _artifact_metadata() -> dict[str, object]:
     paths = {
         "kernel": require_file(
-            artifact_path(KernelBuildConstants.BINARY_NAME), "PVH kernel"
+            artifact_path(KernelBuildConstants.BINARY_NAME), "Linux direct kernel"
         ),
         "initramfs": require_file(
             artifact_path(AlpineBuildConstants.INITRAMFS_NAME),

@@ -3564,7 +3564,7 @@ def run(args: argparse.Namespace) -> int:
         args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(
-        artifact_path(KernelBuildConstants.BINARY_NAME), "microVM PVH kernel"
+        artifact_path(KernelBuildConstants.BINARY_NAME), "microVM Linux direct kernel"
     )
     initrd = require_file(
         artifact_path(descriptor.initramfs_name),

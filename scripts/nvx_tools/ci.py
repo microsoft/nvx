@@ -10,11 +10,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .build_constants import (
+    AlpineBuildConstants,
+    KernelBuildConstants,
     OpenVMMBuildConstants,
     ZstdBuildConstants,
 )
 from .common import (
     ScriptError,
+    artifact_path,
     download,
     require_file,
     require_success,
@@ -46,10 +49,9 @@ REQUIRED_CI_BUILD_JOBS = (
     "build-openvmm-linux-musl",
     "build-openvmm-windows-msvc",
 )
-REQUIRED_CI_OPENVMM_TEST_JOBS = (
-    "openvmm-vmm-tests",
-    "openvmm-unit-tests",
-)
+REQUIRED_CI_OPENVMM_TEST_JOBS = ("openvmm-unit-tests",)
+# OpenVMM VMM tests boot the NVX guest artifacts, which only workload runs build.
+REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS = ("openvmm-vmm-tests",)
 REQUIRED_CI_MICROVM_TEST_JOBS = (
     "nvx-microvm-tests-kvm",
     "nvx-microvm-tests-mshv",
@@ -122,7 +124,10 @@ def required_ci_expected_results(
                 if repository_jobs_enabled and run_tests and run_workloads
                 else "skipped"
             )
-            for job in REQUIRED_CI_MICROVM_TEST_JOBS
+            for job in (
+                *REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS,
+                *REQUIRED_CI_MICROVM_TEST_JOBS,
+            )
         }
     )
     expected.update(
@@ -221,9 +226,9 @@ OPENVMM_WHP_TESTS = (
     "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_clear_vmgs",
     "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_default_boot",
     "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_invalid_boot_entries",
-    "ttrpc::test_ttrpc_microvm_pvh_snapshot",
+    "ttrpc::test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
     "ttrpc::test_ttrpc_uefi_boot",
-    "x86_64::microvm::openvmm_microvm_test_pvh_x64_phase_1_lifecycle",
+    "x86_64::microvm::openvmm_linux_x64_phase_1_lifecycle",
     "x86_64::openvmm_uefi_x64_guest_test_x64_crash_dump_on_triple_fault",
     "x86_64::openvmm_uefi_x64_windows_datacenter_core_2022_x64_battery_capacity",
 )
@@ -383,8 +388,18 @@ def run_openvmm_tests(backend: str) -> None:
     )
     cargo = require_tool("cargo")
     rustup = require_tool("rustup")
+    kernel = require_file(
+        artifact_path(KernelBuildConstants.BINARY_NAME),
+        "microVM Linux direct kernel",
+    )
+    initrd = require_file(
+        artifact_path(AlpineBuildConstants.INITRAMFS_NAME),
+        "microVM Alpine initramfs",
+    )
 
     rust_environment = _prepare_openvmm_test_environment(backend, rustup)
+    rust_environment["OPENVMM_MICROVM_TEST_KERNEL"] = os.fspath(kernel.resolve())
+    rust_environment["OPENVMM_MICROVM_TEST_INITRD"] = os.fspath(initrd.resolve())
     run_checked(
         [cargo, "xflowey", "restore-packages", "--no-compat-igvm"],
         cwd=OpenVMMBuildConstants.DIRECTORY,
