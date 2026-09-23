@@ -36,10 +36,10 @@ runs:
         rustc --version
         cargo --version
         cargo nextest --version
-        test "${CARGO_INCREMENTAL:-}" = 0
         if [ "${REQUIRE_SCCACHE}" = true ]; then
           sccache --version
           test "${RUSTC_WRAPPER:-}" = sccache
+          test "${CARGO_INCREMENTAL:-}" = 0
           test -n "${SCCACHE_DIR:-}"
           test "${SCCACHE_CACHE_SIZE:-}" = 10G
           test -d "${SCCACHE_DIR}"
@@ -81,13 +81,13 @@ runs:
         rustc --version
         cargo --version
         cargo nextest --version
-        if ($env:CARGO_INCREMENTAL -ne "0") {
-          throw "CARGO_INCREMENTAL is not disabled"
-        }
         if ($env:REQUIRE_SCCACHE -eq "true") {
           sccache --version
           if ($env:RUSTC_WRAPPER -ne "sccache") {
             throw "RUSTC_WRAPPER is not configured for sccache"
+          }
+          if ($env:CARGO_INCREMENTAL -ne "0") {
+            throw "CARGO_INCREMENTAL is not disabled"
           }
           if ([string]::IsNullOrWhiteSpace($env:SCCACHE_DIR)) {
             throw "SCCACHE_DIR is not configured"
