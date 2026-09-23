@@ -37,9 +37,10 @@ The combined `build` command rejects unsupported OS/backend combinations before
 producing guest artifacts. Guest-only and source-only commands do not select an
 OpenVMM build target.
 
-When invoked through NVX, OpenVMM's microVM integration tests use the same
-ACPI-free, MP-enabled `build/vmlinux` and `build/initramfs.cpio.gz` artifacts
-as NVX's Linux/device correctness tests, benchmarks, and packaged runtime.
+When invoked through NVX, OpenVMM's custom TTRPC lifecycle, SMP, and snapshot
+test uses the ACPI-free, MP-enabled `build/vmlinux` and
+`build/initramfs.cpio.gz` artifacts. The phase-1 lifecycle and TTRPC interface
+tests continue to use OpenVMM's packaged guest artifacts.
 
 On a Linux host, build either initramfs directly:
 

@@ -12,7 +12,7 @@ The current ABI family intentionally does not provide:
    restore;
 - restore-time RAM shrinking, targets beyond the captured capacity,
    non-128-MiB targets, or expansion from snapshots without an opt-in capacity;
-- ABI value 1 snapshots;
+- ABI value 1 or boot-layout value 1 snapshots;
 - snapshot block media other than cached regular raw files;
 - sandbox-block construction through TTRPC;
 - public activation of the reserved control console or an authenticated guest RPC broker;

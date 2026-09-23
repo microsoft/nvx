@@ -75,7 +75,6 @@ OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
     "vmm_test_macros",
     "flowey_core",
 )
-OPENVMM_LINUX_TEST_FILTER = "test(openvmm) | test(ttrpc)"
 
 
 def required_ci_expected_results(
@@ -165,6 +164,16 @@ def _exact_openvmm_test(test: str) -> str:
     return f"test(/^{re.escape(test)}$/)"
 
 
+OPENVMM_REQUIRED_MICROVM_TESTS = (
+    "ttrpc::test_ttrpc_interface",
+    "ttrpc::test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
+    "x86_64::microvm::openvmm_linux_x64_phase_1_lifecycle",
+)
+OPENVMM_LINUX_TEST_FILTER = "test(openvmm) | test(ttrpc) | " + " | ".join(
+    _exact_openvmm_test(test) for test in OPENVMM_REQUIRED_MICROVM_TESTS
+)
+
+
 def _exclude_openvmm_tests(
     test_filter: str,
     excluded_tests: tuple[str, ...],
@@ -226,9 +235,8 @@ OPENVMM_WHP_TESTS = (
     "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_clear_vmgs",
     "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_default_boot",
     "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_invalid_boot_entries",
-    "ttrpc::test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
+    *OPENVMM_REQUIRED_MICROVM_TESTS,
     "ttrpc::test_ttrpc_uefi_boot",
-    "x86_64::microvm::openvmm_linux_x64_phase_1_lifecycle",
     "x86_64::openvmm_uefi_x64_guest_test_x64_crash_dump_on_triple_fault",
     "x86_64::openvmm_uefi_x64_windows_datacenter_core_2022_x64_battery_capacity",
 )

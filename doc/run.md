@@ -208,9 +208,9 @@ and machine contract already identify the restored guest. For example:
 
 `microvm` is now the only selector and launches the contract previously named
 `microvm-v2`. The `microvm-v2` spelling, the former one-vCPU ABI-1 behavior,
-ABI-1 device-I/O control, TTRPC numeric value 1, and ABI-1 snapshot restore are
-removed. Snapshot metadata and performance series continue to use numeric ABI
-value 2 and boot-layout value 2.
+ABI-1 device-I/O control, TTRPC numeric value 1, ABI-1 snapshot restore, and
+boot-layout-1 snapshot restore are removed. Snapshot metadata and performance
+series continue to use numeric ABI value 2 and boot-layout value 2.
 Use NVX commit `cb52bcd454b454cb241096c33ed42a1dcdc65347` with OpenVMM commit
 `1b70365613517a10718e00284a62bdffbd80e41c`, or an earlier compatible pair, to
 run retired ABI-1 guests or snapshots.

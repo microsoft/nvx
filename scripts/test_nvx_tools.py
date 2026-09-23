@@ -1347,20 +1347,20 @@ class CiTests(unittest.TestCase):
                 ci.OPENVMM_MSHV_TEST_FILTER,
             )
         self.assertNotIn("!test(openvmm_pcat_x64)", ci.OPENVMM_MSHV_TEST_FILTER)
-        self.assertNotIn(
-            "test_ttrpc_interface",
-            ci.OPENVMM_MSHV_TEST_FILTER,
-        )
-        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 29)
+        for backend, test_filter in ci.OPENVMM_TEST_FILTERS.items():
+            for required_test in ci.OPENVMM_REQUIRED_MICROVM_TESTS:
+                with self.subTest(backend=backend, required_test=required_test):
+                    self.assertIn(
+                        ci._exact_openvmm_test(required_test),
+                        test_filter,
+                    )
+        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 30)
         self.assertEqual(
             len(set(ci.OPENVMM_WHP_TESTS)),
             len(ci.OPENVMM_WHP_TESTS),
         )
-        for existing_test in (
-            "ttrpc::test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
-            "x86_64::microvm::openvmm_linux_x64_phase_1_lifecycle",
-        ):
-            self.assertIn(existing_test, ci.OPENVMM_WHP_TESTS)
+        for required_test in ci.OPENVMM_REQUIRED_MICROVM_TESTS:
+            self.assertIn(required_test, ci.OPENVMM_WHP_TESTS)
         self.assertEqual(ci.OPENVMM_WHP_EXCLUDED_TESTS, ())
         self.assertNotIn(
             "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
