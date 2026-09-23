@@ -659,6 +659,10 @@ check_environment() {
     validate_runner_state_paths
     validate_runner_work_paths
     if run_as_root test -f "${runner_directory}/.runner"; then
+        # A dependency-only pass must not require state updated by a named pass.
+        if [ "$configure_runner" = false ] && [ "$check_only" = false ]; then
+            return 0
+        fi
         if [ "$configure_runner" = true ]; then
             configured_runner_name=$(run_as_root python3 -c \
                 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
