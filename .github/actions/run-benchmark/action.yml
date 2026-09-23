@@ -441,6 +441,16 @@ runs:
           }
         }
 
+    - name: Upload benchmark diagnostics
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        path: data/runs/${{ inputs.platform }}
+        name: benchmark-diagnostics-${{ inputs.platform }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+        if-no-files-found: error
+        overwrite: false
+        retention-days: 1
+
     - name: Upload benchmark results
       if: always()
       uses: actions/upload-artifact@v7
