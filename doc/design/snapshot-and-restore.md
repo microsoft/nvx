@@ -290,10 +290,10 @@ Restore proceeds in the opposite direction from capture:
 10. on the agent's `0x605` acknowledgment, stop at the exact post-write
    boundary, release input, and only then let the guest continue.
 
-Listener attachments preserve their stable device ID, backend kind, reconnect
-policy, required flag, and timeout, but not the source listener pathname.
-Each restore supplies fresh private boot-console and authenticated control
-listener paths. Treating the captured pathname as immutable would make
+Listener attachments preserve their stable device ID, attachment kind, backend
+kind, reconnect policy, required flag, and timeout, but not the source listener
+pathname. Each restore supplies fresh private boot-console and authenticated
+control-listener paths. Treating the captured pathname as immutable would make
 independent or concurrent reusable-clone restores collide with the terminated
 source generation.
 

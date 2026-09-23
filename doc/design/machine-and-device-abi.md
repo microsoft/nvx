@@ -207,10 +207,13 @@ Boot-only command lines retain their existing behavior.
 
 The internal control attachment helper accepts only local `listen=...`,
 `connect=...`, or disconnected `none` endpoints, not TCP or inherited stdio.
-Linux uses Unix sockets and Windows uses named pipes. Reconstruction checks
-the exact saved identity and reconnect policy; client connections require
-explicit restore-time approval. These restrictions are groundwork for the
-broker, not a substitute for its authentication.
+Linux uses Unix sockets and Windows uses named pipes. A saved listener may be
+recreated at a fresh private restore-time path, but its stable attachment ID,
+attachment kind, backend kind, reconnect policy, required flag, length, and
+timeout remain exact. A saved `connect` endpoint retains its exact identity and
+requires explicit restore-time approval; `none` remains disconnected. These
+restrictions are groundwork for the broker, not a substitute for its
+authentication.
 
 This is transport and lifecycle groundwork, not an enabled agent protocol.
 The CLI has no public activation option, and CLI and TTRPC restore reject a

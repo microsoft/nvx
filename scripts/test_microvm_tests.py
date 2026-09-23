@@ -759,6 +759,60 @@ class MicrovmTests(unittest.TestCase):
         packet_restore = snapshot.index("    post_restore\n")
         self.assertLess(zero_expansion_fast_path, packet_restore)
 
+    def test_snapshot_console_diagnostics_are_nonfatal_and_ordered(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        snapshot = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
+        ).read_text(encoding="utf-8")
+
+        markers = [
+            'console_status "NVX-POST-RESTORE-STAGE: packet"',
+            'console_status "NVX-POST-RESTORE-STAGE: entropy"',
+            'console_status "NVX-POST-RESTORE-STAGE: identity"',
+            'console_status "NVX-POST-RESTORE-STAGE: runtime-hook"',
+            'console_status "NVX-POST-RESTORE-STAGE: acknowledge"',
+        ]
+        positions = [snapshot.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
+
+        functions_start = snapshot.index("console_status() {")
+        functions_end = snapshot.index("\n}\n\ncleanup()", functions_start) + 3
+        functions = snapshot[functions_start:functions_end]
+        functions = functions.replace(">/dev/console", '>"$console_target"')
+        functions = functions.replace("/sbin/nvx-exit", "nvx_exit")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            console_target = root / "console-directory"
+            console_target.mkdir()
+            exit_record = root / "exit-record"
+            result = subprocess.run(
+                [shell, "-s", "--", str(console_target), str(exit_record)],
+                input=(
+                    "set -eu\n"
+                    "console_target=$1\n"
+                    "exit_record=$2\n"
+                    "post_restore_pending=false\n"
+                    'nvx_exit() { printf "%s\\n" "$1" >"$exit_record"; }\n'
+                    f"{functions}\n"
+                    'console_status "unavailable console is non-fatal"\n'
+                    'fail_closed "synthetic restore failure"\n'
+                ),
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(exit_record.read_text(encoding="ascii"), "1\n")
+            self.assertIn(
+                "nvx-snapshot: synthetic restore failure; terminating the VM",
+                result.stderr,
+            )
+
     def test_console_log_persists_buffered_and_completed_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
