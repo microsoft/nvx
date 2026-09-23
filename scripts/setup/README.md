@@ -58,6 +58,13 @@ available under `System32`.
 On both platforms, runner and toolchain executables are administrator-owned and
 read-only to jobs, automatic runner updates are disabled, and writable runner
 state is confined to `_work`.
+Windows runner provisioning also creates a `nvx-benchmark-scratch` directory on
+the largest non-system NTFS volume, or at `-BenchmarkScratchDirectory`, and
+publishes it as the machine-level `NVX_BENCHMARK_SCRATCH` variable. Network
+Service receives Modify access to that directory tree, as for `_work/_sccache`.
+CI places benchmark snapshots and guest RAM backing files there so their
+flushes avoid the burst-limited system disk. Check mode requires the directory
+when a data volume exists.
 Persistent runners do not have Docker access. Guest artifacts are built with
 Docker on a GitHub-hosted runner instead.
 Linux provisioning runs through the SSH administrator, but the listener and

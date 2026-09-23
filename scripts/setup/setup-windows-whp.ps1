@@ -27,6 +27,9 @@ param(
     [string]$RunnerDirectory = "$env:SystemDrive\actions-runner",
 
     [Parameter()]
+    [string]$BenchmarkScratchDirectory,
+
+    [Parameter()]
     [switch]$RunnerTokenStdin
 )
 
@@ -53,6 +56,8 @@ $ToolRoot = Join-Path $env:ProgramData "nvx"
 $TrustedCargoHome = Join-Path $ToolRoot "cargo"
 $CargoHome = Join-Path $RunnerDirectory "_work\_temp\cargo-home"
 $SccacheDirectory = Join-Path $RunnerDirectory "_work\_sccache"
+$BenchmarkScratchVariable = "NVX_BENCHMARK_SCRATCH"
+$BenchmarkScratchName = "nvx-benchmark-scratch"
 $RustupHome = Join-Path $ToolRoot "rustup"
 $RequiredGuestArtifacts = @(
     "vmlinux",
@@ -820,6 +825,97 @@ function Configure-SccacheEnvironment {
     }
 }
 
+function Test-SystemVolumePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path)).TrimEnd("\")
+    return [StringComparer]::OrdinalIgnoreCase.Equals(
+        $root,
+        $env:SystemDrive.TrimEnd("\")
+    )
+}
+
+function Get-BenchmarkScratchDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($BenchmarkScratchDirectory)) {
+        return [IO.Path]::GetFullPath($BenchmarkScratchDirectory)
+    }
+    $configured = [Environment]::GetEnvironmentVariable(
+        $BenchmarkScratchVariable,
+        "Machine"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        return $configured
+    }
+    # Snapshot capture flushes guest RAM through benchmark scratch. Prefer the
+    # largest data volume so that I/O avoids the system disk's build traffic
+    # and burst throttling.
+    $volume = @(Get-Volume | Where-Object {
+            $_.DriveType -eq "Fixed" -and
+            $_.FileSystem -eq "NTFS" -and
+            "$($_.DriveLetter)" -match "^[A-Za-z]$" -and
+            -not (Test-SystemVolumePath "$($_.DriveLetter):\")
+        } | Sort-Object `
+            -Property @{ Expression = "Size"; Descending = $true }, DriveLetter) |
+    Select-Object -First 1
+    if ($null -eq $volume) {
+        return $null
+    }
+    return "$($volume.DriveLetter):\$BenchmarkScratchName"
+}
+
+function Configure-BenchmarkScratch {
+    $directory = Get-BenchmarkScratchDirectory
+    if ($null -eq $directory) {
+        Write-Output "No data volume found; benchmarks use the system temporary directory."
+        return
+    }
+    if (Test-SystemVolumePath $directory) {
+        throw "benchmark scratch must not use the system volume: $directory"
+    }
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    Set-ServiceDirectoryAcl `
+        -Path $directory `
+        -ServiceRights "Modify" `
+        -SkipChildren
+    foreach ($target in @("Machine", "Process")) {
+        [Environment]::SetEnvironmentVariable(
+            $BenchmarkScratchVariable,
+            $directory,
+            $target
+        )
+    }
+}
+
+function Assert-BenchmarkScratch {
+    $configured = [Environment]::GetEnvironmentVariable(
+        $BenchmarkScratchVariable,
+        "Machine"
+    )
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        if ($null -ne (Get-BenchmarkScratchDirectory)) {
+            throw "machine $BenchmarkScratchVariable is not configured"
+        }
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BenchmarkScratchDirectory) -and
+        -not [StringComparer]::OrdinalIgnoreCase.Equals(
+            $configured,
+            [IO.Path]::GetFullPath($BenchmarkScratchDirectory)
+        )) {
+        throw "machine $BenchmarkScratchVariable is $configured, expected $BenchmarkScratchDirectory"
+    }
+    if (Test-SystemVolumePath $configured) {
+        throw "benchmark scratch must not use the system volume: $configured"
+    }
+    $item = Get-Item -LiteralPath $configured -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or -not $item.PSIsContainer) {
+        throw "benchmark scratch directory was not found: $configured"
+    }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "benchmark scratch directory must not be a reparse point: $configured"
+    }
+    Assert-ServiceDirectoryAcl -Path $configured -Writable
+}
+
 function Get-RelativePackageFiles {
     param([Parameter(Mandatory = $true)][string]$Root)
     $prefixLength = $Root.TrimEnd("\").Length + 1
@@ -1374,6 +1470,7 @@ function Assert-Environment {
             }
         }
         Assert-ServiceDirectoryAcl -Path $SccacheDirectory -Writable
+        Assert-BenchmarkScratch
     }
     $installedTargets = & (Get-RequiredCommand "rustup.exe") `
         target list --installed --toolchain $RustToolchain
@@ -1457,6 +1554,7 @@ Assert-Administrator
 Install-Toolchain
 if ($RunnerOnly) {
     Configure-SccacheEnvironment
+    Configure-BenchmarkScratch
 }
 $restartNeeded = Enable-Whp
 

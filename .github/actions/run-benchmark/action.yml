@@ -180,6 +180,39 @@ runs:
           --teardown-mode "${{ inputs.teardown-mode }}" \
           --output-dir "${run_dir}"
 
+    - name: Prepare Windows benchmark scratch
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        # Snapshot capture flushes guest RAM through benchmark scratch files.
+        # Keep that I/O off the burst-limited system disk when provisioned.
+        $Root = [Environment]::GetEnvironmentVariable("NVX_BENCHMARK_SCRATCH", "Machine")
+        if ([string]::IsNullOrWhiteSpace($Root)) {
+          Write-Output "::warning::NVX_BENCHMARK_SCRATCH is not provisioned; benchmark scratch uses the system temporary directory"
+          exit 0
+        }
+        if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+          throw "Benchmark scratch root was not found: $Root"
+        }
+        # Remove scratch that cancelled jobs left behind. Jobs time out long
+        # before an entry becomes stale.
+        $Stale = [DateTime]::UtcNow.AddHours(-6)
+        foreach ($Entry in Get-ChildItem -LiteralPath $Root -Force) {
+          if ($Entry.LastWriteTimeUtc -lt $Stale -and
+              -not ($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Remove-Item -LiteralPath $Entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          }
+        }
+        $Scratch = Join-Path $Root "${{ inputs.platform }}-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+        if (Test-Path -LiteralPath $Scratch) {
+          Remove-Item -LiteralPath $Scratch -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $Scratch | Out-Null
+        "NVX_BENCHMARK_SCRATCH_DIR=$Scratch" |
+          Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Output "Benchmark scratch: $Scratch"
+
     - name: Run Windows acceptance test
       if: runner.os == 'Windows'
       shell: powershell
@@ -192,6 +225,10 @@ runs:
         $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
         if ($env:NVX_BENCHMARK_CPUS) {
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        $ScratchArgs = @()
+        if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
+          $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
         }
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
         $AcceptanceOutput = "$RunDir/acceptance.json"
@@ -212,7 +249,8 @@ runs:
             --teardown-mode "${{ inputs.teardown-mode }}" `
             --snapshot-profile `
             --output $AttemptOutput `
-            @CpuArgs
+            @CpuArgs `
+            @ScratchArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts\nvx.py performance validate-openvmm `
             --platform "${{ inputs.platform }}" `
@@ -241,6 +279,10 @@ runs:
         if ($env:NVX_BENCHMARK_CPUS) {
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
+        $ScratchArgs = @()
+        if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
+          $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
+        }
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
         python scripts\nvx.py benchmark `
           --suite performance `
@@ -254,7 +296,8 @@ runs:
           --skip-build `
           --teardown-mode "${{ inputs.teardown-mode }}" `
           --output-dir "$RunDir" `
-          @CpuArgs
+          @CpuArgs `
+          @ScratchArgs
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Run Windows multi-vCPU shell restore
@@ -270,6 +313,10 @@ runs:
         if ($env:NVX_BENCHMARK_CPUS) {
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
+        $ScratchArgs = @()
+        if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
+          $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
+        }
         foreach ($Processors in 2, 4, 8) {
           $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
           python scripts\nvx.py benchmark `
@@ -284,7 +331,8 @@ runs:
             --skip-build `
             --teardown-mode "${{ inputs.teardown-mode }}" `
             --output-dir "$RunDir" `
-            @CpuArgs
+            @CpuArgs `
+            @ScratchArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
 
@@ -301,6 +349,10 @@ runs:
         if ($env:NVX_BENCHMARK_CPUS) {
           $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
         }
+        $ScratchArgs = @()
+        if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
+          $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
+        }
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
         python scripts\nvx.py benchmark `
           --suite device-io `
@@ -314,7 +366,8 @@ runs:
           --skip-build `
           --teardown-mode "${{ inputs.teardown-mode }}" `
           --output-dir "$RunDir" `
-          @CpuArgs
+          @CpuArgs `
+          @ScratchArgs
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Publish Linux performance results
@@ -438,6 +491,21 @@ runs:
             if ($Rows.Count -ne 1 -or $Rows[0].metric -ne "shell_snapshot_restore_512_mib") {
               throw "Expected only shell_snapshot_restore_512_mib in $Result"
             }
+          }
+        }
+
+    - name: Remove Windows benchmark scratch
+      if: always() && runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        if ($env:NVX_BENCHMARK_SCRATCH_DIR -and
+            (Test-Path -LiteralPath $env:NVX_BENCHMARK_SCRATCH_DIR)) {
+          try {
+            Remove-Item -LiteralPath $env:NVX_BENCHMARK_SCRATCH_DIR -Recurse -Force
+          }
+          catch {
+            Write-Output "::warning::Could not remove benchmark scratch: $($_.Exception.Message)"
           }
         }
 

@@ -534,6 +534,23 @@ Reproduce with the exact executable and guest artifact hashes on the same host
 before attributing the delay to a source change. Keep the stability thresholds and
 bounded remeasurement unchanged when collecting diagnostic evidence.
 
+Snapshot generation is bounded by the write throughput of the benchmark's
+temporary directory, because capture flushes guest RAM through a backing file
+created there. The Windows backing file stays dense so restore keeps the
+captured pages cached; NTFS therefore zero-fills the unwritten range below the
+guest's top-of-RAM pages, and a 128 MiB guest writes about 150 MiB per capture.
+The Windows CI runners' 128 GiB Premium SSD system disk also holds the runner
+work tree, caches, and builds. Under load it alternates between its burst limit
+of about 173 MB/s and its baseline of about 102 MB/s in blocks of tens of
+seconds, which splits one lifecycle series into flush clusters near 0.95 and
+1.6 seconds. Windows CI therefore passes `--scratch-dir` with a per-job
+directory under the `NVX_BENCHMARK_SCRATCH` root that runner provisioning
+creates on the data volume. Acceptance JSON records the directory as
+`controls.scratch_directory`, and workload metadata records it as
+`scratch_directory`. When the root is not provisioned, CI warns and uses the
+system temporary directory. Use `--scratch-dir` for manual runs whose
+temporary directory shares a volume with other I/O-heavy work.
+
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10
 matching history points. A metric regresses only when it is more than 50%
