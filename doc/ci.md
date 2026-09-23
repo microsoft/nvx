@@ -109,22 +109,41 @@ trusted repository branch before running the backend matrices.
 The separate
 [`adversarial.yml`](../.github/workflows/adversarial.yml) workflow runs
 Copilot-driven campaigns only on trusted manual dispatches or schedules from
-`dev`. It is not part of pull-request CI. The workflow's dedicated
-`nvx-adversarial-controller` runner must already have an authenticated Copilot
-CLI and an administrator-owned executor wrapper named by the
-`NVX_ADVERSARIAL_EXECUTOR` repository variable. The workflow does not install
-Copilot or initiate login.
+`dev`. It is not part of pull-request CI. Each matrix lane uses the matching
+persistent KVM, MSHV, or WHP runner and downloads the latest packaged release
+before running the controller and executor locally. The runner bootstrap
+installs a pinned, SHA-256-verified Copilot CLI; the workflow does not install
+the CLI or initiate login.
 
-The wrapper provisions a distinct disposable KVM, MSHV, or WHP target with no
-production or GitHub credentials and forwards only the typed executor
-protocol. Existing persistent microVM and performance runners are not valid
-adversarial targets. Loss of the target heartbeat, a policy oracle, or a
-teardown/post-campaign boot failure fails the job and requires quarantine and
-reimage.
+Copilot authentication is the `COPILOT_GITHUB_TOKEN` secret in the
+`adversarial` GitHub Environment, which is restricted to `dev`. The token must
+be a personal-account-owned fine-grained token with only the
+`Copilot Requests` account permission. It is exposed only to preflight and
+campaign steps. The executor's environment allowlist drops Copilot, GitHub,
+and SSH credentials. Because controller and executor still share one host and
+service account, that allowlist is not a host-escape security boundary.
+
+Local execution is an explicit operational compromise: it validates OpenVMM
+process failures, cleanup, canaries, and post-campaign boots, but it cannot
+reliably classify a crash of the runner VM itself and does not reimage the
+runner after a campaign. Prefix minimization is disabled in CI so an anomalous
+target is not reused for additional attempts. A separate disposable executor
+remains required for campaigns intended to validate host-crash classification
+or contain a suspected guest-to-host escape.
 
 Normal Actions artifacts contain only the guest-text-free public summary,
-catalogued case identifiers, and replay manifest. The external provisioner
-must collect controller transcripts and complete target logs into
-access-controlled security storage. See
+catalogued case identifiers, and replay manifest. Full controller transcripts
+and target logs remain on the runner and must be transferred to
+access-controlled security storage before workspace recycling when an anomaly
+requires investigation. The local workflow does not automate that transfer.
+
+When any campaign matrix job fails, a GitHub-hosted reporting job creates or
+updates one issue for the workflow run. The issue contains the run, commit,
+event, failed-job conclusions, and links to the workflow and job pages. It
+does not copy guest output, Copilot transcripts, complete target logs, or
+potential escape payloads into the issue. Rerunning the same workflow run
+updates and reopens the existing issue instead of creating a duplicate.
+
+See
 [Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
 for the architecture and operational contract.

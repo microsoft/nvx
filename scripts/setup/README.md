@@ -42,6 +42,8 @@ but are not registered as labels.
 Rustup bootstrap binaries are versioned and SHA-256 verified before execution;
 Linux provisioning also installs `zstd` for native Actions cache archives.
 Both runner setup scripts install a pinned, SHA-256-verified `sccache` binary.
+They also install a pinned, SHA-256-verified GitHub Copilot CLI binary for the
+trusted adversarial workflow. Authentication is not stored on the runner.
 Runner services use a persistent `_work/_sccache` directory with a 10-GiB
 limit, disable Cargo incremental compilation, and expose `sccache` through
 `RUSTC_WRAPPER`. CI uses clean Cargo target directories and reports per-job
@@ -66,6 +68,21 @@ nor Docker access.
 Persistent runners execute pushes and same-repository pull requests only. Fork
 pull requests remain on GitHub-hosted jobs until a maintainer stages the change
 on a trusted repository branch.
+
+The adversarial workflow reads `COPILOT_GITHUB_TOKEN` from the `adversarial`
+GitHub Environment. Use a personal-account-owned fine-grained token with only
+the `Copilot Requests` account permission, and restrict that environment to
+the `dev` branch. Do not use `copilot login` on a shared runner service
+account.
+
+After creating the environment and its `dev` deployment-branch policy, store
+the token without placing it on the command line:
+
+```bash
+gh secret set COPILOT_GITHUB_TOKEN \
+  --env adversarial \
+  --repo microsoft/nvx
+```
 
 Validate an installed runner without changing the host:
 

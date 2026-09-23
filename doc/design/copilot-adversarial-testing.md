@@ -117,11 +117,18 @@ Child test processes receive a small environment allowlist. In particular,
 GitHub, Copilot, SSH-agent, token, and arbitrary controller environment
 variables are not forwarded.
 
-The controller may start the executor locally, but production campaigns must
-use `--executor-command`. This option names one trusted executable and accepts
-no arguments. The executable is an administrator-owned wrapper that forwards
-stdin/stdout to a forced executor command on a separately provisioned target.
-It must not evaluate protocol data as a shell command.
+The controller may start the executor locally. The current trusted CI workflow
+uses that mode on backend-matched persistent runners and disables prefix
+minimization so an anomalous local target is not reused. This mode validates
+OpenVMM process failure, teardown, canaries, and post-campaign boot, but cannot
+reliably classify a crash of the runner VM itself or contain a successful
+guest-to-host escape.
+
+Full-containment production campaigns must use `--executor-command`. This
+option names one trusted executable and accepts no arguments. The executable
+is an administrator-owned wrapper that forwards stdin/stdout to a forced
+executor command on a separately provisioned target. It must not evaluate
+protocol data as a shell command.
 
 The wrapper and target provisioner must:
 
@@ -135,9 +142,10 @@ The wrapper and target provisioner must:
 - quarantine and reimage the target after every run; and
 - move the target artifact directory to access-controlled security storage.
 
-This controller/target split is required for CI. Local mode is useful for
-development, but a controller on the target host cannot reliably distinguish
-a host crash from its own failure.
+This controller/target split is required for full-containment CI. Local mode
+is useful for development and the current trusted workflow, but a controller
+on the target host cannot reliably distinguish a host crash from its own
+failure.
 
 Local executor artifacts use the short `build/adv/<run-id>` state root rather
 than nesting below `--output-dir`. This keeps the deepest deterministic
@@ -192,7 +200,8 @@ Linux supports `kvm` and `mshv`; Windows supports `whp`. `--host-type` records
 `baremetal` or `virtual-machine`. If omitted, the harness records
 `NVX_HOST_TYPE` or `unspecified`.
 
-For the required two-node topology, configure a no-argument wrapper and run:
+For the full-containment two-node topology, configure a no-argument wrapper
+and run:
 
 ```bash
 python3 scripts/nvx.py test-adversarial \
@@ -262,19 +271,34 @@ baseline artifacts, and post-campaign canary-boot artifacts.
 Potential escape payloads, target logs, Copilot transcripts, and full outcome
 reports must go to access-controlled security storage. The GitHub Actions
 workflow uploads only `public-summary.json`, case identifiers, and the replay
-manifest. Its external provisioner owns collection and quarantine of the full
-controller and target directories.
+manifest. An external provisioner owns collection and quarantine of the full
+controller and target directories. Local CI leaves those directories on the
+runner for an operator to transfer before workspace recycling when an anomaly
+requires investigation.
 
 ## CI policy
 
 [`adversarial.yml`](../../.github/workflows/adversarial.yml) runs only by
 trusted manual dispatch or a schedule on `dev`. It does not handle pull
-requests or fork code and does not install or authenticate Copilot CLI.
+requests or fork code and does not install Copilot CLI or initiate login.
 
-The workflow runs on a dedicated `nvx-adversarial-controller` runner and
-requires the `NVX_ADVERSARIAL_EXECUTOR` repository variable to name its
-administrator-owned remote wrapper. It must never point at the persistent
-build, microVM-test, or performance runner fleet. Controller and executor
-images, network isolation, artifact collection, quarantine, and reimage are
-infrastructure prerequisites; a missing prerequisite fails preflight rather
-than skipping a campaign.
+The workflow selects a persistent runner whose platform matches the requested
+backend, downloads the matching packaged release, and runs the controller and
+executor locally. Copilot authentication comes from the
+`COPILOT_GITHUB_TOKEN` secret in the `dev`-restricted `adversarial`
+environment. The bootstrap scripts pin and verify the CLI binary, while the
+workflow uses an ephemeral home and removes its state after every job.
+
+After a matrix failure, a GitHub-hosted reporter reads the workflow job
+conclusions and creates or updates one issue keyed by workflow run ID. The
+issue contains only trusted run metadata and links; guest output, Copilot
+transcripts, complete target logs, and potential escape payloads remain
+excluded.
+
+This local CI topology deliberately provides weaker containment than the
+two-node architecture: runner-VM crashes cannot be classified independently,
+the runner is not automatically reimaged, controller credentials share the
+host even though they are omitted from the executor subprocess environment,
+and host-escape containment is not established. Use an administrator-owned
+`--executor-command` backed by fresh, credential-free targets for that
+stronger claim.

@@ -2043,6 +2043,59 @@ class CiConfigurationTests(unittest.TestCase):
             linux_setup.index('test -w "$runner_sccache_dir"'),
         )
 
+    def test_adversarial_ci_pins_and_validates_copilot_cli(self):
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "adversarial.yml"
+        ).read_text(encoding="utf-8")
+        windows_setup = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+        linux_setup = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('$CopilotVersion = "1.0.88"', windows_setup)
+        self.assertIn(
+            '$CopilotSha256 = "59c66ccd61a7f2796d4924c4c4da3e34951bc06fdaf11642d7033296fc71da11"',
+            windows_setup,
+        )
+        self.assertIn("COPILOT_VERSION=1.0.88", linux_setup)
+        self.assertIn(
+            "COPILOT_SHA256=42f40c08ff8a8ff78522161e4b5e2b86340ad8bb0853a5f1aa64ce65b48d007b",
+            linux_setup,
+        )
+        for configuration in (windows_setup, linux_setup):
+            self.assertIn("copilot --version", configuration)
+        self.assertIn("environment: adversarial", workflow)
+        self.assertIn(
+            "COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}",
+            workflow,
+        )
+        self.assertIn("/opt/nvx/cargo/bin/copilot", workflow)
+        self.assertIn('"nvx\\cargo\\bin\\copilot.exe"', workflow)
+        self.assertIn('download --hypervisor "${{ matrix.backend }}"', workflow)
+        self.assertIn("--no-minimize", workflow)
+        self.assertNotIn("NVX_ADVERSARIAL_EXECUTOR", workflow)
+        self.assertNotIn("nvx-adversarial-controller", workflow)
+
+    def test_adversarial_ci_reports_failures_as_issues(self):
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "adversarial.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("report-failure:", workflow)
+        self.assertIn("needs.campaign.result == 'failure'", workflow)
+        self.assertIn("actions: read", workflow)
+        self.assertIn("issues: write", workflow)
+        self.assertIn("listJobsForWorkflowRun", workflow)
+        self.assertIn("github.rest.issues.create", workflow)
+        self.assertIn("github.rest.issues.update", workflow)
+        self.assertIn("nvx-adversarial-run-id:", workflow)
+        self.assertIn(
+            "Do not attach guest output, Copilot transcripts, complete ",
+            workflow,
+        )
+
     def test_linux_setup_installs_openvmm_perl_modules(self):
         setup_directory = BuildConstants.REPO_ROOT / "scripts" / "setup"
         configurations = (

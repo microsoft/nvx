@@ -9,6 +9,8 @@ RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 CARGO_NEXTEST_VERSION=0.9.133
 SCCACHE_VERSION=0.18.0
 SCCACHE_SHA256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
+COPILOT_VERSION=1.0.88
+COPILOT_SHA256=42f40c08ff8a8ff78522161e4b5e2b86340ad8bb0853a5f1aa64ce65b48d007b
 RUNNER_VERSION=2.337.0
 RUNNER_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
 
@@ -510,6 +512,53 @@ install_rust_tools() {
     run_as_root chmod -R go-w "$trusted_tool_root"
 }
 
+install_copilot_cli() {
+    copilot=${trusted_cargo_home}/bin/copilot
+    installed_version=
+    if [ -x "$copilot" ]; then
+        installed_version=$(
+            (
+                version_home=$(run_as_root mktemp -d \
+                    "${trusted_tool_root}/copilot-version.XXXXXX")
+                trap 'run_as_root rm -rf "$version_home"' 0 HUP INT TERM
+                run_as_root env HOME="$version_home" "$copilot" --version
+            ) 2>/dev/null || true
+        )
+    fi
+    if ! printf '%s\n' "$installed_version" |
+        grep -Fq "GitHub Copilot CLI ${COPILOT_VERSION}."; then
+        (
+            package_directory=$(run_as_root mktemp -d \
+                "${trusted_tool_root}/copilot-package.XXXXXX")
+            archive=${package_directory}/copilot.tar.gz
+            root=${package_directory}/root
+            trap 'run_as_root rm -rf "$package_directory"' 0 HUP INT TERM
+            run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
+                --silent --show-error \
+                --output "$archive" \
+                "https://github.com/github/copilot-cli/releases/download/v${COPILOT_VERSION}/copilot-linux-x64.tar.gz"
+            actual_sha256=$(run_as_root sha256sum "$archive" | awk '{print $1}')
+            [ "$actual_sha256" = "$COPILOT_SHA256" ] ||
+                die "Copilot CLI archive checksum mismatch: ${actual_sha256}"
+            archive_entries=$(run_as_root tar --list --gzip --file "$archive")
+            [ "$archive_entries" = copilot ] ||
+                die "Copilot CLI archive has unexpected entries"
+            run_as_root mkdir -p "$root"
+            run_as_root tar --extract --gzip \
+                --file "$archive" \
+                --directory "$root"
+            extracted=${root}/copilot
+            run_as_root test -f "$extracted" ||
+                die "Copilot CLI executable was not found after extraction"
+            run_as_root test ! -L "$extracted" ||
+                die "Copilot CLI executable must not be a symbolic link"
+            run_as_root install -m 0755 "$extracted" "$copilot"
+        )
+    fi
+    run_as_root chown -R root:root "$trusted_tool_root"
+    run_as_root chmod -R go-w "$trusted_tool_root"
+}
+
 restrict_docker_access() {
     if getent group docker >/dev/null 2>&1 &&
         id -nG "$runner_service_account" | tr ' ' '\n' | grep -Fxq docker; then
@@ -608,8 +657,8 @@ install_runner() {
 check_environment() {
     [ "$(uname -s)" = Linux ] || die "this script requires Linux"
     [ "$(uname -m)" = x86_64 ] || die "this script requires x86_64"
-    for command_name in python3 git curl diff rustup cargo cargo-nextest sccache gcc make ld \
-        bison flex cpio gzip sha256sum tar xz zstd systemctl; do
+    for command_name in python3 git curl diff rustup cargo cargo-nextest sccache copilot \
+        gcc make ld bison flex cpio gzip sha256sum tar xz zstd systemctl; do
         require_command "$command_name"
     done
 
@@ -636,10 +685,23 @@ check_environment() {
     run_as_runner sccache --version |
         grep -Fq "sccache ${SCCACHE_VERSION}" ||
         die "sccache ${SCCACHE_VERSION} is not installed"
+    copilot_version=$(
+        (
+            copilot_home=$(run_as_runner mktemp -d \
+                /tmp/nvx-copilot-home.XXXXXX)
+            trap 'run_as_root rm -rf "$copilot_home"' 0 HUP INT TERM
+            run_as_runner env HOME="$copilot_home" copilot --version
+        )
+    )
+    printf '%s\n' "$copilot_version" |
+        grep -Fq "GitHub Copilot CLI ${COPILOT_VERSION}." ||
+        die "GitHub Copilot CLI ${COPILOT_VERSION} is not installed"
     [ "$(stat -c %U "$trusted_tool_root")" = root ] ||
         die "trusted Rust toolchain is not root-owned"
     run_as_runner test ! -w "${trusted_cargo_home}/bin/cargo" ||
         die "runner service account can modify trusted Cargo"
+    run_as_runner test ! -w "${trusted_cargo_home}/bin/copilot" ||
+        die "runner service account can modify Copilot CLI"
     run_as_runner test ! -w "$trusted_rustup_home" ||
         die "runner service account can modify trusted Rustup state"
     run_as_runner sh -c \
@@ -823,6 +885,7 @@ if [ "$check_only" = false ]; then
     install_packages
     configure_runner_account
     install_rust_tools
+    install_copilot_cli
     restrict_docker_access
     configure_backend_access
     if [ "$configure_runner" = true ]; then

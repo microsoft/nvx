@@ -46,7 +46,12 @@ jobs:
         github.repository == 'microsoft/nvx' &&
         github.ref == 'refs/heads/dev'
       }}
-    runs-on: [self-hosted, nvx-adversarial-controller]
+    runs-on:
+      - self-hosted
+      - ${{ matrix.backend == 'whp' && 'windows' || 'linux' }}
+      - ${{ matrix.backend }}
+      - virtual-machine
+    environment: adversarial
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -75,27 +80,87 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout OpenVMM on the controller
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ matrix.backend }}
+
+      - name: Checkout OpenVMM
         uses: ./.github/actions/checkout-openvmm
         with:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-      - name: Validate preinstalled controller and executor wrapper
+      - name: Validate preinstalled Copilot CLI on Linux
+        if: runner.os != 'Windows'
         shell: bash
         env:
-          NVX_ADVERSARIAL_EXECUTOR: ${{ vars.NVX_ADVERSARIAL_EXECUTOR }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          HOME: ${{ runner.temp }}/copilot-home
         run: |
           set -euo pipefail
-          test -n "${NVX_ADVERSARIAL_EXECUTOR}"
-          command -v "${NVX_ADVERSARIAL_EXECUTOR}"
-          command -v copilot
+          test -n "${COPILOT_GITHUB_TOKEN}"
+          mkdir -p "${HOME}"
+          test "$(command -v copilot)" = /opt/nvx/cargo/bin/copilot
+          test ! -w /opt/nvx/cargo/bin/copilot
           copilot --version
           python3 scripts/nvx.py verify
 
-      - name: Run bounded adversarial campaign
+      - name: Validate preinstalled Copilot CLI on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          HOME: ${{ runner.temp }}\copilot-home
+          USERPROFILE: ${{ runner.temp }}\copilot-home
+          APPDATA: ${{ runner.temp }}\copilot-home\AppData\Roaming
+          LOCALAPPDATA: ${{ runner.temp }}\copilot-home\AppData\Local
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:COPILOT_GITHUB_TOKEN)) {
+            throw "COPILOT_GITHUB_TOKEN is not configured"
+          }
+          New-Item -ItemType Directory -Path `
+            $env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA -Force |
+            Out-Null
+          $copilot = Get-Command copilot.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($null -eq $copilot) {
+            throw "Copilot CLI is not installed"
+          }
+          $expectedCopilot = Join-Path $env:ProgramData "nvx\cargo\bin\copilot.exe"
+          if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+              $copilot.Source,
+              $expectedCopilot
+            )) {
+            throw "Copilot CLI is loaded from $($copilot.Source)"
+          }
+          & $copilot.Source --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts\nvx.py verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Download matching NVX release on Linux
+        if: runner.os != 'Windows'
         shell: bash
         env:
-          NVX_ADVERSARIAL_EXECUTOR: ${{ vars.NVX_ADVERSARIAL_EXECUTOR }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/nvx.py download --hypervisor "${{ matrix.backend }}"
+
+      - name: Download matching NVX release on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts\nvx.py download --hypervisor "${{ matrix.backend }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run bounded adversarial campaign on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          HOME: ${{ runner.temp }}/copilot-home
           CAMPAIGN_SEED: ${{ github.event_name == 'workflow_dispatch' && inputs.seed || github.run_id }}
         run: >-
           python3 scripts/nvx.py test-adversarial
@@ -107,7 +172,43 @@ jobs:
           --budget-ai-credits 300
           --seed "${CAMPAIGN_SEED}"
           --output-dir "build/test-results/adversarial-${{ matrix.backend }}-${{ matrix.campaign }}"
-          --executor-command "${NVX_ADVERSARIAL_EXECUTOR}"
+          --no-minimize
+
+      - name: Run bounded adversarial campaign on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          HOME: ${{ runner.temp }}\copilot-home
+          USERPROFILE: ${{ runner.temp }}\copilot-home
+          APPDATA: ${{ runner.temp }}\copilot-home\AppData\Roaming
+          LOCALAPPDATA: ${{ runner.temp }}\copilot-home\AppData\Local
+          CAMPAIGN_SEED: ${{ github.event_name == 'workflow_dispatch' && inputs.seed || github.run_id }}
+        run: |
+          python scripts\nvx.py test-adversarial `
+            --backend "${{ matrix.backend }}" `
+            --campaign "${{ matrix.campaign }}" `
+            --host-type virtual-machine `
+            --budget-seconds 900 `
+            --budget-actions 8 `
+            --budget-ai-credits 300 `
+            --seed "$env:CAMPAIGN_SEED" `
+            --output-dir "build/test-results/adversarial-${{ matrix.backend }}-${{ matrix.campaign }}" `
+            --no-minimize
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove Copilot state on Linux
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: rm -rf -- "${RUNNER_TEMP}/copilot-home"
+
+      - name: Remove Copilot state on Windows
+        if: always() && runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          Remove-Item -LiteralPath
+          (Join-Path $env:RUNNER_TEMP "copilot-home")
+          -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Upload public campaign metadata
         if: always()
@@ -120,3 +221,122 @@ jobs:
             build/test-results/adversarial-${{ matrix.backend }}-${{ matrix.campaign }}/run-*/replay-manifest.json
           if-no-files-found: error
           retention-days: 14
+
+  report-failure:
+    name: Report adversarial failure
+    needs: campaign
+    if: >-
+      ${{
+        always() &&
+        needs.campaign.result == 'failure' &&
+        github.repository == 'microsoft/nvx' &&
+        github.ref == 'refs/heads/dev'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: Create or update failure issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const runUrl =
+              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const title =
+              `[adversarial] Campaign failure in run ${context.runId}`;
+            const marker =
+              `<!-- nvx-adversarial-run-id:${context.runId} -->`;
+            const jobs = await github.paginate(
+              github.rest.actions.listJobsForWorkflowRun,
+              {
+                owner,
+                repo,
+                run_id: context.runId,
+                filter: "latest",
+                per_page: 100,
+              },
+            );
+            const failedConclusions = new Set([
+              "failure",
+              "startup_failure",
+              "timed_out",
+            ]);
+            const failedJobs = jobs
+              .filter((job) => failedConclusions.has(job.conclusion))
+              .sort((left, right) => left.name.localeCompare(right.name));
+            const escapeTable = (value) =>
+              String(value ?? "")
+                .replaceAll("|", "\\|")
+                .replaceAll(/\r?\n/g, " ");
+            const failedJobRows =
+              failedJobs.length === 0
+                ? [
+                    "_The campaign failed, but the jobs API returned no " +
+                      "failed job details._",
+                  ]
+                : [
+                    "| Job | Conclusion | Link |",
+                    "| --- | --- | --- |",
+                    ...failedJobs.map(
+                      (job) =>
+                        `| ${escapeTable(job.name)} | ` +
+                        `${escapeTable(job.conclusion)} | ` +
+                        `[job](${job.html_url}) |`,
+                    ),
+                  ];
+            const body = [
+              marker,
+              "An NVX adversarial campaign failed on `dev`.",
+              "",
+              `- **Workflow run:** [${context.runId}](${runUrl})`,
+              `- **Run attempt:** ${process.env.GITHUB_RUN_ATTEMPT}`,
+              `- **Commit:** \`${context.sha}\``,
+              `- **Event:** \`${context.eventName}\``,
+              "",
+              "## Failed jobs",
+              "",
+              ...failedJobRows,
+              "",
+              "## Triage",
+              "",
+              "- Inspect the public campaign metadata artifacts attached to " +
+                "the workflow run.",
+              "- Treat a policy violation, canary change, OpenVMM failure, or " +
+                "incomplete teardown as requiring runner quarantine.",
+              "- Do not attach guest output, Copilot transcripts, complete " +
+                "target logs, or potential escape payloads to this issue.",
+              "",
+              "_This issue is created or updated automatically for this " +
+                "workflow run._",
+            ].join("\n");
+            const { data: recentIssues } =
+              await github.rest.issues.listForRepo({
+                owner,
+                repo,
+                state: "all",
+                sort: "created",
+                direction: "desc",
+                per_page: 100,
+              });
+            const existing = recentIssues.find(
+              (issue) => !issue.pull_request && issue.title === title,
+            );
+            const { data: issue } = existing
+              ? await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  title,
+                  body,
+                  state: "open",
+                })
+              : await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title,
+                  body,
+                });
+            core.notice(`Adversarial failure issue: ${issue.html_url}`);

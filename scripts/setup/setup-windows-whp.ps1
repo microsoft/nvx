@@ -47,6 +47,8 @@ $RustupSha256 = "6f4bef66261261fcb43131be8720bab817d403a09edec7455c371974b90bdb7
 $CargoNextestVersion = "0.9.133"
 $SccacheVersion = "0.18.0"
 $SccacheSha256 = "1a63c1be2beab3f04d27e4cc145443e092e02d3dd83a51030989829d7023091b"
+$CopilotVersion = "1.0.88"
+$CopilotSha256 = "59c66ccd61a7f2796d4924c4c4da3e34951bc06fdaf11642d7033296fc71da11"
 $RunnerVersion = "2.337.0"
 $RunnerSha256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 $ToolRoot = Join-Path $env:ProgramData "nvx"
@@ -820,6 +822,68 @@ function Configure-SccacheEnvironment {
     }
 }
 
+function Install-CopilotCli {
+    $copilot = Join-Path $TrustedCargoHome "bin\copilot.exe"
+    $installCopilot = -not (Test-Path -LiteralPath $copilot -PathType Leaf)
+    if (-not $installCopilot) {
+        $installedVersion = @(& $copilot --version 2>$null)
+        $installCopilot = $LASTEXITCODE -ne 0 -or
+            ($installedVersion -join "`n") -notmatch
+            "GitHub Copilot CLI $([regex]::Escape($CopilotVersion))\."
+    }
+    if ($installCopilot) {
+        $archive = Join-Path $ToolRoot `
+            "copilot-$CopilotVersion-$([guid]::NewGuid().ToString('N')).zip"
+        $extractDirectory = Join-Path $ToolRoot `
+            "copilot-$CopilotVersion-$([guid]::NewGuid().ToString('N'))"
+        try {
+            Invoke-WebRequest `
+                -UseBasicParsing `
+                -Uri "https://github.com/github/copilot-cli/releases/download/v$CopilotVersion/copilot-win32-x64.zip" `
+                -OutFile $archive
+            $actualHash = (Get-FileHash `
+                    -LiteralPath $archive `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $CopilotSha256) {
+                throw "Copilot CLI archive checksum mismatch: $actualHash"
+            }
+            New-Item `
+                -ItemType Directory `
+                -Path $extractDirectory `
+                -Force |
+            Out-Null
+            Expand-Archive `
+                -LiteralPath $archive `
+                -DestinationPath $extractDirectory
+            $entries = @(Get-ChildItem -LiteralPath $extractDirectory -Force)
+            if ($entries.Count -ne 1 -or
+                $entries[0].PSIsContainer -or
+                $entries[0].Name -ne "copilot.exe" -or
+                $entries[0].Attributes -band
+                [IO.FileAttributes]::ReparsePoint) {
+                throw "Copilot CLI archive has unexpected entries"
+            }
+            Copy-Item `
+                -LiteralPath $entries[0].FullName `
+                -Destination $copilot `
+                -Force
+        }
+        finally {
+            Remove-Item `
+                -LiteralPath $archive, $extractDirectory `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+
+    Set-ServiceDirectoryAcl `
+        -Path $ToolRoot `
+        -ServiceRights "ReadAndExecute" `
+        -AllowInternalLinks
+    Update-ProcessPath
+}
+
 function Get-RelativePackageFiles {
     param([Parameter(Mandatory = $true)][string]$Root)
     $prefixLength = $Root.TrimEnd("\").Length + 1
@@ -1374,6 +1438,20 @@ function Assert-Environment {
             }
         }
         Assert-ServiceDirectoryAcl -Path $SccacheDirectory -Writable
+        $expectedCopilot = Join-Path $TrustedCargoHome "bin\copilot.exe"
+        $copilot = Get-RequiredCommand "copilot.exe"
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+                $copilot,
+                $expectedCopilot
+            )) {
+            throw "Copilot CLI is loaded from $copilot, expected $expectedCopilot"
+        }
+        $installedCopilotVersion = & $copilot --version
+        Assert-LastExitCode "copilot --version"
+        if (($installedCopilotVersion -join "`n") -notmatch
+            "GitHub Copilot CLI $([regex]::Escape($CopilotVersion))\.") {
+            throw "GitHub Copilot CLI $CopilotVersion is not installed"
+        }
     }
     $installedTargets = & (Get-RequiredCommand "rustup.exe") `
         target list --installed --toolchain $RustToolchain
@@ -1456,6 +1534,7 @@ if ($CheckOnly) {
 Assert-Administrator
 Install-Toolchain
 if ($RunnerOnly) {
+    Install-CopilotCli
     Configure-SccacheEnvironment
 }
 $restartNeeded = Enable-Whp

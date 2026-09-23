@@ -191,7 +191,8 @@ Pyright runs in strict mode for both Linux and Windows platform APIs.
 ### Adversarial campaign controller
 
 The optional `test-adversarial` command additionally requires GitHub Copilot
-CLI to be installed and authenticated before the run. Validate the controller
+CLI to be installed and authenticated before the run. The runner bootstrap
+scripts install a pinned, SHA-256-verified CLI binary. Validate the controller
 without changing authentication:
 
 ```bash
@@ -204,9 +205,25 @@ Copilot CLI or run `copilot login`. The repository's
 `.github/workflows/copilot-setup-steps.yml` installs `gh-aw`; it does not
 satisfy this prerequisite.
 
-Production campaigns also require an administrator-owned, no-argument
-executor wrapper that provisions a separate disposable target and forwards
-the bounded executor protocol. See
+CI authentication comes from the `COPILOT_GITHUB_TOKEN` secret in the
+`adversarial` GitHub Environment. Use a personal-account-owned fine-grained
+token with only the `Copilot Requests` account permission, and restrict the
+environment to the `dev` branch. The workflow exposes the secret only to
+Copilot preflight and campaign steps and removes temporary Copilot state after
+the job. Do not persist a personal OAuth login under a shared runner service
+account.
+
+Store the token through `gh`'s secure prompt:
+
+```bash
+gh secret set COPILOT_GITHUB_TOKEN \
+  --env adversarial \
+  --repo microsoft/nvx
+```
+
+Full-containment campaigns also require an administrator-owned, no-argument
+executor wrapper that provisions a separate disposable target and forwards the
+bounded executor protocol. See
 [Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
 for the containment and credential requirements.
 
