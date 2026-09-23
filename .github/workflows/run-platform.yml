@@ -70,7 +70,6 @@ jobs:
         uses: ./.github/actions/validate-runner
         with:
           backend: ${{ inputs.backend }}
-          require-sccache: "false"
 
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
