@@ -5324,7 +5324,10 @@ class BenchmarkTests(unittest.TestCase):
             document = benchmark.result_document(args, None, None)
 
         self.assertIsNone(args.scratch_dir)
-        self.assertIsNone(document["controls"]["scratch_directory"])
+        self.assertEqual(
+            document["controls"]["scratch_directory"],
+            str(Path(tempfile.gettempdir()).resolve()),
+        )
 
     def test_benchmark_scratch_directory_must_exist(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -6659,7 +6662,10 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(metadata["processors"], 8)
             self.assertEqual(metadata["host_affinity_set"], args.cpus)
             self.assertEqual(metadata["host_cpu_reserve"], args.host_cpu_reserve)
-            self.assertIsNone(metadata["scratch_directory"])
+            self.assertEqual(
+                metadata["scratch_directory"],
+                str(Path(tempfile.gettempdir()).resolve()),
+            )
             cold.assert_called_once()
             self.assertEqual(virtfs.call_args.kwargs["runs"], 3)
             shell.assert_called_once()

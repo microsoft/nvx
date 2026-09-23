@@ -5718,9 +5718,11 @@ def benchmark_scratch_directory(args: argparse.Namespace) -> Generator[None]:
         tempfile.tempdir = previous
 
 
-def scratch_directory_control(args: argparse.Namespace) -> str | None:
+def scratch_directory_control(args: argparse.Namespace) -> str:
     scratch = getattr(args, "scratch_dir", None)
-    return None if scratch is None else str(scratch)
+    if scratch is None:
+        scratch = Path(tempfile.gettempdir())
+    return str(Path(scratch).resolve())
 
 
 def run(args: argparse.Namespace) -> int:
