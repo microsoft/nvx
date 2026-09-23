@@ -1354,13 +1354,22 @@ class CiTests(unittest.TestCase):
                         ci._exact_openvmm_test(required_test),
                         test_filter,
                     )
-        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 30)
+        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 29)
         self.assertEqual(
             len(set(ci.OPENVMM_WHP_TESTS)),
             len(ci.OPENVMM_WHP_TESTS),
         )
         for required_test in ci.OPENVMM_REQUIRED_MICROVM_TESTS:
             self.assertIn(required_test, ci.OPENVMM_WHP_TESTS)
+        # Only Linux hosts can build the Linux pipette this TTRPC test boots.
+        self.assertNotIn("test_ttrpc_interface", ci.OPENVMM_TEST_FILTERS["whp"])
+        for backend in ("kvm", "mshv"):
+            with self.subTest(backend=backend):
+                self.assertIn("test(ttrpc)", ci.OPENVMM_TEST_FILTERS[backend])
+                self.assertNotIn(
+                    "test_ttrpc_interface",
+                    ci.OPENVMM_TEST_FILTERS[backend],
+                )
         self.assertEqual(ci.OPENVMM_WHP_EXCLUDED_TESTS, ())
         self.assertNotIn(
             "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",

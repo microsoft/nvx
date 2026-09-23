@@ -165,7 +165,6 @@ def _exact_openvmm_test(test: str) -> str:
 
 
 OPENVMM_REQUIRED_MICROVM_TESTS = (
-    "ttrpc::test_ttrpc_interface",
     "ttrpc::test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
     "x86_64::microvm::openvmm_linux_x64_phase_1_lifecycle",
 )
@@ -210,6 +209,8 @@ OPENVMM_MSHV_TEST_FILTER = _exclude_openvmm_tests(
     f"({OPENVMM_LINUX_TEST_FILTER}) & !test(windows_datacenter_core_2022_x64)",
     OPENVMM_MSHV_EXCLUDED_TESTS,
 )
+# ttrpc::test_ttrpc_interface stays on the Linux backends: it boots Linux
+# pipette, which flowey can build only on a Linux host.
 OPENVMM_WHP_TESTS = (
     "multiarch::hibernate::openvmm_uefi_x64_guest_test_x64_hibernate_halts",
     "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2022_x64_kvp_ic",
