@@ -5,6 +5,10 @@ inputs:
   backend:
     description: Virtualization backend expected on the runner
     required: true
+  require-sccache:
+    description: Whether the job requires the persistent Rust compilation cache
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -12,8 +16,17 @@ runs:
     - name: Validate Linux toolchain
       if: runner.os != 'Windows'
       shell: bash
+      env:
+        REQUIRE_SCCACHE: ${{ inputs.require-sccache }}
       run: |
         set -euo pipefail
+        case "${REQUIRE_SCCACHE}" in
+          true|false) ;;
+          *)
+            echo "::error::Unsupported require-sccache value: ${REQUIRE_SCCACHE}" >&2
+            exit 1
+            ;;
+        esac
         test -n "${CARGO_HOME:-}" || {
           echo "::error::CARGO_HOME is not configured" >&2
           exit 1
@@ -23,13 +36,15 @@ runs:
         rustc --version
         cargo --version
         cargo nextest --version
-        sccache --version
-        test "${RUSTC_WRAPPER:-}" = sccache
         test "${CARGO_INCREMENTAL:-}" = 0
-        test -n "${SCCACHE_DIR:-}"
-        test "${SCCACHE_CACHE_SIZE:-}" = 10G
-        test -d "${SCCACHE_DIR}"
-        test -w "${SCCACHE_DIR}"
+        if [ "${REQUIRE_SCCACHE}" = true ]; then
+          sccache --version
+          test "${RUSTC_WRAPPER:-}" = sccache
+          test -n "${SCCACHE_DIR:-}"
+          test "${SCCACHE_CACHE_SIZE:-}" = 10G
+          test -d "${SCCACHE_DIR}"
+          test -w "${SCCACHE_DIR}"
+        fi
         if sudo -n true >/dev/null 2>&1; then
           echo "::error::Runner has passwordless sudo access" >&2
           exit 1
@@ -51,7 +66,12 @@ runs:
     - name: Validate Windows toolchain
       if: runner.os == 'Windows'
       shell: powershell
+      env:
+        REQUIRE_SCCACHE: ${{ inputs.require-sccache }}
       run: |
+        if ($env:REQUIRE_SCCACHE -notin @("true", "false")) {
+          throw "Unsupported require-sccache value: $env:REQUIRE_SCCACHE"
+        }
         if ([string]::IsNullOrWhiteSpace($env:CARGO_HOME)) {
             throw "CARGO_HOME is not configured"
         }
@@ -61,21 +81,23 @@ runs:
         rustc --version
         cargo --version
         cargo nextest --version
-        sccache --version
-        if ($env:RUSTC_WRAPPER -ne "sccache") {
-          throw "RUSTC_WRAPPER is not configured for sccache"
-        }
         if ($env:CARGO_INCREMENTAL -ne "0") {
           throw "CARGO_INCREMENTAL is not disabled"
         }
-        if ([string]::IsNullOrWhiteSpace($env:SCCACHE_DIR)) {
-          throw "SCCACHE_DIR is not configured"
-        }
-        if ($env:SCCACHE_CACHE_SIZE -ne "10G") {
-          throw "SCCACHE_CACHE_SIZE is not configured"
-        }
-        if (-not (Test-Path -LiteralPath $env:SCCACHE_DIR -PathType Container)) {
-          throw "sccache directory was not found: $env:SCCACHE_DIR"
+        if ($env:REQUIRE_SCCACHE -eq "true") {
+          sccache --version
+          if ($env:RUSTC_WRAPPER -ne "sccache") {
+            throw "RUSTC_WRAPPER is not configured for sccache"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SCCACHE_DIR)) {
+            throw "SCCACHE_DIR is not configured"
+          }
+          if ($env:SCCACHE_CACHE_SIZE -ne "10G") {
+            throw "SCCACHE_CACHE_SIZE is not configured"
+          }
+          if (-not (Test-Path -LiteralPath $env:SCCACHE_DIR -PathType Container)) {
+            throw "sccache directory was not found: $env:SCCACHE_DIR"
+          }
         }
         if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
           throw "RUNNER_TEMP is not configured"

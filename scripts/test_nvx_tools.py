@@ -2056,6 +2056,32 @@ class CiConfigurationTests(unittest.TestCase):
             linux_setup.index('test -w "$runner_sccache_dir"'),
         )
 
+    def test_runtime_workflows_do_not_require_sccache(self):
+        validate_runner = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-runner"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("  require-sccache:", validate_runner)
+        self.assertIn('    default: "true"', validate_runner)
+
+        workflows = (
+            ("run-nvx-microvm-tests.yml", "test"),
+            ("run-platform.yml", "run"),
+        )
+        for workflow_name, job_name in workflows:
+            with self.subTest(workflow=workflow_name):
+                workflow = (
+                    BuildConstants.REPO_ROOT / ".github" / "workflows" / workflow_name
+                ).read_text(encoding="utf-8")
+                job = _workflow_job(workflow, job_name)
+                validation = job.split("      - name: Validate runner", 1)[1].split(
+                    "\n      - name:", 1
+                )[0]
+                self.assertIn('require-sccache: "false"', validation)
+
     def test_linux_setup_installs_openvmm_perl_modules(self):
         setup_directory = BuildConstants.REPO_ROOT / "scripts" / "setup"
         configurations = (
