@@ -841,9 +841,9 @@ class MicrovmTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertEqual(exit_record.read_text(encoding="ascii"), "1\n")
-            self.assertIn(
-                "nvx-snapshot: synthetic restore failure; terminating the VM",
+            self.assertEqual(
                 result.stderr,
+                "nvx-snapshot: synthetic restore failure; terminating the VM\n",
             )
 
     def test_console_log_persists_buffered_and_completed_output(self):

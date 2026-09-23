@@ -36,7 +36,7 @@ post_restore_pending=false
 mkdir -p "$runtime"
 
 console_status() {
-    printf '%s\n' "$*" >/dev/console 2>/dev/null || true
+    printf '%s\n' "$*" 2>/dev/null >/dev/console || true
 }
 
 fail_closed() {
