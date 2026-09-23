@@ -2106,7 +2106,7 @@ def run_snapshot_core(
     ) as process:
         process.wait_for(BOOT_MARKER, timeout)
         process.send_line("nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK")
-        process.wait_for(no_destination_marker, timeout)
+        process.wait_for_line(no_destination_marker, timeout)
         process.send_line("nvx-exit 0")
         result = process.wait(timeout)
     if result.returncode != 0:
