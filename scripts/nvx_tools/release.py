@@ -616,10 +616,14 @@ def _validate_alpine_sources(package_manifests: list[Path]) -> None:
         source_root / "manifest.json",
         "collected Alpine source manifest",
     )
-    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    source_manifest = _read_json_object(
+        source_manifest_path,
+        "collected Alpine source manifest",
+    )
+    source_packages = cast(list[dict[str, str]], source_manifest["packages"])
     collected = {
         (package["package"], package["version"], package["commit"]): package
-        for package in source_manifest["packages"]
+        for package in source_packages
     }
     missing: list[str] = []
     for manifest_path in package_manifests:

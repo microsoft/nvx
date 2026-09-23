@@ -4762,7 +4762,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result, (10.0, 1024, 7.0, 17.0))
         self.assertEqual(interaction.writes, [])
 
-    def test_measure_once_retains_rss_when_process_exits_after_marker(self):
+    def test_measure_once_retains_rss_when_process_exits_before_marker_read(self):
         class FakeProcess:
             pid = 123
 
@@ -4782,9 +4782,8 @@ class BenchmarkTests(unittest.TestCase):
             def __init__(self):
                 self.process = FakeProcess()
 
-            def read_output(self, chunks: queue.Queue[bytes | None]):
-                self.process.exited = True
-                chunks.put(benchmark.RESTORE_MARKER + b"\n")
+            def read_output(self, _chunks: queue.Queue[bytes | None]):
+                pass
 
             def write_input(self, data: bytes):
                 raise AssertionError(f"unexpected input: {data!r}")
@@ -4794,18 +4793,27 @@ class BenchmarkTests(unittest.TestCase):
 
         interaction = FakeInteraction()
 
+        def read_chunk(*, timeout: float) -> bytes:
+            del timeout
+            interaction.process.exited = True
+            interaction.process.returncode = 0
+            return benchmark.RESTORE_MARKER + b"\n"
+
         def peak_rss_bytes(_pid: int):
-            if interaction.process.returncode is not None:
+            if interaction.process.exited:
                 raise ProcessLookupError(3, "No such process")
             return 1024
 
         with (
             patch.object(benchmark, "InteractiveProcess", return_value=interaction),
+            patch.object(benchmark.threading, "Thread"),
+            patch.object(benchmark.queue, "Queue") as queues,
             patch.object(
                 benchmark, "peak_rss_bytes", side_effect=peak_rss_bytes
             ) as read_peak_rss,
             patch.object(benchmark, "wait_for_process_exit", return_value=0),
         ):
+            queues.return_value.get.side_effect = read_chunk
             result = benchmark.measure_once(
                 ["openvmm"],
                 environment={},
@@ -4816,8 +4824,50 @@ class BenchmarkTests(unittest.TestCase):
             )
 
         self.assertEqual(result[1], 1024)
-        self.assertIsNone(interaction.process.returncode)
-        read_peak_rss.assert_called_once_with(123)
+        self.assertTrue(interaction.process.exited)
+        self.assertEqual(read_peak_rss.call_args_list, [call(123), call(123)])
+
+    def test_measure_once_rejects_marker_when_rss_never_available(self):
+        class FakeProcess:
+            pid = 123
+
+            def terminate(self):
+                raise AssertionError("unexpected direct process termination")
+
+        class FakeInteraction:
+            def __init__(self):
+                self.process = FakeProcess()
+
+            def read_output(self, chunks: queue.Queue[bytes | None]):
+                chunks.put(benchmark.RESTORE_MARKER + b"\n")
+
+            def write_input(self, data: bytes):
+                raise AssertionError(f"unexpected input: {data!r}")
+
+            def close(self):
+                pass
+
+        interaction = FakeInteraction()
+
+        with (
+            patch.object(benchmark, "InteractiveProcess", return_value=interaction),
+            patch.object(benchmark, "_try_peak_rss", return_value=0),
+            patch.object(benchmark, "terminate") as terminate,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "OpenVMM peak RSS was unavailable at the guest marker",
+            ),
+        ):
+            benchmark.measure_once(
+                ["openvmm"],
+                environment={},
+                timeout=1,
+                marker=benchmark.RESTORE_MARKER,
+                marker_must_be_line=True,
+                guest_exit_prequeued=True,
+            )
+
+        terminate.assert_called_once_with(interaction.process)
 
     def test_builds_isolated_workload_command(self):
         command = benchmark.workload_boot_command(
@@ -6456,6 +6506,22 @@ AUTHORIZATION_VALUE = "Bearer placeholder-value"
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_alpine_source_validation_rejects_malformed_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_dir = Path(temporary)
+            alpine_dir = source_dir / "alpine"
+            alpine_dir.mkdir()
+            (alpine_dir / "manifest.json").write_text("{", encoding="utf-8")
+
+            with (
+                patch.object(BuildConstants, "SOURCE_DIR", source_dir),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "invalid collected Alpine source manifest",
+                ),
+            ):
+                release._validate_alpine_sources([])
+
     def test_selects_latest_matching_prerelease_asset(self):
         releases = [
             {

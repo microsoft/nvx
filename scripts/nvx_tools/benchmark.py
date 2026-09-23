@@ -1370,6 +1370,7 @@ def measure_once(
     )
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
+    peak_bytes = _try_peak_rss(process, 0)
 
     chunks: queue.Queue[bytes | None] = queue.Queue()
     threading.Thread(
@@ -1403,9 +1404,13 @@ def measure_once(
             if marker_seen:
                 marker_reached = time.perf_counter_ns()
                 # A prequeued guest exit can terminate OpenVMM immediately
-                # after writing the marker. Sample RSS before the more detailed
-                # opt-in profile counters, and tolerate an already-gone process.
-                peak_bytes = _try_peak_rss(process, 0)
+                # after writing the marker. Retain the post-launch sample when
+                # the marker-time read loses that race.
+                peak_bytes = _try_peak_rss(process, peak_bytes)
+                if peak_bytes <= 0:
+                    raise RuntimeError(
+                        "OpenVMM peak RSS was unavailable at the guest marker"
+                    )
                 if profile is not None and profile_sink is not None:
                     profile_sink.append(profile.finish_restore(marker_reached))
                 elapsed_ms = (marker_reached - started) / 1_000_000
