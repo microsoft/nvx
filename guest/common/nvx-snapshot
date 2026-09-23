@@ -35,9 +35,14 @@ scratch_frozen=false
 post_restore_pending=false
 mkdir -p "$runtime"
 
+console_status() {
+    printf '%s\n' "$*" >/dev/console 2>/dev/null || true
+}
+
 fail_closed() {
     post_restore_pending=true
     echo "nvx-snapshot: $*; terminating the VM" >&2
+    console_status "NVX-SNAPSHOT-ERROR: $*"
     /sbin/nvx-exit 1 2>/dev/null || true
     exit 1
 }
@@ -282,6 +287,7 @@ export NVX_VM_GENERATION_ID="$generation_id"
 
 post_restore() {
     post_restore_pending=true
+    console_status "NVX-POST-RESTORE-STAGE: packet"
     restore_packet=$runtime/restore-packet
     entropy=$runtime/restore-entropy
     packet_metadata=$(
@@ -344,6 +350,7 @@ post_restore() {
         activate_restore_memory "$restore_memory_range_count" "$@"
     fi
 
+    console_status "NVX-POST-RESTORE-STAGE: entropy"
     tail -c 64 "$restore_packet" >"$entropy" ||
         fail_closed "failed to extract restore entropy"
     if [ "$snapshot_tier" = instance-checkpoint ]; then
@@ -358,6 +365,7 @@ post_restore() {
     export NVX_VM_GENERATION_ID="$generation_id"
 
     if [ "$snapshot_tier" != instance-checkpoint ]; then
+        console_status "NVX-POST-RESTORE-STAGE: identity"
         machine_id=$(sha256sum "$entropy" | cut -c1-32)
         printf '%s\n' "$machine_id" >/etc/machine-id ||
             fail_closed "failed to refresh machine identity"
@@ -389,11 +397,13 @@ post_restore() {
                 fail_closed "workload-start restore requires a runtime hook"
         fi
         if [ -x "$runtime/runtime-post-restore" ]; then
+            console_status "NVX-POST-RESTORE-STAGE: runtime-hook"
             "$runtime/runtime-post-restore" || fail_closed "runtime RNG hook failed"
         fi
     fi
 
     rm -f "$restore_packet" "$entropy"
+    console_status "NVX-POST-RESTORE-STAGE: acknowledge"
     write_port_byte 1541 2 ||
         fail_closed "failed to release the VMM restore gate"
     post_restore_pending=false

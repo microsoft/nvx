@@ -742,6 +742,12 @@ class MicrovmTests(unittest.TestCase):
         self.assertNotIn("dd of=/dev/port", snapshot)
         self.assertIn('[ "$range_count" -eq 0 ]', snapshot)
         self.assertIn("RESTORE_MEMORY_EXPANSION_AVAILABLE=16", snapshot)
+        self.assertIn('console_status "NVX-SNAPSHOT-ERROR: $*"', snapshot)
+        for stage in ("packet", "entropy", "identity", "runtime-hook", "acknowledge"):
+            self.assertIn(
+                f'console_status "NVX-POST-RESTORE-STAGE: {stage}"',
+                snapshot,
+            )
         self.assertIn(
             '"NVX-MEMORY-ONLINE-OK: added_bytes=0 '
             'memtotal_kib=$memtotal_kib elapsed_us=0"',
