@@ -19,6 +19,13 @@ reads the process high-water mark; Windows reads the cumulative peak working set
 resident guest-memory mappings. CI persists and gates p50 RSS and reports both p50 and maximum RSS
 in its lifecycle diagnostics.
 
+The coordinator samples peak RSS once, at the readiness marker, while OpenVMM is still running.
+A prequeued guest exit can end OpenVMM before that sample. The coordinator then discards and
+repeats the attempt, up to three attempts per measured sample, and reports the number of discarded
+attempts in `peak_rss_remeasured_count`. It never substitutes another reading: a sample taken
+before the marker omits the restore, Linux exit accounting includes the coordinator's pre-exec
+image, and a Windows reading after exit includes teardown.
+
 Use this page for metric names and methodology. Current historical p50 values live in
 `data/`; timings copied into old discussions or commit messages are not baselines. Bare-metal and
 virtual-machine results have separate histories and must not be compared as one regression series.
