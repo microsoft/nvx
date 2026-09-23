@@ -2719,6 +2719,12 @@ def _device_io_attempt_record(
     return record
 
 
+def _decode_device_io_line(line: str) -> tuple[bool, object]:
+    if not line.startswith(DEVICE_IO_RESULT_PREFIX):
+        return False, None
+    return True, json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
+
+
 def _device_io_completed_attempts(path: Path | None) -> set[tuple[str, int]]:
     if path is None or not path.is_file():
         return set()
@@ -2726,14 +2732,14 @@ def _device_io_completed_attempts(path: Path | None) -> set[tuple[str, int]]:
     for line_number, line in enumerate(
         path.read_text(encoding="utf-8").splitlines(), 1
     ):
-        if not line.startswith(DEVICE_IO_RESULT_PREFIX):
-            continue
         try:
-            decoded: object = json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
+            is_record, decoded = _decode_device_io_line(line)
         except json.JSONDecodeError as error:
             raise ValueError(
                 f"invalid resumable device I/O record at {path}:{line_number}: {error}"
             ) from error
+        if not is_record:
+            continue
         if not isinstance(decoded, dict):
             raise ValueError(
                 f"resumable device I/O record at {path}:{line_number} must be an object"
@@ -2775,10 +2781,9 @@ def _append_device_io_record(path: Path | None, record: dict[str, object]) -> No
 def _read_device_io_records(path: Path) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith(DEVICE_IO_RESULT_PREFIX):
-            decoded: object = json.loads(line.removeprefix(DEVICE_IO_RESULT_PREFIX))
-            if isinstance(decoded, dict):
-                records.append(cast(dict[str, object], decoded))
+        is_record, decoded = _decode_device_io_line(line)
+        if is_record and isinstance(decoded, dict):
+            records.append(cast(dict[str, object], decoded))
     return records
 
 
