@@ -812,10 +812,14 @@ def _guest_release_inputs() -> tuple[list[str], list[Path], list[Path], list[Pat
         azurelinux_manifests[0],
         "Azure Linux initramfs manifest",
     )
+    azurelinux_initramfs = artifact_path(AzureLinuxBuildConstants.INITRAMFS_NAME)
     if (
         azurelinux_manifest.get("format")
         != AzureLinuxBuildConstants.PACKAGE_MANIFEST_VERSION
         or azurelinux_manifest.get("guest") != AzureLinuxBuildConstants.GUEST_NAME
+        or azurelinux_manifest.get("artifact") != azurelinux_initramfs.name
+        or azurelinux_manifest.get("artifact_sha256")
+        != sha256_file(azurelinux_initramfs)
         or azurelinux_manifest.get("package_manifest_format")
         != AzureLinuxBuildConstants.PACKAGE_MANIFEST_FORMAT
     ):
@@ -988,9 +992,10 @@ def _packaged_source_manifest(
     linux = root_manifest.get("linux")
     alpine = root_manifest.get("alpine")
     ubuntu = root_manifest.get("ubuntu")
+    azurelinux = root_manifest.get("azurelinux")
     if not all(
         isinstance(section, dict)
-        for section in (distribution, openvmm, linux, alpine, ubuntu)
+        for section in (distribution, openvmm, linux, alpine, ubuntu, azurelinux)
     ):
         raise ScriptError("SOURCE-MANIFEST.json is missing a required object")
     distribution_section = cast(dict[str, object], distribution)
@@ -998,6 +1003,7 @@ def _packaged_source_manifest(
     linux_section = cast(dict[str, object], linux)
     alpine_section = cast(dict[str, object], alpine)
     ubuntu_section = cast(dict[str, object], ubuntu)
+    azurelinux_section = cast(dict[str, object], azurelinux)
     distribution_section["version"] = release_version
     openvmm_section["source_revision"] = openvmm_provenance["source_revision"]
     openvmm_section["executable_sha256"] = sha256_file(
@@ -1026,6 +1032,12 @@ def _packaged_source_manifest(
     )
     ubuntu_section["distro_layer_manifest_sha256"] = sha256_file(
         release_root / "guest" / UbuntuBuildConstants.DISTRO_MANIFEST_NAME
+    )
+    azurelinux_section["initramfs_sha256"] = sha256_file(
+        release_root / "guest" / AzureLinuxBuildConstants.INITRAMFS_NAME
+    )
+    azurelinux_section["initramfs_package_manifest_sha256"] = sha256_file(
+        release_root / "guest" / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
     )
     return (json.dumps(root_manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
 

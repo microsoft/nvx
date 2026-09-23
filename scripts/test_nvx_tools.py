@@ -155,6 +155,10 @@ def _write_release_fixture(
             {
                 "format": AzureLinuxBuildConstants.PACKAGE_MANIFEST_VERSION,
                 "guest": AzureLinuxBuildConstants.GUEST_NAME,
+                "artifact": AzureLinuxBuildConstants.INITRAMFS_NAME,
+                "artifact_sha256": common.sha256_file(
+                    build_dir / AzureLinuxBuildConstants.INITRAMFS_NAME
+                ),
                 "package_manifest_format": (
                     AzureLinuxBuildConstants.PACKAGE_MANIFEST_FORMAT
                 ),
@@ -7686,6 +7690,20 @@ class ReleaseTests(unittest.TestCase):
                 manifest["linux"]["config_sha256"],
                 common.sha256_file(destination / "guest" / "vmlinux.config"),
             )
+            self.assertEqual(
+                manifest["azurelinux"]["initramfs_sha256"],
+                common.sha256_file(
+                    destination / "guest" / AzureLinuxBuildConstants.INITRAMFS_NAME
+                ),
+            )
+            self.assertEqual(
+                manifest["azurelinux"]["initramfs_package_manifest_sha256"],
+                common.sha256_file(
+                    destination
+                    / "guest"
+                    / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
+                ),
+            )
             common.verify_sha256_sums(destination)
             self.assertIn("binary-only package", stderr.getvalue())
 
@@ -7793,6 +7811,27 @@ class ReleaseTests(unittest.TestCase):
                     ),
                 ):
                     release._guest_release_inputs()
+
+    def test_guest_release_inputs_reject_stale_azurelinux_initramfs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            (build_dir / AzureLinuxBuildConstants.INITRAMFS_NAME).write_bytes(
+                b"stale artifact"
+            )
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Azure Linux initramfs manifest is invalid",
+                ),
+            ):
+                release._guest_release_inputs()
 
     def test_guest_release_inputs_reject_stale_ubuntu_source_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:

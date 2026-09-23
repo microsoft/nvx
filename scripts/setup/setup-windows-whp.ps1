@@ -67,7 +67,9 @@ $RequiredGuestArtifacts = @(
     "initramfs-ubuntu.cpio.gz",
     "initramfs-ubuntu.cpio.gz.packages.json",
     "ubuntu-distro.erofs",
-    "ubuntu-distro.erofs.manifest.json"
+    "ubuntu-distro.erofs.manifest.json",
+    "initramfs-azurelinux.cpio.gz",
+    "initramfs-azurelinux.cpio.gz.packages.json"
 )
 
 function Assert-LastExitCode {

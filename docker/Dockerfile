@@ -90,12 +90,15 @@ RUN set -eux; \
     cd /rootfs; \
     find . -print0 | sort -z | cpio --null --quiet --reproducible \
         --owner=0:0 -o -H newc | gzip -n -9 > /tmp/initramfs-azurelinux.cpio.gz; \
+    artifact_sha256="$(sha256sum /tmp/initramfs-azurelinux.cpio.gz | cut -d ' ' -f 1)"; \
     source_sha256="$(sha256sum /repo/guest/common/nvx-device-io.c | cut -d ' ' -f 1)"; \
     binary_sha256="$(sha256sum /rootfs/sbin/nvx-device-io | cut -d ' ' -f 1)"; \
     printf '%s\n' \
         '{' \
         '  "format": 1,' \
         '  "guest": "azurelinux",' \
+        '  "artifact": "initramfs-azurelinux.cpio.gz",' \
+        "  \"artifact_sha256\": \"$artifact_sha256\"," \
         '  "distribution": "Azure Linux",' \
         "  \"version\": \"$AZURELINUX_VERSION\"," \
         '  "architecture": "x86_64",' \
