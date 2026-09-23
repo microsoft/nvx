@@ -5,8 +5,8 @@
 NVX provides a small, versioned virtual machine for running an x86-64 Linux
 guest without firmware or a PC platform. Its design has four primary goals:
 
-- boot the same uncompressed Xen PVH kernel with explicitly selected Alpine or
-  Ubuntu userland on Linux and Windows;
+- boot the same uncompressed Linux-direct kernel with explicitly selected
+  Alpine or Ubuntu userland on Linux and Windows;
 - keep the guest-visible machine independent of the selected hypervisor;
 - expose only a fixed, allowlisted set of devices; and
 - capture a running VM into immutable artifacts that can be restored in a new
@@ -15,8 +15,8 @@ guest without firmware or a PC platform. Its design has four primary goals:
 The implemented runtime profile is `MachineProfile::Microvm`, selected only by
 `--machine microvm`. It uses fixed sandbox layer and scratch roles,
 deterministic SMP topology, and shared virtio-mmio interrupt status with
-edge-triggered delivery. Snapshot manifests retain microVM ABI value 2 and PVH
-layout value 2, optional restore-time RAM expansion uses machine-contract
+edge-triggered delivery. Snapshot manifests retain microVM ABI value 2 and
+boot-layout value 2, optional restore-time RAM expansion uses machine-contract
 capability version 1, and TTRPC uses numeric machine-profile value 2. KVM and
 MSHV are supported on Linux and WHP is supported on Windows.
 Hypervisor-specific code provides partition creation, vCPU execution,
@@ -27,12 +27,12 @@ compatibility contract.
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart TB
-   Inputs["NVX CLI<br/>PVH kernel and selected guest initramfs"]
+   Inputs["NVX CLI<br/>Linux-direct kernel and selected guest initramfs"]
    Profile["OpenVMM microVM<br/>boot, memory, devices, and snapshots"]
    Kvm["Linux / KVM"]
    Mshv["Linux / MSHV"]
    Whp["Windows / WHP"]
-   Contract["Guest-visible PVH machine contract<br/>persisted ABI/layout value 2"]
+   Contract["Guest-visible Linux MP-table contract<br/>ABI 2 / boot layout 2"]
 
    Inputs --> Profile
    Profile --> Kvm

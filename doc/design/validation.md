@@ -6,14 +6,15 @@ The implementation is exercised at three levels:
 
 - loader, command-line, memory-layout, RTC, PMIO, network-policy, snapshot
   format, and device-private-state unit tests;
-- self-contained OpenVMM Petri lifecycle and TTRPC tests using the
-  checkout-built [`guest_test_pvh`](../../openvmm/guest_test_pvh); and
+- OpenVMM TTRPC lifecycle, SMP, and snapshot tests using NVX's ACPI-free,
+  MP-enabled x86-64 Linux-direct kernel and initramfs when invoked through
+  `nvx.py test-openvmm`; and
 - NVX-owned process tests in
   [`scripts/nvx_tools/microvm_tests.py`](../../scripts/nvx_tools/microvm_tests.py)
   using this repository's Linux kernel and selected Alpine or Ubuntu initramfs
   through the public OpenVMM CLI.
 
-The NVX-owned suite boots the same PVH artifacts on the available native
+The NVX-owned suite boots the same Linux-direct artifacts on the available native
 backend and covers IRQ0/RTC behavior, raw portb I/O, shutdown status, exact
 snapshot sequencing, repeated immutable restore, coherent downtime, fresh
 generation IDs, `getrandom()` output, kernel UUIDs, temporary-file identifiers,

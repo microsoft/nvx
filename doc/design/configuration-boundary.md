@@ -12,15 +12,16 @@ The microVM requires:
 
 - an x86-64 guest;
 - one NUMA node;
-- Xen PVH direct boot;
+- Linux direct boot with Intel MP 1.4 tables;
 - KVM, MSHV, or WHP;
 - no VTL2, isolation, nested virtualization, or Hyper-V enlightenments; and
 - the exact [chipset and device inventory](machine-and-device-abi.md).
 
 It accepts exactly 1, 2, 4, or 8 vCPUs
 in one socket and one die, with one core per vCPU, no SMT, xAPIC mode, and
-contiguous APIC IDs starting at zero. Its PVH layout places the GDT at `0x800`
-and reserves `0x30000..0x30fff` for interrupt status.
+contiguous APIC IDs starting at zero. Its Linux direct layout places the MP
+floating pointer at `0x0`, MP configuration table at `0x400`, GDT at `0x1000`,
+zero page at `0x2000`, and reserves `0x30000..0x30fff` for interrupt status.
 
 Snapshot capture may declare an immutable RAM capacity at least as large as the
 active base RAM. When it does, both values must be 128-MiB aligned. A snapshot
@@ -35,7 +36,7 @@ snapshots are also supported and do not use sandbox tier metadata.
 It rejects UEFI, PCAT, IGVM, caller-supplied ACPI, SMBIOS, device tree,
 PCI/PCIe, VPCI, VMBus, ISA DMA, IDE, floppy, VMGS, graphics, VGA firmware,
 debugger resources, and devices outside the profile. The profile itself emits
-the [fixed MP and minimal ACPI metadata](cold-boot.md#xen-pvh-loader).
+the [fixed Linux direct MP-table metadata](cold-boot.md#linux-direct-mp-table-loader).
 This is an allowlist: the implementation builds a microVM directly instead of
 constructing a standard PC and removing unwanted devices.
 

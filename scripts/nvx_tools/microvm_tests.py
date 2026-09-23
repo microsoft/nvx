@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import Sequence
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, cast
 
@@ -95,11 +96,14 @@ DIRECTIONAL_NETWORK_GUEST_IPV4 = "192.0.2.2"
 DIRECTIONAL_NETWORK_GATEWAY_IPV4 = "192.0.2.1"
 DIRECTIONAL_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/24"
 DIRECTIONAL_NETWORK_INGRESS_PORT = 18080
+NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS = 0.25
+NETWORK_SERVER_JOIN_TIMEOUT_SECONDS = 1.0
 L3_L4_EGRESS_COMPLETION_MARKER = b"NVX-L3-L4-EGRESS-OK"
 HOST_LOOPBACK_DENY_MARKER = b"NVX-HOST-LOOPBACK-DENY-OK"
 HOST_LOOPBACK_UDP_CONTROL_MARKER = b"NVX-HOST-LOOPBACK-UDP-CONTROL-OK"
 HOST_LOOPBACK_ALLOW_MARKER = b"NVX-HOST-LOOPBACK-ALLOW-OK"
 HOST_LOOPBACK_INGRESS_READY_MARKER = b"NVX-HOST-LOOPBACK-INGRESS-READY"
+HOST_LOOPBACK_PORT_BIND_ATTEMPTS = 16
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -1239,7 +1243,7 @@ def run_directional_network_policy(
             timeout=timeout,
             log_path=output_dir / "directional-network-deny.log",
         )
-        listener.settimeout(0.25)
+        listener.settimeout(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS)
         try:
             unexpected, _ = listener.accept()
         except TimeoutError:
@@ -1272,7 +1276,7 @@ def run_directional_network_policy(
             )
     finally:
         listener.close()
-        server.join(timeout=1)
+        server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)
 
 
 def run_l3_l4_egress_policy(
@@ -1375,7 +1379,7 @@ def run_l3_l4_egress_policy(
                 "L3/L4 allowed endpoint server failed"
             ) from server_errors[0]
 
-        denied_tcp.settimeout(0.25)
+        denied_tcp.settimeout(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS)
         try:
             unexpected, _ = denied_tcp.accept()
         except TimeoutError:
@@ -1383,7 +1387,7 @@ def run_l3_l4_egress_policy(
         else:
             unexpected.close()
             raise RuntimeError("deny rule did not override the TCP allow rule")
-        denied_udp.settimeout(0.25)
+        denied_udp.settimeout(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS)
         try:
             unexpected, _ = denied_udp.recvfrom(128)
         except TimeoutError:
@@ -1436,7 +1440,7 @@ def run_l3_l4_egress_policy(
     finally:
         for endpoint in (allowed_tcp, denied_tcp, allowed_udp, denied_udp):
             endpoint.close()
-        server.join(timeout=1)
+        server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)
 
 
 def _http_server(
@@ -1465,6 +1469,37 @@ def _http_server(
         errors.append(error)
 
 
+def _bind_tcp_udp_listener_pair(
+    tcp_timeout: float, udp_timeout: float
+) -> tuple[socket.socket, socket.socket]:
+    last_error: OSError | None = None
+    for _ in range(HOST_LOOPBACK_PORT_BIND_ATTEMPTS):
+        with ExitStack() as sockets:
+            udp_listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sockets.callback(udp_listener.close)
+            udp_listener.bind(("127.0.0.1", 0))
+            port = int(udp_listener.getsockname()[1])
+
+            tcp_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.callback(tcp_listener.close)
+            try:
+                tcp_listener.bind(("0.0.0.0", port))
+            except OSError as error:
+                last_error = error
+                continue
+
+            tcp_listener.listen(1)
+            tcp_listener.settimeout(tcp_timeout)
+            udp_listener.settimeout(udp_timeout)
+            sockets.pop_all()
+            return tcp_listener, udp_listener
+
+    raise RuntimeError(
+        "failed to allocate a port available to both TCP and UDP "
+        f"after {HOST_LOOPBACK_PORT_BIND_ATTEMPTS} attempts"
+    ) from last_error
+
+
 def run_host_loopback_policy(
     executable: Path,
     kernel: Path,
@@ -1475,12 +1510,18 @@ def run_host_loopback_policy(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    denied_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    for listener in (denied_general, proxy):
-        listener.bind(("0.0.0.0", 0))
-        listener.listen(1)
-        listener.settimeout(timeout)
+    with ExitStack() as listeners:
+        denied_general, denied_general_udp = _bind_tcp_udp_listener_pair(
+            timeout, NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS
+        )
+        listeners.callback(denied_general.close)
+        listeners.callback(denied_general_udp.close)
+        proxy, proxy_udp = _bind_tcp_udp_listener_pair(
+            timeout, NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS
+        )
+        listeners.callback(proxy.close)
+        listeners.callback(proxy_udp.close)
+        listeners.pop_all()
     denied_general_port = int(denied_general.getsockname()[1])
     proxy_port = int(proxy.getsockname()[1])
     proxy_errors: list[Exception] = []
@@ -1496,13 +1537,8 @@ def run_host_loopback_policy(
         name="nvx-host-loopback-proxy",
         daemon=True,
     )
-    denied_udp: list[socket.socket] = []
+    denied_udp = [proxy_udp, denied_general_udp]
     try:
-        for port in (proxy_port, denied_general_port):
-            listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            denied_udp.append(listener)
-            listener.bind(("127.0.0.1", port))
-            listener.settimeout(0.25)
         control_command = workload_boot_command(
             executable,
             backend,
@@ -1568,7 +1604,7 @@ def run_host_loopback_policy(
             raise TimeoutError("host-loopback proxy endpoint was not reached")
         if proxy_errors:
             raise RuntimeError("host-loopback proxy server failed") from proxy_errors[0]
-        denied_general.settimeout(0.25)
+        denied_general.settimeout(NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS)
         try:
             unexpected, _ = denied_general.accept()
         except TimeoutError:
@@ -1591,7 +1627,7 @@ def run_host_loopback_policy(
         denied_general.close()
         proxy.close()
         if proxy_server.ident is not None:
-            proxy_server.join(timeout=1)
+            proxy_server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)
 
     allowed_general = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     allowed_general.bind(("0.0.0.0", 0))
@@ -1674,7 +1710,7 @@ def run_host_loopback_policy(
             ]
     finally:
         allowed_general.close()
-        allow_server.join(timeout=1)
+        allow_server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)
 
     run_host_loopback_rejections(
         executable,
@@ -2106,7 +2142,7 @@ def run_snapshot_core(
     ) as process:
         process.wait_for(BOOT_MARKER, timeout)
         process.send_line("nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK")
-        process.wait_for(no_destination_marker, timeout)
+        process.wait_for_line(no_destination_marker, timeout)
         process.send_line("nvx-exit 0")
         result = process.wait(timeout)
     if result.returncode != 0:
@@ -2660,7 +2696,7 @@ def run_network_snapshot(
     finally:
         tcp_listener.close()
         udp_socket.close()
-        server.join(timeout=1)
+        server.join(timeout=NETWORK_SERVER_JOIN_TIMEOUT_SECONDS)
     if server.is_alive():
         raise RuntimeError("network test server did not stop")
     if server_errors:
@@ -3528,7 +3564,7 @@ def run(args: argparse.Namespace) -> int:
         args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(
-        artifact_path(KernelBuildConstants.BINARY_NAME), "microVM PVH kernel"
+        artifact_path(KernelBuildConstants.BINARY_NAME), "microVM Linux direct kernel"
     )
     initrd = require_file(
         artifact_path(descriptor.initramfs_name),

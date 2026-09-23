@@ -45,6 +45,7 @@ python3 scripts/nvx.py performance gate --help
 | `collect-ubuntu-sources` | Collect exact Ubuntu source packages. |
 | `create-linux-source-archive` | Create a Linux corresponding-source archive. |
 | `package` | Stage a binary distribution. |
+| `archive-release` | Create a deterministic archive from a staged distribution. |
 | `verify` | Verify source and submodule inputs. |
 
 ## Initialization and verification
@@ -179,8 +180,9 @@ Afterward, runs the workspace doctests with Cargo.
 python3 scripts/nvx.py test-openvmm --backend {kvm,mshv,whp}
 ```
 
-Builds and runs OpenVMM's checkout-owned microVM tests. The test artifacts are
-produced by OpenVMM itself; NVX's kernel and initramfs are not required.
+Builds and runs OpenVMM's checkout-owned VMM tests. The Linux-direct microVM
+TTRPC test boots NVX's `build/vmlinux` and `build/initramfs.cpio.gz`, so build
+the guest first; the remaining test artifacts are produced by OpenVMM itself.
 
 ### `test-microvm`
 
@@ -581,3 +583,16 @@ python3 scripts/nvx.py package
 Exactly one of `--include-source` and `--binary-only` is required. See
 [Package and source delivery](distribution.md) for release procedures and
 source-publication requirements.
+
+### `archive-release`
+
+```text
+python3 scripts/nvx.py archive-release
+    --source PATH
+    --destination PATH
+```
+
+Validates the staged distribution against its `SHA256SUMS`, snapshots the
+accepted inventory, and creates a deterministic archive at the destination.
+The destination must be outside the source directory and end in `.tar.gz` or
+`.zip`.

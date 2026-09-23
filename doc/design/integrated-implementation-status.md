@@ -6,7 +6,7 @@ The implementation and remaining proposals separate as follows:
 
 | Area | Current implementation |
 | --- | --- |
-| Base machine | PVH, MP/minimal ACPI, allowlisted chipset/PMIO, fixed-role sandbox blocks, eight reserved virtio-mmio slots, and 1/2/4/8-vCPU SMP on KVM, MSHV, and WHP. Persisted ABI and PVH layout remain value 2. |
+| Base machine | ACPI-free Linux direct boot with Intel MP tables, allowlisted chipset/PMIO, fixed-role sandbox blocks, eight reserved virtio-mmio slots, and 1/2/4/8-vCPU SMP on KVM, MSHV, and WHP. Persisted ABI and boot layout remain value 2. |
 | Snapshot and restore | Guest-requested version-5 publication, same-backend restore, exact saved inventory, private COW RAM, optional fresh RAM expansion, fresh/paired scratch, three sandbox tiers, input gating, single-use resume claims, and management exclusion at the capture boundary. Older supported manifests remain readable subject to their recorded capabilities. |
 | Resource activation | Opt-in CPU-prefix and 128-MiB-aligned RAM targets within immutable capacity. Explicit MSHV targets materialize only that VP prefix and cannot be saved again; KVM, WHP, and untargeted MSHV retain full VP capacity. |
 | Console | Boot virtio-console with private RX/TX state and reconnect policies; bounded portb/host-relay drain at process exit. The separate control console has authenticated Linux and Windows endpoints, bounded framing, reconnect epochs, and managed workload RPC. |
