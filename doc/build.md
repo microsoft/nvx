@@ -37,10 +37,10 @@ The combined `build` command rejects unsupported OS/backend combinations before
 producing guest artifacts. Guest-only and source-only commands do not select an
 OpenVMM build target.
 
-OpenVMM's microVM tests build their own minimal Xen PVH guest from source in
-the OpenVMM checkout. They do not consume `build/vmlinux` or
-`build/initramfs.cpio.gz`. NVX uses those two artifacts only for its Linux and
-device correctness tests, benchmarks, and packaged runtime.
+When invoked through NVX, OpenVMM's custom TTRPC lifecycle, SMP, and snapshot
+test uses the ACPI-free, MP-enabled `build/vmlinux` and
+`build/initramfs.cpio.gz` artifacts. The phase-1 lifecycle and TTRPC interface
+tests continue to use OpenVMM's packaged guest artifacts.
 
 On a Linux host, build either initramfs directly:
 
@@ -128,8 +128,8 @@ python3 scripts/nvx.py test-microvm --backend kvm
 python3 scripts/nvx.py test-microvm --backend kvm --guest ubuntu
 ```
 
-The first command needs only the OpenVMM checkout. The second needs the
-standard build outputs above and writes complete per-scenario logs under
+Both commands need the standard guest build outputs above. The second writes
+complete per-scenario logs under
 `build/test-results/microvm` by default.
 
 The Alpine initramfs includes the sandbox PID-1 bootstrap, its container namespace
@@ -153,9 +153,11 @@ rootfs SHA-256, and NVX helper provenance.
 
 The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
-generated config as `build/vmlinux.config`, and fails if the Xen PVH note is
-absent. Changing an archive hash or patch invalidates both source and object
-caches; changing the input configuration invalidates the object cache.
+generated config as `build/vmlinux.config`, and fails if ACPI is enabled,
+PVH remains enabled, or the MP-table, APIC, IOAPIC, and command-line
+virtio-mmio requirements are missing. Changing an archive hash or patch
+invalidates both source and object caches; changing the input configuration
+invalidates the object cache.
 
 Release packaging stages and verifies a complete output before replacing an
 existing `dist/` version. Its `SOURCE-MANIFEST.json` records the package

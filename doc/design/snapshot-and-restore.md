@@ -414,7 +414,7 @@ the total restore latencies or tail behavior to match.
 Restore-time memory activation separates the immutable RAM geometry recorded
 by a snapshot from the active amount selected for one restored process:
 
-- `M0` is the captured base RAM. `memory.bin`, the PVH usable-memory map, and
+- `M0` is the captured base RAM. `memory.bin`, the Linux direct e820 map, and
   the saved RAM-range inventory contain exactly `M0`.
 - `Cmem` is the optional immutable capacity declared by `--memory-capacity` at
   capture. The contract records capability version 1, `Cmem`, the 128-MiB Linux
@@ -461,7 +461,7 @@ post-readiness memory-hotplug interface.
 
 ## Time and entropy
 
-Cold PVH microVM boots receive a canonical `lapic_timer_hz` kernel parameter from
+Cold microVM boots receive a canonical `lapic_timer_hz` kernel parameter from
 the backend's reported LAPIC clock frequency. The NVX kernel uses this known rate
 instead of comparing LAPIC interrupts with scheduling-sensitive emulated PIT
 interrupts during boot. Without it, delayed PIT delivery can cause Linux to disable

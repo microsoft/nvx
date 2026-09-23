@@ -179,8 +179,9 @@ Afterward, runs the workspace doctests with Cargo.
 python3 scripts/nvx.py test-openvmm --backend {kvm,mshv,whp}
 ```
 
-Builds and runs OpenVMM's checkout-owned microVM tests. The test artifacts are
-produced by OpenVMM itself; NVX's kernel and initramfs are not required.
+Builds and runs OpenVMM's checkout-owned VMM tests. The Linux-direct microVM
+TTRPC test boots NVX's `build/vmlinux` and `build/initramfs.cpio.gz`, so build
+the guest first; the remaining test artifacts are produced by OpenVMM itself.
 
 ### `test-microvm`
 

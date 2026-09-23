@@ -153,6 +153,7 @@ def _write_release_fixture(
     generated_config.write_text(
         "\n".join(
             (
+                *KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,
                 *KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
                 *KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
                 *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
@@ -1075,12 +1076,16 @@ class CiTests(unittest.TestCase):
 
             run_checked.assert_not_called()
 
-    def test_openvmm_tests_are_independent_of_nvx_guest_artifacts(self):
+    def test_openvmm_tests_use_nvx_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             openvmm = root / "openvmm"
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
+            kernel = root / "vmlinux"
+            initrd = root / "initramfs.cpio.gz"
+            kernel.touch()
+            initrd.touch()
             backend = "whp" if os.name == "nt" else "kvm"
             installed_targets = common.CommandResult(
                 args=("rustup", "target", "list"),
@@ -1093,6 +1098,11 @@ class CiTests(unittest.TestCase):
 
             with (
                 patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm),
+                patch.object(
+                    ci,
+                    "artifact_path",
+                    side_effect=[kernel, initrd],
+                ),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
@@ -1105,8 +1115,6 @@ class CiTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "OPENVMM_MICROVM_PVH_KERNEL": "nvx-kernel",
-                        "OPENVMM_MICROVM_PVH_INITRD": "nvx-initrd",
                         "PETRI_CAPABILITIES": "vpci",
                         "RUNNER_TEMP": os.fspath(root),
                     },
@@ -1151,6 +1159,15 @@ class CiTests(unittest.TestCase):
             )
             self.assertEqual(tests.kwargs["cwd"], openvmm)
             self.assertIs(tests.kwargs["env"], environment)
+            self.assertEqual(
+                environment["OPENVMM_MICROVM_TEST_KERNEL"],
+                os.fspath(kernel.resolve()),
+            )
+            self.assertEqual(
+                environment["OPENVMM_MICROVM_TEST_INITRD"],
+                os.fspath(initrd.resolve()),
+            )
+            self.assertEqual(environment["PETRI_CAPABILITIES"], "vpci")
             if os.name == "nt":
                 self.assertEqual(
                     command[command.index("--dir") + 1],
@@ -1186,6 +1203,10 @@ class CiTests(unittest.TestCase):
             openvmm = root / "openvmm"
             openvmm.mkdir()
             (openvmm / "Cargo.toml").touch()
+            kernel = root / "vmlinux"
+            initrd = root / "initramfs.cpio.gz"
+            kernel.touch()
+            initrd.touch()
             backend = "whp" if os.name == "nt" else "kvm"
             installed_targets = common.CommandResult(
                 args=("rustup", "target", "list"),
@@ -1196,6 +1217,11 @@ class CiTests(unittest.TestCase):
 
             with (
                 patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm),
+                patch.object(
+                    ci,
+                    "artifact_path",
+                    side_effect=[kernel, initrd],
+                ),
                 patch.object(ci.os, "access", return_value=True),
                 patch.object(ci.Path, "exists", return_value=False),
                 patch.object(ci, "require_tool", side_effect=["cargo", "rustup"]),
@@ -1323,20 +1349,29 @@ class CiTests(unittest.TestCase):
                 ci.OPENVMM_MSHV_TEST_FILTER,
             )
         self.assertNotIn("!test(openvmm_pcat_x64)", ci.OPENVMM_MSHV_TEST_FILTER)
-        self.assertNotIn(
-            "test_ttrpc_interface",
-            ci.OPENVMM_MSHV_TEST_FILTER,
-        )
+        for backend, test_filter in ci.OPENVMM_TEST_FILTERS.items():
+            for required_test in ci.OPENVMM_REQUIRED_MICROVM_TESTS:
+                with self.subTest(backend=backend, required_test=required_test):
+                    self.assertIn(
+                        ci._exact_openvmm_test(required_test),
+                        test_filter,
+                    )
         self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 29)
         self.assertEqual(
             len(set(ci.OPENVMM_WHP_TESTS)),
             len(ci.OPENVMM_WHP_TESTS),
         )
-        for existing_test in (
-            "ttrpc::test_ttrpc_microvm_pvh_snapshot",
-            "x86_64::microvm::openvmm_microvm_test_pvh_x64_phase_1_lifecycle",
-        ):
-            self.assertIn(existing_test, ci.OPENVMM_WHP_TESTS)
+        for required_test in ci.OPENVMM_REQUIRED_MICROVM_TESTS:
+            self.assertIn(required_test, ci.OPENVMM_WHP_TESTS)
+        # Only Linux hosts can build the Linux pipette this TTRPC test boots.
+        self.assertNotIn("test_ttrpc_interface", ci.OPENVMM_TEST_FILTERS["whp"])
+        for backend in ("kvm", "mshv"):
+            with self.subTest(backend=backend):
+                self.assertIn("test(ttrpc)", ci.OPENVMM_TEST_FILTERS[backend])
+                self.assertNotIn(
+                    "test_ttrpc_interface",
+                    ci.OPENVMM_TEST_FILTERS[backend],
+                )
         self.assertEqual(ci.OPENVMM_WHP_EXCLUDED_TESTS, ())
         self.assertNotIn(
             "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
@@ -1389,6 +1424,7 @@ class CiConfigurationTests(unittest.TestCase):
         always_successful = {"quality", "openvmm-changes"}
         builds = set(ci.REQUIRED_CI_BUILD_JOBS)
         openvmm_tests = set(ci.REQUIRED_CI_OPENVMM_TEST_JOBS)
+        openvmm_artifact_tests = set(ci.REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS)
         microvm_tests = set(ci.REQUIRED_CI_MICROVM_TEST_JOBS)
         artifacts = {ci.REQUIRED_CI_ARTIFACT_JOB}
         platforms = set(ci.REQUIRED_CI_PLATFORM_JOBS)
@@ -1420,6 +1456,7 @@ class CiConfigurationTests(unittest.TestCase):
                 always_successful
                 | builds
                 | openvmm_tests
+                | openvmm_artifact_tests
                 | microvm_tests
                 | artifacts
                 | platforms
@@ -1465,6 +1502,7 @@ class CiConfigurationTests(unittest.TestCase):
                 | artifacts
                 | builds
                 | openvmm_tests
+                | openvmm_artifact_tests
                 | microvm_tests
                 | platforms,
             ),
@@ -3456,6 +3494,7 @@ class BuildTests(unittest.TestCase):
             input_config.write_text(
                 "\n".join(
                     (
+                        *KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,
                         *KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
                         *KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
                         *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
@@ -3483,12 +3522,6 @@ class BuildTests(unittest.TestCase):
                     (work / "vmlinux").write_bytes(b"kernel")
                     input_config.write_text("CONFIG_CHANGED=y\n", encoding="utf-8")
 
-            notes = common.CommandResult(
-                ("readelf",),
-                0,
-                b"Xen 0x00000012",
-                b"",
-            )
             with (
                 patch.object(BuildConstants, "REPO_ROOT", root),
                 patch.object(build, "_require_linux"),
@@ -3499,7 +3532,6 @@ class BuildTests(unittest.TestCase):
                     return_value=(source, source_fingerprint),
                 ),
                 patch.object(build, "run_checked", side_effect=run_build),
-                patch.object(build, "run_capture", return_value=notes),
                 self.assertRaisesRegex(
                     common.ScriptError,
                     "inputs changed during the build",
@@ -4350,6 +4382,18 @@ class BuildTests(unittest.TestCase):
         )
         self.assertIn("ARG EROFS_UTILS_VERSION=1.5-1", dockerfile)
         self.assertIn("erofs-utils=${EROFS_UTILS_VERSION}", dockerfile)
+
+    def test_openvmm_ci_downloads_guest_artifacts(self):
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        openvmm_tests = _workflow_job(workflow, "openvmm-vmm-tests")
+        self.assertIn("needs: [artifacts, openvmm-changes]", openvmm_tests)
+        self.assertIn("needs.artifacts.result == 'success'", openvmm_tests)
+        self.assertIn("- name: Download guest artifacts", openvmm_tests)
+        self.assertIn("name: guest-artifacts", openvmm_tests)
+        self.assertIn("path: build", openvmm_tests)
+        self.assertIn("openvmm-vmm-tests", ci.REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS)
 
     def test_apk_add_uses_host_ca_bundle_without_overriding_configuration(self):
         root = Path("root")

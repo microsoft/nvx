@@ -5383,7 +5383,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
     if run_guest:
         artifact_dir = args.nvx_dir.resolve() / "build"
         kernel = require_file(
-            artifact_dir / KernelBuildConstants.BINARY_NAME, "NVX PVH kernel"
+            artifact_dir / KernelBuildConstants.BINARY_NAME, "NVX Linux direct kernel"
         )
         initrd = require_file(
             artifact_dir / AlpineBuildConstants.INITRAMFS_NAME,
@@ -5856,7 +5856,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
     if run_guest:
         nvx_dir = args.nvx_dir.resolve()
         kernel = require_file(
-            nvx_dir / "build" / KernelBuildConstants.BINARY_NAME, "NVX PVH kernel"
+            nvx_dir / "build" / KernelBuildConstants.BINARY_NAME,
+            "NVX Linux direct kernel",
         )
         initrd = require_file(
             nvx_dir / "build" / AlpineBuildConstants.INITRAMFS_NAME,

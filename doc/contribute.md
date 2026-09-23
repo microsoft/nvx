@@ -10,11 +10,12 @@ update the submodule. Cloning this repository does not grant access to it.
 
 ## Test ownership
 
-OpenVMM owns checkout-built control-plane coverage. Its microVM tests must not
-reference NVX paths, environment variables, kernel binaries, or initramfs
-images. Run its unit and documentation tests with
-`scripts/nvx.py test-openvmm-unit`, and use
-`scripts/nvx.py test-openvmm --backend BACKEND` for its VMM tests.
+OpenVMM owns control-plane coverage. The phase-1 lifecycle and TTRPC interface
+tests use OpenVMM's packaged guest artifacts. When invoked through NVX, the
+custom TTRPC lifecycle, SMP, and snapshot test uses NVX's built kernel and
+initramfs through the documented environment overrides. Run the unit and
+documentation tests with `scripts/nvx.py test-openvmm-unit`, and use
+`scripts/nvx.py test-openvmm --backend BACKEND` for the VMM tests.
 
 NVX owns behavior that depends on its patched Linux kernel, Alpine userspace,
 guest helpers, SMP behavior, or virtio devices. Add those scenarios to

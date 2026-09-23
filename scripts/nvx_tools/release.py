@@ -1527,7 +1527,7 @@ def verify_source_tree() -> None:
     config_path = BuildConstants.REPO_ROOT / "kernel" / "config-microvm"
     config = config_path.read_text(encoding="utf-8")
     for setting in (
-        "CONFIG_PVH=y",
+        *KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,
         "CONFIG_HVC_XE9=y",
         "CONFIG_VIRTIO_FS=y",
         "CONFIG_FUSE_FS=y",
@@ -1545,7 +1545,7 @@ def verify_source_tree() -> None:
     if generated_config.is_file():
         generated = generated_config.read_text(encoding="utf-8").splitlines()
         for setting in (
-            "CONFIG_PVH=y",
+            *KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,
             "CONFIG_HVC_XE9=y",
             *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
         ):

@@ -84,6 +84,14 @@ def _assert_kernel_config(
         raise ScriptError(error_prefix + ", ".join(missing))
 
 
+def _assert_direct_boot_kernel_config(path: Path) -> None:
+    _assert_kernel_config(
+        path,
+        KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,
+        "kernel configuration cannot boot the ACPI-free MP-table microVM: ",
+    )
+
+
 def _assert_virtio_console_kernel_config(path: Path) -> None:
     _assert_kernel_config(
         path,
@@ -110,6 +118,7 @@ def _assert_shared_status_kernel_config(path: Path) -> None:
 
 def assert_required_kernel_config(path: Path) -> None:
     """Validate the generated configuration required by the NVX platform."""
+    _assert_direct_boot_kernel_config(path)
     _assert_virtio_console_kernel_config(path)
     _assert_sandbox_kernel_config(path)
     _assert_shared_status_kernel_config(path)
@@ -1021,7 +1030,7 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
 
 def build_kernel(config: KernelBuildConfig) -> None:
     _require_linux("build-kernel")
-    for tool in ("make", "readelf"):
+    for tool in ("make",):
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config)
     input_config = BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG
@@ -1062,13 +1071,6 @@ def build_kernel(config: KernelBuildConfig) -> None:
     generated_config = config.output.with_name(f"{config.output.name}.config")
     shutil.copy2(kernel_config, generated_config)
     print(f">> built {config.output}")
-
-    notes = run_capture(["readelf", "-n", config.output])
-    if "Xen" in notes.text and "0x00000012" in notes.text:
-        print(">> PVH entry note present")
-    else:
-        config.output.unlink(missing_ok=True)
-        raise ScriptError("PVH entry note 0x12 is missing from the built vmlinux")
 
     if (
         _kernel_source_fingerprint() != source_fingerprint
