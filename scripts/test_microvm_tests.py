@@ -1085,7 +1085,7 @@ class MicrovmTests(unittest.TestCase):
                 if expected_returncode:
                     self.assertIn("NVX-SNAPSHOT-CORE-FAIL code=46", result.stdout)
 
-    def test_snapshot_core_waits_for_no_destination_marker_before_exit(self):
+    def test_snapshot_core_waits_for_no_destination_marker_line_before_exit(self):
         events: list[tuple[str, bytes | str | None]] = []
         marker = b"NVX-SNAPSHOT-NO-DESTINATION-OK"
 
@@ -1106,6 +1106,9 @@ class MicrovmTests(unittest.TestCase):
 
             def wait_for(self, expected: bytes, _timeout: float) -> None:
                 events.append(("wait_for", expected))
+
+            def wait_for_line(self, expected: bytes, _timeout: float) -> None:
+                events.append(("wait_for_line", expected))
 
             def send_line(self, line: str) -> None:
                 events.append(("send_line", line))
@@ -1141,7 +1144,7 @@ class MicrovmTests(unittest.TestCase):
             [
                 ("wait_for", microvm_tests.BOOT_MARKER),
                 ("send_line", "nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK"),
-                ("wait_for", marker),
+                ("wait_for_line", marker),
                 ("send_line", "nvx-exit 0"),
                 ("wait", None),
             ],
