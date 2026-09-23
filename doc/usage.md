@@ -594,4 +594,5 @@ python3 scripts/nvx.py archive-release
 
 Validates the staged distribution against its `SHA256SUMS`, snapshots the
 accepted inventory, and creates a deterministic archive at the destination.
-The destination must be outside the source directory.
+The destination must be outside the source directory and end in `.tar.gz` or
+`.zip`.
