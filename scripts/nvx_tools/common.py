@@ -145,7 +145,12 @@ def verify_sha256_sums(directory: Path) -> VerifiedChecksumInventory:
         raise ScriptError(f"source checksums must be a regular file: {checksum_file}")
     checksum_bytes = checksum_file.read_bytes()
     checksum_sha256 = hashlib.sha256(checksum_bytes).hexdigest()
-    checksum_text = checksum_bytes.decode("ascii")
+    try:
+        checksum_text = checksum_bytes.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ScriptError(
+            f"source checksums must contain only ASCII text: {checksum_file}"
+        ) from error
 
     packaged_files: set[str] = set()
     for path in directory.rglob("*"):

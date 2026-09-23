@@ -8118,6 +8118,14 @@ class SharedFileTests(unittest.TestCase):
             with self.assertRaisesRegex(common.ScriptError, "duplicate checksum path"):
                 common.verify_sha256_sums(root)
 
+    def test_checksum_manifest_rejects_non_ascii_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "SHA256SUMS").write_bytes(b"\xff")
+
+            with self.assertRaisesRegex(common.ScriptError, "only ASCII text"):
+                common.verify_sha256_sums(root)
+
     def test_checksum_manifest_rejects_unsafe_paths_and_symlinks(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
