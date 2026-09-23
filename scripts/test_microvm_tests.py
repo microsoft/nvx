@@ -1217,11 +1217,31 @@ class MicrovmTests(unittest.TestCase):
             b"12",
         )
         self.assertEqual(
+            microvm_tests._single_framed_marker_value(
+                b"FRAME-17-END[kernel output]\n",
+                b"FRAME-",
+                b"-END",
+            ),
+            b"17",
+        )
+        self.assertEqual(
             microvm_tests._parse_marker_pair(output, b"PAIR-"),
             (4, 5),
         )
         with self.assertRaisesRegex(RuntimeError, "exactly one"):
             microvm_tests._single_marker_value(b"X-1\nX-2\n", b"X-")
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            microvm_tests._single_framed_marker_value(
+                b"FRAME-17-ENDFRAME-34-END",
+                b"FRAME-",
+                b"-END",
+            )
+        with self.assertRaisesRegex(RuntimeError, "malformed"):
+            microvm_tests._single_framed_marker_value(
+                b"FRAME-17",
+                b"FRAME-",
+                b"-END",
+            )
         with self.assertRaisesRegex(RuntimeError, "malformed"):
             microvm_tests._parse_marker_pair(b"PAIR-4\n", b"PAIR-")
 
