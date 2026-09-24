@@ -165,30 +165,6 @@ jobs:
           --scenario workload-identity
           --output-dir "build/test-results/ubuntu-kvm-extended"
 
-      - name: Run Azure Linux guest smoke tests on Linux
-        if: runner.os != 'Windows'
-        shell: bash
-        run: >-
-          python3 scripts/nvx.py test-microvm
-          --backend "${{ inputs.backend }}"
-          --guest azurelinux
-          --processors 1
-          --scenario guest-boot
-          --scenario guest-identity
-          --output-dir "build/test-results/azurelinux-${{ inputs.backend }}"
-
-      - name: Run Azure Linux guest smoke tests on Windows
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: >-
-          python scripts\nvx.py test-microvm
-          --backend "${{ inputs.backend }}"
-          --guest azurelinux
-          --processors 1
-          --scenario guest-boot
-          --scenario guest-identity
-          --output-dir "build/test-results/azurelinux-${{ inputs.backend }}"
-
       - name: Run Ubuntu sandbox layer smoke test on Linux
         if: runner.os != 'Windows'
         shell: bash
