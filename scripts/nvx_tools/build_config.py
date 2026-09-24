@@ -54,14 +54,14 @@ class DistroLayerBuildConfig:
             guest=UbuntuBuildConstants.GUEST_NAME
         )
     )
-    output: Path = BuildConstants.BUILD_DIR / UbuntuBuildConstants.DISTRO_NAME
+    output: Path = artifact_path(UbuntuBuildConstants.DISTRO_NAME)
     replace: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class KernelBuildConfig:
     work: Path = BuildConstants.BUILD_DIR / KernelBuildConstants.WORK_DIRECTORY_NAME
-    output: Path = BuildConstants.BUILD_DIR / KernelBuildConstants.BINARY_NAME
+    output: Path = artifact_path(KernelBuildConstants.BINARY_NAME)
     cache_directory: Path = field(default_factory=_default_cache_directory)
 
 
