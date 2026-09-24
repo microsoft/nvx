@@ -74,6 +74,7 @@ RUN tdnf install -y util-linux \
     && tdnf clean all
 
 FROM base AS azurelinux-initramfs
+ARG AZURELINUX_IMAGE
 ARG AZURELINUX_VERSION
 COPY --from=azurelinux-rootfs / /rootfs/
 COPY --from=azurelinux-helpers /out/helpers/ /rootfs/sbin/
@@ -107,6 +108,7 @@ RUN set -eux; \
         '  "distribution": "Azure Linux",' \
         "  \"version\": \"$AZURELINUX_VERSION\"," \
         '  "architecture": "x86_64",' \
+        "  \"image\": \"$AZURELINUX_IMAGE\"," \
         '  "package_manifest_format": "azurelinux-v1",' \
         '  "packages": [],' \
         '  "helpers": {' \

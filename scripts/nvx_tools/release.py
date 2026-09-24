@@ -822,6 +822,7 @@ def _guest_release_inputs() -> tuple[list[str], list[Path], list[Path], list[Pat
         != sha256_file(azurelinux_initramfs)
         or azurelinux_manifest.get("package_manifest_format")
         != AzureLinuxBuildConstants.PACKAGE_MANIFEST_FORMAT
+        or azurelinux_manifest.get("image") != AzureLinuxBuildConstants.IMAGE
     ):
         raise ScriptError("Azure Linux initramfs manifest is invalid")
     expected_input_sha256 = converter_input_sha256(customization_files())

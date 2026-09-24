@@ -162,6 +162,7 @@ def _write_release_fixture(
                 "package_manifest_format": (
                     AzureLinuxBuildConstants.PACKAGE_MANIFEST_FORMAT
                 ),
+                "image": AzureLinuxBuildConstants.IMAGE,
             }
         ),
         encoding="utf-8",
