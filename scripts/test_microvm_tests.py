@@ -2061,6 +2061,67 @@ class MicrovmTests(unittest.TestCase):
                 ):
                     microvm_tests.run(args)
 
+    def test_runner_excludes_sandbox_scenarios_without_sandbox_control(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "kvm",
+                    "--guest",
+                    "azurelinux",
+                    "--output-dir",
+                    temporary,
+                ]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(
+                    microvm_tests,
+                    "MICROVM_TEST_SCENARIOS",
+                    ("sandbox-blocks", "guest-boot"),
+                ),
+                patch.object(
+                    microvm_tests,
+                    "require_file",
+                    side_effect=require,
+                ),
+                patch.object(microvm_tests, "run_guest_boot") as guest_boot,
+                patch.object(microvm_tests, "run_sandbox_blocks") as sandbox_blocks,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+
+        guest_boot.assert_called_once()
+        sandbox_blocks.assert_not_called()
+
+    def test_runner_rejects_sandbox_scenarios_without_sandbox_control(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        args = nvx.parse_args(
+            [
+                "test-microvm",
+                "--backend",
+                "kvm",
+                "--guest",
+                "azurelinux",
+                "--scenario",
+                "sandbox-blocks",
+            ]
+        )
+        with (
+            patch.object(microvm_tests, "validate_openvmm_test_backend"),
+            patch.object(microvm_tests, "require_file", side_effect=require),
+            self.assertRaisesRegex(
+                common.ScriptError,
+                "Azure Linux guest does not support",
+            ),
+        ):
+            microvm_tests.run(args)
+
     def test_runner_keeps_restore_tsc_logs_separate_from_processor_restore(self):
         def require(path: Path, _description: str) -> Path:
             return path
