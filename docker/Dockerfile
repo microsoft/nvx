@@ -68,6 +68,10 @@ RUN set -eux; \
     cp /bin/busybox /out/busybox
 
 FROM ${AZURELINUX_IMAGE} AS azurelinux-rootfs
+RUN tdnf install -y util-linux \
+    && test -x /usr/bin/ldd \
+    && test -x /usr/bin/setpriv \
+    && tdnf clean all
 
 FROM base AS azurelinux-initramfs
 ARG AZURELINUX_VERSION
@@ -84,7 +88,8 @@ RUN set -eux; \
         /repo/guest/common/nvx-container-enter-azurelinux /rootfs/sbin/; \
     install -m 0755 /repo/guest/common/nvx-container-launch-azurelinux \
         /rootfs/sbin/nvx-container-launch; \
-    for utility in awk chroot ifconfig ip mdev mount ping blkid losetup mkfs.ext4 mountpoint flock unshare; do \
+    for utility in awk basename cat chmod chroot cp hostname ifconfig ip mdev mkdir mknod mount \
+        ping route rm sed sleep tr blkid losetup mkfs.ext4 mountpoint flock unshare; do \
         ln -sf busybox "/rootfs/bin/$utility"; \
     done; \
     cd /rootfs; \
