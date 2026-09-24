@@ -7285,6 +7285,11 @@ class ReleaseTests(unittest.TestCase):
                 "tag_name": "v1.2.3-dev.abc123",
                 "assets": [
                     {
+                        "name": "nvx-invalid-linux-kvm.tar.gz",
+                        "url": "https://api.example.invalid/invalid",
+                        "size": True,
+                    },
+                    {
                         "name": "nvx-1.2.3-windows-whp.zip",
                         "url": "https://api.example.invalid/windows",
                         "size": 200,
