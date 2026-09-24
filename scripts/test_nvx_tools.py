@@ -7893,6 +7893,30 @@ class ReleaseTests(unittest.TestCase):
             ):
                 release._guest_release_inputs()
 
+    def test_guest_release_inputs_reject_unpinned_azurelinux_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            manifest_path = build_dir / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["image"] = "mcr.microsoft.com/azurelinux/base/core@sha256:" + (
+                "0" * 64
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Azure Linux initramfs manifest is invalid",
+                ),
+            ):
+                release._guest_release_inputs()
+
     def test_guest_release_inputs_reject_stale_ubuntu_source_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
