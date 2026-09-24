@@ -20,9 +20,9 @@ mkdir -p \
     "$rootfs/sys"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$tools"
 cp -L "$loader" "$tools/ld-linux-x86-64.so.2"
-cp /bin/setpriv "$tools/setpriv"
+cp /usr/bin/setpriv "$tools/setpriv"
 # Extract `name => /path` mappings and bare `/path` loader entries.
-ldd /bin/setpriv |
+ldd /usr/bin/setpriv |
     sed -n '/=>/ { s/.*=> \(\/[^ ]*\).*/\1/; p; d; }; s/^[[:space:]]*\(\/[^ ]*\).*/\1/p' |
     while IFS= read -r library; do
         if [ "$library" = "$loader" ]; then
