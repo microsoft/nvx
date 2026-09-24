@@ -3892,6 +3892,10 @@ def _device_io_helper_provenance(
     }
 
 
+def _benchmark_platform(args: argparse.Namespace, backend: str) -> str:
+    return args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
+
+
 def write_benchmark_metadata(
     args: argparse.Namespace,
     output_dir: Path,
@@ -3900,7 +3904,7 @@ def write_benchmark_metadata(
     initrd: Path,
     backend: str,
 ) -> Path:
-    platform = args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
+    platform = _benchmark_platform(args, backend)
     device_io = args.suite == "device-io"
     microvm_abi_version = OpenVMMBuildConstants.MICROVM_ABI_VERSION
     processors = 1 if device_io else args.processors
@@ -4012,9 +4016,7 @@ def run_workload_benchmarks(
         requested = [args.suite]
     output_dir = args.output_dir
     if output_dir is None and args.suite in {"performance", "device-io"}:
-        platform = (
-            args.platform or f"{'windows' if os.name == 'nt' else 'linux'}-{backend}"
-        )
+        platform = _benchmark_platform(args, backend)
         if args.suite == "device-io":
             output_dir = (
                 args.nvx_dir.resolve()
