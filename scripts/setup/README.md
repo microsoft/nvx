@@ -39,6 +39,9 @@ Both scripts pin and verify the Actions runner package. Linux runner labels are
 `linux`, the selected backend, and `virtual-machine`. Windows labels are
 `windows`, `whp`, and `virtual-machine`. Runner names remain unique identities
 but are not registered as labels.
+On Linux, omit `--runner-name` to prepare host dependencies without reconciling
+an existing runner's service or cache directory. Pass its name in a subsequent
+invocation to update the service; `--check-only` still validates runner state.
 Rustup bootstrap binaries are versioned and SHA-256 verified before execution;
 Linux provisioning also installs `zstd` for native Actions cache archives.
 Both runner setup scripts install a pinned, SHA-256-verified `sccache` binary.

@@ -290,6 +290,16 @@ Restore proceeds in the opposite direction from capture:
 10. on the agent's `0x605` acknowledgment, stop at the exact post-write
    boundary, release input, and only then let the guest continue.
 
+Listener attachments preserve their stable attachment ID, attachment kind,
+backend kind, reconnect policy, required flag, length, and timeout. Restore
+callers may rebind an eligible listener to a fresh same-kind endpoint. When an
+ordinary `recreate-listener` replacement is omitted, OpenVMM reconstructs the
+captured pathname; an authenticated control listener still requires an
+explicitly approved restore-time attachment. Reusable-clone orchestrators must
+supply fresh private boot-console and authenticated control-listener paths so
+independent or concurrent restores do not collide with the terminated source
+generation.
+
 The partition must exist before OpenVMM can derive its effective destination
 CPU contract. This does not expose a partially restored guest: contract
 comparison and all saved-state validation still complete before a vCPU runs.
