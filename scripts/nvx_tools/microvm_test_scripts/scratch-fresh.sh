@@ -9,5 +9,5 @@ done
 echo NVX-SCRATCH-FRESH-POST-OUT
 blockdev --flushbufs /dev/vdb
 value="$(dd if=/dev/vdb bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]')"
-echo "NVX-SCRATCH-FRESH-VALUE-$value"
+echo "NVX-SCRATCH-FRESH-VALUE-$value-END"
 nvx-exit 0

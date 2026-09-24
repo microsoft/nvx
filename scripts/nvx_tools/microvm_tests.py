@@ -130,6 +130,8 @@ NETWORK_AFTER_MARKER = b"NVX-NETWORK-AFTER"
 SCRATCH_PAIRED_POST_MARKER = b"NVX-SCRATCH-PAIRED-POST-OUT"
 SCRATCH_PAIRED_RESTORED_MARKER = b"NVX-SCRATCH-PAIRED-RESTORED"
 SCRATCH_FRESH_POST_MARKER = b"NVX-SCRATCH-FRESH-POST-OUT"
+SCRATCH_FRESH_VALUE_PREFIX = b"NVX-SCRATCH-FRESH-VALUE-"
+SCRATCH_FRESH_VALUE_SUFFIX = b"-END"
 WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
 BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
 GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
@@ -401,6 +403,26 @@ def _single_marker_value(output: bytes, prefix: bytes) -> bytes:
     values = [
         line[len(prefix) :] for line in _output_lines(output) if line.startswith(prefix)
     ]
+    if len(values) != 1:
+        raise RuntimeError(
+            f"expected exactly one {prefix!r} marker, found {len(values)}"
+        )
+    return values[0]
+
+
+def _single_framed_marker_value(output: bytes, prefix: bytes, suffix: bytes) -> bytes:
+    values: list[bytes] = []
+    offset = 0
+    while True:
+        start = output.find(prefix, offset)
+        if start < 0:
+            break
+        value_start = start + len(prefix)
+        value_end = output.find(suffix, value_start)
+        if value_end < 0:
+            raise RuntimeError(f"malformed {prefix!r} marker")
+        values.append(output[value_start:value_end])
+        offset = value_end + len(suffix)
     if len(values) != 1:
         raise RuntimeError(
             f"expected exactly one {prefix!r} marker, found {len(values)}"
@@ -3152,7 +3174,10 @@ def run_scratch_snapshot(
         for restore_index, value in enumerate((17, 34)):
             scratch = root / f"fresh-scratch-{restore_index}.raw"
             _write_pattern(scratch, 1024 * 1024, value)
-            marker = f"NVX-SCRATCH-FRESH-VALUE-{value}".encode()
+            expected_value = str(value).encode()
+            marker = (
+                SCRATCH_FRESH_VALUE_PREFIX + expected_value + SCRATCH_FRESH_VALUE_SUFFIX
+            )
             with OpenvmmProcess(
                 fresh_restore_command(scratch),
                 output_dir / f"scratch-fresh-restore-{restore_index}.log",
@@ -3160,9 +3185,14 @@ def run_scratch_snapshot(
                 process.wait_for(marker, timeout)
                 restored = process.wait(timeout)
             restored_lines = _output_lines(restored.output)
+            restored_value = _single_framed_marker_value(
+                restored.output,
+                SCRATCH_FRESH_VALUE_PREFIX,
+                SCRATCH_FRESH_VALUE_SUFFIX,
+            )
             if restored.returncode != 0 or (
                 restored_lines.count(SCRATCH_FRESH_POST_MARKER) != 1
-                or restored_lines.count(marker) != 1
+                or restored_value != expected_value
             ):
                 raise RuntimeError(
                     f"fresh scratch restore {restore_index} used the wrong backing"
