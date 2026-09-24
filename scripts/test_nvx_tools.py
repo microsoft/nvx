@@ -2096,6 +2096,65 @@ class CiConfigurationTests(unittest.TestCase):
             linux_setup.index('test -w "$runner_sccache_dir"'),
         )
 
+    def test_linux_unnamed_setup_defers_existing_runner_validation(self):
+        linux_setup = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+        ).read_text(encoding="utf-8")
+        environment_check = linux_setup.split("check_environment() {\n", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        runner_checks = environment_check.split(
+            "    validate_runner_state_paths\n    validate_runner_work_paths\n", 1
+        )[1]
+        guard = 'if [ "$configure_runner" = false ] && [ "$check_only" = false ]; then'
+        self.assertIn(guard, runner_checks)
+        self.assertLess(
+            runner_checks.index(guard),
+            runner_checks.index('test -w "$runner_sccache_dir"'),
+        )
+        if os.name != "posix":
+            return
+
+        harness = (
+            "set -eu\n"
+            "runner_directory=/missing-runner\n"
+            "runner_sccache_dir=/missing-runner/_work/_sccache\n"
+            "validate_runner_state_paths() { echo state-checked; }\n"
+            "validate_runner_work_paths() { echo work-checked; }\n"
+            'run_as_root() { [ "$1" = test ] && [ "$2" = -f ]; }\n'
+            "check_runner_state() {\n"
+            "    validate_runner_state_paths\n"
+            "    validate_runner_work_paths\n"
+            f"{runner_checks}\n"
+            "}\n"
+        )
+        for configure_runner, check_only in (
+            ("false", "false"),
+            ("false", "true"),
+            ("true", "false"),
+        ):
+            with self.subTest(configure_runner=configure_runner, check_only=check_only):
+                result = subprocess.run(
+                    [
+                        "sh",
+                        "-c",
+                        harness + f"{configure_runner=}\n{check_only=}\n"
+                        "check_runner_state\n",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode == 0,
+                    configure_runner == check_only == "false",
+                    result.stderr,
+                )
+                if result.returncode == 0:
+                    self.assertIn("state-checked", result.stdout)
+                    self.assertIn("work-checked", result.stdout)
+
     def test_linux_setup_installs_openvmm_perl_modules(self):
         setup_directory = BuildConstants.REPO_ROOT / "scripts" / "setup"
         configurations = (
