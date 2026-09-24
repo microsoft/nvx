@@ -578,7 +578,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     initramfs = subparsers.add_parser(
         "build-initramfs",
-        help="build a selected guest initramfs natively on Linux",
+        help=(
+            "build a selected guest initramfs (natively on Linux, or via "
+            "Docker for guests that require it)"
+        ),
     )
     initramfs.add_argument(
         "--guest",
