@@ -39,6 +39,7 @@ runs:
             print(f"alpine-version={manifest['alpine']['version']}", file=output)
             print(f"ubuntu-version={manifest['ubuntu']['version']}", file=output)
             print(f"azurelinux-version={manifest['azurelinux']['version']}", file=output)
+            print(f"azurelinux-image={manifest['azurelinux']['image']}", file=output)
         PY
 
     - name: Resolve guest cache keys
@@ -191,10 +192,15 @@ runs:
     - name: Build Azure Linux initramfs (Docker)
       if: steps.cache-azurelinux-initramfs-zstd.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        AZURELINUX_IMAGE: ${{ steps.guest-versions.outputs.azurelinux-image }}
+        AZURELINUX_VERSION: ${{ steps.guest-versions.outputs.azurelinux-version }}
       run: >-
         docker build
         --file docker/Dockerfile
         --target azurelinux-initramfs-artifacts
+        --build-arg AZURELINUX_IMAGE="${AZURELINUX_IMAGE}"
+        --build-arg AZURELINUX_VERSION="${AZURELINUX_VERSION}"
         --output type=local,dest=build
         .
 
