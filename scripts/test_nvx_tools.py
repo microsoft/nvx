@@ -4523,6 +4523,15 @@ class BuildTests(unittest.TestCase):
         self.assertIn("ARG EROFS_UTILS_VERSION=1.5-1", dockerfile)
         self.assertIn("erofs-utils=${EROFS_UTILS_VERSION}", dockerfile)
 
+    def test_azurelinux_initramfs_uses_static_busybox_shell(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "awk basename cat chmod chroot cp grep head hostname ifconfig ip mdev mkdir sh",
+            dockerfile,
+        )
+
     def test_openvmm_ci_downloads_guest_artifacts(self):
         workflow = (
             BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
