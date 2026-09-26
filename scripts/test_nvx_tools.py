@@ -4531,6 +4531,14 @@ class BuildTests(unittest.TestCase):
             "awk basename cat chmod chroot cp grep head hostname ifconfig ip mdev mkdir sh",
             dockerfile,
         )
+        self.assertIn("rm -f /rootfs/bin/sh;", dockerfile)
+
+    def test_azurelinux_initramfs_installs_virtfs_mount_helper(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        self.assertIn("/repo/guest/common/nvx-hostmount", azure_stage)
 
     def test_openvmm_ci_downloads_guest_artifacts(self):
         workflow = (
