@@ -25,6 +25,7 @@ from .build_config import (
 )
 from .build_constants import (
     AlpineBuildConstants,
+    AzureLinuxBuildConstants,
     BuildConstants,
     DockerBuildConstants,
     InitramfsBuildConstants,
@@ -412,6 +413,16 @@ def build_openvmm(
 
 def build_guest(config: BuildConfig) -> None:
     if config.native_guest:
+        unsupported = [
+            guest
+            for guest in config.selected_guests()
+            if not guest_descriptor(guest).native_build_supported
+        ]
+        if unsupported:
+            raise ScriptError(
+                f"{guest_descriptor(unsupported[0]).distribution} initramfs builds "
+                "require Docker"
+            )
         build_kernel(config.kernel)
         for guest in config.selected_guests():
             build_initramfs(config.initramfs_config(guest))
@@ -1108,6 +1119,10 @@ def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | P
     ]
     command.extend(
         [
+            "--build-arg",
+            f"AZURELINUX_IMAGE={AzureLinuxBuildConstants.IMAGE}",
+            "--build-arg",
+            f"AZURELINUX_VERSION={AzureLinuxBuildConstants.VERSION}",
             "--output",
             f"type={DockerBuildConstants.OUTPUT_TYPE},dest={destination}",
             BuildConstants.REPO_ROOT,
@@ -1153,14 +1168,10 @@ def build_docker_artifacts(
     if guest == "all":
         target = DockerBuildConstants.ALL_GUESTS_TARGET
         expected = DockerBuildConstants.ALL_GUEST_ARTIFACT_NAMES
-        guest_label = "Alpine and Ubuntu"
+        guest_label = "Alpine, Ubuntu, and Azure Linux"
     else:
         descriptor = guest_descriptor(guest)
-        target = (
-            DockerBuildConstants.ALPINE_TARGET
-            if descriptor.name == AlpineBuildConstants.GUEST_NAME
-            else DockerBuildConstants.UBUNTU_TARGET
-        )
+        target = descriptor.docker_artifacts_target
         expected = (
             KernelBuildConstants.BINARY_NAME,
             KernelBuildConstants.CONFIG_NAME,
@@ -1183,3 +1194,25 @@ def build_docker_artifacts(
     for name in expected:
         path = destination / name
         print(f"  {path} ({format_size(path.stat().st_size)})")
+
+
+def build_docker_initramfs(config: DockerBuildConfig, guest: str) -> None:
+    descriptor = guest_descriptor(guest)
+    if descriptor.native_build_supported:
+        raise ScriptError(
+            f"{descriptor.distribution} initramfs builds do not require Docker"
+        )
+    target = descriptor.docker_initramfs_artifacts_target
+    if target is None:
+        raise ScriptError(f"missing Docker initramfs target for {descriptor.name}")
+    expected = (descriptor.initramfs_name, descriptor.package_manifest_name)
+    require_tool(
+        "docker",
+        "docker was not found on PATH; install Docker with the Linux engine first",
+    )
+    destination = _docker_destination(config.artifact_destination)
+    print(f">> building {descriptor.distribution} initramfs into '{destination}'")
+    run_checked(docker_build_command(config, target), cwd=BuildConstants.REPO_ROOT)
+    missing = [name for name in expected if not (destination / name).is_file()]
+    if missing:
+        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")

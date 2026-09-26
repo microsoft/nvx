@@ -40,6 +40,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        if ! command -v sccache >/dev/null 2>&1; then
+          echo "::warning::sccache is unavailable; building without the shared Rust cache"
+          echo "RUSTC_WRAPPER=" >> "${GITHUB_ENV}"
+          exit 0
+        fi
         sccache --version
         test -n "${SCCACHE_DIR:-}"
         mkdir -p "${SCCACHE_DIR}"
@@ -51,6 +56,11 @@ runs:
       shell: powershell
       run: |
         $ErrorActionPreference = "Stop"
+        if ($null -eq (Get-Command sccache -ErrorAction SilentlyContinue)) {
+          Write-Warning "sccache is unavailable; building without the shared Rust cache"
+          "RUSTC_WRAPPER=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          exit 0
+        }
         sccache --version
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         if ([string]::IsNullOrWhiteSpace($env:SCCACHE_DIR)) {
@@ -67,6 +77,9 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        if ! command -v sccache >/dev/null 2>&1; then
+          exit 0
+        fi
         sccache --show-stats
         sccache --stop-server
 
@@ -75,6 +88,9 @@ runs:
       shell: powershell
       run: |
         $ErrorActionPreference = "Stop"
+        if ($null -eq (Get-Command sccache -ErrorAction SilentlyContinue)) {
+          exit 0
+        }
         sccache --show-stats
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         sccache --stop-server

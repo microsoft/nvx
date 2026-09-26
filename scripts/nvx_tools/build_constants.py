@@ -223,6 +223,24 @@ class UbuntuBuildConstants:
     }
 
 
+class AzureLinuxBuildConstants:
+    GUEST_NAME: Final = "azurelinux"
+    GUEST_SOURCE_DIRECTORIES: Final = (BuildConstants.COMMON_GUEST_DIRECTORY,)
+    DISTRIBUTION: Final = "Azure Linux"
+    VERSION: Final = "3.0"
+    ARCHITECTURE: Final = "x86_64"
+    IMAGE: Final = (
+        "mcr.microsoft.com/azurelinux/base/core@"
+        "sha256:c877612270d1ee2d6ab2bc1f64bfe38ab697ac50be325154ee5129fce89c17e4"
+    )
+    INITRAMFS_NAME: Final = "initramfs-azurelinux.cpio.gz"
+    PACKAGE_MANIFEST_NAME: Final = (
+        f"{INITRAMFS_NAME}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
+    )
+    PACKAGE_MANIFEST_FORMAT: Final = "azurelinux-v1"
+    PACKAGE_MANIFEST_VERSION: Final = 1
+
+
 class InitramfsBuildConstants:
     DEFAULT_GUEST: Final = AlpineBuildConstants.GUEST_NAME
     WORK_DIRECTORY_TEMPLATE: Final = "initramfs-{guest}-work"
@@ -269,6 +287,8 @@ class DockerBuildConstants:
     DOCKERFILE: Final = Path("docker") / "Dockerfile"
     ALPINE_TARGET: Final = "artifacts"
     UBUNTU_TARGET: Final = "ubuntu-guest-artifacts"
+    AZURELINUX_TARGET: Final = "azurelinux-guest-artifacts"
+    AZURELINUX_INITRAMFS_TARGET: Final = "azurelinux-initramfs-artifacts"
     ALL_GUESTS_TARGET: Final = "all-guest-artifacts"
     LINUX_SOURCE_TARGET: Final = "linux-source-artifacts"
     OUTPUT_TYPE: Final = "local"
@@ -283,6 +303,8 @@ class DockerBuildConstants:
         UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
         UbuntuBuildConstants.DISTRO_NAME,
         UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+        AzureLinuxBuildConstants.INITRAMFS_NAME,
+        AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
     )
 
 
@@ -331,6 +353,8 @@ class ReleaseBuildConstants:
         UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
         UbuntuBuildConstants.DISTRO_NAME,
         UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+        AzureLinuxBuildConstants.INITRAMFS_NAME,
+        AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
     )
     TAR_TIMESTAMP: Final = 0
     ZIP_TIMESTAMP: Final = (1980, 1, 1, 0, 0, 0)

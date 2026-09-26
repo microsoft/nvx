@@ -19,6 +19,7 @@ from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
     build_all,
     build_distro_layer,
+    build_docker_initramfs,
     build_guest,
     build_initramfs,
     build_kernel,
@@ -165,6 +166,9 @@ def command_build_kernel(_: argparse.Namespace) -> None:
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
+    if not guest_descriptor(args.guest).native_build_supported:
+        build_docker_initramfs(DockerBuildConfig(), args.guest)
+        return
     build_initramfs(BuildConfig.initramfs_config(args.guest))
 
 
@@ -574,7 +578,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     initramfs = subparsers.add_parser(
         "build-initramfs",
-        help="build a selected guest initramfs natively on Linux",
+        help=(
+            "build a selected guest initramfs (natively on Linux, or via "
+            "Docker for guests that require it)"
+        ),
     )
     initramfs.add_argument(
         "--guest",

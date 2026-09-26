@@ -25,7 +25,7 @@ python3 scripts/nvx.py performance gate --help
 | `init` | Initialize the OpenVMM submodule and its nested submodules. |
 | `build-guest` | Build the Linux kernel and selected guest artifacts. |
 | `build-kernel` | Build the pinned and patched Linux kernel natively. |
-| `build-initramfs` | Build the selected Alpine or Ubuntu initramfs natively. |
+| `build-initramfs` | Build the selected Alpine, Ubuntu, or Azure Linux initramfs. |
 | `build-distro-layer` | Build a deterministic Ubuntu EROFS distro layer. |
 | `verify-guest-determinism` | Rebuild Ubuntu guest artifacts twice and compare SHA-256 values. |
 | `build-openvmm` | Build the OpenVMM release binary. |
@@ -82,13 +82,14 @@ See [Setup](setup.md) for host prerequisites.
 
 ```text
 python3 scripts/nvx.py build-guest
-    [--guest {alpine,ubuntu,all}]
+    [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
 ```
 
 By default, builds the guest kernel and initramfs with Docker. `--native`
 builds the selected artifacts directly on Linux instead. Alpine is the
-default. `--guest all` also builds the Ubuntu EROFS distro layer.
+default. Azure Linux does not support `--native` and always builds through
+Docker. `--guest all` also builds the Ubuntu EROFS distro layer.
 
 ### `build-kernel`
 
@@ -101,10 +102,11 @@ Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
 ### `build-initramfs`
 
 ```console
-python3 scripts/nvx.py build-initramfs [--guest {alpine,ubuntu}]
+python3 scripts/nvx.py build-initramfs [--guest {alpine,ubuntu,azurelinux}]
 ```
 
-Builds the selected initramfs directly on Linux. Alpine is the default.
+Builds the selected initramfs. Alpine and Ubuntu build directly on Linux; Azure
+Linux uses Docker. Alpine is the default.
 
 ### `build-distro-layer`
 
@@ -150,7 +152,7 @@ combinations are rejected.
 
 ```text
 python3 scripts/nvx.py build
-    [--guest {alpine,ubuntu,all}]
+    [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
     [--skip-restore]
     [--backend {kvm,mshv,whp}]

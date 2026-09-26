@@ -56,6 +56,12 @@ def _load_packages(paths: list[Path]) -> tuple[str, str, list[dict[str, object]]
     packages: dict[tuple[str, str], dict[str, object]] = {}
     for path in paths:
         document = json.loads(path.read_text(encoding="utf-8"))
+        guest = document.get("guest", AlpineBuildConstants.GUEST_NAME)
+        if guest != AlpineBuildConstants.GUEST_NAME:
+            raise SourceError(
+                f"{path} is a {guest!r} guest package manifest; "
+                "Alpine source collection only supports Alpine manifests"
+            )
         current_branch = document.get("alpine_branch", AlpineBuildConstants.BRANCH)
         current_architecture = document.get(
             "architecture", AlpineBuildConstants.ARCHITECTURE

@@ -36,6 +36,8 @@ runs:
           guest/alpine/nvx-container-launch guest/common/nvx-exit \
           guest/common/nvx-hostmount guest/common/nvx-identity-probe \
           guest/common/nvx-init-agent \
+          guest/common/nvx-container-enter-azurelinux \
+          guest/common/nvx-container-launch-azurelinux \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \
@@ -50,6 +52,8 @@ runs:
           guest/alpine/nvx-container-launch guest/common/nvx-exit \
           guest/common/nvx-hostmount guest/common/nvx-identity-probe \
           guest/common/nvx-init-agent \
+          guest/common/nvx-container-enter-azurelinux \
+          guest/common/nvx-container-launch-azurelinux \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
           scripts/setup/setup-linux-mshv.sh \

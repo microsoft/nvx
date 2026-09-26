@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+rootfs=$1
+hostname_value=$2
+workload_uid=$3
+workload_gid=$4
+workload_name=$5
+workload_home=$6
+shift 6
+tools=$rootfs/.nvx-agent
+loader=/lib64/ld-linux-x86-64.so.2
+
+mount --make-rprivate /
+rm -rf "$tools"
+mkdir -p \
+    "$tools" \
+    "$rootfs/dev" \
+    "$rootfs/proc" \
+    "$rootfs/sys"
+mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$tools"
+cp -L "$loader" "$tools/ld-linux-x86-64.so.2"
+cp /usr/bin/setpriv "$tools/setpriv"
+# Extract `name => /path` mappings and bare `/path` loader entries.
+ldd /usr/bin/setpriv |
+    sed -n '/=>/ { s/.*=> \(\/[^ ]*\).*/\1/; p; d; }; s/^[[:space:]]*\(\/[^ ]*\).*/\1/p' |
+    while IFS= read -r library; do
+        if [ "$library" = "$loader" ]; then
+            continue
+        fi
+        cp -L "$library" "$tools/$(basename "$library")"
+    done
+chmod 0555 "$tools"/*
+mount -o remount,ro,nosuid,nodev "$tools"
+mount -t proc -o nosuid,nodev,noexec proc "$rootfs/proc"
+mount -t sysfs -o ro,nosuid,nodev,noexec sysfs "$rootfs/sys"
+mount -t tmpfs -o mode=755,nosuid tmpfs "$rootfs/dev"
+mkdir -p "$rootfs/dev/pts" "$rootfs/dev/shm"
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$rootfs/dev/pts"
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$rootfs/dev/shm"
+
+workload_machine_id=/run/nvx/workload-machine-id
+if [ ! -f "$workload_machine_id" ] || [ -L "$workload_machine_id" ]; then
+    echo "invalid workload machine ID: $workload_machine_id" >&2
+    exit 125
+fi
+if [ -L "$rootfs/etc" ] || { [ -e "$rootfs/etc" ] && [ ! -d "$rootfs/etc" ]; }; then
+    echo "workload rootfs has an invalid /etc directory" >&2
+    exit 125
+fi
+mkdir -p "$rootfs/etc"
+rm -f "$rootfs/etc/machine-id"
+: >"$rootfs/etc/machine-id"
+mount --bind "$workload_machine_id" "$rootfs/etc/machine-id"
+mount -o remount,bind,ro,nosuid,nodev "$rootfs/etc/machine-id"
+
+mknod -m 666 "$rootfs/dev/null" c 1 3
+mknod -m 666 "$rootfs/dev/zero" c 1 5
+mknod -m 666 "$rootfs/dev/full" c 1 7
+mknod -m 666 "$rootfs/dev/random" c 1 8
+mknod -m 666 "$rootfs/dev/urandom" c 1 9
+mknod -m 666 "$rootfs/dev/tty" c 5 0
+ln -s pts/ptmx "$rootfs/dev/ptmx"
+ln -s /proc/self/fd "$rootfs/dev/fd"
+ln -s /proc/self/fd/0 "$rootfs/dev/stdin"
+ln -s /proc/self/fd/1 "$rootfs/dev/stdout"
+ln -s /proc/self/fd/2 "$rootfs/dev/stderr"
+
+hostname "$hostname_value"
+export HOME="$workload_home" USER="$workload_name" LOGNAME="$workload_name"
+exec chroot "$rootfs" /.nvx-agent/ld-linux-x86-64.so.2 \
+    --library-path /.nvx-agent \
+    /.nvx-agent/setpriv \
+    --reuid "$workload_uid" \
+    --regid "$workload_gid" \
+    --clear-groups \
+    --no-new-privs \
+    --bounding-set=-all \
+    --inh-caps=-all \
+    --ambient-caps=-all \
+    "$@"

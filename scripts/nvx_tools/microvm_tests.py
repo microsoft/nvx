@@ -81,8 +81,9 @@ MICROVM_TEST_SCENARIOS = (
     "virtio-net",
     "workload-identity",
 )
-UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(
-    ("console-snapshot", "sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
+UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
+SANDBOX_CONTROL_SCENARIOS = frozenset(
+    ("sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
 )
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -3602,23 +3603,26 @@ def run(args: argparse.Namespace) -> int:
     )
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    unsupported_scenarios: set[str] = set()
+    if descriptor.name == "ubuntu":
+        unsupported_scenarios.update(UBUNTU_UNSUPPORTED_SCENARIOS)
+    if not descriptor.sandbox_control:
+        unsupported_scenarios.update(SANDBOX_CONTROL_SCENARIOS)
     if args.scenario is None:
         scenarios = tuple(
             scenario
             for scenario in MICROVM_TEST_SCENARIOS
-            if descriptor.name != "ubuntu"
-            or scenario not in UBUNTU_UNSUPPORTED_SCENARIOS
+            if scenario not in unsupported_scenarios
         )
     else:
         scenarios = tuple(dict.fromkeys(args.scenario))
-        unsupported: set[str] = set()
-        if descriptor.name == "ubuntu":
-            for scenario in UBUNTU_UNSUPPORTED_SCENARIOS:
-                if scenario in scenarios:
-                    unsupported.add(scenario)
+        unsupported = set(scenarios) & unsupported_scenarios
         if unsupported:
+            guest_label = (
+                "Ubuntu" if descriptor.name == "ubuntu" else descriptor.distribution
+            )
             raise ScriptError(
-                "Ubuntu guest does not support correctness scenario(s): "
+                f"{guest_label} guest does not support correctness scenario(s): "
                 + ", ".join(sorted(unsupported))
             )
 
