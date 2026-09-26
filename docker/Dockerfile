@@ -89,6 +89,7 @@ RUN set -eux; \
         /repo/guest/common/nvx-container-enter-azurelinux /rootfs/sbin/; \
     install -m 0755 /repo/guest/common/nvx-container-launch-azurelinux \
         /rootfs/sbin/nvx-container-launch; \
+    sed -i '1c#!/bin/busybox sh' /rootfs/sbin/nvx-hostmount; \
     rm -f /rootfs/bin/sh; \
     for utility in awk basename cat chmod chroot cp grep head hostname ifconfig ip mdev mkdir sh \
         mknod mount ping route rm sed sleep tr blkid losetup mkfs.ext4 mountpoint flock unshare; do \

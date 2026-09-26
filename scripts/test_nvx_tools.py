@@ -4539,6 +4539,10 @@ class BuildTests(unittest.TestCase):
         )
         azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
         self.assertIn("/repo/guest/common/nvx-hostmount", azure_stage)
+        self.assertIn(
+            "sed -i '1c#!/bin/busybox sh' /rootfs/sbin/nvx-hostmount;",
+            azure_stage,
+        )
 
     def test_openvmm_ci_downloads_guest_artifacts(self):
         workflow = (
