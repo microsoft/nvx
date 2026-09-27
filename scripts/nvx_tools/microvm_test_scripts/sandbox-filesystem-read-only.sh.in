@@ -1,0 +1,27 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-SANDBOX-FILESYSTEM-READ-ONLY-FAIL code=$code"
+    exit "$code"
+}
+
+share=@TARGET@
+options=$(awk -v share="$share" '$2 == share && $3 == "virtiofs" { print $4 }' /proc/mounts)
+case ",$options," in *,ro,*) ;; *) fail 60 ;; esac
+case ",$options," in *,nosuid,*) ;; *) fail 61 ;; esac
+case ",$options," in *,nodev,*) ;; *) fail 62 ;; esac
+[ "$(cat "$share/host-seed")" = NVX-HOST-SEED ] || fail 63
+if ls -A "$share" | grep -qx secrets; then
+    fail 64
+fi
+if cat "$share/secrets/token" >/dev/null 2>&1; then
+    fail 65
+fi
+if error=$(touch "$share/mutation" 2>&1); then
+    fail 66
+fi
+case "$error" in *"Read-only file system"*) ;; *) fail 67 ;; esac
+if mkdir "$share/mutation-dir" 2>/dev/null; then
+    fail 68
+fi
+echo NVX-SANDBOX-FILESYSTEM-READ-ONLY-OK

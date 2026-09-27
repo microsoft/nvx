@@ -20,11 +20,11 @@ or snapshot-tier metadata alone.
 ## Implemented filesystem bootstrap
 
 The public `nvx sandbox` command accepts one to three role-bearing EROFS lower
-images, a preformatted ext4 scratch image, an absolute entrypoint, and
-individual argument tokens. It supplies non-secret kernel-command-line
-configuration; environment variables, secrets, arguments containing
-whitespace, and sandbox snapshot orchestration are not supported by this
-command. Lower-level OpenVMM capture and restore do support sandbox blocks.
+images, a preformatted ext4 scratch image, an absolute entrypoint, individual
+argument tokens, and an optional live virtio-fs share. It supplies non-secret
+kernel-command-line configuration; environment variables, secrets, arguments
+containing whitespace, and sandbox snapshot orchestration are not supported by
+this command. Lower-level OpenVMM capture and restore do support sandbox blocks.
 See [Run](../run.md#experimental-single-workload-sandbox) and
 [`scripts/nvx_tools/sandbox.py`](../../scripts/nvx_tools/sandbox.py).
 
@@ -46,10 +46,13 @@ device filter does not mean the current agent installs one.
 4. resolve and flush scratch, mount it as ext4 with `rw,nosuid,nodev`, and
    create its `upper` and `work` directories;
 5. mount overlayfs with top-first lower layers and `metacopy=on,xino=on`;
-6. start a child behind a FIFO barrier, place that child in the workload
+6. when OpenVMM attached a live virtio-fs share, validate its command-line
+   target, create any missing components without traversing image symbolic
+   links, and mount the share inside the overlay with `nosuid,nodev`;
+7. start a child behind a FIFO barrier, place that child in the workload
    cgroup before releasing it, and retain a runtime-tmpfs machine-ID file;
-7. wait for the child, unmount the overlay, layers, and scratch, and return its
-   status through the guest exit helper.
+8. wait for the child, unmount the share, overlay, layers, and scratch, and
+   return its status through the guest exit helper.
 
 The assembled view is:
 

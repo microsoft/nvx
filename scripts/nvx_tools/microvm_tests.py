@@ -7,8 +7,11 @@ import json
 import os
 import queue
 import secrets
+import shutil
 import socket
+import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -40,6 +43,7 @@ from .benchmark import (
 from .build_constants import (
     BuildConstants,
     KernelBuildConstants,
+    UbuntuBuildConstants,
 )
 from .ci import OPENVMM_TEST_BACKENDS, validate_openvmm_test_backend
 from .common import (
@@ -47,11 +51,20 @@ from .common import (
     artifact_path,
     openvmm_binary_path,
     require_file,
+    require_tool,
+    run_checked,
     sha256_file,
 )
 from .control_session import ControlSession
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .openvmm_process import OpenvmmProcess, TcpConsole
+from .sandbox import (
+    DEFAULT_WORKLOAD_IDENTITY,
+    SandboxLaunch,
+    SandboxLayer,
+    SandboxMount,
+    default_mount_owner,
+)
 
 MICROVM_TEST_SCENARIOS = (
     "console-exit",
@@ -71,6 +84,7 @@ MICROVM_TEST_SCENARIOS = (
     "restore-processors",
     "restore-tsc-sync",
     "sandbox-blocks",
+    "sandbox-filesystem",
     "scratch-snapshot",
     "smp",
     "smp-lapic",
@@ -82,7 +96,13 @@ MICROVM_TEST_SCENARIOS = (
     "workload-identity",
 )
 UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(
-    ("console-snapshot", "sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
+    (
+        "console-snapshot",
+        "sandbox-blocks",
+        "sandbox-filesystem",
+        "scratch-snapshot",
+        "snapshot-tiers",
+    )
 )
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -105,6 +125,16 @@ HOST_LOOPBACK_ALLOW_MARKER = b"NVX-HOST-LOOPBACK-ALLOW-OK"
 HOST_LOOPBACK_INGRESS_READY_MARKER = b"NVX-HOST-LOOPBACK-INGRESS-READY"
 HOST_LOOPBACK_PORT_BIND_ATTEMPTS = 16
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
+SANDBOX_FILESYSTEM_TARGET = "/workspace"
+SANDBOX_FILESYSTEM_WRITTEN_MARKER = b"NVX-SANDBOX-FILESYSTEM-WRITTEN"
+SANDBOX_FILESYSTEM_OK_MARKER = b"NVX-SANDBOX-FILESYSTEM-OK"
+SANDBOX_FILESYSTEM_READ_ONLY_MARKER = b"NVX-SANDBOX-FILESYSTEM-READ-ONLY-OK"
+SANDBOX_FILESYSTEM_EXIT_MARKER = b"NVX-SANDBOX-EXIT: status=0"
+SANDBOX_FILESYSTEM_USER = "nvx-share"
+# A root test run cannot use UID 0 as the workload, so it exports this owner.
+SANDBOX_FILESYSTEM_ROOT_RUN_IDENTITY = (12345, 12345)
+SANDBOX_FILESYSTEM_SCRATCH_TEMPLATE_NAME = "ubuntu-smoke-scratch.ext4"
+SANDBOX_FILESYSTEM_SCRATCH_SIZE = 64 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
 CONSOLE_BINARY_MARKER = b"\0\r\n\x7f\xffNVX-CONSOLE-BINARY"
@@ -1950,6 +1980,323 @@ def run_sandbox_blocks(
             timeout=timeout,
             log_path=log_path,
         )
+
+
+def _sandbox_filesystem_identity() -> tuple[tuple[int, int], str]:
+    """Returns the workload identity and mount owner for the live-share test.
+
+    Linux runs use caller ownership with a workload identity that owns the
+    export, which maps guest-created files to that owner. Windows has no host
+    UID mapping and keeps the default identity and process ownership.
+    """
+    if sys.platform == "win32":
+        return DEFAULT_WORKLOAD_IDENTITY, default_mount_owner()
+    uid, gid = os.getuid(), os.getgid()
+    if uid == 0:
+        return SANDBOX_FILESYSTEM_ROOT_RUN_IDENTITY, "caller"
+    if gid == 0 or 65534 in (uid, gid):
+        raise ScriptError(
+            "sandbox-filesystem requires a host UID and GID other than 0 and 65534"
+        )
+    return (uid, gid), "caller"
+
+
+def _assign_sandbox_export_owner(export: Path, identity: tuple[int, int]) -> None:
+    if sys.platform == "win32":
+        return
+    # This also replaces a group inherited from a set-group-ID parent.
+    for path in (export, *export.rglob("*")):
+        os.chown(path, *identity, follow_symlinks=False)
+    os.chmod(export, 0o700)
+
+
+def _sandbox_filesystem_scratch(root: Path, identity: tuple[int, int]) -> Path:
+    """Creates the scratch template whose upper layer defines the identity."""
+    template = root / "scratch-template.ext4"
+    if sys.platform == "win32":
+        shutil.copyfile(
+            require_file(
+                artifact_path(SANDBOX_FILESYSTEM_SCRATCH_TEMPLATE_NAME),
+                "Ubuntu sandbox scratch template",
+            ),
+            template,
+        )
+        return template
+    uid, gid = identity
+    staging = root / "scratch-staging"
+    upper = staging / "upper"
+    etc = upper / "etc"
+    home = upper / "home" / SANDBOX_FILESYSTEM_USER
+    etc.mkdir(parents=True)
+    home.mkdir(parents=True)
+    (etc / "passwd").write_bytes(
+        (
+            "root:x:0:0:root:/root:/bin/sh\n"
+            "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
+            f"{SANDBOX_FILESYSTEM_USER}:x:{uid}:{gid}::"
+            f"/home/{SANDBOX_FILESYSTEM_USER}:/bin/sh\n"
+        ).encode()
+    )
+    (etc / "group").write_bytes(
+        f"root:x:0:\nnogroup:x:65534:\n{SANDBOX_FILESYSTEM_USER}:x:{gid}:\n".encode()
+    )
+    for directory in (staging, upper, etc, home.parent, home):
+        os.chmod(directory, 0o755)
+    os.chown(home, uid, gid)
+    with template.open("wb") as image:
+        image.truncate(SANDBOX_FILESYSTEM_SCRATCH_SIZE)
+    run_checked(
+        [
+            require_tool("mkfs.ext4", "sandbox-filesystem requires mkfs.ext4 on Linux"),
+            "-q",
+            "-F",
+            "-m",
+            "0",
+            "-E",
+            "lazy_itable_init=0,lazy_journal_init=0",
+            "-d",
+            staging,
+            template,
+        ]
+    )
+    return template
+
+
+def _sandbox_filesystem_command(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    memory_mib: int,
+    launch: SandboxLaunch,
+    *,
+    extra_arguments: Sequence[str] = (),
+    report: Path | None = None,
+) -> list[str]:
+    command = [
+        str(executable),
+        *launch.validated().openvmm_arguments(),
+        *extra_arguments,
+        "--microvm-lifecycle",
+        "one-shot",
+        "--single-process",
+        "--hypervisor",
+        backend,
+        "--memory",
+        f"{memory_mib}M",
+        "--kernel",
+        str(kernel),
+        "--initrd",
+        str(initrd),
+        "--cmdline",
+        launch.kernel_command_line("quiet loglevel=0"),
+    ]
+    if report is not None:
+        command.extend(("--microvm-report", str(report)))
+    return command
+
+
+def _check_sandbox_filesystem_writes(export: Path, identity: tuple[int, int]) -> None:
+    written = export / "guest-file"
+    nested = export / "guest-dir" / "nested"
+    if (
+        written.read_bytes() != b"NVX-GUEST-WRITE\n"
+        or nested.read_bytes() != b"NVX-GUEST-NESTED\n"
+    ):
+        raise RuntimeError("sandbox workload writes were not visible on the host")
+    if sys.platform == "win32":
+        return
+    for path in (written, nested.parent, nested):
+        status = path.stat()
+        if (status.st_uid, status.st_gid) != identity:
+            raise RuntimeError(
+                f"sandbox workload created {path.name} as "
+                f"{status.st_uid}:{status.st_gid}, not the export owner "
+                f"{identity[0]}:{identity[1]}"
+            )
+    if stat.S_IMODE(written.stat().st_mode) != 0o600:
+        raise RuntimeError("sandbox workload chmod did not reach the host file")
+
+
+def run_sandbox_filesystem(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    layer_path = require_file(
+        artifact_path(UbuntuBuildConstants.DISTRO_NAME),
+        "Ubuntu EROFS distro layer",
+    )
+    manifest_path = require_file(
+        artifact_path(UbuntuBuildConstants.DISTRO_MANIFEST_NAME),
+        "Ubuntu EROFS distro manifest",
+    )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        layer = SandboxLayer(
+            role="distro",
+            path=layer_path,
+            uuid=str(uuid.UUID(str(manifest["uuid"]))),
+        )
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise ScriptError(
+            f"invalid Ubuntu EROFS distro manifest: {manifest_path}"
+        ) from error
+    memory_mib = max(memory_mib, 256)
+    target = SANDBOX_FILESYSTEM_TARGET
+    identity, owner = _sandbox_filesystem_identity()
+    with tempfile.TemporaryDirectory(prefix="nvx-sandbox-filesystem-") as temporary:
+        root = Path(temporary)
+        export = root / "export"
+        secrets_path = export / "secrets"
+        secrets_path.mkdir(parents=True)
+        secret = secrets_path / "token"
+        secret.write_bytes(b"NVX-SECRET\n")
+        (export / "host-seed").write_bytes(b"NVX-HOST-SEED\n")
+        (export / "probe.sh").write_bytes(
+            _render_script(
+                "sandbox-filesystem.sh.in",
+                TARGET=target,
+                IDENTITY=f"{identity[0]}:{identity[1]}",
+                # Only a caller-owned share reports the workload as the owner
+                # that the guest kernel requires for chmod.
+                OWNER_CHECK=(
+                    'chmod 0600 "$share/guest-file" || fail 50'
+                    if owner == "caller"
+                    else ":"
+                ),
+            ).encode()
+        )
+        (export / "probe-read-only.sh").write_bytes(
+            _render_script("sandbox-filesystem-read-only.sh.in", TARGET=target).encode()
+        )
+        _assign_sandbox_export_owner(export, identity)
+        template = _sandbox_filesystem_scratch(root, identity)
+
+        def sandbox(name: str, access: str | None, probe: str) -> SandboxLaunch:
+            scratch = root / f"{name}-scratch.ext4"
+            shutil.copyfile(template, scratch)
+            return SandboxLaunch(
+                layers=(layer,),
+                scratch=scratch,
+                entrypoint="/bin/sh",
+                args=(f"{target}/{probe}",),
+                workload_identity=identity,
+                mount=(
+                    None
+                    if access is None
+                    else SandboxMount(
+                        guest_target=target,
+                        host_path=export,
+                        access=access,
+                        denied_paths=(secrets_path,),
+                        owner=owner,
+                    )
+                ),
+            )
+
+        report_path = root / "sandbox-filesystem.json"
+        with OpenvmmProcess(
+            _sandbox_filesystem_command(
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib,
+                sandbox("read-write", "rw", "probe.sh"),
+                report=report_path,
+            ),
+            output_dir / "sandbox-filesystem.log",
+        ) as process:
+            process.wait_for_line(
+                f"NVX-SANDBOX-VIRTFS: mounted microvm at {target} (rw)".encode(),
+                timeout,
+            )
+            process.wait_for_line(SANDBOX_FILESYSTEM_WRITTEN_MARKER, timeout)
+            # The workload is still running, so these checks observe the live
+            # share rather than a copy-back after exit.
+            _check_sandbox_filesystem_writes(export, identity)
+            staged_edit = export / ".host-edit"
+            staged_edit.write_bytes(b"NVX-HOST-EDIT\n")
+            os.replace(staged_edit, export / "host-edit")
+            process.wait_for_line(SANDBOX_FILESYSTEM_OK_MARKER, timeout)
+            result = process.wait(timeout)
+        if (
+            result.returncode != 0
+            or SANDBOX_FILESYSTEM_EXIT_MARKER not in _output_lines(result.output)
+        ):
+            raise RuntimeError("sandbox live-share workload did not exit cleanly")
+        if secret.read_bytes() != b"NVX-SECRET\n":
+            raise RuntimeError("sandbox workload modified a denied path")
+        report = _read_outcome_report(report_path)
+        _preserve_outcome_report(output_dir / "sandbox-filesystem.json", report)
+        if report["outcome"]["category"] != "success" or not all(
+            report["teardown"].values()
+        ):
+            raise RuntimeError("sandbox live-share outcome reported an unclean exit")
+
+        with OpenvmmProcess(
+            _sandbox_filesystem_command(
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib,
+                sandbox("read-only", "ro", "probe-read-only.sh"),
+            ),
+            output_dir / "sandbox-filesystem-read-only.log",
+        ) as process:
+            result = process.wait(timeout)
+        lines = _output_lines(result.output)
+        if (
+            result.returncode != 0
+            or f"NVX-SANDBOX-VIRTFS: mounted microvm at {target} (ro)".encode()
+            not in lines
+            or SANDBOX_FILESYSTEM_READ_ONLY_MARKER not in lines
+        ):
+            raise RuntimeError("read-only sandbox share did not reject workload writes")
+        if (export / "mutation").exists() or (export / "mutation-dir").exists():
+            raise RuntimeError("read-only sandbox share was modified")
+
+        for name, rejected_target, expected in (
+            (
+                "reserved",
+                "/dev/nvx-share",
+                b"virtio-fs target is reserved by the sandbox",
+            ),
+            (
+                "symlink",
+                "/bin/nvx-share",
+                b"virtio-fs target traverses a symbolic link",
+            ),
+        ):
+            with OpenvmmProcess(
+                _sandbox_filesystem_command(
+                    executable,
+                    kernel,
+                    initrd,
+                    backend,
+                    memory_mib,
+                    sandbox(name, None, "probe-read-only.sh"),
+                    extra_arguments=("--mount", f"{rejected_target},{export},ro"),
+                ),
+                output_dir / f"sandbox-filesystem-{name}.log",
+            ) as process:
+                result = process.wait(timeout)
+            if (
+                result.returncode == 0
+                or expected not in result.output
+                or b"NVX-SANDBOX-READY" in result.output
+            ):
+                raise RuntimeError(
+                    f"sandbox agent did not reject the {name} share target "
+                    f"{rejected_target}"
+                )
 
 
 def run_smp_snapshot(
@@ -3825,6 +4172,17 @@ def run(args: argparse.Namespace) -> int:
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "sandbox-blocks.log",
+        )
+    if "sandbox-filesystem" in scenarios:
+        print(f"Running microVM sandbox live filesystem on OpenVMM/{args.backend}")
+        run_sandbox_filesystem(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
         )
     if "scratch-snapshot" in scenarios:
         print(f"Running microVM scratch snapshot correctness on OpenVMM/{args.backend}")

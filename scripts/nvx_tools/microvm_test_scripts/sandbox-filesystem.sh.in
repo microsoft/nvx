@@ -1,0 +1,33 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-SANDBOX-FILESYSTEM-FAIL code=$code"
+    exit "$code"
+}
+
+share=@TARGET@
+options=$(awk -v share="$share" '$2 == share && $3 == "virtiofs" { print $4 }' /proc/mounts)
+case ",$options," in *,rw,*) ;; *) fail 40 ;; esac
+case ",$options," in *,nosuid,*) ;; *) fail 41 ;; esac
+case ",$options," in *,nodev,*) ;; *) fail 42 ;; esac
+[ "$(id -u):$(id -g)" = @IDENTITY@ ] || fail 43
+[ "$(cat "$share/host-seed")" = NVX-HOST-SEED ] || fail 44
+if ls -A "$share" | grep -qx secrets; then
+    fail 45
+fi
+if cat "$share/secrets/token" >/dev/null 2>&1; then
+    fail 46
+fi
+mkdir "$share/guest-dir" || fail 47
+printf 'NVX-GUEST-NESTED\n' >"$share/guest-dir/nested" || fail 48
+printf 'NVX-GUEST-WRITE\n' >"$share/guest-file" || fail 49
+@OWNER_CHECK@
+echo NVX-SANDBOX-FILESYSTEM-WRITTEN
+tries=0
+while [ ! -e "$share/host-edit" ]; do
+    [ "$tries" -lt 1200 ] || fail 51
+    sleep 0.05
+    tries=$((tries + 1))
+done
+[ "$(cat "$share/host-edit")" = NVX-HOST-EDIT ] || fail 52
+echo NVX-SANDBOX-FILESYSTEM-OK

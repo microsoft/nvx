@@ -36,6 +36,13 @@ pre-entry rejection of missing, corrupt, mismatched, or wrong-geometry media.
 Denied-filesystem coverage verifies listing suppression, allowed writes,
 direct and parent-relative denial, symlink/junction alias denial, a second
 virtio-fs mount, and pre-boot rejection of unsafe path policies.
+Sandbox live-share coverage boots the real sandbox agent over the Ubuntu EROFS
+layer with a read-write share. While the workload runs, it verifies host-file
+visibility, denied-path hiding, nested workload writes and `chmod` that appear
+on the host immediately, and a host edit that the workload observes. On Linux
+it also verifies that caller-owned requests create those files as the export
+owner. It then verifies a read-only share that rejects writes, and agent
+rejection of reserved and symlinked mount targets before the workload starts.
 The native suite targets KVM, MSHV, and WHP; a passing run on one backend is
 not a fresh result for the others.
 Coverage also includes

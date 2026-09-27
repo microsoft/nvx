@@ -26,7 +26,7 @@ from .control_session import (
     ControlSession,
     ManagedExecResult,
 )
-from .sandbox import SandboxLaunch, SandboxLayer
+from .sandbox import SandboxLaunch, SandboxLayer, SandboxMount
 
 CONFIG_NAME = "config.json"
 RUNTIME_NAME = "runtime.json"
@@ -201,7 +201,36 @@ def _serialize_launch(
         "network_proxy": network_proxy,
         "host_loopback_forward": list(host_loopback_forward),
         "cmdline": cmdline,
+        "mount": _serialize_mount(launch.mount),
     }
+
+
+def _serialize_mount(mount: SandboxMount | None) -> dict[str, Any] | None:
+    if mount is None:
+        return None
+    resolved = mount.resolved()
+    return {
+        "guest_target": resolved.guest_target,
+        "host_path": os.fspath(resolved.host_path),
+        "access": resolved.access,
+        "denied_paths": [os.fspath(path) for path in resolved.denied_paths],
+        "owner": resolved.owner,
+    }
+
+
+def _deserialize_mount(value: object) -> SandboxMount | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ScriptError("sandbox configuration is malformed")
+    mount = cast(dict[str, Any], value)
+    return SandboxMount(
+        guest_target=str(mount["guest_target"]),
+        host_path=Path(str(mount["host_path"])),
+        access=str(mount["access"]),
+        denied_paths=tuple(Path(str(path)) for path in mount["denied_paths"]),
+        owner=str(mount["owner"]),
+    )
 
 
 def _deserialize_launch(config: dict[str, Any]) -> SandboxLaunch:
@@ -224,6 +253,8 @@ def _deserialize_launch(config: dict[str, Any]) -> SandboxLaunch:
                 None if config["memory_max"] is None else int(config["memory_max"])
             ),
             pids_max=None if config["pids_max"] is None else int(config["pids_max"]),
+            # State directories provisioned before live shares have no mount.
+            mount=_deserialize_mount(config.get("mount")),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ScriptError("sandbox configuration is malformed") from error

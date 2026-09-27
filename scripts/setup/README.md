@@ -43,7 +43,9 @@ On Linux, omit `--runner-name` to prepare host dependencies without reconciling
 an existing runner's service or cache directory. Pass its name in a subsequent
 invocation to update the service; `--check-only` still validates runner state.
 Rustup bootstrap binaries are versioned and SHA-256 verified before execution;
-Linux provisioning also installs `zstd` for native Actions cache archives.
+Linux provisioning also installs `zstd` for native Actions cache archives and
+`e2fsprogs` for the scratch image that the sandbox live-share microVM test
+formats.
 Both runner setup scripts install a pinned, SHA-256-verified `sccache` binary.
 Runner services use a persistent `_work/_sccache` directory with a 10-GiB
 limit, disable Cargo incremental compilation, and expose `sccache` through

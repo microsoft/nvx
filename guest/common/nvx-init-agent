@@ -126,6 +126,60 @@ mount_layer() {
     fi
 }
 
+# Mounts the optional live virtio-fs share inside the container root. The
+# workload cannot mount it itself because it runs without capabilities, and a
+# mount below the overlay survives the private mount namespace and chroot.
+mount_virtfs_share() {
+    virtfs_tag=$(cmdline_value virtfs_tag || true)
+    [ -n "$virtfs_tag" ] || return 0
+    [ "$virtfs_tag" = microvm ] || fatal "unexpected virtio-fs tag: $virtfs_tag"
+    virtfs_dir=$(cmdline_value virtfs_dir || true)
+    virtfs_mode=$(cmdline_value virtfs_mode || true)
+    case "$virtfs_mode" in
+        ro | rw) ;;
+        *) fatal "invalid virtio-fs mode: $virtfs_mode" ;;
+    esac
+    case "$virtfs_dir" in
+        /*) ;;
+        *) fatal "virtio-fs target must be an absolute path: $virtfs_dir" ;;
+    esac
+    # The appended slash also catches the root and trailing dot components.
+    case "$virtfs_dir/" in
+        *//* | */./* | */../*)
+            fatal "virtio-fs target is not a canonical path: $virtfs_dir"
+            ;;
+        /proc/* | /sys/* | /dev/* | /.nvx-agent/* | /etc/ | /etc/machine-id/)
+            fatal "virtio-fs target is reserved by the sandbox: $virtfs_dir"
+            ;;
+    esac
+
+    # Nothing else runs yet, so checking and creating each component in turn
+    # cannot race with an image symlink that redirects the mount outside the
+    # container root.
+    virtfs_path=$rootfs
+    virtfs_remainder=${virtfs_dir#/}
+    while [ -n "$virtfs_remainder" ]; do
+        virtfs_component=${virtfs_remainder%%/*}
+        case "$virtfs_remainder" in
+            */*) virtfs_remainder=${virtfs_remainder#*/} ;;
+            *) virtfs_remainder= ;;
+        esac
+        virtfs_path=$virtfs_path/$virtfs_component
+        [ ! -L "$virtfs_path" ] ||
+            fatal "virtio-fs target traverses a symbolic link: $virtfs_dir"
+        if [ ! -e "$virtfs_path" ]; then
+            mkdir -m 0755 "$virtfs_path" ||
+                fatal "failed to create virtio-fs target: $virtfs_dir"
+        fi
+        [ -d "$virtfs_path" ] && [ ! -L "$virtfs_path" ] ||
+            fatal "virtio-fs target is not a directory: $virtfs_dir"
+    done
+    mount -t virtiofs -o "$virtfs_mode,nosuid,nodev" "$virtfs_tag" "$virtfs_path" ||
+        fatal "failed to mount the virtio-fs share at $virtfs_dir"
+    virtfs_target=$virtfs_path
+    echo "NVX-SANDBOX-VIRTFS: mounted $virtfs_tag at $virtfs_dir ($virtfs_mode)"
+}
+
 mkdir -p "$layers" "$scratch" "$rootfs"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs /run ||
     fatal "failed to mount runtime tmpfs"
@@ -208,6 +262,8 @@ mkdir -p "$scratch/upper" "$scratch/work"
 mount -t overlay overlay \
     -o "lowerdir=$lowerdirs,upperdir=$scratch/upper,workdir=$scratch/work,metacopy=on,xino=on" \
     "$rootfs" || fatal "failed to assemble the container overlay"
+virtfs_target=
+mount_virtfs_share
 
 entrypoint=$(cmdline_value nvx_entrypoint || true)
 [ -n "$entrypoint" ] || entrypoint=/bin/sh
@@ -291,6 +347,10 @@ echo "NVX-SANDBOX-READY: pid=$container_pid layers=$layer_count"
 status=0
 wait "$container_pid" || status=$?
 rm -f "$runtime/container.pid" "$runtime/workload-machine-id"
+if [ -n "$virtfs_target" ] && ! umount "$virtfs_target"; then
+    echo "NVX-SANDBOX-ERROR: failed to unmount the virtio-fs share" >&2
+    status=1
+fi
 if ! umount "$rootfs"; then
     echo "NVX-SANDBOX-ERROR: failed to unmount the container overlay" >&2
     status=1

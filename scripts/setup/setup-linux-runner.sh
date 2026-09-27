@@ -402,14 +402,14 @@ install_packages() {
         run_as_root apt-get update
         run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc binutils bison build-essential ca-certificates cmake cpio curl diffutils \
-            flex git gzip iproute2 iptables \
+            e2fsprogs flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
             pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
             zstd
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
             bc binutils bison ca-certificates cmake cpio curl diffutils \
-            elfutils-libelf-devel findutils flex gcc \
+            e2fsprogs elfutils-libelf-devel findutils flex gcc \
             gcc-c++ git glibc-devel glibc-iconv gzip icu iproute iptables \
             kernel-headers libarchive libarchive-devel lttng-ust make \
             ninja-build openssl openssl-devel patch perl perl-FindBin \
@@ -419,7 +419,7 @@ install_packages() {
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
             bc binutils bison ca-certificates cmake cpio curl diffutils \
-            elfutils-libelf-devel findutils flex gcc gcc-c++ git glibc-devel \
+            e2fsprogs elfutils-libelf-devel findutils flex gcc gcc-c++ git glibc-devel \
             gzip iproute iptables kernel-headers libarchive libarchive-devel \
             make ninja-build openssl openssl-devel patch perl \
             pkgconf pkgconf-pkg-config protobuf-compiler python3 rsync \

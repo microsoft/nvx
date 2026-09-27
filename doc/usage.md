@@ -200,11 +200,15 @@ python3 scripts/nvx.py test-microvm
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
 it, every scenario supported by the selected guest runs. Alpine remains the
-default. Ubuntu rejects the Alpine-control-only `sandbox-blocks` and
-`scratch-snapshot` scenarios, the Alpine-prompt-specific `console-snapshot`
-scenario, and the sandbox-control-dependent `snapshot-tiers` scenario. The
-command requires `build/vmlinux`, the selected initramfs, and
-`openvmm/target/release/openvmm[.exe]`.
+default. Ubuntu rejects the Alpine-control-only `sandbox-blocks`,
+`sandbox-filesystem`, and `scratch-snapshot` scenarios, the
+Alpine-prompt-specific `console-snapshot` scenario, and the
+sandbox-control-dependent `snapshot-tiers` scenario. The command requires
+`build/vmlinux`, the selected initramfs, and
+`openvmm/target/release/openvmm[.exe]`. The `sandbox-filesystem` scenario also
+requires `build/ubuntu-distro.erofs` and its manifest. On Linux it formats its
+scratch image with `mkfs.ext4`; on Windows it copies
+`build/ubuntu-smoke-scratch.ext4`.
 
 ### `test-adversarial`
 
@@ -296,6 +300,8 @@ python3 scripts/nvx.py run
     [--memory-capacity-mib MIB]
     [--processors {1,2,4,8}]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
+    [--mount-deny HOST_PATH]...
+    [--mount-owner {process,caller}]
     [--net IPV4/PREFIX]
     [--network-profile {portable}]
     [--network-egress {allow,deny}]
@@ -322,6 +328,8 @@ python3 scripts/nvx.py run
 | `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target. Active snapshot restore requires the same canonical path, target, and mode; a dormant-slot restore may attach a new mapping that the resumed guest mounts explicitly. |
+| `--mount-deny HOST_PATH` | none | Hide an existing path inside the `--mount` export. Repeat for multiple paths; relative paths are resolved against the export root. |
+| `--mount-owner {process,caller}` | OpenVMM default (`process`) | Select the host identity for guest requests on `--mount`. `caller` is Linux-only; see [virtio-fs host mapping](run.md#virtio-fs-host-mapping). |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net`. |
 | `--network-egress {allow,deny}` | `allow` | Set the default guest egress policy. |
@@ -354,6 +362,9 @@ python3 scripts/nvx.py sandbox
     [--hostname NAME]
     [--memory-max BYTES]
     [--pids-max COUNT]
+    [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
+    [--mount-deny HOST_PATH]...
+    [--mount-owner {process,caller}]
     [--memory-mib MIB]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--net IPV4/PREFIX]
@@ -371,6 +382,9 @@ python3 scripts/nvx.py sandbox
 | `--hostname NAME` | `nvx-sandbox` | Set the workload UTS hostname. |
 | `--memory-max BYTES` | none | Set the workload cgroup memory limit. |
 | `--pids-max COUNT` | none | Set the workload cgroup process limit. |
+| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Live-share one host directory at the absolute target inside the workload root; valid for `run` and `provision`. The target cannot be `/etc`, `/etc/machine-id`, or a path under `/proc`, `/sys`, `/dev`, or `/.nvx-agent`. |
+| `--mount-deny HOST_PATH` | none | Hide an existing path inside the export. Repeat for multiple paths; relative paths are resolved against the export root. |
+| `--mount-owner {process,caller}` | `caller` on Linux, `process` on Windows | Select the host identity for workload requests on the share. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with a static guest address. |

@@ -111,6 +111,7 @@ fi
 mount_virtfs() {
     /sbin/nvx-hostmount || fatal "virtfs: failed to mount live host directory"
 }
+# The sandbox agent mounts the share inside the container root instead.
 if [ "$sandbox_mode" = false ]; then
     mount_virtfs
 fi

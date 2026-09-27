@@ -252,7 +252,9 @@ backing and are onlined before restore readiness.
 ## virtio-fs host mapping
 
 The microVM reserves one mapping slot with a fixed `microvm` tag. On a cold
-boot with `--mount`, the initramfs mounts it automatically:
+boot with `--mount`, the initramfs mounts it automatically. In the sandbox
+profile, the agent instead mounts it inside the workload root; see
+[Live host share in the sandbox](#live-host-share-in-the-sandbox):
 
 ```bash
 python3 scripts/nvx.py run --mount "/mnt/host,/absolute/host/share,rw"
@@ -282,6 +284,44 @@ already completed:
 mkdir -p /mnt/host
 mount -t virtiofs microvm /mnt/host
 ```
+
+The share is live host state with no guest caching: entry and attribute cache
+lifetimes are zero and file I/O is direct. Host and guest changes are visible to
+the other side immediately. In exchange, every path lookup is a round trip to
+the host, which metadata-heavy workloads such as package installs will notice.
+Files appear exactly as they are on the host, and NVX strips nothing from a live
+share. Hide credentials and other sensitive paths with `--mount-deny`. The
+device adds no network path, so the network and egress policy are unchanged.
+
+By default, OpenVMM performs every guest request as its own host identity, so
+guest-created files are owned by the OpenVMM user. On Linux,
+`--mount-owner caller` performs each request as the guest caller's UID and GID
+instead, and maps guest root to the owner of the export root:
+
+```bash
+python3 scripts/nvx.py run --mount "/mnt/host,/absolute/host/share,rw" \
+  --mount-owner caller
+```
+
+Caller mode rejects an export root owned by UID 0 or GID 0. Each request runs
+without OpenVMM's supplementary groups and effective capabilities, so a
+privileged OpenVMM process cannot lend the guest its privileges. OpenVMM must
+run as the export owner or hold `CAP_SETUID` and `CAP_SETGID`. Without those
+capabilities, only requests from OpenVMM's own identity, including guest root,
+succeed, and they keep OpenVMM's supplementary groups; any other caller gets
+`EPERM`. Supplementary groups of the guest caller are not propagated. Because
+the guest names the caller, guest root can act as any non-root host user inside
+the export. Grant the capabilities only for exports that hold no other users'
+files. Windows rejects `--mount-owner caller`: files are created by the OpenVMM
+user, and the guest sees attributes derived from that user's access. The owner
+mode is host policy rather than snapshot state, so a restore selects it again.
+
+The microVM has exactly one share, with a single access mode. For example, a
+read-write workspace and a read-only tool cache cannot be exported as two
+shares. A second share would need a new microVM ABI version. Guest creation of
+symbolic links returns `ENOTSUP`, so tools that create links, such as
+`npm ci` with `node_modules/.bin`, must run in scratch rather than in the
+share. Existing host symbolic links are visible and are resolved by the guest.
 
 ## Experimental single-workload sandbox
 
@@ -335,6 +375,58 @@ root; otherwise the workload is never started.
 The outer agent retains the initramfs root; the capability-stripped child
 enters only the assembled root with `chroot`, because Linux cannot
 `pivot_root` away from an initramfs `rootfs`.
+
+### Live host share in the sandbox
+
+Add `--mount GUEST_TARGET,HOST_PATH[,ro|rw]` to `sandbox run` or
+`sandbox provision` to live-share one host directory with the workload:
+
+```bash
+python3 scripts/nvx.py sandbox \
+  --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
+  --scratch /var/lib/nvx/scratch.ext4 \
+  --workload-user 1001:1001 \
+  --mount /workspace,/home/runner/work/repo,rw \
+  --mount-deny /home/runner/work/repo/.secrets
+```
+
+After it assembles the overlay, and before it starts any workload, the agent
+mounts the share at `GUEST_TARGET` inside the workload root with the selected
+mode and `nosuid,nodev`. The mount lives below the overlay, so it survives the
+workload's private mount namespace and `chroot`. The workload itself still has
+no capabilities, so it cannot mount or unmount the share. The share exists only
+in the workload root; the agent does not mount it anywhere else. A one-shot
+agent unmounts it before the overlay. The agent fails closed with
+`NVX-SANDBOX-ERROR` and status 125, never starting the workload, if any of
+these holds:
+
+- the target is not canonical;
+- the target is `/etc` or `/etc/machine-id`, or lies under `/proc`, `/sys`,
+  `/dev`, or `/.nvx-agent`, all of which the agent manages;
+- a component of the target in the image is a symbolic link or a
+  non-directory;
+- the mount fails.
+
+Missing target components are created as root-owned `0755` directories in
+scratch. The marker `NVX-SANDBOX-VIRTFS: mounted microvm at GUEST_TARGET (MODE)`
+reports a successful mount. Without `--mount`, the sandbox is unchanged.
+
+The workload accesses the share as its fixed `--workload-user` identity. The
+guest kernel checks access against the host owners and modes, so choose the
+identity that owns the exported directory, such as the runner user; the image
+must define that user, as for any `--workload-user`. On Linux, the command
+passes `--mount-owner caller` by default. OpenVMM then performs workload
+requests as that identity and agent requests as the export owner, so with an
+identity that owns the export, every file the workload creates on the share is
+owned by that host user. The export root must not be owned by UID 0 or GID 0.
+OpenVMM must run as the export owner or hold `CAP_SETUID` and `CAP_SETGID`;
+otherwise the workload's share requests fail with `EPERM`. Use
+`--mount-owner process` to perform every request as the OpenVMM process
+instead. Windows supports only `process`. A
+read-only share rejects workload writes with `EROFS`. `--mount-deny` paths stay
+hidden inside the container. The policy, caching, and link limits in
+[virtio-fs host mapping](#virtio-fs-host-mapping) apply unchanged. A sandbox
+snapshot restore does not mount a newly attached share for the workload.
 
 For a state-aware sandbox, provision configuration without starting a VM,
 start it once, run multiple workloads in the same warm guest, stop it while

@@ -18,8 +18,22 @@ The current ABI family intentionally does not provide:
 - public activation of the reserved control console or an authenticated guest RPC broker;
 - replaceable sandbox configuration, a production OCI agent, or a public sandbox snapshot workflow;
 - serialization of live network flows or native host handles;
-- snapshotting of the contents of a live virtio-fs export; or
+- snapshotting of the contents of a live virtio-fs export;
+- more than one virtio-fs share, or different access modes within one share;
+- guest creation of symbolic links on the live virtio-fs share;
+- caller-owned virtio-fs requests on Windows, or propagation of the guest
+   caller's supplementary groups;
+- mounting a restore-time virtio-fs attachment inside a sandbox workload root; or
 - compatibility with standalone NVX `MVMSNAP*` or `WHPSNAP*` files.
+
+Sandbox mode does support the live virtio-fs share on a cold boot. The agent
+mounts it inside the workload root with `nosuid,nodev`, rejects targets that it
+manages or that traverse an image symbolic link, and fails closed if the mount
+fails. `--mount-deny` and read-only mode are enforced by the host server as in
+the standard profile. With `--mount-owner caller`, Linux hosts perform each
+request as the guest caller, map guest root to the export owner, and fail
+requests that cannot switch identity with `EPERM`. See
+[Live host share in the sandbox](../run.md#live-host-share-in-the-sandbox).
 
 The tier contract and post-restore gate are currently low-level OpenVMM and
 guest-agent primitives exercised by the native lifecycle suite. The public

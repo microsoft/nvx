@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import queue
 import shutil
 import socket
@@ -1606,6 +1607,237 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests.SANDBOX_BLOCKS_COMPLETION_MARKER,
         )
 
+    def test_sandbox_filesystem_scripts_check_the_share_before_success(self):
+        writable = microvm_tests._render_script(
+            "sandbox-filesystem.sh.in",
+            TARGET=microvm_tests.SANDBOX_FILESYSTEM_TARGET,
+            IDENTITY="1001:1001",
+            OWNER_CHECK='chmod 0600 "$share/guest-file" || fail 50',
+        )
+        read_only = microvm_tests._render_script(
+            "sandbox-filesystem-read-only.sh.in",
+            TARGET=microvm_tests.SANDBOX_FILESYSTEM_TARGET,
+        )
+        for script in (writable, read_only):
+            self.assertNotIn("@", script)
+            self.assertIn("share=/workspace\n", script)
+        self.assertIn('[ "$(id -u):$(id -g)" = 1001:1001 ]', writable)
+        self.assertLess(
+            writable.index("fail 50"),
+            writable.index(microvm_tests.SANDBOX_FILESYSTEM_WRITTEN_MARKER.decode()),
+        )
+        self.assertLess(
+            writable.index("fail 52"),
+            writable.index(microvm_tests.SANDBOX_FILESYSTEM_OK_MARKER.decode()),
+        )
+        self.assertLess(
+            read_only.index("fail 68"),
+            read_only.index(microvm_tests.SANDBOX_FILESYSTEM_READ_ONLY_MARKER.decode()),
+        )
+
+    def _run_sandbox_filesystem(
+        self,
+        root: Path,
+        outputs: dict[str, tuple[int, bytes]],
+    ) -> list[list[str]]:
+        layer = root / "ubuntu-distro.erofs"
+        layer.write_bytes(b"layer")
+        (root / "ubuntu-distro.erofs.manifest.json").write_text(
+            json.dumps({"uuid": "11111111-1111-1111-1111-111111111111"}),
+            encoding="utf-8",
+        )
+        output_dir = root / "logs"
+        output_dir.mkdir()
+        identity: tuple[tuple[int, int], str]
+        if sys.platform == "win32":
+            identity = ((65534, 65534), "process")
+        else:
+            identity = ((os.getuid(), os.getgid()), "caller")
+        commands: list[list[str]] = []
+
+        def scratch(scratch_root: Path, _identity: tuple[int, int]) -> Path:
+            template = scratch_root / "scratch-template.ext4"
+            template.write_bytes(b"scratch")
+            return template
+
+        def artifact(name: str) -> Path:
+            return root / name
+
+        class FakeProcess:
+            def __init__(self, command: list[str], _log_path: Path) -> None:
+                commands.append(command)
+                mount = command[command.index("--mount") + 1].split(",")
+                self.target = mount[0]
+                self.export = Path(mount[1])
+                self.access = mount[2]
+                probe = (self.export / "probe.sh").read_text(encoding="utf-8")
+                chmod = 'chmod 0600 "$share/guest-file" || fail 50\n'
+                caller_owned = cast(str, identity[1]) == "caller"
+                if (chmod in probe) != caller_owned:
+                    raise AssertionError("probe chmod does not match the owner mode")
+
+            def __enter__(self) -> "FakeProcess":
+                return self
+
+            def __exit__(self, *_arguments: object) -> None:
+                return None
+
+            def wait_for_line(self, marker: bytes, _timeout: float) -> None:
+                if marker == microvm_tests.SANDBOX_FILESYSTEM_WRITTEN_MARKER:
+                    (self.export / "guest-dir").mkdir()
+                    (self.export / "guest-dir" / "nested").write_bytes(
+                        b"NVX-GUEST-NESTED\n"
+                    )
+                    (self.export / "guest-file").write_bytes(b"NVX-GUEST-WRITE\n")
+                    os.chmod(self.export / "guest-file", 0o600)
+                elif marker == microvm_tests.SANDBOX_FILESYSTEM_OK_MARKER:
+                    if (self.export / "host-edit").read_bytes() != b"NVX-HOST-EDIT\n":
+                        raise AssertionError("host edit was not staged")
+
+            def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
+                command = commands[-1]
+                if "--microvm-report" in command:
+                    Path(command[command.index("--microvm-report") + 1]).write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "instance_id": "0" * 32,
+                                "backend": "whp",
+                                "outcome": {
+                                    "operation": "run",
+                                    "category": "success",
+                                    "status_code": 0,
+                                },
+                                "network_policy": {
+                                    "status": "not-configured",
+                                    "status_code": 0,
+                                    "mode": "none",
+                                    "allow_rule_count": 0,
+                                    "deny_rule_count": 0,
+                                    "host_loopback": "allow",
+                                },
+                                "teardown": dict.fromkeys(
+                                    microvm_tests.OUTCOME_TEARDOWN_FIELDS, True
+                                ),
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                returncode, output = outputs[f"{self.target},{self.access}"]
+                return openvmm_process.OpenvmmProcessResult(returncode, output)
+
+        with (
+            patch.object(microvm_tests, "artifact_path", side_effect=artifact),
+            patch.object(
+                microvm_tests,
+                "_sandbox_filesystem_identity",
+                return_value=identity,
+            ),
+            patch.object(microvm_tests, "_assign_sandbox_export_owner"),
+            patch.object(
+                microvm_tests,
+                "_sandbox_filesystem_scratch",
+                side_effect=scratch,
+            ),
+            patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
+        ):
+            microvm_tests.run_sandbox_filesystem(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                memory_mib=128,
+                timeout=60,
+                output_dir=output_dir,
+            )
+        self.assertTrue((output_dir / "sandbox-filesystem.json").is_file())
+        return commands
+
+    def _sandbox_filesystem_outputs(self) -> dict[str, tuple[int, bytes]]:
+        return {
+            "/workspace,rw": (
+                0,
+                b"NVX-SANDBOX-VIRTFS: mounted microvm at /workspace (rw)\n"
+                b"NVX-SANDBOX-FILESYSTEM-WRITTEN\n"
+                b"NVX-SANDBOX-FILESYSTEM-OK\n"
+                b"NVX-SANDBOX-EXIT: status=0\n",
+            ),
+            "/workspace,ro": (
+                0,
+                b"NVX-SANDBOX-VIRTFS: mounted microvm at /workspace (ro)\n"
+                b"NVX-SANDBOX-FILESYSTEM-READ-ONLY-OK\n"
+                b"NVX-SANDBOX-EXIT: status=0\n",
+            ),
+            "/dev/nvx-share,ro": (
+                125,
+                b"NVX-SANDBOX-ERROR: virtio-fs target is reserved by the sandbox: "
+                b"/dev/nvx-share\n",
+            ),
+            "/bin/nvx-share,ro": (
+                125,
+                b"NVX-SANDBOX-ERROR: virtio-fs target traverses a symbolic link: "
+                b"/bin/nvx-share\n",
+            ),
+        }
+
+    def test_sandbox_filesystem_checks_live_share_policy_and_rejections(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            commands = self._run_sandbox_filesystem(
+                Path(temporary), self._sandbox_filesystem_outputs()
+            )
+
+        self.assertEqual(
+            [
+                command[command.index("--mount") + 1].split(",")[0]
+                for command in commands
+            ],
+            ["/workspace", "/workspace", "/dev/nvx-share", "/bin/nvx-share"],
+        )
+        expected_owner = "process" if sys.platform == "win32" else "caller"
+        for command, access in zip(commands[:2], ("rw", "ro"), strict=True):
+            self.assertTrue(command[command.index("--mount") + 1].endswith(access))
+            self.assertTrue(
+                command[command.index("--mount-deny") + 1].endswith("secrets")
+            )
+            self.assertEqual(
+                command[command.index("--mount-owner") + 1], expected_owner
+            )
+            self.assertEqual(command[command.index("--memory") + 1], "256M")
+            self.assertEqual(
+                command[command.index("--microvm-lifecycle") + 1], "one-shot"
+            )
+            cmdline = command[command.index("--cmdline") + 1]
+            self.assertIn("nvx_sandbox=1", cmdline)
+            self.assertIn("nvx_entrypoint=/bin/sh", cmdline)
+        self.assertIn(
+            "nvx_arg=/workspace/probe.sh",
+            commands[0][commands[0].index("--cmdline") + 1],
+        )
+        self.assertIn("--microvm-report", commands[0])
+        for command in commands[2:]:
+            self.assertNotIn("--mount-owner", command)
+            self.assertNotIn("--mount-deny", command)
+
+    def test_sandbox_filesystem_rejects_an_accepted_unsafe_target(self):
+        outputs = self._sandbox_filesystem_outputs()
+        outputs["/bin/nvx-share,ro"] = (0, b"NVX-SANDBOX-READY: pid=2 layers=1\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(RuntimeError, "did not reject the symlink"):
+                self._run_sandbox_filesystem(Path(temporary), outputs)
+
+    def test_sandbox_filesystem_requires_live_visibility_while_running(self):
+        outputs = self._sandbox_filesystem_outputs()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests,
+                "_check_sandbox_filesystem_writes",
+                side_effect=RuntimeError("not visible"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "not visible"),
+        ):
+            self._run_sandbox_filesystem(Path(temporary), outputs)
+
     def test_smp_snapshot_reruns_probe_and_checks_two_restores(self):
         with tempfile.TemporaryDirectory() as temporary:
             output_dir = Path(temporary) / "logs"
@@ -2029,6 +2261,7 @@ class MicrovmTests(unittest.TestCase):
         for scenario in (
             "console-snapshot",
             "sandbox-blocks",
+            "sandbox-filesystem",
             "scratch-snapshot",
             "snapshot-tiers",
         ):

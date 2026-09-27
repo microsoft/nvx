@@ -59,14 +59,14 @@ install_packages() {
         run_as_root apt-get update
         run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc binutils bison build-essential ca-certificates cmake cpio curl \
-            docker-buildx docker.io flex git gzip iproute2 iptables \
+            docker-buildx docker.io e2fsprogs flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
             pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
             zstd
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
             bc binutils bison ca-certificates cmake cpio curl diffutils \
-            docker-buildx docker-cli elfutils-libelf-devel findutils flex gcc \
+            docker-buildx docker-cli e2fsprogs elfutils-libelf-devel findutils flex gcc \
             gcc-c++ git glibc-devel glibc-iconv gzip iproute iptables \
             kernel-headers libarchive libarchive-devel make moby-engine \
             ninja-build openssl openssl-devel patch perl perl-FindBin \
@@ -76,7 +76,7 @@ install_packages() {
         run_as_root tdnf install -y docker-cli
     elif command -v dnf >/dev/null 2>&1; then
         run_as_root dnf install -y \
-            bc binutils bison ca-certificates cmake cpio curl elfutils-libelf-devel \
+            bc binutils bison ca-certificates cmake cpio curl e2fsprogs elfutils-libelf-devel \
             findutils flex gcc gcc-c++ git glibc-devel gzip iproute iptables \
             kernel-headers libarchive libarchive-devel make moby-engine \
             ninja-build openssl openssl-devel patch perl pkgconf \

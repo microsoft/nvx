@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID
 
@@ -24,6 +24,18 @@ SANDBOX_COMMAND_LINE_MAX_SIZE = (
 )
 _HOSTNAME = re.compile(r"(?=^.{1,63}$)(?!-)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 DEFAULT_WORKLOAD_IDENTITY = (65534, 65534)
+MOUNT_ACCESS_MODES = ("ro", "rw")
+MOUNT_OWNERS = ("process", "caller")
+MOUNT_DENIED_PATHS_MAX = 128
+# Targets that the sandbox agent itself mounts or rewrites inside the container.
+_RESERVED_MOUNT_TREES = ("/proc", "/sys", "/dev", "/.nvx-agent")
+_RESERVED_MOUNT_TARGETS = ("/etc", "/etc/machine-id")
+_INVALID_MOUNT_TARGET_CHARACTERS = frozenset("\0\\=,")
+
+
+def default_mount_owner() -> str:
+    """Returns the host identity used for sandbox mounts on this host."""
+    return "process" if os.name == "nt" else "caller"
 
 
 def parse_workload_identity(value: str) -> tuple[int, int]:
@@ -67,6 +79,108 @@ class SandboxLayer:
 
 
 @dataclass(frozen=True)
+class SandboxMount:
+    """Live host directory mounted inside the sandbox workload root."""
+
+    guest_target: str
+    host_path: Path
+    access: str = "ro"
+    denied_paths: tuple[Path, ...] = ()
+    owner: str = "process"
+
+    @classmethod
+    def parse(
+        cls,
+        value: str,
+        *,
+        denied_paths: tuple[Path, ...] = (),
+        owner: str | None = None,
+    ) -> SandboxMount:
+        fields = value.split(",")
+        if len(fields) not in (2, 3):
+            raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
+        guest_target, raw_path = fields[:2]
+        if not raw_path:
+            raise ScriptError("--mount host path is empty")
+        return cls(
+            guest_target=guest_target,
+            host_path=Path(raw_path),
+            access=fields[2] if len(fields) == 3 else "ro",
+            denied_paths=denied_paths,
+            owner=default_mount_owner() if owner is None else owner,
+        )
+
+    def __post_init__(self) -> None:
+        target = self.guest_target
+        components = target.split("/")[1:]
+        if (
+            not target.startswith("/")
+            or target == "/"
+            or any(component in ("", ".", "..") for component in components)
+            or any(character.isspace() for character in target)
+            or not _INVALID_MOUNT_TARGET_CHARACTERS.isdisjoint(target)
+        ):
+            raise ScriptError(
+                "--mount guest target must be a canonical absolute path without "
+                f"whitespace, backslashes, commas, or '=': {target!r}"
+            )
+        if target in _RESERVED_MOUNT_TARGETS or any(
+            target == tree or target.startswith(f"{tree}/")
+            for tree in _RESERVED_MOUNT_TREES
+        ):
+            raise ScriptError(
+                f"--mount guest target is reserved by the sandbox: {target}"
+            )
+        if self.access not in MOUNT_ACCESS_MODES:
+            raise ScriptError(f"--mount mode must be ro or rw, not {self.access!r}")
+        if self.owner not in MOUNT_OWNERS:
+            raise ScriptError(f"unsupported --mount-owner {self.owner!r}")
+        if self.owner == "caller" and os.name == "nt":
+            raise ScriptError("--mount-owner caller requires a Linux host")
+        if len(self.denied_paths) > MOUNT_DENIED_PATHS_MAX:
+            raise ScriptError(
+                f"--mount-deny accepts at most {MOUNT_DENIED_PATHS_MAX} paths"
+            )
+        if "," in os.fspath(self.host_path):
+            raise ScriptError(
+                f"--mount host paths containing commas are unsupported: {self.host_path}"
+            )
+
+    def validated(self) -> SandboxMount:
+        if not self.host_path.is_dir():
+            raise ScriptError(
+                f"--mount host directory does not exist: {self.host_path}"
+            )
+        for denied in self.denied_paths:
+            # OpenVMM resolves relative denied paths against the export root.
+            candidate = denied if denied.is_absolute() else self.host_path / denied
+            if not os.path.lexists(candidate):
+                raise ScriptError(f"--mount-deny path does not exist: {candidate}")
+        return self
+
+    def resolved(self) -> SandboxMount:
+        """Returns the mount with an absolute export root for later launches."""
+        return replace(self, host_path=self.host_path.resolve())
+
+    def openvmm_arguments(self) -> list[str]:
+        arguments = [
+            "--mount",
+            f"{self.guest_target},{os.fspath(self.host_path)},{self.access}",
+        ]
+        for denied in self.denied_paths:
+            arguments.extend(("--mount-deny", os.fspath(denied)))
+        arguments.extend(("--mount-owner", self.owner))
+        return arguments
+
+    def command_line_fragment(self) -> str:
+        """Returns the bootstrap tokens that OpenVMM appends for this mount."""
+        return (
+            f"virtfs_dir={self.guest_target} virtfs_tag=microvm "
+            f"virtfs_mode={self.access}"
+        )
+
+
+@dataclass(frozen=True)
 class SandboxLaunch:
     layers: tuple[SandboxLayer, ...]
     scratch: Path
@@ -76,6 +190,7 @@ class SandboxLaunch:
     workload_identity: tuple[int, int] = DEFAULT_WORKLOAD_IDENTITY
     memory_max: int | None = None
     pids_max: int | None = None
+    mount: SandboxMount | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.layers) <= len(LAYER_ROLES):
@@ -117,6 +232,8 @@ class SandboxLaunch:
             _reject_disk_path(layer.path)
         require_file(self.scratch, "ext4 scratch image")
         _reject_disk_path(self.scratch)
+        if self.mount is not None:
+            self.mount.validated()
         return self
 
     def ordered_layers(self) -> tuple[SandboxLayer, ...]:
@@ -140,6 +257,8 @@ class SandboxLaunch:
                 f"{self.workload_identity[0]}:{self.workload_identity[1]}",
             )
         )
+        if self.mount is not None:
+            arguments.extend(self.mount.openvmm_arguments())
         return arguments
 
     def kernel_command_line(self, user_command_line: str = "") -> str:
@@ -169,7 +288,14 @@ class SandboxLaunch:
         if self.pids_max is not None:
             tokens.append(f"nvx_pids_max={self.pids_max + 1}")
         command_line = " ".join(token for token in tokens if token)
-        if len(command_line.encode("utf-8")) + 1 > SANDBOX_COMMAND_LINE_MAX_SIZE:
+        # OpenVMM appends the share's bootstrap tokens to the same x86 budget.
+        mount_tokens = (
+            "" if self.mount is None else f" {self.mount.command_line_fragment()}"
+        )
+        if (
+            len(command_line.encode("utf-8")) + len(mount_tokens.encode("utf-8")) + 1
+            > SANDBOX_COMMAND_LINE_MAX_SIZE
+        ):
             raise ScriptError(
                 "sandbox kernel command line exceeds its 1024-byte x86 budget"
             )
