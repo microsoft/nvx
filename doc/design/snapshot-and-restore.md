@@ -310,14 +310,15 @@ Restore proceeds in the opposite direction from capture:
     exact post-write boundary, release input, and only then let the guest
     continue.
 
-Restore recreates each listener attachment at its captured endpoint with the
-saved stable ID, attachment kind, backend kind, reconnect policy, required
-flag, length, and timeout; any restore-time attachment the caller supplies
-must match that saved identity exactly. A committed source removes the sockets
-it created so that a later restore can bind the same endpoints. Restores of
-one snapshot therefore share its listener endpoints, and per-restore endpoint
-relocation is not implemented. An authenticated control listener also requires
-an explicitly approved restore-time attachment with a fresh capability.
+Listener attachments preserve their stable attachment ID, attachment kind,
+backend kind, reconnect policy, required flag, length, and timeout. Restore
+callers may rebind an eligible listener to a fresh same-kind endpoint. When an
+ordinary `recreate-listener` replacement is omitted, OpenVMM reconstructs the
+captured pathname; an authenticated control listener still requires an
+explicitly approved restore-time attachment with a fresh capability.
+Reusable-clone orchestrators must supply fresh private boot-console and
+authenticated control-listener paths so independent or concurrent restores do
+not collide with the terminated source generation.
 
 An orchestrator may supply a single-use readiness endpoint: an existing Unix
 socket on Linux or named pipe on Windows. OpenVMM connects to it before the

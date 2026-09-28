@@ -197,12 +197,13 @@ retains pending guest output until a client connects. The snapshot records the
 attachment's stable ID, canonical endpoint identity, reconnect policy,
 requiredness, and timeout. For a snapshot-capable machine, Unix sockets live
 beside the snapshot directory and Windows pipes use OpenVMM's fixed microVM
-pipe namespace. Restore recreates a listener at its captured endpoint. Client
-reconnects require an explicitly approved restore-time attachment and have a
-five-second timeout; inherited attachments must also be supplied again rather
-than serialized. Any supplied restore-time attachment must match the saved one
-exactly. After a committed capture, the source removes the socket it created
-so that the restored process can bind the same path.
+pipe namespace. A saved listener may be recreated at a fresh private
+restore-time endpoint, but its stable attachment ID, attachment kind, backend
+kind, reconnect policy, required flag, length, and timeout remain exact.
+Client reconnects retain their exact saved identity, require an explicitly
+approved restore-time attachment, and have a five-second timeout; inherited
+attachments must also be supplied again rather than serialized. Disconnected
+attachments remain disconnected.
 
 ### Control console
 
