@@ -29,6 +29,28 @@ An instance checkpoint has one claimed continuation. Its single-use rule
 prevents accidental forks but does not replace artifact confidentiality,
 retention policy, or protection against host-side copying.
 
+## Snapshot identity and admission
+
+The common trusted-storage path identifies a sealed snapshot by its immutable
+storage generation, artifact roles, exact sizes, and block geometry. The
+generation must be authenticated by the publisher or storage control plane and
+bound to the exact immutable object versions. Restore compares that metadata;
+it does not reread every logical byte merely to reconstruct a content digest.
+
+Whole-file SHA-256 remains an optional diagnostic, export, deduplication, or
+deep-verification identity. If an external transport supplies SHA-256, compute
+it inline while downloading rather than as a second local-disk pass. Azure
+Blob ETag or version ID can identify the immutable object version, but Blob
+does not provide a server-generated SHA-256; publisher metadata must bind any
+SHA-256 to that exact version. Upload payloads first and commit the manifest
+last.
+
+External bytes are an unverified import candidate until admitted. A sealed
+snapshot is immutable. A clone creates a separate writable descendant, while
+a resume atomically claims the snapshot and transfers its continuation into a
+live instance. The claimed continuation is no longer an available snapshot;
+there is no mutable-snapshot state.
+
 ## Independent backing files (Proposed)
 
 Per-tenant instantiation can separate file-backed page caches while retaining

@@ -3504,6 +3504,27 @@ echo {repair_marker}"""
     )
 
 
+def _snapshot_storage_policy(tier: str) -> tuple[str, ...]:
+    if tier == "platform":
+        return ()
+    if tier == "workload-start":
+        generation = "00112233445566778899aabbccddee01"
+        restore_mode = "private-copy"
+    elif tier == "instance-checkpoint":
+        generation = "00112233445566778899aabbccddee02"
+        restore_mode = "direct-claimed"
+    else:
+        raise ValueError(f"unsupported snapshot tier {tier!r}")
+    return (
+        "--snapshot-block-identity",
+        "generation",
+        "--snapshot-generation-id",
+        generation,
+        "--snapshot-scratch-restore-mode",
+        restore_mode,
+    )
+
+
 def _run_snapshot_tier(
     tier: str,
     executable: Path,
@@ -3563,6 +3584,7 @@ def _run_snapshot_tier(
                 str(snapshot),
                 "--snapshot-tier",
                 tier,
+                *_snapshot_storage_policy(tier),
                 "--microvm-sandbox-block",
                 _block_arg("distro", source_layer, read_only=True),
                 "--microvm-sandbox-block",

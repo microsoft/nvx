@@ -168,13 +168,17 @@ Block devices are routed directly to virtio-mmio rather than VPCI. Packed rings
 are unavailable. Each block has a stable role, MMIO address, IRQ, access mode, and
 fixed feature mask. Its snapshot contract records the role, read-only flag,
 logical length, logical and physical block sizes, and identity policy. Each
-consumed external read-only layer is identified by SHA-256 and must be supplied
-again on restore. Platform-tier layers are recorded as unbound because image
-binding has not been consumed; restore may supply different same-geometry
-layers. Writable scratch uses one of two policies:
+consumed block uses either whole-file SHA-256 or the caller-authenticated
+immutable storage generation supplied at capture. Generation mode requires all
+bound roles to carry the same nonzero generation and avoids content scans; the
+storage controller remains responsible for binding that generation to the
+exact immutable files. Platform-tier layers are recorded as unbound because
+image binding has not been consumed; restore may supply different
+same-geometry layers. Writable scratch uses one of two artifact policies:
 
-- **paired**: capture publishes `scratch.img` with its exact length and SHA-256;
-   each restore verifies it and creates a process-private writable copy;
+- **paired**: capture publishes `scratch.img` with its exact length and selected
+   identity. Restore uses the recorded `private-copy`, reflink-only
+   `copy-on-write`, or single-use `direct-claimed` materialization policy;
 - **fresh**: capture occurs before scratch is mounted, publishes no scratch
    artifact, and restore requires a new writable file with matching geometry.
 
