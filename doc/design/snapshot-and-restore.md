@@ -16,9 +16,10 @@ configuration-section bitmask. The validator accepts only these combinations:
 Tier metadata requires sandbox blocks; blockless snapshots do not declare it.
 The saved host-owned `nvx_snapshot_tier=` token must agree with the manifest.
 Platform lower layers have empty, unbound identities, whereas later tiers bind
-consumed layers to their hashes. The bitmask establishes when configuration
-is considered consumed; it is not an implementation of replaceable payloads
-or per-section configuration-region validation.
+consumed layers either to whole-file SHA-256 identities or to one explicit
+caller-authenticated immutable storage generation. The bitmask establishes
+when configuration is considered consumed; it is not an implementation of
+replaceable payloads or per-section configuration-region validation.
 
 The platform point removes kernel and agent initialization from subsequent
 launches. Workload-start removes runtime initialization as well, but contains
@@ -43,6 +44,12 @@ creates file-backed RAM beside it when no memory backing file was supplied.
 Capture with sandbox blocks requires
 `--snapshot-tier platform|workload-start|instance-checkpoint`; inconsistent
 tier, clone/resume, and fresh/paired scratch combinations are rejected. For
+the default `sha256` block identity, capture and restore scan each bound block.
+An immutable storage owner may instead select
+`--snapshot-block-identity generation --snapshot-generation-id <32-HEX>` and
+bind every consumed block to that same generation without reading the files
+solely to recalculate a digest. This mode trusts the storage controller to keep
+the generation immutable and bound to the exact files. For
 paired scratch, the guest snapshot helper first freezes the workload cgroup
 with a bounded wait, calls `sync`, and freezes the mounted filesystem. Its
 fresh-scratch mode instead requires scratch to be unmounted. A rejected capture
@@ -249,18 +256,22 @@ The manifest is authoritative for:
   layout, and processor features) and its digest, TSC and LAPIC timer
   frequencies, capture wall clock, and downtime clock policy;
 - required host attachments and their policies;
-- block roles, access, geometry, layer identities, and scratch policy;
+- block roles, access, geometry, layer identities, scratch policy, and paired
+  scratch restore materialization;
 - snapshot tier, clone/resume policy, and consumed configuration sections;
 - exact lengths of `state.bin` and `memory.bin`; and
-- the exact length and SHA-256 of paired `scratch.img`.
+- the exact length and either SHA-256 or storage-generation identity of paired
+  `scratch.img`.
 
 Snapshot paths and repeated fields are bounded. Restore rejects truncated,
 oversized, malformed, wrong-type, path-escaping, symlinked, incompatible,
 missing, extra, or reordered state before guest execution. New snapshots use
 version 5. It does not store or validate embedded checksums for `state.bin` or
 `memory.bin`; a same-length change to either payload is therefore outside the
-validation contract. Paired scratch is checked because it must match captured
-filesystem state. Versions 2 through 4 remain readable; versions 2 and 3 cannot
+validation contract. SHA-256 paired scratch is checked byte-for-byte.
+Generation-bound paired scratch is checked structurally and by exact size and
+generation, so same-length byte verification remains the storage owner's
+responsibility. Versions 2 through 4 remain readable; versions 2 and 3 cannot
 describe sandbox blocks, and version 4 predates tier metadata. Legacy version-2
 checksum fields are accepted without re-hashing either payload. Snapshot
 directories rely on host access control, while
@@ -358,9 +369,19 @@ flowchart LR
 
 The captured memory artifact is mapped private and copy-on-write across
 restores, while selected expansion ranges receive fresh private backing.
-Paired scratch is copied into a private temporary file for each restore.
-Multiple restored VMs may therefore dirty RAM and scratch without changing
-reusable clone artifacts. On WHP, a restore whose RAM is entirely the private
+Paired scratch records one of three explicit restore policies:
+
+- `private-copy` preserves the existing behavior and may use reflink or sparse
+  copying;
+- `copy-on-write` requires a filesystem reflink and is valid only for a
+  reusable workload-start clone; and
+- `direct-claimed` attaches paired scratch only after an instance checkpoint
+  has been durably and exclusively claimed.
+
+Clone restores therefore dirty an independent file and leave the reusable
+snapshot immutable. A direct-claimed restore transfers the single-use
+continuation into normal live-instance ownership; it is no longer an available
+snapshot. On WHP, a restore whose RAM is entirely the private
 mapping of `memory.bin`, with no expansion ranges, prefetch, or VPCI devices,
 registers only the first 64 MiB of each mapping with the hypervisor up front.
 Later guest accesses register the remainder in 2-MiB chunks, and WHP resolves
