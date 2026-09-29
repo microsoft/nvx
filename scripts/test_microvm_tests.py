@@ -3122,6 +3122,26 @@ class MicrovmTests(unittest.TestCase):
             ["platform", "workload-start", "instance-checkpoint"],
         )
 
+    def test_snapshot_storage_policy_selects_generation_and_materialization(self):
+        self.assertEqual(microvm_tests._snapshot_storage_policy("platform"), ())
+        workload = microvm_tests._snapshot_storage_policy("workload-start")
+        checkpoint = microvm_tests._snapshot_storage_policy("instance-checkpoint")
+
+        self.assertEqual(
+            workload,
+            (
+                "--snapshot-block-identity",
+                "generation",
+                "--snapshot-generation-id",
+                "00112233445566778899aabbccddee01",
+                "--snapshot-scratch-restore-mode",
+                "private-copy",
+            ),
+        )
+        self.assertEqual(checkpoint[-1], "direct-claimed")
+        with self.assertRaisesRegex(ValueError, "unsupported snapshot tier"):
+            microvm_tests._snapshot_storage_policy("other")
+
     def test_lifecycle_uses_one_vcpu_linux_guest(self):
         with (
             patch.object(

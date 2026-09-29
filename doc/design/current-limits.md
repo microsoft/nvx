@@ -14,6 +14,7 @@ The current ABI family intentionally does not provide:
    non-128-MiB targets, or expansion from snapshots without an opt-in capacity;
 - ABI value 1 or boot-layout value 1 snapshots;
 - snapshot block media other than cached regular raw files;
+- copy-on-write paired-scratch restore on filesystems without reflink support;
 - sandbox-block, network, or control-console construction through the
    management RPC, or its restore of snapshots that contain them;
 - host networking other than the in-process portable endpoint, unrestricted
