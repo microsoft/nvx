@@ -3472,7 +3472,7 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("expected_runner_labels=linux,${backend},virtual-machine", setup)
         self.assertIn("expected_runner_labels=$runner_labels", setup)
         self.assertIn("runner_labels_override=true", setup)
-        self.assertNotIn("runs-on: ubuntu-latest", workflow)
+        self.assertIn("python3 python3-venv", setup)
         for name in (
             "quality",
             "openvmm-changes",
@@ -3490,10 +3490,13 @@ class CiConfigurationTests(unittest.TestCase):
                 _workflow_job(workflow, name),
             )
         for name in ("quality", "artifacts"):
+            job = _workflow_job(workflow, name)
             self.assertIn(
                 "uses: ./.github/actions/require-rootless-docker",
-                _workflow_job(workflow, name),
+                job,
             )
+            self.assertIn("python3 scripts/setup/cleanup_rootless_docker.py", job)
+            self.assertIn("steps.rootless.outputs.config_dir", job)
         docker_action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -3501,13 +3504,17 @@ class CiConfigurationTests(unittest.TestCase):
             / "require-rootless-docker"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn('endpoint="unix:///run/user/$(id -u)/docker.sock"', docker_action)
+        self.assertIn(
+            'runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+            docker_action,
+        )
         self.assertIn(
             'config=$(mktemp -d "$RUNNER_TEMP/nvx-docker-config.XXXXXX")',
             docker_action,
         )
         self.assertIn('DOCKER_CONFIG="$config" DOCKER_HOST="$endpoint"', docker_action)
-        self.assertIn('DOCKER_HOST="$endpoint" docker info', docker_action)
+        self.assertIn("if ! security=$(", docker_action)
+        self.assertIn("Rootless Docker is unavailable at $endpoint", docker_action)
         quality_action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -3517,17 +3524,23 @@ class CiConfigurationTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("if: runner.environment == 'github-hosted'", quality_action)
         self.assertIn("if: runner.environment == 'self-hosted'", quality_action)
+        self.assertNotIn("GITHUB_PATH", quality_action)
         self.assertIn(
             'venv_dir=$(mktemp -d "$RUNNER_TEMP/nvx-quality-venv.XXXXXX")',
             quality_action,
         )
+        self.assertIn("python=%s/bin/python", quality_action)
         self.assertIn("name=rootless", docker_action)
         if os.name != "posix":
             return
 
-        function = setup.split("validate_runner_labels() {\n", 1)[1]
-        function = "validate_runner_labels() {\n" + function.split("\n}\n", 1)[0]
-        function += "\n}\n"
+        match = re.search(
+            r"(?ms)^[ \t]*validate_runner_labels\(\)[ \t]*(?:\n[ \t]*)?"
+            r"\{[ \t]*\n.*?^[ \t]*\}[ \t]*(?:\n|$)",
+            setup.replace("\r\n", "\n"),
+        )
+        self.assertIsNotNone(match, "label validation function was not found")
+        function = match.group(0)
         for labels, valid in (
             ("linux,kvm,virtual-machine", True),
             ("linux,virtual-machine,nvx-utility-pr", True),
@@ -3555,6 +3568,70 @@ class CiConfigurationTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(result.returncode == 0, valid, result.stderr)
+
+    def test_rootless_docker_config_cleanup_is_scoped(self):
+        cleaner = (
+            BuildConstants.REPO_ROOT
+            / "scripts"
+            / "setup"
+            / "cleanup_rootless_docker.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "_temp"
+            root.mkdir()
+            config = root / "nvx-docker-config.AbC123"
+            (config / "buildx").mkdir(parents=True)
+            (config / "config.json").write_text(
+                '{"auths": {"example.invalid": {}}}', encoding="utf-8"
+            )
+            environment = {
+                **os.environ,
+                "RUNNER_TEMP": str(root),
+                "NVX_DOCKER_CONFIG_TO_CLEAN": str(root),
+            }
+            rejected = subprocess.run(
+                [sys.executable, str(cleaner)],
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertTrue(config.exists())
+
+            if os.name == "posix":
+                outside = Path(temporary) / "outside"
+                outside.mkdir()
+                marker = outside / "keep"
+                marker.write_text("unrelated", encoding="utf-8")
+                link = root / "nvx-docker-config.SyM123"
+                link.symlink_to(outside, target_is_directory=True)
+                environment["NVX_DOCKER_CONFIG_TO_CLEAN"] = str(link)
+                escaped = subprocess.run(
+                    [sys.executable, str(cleaner)],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertNotEqual(escaped.returncode, 0)
+                self.assertTrue(marker.exists())
+                link.unlink()
+
+            environment["NVX_DOCKER_CONFIG_TO_CLEAN"] = str(config)
+            removed = subprocess.run(
+                [sys.executable, str(cleaner)],
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(config.exists())
+            self.assertTrue(root.exists())
 
     def test_windows_runner_requires_inbox_pcat_firmware(self):
         windows_setup = (
