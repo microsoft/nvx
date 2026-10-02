@@ -935,21 +935,28 @@ static int state_store(const struct time_state *state)
 
 typedef void (*state_update)(struct time_state *state, const void *context);
 
+// The state lock's descriptor while this process holds it across a capture
+// request (prepare_capture to record_restore). state_apply then updates the
+// state under that lock instead of taking it again, which would wait on
+// itself: a repair failure counts its violation before powering off.
+static int g_state_lock_held = -1;
+
 // Applies UPDATE to the published state under its lock. The helpers and the
 // daemon all write the state this way, so updates never interleave.
 static int state_apply(state_update update, const void *context)
 {
     struct time_state state;
-    int lock = lock_file(STATE_LOCK_PATH);
+    int lock = g_state_lock_held >= 0 ? -1 : lock_file(STATE_LOCK_PATH);
     int result;
 
-    if (lock < 0)
+    if (lock < 0 && g_state_lock_held < 0)
         return -1;
     if (state_load(&state) != 0)
         state_init(&state);
     update(&state, context);
     result = state_store(&state);
-    close(lock);
+    if (lock >= 0)
+        close(lock);
     return result;
 }
 
@@ -4373,6 +4380,7 @@ static void abandon_capture(struct capture_prep *prep)
         prep->time_dir = -1;
     }
     if (prep->state_lock >= 0) {
+        g_state_lock_held = -1;
         close(prep->state_lock);
         prep->state_lock = -1;
     }
@@ -4399,6 +4407,7 @@ static int prepare_capture(struct capture_prep *prep, const char *entropy_path,
         snprintf(detail, size, "state lock: %s", strerror(errno));
         return -1;
     }
+    g_state_lock_held = prep->state_lock;
     if (state_load(&prep->state) != 0) {
         snprintf(detail, size, "the time state is unavailable");
         return -1;
@@ -4458,6 +4467,7 @@ static int record_restore(struct capture_prep *prep,
         renameat(prep->time_dir, STATE_TEMP_NAME, prep->time_dir,
                  STATE_NAME) != 0)
         result = -1;
+    g_state_lock_held = -1;
     close(prep->state_lock);
     prep->state_lock = -1;
     return result;
