@@ -288,10 +288,12 @@ export NVX_VM_GENERATION_ID="$generation_id"
 entropy=$runtime/restore-entropy
 
 # Restore steps 9 to 13 of the time ABI (doc/design/time-abi.md). nvx-time
-# capture has already read restore packet v4, checked its generation, set
-# the wall clock, and written the entropy. Its metadata is FLAGS,
-# ONLINE_VP_COUNT, RANGE_COUNT, and the new generation ID, followed by START
-# and LENGTH for each memory range.
+# capture has already read restore packet v4, checked its generation, and set
+# the wall clock. It wrote the entropy too, except for a plain untiered
+# restore, whose entropy stays in the device until step 13 or the next portb
+# user drains it into the file. Its metadata is FLAGS, ONLINE_VP_COUNT,
+# RANGE_COUNT, and the new generation ID, followed by START and LENGTH for
+# each memory range.
 post_restore() {
     post_restore_pending=true
     [ "$#" -ge 4 ] || fail_closed "restore packet metadata is invalid"

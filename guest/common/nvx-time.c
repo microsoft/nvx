@@ -67,6 +67,9 @@
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
 #endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
 
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
@@ -120,6 +123,9 @@
 #define FAST_PERIOD_S 16
 #define SLOW_PERIOD_S 64
 #define FAST_POLLS 4
+// A poll that finds a capture or restore holding the portb lock retries after
+// this many seconds instead of queueing behind it.
+#define POLL_RETRY_S 1
 #define FAST_TIME_CONSTANT 4
 #define SLOW_TIME_CONSTANT 6
 #define TIMER_LIST_WAIT_NS (200 * NSEC_PER_MSEC)
@@ -133,6 +139,12 @@
 // under a CPU-bound workload.
 #define DEFERRED_START_NS (150 * NSEC_PER_MSEC)
 #define IDLE_BOUND_NS (100 * NSEC_PER_MSEC)
+// The daemon's restore timer sits at this descriptor, where a restore helper
+// finds it with pidfd_getfd() and arms it for step 13 (arm_restore); its
+// discipline timer sits at the next one, where a capture request disarms it
+// across the snapshot.
+#define RESTORE_TIMER_FD 100
+#define DISCIPLINE_TIMER_FD 101
 // nvx-time status and pre-capture wait at most 30 s for pending checks.
 #define STATUS_WAIT_NS (30 * NSEC_PER_SEC)
 #define STATUS_POLL_NS (10 * NSEC_PER_MSEC)
@@ -142,13 +154,18 @@
 
 #define RUN_DIR "/run/nvx"
 #define TIME_DIR RUN_DIR "/time"
-#define STATE_PATH TIME_DIR "/state"
-#define STATE_TEMP_PATH TIME_DIR "/.state"
+#define STATE_NAME "state"
+#define STATE_TEMP_NAME ".state"
+#define STATE_PATH TIME_DIR "/" STATE_NAME
+#define STATE_TEMP_PATH TIME_DIR "/" STATE_TEMP_NAME
 #define STATE_LOCK_PATH TIME_DIR "/state.lock"
 #define DAEMON_PID_PATH TIME_DIR "/daemon.pid"
 #define SUPPRESSION_PATH TIME_DIR "/suppression"
 #define SUPPRESSION_LOCK_PATH TIME_DIR "/suppression.lock"
 #define RESTORE_PATH TIME_DIR "/restore"
+// Names the caller's entropy file while an untiered restore's entropy bytes
+// wait in the device (see drain_packet).
+#define PACKET_PENDING_PATH TIME_DIR "/packet-pending"
 #define PORTB_LOCK_PATH RUN_DIR "/portb.lock"
 #define RCU_SYNC_PATH RUN_DIR "/rcu-sync"
 
@@ -1126,13 +1143,14 @@ struct restore_packet {
     uint8_t entropy[PACKET_ENTROPY_SIZE];
 };
 
+// Decodes the header into PACKET's header fields. The ranges and entropy are
+// left alone: a restore that never reads the body never touches them.
 static int parse_packet_header(const uint8_t *bytes,
                                struct restore_packet *packet, char *detail,
                                size_t size)
 {
     uint8_t online;
 
-    memset(packet, 0, sizeof(*packet));
     if (memcmp(bytes, "OVR", 3) != 0) {
         snprintf(detail, size, "restore packet magic is %02x%02x%02x",
                  bytes[0], bytes[1], bytes[2]);
@@ -2690,6 +2708,57 @@ static int signal_restore(pid_t daemon, bool ack, int64_t start_ns)
     return sigqueue(daemon, SIGUSR1, value) == 0 ? 0 : 1;
 }
 
+// Returns a descriptor for DAEMON's timer at descriptor FD (RESTORE_TIMER_FD
+// or DISCIPLINE_TIMER_FD), from pidfd_getfd(), or -1 when there is none.
+// Callers take it before their readiness path.
+static int daemon_timer(pid_t daemon, int fd)
+{
+    struct itimerspec value;
+    int pidfd;
+    int timer;
+
+    if (daemon <= 0)
+        return -1;
+    pidfd = (int)syscall(SYS_pidfd_open, daemon, 0);
+    if (pidfd < 0)
+        return -1;
+    timer = (int)syscall(SYS_pidfd_getfd, pidfd, fd, 0);
+    close(pidfd);
+    // Only a timerfd answers timerfd_gettime().
+    if (timer >= 0 && timerfd_gettime(timer, &value) != 0) {
+        close(timer);
+        timer = -1;
+    }
+    return timer;
+}
+
+// Restore steps 12 and 13 like signal_restore, but with TIMER, the daemon's
+// restore timer, the hand-off arms it to expire DEFERRED_START_NS from now,
+// when step 13 is due, instead of waking the daemon: woken now, the daemon
+// would preempt the readiness path on a single vCPU and fault in its pages
+// there, about 1.2 ms on MSHV and 0.6 ms on KVM. The daemon derives the
+// readiness path's wall time from the state when the timer expires. Without
+// TIMER, or when arming it fails, this falls back to the signal.
+static int arm_restore(pid_t daemon, int timer, bool ack, int64_t start_ns)
+{
+    struct itimerspec due;
+    int64_t at;
+
+    if (timer < 0)
+        return signal_restore(daemon, ack, start_ns);
+    if (daemon <= 0 || kill(daemon, 0) != 0)
+        return -1;
+    if (ack)
+        outb(SNAPSHOT_ACKNOWLEDGE, PORT_SNAPSHOT);
+    at = clock_ns(CLOCK_MONOTONIC) + DEFERRED_START_NS;
+    memset(&due, 0, sizeof(due));
+    due.it_value.tv_sec = (time_t)(at / NSEC_PER_SEC);
+    due.it_value.tv_nsec = (long)(at % NSEC_PER_SEC);
+    if (timerfd_settime(timer, TFD_TIMER_ABSTIME, &due, NULL) == 0)
+        return 0;
+    return signal_restore(daemon, false, start_ns);
+}
+
 // C10: the daemon runs, has recorded no violation, and no stall was counted.
 static bool check_daemon(struct checks *checks)
 {
@@ -2937,6 +3006,41 @@ static int lock_portb(char *detail, size_t size)
     return lock;
 }
 
+// An untiered restore with nothing to activate reads only the packet header
+// and the generation ID before readiness, and leaves the packet's 64 entropy
+// bytes in the device. The capture request creates PACKET_PENDING_PATH, which
+// names the caller's entropy file, so the first portb user after the restore
+// drains the bytes into that file and removes the marker: the step 13 worker,
+// `nvx-time generation-id`, or the next capture request. A restore that read
+// the whole packet left nothing in the device, and then only the marker is
+// removed. The caller holds the portb lock and has enabled the ports.
+// Returns 0, or -1 with DETAIL when the bytes cannot be written.
+static int drain_packet(char *detail, size_t size)
+{
+    uint8_t entropy[PACKET_ENTROPY_SIZE];
+    char path[256];
+    int result = 0;
+    int fd;
+
+    if (read_text(PACKET_PENDING_PATH, path, sizeof(path)) < 0)
+        return 0;
+    path[strcspn(path, "\n")] = '\0';
+    if ((inb(PORTB_STATUS) & PORTB_PACKET_AVAILABLE) != 0) {
+        outb(SELECT_PACKET, PORTB_STATUS);
+        portb_read(PORTB_DATA, entropy, sizeof(entropy));
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                  0600);
+        if (fd < 0 || write_all(fd, entropy, sizeof(entropy)) != 0)
+            result = -1;
+        if (fd >= 0 && close(fd) != 0)
+            result = -1;
+        if (result != 0)
+            snprintf(detail, size, "write %.200s: %s", path, strerror(errno));
+    }
+    (void)unlink(PACKET_PENDING_PATH);
+    return result;
+}
+
 // Takes up to ATTEMPTS samples of generation G and keeps the first whose
 // uncertainty is within BOUND_NS. Returns 0 when one is, 1 when only wider
 // samples were seen (the narrowest is returned), and -1 when none was valid
@@ -3052,6 +3156,12 @@ struct daemon {
     int kmsg;
     int signals;
     int timer;
+    // Armed by a restore helper to expire when step 13 is due; -1 when the
+    // daemon could not place it at RESTORE_TIMER_FD.
+    int restore_timer;
+    // The portb lock file, open for the daemon's lifetime, so that a poll
+    // that finds the lock busy costs no path lookup.
+    int portb_lock;
     int polls;
     int64_t last_accepted_ns;
     pid_t worker_pid;
@@ -3088,6 +3198,16 @@ static int arm_timer(struct daemon *daemon)
     period.it_value.tv_sec =
         daemon->polls < FAST_POLLS ? FAST_PERIOD_S : SLOW_PERIOD_S;
     return timerfd_settime(daemon->timer, 0, &period, NULL);
+}
+
+// Retries a poll that found the portb lock busy after POLL_RETRY_S.
+static int arm_retry(struct daemon *daemon)
+{
+    struct itimerspec retry;
+
+    memset(&retry, 0, sizeof(retry));
+    retry.it_value.tv_sec = POLL_RETRY_S;
+    return timerfd_settime(daemon->timer, 0, &retry, NULL);
 }
 
 struct poll_outcome {
@@ -3130,31 +3250,43 @@ static void apply_poll(struct time_state *state, const void *context)
 // step reapplies the frequency and status that the step's NTP reset clears.
 // The poll holds the portb lock from its first sample to the published state,
 // as a capture does from its request to the restored clock, so a snapshot
-// never contains a half-applied poll: a poll blocked behind a capture samples
-// after the restore, sees the new generation, and is discarded.
-static void discipline_poll(struct daemon *daemon)
+// never contains a half-applied poll. A poll that finds the lock held does
+// not queue behind it, and returns false for a retry POLL_RETRY_S later: a
+// capture holds the lock across the snapshot, and a poll that came due during
+// the downtime, as after any downtime longer than the poll period, would
+// otherwise wake at resume and sample on the restore's readiness path. Step
+// 13 restarts the cadence after a restore.
+static bool discipline_poll(struct daemon *daemon)
 {
     struct poll_outcome outcome;
     struct time_sample sample;
     char detail[DETAIL_MAX] = "";
     bool fast = daemon->polls < FAST_POLLS;
     int64_t stalls = 0;
+    bool locked;
     int result;
-    int lock;
 
+    if (daemon->portb_lock < 0)
+        daemon->portb_lock =
+            open(PORTB_LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (daemon->portb_lock >= 0 &&
+        flock(daemon->portb_lock, LOCK_EX | LOCK_NB) != 0)
+        return false;
+    locked = daemon->portb_lock >= 0;
+    if (!locked)
+        snprintf(detail, sizeof(detail), "portb lock: %s", strerror(errno));
     memset(&outcome, 0, sizeof(outcome));
     if (read_int64(RCU_STALL_COUNT, &stalls) == 0 && stalls != 0)
         fail_fatal(STATUS_VIOLATION, "G_RCU_STALL", "watcher", PHASE_RUNTIME,
                    "rcu_stall_count is %" PRId64, stalls);
     daemon->polls++;
-    lock = lock_portb(detail, sizeof(detail));
-    result = lock < 0 ? -1
-                      : best_sample(SAMPLE_ATTEMPTS, POLL_BOUND_NS,
-                                    g_generation, &sample, &outcome.theta,
-                                    &outcome.epsilon, detail, sizeof(detail));
+    result = !locked ? -1
+                     : best_sample(SAMPLE_ATTEMPTS, POLL_BOUND_NS,
+                                   g_generation, &sample, &outcome.theta,
+                                   &outcome.epsilon, detail, sizeof(detail));
     if (result == -2) {
-        close(lock);
-        return;
+        (void)flock(daemon->portb_lock, LOCK_UN);
+        return true;
     }
     if (result == 0) {
         struct timex tx;
@@ -3174,8 +3306,9 @@ static void discipline_poll(struct daemon *daemon)
         clock_ns(CLOCK_MONOTONIC) - daemon->last_accepted_ns <=
             SYNCHRONIZED_AGE_NS;
     (void)state_apply(apply_poll, &outcome);
-    if (lock >= 0)
-        close(lock);
+    if (locked)
+        (void)flock(daemon->portb_lock, LOCK_UN);
+    return true;
 }
 
 // Waits for a full normal RCU grace period: with rcu_normal set, the
@@ -3356,7 +3489,18 @@ static int restore_work(const bool *new_cpus, int new_count, bool with_deadline,
     int64_t elapsed;
     int64_t cpu;
     bool released;
+    int lock;
 
+    // Step 10's entropy of a plain untiered restore, which the readiness
+    // path left in the device.
+    if (enable_ports() == 0) {
+        lock = lock_portb(detail, sizeof(detail));
+        if (lock < 0 || drain_packet(detail, sizeof(detail)) != 0)
+            fail_fatal(STATUS_REPAIR, "G_REPAIR_PACKET", "repair",
+                       PHASE_RESTORE, "%s", detail);
+        if (lock >= 0)
+            close(lock);
+    }
     if (checks_init(&checks, PHASE_RESTORE) != 0)
         check_failed(&checks, "C6", "cannot read the CPU sets");
     else
@@ -3503,11 +3647,52 @@ static void handle_signals(struct daemon *daemon)
     reap_children(daemon);
 }
 
+// The restore timer expired: a restore helper armed it DEFERRED_START_NS
+// after its readiness path ended, so step 13 is due now. The readiness path
+// ran from the capture request's return, which the restore record places
+// restore_elapsed_us before the clock step at last_step_realtime_ns, to
+// DEFERRED_START_NS ago.
+static void handle_restore_timer(struct daemon *daemon)
+{
+    struct time_state state;
+    uint64_t expirations;
+    int64_t now = clock_ns(CLOCK_MONOTONIC);
+    int64_t start;
+
+    if (read(daemon->restore_timer, &expirations, sizeof(expirations)) !=
+        sizeof(expirations))
+        return;
+    daemon->restore_pending = true;
+    daemon->restore_due_ns = now;
+    daemon->last_accepted_ns = now - DEFERRED_START_NS;
+    daemon->readiness_us = 0;
+    if (state_load(&state) == 0) {
+        start = now - (clock_ns(CLOCK_REALTIME) - state.last_step_realtime_ns) -
+                state.checks[PHASE_RESTORE].elapsed_us * NSEC_PER_USEC;
+        if (now - DEFERRED_START_NS > start)
+            daemon->readiness_us =
+                (now - DEFERRED_START_NS - start) / NSEC_PER_USEC;
+    }
+}
+
+// Moves descriptor FD to TARGET, close-on-exec, for the timers that capture
+// and restore helpers find with pidfd_getfd(). Returns TARGET, or FD itself
+// when it cannot move.
+static int place_descriptor(int fd, int target)
+{
+    if (fd < 0 || fd == target ||
+        dup3(fd, target, O_CLOEXEC) != target)
+        return fd;
+    close(fd);
+    return target;
+}
+
 // Sets up the daemon's signal and timer descriptors and its OOM exemption.
 // Returns 0 or an errno value.
 static int daemon_setup(struct daemon *daemon)
 {
     sigset_t mask;
+    int timer;
 
     sigemptyset(&mask);
     sigaddset(&mask, SIGUSR1);
@@ -3520,9 +3705,22 @@ static int daemon_setup(struct daemon *daemon)
     daemon->signals = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
     if (daemon->signals < 0)
         return errno;
-    daemon->timer = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    daemon->timer = place_descriptor(
+        timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK),
+        DISCIPLINE_TIMER_FD);
     if (daemon->timer < 0)
         return errno;
+    timer = place_descriptor(
+        timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK),
+        RESTORE_TIMER_FD);
+    if (timer != RESTORE_TIMER_FD && timer >= 0) {
+        close(timer);
+        timer = -1;
+    }
+    daemon->restore_timer = timer;
+    make_runtime_directories();
+    daemon->portb_lock =
+        open(PORTB_LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (write_text("/proc/self/oom_score_adj", "-1000") != 0 ||
         arm_timer(daemon) != 0)
         return errno;
@@ -3556,9 +3754,12 @@ static int earlier_timeout(int first, int second)
 static void daemon_loop(struct daemon *daemon)
 {
     for (;;) {
-        struct pollfd fds[3] = {{daemon->kmsg, POLLIN, 0},
+        // poll() skips a negative descriptor, as when the restore timer is
+        // missing.
+        struct pollfd fds[4] = {{daemon->kmsg, POLLIN, 0},
                                 {daemon->signals, POLLIN, 0},
-                                {daemon->timer, POLLIN, 0}};
+                                {daemon->timer, POLLIN, 0},
+                                {daemon->restore_timer, POLLIN, 0}};
         bool waiting = daemon->worker_pid > 0 && !daemon->suppression_released;
         bool idle = daemon->worker_pid > 0 && daemon->worker_promote_ns != 0;
         bool due = daemon->restore_pending && daemon->worker_pid == 0;
@@ -3583,9 +3784,13 @@ static void daemon_loop(struct daemon *daemon)
                                  sizeof(expirations));
 
             (void)count;
-            discipline_poll(daemon);
-            arm_timer(daemon);
+            if (discipline_poll(daemon))
+                arm_timer(daemon);
+            else
+                arm_retry(daemon);
         }
+        if ((fds[3].revents & POLLIN) != 0)
+            handle_restore_timer(daemon);
         now = clock_ns(CLOCK_MONOTONIC);
         // Step 13 starts DEFERRED_START_NS after the ack, and continues at
         // normal priority IDLE_BOUND_NS after it starts.
@@ -3617,6 +3822,8 @@ static int become_daemon(struct daemon *daemon, int kmsg,
 
     memset(daemon, 0, sizeof(*daemon));
     daemon->kmsg = kmsg;
+    daemon->restore_timer = -1;
+    daemon->portb_lock = -1;
     daemon->last_accepted_ns = last_accepted_ns;
     set_idle_priority(0, false);
     error = daemon_setup(daemon);
@@ -4074,31 +4281,196 @@ static int repair_failed(const char *code, const char *detail)
     return 1;
 }
 
+// What a capture request prepares before the snapshot, so that the restored
+// helper's readiness path opens, creates, and allocates nothing: the state,
+// loaded under the state lock, which the helper holds across the request; the
+// directory and the temporary file through which the restore record replaces
+// the state, the file already holding the current state's text so that its
+// page exists; the caller's entropy file, created empty; and, for an
+// untiered capture, the pending marker of drain_packet.
+struct capture_prep {
+    struct time_state state;
+    uint8_t previous_id[GENERATION_ID_SIZE];
+    const char *entropy_path;
+    int entropy_fd;
+    int state_lock;
+    int time_dir;
+    int state_temp;
+    pid_t daemon;
+    // The daemon's restore timer, for an untiered capture (arm_restore).
+    int daemon_timer;
+    // The daemon's discipline timer, disarmed across the request, and its
+    // remaining time before (pause_discipline).
+    int discipline_timer;
+    struct itimerspec discipline_saved;
+};
+
+// Disarms the daemon's discipline timer across the capture request and keeps
+// its remaining time: a poll that came due during the downtime would wake
+// the daemon at resume, and on a single vCPU it would preempt the readiness
+// path and fault in its pages there. Step 13 restarts the cadence after a
+// restore; abandon_capture restores the remaining time otherwise. The caller
+// holds the portb lock, so no poll is in flight.
+static void pause_discipline(struct capture_prep *prep)
+{
+    static const struct itimerspec disarmed;
+
+    if (prep->discipline_timer >= 0 &&
+        timerfd_settime(prep->discipline_timer, 0, &disarmed,
+                        &prep->discipline_saved) != 0) {
+        close(prep->discipline_timer);
+        prep->discipline_timer = -1;
+    }
+}
+
+// Releases what prepare_capture took and removes its files, for a capture
+// that restored nothing or a packet that this guest already applied.
+static void abandon_capture(struct capture_prep *prep)
+{
+    if (prep->discipline_timer >= 0) {
+        // A timer found disarmed restarts the discipline soon.
+        if (prep->discipline_saved.it_value.tv_sec == 0 &&
+            prep->discipline_saved.it_value.tv_nsec == 0)
+            prep->discipline_saved.it_value.tv_sec = POLL_RETRY_S;
+        (void)timerfd_settime(prep->discipline_timer, 0,
+                              &prep->discipline_saved, NULL);
+        close(prep->discipline_timer);
+        prep->discipline_timer = -1;
+    }
+    if (prep->daemon_timer >= 0) {
+        close(prep->daemon_timer);
+        prep->daemon_timer = -1;
+    }
+    if (prep->state_temp >= 0) {
+        close(prep->state_temp);
+        (void)unlinkat(prep->time_dir, STATE_TEMP_NAME, 0);
+        prep->state_temp = -1;
+    }
+    if (prep->time_dir >= 0) {
+        close(prep->time_dir);
+        prep->time_dir = -1;
+    }
+    if (prep->state_lock >= 0) {
+        close(prep->state_lock);
+        prep->state_lock = -1;
+    }
+    if (prep->entropy_fd >= 0) {
+        close(prep->entropy_fd);
+        (void)unlink(prep->entropy_path);
+        prep->entropy_fd = -1;
+    }
+    (void)unlink(PACKET_PENDING_PATH);
+}
+
+// Fills PREP before the capture request of an untiered capture (UNTIERED) or
+// a tiered one. The caller holds the portb lock. Returns 0, or -1 with DETAIL;
+// abandon_capture then releases what was taken.
+static int prepare_capture(struct capture_prep *prep, const char *entropy_path,
+                           bool untiered, char *detail, size_t size)
+{
+    char text[2048];
+    int fd;
+
+    prep->entropy_path = entropy_path;
+    prep->state_lock = lock_file(STATE_LOCK_PATH);
+    if (prep->state_lock < 0) {
+        snprintf(detail, size, "state lock: %s", strerror(errno));
+        return -1;
+    }
+    if (state_load(&prep->state) != 0) {
+        snprintf(detail, size, "the time state is unavailable");
+        return -1;
+    }
+    state_format(&prep->state, text, sizeof(text));
+    prep->time_dir = open(TIME_DIR, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (prep->time_dir >= 0)
+        prep->state_temp =
+            openat(prep->time_dir, STATE_TEMP_NAME,
+                   O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (prep->state_temp < 0 ||
+        write_all(prep->state_temp, text, strlen(text)) != 0) {
+        snprintf(detail, size, "prepare %s: %s", STATE_TEMP_PATH,
+                 strerror(errno));
+        return -1;
+    }
+    // Creating a file right after a restore faults in the filesystem's
+    // metadata, 4 to 9 ms on WHP, so the entropy file exists, empty, before
+    // the capture.
+    prep->entropy_fd = open(entropy_path, O_WRONLY | O_CREAT | O_TRUNC |
+                                              O_NOFOLLOW | O_CLOEXEC,
+                            0600);
+    if (prep->entropy_fd < 0) {
+        snprintf(detail, size, "open %.200s: %s", entropy_path,
+                 strerror(errno));
+        return -1;
+    }
+    if (!untiered)
+        return 0;
+    fd = open(PACKET_PENDING_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW |
+                                       O_CLOEXEC,
+              0600);
+    snprintf(text, sizeof(text), "%s\n", entropy_path);
+    if (fd < 0 || write_all(fd, text, strlen(text)) != 0 || close(fd) != 0) {
+        snprintf(detail, size, "prepare %s: %s", PACKET_PENDING_PATH,
+                 strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+// Restore step 8's state update: applies REPAIR to the state loaded before
+// the capture, publishes it through the prepared temporary file, and then
+// releases the state lock. Returns 0, or -1 with errno.
+static int record_restore(struct capture_prep *prep,
+                          const struct repair_record *repair)
+{
+    char text[2048];
+    size_t length;
+    int result = 0;
+
+    apply_repair(&prep->state, repair);
+    state_format(&prep->state, text, sizeof(text));
+    length = strlen(text);
+    if (pwrite(prep->state_temp, text, length, 0) != (ssize_t)length ||
+        ftruncate(prep->state_temp, (off_t)length) != 0 ||
+        renameat(prep->time_dir, STATE_TEMP_NAME, prep->time_dir,
+                 STATE_NAME) != 0)
+        result = -1;
+    close(prep->state_lock);
+    prep->state_lock = -1;
+    return result;
+}
+
 // Restore steps 6 to 8: read the packet with four-byte reads, validate it,
-// and set the wall clock from its bracketed UTC, then write the entropy to
-// ENTROPY_FD, the caller's file at ENTROPY_PATH. START_NS is when the capture
-// request returned. The caller holds the portb lock. With FINISH (untiered)
-// and a DAEMON, a restore with no processors or memory to activate needs no
-// shell work before the acknowledgement, so steps 12 and 13 start here too
-// and no second helper process starts; the metadata then begins with 2
-// instead of 1.
-static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
-                          int entropy_fd, int64_t start_ns, bool finish,
-                          pid_t daemon)
+// and set the wall clock from its bracketed UTC. START_NS is when the capture
+// request returned; the caller holds the portb lock and PREP. With FINISH
+// (untiered), a restore with no processors or memory to activate needs
+// neither the packet body nor shell work before the acknowledgement: the
+// helper reads the header and then the generation ID, which ends the packet's
+// selection, and leaves the entropy to drain_packet; with a daemon it also
+// runs steps 12 and 13, so no second helper process starts, and the metadata
+// begins with 2 instead of 1 (*FINISHED). Any other restore reads the whole
+// packet and writes the entropy to the caller's file.
+static int repair_restore(struct capture_prep *prep, int64_t start_ns,
+                          bool finish, bool *finished)
 {
     static uint8_t body[PACKET_MAX_SIZE];
     static struct restore_packet packet;
     uint8_t header[PACKET_HEADER_SIZE];
+    uint8_t generation_id[GENERATION_ID_SIZE];
+    const uint8_t *new_id;
     struct repair_record repair;
     struct time_sample sample;
     char detail[DETAIL_MAX];
     char id[GENERATION_ID_SIZE * 2 + 1];
+    char line[96];
     int64_t t0;
     int64_t t1;
     int64_t sample_theta;
     int64_t sample_epsilon;
-    bool finishing;
-    int finished = -1;
+    bool plain;
+    int signaled = -1;
+    int length;
 
     t0 = clock_ns(CLOCK_REALTIME);
     outb(SELECT_PACKET, PORTB_STATUS);
@@ -4107,9 +4479,11 @@ static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
     if (parse_packet_header(header, &packet, detail, sizeof(detail)) != 0)
         return repair_failed("G_REPAIR_PACKET", detail);
     if (packet.generation == g_generation) {
-        close(entropy_fd);
-        unlink(entropy_path);
-        puts("0");
+        // A packet that this guest already applied is ignored. Reading it to
+        // its end consumes it, which gives the console its input back.
+        portb_read(PORTB_DATA, body, packet_body_size(&packet));
+        abandon_capture(prep);
+        (void)write_all(STDOUT_FILENO, "0\n", 2);
         return 0;
     }
     if ((uint64_t)packet.generation != (uint64_t)g_generation + 1) {
@@ -4119,10 +4493,19 @@ static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
                  packet.generation, g_generation);
         return repair_failed("G_REPAIR_GENERATION", detail);
     }
-    portb_read(PORTB_DATA, body, packet_body_size(&packet));
-    if (parse_packet_body(body, &packet, detail, sizeof(detail)) != 0)
-        return repair_failed("G_REPAIR_PACKET", detail);
-    if (memcmp(packet.entropy, previous_id, GENERATION_ID_SIZE) == 0)
+    plain = finish && packet.online_vp_count == 0 && packet.range_count == 0 &&
+            (packet.flags & PACKET_MEMORY_TARGET) == 0;
+    if (plain) {
+        outb(SELECT_GENERATION_ID, PORTB_STATUS);
+        portb_read(PORTB_DATA, generation_id, sizeof(generation_id));
+        new_id = generation_id;
+    } else {
+        portb_read(PORTB_DATA, body, packet_body_size(&packet));
+        if (parse_packet_body(body, &packet, detail, sizeof(detail)) != 0)
+            return repair_failed("G_REPAIR_PACKET", detail);
+        new_id = packet.entropy;
+    }
+    if (memcmp(new_id, prep->previous_id, GENERATION_ID_SIZE) == 0)
         return repair_failed("G_REPAIR_GENERATION",
                              "the VM generation ID did not change");
     g_generation = packet.generation;
@@ -4153,36 +4536,36 @@ static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
     repair.step_realtime_ns = clock_ns(CLOCK_REALTIME);
     repair.elapsed_us = (clock_ns(CLOCK_MONOTONIC) - start_ns) / NSEC_PER_USEC;
     repair.packet = &packet;
-    // A plain untiered restore needs no shell work: this helper also
-    // acknowledges and hands step 13 to the daemon.
-    finishing = finish && daemon > 0 && packet.online_vp_count == 0 &&
-                packet.range_count == 0 &&
-                (packet.flags & PACKET_MEMORY_TARGET) == 0;
-    // The entropy goes to the caller in every case, an untiered restore's
-    // too; the file already exists, empty, so only its bytes are written.
-    if (pwrite(entropy_fd, packet.entropy, PACKET_ENTROPY_SIZE, 0) !=
-            PACKET_ENTROPY_SIZE ||
-        close(entropy_fd) != 0) {
-        snprintf(detail, sizeof(detail), "write %.200s: %s", entropy_path,
-                 strerror(errno));
+    if (!plain && pwrite(prep->entropy_fd, packet.entropy, PACKET_ENTROPY_SIZE,
+                         0) != PACKET_ENTROPY_SIZE) {
+        snprintf(detail, sizeof(detail), "write %.200s: %s",
+                 prep->entropy_path, strerror(errno));
         return repair_failed("G_REPAIR_PACKET", detail);
     }
-    if (state_apply(apply_repair, &repair) != 0) {
+    if (record_restore(prep, &repair) != 0) {
         snprintf(detail, sizeof(detail), "record the restore: %s",
                  strerror(errno));
         return repair_failed("G_REPAIR_CLOCK", detail);
     }
-    format_hex(packet.entropy, GENERATION_ID_SIZE, id);
-    if (finishing) {
-        finished = signal_restore(daemon,
-                                  (packet.flags & PACKET_ACK_REQUIRED) != 0,
-                                  start_ns);
-        if (finished > 0)
+    format_hex(new_id, GENERATION_ID_SIZE, id);
+    if (plain && prep->daemon > 0) {
+        signaled = arm_restore(prep->daemon, prep->daemon_timer,
+                               (packet.flags & PACKET_ACK_REQUIRED) != 0,
+                               start_ns);
+        if (signaled > 0)
             fail_fatal(STATUS_CONFORMANCE, "G_CONFORMANCE_C10", "conformance",
                        PHASE_RESTORE, "the time daemon is not running");
     }
-    printf("%d %u %u %u %s", finished >= 0 ? 2 : 1, packet.flags,
-           packet.online_vp_count, packet.range_count, id);
+    *finished = signaled >= 0;
+    length = snprintf(line, sizeof(line), "%d %u %u %u %s",
+                      signaled >= 0 ? 2 : 1, packet.flags,
+                      packet.online_vp_count, packet.range_count, id);
+    if (packet.range_count == 0) {
+        line[length++] = '\n';
+        (void)write_all(STDOUT_FILENO, line, (size_t)length);
+        return 0;
+    }
+    (void)write_all(STDOUT_FILENO, line, (size_t)length);
     for (unsigned index = 0; index < packet.range_count; index++)
         printf(" %" PRIu64 " %" PRIu64, packet.ranges[index][0],
                packet.ranges[index][1]);
@@ -4195,70 +4578,74 @@ static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
 // any other guest work. Prints 0 when no restore happened. The portb lock is
 // held from the request to the restored clock, so the snapshot never
 // contains a discipline poll that would apply a pre-capture sample after the
-// restore.
+// restore, and the state lock until the restore is recorded.
 static int cmd_capture(int argc, char **argv)
 {
-    uint8_t previous_id[GENERATION_ID_SIZE];
+    struct capture_prep prep = {.entropy_fd = -1,
+                                .state_lock = -1,
+                                .time_dir = -1,
+                                .state_temp = -1,
+                                .daemon = -1,
+                                .daemon_timer = -1,
+                                .discipline_timer = -1};
     char detail[DETAIL_MAX];
     char *end;
     long request;
     int64_t start;
     unsigned status;
-    pid_t daemon = -1;
-    int entropy_fd;
+    bool finished = false;
     int result;
     int lock;
 
     if ((argc != 3 && (argc != 4 || strcmp(argv[3], "--finish") != 0)) ||
         (request = strtol(argv[0], &end, 10), *end != '\0') ||
         (request != 0 && request != 1) ||
-        parse_hex(argv[1], previous_id, sizeof(previous_id)) != 0) {
+        parse_hex(argv[1], prep.previous_id, sizeof(prep.previous_id)) != 0) {
         fprintf(stderr, "usage: nvx-time capture 0|1 GENERATION_ID "
                         "ENTROPY_FILE [--finish]\n");
         return 2;
     }
-    if (state_load(&(struct time_state){0}) != 0) {
-        fprintf(stderr, "nvx-time: the time state is unavailable\n");
-        return 1;
-    }
-    load_generation();
     if (enable_ports() != 0) {
         fprintf(stderr, "nvx-time: ioperm: %s\n", strerror(errno));
         return 1;
     }
-    // The daemon keeps its PID in the restored guest; looking it up now keeps
-    // the file reads off the restore path.
+    // The daemon keeps its PID and its timers in the restored guest; looking
+    // them up now keeps the lookups off the restore path.
+    prep.daemon = daemon_pid();
+    prep.discipline_timer = daemon_timer(prep.daemon, DISCIPLINE_TIMER_FD);
     if (argc == 4)
-        daemon = daemon_pid();
-    // The entropy file is created before the capture, empty, so that a
-    // restored helper only writes its bytes: creating a file right after a
-    // restore faults in the filesystem's metadata, 4 to 9 ms on WHP.
-    entropy_fd = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW |
-                                   O_CLOEXEC,
-                      0600);
-    if (entropy_fd < 0) {
-        fprintf(stderr, "nvx-time: open %s: %s\n", argv[2], strerror(errno));
-        return 1;
-    }
+        prep.daemon_timer = daemon_timer(prep.daemon, RESTORE_TIMER_FD);
     lock = lock_portb(detail, sizeof(detail));
     if (lock < 0) {
         fprintf(stderr, "nvx-time: %s\n", detail);
-        close(entropy_fd);
-        unlink(argv[2]);
         return 1;
     }
+    // A previous untiered restore's entropy may still wait in the device,
+    // where a rejected request would find it.
+    if (drain_packet(detail, sizeof(detail)) != 0 ||
+        prepare_capture(&prep, argv[2], argc == 4, detail, sizeof(detail)) !=
+            0) {
+        fprintf(stderr, "nvx-time: %s\n", detail);
+        abandon_capture(&prep);
+        close(lock);
+        return 1;
+    }
+    g_generation = (uint32_t)prep.state.generation;
+    pause_discipline(&prep);
     outb((unsigned char)request, PORT_SNAPSHOT);
     start = clock_ns(CLOCK_MONOTONIC);
     status = inb(PORTB_STATUS);
     if ((status & PORTB_PACKET_AVAILABLE) == 0) {
+        abandon_capture(&prep);
         close(lock);
-        close(entropy_fd);
-        unlink(argv[2]);
         puts("0");
         return 0;
     }
-    result = repair_restore(previous_id, argv[2], entropy_fd, start, argc == 4,
-                            daemon);
+    result = repair_restore(&prep, start, argc == 4, &finished);
+    // A finished restore wrote its metadata with write(); exiting now skips
+    // the stdio teardown, which has nothing to flush.
+    if (result == 0 && finished)
+        _exit(0);
     close(lock);
     return result;
 }
@@ -4279,6 +4666,7 @@ static int cmd_restore_finish(int argc, char **argv)
     int64_t start;
     bool ack = false;
     int new_count = 0;
+    pid_t daemon;
     int signaled;
 
     for (int index = 0; index < argc; index++) {
@@ -4313,7 +4701,9 @@ static int cmd_restore_finish(int argc, char **argv)
     start = clock_ns(CLOCK_MONOTONIC) -
             (clock_ns(CLOCK_REALTIME) - state.last_step_realtime_ns) -
             state.checks[PHASE_RESTORE].elapsed_us * NSEC_PER_USEC;
-    signaled = signal_restore(daemon_pid(), ack, start);
+    daemon = daemon_pid();
+    signaled = arm_restore(daemon, daemon_timer(daemon, RESTORE_TIMER_FD), ack,
+                           start);
     if (signaled == 0)
         return 0;
     if (signaled > 0 || !g_report_only) {
@@ -4440,6 +4830,7 @@ static int cmd_generation_id(void)
 {
     uint8_t id[GENERATION_ID_SIZE];
     char text[GENERATION_ID_SIZE * 2 + 1];
+    char detail[DETAIL_MAX];
     unsigned status;
     int lock;
 
@@ -4455,6 +4846,13 @@ static int cmd_generation_id(void)
     lock = lock_file(PORTB_LOCK_PATH);
     if (lock < 0) {
         fprintf(stderr, "nvx-time: portb lock: %s\n", strerror(errno));
+        return 1;
+    }
+    // An untiered restore's entropy waits in the device until the first
+    // portb user after it; callers read the entropy file after this command.
+    if (drain_packet(detail, sizeof(detail)) != 0) {
+        fprintf(stderr, "nvx-time: %s\n", detail);
+        close(lock);
         return 1;
     }
     outb(SELECT_GENERATION_ID, PORTB_STATUS);
