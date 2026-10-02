@@ -75,8 +75,9 @@ flushes avoid the burst-limited system disk. Check mode requires the directory
 when a data volume exists.
 Backend test runners do not have Docker access. The separate CI utility runner
 used for guest artifacts and quality checks requires rootless Docker; jobs
-validate the daemon and never fall back to the host-root Docker socket. Keep
-push-only jobs that consume write credentials on a different runner.
+validate the daemon, use a per-job Docker configuration directory, and never
+fall back to the host-root Docker socket. Keep push-only jobs that consume
+write credentials on a different runner.
 Linux provisioning runs through the SSH administrator, but the listener and
 workflow jobs run as the dedicated `nvx-runner` account, which has neither sudo
 nor Docker access.

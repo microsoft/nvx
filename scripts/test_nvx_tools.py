@@ -2540,6 +2540,8 @@ class CiConfigurationTests(unittest.TestCase):
             / "action.yml"
         ).read_text(encoding="utf-8")
         self.assertIn('endpoint="unix:///run/user/$(id -u)/docker.sock"', docker_action)
+        self.assertIn('config="$RUNNER_TEMP/nvx-docker-config"', docker_action)
+        self.assertIn('DOCKER_CONFIG="$config" DOCKER_HOST="$endpoint"', docker_action)
         self.assertIn('DOCKER_HOST="$endpoint" docker info', docker_action)
         self.assertIn('name=rootless', docker_action)
         if os.name != "posix":
