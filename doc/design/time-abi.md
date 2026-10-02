@@ -1244,10 +1244,11 @@ the background cost to the workload. It includes interrupts that arrive
 while the checks run, and it scales with the host processor's clock: a host
 idling at a low frequency runs the checks more slowly, and because the
 Hyper-V identity gives the guest no steal-time accounting, host preemption is
-charged to the checks too. The fleet matrix driver checks every `cpu_us`
-sample against the backend's budget for the phase in
-[Performance expectations](#performance-expectations-and-acceptance-gate)
-during validation; CI reports it without gating on it.
+charged to the checks too. Fleet validation records every `cpu_us` sample
+and checks it after the run against the backend's budget for the phase, with
+one exempt sample and a triage rule for samples over budget, both in
+[Performance expectations](#performance-expectations-and-acceptance-gate);
+CI reports it without gating on it.
 
 A failed check prints no marker: it emits the violation event with code
 `G_CONFORMANCE_<ID>` (`G_KERNEL_WX` for `K1`) and powers off with status 193,
@@ -1509,14 +1510,15 @@ The daemon keeps `CLOCK_REALTIME` on host UTC through the kernel's PLL:
   fast and ahead when it runs slow: 1.76 ms behind at the +6.88 ppm of an
   Azure 8370C WHP runner, about 3.2 ms ahead at the −12.89 ppm of an 8573C
   one, and 4.06 ms behind at the +16.07 ppm of the bare-metal WHP host,
-  against 4.11 ms predicted. The bare-metal MSHV host, at +14.82 ppm, was 3.50
-  ms behind after 12 minutes and still approaching its 3.79 ms plateau. Where
-  the host's own UTC is being slewed, as on a nested Azure MSHV host, the
-  offset follows the changing rate. A skipped poll (`G_SAMPLE_UNCERTAIN`) lets
-  the offset grow at the remaining rate for another 64 s, and the nested WHP
-  runners, whose sample uncertainty approaches the 50 µs bound, skip some: the
-  8573C runner reached 4.1 ms after two skipped polls in a row. All of these
-  are far below the step threshold.
+  against 4.11 ms predicted. The bare-metal MSHV host, at +14.82 ppm, was
+  3.50 ms behind after 12 minutes and still approaching its 3.79 ms plateau.
+  The bare-metal KVM host, at −5.98 ppm, was 1.45 ms ahead after 12 minutes,
+  near its 1.53 ms plateau. Where the host's own UTC is being slewed, as on a
+  nested Azure MSHV host, the offset follows the changing rate. A skipped poll
+  (`G_SAMPLE_UNCERTAIN`) lets the offset grow at the remaining rate for
+  another 64 s, and the nested WHP runners, whose sample uncertainty
+  approaches the 50 µs bound, skip some: the 8573C runner reached 4.1 ms after
+  two skipped polls in a row. All of these are far below the step threshold.
 
 The discipline never powers off the guest: a host wall-clock step is
 followed, not reported as a violation.
@@ -1859,18 +1861,20 @@ Expected wins are tracked separately and do not relax the gate.
 
 **`cpu_us` budgets.** Each backend budgets the CPU time of each phase's
 checks (boot, capture, and restore) at a + b·(n − 1) ms for n online vCPUs,
-per sample. A budget is the larger of the bare-metal and Azure maxima of
-wiring v7m on the production kernel (`vmlinux-lockstep`), with at least
-20% headroom:
+per sample. A budget has at least 20% headroom over the largest sample that
+fleet validation recorded for its backend, phase, and vCPU count: it is at
+least 1.2 times that maximum, taken over bare metal and Azure and over the
+production and debug kernels (wiring v7m), without triaged outliers or the
+exempt sample below:
 
 | Backend | Boot | Capture | Restore | Measured on |
 | --- | --- | --- | --- | --- |
-| KVM | 6 + 2 | 1 + 0.4 | 6.5 + 1.5 | Bare metal and nested Azure 8370C, 128 MiB |
-| MSHV | 3 + 0.75 | 1 + 0.4 | 2.5 + 0.5 | Bare metal and nested Azure 8573C, 128 and 512 MiB |
-| WHP | 20 + 1.5 | 1 + 0.4 | 35 + 6 | Bare metal and the Azure 8370C and 8573C runners, 512 MiB |
+| KVM | 6 + 2 | 1.5 + 0.4 | 7 + 2 | Bare metal and nested Azure 8370C, 128 MiB |
+| MSHV | 3 + 1 | 1 + 0.4 | 2.5 + 0.5 | Bare metal and nested Azure 8573C, 128 and 512 MiB |
+| WHP | 25 + 1.5 | 1.2 + 0.4 | 35 + 6 | Bare metal and the Azure 8370C and 8573C runners, 128 and 512 MiB |
 
 Fleet validation records every sample's `cpu_us` and checks each one
-against these budgets. CI reports each phase against its budget
+against these budgets after the run. CI reports each phase against its budget
 (`<phase>_cpu_over_budget`) but does not gate on it, because the A/B gate
 above covers latency. The checks' CPU time also counts the host stalls of
 their first touches of restored RAM:
@@ -1879,19 +1883,72 @@ their first touches of restored RAM:
   about 50 µs each on bare metal and 70 to 95 µs on Azure, which the workload
   would otherwise do. Their cost grows with guest memory: medians are 1.3 to
   2.4 times higher at 512 MiB than at 128 MiB at 4 and 8 vCPUs on Azure. So
-  WHP's budgets come from 512 MiB guests, which bound smaller ones. Its Azure
-  maxima are 17.03 ms at boot with 2 vCPUs and 42.20 ms at restore with 4.
+  WHP's restore budget comes from 512 MiB guests, which bound smaller ones;
+  its Azure maximum is 42.20 ms with 4 vCPUs. Its boot and capture budgets
+  come from two 128 MiB samples on the nested runners: a 21.84 ms boot with
+  2 vCPUs on an 8573C runner (see below) and a 0.99 ms capture with 1 vCPU on
+  an 8370C one.
 - On MSHV, each first touch of a 2 MiB chunk of restored RAM stalls the
   toucher about 1.1 ms on bare metal (see MSHV root-driver costs). The
   restore budget leaves room for one more stall above every maximum.
 - On nested Azure KVM, KVM's restore checks fault in the file-backed restored
-  RAM 4 KiB at a time: medians of 3.4 to 7.6 ms at 1 to 8 vCPUs, and maxima
-  of 5.15 ms at 1 vCPU and 13.14 ms at 8, over 72 restores.
+  RAM 4 KiB at a time: medians of 3.4 to 7.6 ms at 1 to 8 vCPUs over 72
+  restores, and fleet validation maxima of 5.53 ms at 1 vCPU and 16.16 ms at
+  8.
 
 KVM's budgets come from 128 MiB guests, the size that CI and the fleet
 matrices run. MSHV's hold at 128 and 512 MiB alike: MSHV registers all
 guest RAM before the restore, and the checks pay only for the chunks they
 touch, which doesn't depend on the guest's memory size.
+
+**After a rolled-back capture.** A capture flushes file-backed guest RAM
+before it stages: this is OpenVMM's pre-staging RAM flush, the same with or
+without the time ABI. So a capture that rolls back leaves that RAM clean, and
+the guest's first write to each page traps once to re-dirty it. The next
+capture's checks pay that for the pages they write: on the bare-metal WHP
+host, 0.91 to 1.23 ms at one vCPU and 1.33 to 1.88 ms at eight, against 0.22
+to 0.25 and 0.63 to 0.72 ms before the rollback. On bare-metal MSHV the cost
+doesn't show: medians of 0.21 and 0.57 ms at one and eight vCPUs, against 0.20
+and 0.57 ms before. On bare-metal KVM it's small: 0.42 to 0.63 ms at one vCPU
+and 1.52 to 2.58 ms at eight, against 0.38 to 0.46 and 2.36 to 2.51 ms after a
+rejected request. Later captures are back to normal, and a request that
+preflight rejects flushes nothing and costs nothing extra. So the capture
+budget doesn't apply to exactly one sample, the first capture after a
+rolled-back capture in the same VM, on any backend: validation reports its
+`cpu_us` without checking it, and checks the next capture normally.
+
+**Over-budget samples.** The checks' CPU time includes host preemption (see
+[Conformance checks](#conformance-checks-and-the-nvx-time-abi-marker)), so a
+host can stretch a single sample past its budget. Validation accepts an
+over-budget sample as a triaged outlier only if all three of these hold:
+
+1. **Isolated:** a rerun of the same case on the same host, with at least 30
+   samples of the phase, has none over the budget, and no other sample of
+   that case on that host is over it.
+2. **Stretched:** the sample's `elapsed_us` exceeds the nearest-rank 99th
+   percentile of the rerun's `elapsed_us` for the phase; host preemption
+   stretches the wall time along with the CPU time.
+3. **Clean:** the same VM shows no violation event, no `NVX-SNAPSHOT-ERROR`,
+   no exit status 193 to 195, and `violations=0`.
+
+Any other over-budget sample is a budget failure, fixed in the budget or in
+the code. Fleet validation's after-the-run check found:
+
+- KVM's five 2-vCPU captures on bare metal over the earlier 1 + 0.4 ms were
+  budget failures, fixed by the capture budget above.
+- MSHV's debug-kernel 4-vCPU boot at 47.1 ms, 56.8 ms elapsed, is a triaged
+  outlier: a rerun of its case had none of 30 samples over, and at most 3.4 ms
+  elapsed.
+- WHP's 1-vCPU capture at 3.91 ms on a nested 8370C runner is a triaged
+  outlier: a rerun of its case had none of 30 samples over, and at most
+  0.99 ms elapsed.
+- WHP's 2-vCPU boot at 21.84 ms on a nested 8573C runner, 51.6 ms elapsed, was
+  a budget failure: a rerun of its case had none of 30 samples over, but up to
+  59.0 ms elapsed, because the boot checks there wait across vCPUs for a long
+  and variable time. The boot budget above covers it.
+- KVM's 4-vCPU restore at 14.05 ms on nested Azure KVM (8370C), after
+  10 minutes of downtime and 19.0 ms elapsed, is a triaged outlier: a rerun of
+  its case had none of 30 samples over, and at most 14.4 ms elapsed.
 
 **Start-up budget.** The time ABI and CPU profile work of a cold boot or
 restore costs less than 0.5 ms over the pre-profile head (`e7ec0ca6c`),
@@ -2021,7 +2078,7 @@ can use as the fleet restore matrix.
 | Backend that cannot offer invariant TSC to its guests, on a host OS that sees it | The Azure WHP runners and nested Azure MSHV | Restored; the guest has `constant_tsc` and `nonstop_tsc`; `H4` and `H6` pass |
 | Across backends | Bare-metal KVM to bare-metal MSHV | `E_BACKEND_MISMATCH` |
 | Pre-v1 snapshot | Any | `E_SNAPSHOT_VERSION` |
-| Failed capture: in one VM, a request whose destination's parent the host made unwritable to the OpenVMM process after launch, so that creating the staging directory fails after quiesce and OpenVMM rolls back (root's `CAP_DAC_OVERRIDE` and an administrator's backup and restore privileges bypass file permissions, so drop them first and probe with the same credentials, or use an immutable or read-only mount); then, with the parent writable again and after 30 s idle, a second request. Companion: a request whose destination already exists, which preflight rejects before quiesce. Scratch variant: the failed request in a VM with a paired scratch device mounted at `/run/nvx/scratch` and a workload in the `container` cgroup, so that the snapshot agent's freezer and scratch barriers engage | Each bare-metal host at 1 and 8 vCPUs, 3 times each, and the scratch variant on one bare-metal host at 1 vCPU, 3 times; [CI's `snapshot-core`](../ci.md) exercises a request without a destination, which OpenVMM releases before preflight, and asserts that the guest continues once, that `nvx-time status` passes at `generation=0` with no restore, and that `rcu_cpu_stall_suppress` reads 0 | OpenVMM logs the rollback (`microVM snapshot failed before commit; attempting rollback`, then `microVM snapshot rollback succeeded; guest resumed`), with no time ABI code, and each failed request returns in the same VM: status bit 1 clear, `nvx-time status` passing at `generation=0` with `discontinuities` unchanged (from the capture's checks; `cancel-capture` records nothing), the saved values back at their values before the request (`rcu_cpu_stall_suppress`, and on the debug kernel `soft_watchdog` and `hung_task_timeout_secs`) with no saved-values file left, and no 193, 194, or 195 and no clock message; the second request captures, which step 2 of the snapshot agent refuses while the first request's saved values remain, and its snapshot restores. The companion logs `microVM snapshot preflight failed; guest continues` with no capture anchor and no rollback, and its guest side is the same. In the scratch variant, the failed request also leaves the workload cgroup thawed (`cgroup.freeze` reads 0), the scratch filesystem taking a write with `fsync` within 1 s, and the workload running, and the real capture and restore with the scratch device pass |
+| Failed capture: in one VM, a request whose destination's parent the host made unwritable to the OpenVMM process after launch, so that creating the staging directory fails after quiesce and OpenVMM rolls back (root's `CAP_DAC_OVERRIDE` and an administrator's backup and restore privileges bypass file permissions, so drop them first and probe with the same credentials, or use an immutable or read-only mount); then, with the parent writable again and after 30 s idle, a second request. Companion: a request whose destination already exists, which preflight rejects before quiesce. Scratch variant: the failed request in a VM with a paired scratch device mounted at `/run/nvx/scratch` and a workload in the `container` cgroup, so that the snapshot agent's freezer and scratch barriers engage | Each bare-metal host at 1 and 8 vCPUs, 3 times each, and the scratch variant on one bare-metal host at 1 vCPU, 3 times; [CI's `snapshot-core`](../ci.md) exercises a request without a destination, which OpenVMM releases before preflight, and asserts that the guest continues once, that `nvx-time status` passes at `generation=0` with no restore, and that `rcu_cpu_stall_suppress` reads 0 | OpenVMM logs the rollback (`microVM snapshot failed before commit; attempting rollback`, then `microVM snapshot rollback succeeded; guest resumed`), with no time ABI code, and each failed request returns in the same VM: status bit 1 clear, `nvx-time status` passing at `generation=0` with `discontinuities` unchanged (from the capture's checks; `cancel-capture` records nothing), the saved values back at their values before the request (`rcu_cpu_stall_suppress`, and on the debug kernel `soft_watchdog` and `hung_task_timeout_secs`) with no saved-values file left, and no 193, 194, or 195 and no clock message; the second request captures, which step 2 of the snapshot agent refuses while the first request's saved values remain, and its snapshot restores; that capture's `cpu_us` is reported but not budgeted (see [`cpu_us` budgets](#performance-expectations-and-acceptance-gate)). The companion logs `microVM snapshot preflight failed; guest continues` with no capture anchor and no rollback, and its guest side is the same. In the scratch variant, the failed request also leaves the workload cgroup thawed (`cgroup.freeze` reads 0), the scratch filesystem taking a write with `fsync` within 1 s, and the workload running, and the real capture and restore with the scratch device pass |
 | Processor activation from one boot-online CPU to 2, 4, and 8 | All backends | Restored; warp probe passes |
 | Every tier and an untiered snapshot, restored more than once | All backends | Restored; each restore of a snapshot captured at `g = 0` carries `g = 1` and a new generation ID. OpenVMM cannot capture a restored process, so unit tests cover the generation arithmetic beyond one restore, including `E_GENERATION_EXHAUSTED` |
 
