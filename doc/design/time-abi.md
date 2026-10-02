@@ -268,7 +268,7 @@ settled cell on the registered hosts.
 | Obligation | KVM | MSHV | WHP |
 | --- | --- | --- | --- |
 | Identity CPUID (exact leaves, out-of-range rule) | `KVM_SET_CPUID2` with the identity and explicit zero leaves; every KVM `0x4xxxxxxx` entry removed. Other leaves in the range return KVM's Intel out-of-range result | No synthetic processor features, so the hypervisor reports no `0x400000xx` leaves; CPUID intercept results (`always_override`) for the identity leaves, while the explicit zero leaves already read zero in VP 0's view and get none (see the next row); preflight reads every entry back and requires VP 0 to read zero at six sentinel leaves (`0x40000006`, `0x40000081`, `0x400000ff`, `0x40000100`, `0x40000200`, and `0x4000ff00`) | CPUID exits for the six identity leaves, served from OpenVMM's table; with synthetic features off, WHP returns zero natively for `0x40000006..=0x400000ff` and the bases from `0x40000100`, which preflight asserts |
-| Profile CPUID and time bits | `KVM_SET_CPUID2` with the effective CPUID. KVM 6.3 and newer hide invariant TSC while KVM's own `HV_X64_MSR_TSC_INVARIANT_CONTROL` is 0, so the backend mirrors the guest-visible value, which core saves with the VM, into it with a host-initiated `KVM_SET_MSRS` after every accepted guest write and before a VP runs after a restore or reset; without it the guest loses `constant_tsc` and `nonstop_tsc` and boots about 160 ms slower | Processor feature banks derived from the profile (`hv_banks`), plus a CPUID intercept result (`always_override`, subleaf-specific where the entry has a subleaf) for every partition-wide entry of the effective CPUID that VP 0's own view does not already present under its mask. Once VP 0 exists, one bulk `HvCallGetVpCpuidValues` reads every partition-wide entry before any result is registered, and a failed bulk read registers every entry. That leaves 11 of 61 entries on prometheus30 (the hypervisor bit, one leaf-2 descriptor byte, ARAT, the six identity leaves, and two brand leaves) and 12 of 65 on azure-azlinux-5 (the same plus invariant TSC), at every vCPU count, because VP 0's own view already presents leaf 4's shared L3; registering them, the read included, takes 63 to 71 µs and about 90 µs, against 200 and about 300 µs for every entry. Profile masks never cover runtime-owned or VM-owned bits, so a pinned value that VP 0 presents at reset it presents always. Reserved entries pass through from the hypervisor's guest view, which reads zero at every one with no result registered, and verification requires every candidate to read zero (`E_CPU_UNLISTED`). Per-VP fields cannot be left to the hypervisor: it does not implement `0xB` for these partitions and reads `EDX` as 0 on every VP, so Linux would log `APIC ID mismatch` (`G_APIC_ID_MISMATCH`). The `0xB` and `0x1F` entries are therefore per-VP intercept results with the VP's x2APIC ID in `EDX`, registered as each VP is created: the hypervisor refuses a per-VP result for a VP that does not exist yet (`InvalidVpIndex`). Leaf 1's initial APIC ID is the hypervisor's own, which is correct | Processor feature banks derived from the profile (`hv_banks`), and every effective-CPUID entry outside the hypervisor range as a `CpuidResultList2` result (the banks cannot express the hypervisor bit, ARAT, or, on Azure, invariant TSC); reserved entries pass through from WHP's guest view, which verification requires to be zero (`E_CPU_UNLISTED`). CPUID exits only for the identity leaves and the leaves with per-VP APIC fields (`1`, `0xB`, and, where listed, `0x1F` and `0x8000001E`), 8 exits for every v1 profile: each exit-list entry adds about 25 µs to partition setup, and the legacy 269-entry list cost about 7 ms per restore. The exit handler presents the effective CPUID's `0xB` terminator, with the VP's x2APIC ID, instead of zeroing subleaves from 2 |
+| Profile CPUID and time bits | `KVM_SET_CPUID2` with the effective CPUID. KVM 6.3 and newer hide invariant TSC while KVM's own `HV_X64_MSR_TSC_INVARIANT_CONTROL` is 0, so the backend mirrors the guest-visible value, which core saves with the VM, into it with a host-initiated `KVM_SET_MSRS` after every accepted guest write and before a VP runs after a restore or reset; without it the guest loses `constant_tsc` and `nonstop_tsc` and boots about 160 ms slower | Processor feature banks derived from the profile (`hv_banks`), plus a CPUID intercept result (`always_override`, subleaf-specific where the entry has a subleaf) for every partition-wide entry of the effective CPUID that VP 0's own view does not already present under its mask. Once VP 0 exists, one bulk `HvCallGetVpCpuidValues` reads every partition-wide entry before any result is registered, and a failed bulk read registers every entry. That leaves 11 of 61 entries on the bare-metal host (the hypervisor bit, one leaf-2 descriptor byte, ARAT, the six identity leaves, and two brand leaves) and 12 of 65 on the nested Azure host (the same plus invariant TSC), at every vCPU count, because VP 0's own view already presents leaf 4's shared L3; registering them, the read included, takes 63 to 71 µs and about 90 µs, against 200 and about 300 µs for every entry. Profile masks never cover runtime-owned or VM-owned bits, so a pinned value that VP 0 presents at reset it presents always. Reserved entries pass through from the hypervisor's guest view, which reads zero at every one with no result registered, and verification requires every candidate to read zero (`E_CPU_UNLISTED`). Per-VP fields cannot be left to the hypervisor: it does not implement `0xB` for these partitions and reads `EDX` as 0 on every VP, so Linux would log `APIC ID mismatch` (`G_APIC_ID_MISMATCH`). The `0xB` and `0x1F` entries are therefore per-VP intercept results with the VP's x2APIC ID in `EDX`, registered as each VP is created: the hypervisor refuses a per-VP result for a VP that does not exist yet (`InvalidVpIndex`). Leaf 1's initial APIC ID is the hypervisor's own, which is correct | Processor feature banks derived from the profile (`hv_banks`), and every effective-CPUID entry outside the hypervisor range as a `CpuidResultList2` result (the banks cannot express the hypervisor bit, ARAT, or, on Azure, invariant TSC); reserved entries pass through from WHP's guest view, which verification requires to be zero (`E_CPU_UNLISTED`). CPUID exits only for the identity leaves and the leaves with per-VP APIC fields (`1`, `0xB`, and, where listed, `0x1F` and `0x8000001E`), 8 exits for every v1 profile: each exit-list entry adds about 25 µs to partition setup, and the legacy 269-entry list cost about 7 ms per restore. The exit handler presents the effective CPUID's `0xB` terminator, with the VP's x2APIC ID, instead of zeroing subleaves from 2 |
 | Identity MSRs routed to OpenVMM | `KVM_CAP_X86_USER_SPACE_MSR` (`UNKNOWN`, `FILTER`) and `KVM_X86_SET_MSR_FILTER` denying reads and writes of `0x40000000..=0x400001ff`; the filter takes precedence over KVM's in-kernel Hyper-V MSRs. A Linux boot takes four MSR exits, all on the BSP, at any vCPU count | MSR-index intercepts (`HV_INTERCEPT_TYPE_X64_MSR_INDEX`, `READ_WRITE`) for `0x40000002`, `0x40000022`, `0x40000023`, and `0x40000118`. The hypervisor itself raises #GP for writes to the three read-only MSRs and for every other MSR in the range. Native synthetic MSRs are forbidden: they pre-empt the intercepts, and the native `HV_X64_MSR_TSC_FREQUENCY` returns the destination's rate instead of `F`. Verified on hypervisor builds 26100.30000 (bare metal) and 26100.9444 (Azure) | `X64MsrExitBitmap` with `UnhandledMsrs` (capability `0x3f` on every host) and the offloaded APIC, no synthetic features and no `hv1_emulator`: the identity MSRs exit to OpenVMM, which raises #GP for every other MSR in the range |
 | Native rate `F_d` | `KVM_GET_TSC_KHZ` × 1000 on VP 0 (1 kHz granularity) | `ProcessorClockFrequency` partition property | `WHvCapabilityCodeProcessorClockFrequency` |
 | No TSC scaling | Never `KVM_SET_TSC_KHZ`; every vCPU reports the host rate | No frequency override | No `ProcessorClockFrequency` partition property; the 1 GHz request is removed |
@@ -280,7 +280,7 @@ settled cell on the registered hosts.
 | Capture anchor: VP 0 TSC paired with a host time sample within 100 µs, from at most 64 samples | Host `rdtsc` plus VP 0's `KVM_VCPU_TSC_OFFSET`, bracketed by two host `rdtsc` reads around the host clock reads; up to 16 attempts (0.06 to 0.4 µs) | The tightest of up to 64 brackets `[sample, HvCallGetVpRegisters(VP 0 TSC), sample]`, paired at the bracket midpoint (p50 3.5 µs on bare metal, 6.2 µs on Azure) | The tightest of up to 64 bracketed reads of VP 0's TSC register, paired at the bracket midpoint (2.6 to 6.4 µs on bare metal, 5.4 to 9.7 µs on 8370C runners, 5.8 to 11 µs on 8573C runners) |
 | Synchronized TSC set at one host instant | One `KVM_VCPU_TSC_OFFSET` value for every vCPU, `target(t) - (h0 + h1) / 2` from a host clock read `t` bracketed by host `rdtsc` reads `h0` and `h1` (Linux 5.16 or newer); no `IA32_TSC` writes, which Linux 6.6 can discard | Freeze partition time (already frozen since preflight), write the target to every created VP, read back, and clear `TimeFreeze` right after a successful read-back, inside the set rather than at the first VP run (56 to 312 µs for 1 to 8 VPs; equal on 20 of 20 restores) | Suspend partition time, write the target to every VP, read back, and resume with `WHvResumePartitionTime` right after a successful read-back, inside the set. Writing while time runs would skew the VPs by the write latency, about 11 µs per write on bare metal and 25 µs nested; `TscVirtualOffset` is unusable (writes fail) |
 | Read-back before any VP runs | Every vCPU's `KVM_VCPU_TSC_OFFSET` equals the written value, and a host `rdtsc` bracket around VP 0's `IA32_TSC` shows no scaling | Every created VP's TSC equals the target while time is frozen | Every VP's TSC equals the target while time is suspended; live reads cannot verify 1 µs (a register read takes 9.5 to 21 µs) |
-| Live cross-vCPU skew after release at most 1 µs | Equal offsets: skew is the host's TSC skew, bounded by qualification. Measured at most 63 ns | Measured 0 warps; offsets within 516 ns on dual-socket bare metal and 195 ns on Azure, both bounded by the probe's round trip | Measured at most 70 ns over 60 s on prometheus28, 8370C, and 8573C hosts |
+| Live cross-vCPU skew after release at most 1 µs | Equal offsets: skew is the host's TSC skew, bounded by qualification. Measured at most 63 ns | Measured 0 warps; offsets within 516 ns on dual-socket bare metal and 195 ns on Azure, both bounded by the probe's round trip | Measured at most 70 ns over 60 s on the bare-metal host and on 8370C and 8573C runners |
 | VP instantiation | All `C` VPs exist before the set | Every instantiated VP is bound, which creates it, before the set; no VP is created after it | All `C` VPs exist before the set |
 | Partition capabilities, so that the identity leaves never enable the Hyper-V emulator or its saved-state elements | Derived from CPUID with the hypervisor range masked: `hv1` and `kvm_clock` are false | Same | Same |
 | Unknown MSRs | #GP, including the legacy L2-cache MSR stubs (see [MSRs](#msrs)) | #GP from the hypervisor | #GP, including the legacy L2-cache MSR stubs |
@@ -291,7 +291,7 @@ Linux 6.6 KVM, which the Azure KVM runners run, treats a host `IA32_TSC`
 write within about 1 s of the TSC timeline started at vCPU creation as a
 synchronization attempt and discards the written value, the first write of a
 restore included; every CI shell snapshot is taken within a second of boot.
-With the legacy restore path on `azure-kvm-5`, a restored guest's monotonic
+With the legacy restore path on nested Azure KVM, a restored guest's monotonic
 clock advanced 54.7 ms across a 512.5 ms host interval, losing 458 ms. Linux
 6.7 applies the heuristic only after a first user-space write
 (`user_set_tsc`). `KVM_VCPU_TSC_OFFSET` sets the offset exactly on every
@@ -447,8 +447,8 @@ the Skylake-SP roots show as non-zero:
 - WHP's hardware sweep covers subleaves 0 to 63 of every indexed leaf and four
   leaves past each maximum, on all three host types.
 - MSHV's sweep, run with no result registered for any reserved entry, covers
-  the host-enumerated reserved entries (15 on prometheus30 and 13 on
-  azure-azlinux-5) plus 2,755 and 3,261 probes: the same near range as
+  the host-enumerated reserved entries (15 on the bare-metal host and 13 on
+  the nested Azure one) plus 2,755 and 3,261 probes: the same near range as
   WHP's, and far probes where the hypervisor answers by itself (subleaves 64
   to 255 of every indexed leaf, the leaves past the near range up to `0xff`
   and `0x800000ff`, the hypervisor range up to `0x400001ff`, and nine distant
@@ -548,7 +548,7 @@ bare-metal hosts (one per backend) and fifteen Azure hosts:
 
 | ID | Generation | Hosts | Source backends |
 | --- | --- | --- | --- |
-| `intel.skylake-sp.v1` | 6/85, steppings 0 to 4 | Bare-metal prometheus hosts | KVM, MSHV, WHP |
+| `intel.skylake-sp.v1` | 6/85, steppings 0 to 4 | The bare-metal hosts | KVM, MSHV, WHP |
 | `intel.icelake-sp.v1` | 6/106 | Xeon Platinum 8370C runners | KVM, MSHV, WHP |
 | `intel.emeraldrapids.v1` | 6/207 | Xeon Platinum 8573C runners | MSHV, WHP (no KVM host exists) |
 
@@ -625,8 +625,8 @@ restored state, must reach its VP when the VP is released, even if the VP is
 halted. MSHV and WHP do not wake a halted VP for an IRR bit written with its
 LAPIC state, so their backends assert the vector again (see
 [Backend obligations](#backend-obligations)). Without that, on busy 8-vCPU
-guests, 29 of 60 time ABI restores on MSHV (prometheus30) and 5 of 12 on WHP
-(prometheus28) left a CPU halted with its timer vector pending until another
+guests, 29 of 60 time ABI restores on bare-metal MSHV and 5 of 12 on
+bare-metal WHP left a CPU halted with its timer vector pending until another
 interrupt woke it, about 2 s later or never; with it, 0 of 300 and 0 of 12.
 A periodic or TSC-deadline LAPIC timer is never valid: capture and restore
 reject one that is armed (`E_LAPIC_PERIODIC`, `E_LAPIC_TSC_DEADLINE`).
@@ -727,7 +727,7 @@ resume at the read-back, at parity with KVM, against −0.9 to −1.6 ms when th
 first VP run thawed time; warps and restore latency were unchanged. The
 legacy path, which stopped guest time during restore setup, left guest
 `CLOCK_MONOTONIC` about 400 ms behind the host on every restore on
-`azure-kvm-5` with 512 MiB (7 to 12 ms on prometheus32); the time ABI stays
+nested Azure KVM with 512 MiB (7 to 12 ms on bare metal); the time ABI stays
 within 1.5 ms there.
 
 **Anchor pairing bound.** An anchor that pairs a TSC read with a host time
@@ -1056,13 +1056,13 @@ difference:
 
 | Backend | Host | `epsilon` p50 / p99 | Worst sample |
 | --- | --- | --- | --- |
-| KVM | prometheus32 (bare metal, Linux 7.0) | 4.0 to 4.1 µs / 4 to 15 µs | 33 µs |
-| KVM | `azure-kvm-5` (nested, Linux 6.6) | 3.8 to 4.1 µs / 4 to 9 µs | 75 µs |
-| MSHV | prometheus30 (bare metal) | 6.3 to 6.4 µs / 6.8 to 7.1 µs | 37 µs |
-| MSHV | `azure-azlinux-5` (nested) | 12.7 to 13.0 µs / 15 to 25 µs | 102 µs |
-| WHP | prometheus28 (bare metal) | 20.7 to 21.3 µs / 29.4 to 30.5 µs | 52 µs |
-| WHP | `azure-windows-1` (8370C, nested) | 24.8 to 25.2 µs / 36.5 to 41.9 µs | 794 µs |
-| WHP | `azure-windows-3` (8573C, nested) | 30.5 to 30.8 µs / 46.0 to 46.4 µs | 251 µs |
+| KVM | Bare metal (Linux 7.0) | 4.0 to 4.1 µs / 4 to 15 µs | 33 µs |
+| KVM | Nested Azure 8370C (Linux 6.6) | 3.8 to 4.1 µs / 4 to 9 µs | 75 µs |
+| MSHV | Bare metal | 6.3 to 6.4 µs / 6.8 to 7.1 µs | 37 µs |
+| MSHV | Nested Azure 8573C | 12.7 to 13.0 µs / 15 to 25 µs | 102 µs |
+| WHP | Bare metal | 20.7 to 21.3 µs / 29.4 to 30.5 µs | 52 µs |
+| WHP | Nested Azure 8370C | 24.8 to 25.2 µs / 36.5 to 41.9 µs | 794 µs |
+| WHP | Nested Azure 8573C | 30.5 to 30.8 µs / 46.0 to 46.4 µs | 251 µs |
 
 The second run of each boot overlaps the console's drain of the first run's
 output, and it has the higher KVM p99s. The WHP rows come from the WHP
@@ -1379,10 +1379,10 @@ Step 13 starts 150 ms after the acknowledgement (or after step 10, when none
 is required), and the asynchronous boot checks start 150 ms after the boot
 step. Starting them earlier slows the guest: their checks contend
 with the readiness path on the other vCPUs, even at `SCHED_IDLE`. On WHP
-(prometheus28, 512 MiB, measurement-only builds), checks right after the
+(bare metal, 512 MiB, measurement-only builds), checks right after the
 acknowledgement added 6 to 12 ms to 2-vCPU restores, whereas a 100 ms
 delay left them 0.8 and 1.2 ms over the release guest at 1 and 2 vCPUs. On
-MSHV (prometheus30), boot checks right after shell-ready added about 3 ms
+bare-metal MSHV, boot checks right after shell-ready added about 3 ms
 to 2-vCPU cold boots. KVM showed no clear effect either way. The delay is
 150 ms rather than 100 ms because a workload's own activity right after
 readiness must not meet the checks either: the guest-exit window of
@@ -1461,8 +1461,8 @@ The daemon keeps `CLOCK_REALTIME` on host UTC through the kernel's PLL:
   synchronization slews by a few ppm. The PLL's frequency integrator absorbs
   that rate over about an hour at the 64 s cadence. Until then the offset
   settles near 256 s times the rate: 1.76 ms behind host UTC at the 6.88 ppm
-  of an Azure WHP runner, and an expected 4.2 ms at prometheus28's 16.5 ppm.
-  Both are far below the step threshold.
+  of an Azure WHP runner, and an expected 4.2 ms at the 16.5 ppm of the
+  bare-metal WHP host. Both are far below the step threshold.
 
 The discipline never powers off the guest: a host wall-clock step is
 followed, not reported as a violation.
@@ -1649,7 +1649,7 @@ Hyper-V PTP clock:
 - Against `CLOCK_MONOTONIC_RAW` and `QueryPerformanceCounter`, 35
   short-schedule runs on the Azure KVM, MSHV, and WHP runners agree within
   0.000 to 0.050 ppm, with the largest `u_i` between 0.04 and 0.106 ppm. The
-  long schedule agrees within 0.002 ppm on prometheus30, where
+  long schedule agrees within 0.002 ppm on the bare-metal MSHV host, where
   `CLOCK_MONOTONIC` gave 0.402 ppm.
 - The WHP hosts show 0.000 ppm with a residual of at most 0.07 µs over 118 s.
 
@@ -1658,10 +1658,10 @@ orders of magnitude where the host's clocksource does not follow the TSC's
 steps: the Hyper-V reference page and `QueryPerformanceCounter` in a VM,
 which the hypervisor computes from the TSC but keeps continuous when it
 corrects TSC offsets, or the HPET, which has its own oscillator.
-Where the host clocksource is `tsc` itself (the Azure KVM runners and
-prometheus32), every kernel clock derives from the TSC, so no host clock can
-catch a TSC step; the guest warp probe (`H6` and the CI schedule) is the
-detector there.
+Where the host clocksource is `tsc` itself (the Azure KVM runners and the
+bare-metal KVM host), every kernel clock derives from the TSC, so no host
+clock can catch a TSC step; the guest warp probe (`H6` and the CI schedule)
+is the detector there.
 
 The 100 ppm bound keeps the guest's wall-clock discipline, which steers at
 most 500 ppm, clear of the TSC's error plus a restore's rate deviation of up
@@ -1693,8 +1693,8 @@ gate, on any backend:
 
 - On Azure, WHP and nested MSHV cannot offer the invariant-TSC bit to their
   guests through their feature banks, although the host OS sees an invariant
-  TSC on every runner except `azure-azlinux-2`. The profile exposes the bit
-  through CPUID anyway, so `H4` and `H6` measure what it promises.
+  TSC on every runner except one 8370C MSHV runner. The profile exposes the
+  bit through CPUID anyway, so `H4` and `H6` measure what it promises.
 - MSHV roots and Azure KVM hosts run `hyperv_clocksource_tsc_page`, not
   `tsc`. The guest has no kvmclock, so no guest clock derives from the host
   clocksource, and the downtime comes from host monotonic time and UTC, whose
@@ -1704,7 +1704,7 @@ gate, on any backend:
   `hyperv_clocksource_tsc_page`. `H6` measures the warps that this would
   cause.
 
-`azure-azlinux-2` (8370C), whose host OS lacks the bit and which showed the
+That 8370C MSHV runner, whose host OS lacks the bit and which showed the
 #265 warps, is out of rotation and unqualified because our account cannot run
 guests there, not because of this rule; its host-level warp probe saw
 backward steps of at most 2.1 ns.
@@ -1727,10 +1727,11 @@ Routing CI jobs by generation labels is optional future work.
 **Gate.** Per backend and vCPU count, no p50 is worse than the base-branch
 median by more than `max(5%, 2 ms)`. The gate covers all 36 one-vCPU metrics
 and `shell_snapshot_restore_512_mib` at 2, 4, and 8 vCPUs. It is measured on
-the CI Azure platforms; bare-metal results are informational. prometheus32
-idles at 800 MHz (`intel_pstate` powersave without HWP), which inflates its
-absolute restore latency (`restored_ms` p50 at one vCPU 39 ms, against 23 ms
-at full clock) and its `cpu_us`; the arms of an A/B share the effect.
+the CI Azure platforms; bare-metal results are informational. The bare-metal
+KVM host idles at 800 MHz (`intel_pstate` powersave without HWP), which
+inflates its absolute restore latency (`restored_ms` p50 at one vCPU 39 ms,
+against 23 ms at full clock) and its `cpu_us`; the arms of an A/B share the
+effect.
 
 Expected effects:
 
@@ -1741,17 +1742,17 @@ Expected effects:
 | Wall clock from the packet instead of RTC polling | Removes at least 32 CMOS port exits and the update wait per tiered restore; the gate's base skips the RTC reads in its untiered restores |
 | The kernel's RTC write | Because the discipline clears `STA_UNSYNC`, the guest kernel writes the CMOS RTC within a second of each clock step at boot and restore and then every 11 minutes: 26 port exits per write, about 0.1 ms on KVM and more where port exits cost more. Keeping `STA_UNSYNC` set would avoid it but report `TIME_ERROR` to applications |
 | No capture-time clocksource waits | Removes the harness's wait for `tsc-early` to become `tsc`: 0.73 to 0.92 s per capture on MSHV and 0.47 to 0.67 s on WHP; outside the gated metrics |
-| `no_timer_check` from the Hyper-V identity, no LAPIC calibration, and no `tsc-early` window at cold boot | About 43 to 52 ms (9 to 15%) faster `cold_start_base` and other quiet cold boots on MSHV and WHP (WHP measured 31 to 55 ms on prometheus28, and 61 to 71 ms at one vCPU on Azure); KVM unchanged |
+| `no_timer_check` from the Hyper-V identity, no LAPIC calibration, and no `tsc-early` window at cold boot | About 43 to 52 ms (9 to 15%) faster `cold_start_base` and other quiet cold boots on MSHV and WHP (WHP measured 31 to 55 ms on bare metal, and 61 to 71 ms at one vCPU on Azure); KVM unchanged |
 | Invariant TSC from the profile where the backend cannot offer it to guests (Azure MSHV and WHP) | Removes each AP's delay calibration of about 150 ms: an 8-vCPU cold boot takes 299 ms instead of 1,385 ms on Azure MSHV, and cold boots are 0.2 to 1.1 s faster at 2 to 8 vCPUs on Azure WHP |
 | Fixed restore work: the restore clock (0.7 to 1.1 ms), restore verification, and the backend preflight | A one-vCPU WHP restore is at parity on Azure 8370C runners (p50 −0.6 ms) and about 2 ms slower on bare metal, where no emulation cost is recovered; the counting LAPIC accounts for at most 0.75 ms of it |
-| MSHV root-driver costs | Host characteristics, which the time ABI and the legacy path pay alike, not ABI obligations. On prometheus30 (hypervisor 26100.30000) three root-driver costs make up 50 of the 70 ms of a one-vCPU, 512 MiB restore and 130 of 150 ms at eight vCPUs: registering guest RAM, which the driver maps no-access 4 KiB at a time (28 ms; 9.5 ms on Azure); creating each application processor after the first: the second takes about 6 ms and each later one 14 to 15 ms, because `MSHV_CREATE_VP` pre-deposits 90 pages, a VP needs about 172 there, and each failed creation deposits one more page (21 and 78 ms at 4 and 8 vCPUs, and the same at cold boot; 1.9 ms at 8 vCPUs on Azure); and the first touch of each 2 MiB chunk after resume (about 22 ms, see below). The first two serialize on the driver's partition mutex. Prefaulting the snapshot's resident chunks before registration (`MADV_POPULATE_WRITE`) cuts the third to 4 to 10 ms but costs about 45 ms itself, so the remedies are driver changes (larger deposits, and read-only mappings for read faults or a smaller fault granule for private file mappings) or guest RAM filled from the snapshot in parallel. The frozen synchronized TSC set adds 40 to 170 µs for 1 to 4 VPs and no per-VP serialized work |
-| Boot check and daemon start | Off the cold-boot path. Before shell-ready only the initial time sample and clock step remain (`C12`: one port write and four reads). The other checks and the daemon start run after shell-ready, and `nvx-time status` reports their wall time (`elapsed_us`, not budgeted) and CPU time (`cpu_us`), which each backend budgets per phase (see `cpu_us` budgets below). Wiring v7 measured medians of 1.6 to 3.7 ms at boot and 0.4 to 1.0 ms at restore on MSHV, 3.5 to 5.1 ms and 2.8 to 5.3 ms on KVM (prometheus32 idles at 800 MHz, which slows the delayed checks), and 2.6 to 4.8 ms and 7.7 to 11.5 ms on WHP at 1 to 8 vCPUs, with captures under 3 ms everywhere |
+| MSHV root-driver costs | Host characteristics, which the time ABI and the legacy path pay alike, not ABI obligations. On the bare-metal MSHV host (hypervisor 26100.30000) three root-driver costs make up 50 of the 70 ms of a one-vCPU, 512 MiB restore and 130 of 150 ms at eight vCPUs: registering guest RAM, which the driver maps no-access 4 KiB at a time (28 ms; 9.5 ms on Azure); creating each application processor after the first: the second takes about 6 ms and each later one 14 to 15 ms, because `MSHV_CREATE_VP` pre-deposits 90 pages, a VP needs about 172 there, and each failed creation deposits one more page (21 and 78 ms at 4 and 8 vCPUs, and the same at cold boot; 1.9 ms at 8 vCPUs on Azure); and the first touch of each 2 MiB chunk after resume (about 22 ms, see below). The first two serialize on the driver's partition mutex. Prefaulting the snapshot's resident chunks before registration (`MADV_POPULATE_WRITE`) cuts the third to 4 to 10 ms but costs about 45 ms itself, so the remedies are driver changes (larger deposits, and read-only mappings for read faults or a smaller fault granule for private file mappings) or guest RAM filled from the snapshot in parallel. The frozen synchronized TSC set adds 40 to 170 µs for 1 to 4 VPs and no per-VP serialized work |
+| Boot check and daemon start | Off the cold-boot path. Before shell-ready only the initial time sample and clock step remain (`C12`: one port write and four reads). The other checks and the daemon start run after shell-ready, and `nvx-time status` reports their wall time (`elapsed_us`, not budgeted) and CPU time (`cpu_us`), which each backend budgets per phase (see `cpu_us` budgets below). Wiring v7 measured medians of 1.6 to 3.7 ms at boot and 0.4 to 1.0 ms at restore on MSHV, 3.5 to 5.1 ms and 2.8 to 5.3 ms on KVM (the bare-metal KVM host idles at 800 MHz, which slows the delayed checks), and 2.6 to 4.8 ms and 7.7 to 11.5 ms on WHP at 1 to 8 vCPUs, with captures under 3 ms everywhere |
 | Counting LAPIC instead of TSC-deadline on KVM | Different timer-programming exits; covered by the gate |
-| v1 profiles without `ITS_NO` | Linux's ITS mitigation at boot, about 6 ms of a one-vCPU cold boot where the host's KVM advertises `ITS_NO` (bare-metal prometheus32: +6.3 [5.5, 7.3] ms against the same build booted with `indirect_target_selection=off`). The gated Azure KVM, MSHV, and WHP guests were already mitigated and are unchanged; restore is unaffected |
-| The profile's CPU view at 2 or more vCPUs on KVM | None at the integration head. Before the L3 fix, multi-vCPU cold boots were slower: +9.2 [5.0, 13.7] ms at 2 vCPUs on prometheus32 against the pre-profile head, and about +25 ms on azure-kvm-5. OpenVMM's `CPUID.4` reported a private L3 cache per vCPU, which made Linux's cache-info initialization wait a 10 ms tick for CPU 1 on many boots. With the L3 shared by the socket, prometheus32 cold boots match the pre-profile head: −0.3 [−3.2, +2.7], −0.0 [−2.1, +2.0], and −1.0 [−3.6, +1.7] ms at 2, 4, and 8 vCPUs. The gate measures azure-kvm-5. The msr driver's per-CPU hotplug callback (`msr_init`) waits one or two ticks on multi-vCPU boots, as it did before the profiles; it competes for CPU with the asynchronous initramfs unpack and is off the critical path |
+| v1 profiles without `ITS_NO` | Linux's ITS mitigation at boot, about 6 ms of a one-vCPU cold boot where the host's KVM advertises `ITS_NO` (the bare-metal KVM host: +6.3 [5.5, 7.3] ms against the same build booted with `indirect_target_selection=off`). The gated Azure KVM, MSHV, and WHP guests were already mitigated and are unchanged; restore is unaffected |
+| The profile's CPU view at 2 or more vCPUs on KVM | None at the integration head. Before the L3 fix, multi-vCPU cold boots were slower: +9.2 [5.0, 13.7] ms at 2 vCPUs on the bare-metal KVM host against the pre-profile head, and about +25 ms on nested Azure KVM. OpenVMM's `CPUID.4` reported a private L3 cache per vCPU, which made Linux's cache-info initialization wait a 10 ms tick for CPU 1 on many boots. With the L3 shared by the socket, the bare-metal host's cold boots match the pre-profile head: −0.3 [−3.2, +2.7], −0.0 [−2.1, +2.0], and −1.0 [−3.6, +1.7] ms at 2, 4, and 8 vCPUs. The gate measures nested Azure KVM. The msr driver's per-CPU hotplug callback (`msr_init`) waits one or two ticks on multi-vCPU boots, as it did before the profiles; it competes for CPU with the asynchronous initramfs unpack and is off the critical path |
 | Restore work before the acknowledgement | Only the packet read, the clock set, CPU and memory activation, and entropy and identity repair, in one helper process. The restore checks, the RCU release, and the deferred `C7` start at `SCHED_IDLE` 150 ms after the acknowledgement, after the readiness path |
 | Monotonic time that includes the downtime | Right after resume, the guest kernel runs the timer work that came due during the downtime (kworkers, softirqs, and RCU) and first-touches cold pages doing so: at one vCPU about 1.4 ms on MSHV, 2.2 ms on KVM, and 17 ms on WHP (26 ms at two vCPUs), where a first touch costs about 1 ms. It falls inside the gated restore metric whatever the helper's priority. On MSHV the cost is per 2 MiB chunk: the root driver resolves the first touch of each chunk with 512 copy-on-write copies of the private snapshot mapping, about 1.1 ms. A one-vCPU restore touches about 24 chunks, 25 ms of its restore on both the time ABI and the legacy path, and the time ABI's catch-up adds about one chunk |
-| No time ABI console lines in production | Each console byte costs one or two port exits, about 10 to 12 µs on bare-metal KVM and an estimated 20 to 45 µs nested on Azure. Without the boot marker (about 110 bytes) and the restore marker (about 117 bytes), boots and restores save 1 to 5 ms, enough to fail the gate on `azure-kvm-5`; violation events still print |
+| No time ABI console lines in production | Each console byte costs one or two port exits, about 10 to 12 µs on bare-metal KVM and an estimated 20 to 45 µs nested on Azure. Without the boot marker (about 110 bytes) and the restore marker (about 117 bytes), boots and restores save 1 to 5 ms, enough to fail the gate on nested Azure KVM; violation events still print |
 
 Expected wins are tracked separately and do not relax the gate.
 
@@ -1763,9 +1764,9 @@ wiring v7m on the production kernel (`vmlinux-lockstep`), with at least
 
 | Backend | Boot | Capture | Restore | Measured on |
 | --- | --- | --- | --- | --- |
-| KVM | 6 + 2 | 1 + 0.4 | 6.5 + 1.5 | prometheus32 and `azure-kvm-5`, 128 MiB |
-| MSHV | 3 + 0.75 | 1 + 0.4 | 2.5 + 0.5 | prometheus30 and `azure-azlinux-5`, 128 and 512 MiB |
-| WHP | 20 + 1.5 | 1 + 0.4 | 35 + 6 | prometheus28 and the 8370C and 8573C runners, 512 MiB |
+| KVM | 6 + 2 | 1 + 0.4 | 6.5 + 1.5 | Bare metal and nested Azure 8370C, 128 MiB |
+| MSHV | 3 + 0.75 | 1 + 0.4 | 2.5 + 0.5 | Bare metal and nested Azure 8573C, 128 and 512 MiB |
+| WHP | 20 + 1.5 | 1 + 0.4 | 35 + 6 | Bare metal and the Azure 8370C and 8573C runners, 512 MiB |
 
 Fleet validation records every sample's `cpu_us` and checks each one
 against these budgets. CI reports each phase against its budget
@@ -1782,7 +1783,7 @@ their first touches of restored RAM:
 - On MSHV, each first touch of a 2 MiB chunk of restored RAM stalls the
   toucher about 1.1 ms on bare metal (see MSHV root-driver costs). The
   restore budget leaves room for one more stall above every maximum.
-- On `azure-kvm-5`, KVM's restore checks fault in the file-backed restored
+- On nested Azure KVM, KVM's restore checks fault in the file-backed restored
   RAM 4 KiB at a time: medians of 3.4 to 7.6 ms at 1 to 8 vCPUs, and maxima
   of 5.15 ms at 1 vCPU and 13.14 ms at 8, over 72 restores.
 
@@ -1793,7 +1794,7 @@ touch, which doesn't depend on the guest's memory size.
 
 **Start-up budget.** The time ABI and CPU profile work of a cold boot or
 restore costs less than 0.5 ms over the pre-profile head (`e7ec0ca6c`),
-measured on prometheus32 (KVM) with the kvm agent's attribution harness; the
+measured on the bare-metal KVM host with an attribution harness; the
 flip requires it. At the integration head (`e06ed4d4a`), up to the backend
 preflight at one vCPU, a restore starts 0.32 ms and a cold boot 0.30 ms
 faster than `e7ec0ca6c`. The only added work is the worker's time ABI CPU
@@ -1812,7 +1813,7 @@ or an effective CPUID:
   and the recomputed effective CPUID with the binary record, about 5 µs;
 - `verify_support` costs 2 to 10 µs of CPU time, plus the backend's surface.
 
-On prometheus32, selection, the pinned-record and generation checks, the
+On bare-metal KVM, selection, the pinned-record and generation checks, the
 effective CPUID merge, `verify_support`, and the unlisted-entry check cost
 about 26 µs together (cold medians over 30 fresh processes). The codecs and
 digests (`CpuProfile::{encode, decode, digest, digest_string,
@@ -1829,17 +1830,17 @@ The backends add their own CPUID work:
   Every CPUID instruction exits in a Hyper-V root, so a full enumeration
   costs 70 to 100 µs on the bare-metal roots and 0.23 to 0.31 ms on Azure's
   nested roots. Skipping the range took MSHV's from 96 to 49 µs on
-  prometheus30 and from 305 to 220 µs nested, more than its share of the
+  bare metal and from 305 to 220 µs nested, more than its share of the
   queries suggests. KVM takes its surface from `KVM_GET_SUPPORTED_CPUID` and
   does not enumerate. MSHV enumerates on a thread that partition creation
   starts, so the read leaves the start path; starting the thread costs about
   50 µs in a root partition, and keeping its channel until the partition
   drops avoids freeing memory there, which costs 12 to 18 µs.
 - MSHV reads VP 0's report in one rep `HvCallGetVpCpuidValues`: 73 µs p50 on
-  prometheus30 and 51 µs on azure-azlinux-5, against 0.51 and 0.82 ms with
+  bare metal and 51 µs nested, against 0.51 and 0.82 ms with
   one call per entry. WHP has no batched read: its report takes 57 to 60
   native reads, one call each, which with its one host enumeration cost
-  0.81 ms on prometheus28 and 1.48 to 1.86 ms on Azure (medians). Reading
+  0.81 ms on bare metal and 1.48 to 1.86 ms on Azure (medians). Reading
   them on a few threads before any VP runs is the allowed lever if a gate
   needs it.
 
@@ -1889,8 +1890,9 @@ backend's budget for that phase in
 [Performance expectations](#performance-expectations-and-acceptance-gate);
 CI reports it without gating on it. The fleet runs them on
 the hosts our SSH account can use,
-which for KVM are prometheus32 and `azure-kvm-5` and for MSHV prometheus30
-and `azure-azlinux-5`: the account cannot open `/dev/kvm` or `/dev/mshv` on
+which for KVM and for MSHV are a bare-metal Skylake-SP host and a nested
+Azure VM (8370C for KVM, 8573C for MSHV): the account cannot open `/dev/kvm`
+or `/dev/mshv` on
 the other KVM and MSHV runners, which only CI jobs exercise. On the Azure WHP
 runners, a cold boot with an empty command line, which logs to the console,
 keeps `tsc` as its clocksource (#292: 6 of 6 runs with the time ABI, against
@@ -1907,15 +1909,15 @@ can use as the fleet restore matrix.
 | --- | --- | --- |
 | Same host, immediate | All | Restored; `DOWNTIME_UTC` clear |
 | Same host, downtime of 30 s (over the 21 s RCU stall timeout), at 1 and 8 vCPUs, with and without `rcupdate.rcu_expedited=1` | All | Restored; no RCU stall; `rcu_stall_count` stays 0 |
-| Same host under DVFS load | prometheus32 | Restored |
+| Same host under DVFS load | The bare-metal KVM host | Restored |
 | Simulated host reboot: hooks `force-utc-downtime`, `boot-id-mismatch`, and `dest-rate-offset-ppm=+200`, then `-200` | One host per backend | Restored; `DOWNTIME_UTC` and `TEST_HOOKS` set; rate deviation reported |
 | Simulated rate beyond tolerance: `dest-rate-offset-ppm=+251` | One host per backend | `E_TSC_RATE_TOLERANCE` |
 | Downtime bounds: `downtime-add-s=2592001`; `force-utc-downtime` with `utc-offset-ms=-<n>`, `n` above the elapsed time | One host per backend | `E_DOWNTIME_EXCESSIVE`; `E_DOWNTIME_NEGATIVE` |
 | Sample uncertainty: `sample-delay-us=200`; then `sample-delay-us=3000` on restore and on cold boot | One host per backend | Restored and running, with `last_sample_error=G_SAMPLE_UNCERTAIN` in `nvx-time status`; `G_REPAIR_SAMPLE` (195); `G_CONFORMANCE_C12` (193) |
-| Across VMs of one generation | `azure-windows-1` to `-2`; `azure-windows-3` to `-4`. KVM and MSHV have no usable pair of one generation, so the simulated host reboot covers their cross-host path | Restored |
-| Across generations | `azure-windows-1` (8370C) to `-3` (8573C); prometheus32 to `azure-kvm-5` (KVM); prometheus30 to `azure-azlinux-5` (MSHV) | `E_CPU_GENERATION` |
-| Backend that cannot offer invariant TSC to its guests, on a host OS that sees it | `azure-windows-1` to `-4`, `azure-azlinux-5` | Restored; the guest has `constant_tsc` and `nonstop_tsc`; `H4` and `H6` pass |
-| Across backends | prometheus32 (KVM) to prometheus30 (MSHV) | `E_BACKEND_MISMATCH` |
+| Across VMs of one generation | Between two 8370C Azure WHP runners, and between two 8573C ones. KVM and MSHV have no usable pair of one generation, so the simulated host reboot covers their cross-host path | Restored |
+| Across generations | An 8370C Azure WHP runner to an 8573C one; bare-metal Skylake-SP KVM to nested Azure 8370C KVM; bare-metal Skylake-SP MSHV to nested Azure 8573C MSHV | `E_CPU_GENERATION` |
+| Backend that cannot offer invariant TSC to its guests, on a host OS that sees it | The Azure WHP runners and nested Azure MSHV | Restored; the guest has `constant_tsc` and `nonstop_tsc`; `H4` and `H6` pass |
+| Across backends | Bare-metal KVM to bare-metal MSHV | `E_BACKEND_MISMATCH` |
 | Pre-v1 snapshot | Any | `E_SNAPSHOT_VERSION` |
 | Failed capture: in one VM, a request whose destination's parent the host made unwritable after launch, so that creating the staging directory fails after quiesce and OpenVMM rolls back; then, with the parent writable again and after 30 s idle, a second request | Each bare-metal host at 1 and 8 vCPUs, 3 times each; [CI's `snapshot-core`](../ci.md) exercises a request without a destination, which OpenVMM releases before preflight, and asserts that the guest continues once, that `nvx-time status` passes at `generation=0` with no restore, and that `rcu_cpu_stall_suppress` reads 0 | OpenVMM logs the rollback (`microVM snapshot failed before commit; attempting rollback`, then `microVM snapshot rollback succeeded; guest resumed`), with no time ABI code, and each failed request returns in the same VM: status bit 1 clear, `nvx-time status` passing at `generation=0`, the saved values back at their values before the request (`rcu_cpu_stall_suppress`, and on the debug kernel `soft_watchdog` and `hung_task_timeout_secs`) with no saved-values file left, and no 193, 194, or 195 and no clock message; the second request captures, which step 2 of the snapshot agent refuses while the first request's saved values remain, and its snapshot restores |
 | Processor activation from one boot-online CPU to 2, 4, and 8 | All backends | Restored; warp probe passes |
@@ -2018,7 +2020,7 @@ Migration impact:
 - CPUID becomes profile-defined, so guests can lose host features that no
   profile of their generation pins.
 - Hosts that fail qualification cannot run microVMs until replaced.
-  `azure-azlinux-2` stays out of rotation and unqualified because our
+  One 8370C MSHV runner stays out of rotation and unqualified because our
   account cannot run guests there.
 - Per-PR CI captures and restores on the same runner. Same-generation
   cross-VM restore is validated by the fleet restore matrix on WHP only; no
