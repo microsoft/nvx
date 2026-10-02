@@ -13,6 +13,7 @@ runs:
         cache-dependency-path: requirements-dev.txt
 
     - name: Set up Python (self-hosted)
+      id: self_hosted_python
       if: runner.environment == 'self-hosted'
       shell: bash
       run: |
@@ -25,15 +26,18 @@ runs:
         PY
         venv_dir=$(mktemp -d "$RUNNER_TEMP/nvx-quality-venv.XXXXXX")
         python3 -m venv "$venv_dir"
-        printf '%s/bin\n' "$venv_dir" >> "$GITHUB_PATH"
+        printf 'python=%s/bin/python\n' "$venv_dir" >> "$GITHUB_OUTPUT"
 
     - name: Install development tools
       shell: bash
-      run: python -m pip install --requirement requirements-dev.txt
+      env:
+        PYTHON_BIN: ${{ steps.self_hosted_python.outputs.python || 'python' }}
+      run: '"$PYTHON_BIN" -m pip install --requirement requirements-dev.txt'
 
     - name: Check code quality
       shell: bash
       env:
+        PYTHON_BIN: ${{ steps.self_hosted_python.outputs.python || 'python' }}
         SHELLCHECK: >-
           docker run --rm --volume ${{ github.workspace }}:/workspace:ro
           --workdir /workspace
@@ -45,8 +49,8 @@ runs:
           mvdan/shfmt@sha256:307d265ffd25ce832899ae17c93ed5062fc3375c514bba8f52cbf52792735c4d
       run: |
         set -euo pipefail
-        python -m ruff check scripts .github/specula
-        python -m compileall -q .github/specula
+        "$PYTHON_BIN" -m ruff check scripts .github/specula
+        "$PYTHON_BIN" -m compileall -q .github/specula
         ${SHELLCHECK} --shell=sh \
           guest/common/init guest/alpine/nvx-container-enter \
           guest/alpine/nvx-container-launch guest/common/nvx-exit \
@@ -58,9 +62,9 @@ runs:
           scripts/setup/setup-linux-runner.sh
         ${SHELLCHECK} --shell=bash \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
-        python -m pyright --pythonplatform Linux
-        python -m pyright --pythonplatform Windows
-        python -m ruff format --check scripts .github/specula
+        "$PYTHON_BIN" -m pyright --pythonplatform Linux
+        "$PYTHON_BIN" -m pyright --pythonplatform Windows
+        "$PYTHON_BIN" -m ruff format --check scripts .github/specula
         ${SHFMT} -d -ln posix -i 4 -ci \
           guest/common/init guest/alpine/nvx-container-enter \
           guest/alpine/nvx-container-launch guest/common/nvx-exit \
@@ -76,7 +80,9 @@ runs:
     - name: Test Specula CI wiring
       shell: bash
       working-directory: .github/specula
-      run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q
+      env:
+        PYTHON_BIN: ${{ steps.self_hosted_python.outputs.python || 'python' }}
+      run: 'PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -m unittest discover -s tests -q'
 
     - name: Check PowerShell syntax
       shell: pwsh

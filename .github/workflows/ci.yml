@@ -41,10 +41,17 @@ jobs:
           persist-credentials: false
 
       - name: Require rootless Docker
+        id: rootless
         uses: ./.github/actions/require-rootless-docker
 
       - name: Check code quality
         uses: ./.github/actions/check-quality
+
+      - name: Remove Docker client configuration
+        if: always() && steps.rootless.outputs.config_dir != ''
+        env:
+          NVX_DOCKER_CONFIG_TO_CLEAN: ${{ steps.rootless.outputs.config_dir }}
+        run: python3 scripts/setup/cleanup_rootless_docker.py
 
   openvmm-changes:
     name: Detect CI workload inputs
@@ -150,6 +157,7 @@ jobs:
           persist-credentials: false
 
       - name: Require rootless Docker
+        id: rootless
         uses: ./.github/actions/require-rootless-docker
 
       - name: Build guest artifacts
@@ -174,6 +182,12 @@ jobs:
             build/ubuntu-smoke-scratch.ext4
           if-no-files-found: error
           retention-days: 1
+
+      - name: Remove Docker client configuration
+        if: always() && steps.rootless.outputs.config_dir != ''
+        env:
+          NVX_DOCKER_CONFIG_TO_CLEAN: ${{ steps.rootless.outputs.config_dir }}
+        run: python3 scripts/setup/cleanup_rootless_docker.py
 
   build-openvmm-linux-gnu:
     name: OpenVMM binary / Linux GNU

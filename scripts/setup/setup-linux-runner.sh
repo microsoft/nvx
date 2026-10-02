@@ -422,7 +422,7 @@ install_packages() {
             bc binutils bison build-essential ca-certificates cmake cpio curl diffutils \
             flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
-            pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
+            pkg-config protobuf-compiler python3 python3-venv rsync tar util-linux xz-utils \
             zstd
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
