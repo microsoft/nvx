@@ -1448,7 +1448,11 @@ The daemon keeps `CLOCK_REALTIME` on host UTC through the kernel's PLL:
   nanoseconds, `status = STA_PLL | STA_NANO` (clearing `STA_UNSYNC`),
   `constant = 4` at the 16 s cadence or 6 at the 64 s cadence,
   `maxerror = ceil((|theta| + epsilon) / 1000)` µs, and
-  `esterror = ceil(epsilon / 1000)` µs.
+  `esterror = ceil(epsilon / 1000)` µs. A clear `STA_UNSYNC` reports the
+  clock to applications as synchronized, with these error bounds. It also
+  makes the kernel write the CMOS RTC within a second and then every
+  11 minutes, which v1 accepts (see
+  [Performance expectations](#performance-expectations-and-acceptance-gate)).
 - **Bounds.** The kernel limits the frequency to ±500 ppm; the declared rate
   tolerance uses at most 250 ppm of it.
 - **Convergence.** The boot check and restore repair step the clock, and
@@ -1730,8 +1734,9 @@ Expected effects:
 | Change | Expected effect |
 | --- | --- |
 | WHP restored SMP without RDTSC emulation | Removes the 1-to-2 vCPU restore jump (120.7 ms to 165.9 ms p50): SMP restores measured 8 to 18 ms faster in the spike and 14 to 31 ms faster on 8370C runners at 2 to 8 vCPUs. A guest timestamp read after an SMP restore drops from 41 to 73 µs to 10 to 16 ns |
-| Packet v4 with four-byte reads instead of 83 or more byte reads | Fewer restore exits, most visible on WHP |
-| Wall clock from the packet instead of RTC polling | Removes at least 32 CMOS port exits and the update wait per tiered restore |
+| Packet v4 with four-byte reads instead of 83 or more byte reads | Fewer restore exits than reading packets v1 to v3 a byte at a time. The gate's base reads no packet in its untiered restores, so there the time ABI adds 25 port exits per restore (59 against 34 on KVM): the selector write and 24 four-byte reads |
+| Wall clock from the packet instead of RTC polling | Removes at least 32 CMOS port exits and the update wait per tiered restore; the gate's base skips the RTC reads in its untiered restores |
+| The kernel's RTC write | Because the discipline clears `STA_UNSYNC`, the guest kernel writes the CMOS RTC within a second of each clock step at boot and restore and then every 11 minutes: 26 port exits per write, about 0.1 ms on KVM and more where port exits cost more. Keeping `STA_UNSYNC` set would avoid it but report `TIME_ERROR` to applications |
 | No capture-time clocksource waits | Removes the harness's wait for `tsc-early` to become `tsc`: 0.73 to 0.92 s per capture on MSHV and 0.47 to 0.67 s on WHP; outside the gated metrics |
 | `no_timer_check` from the Hyper-V identity, no LAPIC calibration, and no `tsc-early` window at cold boot | About 43 to 52 ms (9 to 15%) faster `cold_start_base` and other quiet cold boots on MSHV and WHP (WHP measured 31 to 55 ms on prometheus28, and 61 to 71 ms at one vCPU on Azure); KVM unchanged |
 | Invariant TSC from the profile where the backend cannot offer it to guests (Azure MSHV and WHP) | Removes each AP's delay calibration of about 150 ms: an 8-vCPU cold boot takes 299 ms instead of 1,385 ms on Azure MSHV, and cold boots are 0.2 to 1.1 s faster at 2 to 8 vCPUs on Azure WHP |
