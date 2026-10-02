@@ -1483,8 +1483,11 @@ The daemon keeps `CLOCK_REALTIME` on host UTC through the kernel's PLL:
   fast and ahead when it runs slow: 1.76 ms behind at the +6.88 ppm of an
   Azure 8370C WHP runner, about 3.2 ms ahead at the −12.89 ppm of an 8573C
   one, and 4.06 ms behind at the +16.07 ppm of the bare-metal WHP host,
-  against 4.11 ms predicted. A skipped poll (`G_SAMPLE_UNCERTAIN`) lets the
-  offset grow at the remaining rate for another 64 s, and the nested WHP
+  against 4.11 ms predicted. The bare-metal MSHV host, at +14.82 ppm, was 3.50
+  ms behind after 12 minutes and still approaching its 3.79 ms plateau. Where
+  the host's own UTC is being slewed, as on a nested Azure MSHV host, the
+  offset follows the changing rate. A skipped poll (`G_SAMPLE_UNCERTAIN`) lets
+  the offset grow at the remaining rate for another 64 s, and the nested WHP
   runners, whose sample uncertainty approaches the 50 µs bound, skip some: the
   8573C runner reached 4.1 ms after two skipped polls in a row. All of these
   are far below the step threshold.
