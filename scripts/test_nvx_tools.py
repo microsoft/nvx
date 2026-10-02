@@ -3502,9 +3502,21 @@ class CiConfigurationTests(unittest.TestCase):
             / "action.yml"
         ).read_text(encoding="utf-8")
         self.assertIn('endpoint="unix:///run/user/$(id -u)/docker.sock"', docker_action)
-        self.assertIn('config="$RUNNER_TEMP/nvx-docker-config"', docker_action)
+        self.assertIn(
+            'config=$(mktemp -d "$RUNNER_TEMP/nvx-docker-config.XXXXXX")',
+            docker_action,
+        )
         self.assertIn('DOCKER_CONFIG="$config" DOCKER_HOST="$endpoint"', docker_action)
         self.assertIn('DOCKER_HOST="$endpoint" docker info', docker_action)
+        quality_action = (
+            BuildConstants.REPO_ROOT / ".github" / "actions" / "check-quality" / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("if: runner.environment == 'github-hosted'", quality_action)
+        self.assertIn("if: runner.environment == 'self-hosted'", quality_action)
+        self.assertIn(
+            'venv_dir=$(mktemp -d "$RUNNER_TEMP/nvx-quality-venv.XXXXXX")',
+            quality_action,
+        )
         self.assertIn('name=rootless', docker_action)
         if os.name != "posix":
             return
