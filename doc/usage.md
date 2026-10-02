@@ -522,9 +522,9 @@ reject incomplete inputs for their respective workload sets.
 `--require-shell-snapshot-restore-512` accepts only the canonical 512 MiB
 restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
-result, producing the 31-metric microVM CI result. A directory whose metadata
+result, producing the 29-metric microVM CI result. A directory whose metadata
 selects `device-io` is collected as five additional ABI-2, one-vCPU `ops/s`
-metrics; CI merges them into a 36-metric one-vCPU result.
+metrics; CI merges them into a 34-metric one-vCPU result.
 `--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
 
 #### `performance validate-openvmm`

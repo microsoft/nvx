@@ -1,9 +1,9 @@
 # Benchmark
 
 The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites, a
-23-metric microVM non-Python workload suite, and five device operation-rate metrics on
+21-metric microVM non-Python workload suite, and five device operation-rate metrics on
 Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI combines those workloads with eight
-128 MiB shell lifecycle metrics and reports all 36 median (p50) values. At 2, 4, and 8 vCPUs, CI records only
+128 MiB shell lifecycle metrics and reports all 34 median (p50) values. At 2, 4, and 8 vCPUs, CI records only
 `shell_snapshot_restore_512_mib`. Latency and resident-memory metrics are lower-is-better;
 throughput and operation-rate metrics are higher-is-better.
 
@@ -64,10 +64,10 @@ python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-
 Run the complete performance suite with:
 
 ```console
-# Linux/KVM: run all 23 metrics and write collector-compatible logs
+# Linux/KVM: run all 21 metrics and write collector-compatible logs
 python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu
 
-# Linux/MSHV: run all 23 metrics
+# Linux/MSHV: run all 21 metrics
 python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v2/1vcpu
 
 # Windows/WHP
@@ -238,15 +238,15 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Benchmark | Command | Description |
 | --- | --- | --- |
 | Shell lifecycle | `benchmark --suite e2e` | Measures cold start, snapshot generation, snapshot restore, teardown, and peak RSS using a shell-ready guest. |
-| All supported non-Python workloads | `benchmark --suite performance` | Runs 23 metrics and writes collector-compatible logs. |
+| All supported non-Python workloads | `benchmark --suite performance` | Runs 21 metrics and writes collector-compatible logs. |
 | Device operation rates | `benchmark --suite device-io` | Measures five random storage and UDP round-trip operation rates with resumable raw attempts. |
 | Cold start | `benchmark --suite cold-start` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
-| Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with lifecycle-aligned snapshot restore at 64, 128, 256, and 512 MiB. |
+| Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with lifecycle-aligned snapshot restore at 128, 256, and 512 MiB. |
 | Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured lifecycle-aligned snapshot and measures only restore latency for the selected memory sizes. |
 | Restore-time vCPU activation | `benchmark --suite snapshot-restore-vcpu --processors 8` | Restores one boot-online-1, capacity-8 snapshot at online targets 1/2/4/8 and reports latency plus peak RSS. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
-| Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 64/128/256/512/1024 MiB warm/cold restores. |
+| Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 128/256/512/1024 MiB warm/cold restores. |
 | Virtio device restore profile | `benchmark --suite device-restore-profile` | Verifies active and driver-unbound deferred restore for console, network, and virtio-fs; emits standalone diagnostic JSON and raw logs. |
 
 ## Kernel command lines
@@ -420,6 +420,10 @@ This lifecycle-aligned methodology supersedes the earlier pre-banner
 `shellsnap` capture. Historical `shell_snapshot_restore_*` values produced by
 that methodology are not comparable with newly collected values.
 
+The 64 MiB pair, `shell_snapshot_cold_64_mib` and
+`shell_snapshot_restore_64_mib`, was retired in #116. The platform CSVs in
+`data/` keep its results only as history; the last ones are `b8912df`'s.
+
 | Metric | Description |
 | --- | --- |
 | `shell_snapshot_cold_128_mib` | OpenVMM launch to a shell-ready guest with 128 MiB of memory. |
@@ -498,10 +502,10 @@ successful packets.
 ## CI collection
 
 `python scripts/nvx.py performance collect --require-shared-suite` rejects a workload result
-unless it contains exactly the 23 shared metrics. Supplying `--lifecycle-input` requires and merges
-the eight lifecycle metrics, producing a 31-metric one-vCPU result. CI collects the five device
+unless it contains exactly the 21 shared metrics. Supplying `--lifecycle-input` requires and merges
+the eight lifecycle metrics, producing a 29-metric one-vCPU result. CI collects the five device
 operation-rate metrics from their separate raw-log directory and merges them by ABI, processor
-count, commit, and metric, producing the final 36-metric ABI-2 one-vCPU result. Higher-vCPU
+count, commit, and metric, producing the final 34-metric ABI-2 one-vCPU result. Higher-vCPU
 collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 `shell_snapshot_restore_512_mib` plus canonical one-warmup/five-sample metadata for a 2-, 4-, or
 8-vCPU guest. A `device-io` directory is recognized from metadata and must contain exactly its five
