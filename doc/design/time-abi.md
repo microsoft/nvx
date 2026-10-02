@@ -1460,9 +1460,15 @@ The daemon keeps `CLOCK_REALTIME` on host UTC through the kernel's PLL:
   at which the host's own UTC clock runs against its TSC, which host time
   synchronization slews by a few ppm. The PLL's frequency integrator absorbs
   that rate over about an hour at the 64 s cadence. Until then the offset
-  settles near 256 s times the rate: 1.76 ms behind host UTC at the 6.88 ppm
-  of an Azure WHP runner, and an expected 4.2 ms at the 16.5 ppm of the
-  bare-metal WHP host. Both are far below the step threshold.
+  settles near 256 s times the rate, behind host UTC when the host's UTC
+  runs fast and ahead when it runs slow: 1.76 ms behind at the +6.88 ppm of
+  an Azure 8370C WHP runner, about 3.2 ms ahead at the -12.89 ppm of an
+  8573C one, and an expected 4.2 ms at the 16.5 ppm of the bare-metal WHP
+  host. A skipped poll (`G_SAMPLE_UNCERTAIN`) lets the offset grow at the
+  remaining rate for another 64 s, and the nested WHP runners, whose sample
+  uncertainty approaches the 50 µs bound, skip some: the 8573C runner
+  reached 4.1 ms after two skipped polls in a row. All of these are far
+  below the step threshold.
 
 The discipline never powers off the guest: a host wall-clock step is
 followed, not reported as a violation.
@@ -1914,6 +1920,7 @@ can use as the fleet restore matrix.
 | Simulated rate beyond tolerance: `dest-rate-offset-ppm=+251` | One host per backend | `E_TSC_RATE_TOLERANCE` |
 | Downtime bounds: `downtime-add-s=2592001`; `force-utc-downtime` with `utc-offset-ms=-<n>`, `n` above the elapsed time | One host per backend | `E_DOWNTIME_EXCESSIVE`; `E_DOWNTIME_NEGATIVE` |
 | Sample uncertainty: `sample-delay-us=200`; then `sample-delay-us=3000` on restore and on cold boot | One host per backend | Restored and running, with `last_sample_error=G_SAMPLE_UNCERTAIN` in `nvx-time status`; `G_REPAIR_SAMPLE` (195); `G_CONFORMANCE_C12` (193) |
+| Wall-clock convergence, for 12 minutes after a restore and after a cold boot, with the host's UTC rate `r` measured over 60 s alongside (Linux: `CLOCK_REALTIME` against `CLOCK_MONOTONIC_RAW`; Windows: UTC against QPC) | One host per backend | No step after the initial one; `synchronized=1`; `frequency_ppb` moving toward `r`; and `abs(theta)` at most 512 s × `abs(r)` + 1 ms at every accepted poll, which leaves room for four skipped polls in a row. Skipped polls are reported, and fail the case only through that bound |
 | Across VMs of one generation | Between two 8370C Azure WHP runners, and between two 8573C ones. KVM and MSHV have no usable pair of one generation, so the simulated host reboot covers their cross-host path | Restored |
 | Across generations | An 8370C Azure WHP runner to an 8573C one; bare-metal Skylake-SP KVM to nested Azure 8370C KVM; bare-metal Skylake-SP MSHV to nested Azure 8573C MSHV | `E_CPU_GENERATION` |
 | Backend that cannot offer invariant TSC to its guests, on a host OS that sees it | The Azure WHP runners and nested Azure MSHV | Restored; the guest has `constant_tsc` and `nonstop_tsc`; `H4` and `H6` pass |
