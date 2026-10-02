@@ -2,11 +2,9 @@
 
 [Design index](../design.md)
 
-**Proposed.** This document specifies NVX time ABI v1, the single
-guest-visible time, timer, and clock contract of the microVM profile on KVM,
-MSHV, and WHP. NVX and its OpenVMM fork (`nanvix/openvmm`) implement it on
-their `time-abi-v1` integration branches, and it becomes part of the current
-machine contract when they pass validation and merge. It replaces the earlier
+This document specifies NVX time ABI v1, the single guest-visible time,
+timer, and clock contract of the microVM profile on KVM, MSHV, and WHP, as NVX
+and its OpenVMM fork (`nanvix/openvmm`) implement it. It replaces the earlier
 time rules of [Snapshot and restore](snapshot-and-restore.md#time-and-entropy)
 and the clock tokens of [Cold boot](cold-boot.md#effective-command-line).
 
