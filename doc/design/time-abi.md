@@ -1731,13 +1731,13 @@ Routing CI jobs by generation labels is optional future work.
 ## Performance expectations and acceptance gate
 
 **Gate.** Per backend and vCPU count, no p50 is worse than the base-branch
-median by more than `max(5%, 2 ms)`. The gate covers all 36 one-vCPU metrics
-and `shell_snapshot_restore_512_mib` at 2, 4, and 8 vCPUs. It is measured on
-the CI Azure platforms; bare-metal results are informational. The bare-metal
-KVM host idles at 800 MHz (`intel_pstate` powersave without HWP), which
-inflates its absolute restore latency (`restored_ms` p50 at one vCPU 39 ms,
-against 23 ms at full clock) and its `cpu_us`; the arms of an A/B share the
-effect.
+median by more than `max(5%, 2 ms)`. The gate covers 37 cells: all 34
+one-vCPU metrics and `shell_snapshot_restore_512_mib` at 2, 4, and 8 vCPUs.
+It is measured on the CI Azure platforms; bare-metal results are
+informational. The bare-metal KVM host idles at 800 MHz (`intel_pstate`
+powersave without HWP), which inflates its absolute restore latency
+(`restored_ms` p50 at one vCPU 39 ms, against 23 ms at full clock) and its
+`cpu_us`; the arms of an A/B share the effect.
 
 Expected effects:
 
@@ -1755,7 +1755,7 @@ Expected effects:
 | Boot check and daemon start | Off the cold-boot path. Before shell-ready only the initial time sample and clock step remain (`C12`: one port write and four reads). The other checks and the daemon start run after shell-ready, and `nvx-time status` reports their wall time (`elapsed_us`, not budgeted) and CPU time (`cpu_us`), which each backend budgets per phase (see `cpu_us` budgets below). Wiring v7 measured medians of 1.6 to 3.7 ms at boot and 0.4 to 1.0 ms at restore on MSHV, 3.5 to 5.1 ms and 2.8 to 5.3 ms on KVM (the bare-metal KVM host idles at 800 MHz, which slows the delayed checks), and 2.6 to 4.8 ms and 7.7 to 11.5 ms on WHP at 1 to 8 vCPUs, with captures under 3 ms everywhere |
 | Counting LAPIC instead of TSC-deadline on KVM | Different timer-programming exits; covered by the gate |
 | v1 profiles without `ITS_NO` | Linux's ITS mitigation at boot, about 6 ms of a one-vCPU cold boot where the host's KVM advertises `ITS_NO` (the bare-metal KVM host: +6.3 [5.5, 7.3] ms against the same build booted with `indirect_target_selection=off`). The gated Azure KVM, MSHV, and WHP guests were already mitigated and are unchanged; restore is unaffected |
-| The profile's CPU view at 2 or more vCPUs on KVM | None at the integration head. Before the L3 fix, multi-vCPU cold boots were slower: +9.2 [5.0, 13.7] ms at 2 vCPUs on the bare-metal KVM host against the pre-profile head, and about +25 ms on nested Azure KVM. OpenVMM's `CPUID.4` reported a private L3 cache per vCPU, which made Linux's cache-info initialization wait a 10 ms tick for CPU 1 on many boots. With the L3 shared by the socket, the bare-metal host's cold boots match the pre-profile head: −0.3 [−3.2, +2.7], −0.0 [−2.1, +2.0], and −1.0 [−3.6, +1.7] ms at 2, 4, and 8 vCPUs. The gate measures nested Azure KVM. The msr driver's per-CPU hotplug callback (`msr_init`) waits one or two ticks on multi-vCPU boots, as it did before the profiles; it competes for CPU with the asynchronous initramfs unpack and is off the critical path |
+| The profile's CPU view at 2 or more vCPUs on KVM | None at the integration head. Before the L3 fix, multi-vCPU cold boots were slower: +9.2 [5.0, 13.7] ms at 2 vCPUs on the bare-metal KVM host against the pre-profile head, and about +25 ms on nested Azure KVM. OpenVMM's `CPUID.4` reported a private L3 cache per vCPU, which made Linux's cache-info initialization wait a 10 ms tick for CPU 1 on many boots. With the L3 shared by the socket, the bare-metal host's cold boots match the pre-profile head: −0.3 [−3.2, +2.7], −0.0 [−2.1, +2.0], and −1.0 [−3.6, +1.7] ms at 2, 4, and 8 vCPUs. The gate's cold boots are one-vCPU; a boot-only comparison against the `dev` base on nested Azure KVM found no significant difference: +1.7 [−2.5, +6.9] ms at 2 vCPUs, +3.7 [−5.4, +13.6] at 4, and +3.3 [−7.0, +11.5] at 8, which excludes the earlier +25 ms. At 8 vCPUs, the time ABI's VMM boots 9.5 [4.6, 16.4] ms faster and its guest 8.2 [0.4, 15.9] ms slower, which cancel. The msr driver's per-CPU hotplug callback (`msr_init`) waits one or two ticks on multi-vCPU boots, as it did before the profiles; it competes for CPU with the asynchronous initramfs unpack and is off the critical path |
 | Restore work before the acknowledgement | Only the packet read, the clock set, CPU and memory activation, and entropy and identity repair, in one helper process. The restore checks, the RCU release, and the deferred `C7` start at `SCHED_IDLE` 150 ms after the acknowledgement, after the readiness path |
 | Monotonic time that includes the downtime | Right after resume, the guest kernel runs the timer work that came due during the downtime (kworkers, softirqs, and RCU) and first-touches cold pages doing so: at one vCPU about 1.4 ms on MSHV, 2.2 ms on KVM, and 17 ms on WHP (26 ms at two vCPUs), where a first touch costs about 1 ms. It falls inside the gated restore metric whatever the helper's priority. On MSHV the cost is per 2 MiB chunk: the root driver resolves the first touch of each chunk with 512 copy-on-write copies of the private snapshot mapping, about 1.1 ms. A one-vCPU restore touches about 24 chunks, 25 ms of its restore on both the time ABI and the legacy path, and the time ABI's catch-up adds about one chunk |
 | No time ABI console lines in production | Each console byte costs one or two port exits, about 10 to 12 µs on bare-metal KVM and an estimated 20 to 45 µs nested on Azure. Without the boot marker (about 110 bytes) and the restore marker (about 117 bytes), boots and restores save 1 to 5 ms, enough to fail the gate on nested Azure KVM; violation events still print |
