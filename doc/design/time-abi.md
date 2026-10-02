@@ -1470,15 +1470,15 @@ The daemon keeps `CLOCK_REALTIME` on host UTC through the kernel's PLL:
   at which the host's own UTC clock runs against its TSC, which host time
   synchronization slews by a few ppm. The PLL's frequency integrator absorbs
   that rate over about an hour at the 64 s cadence. Until then the offset
-  settles near 256 s times the rate, behind host UTC when the host's UTC
-  runs fast and ahead when it runs slow: 1.76 ms behind at the +6.88 ppm of
-  an Azure 8370C WHP runner, about 3.2 ms ahead at the -12.89 ppm of an
-  8573C one, and an expected 4.2 ms at the 16.5 ppm of the bare-metal WHP
-  host. A skipped poll (`G_SAMPLE_UNCERTAIN`) lets the offset grow at the
-  remaining rate for another 64 s, and the nested WHP runners, whose sample
-  uncertainty approaches the 50 µs bound, skip some: the 8573C runner
-  reached 4.1 ms after two skipped polls in a row. All of these are far
-  below the step threshold.
+  settles near 256 s times the rate, behind host UTC when the host's UTC runs
+  fast and ahead when it runs slow: 1.76 ms behind at the +6.88 ppm of an
+  Azure 8370C WHP runner, about 3.2 ms ahead at the −12.89 ppm of an 8573C
+  one, and 4.06 ms behind at the +16.07 ppm of the bare-metal WHP host,
+  against 4.11 ms predicted. A skipped poll (`G_SAMPLE_UNCERTAIN`) lets the
+  offset grow at the remaining rate for another 64 s, and the nested WHP
+  runners, whose sample uncertainty approaches the 50 µs bound, skip some: the
+  8573C runner reached 4.1 ms after two skipped polls in a row. All of these
+  are far below the step threshold.
 
 The discipline never powers off the guest: a host wall-clock step is
 followed, not reported as a violation.
