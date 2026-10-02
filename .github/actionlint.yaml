@@ -2,6 +2,8 @@ self-hosted-runner:
   labels:
     - kvm
     - mshv
+    - nvx-utility-pr
+    - nvx-utility-trusted
     - specula
     - virtual-machine
     - whp

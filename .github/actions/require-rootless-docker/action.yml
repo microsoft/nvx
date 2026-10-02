@@ -1,0 +1,18 @@
+name: Require rootless Docker
+description: Use only the isolated, unprivileged daemon for Docker-based CI jobs
+
+runs:
+  using: composite
+  steps:
+    - name: Select rootless daemon
+      shell: bash
+      run: |
+        set -euo pipefail
+        endpoint=unix:///run/nvx-rootless-docker/docker.sock
+        security=$(DOCKER_HOST="$endpoint" docker info --format '{{json .SecurityOptions}}')
+        if [[ "$security" != *name=rootless* ]]; then
+          echo "::error::The CI runner does not have a rootless Docker daemon" >&2
+          exit 1
+        fi
+        DOCKER_HOST="$endpoint" docker buildx version
+        printf 'DOCKER_HOST=%s\n' "$endpoint" >> "$GITHUB_ENV"

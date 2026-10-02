@@ -39,6 +39,11 @@ Both scripts pin and verify the Actions runner package. Linux runner labels are
 `linux`, the selected backend, and `virtual-machine`. Windows labels are
 `windows`, `whp`, and `virtual-machine`. Runner names remain unique identities
 but are not registered as labels.
+For a dedicated Linux runner that must not pick up backend test jobs, pass
+`--runner-labels linux,virtual-machine,nvx-utility-pr` (or another unique
+comma-separated label set) when registering it. This replaces the default
+labels; `--backend` still validates the host device and installs its tools.
+Changing an existing runner's labels requires a fresh registration token.
 On Linux, omit `--runner-name` to prepare host dependencies without reconciling
 an existing runner's service or cache directory. Pass its name in a subsequent
 invocation to update the service; `--check-only` still validates runner state.
@@ -68,8 +73,10 @@ Service receives Modify access to that directory tree, as for `_work/_sccache`.
 CI places benchmark snapshots and guest RAM backing files there so their
 flushes avoid the burst-limited system disk. Check mode requires the directory
 when a data volume exists.
-Persistent runners do not have Docker access. Guest artifacts are built with
-Docker on a GitHub-hosted runner instead.
+Backend test runners do not have Docker access. The separate CI utility runner
+used for guest artifacts and quality checks requires rootless Docker; jobs
+validate the daemon and never fall back to the host-root Docker socket. Keep
+push-only jobs that consume write credentials on a different runner.
 Linux provisioning runs through the SSH administrator, but the listener and
 workflow jobs run as the dedicated `nvx-runner` account, which has neither sudo
 nor Docker access.
@@ -77,9 +84,11 @@ Linux provisioning and check mode stop unless the host CPU exposes an invariant
 TSC (`nonstop_tsc` in `/proc/cpuinfo`). Guests on an Azure VM without one hit
 cross-vCPU TSC warps during CPU activation, so redeploy such a VM instead of
 registering it.
-Persistent runners execute pushes and same-repository pull requests only. Fork
-pull requests remain on GitHub-hosted jobs until a maintainer stages the change
-on a trusted repository branch.
+Backend test runners execute pushes and same-repository pull requests only.
+During the hosted-runner outage, the separate utility PR runner also runs
+fork pull requests. It must not receive push-only write credentials; its
+rootless Docker and isolated VM do not make unreviewed code fully trusted.
+Restore the fork jobs to GitHub-hosted runners when they become available.
 
 Validate an installed runner without changing the host:
 

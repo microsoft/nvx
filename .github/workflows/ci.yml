@@ -27,16 +27,21 @@ env:
   PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 10
 
 jobs:
+  # PR jobs, including forks during the hosted-runner outage, use a runner
+  # separate from the push-only jobs that consume write credentials.
   quality:
     name: Lint, typing, and formatting
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-pr]
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      - name: Require rootless Docker
+        uses: ./.github/actions/require-rootless-docker
 
       - name: Check code quality
         uses: ./.github/actions/check-quality
@@ -62,7 +67,7 @@ jobs:
   openvmm-changes:
     name: Detect CI workload inputs
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-pr]
     timeout-minutes: 5
     outputs:
       run-tests: ${{ steps.changes.outputs.run-tests }}
@@ -154,13 +159,16 @@ jobs:
           needs.openvmm-changes.outputs.run-workloads == 'true'
         )
       }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-pr]
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      - name: Require rootless Docker
+        uses: ./.github/actions/require-rootless-docker
 
       - name: Build guest artifacts
         id: guest-artifacts
@@ -1122,7 +1130,7 @@ jobs:
         needs.platform-mshv.result == 'success' &&
         needs.platform-whp.result == 'success'
       }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-trusted]
     timeout-minutes: 90
     permissions:
       actions: read
@@ -1148,7 +1156,7 @@ jobs:
         needs.platform-mshv.result == 'success' &&
         needs.platform-whp.result == 'success'
       }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-pr]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1189,7 +1197,7 @@ jobs:
       - platform-whp
       - performance-gate
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-pr]
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -1293,7 +1301,7 @@ jobs:
         needs.platform-mshv.result == 'success' &&
         needs.platform-whp.result == 'success'
       }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-trusted]
     timeout-minutes: 10
     permissions:
       contents: read
