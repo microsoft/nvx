@@ -2500,6 +2500,81 @@ class CiConfigurationTests(unittest.TestCase):
             ):
                 self.assertIn(package, configuration)
 
+    def test_linux_runner_label_override_and_ci_routing(self):
+        setup = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+        ).read_text(encoding="utf-8")
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("expected_runner_labels=linux,${backend},virtual-machine", setup)
+        self.assertIn("expected_runner_labels=$runner_labels", setup)
+        self.assertIn('runner_labels_override=true', setup)
+        self.assertNotIn("runs-on: ubuntu-latest", workflow)
+        for name in (
+            "quality",
+            "openvmm-changes",
+            "artifacts",
+            "performance-gate",
+            "required-status-check",
+        ):
+            self.assertIn(
+                "runs-on: [self-hosted, linux, x64, nvx-utility-pr]",
+                _workflow_job(workflow, name),
+            )
+        for name in ("release", "performance-persist"):
+            self.assertIn(
+                "runs-on: [self-hosted, linux, x64, nvx-utility-trusted]",
+                _workflow_job(workflow, name),
+            )
+        for name in ("quality", "artifacts"):
+            self.assertIn(
+                "uses: ./.github/actions/require-rootless-docker",
+                _workflow_job(workflow, name),
+            )
+        docker_action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "require-rootless-docker"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('DOCKER_HOST="$endpoint" docker info', docker_action)
+        self.assertIn('name=rootless', docker_action)
+        if os.name != "posix":
+            return
+
+        function = setup.split("validate_runner_labels() {\n", 1)[1]
+        function = "validate_runner_labels() {\n" + function.split("\n}\n", 1)[0]
+        function += "\n}\n"
+        for labels, valid in (
+            ("linux,kvm,virtual-machine", True),
+            ("linux,virtual-machine,nvx-utility-pr", True),
+            ("", False),
+            (",linux", False),
+            ("linux,", False),
+            ("linux,,kvm", False),
+            ("linux,evil label", False),
+            ("linux,$(echo unsafe)", False),
+        ):
+            with self.subTest(labels=labels):
+                result = subprocess.run(
+                    [
+                        "sh",
+                        "-c",
+                        'die() { echo "$*" >&2; exit 1; }\n'
+                        + function
+                        + 'validate_runner_labels "$1"\n',
+                        "sh",
+                        labels,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+
     def test_windows_runner_requires_inbox_pcat_firmware(self):
         windows_setup = (
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
