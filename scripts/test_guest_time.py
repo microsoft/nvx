@@ -330,6 +330,50 @@ class GuestTimeTests(unittest.TestCase):
             with self.subTest(case=name):
                 self.assertTrue(self.sample(sample).startswith("error "), name)
 
+    def test_plain_untiered_restore_reads_only_the_header_and_generation_id(self):
+        def plain(packet: bytes) -> str:
+            line = self.run_test(
+                "packet",
+                self.fixture("plain.bin", packet),
+                "0",
+                PREVIOUS_ID,
+                "untiered",
+            ).strip()
+            return line.rsplit(" ", 1)[-1]
+
+        # Nothing to activate: the entropy stays in the device until the
+        # step 13 worker drains it, whatever the other flags.
+        self.assertEqual(plain(encode_packet()), "plain=1")
+        self.assertEqual(
+            plain(encode_packet(flags=DOWNTIME_UTC | ACK_REQUIRED | TEST_HOOKS)),
+            "plain=1",
+        )
+        # Processors or memory to activate read the whole packet.
+        self.assertEqual(plain(encode_packet(online=2)), "plain=0")
+        self.assertEqual(plain(encode_packet(flags=MEMORY_TARGET)), "plain=0")
+        self.assertEqual(
+            plain(
+                encode_packet(flags=MEMORY_TARGET, ranges=((0x8000_0000, 0x0800_0000),))
+            ),
+            "plain=0",
+        )
+        # The tiered form of the hook prints what it printed before.
+        self.assertNotIn("plain=", self.packet(encode_packet()))
+
+    def test_restore_start_comes_from_the_restore_record(self):
+        # The capture request returned ELAPSED_US before the clock step at
+        # LAST_STEP_REALTIME_NS; CLOCK_REALTIME ran with CLOCK_MONOTONIC since.
+        self.assertEqual(
+            self.run_test(
+                "restore-start",
+                "5000000000",
+                "1790000000500000000",
+                "1790000000300000000",
+                "1500",
+            ).strip(),
+            "start_ns=4798500000",
+        )
+
     def test_utc_pairing_uses_the_bracket_midpoint(self):
         self.assertEqual(
             self.run_test("pair", "1000", "3000", "5000").strip(),

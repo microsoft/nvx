@@ -1219,6 +1219,27 @@ static size_t packet_body_size(const struct restore_packet *packet)
     return (size_t)packet->range_count * PACKET_RANGE_SIZE + PACKET_ENTROPY_SIZE;
 }
 
+// Whether an untiered restore (FINISH) of PACKET is plain: nothing to
+// activate, so the helper reads the header and the generation ID and leaves
+// the entropy to drain_packet.
+static bool plain_restore(const struct restore_packet *packet, bool finish)
+{
+    return finish && packet->online_vp_count == 0 && packet->range_count == 0 &&
+           (packet->flags & PACKET_MEMORY_TARGET) == 0;
+}
+
+// When the readiness path of a restore started, on CLOCK_MONOTONIC: the
+// capture request returned ELAPSED_US before the clock step at
+// LAST_STEP_REALTIME_NS (the restore record), and CLOCK_REALTIME has not
+// been stepped since. NOW_MONOTONIC and NOW_REALTIME are read together.
+static int64_t restore_start_ns(int64_t now_monotonic, int64_t now_realtime,
+                                int64_t last_step_realtime_ns,
+                                int64_t elapsed_us)
+{
+    return now_monotonic - (now_realtime - last_step_realtime_ns) -
+           elapsed_us * NSEC_PER_USEC;
+}
+
 static int parse_packet_body(const uint8_t *bytes,
                              struct restore_packet *packet, char *detail,
                              size_t size)
@@ -3667,8 +3688,9 @@ static void handle_restore_timer(struct daemon *daemon)
     daemon->last_accepted_ns = now - DEFERRED_START_NS;
     daemon->readiness_us = 0;
     if (state_load(&state) == 0) {
-        start = now - (clock_ns(CLOCK_REALTIME) - state.last_step_realtime_ns) -
-                state.checks[PHASE_RESTORE].elapsed_us * NSEC_PER_USEC;
+        start = restore_start_ns(now, clock_ns(CLOCK_REALTIME),
+                                 state.last_step_realtime_ns,
+                                 state.checks[PHASE_RESTORE].elapsed_us);
         if (now - DEFERRED_START_NS > start)
             daemon->readiness_us =
                 (now - DEFERRED_START_NS - start) / NSEC_PER_USEC;
@@ -4493,8 +4515,7 @@ static int repair_restore(struct capture_prep *prep, int64_t start_ns,
                  packet.generation, g_generation);
         return repair_failed("G_REPAIR_GENERATION", detail);
     }
-    plain = finish && packet.online_vp_count == 0 && packet.range_count == 0 &&
-            (packet.flags & PACKET_MEMORY_TARGET) == 0;
+    plain = plain_restore(&packet, finish);
     if (plain) {
         outb(SELECT_GENERATION_ID, PORTB_STATUS);
         portb_read(PORTB_DATA, generation_id, sizeof(generation_id));
@@ -4698,9 +4719,9 @@ static int cmd_restore_finish(int argc, char **argv)
         fprintf(stderr, "nvx-time: ioperm: %s\n", strerror(errno));
         return 1;
     }
-    start = clock_ns(CLOCK_MONOTONIC) -
-            (clock_ns(CLOCK_REALTIME) - state.last_step_realtime_ns) -
-            state.checks[PHASE_RESTORE].elapsed_us * NSEC_PER_USEC;
+    start = restore_start_ns(clock_ns(CLOCK_MONOTONIC), clock_ns(CLOCK_REALTIME),
+                             state.last_step_realtime_ns,
+                             state.checks[PHASE_RESTORE].elapsed_us);
     daemon = daemon_pid();
     signaled = arm_restore(daemon, daemon_timer(daemon, RESTORE_TIMER_FD), ack,
                            start);
@@ -4886,8 +4907,10 @@ static int test_packet(int argc, char **argv)
     char detail[DETAIL_MAX];
     char id[GENERATION_ID_SIZE * 2 + 1];
     uint64_t recorded;
+    bool untiered = argc == 4 && strcmp(argv[3], "untiered") == 0;
 
-    if (argc != 3 || test_bytes(argv[0], bytes, sizeof(bytes)) != 0 ||
+    if ((argc != 3 && !untiered) ||
+        test_bytes(argv[0], bytes, sizeof(bytes)) != 0 ||
         parse_hex(argv[2], previous, sizeof(previous)) != 0)
         return 2;
     recorded = strtoull(argv[1], NULL, 10);
@@ -4924,6 +4947,10 @@ static int test_packet(int argc, char **argv)
     for (unsigned index = 0; index < packet.range_count; index++)
         printf(" range=%" PRIu64 ":%" PRIu64, packet.ranges[index][0],
                packet.ranges[index][1]);
+    // With UNTIERED, whether the restore reads only the header and the
+    // generation ID.
+    if (untiered)
+        printf(" plain=%d", plain_restore(&packet, true) ? 1 : 0);
     putchar('\n');
     return 0;
 }
@@ -5268,6 +5295,14 @@ static int cmd_test(int argc, char **argv)
         pair_clocks(strtoll(argv[0], NULL, 10), strtoll(argv[1], NULL, 10),
                     strtoull(argv[2], NULL, 10), &theta, &epsilon);
         printf("theta_ns=%" PRId64 " epsilon_ns=%" PRId64 "\n", theta, epsilon);
+        return 0;
+    }
+    if (strcmp(name, "restore-start") == 0 && argc == 4) {
+        printf("start_ns=%" PRId64 "\n",
+               restore_start_ns(strtoll(argv[0], NULL, 10),
+                                strtoll(argv[1], NULL, 10),
+                                strtoll(argv[2], NULL, 10),
+                                strtoll(argv[3], NULL, 10)));
         return 0;
     }
     if (strcmp(name, "kmsg") == 0)
