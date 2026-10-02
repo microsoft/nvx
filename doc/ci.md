@@ -117,11 +117,15 @@ line and adds it to the GitHub job summary, because CI keeps the guest logs only
 for failed jobs: the number of warp probe runs with their worst
 `max_abs_offset_ns` and `max_backward_ns`, the count and `elapsed_us` range of
 the newest check that each `nvx-time status` query reported (boot after a cold
-boot, restore after a restore), the exhaustive check's summary, and the
+boot, restore after a restore, and capture after `snapshot-core`'s released
+request), the exhaustive check's summary, and the
 `restore-downtime` stall counts. Where the guest reports a check's CPU time
 (`cpu_us`), the line also gives its range and how many checks exceed the
 backend's [CPU-time budget](design/time-abi.md#performance-expectations-and-acceptance-gate)
-for their phase, which the spec sets from guest measurements.
+for their phase, which the spec sets from guest measurements. The spec exempts
+the first capture after a rolled-back capture in the same VM process; CI never
+makes one, because each VM process sends OpenVMM at most one snapshot request
+and a failed capture fails its scenario.
 `CHECK_CPU_BUDGET_US` in `scripts/nvx_tools/time_abi.py` holds the budgets, one
 per backend and phase. `elapsed_us` is wall time, including waits behind the
 workload, and has no budget. CI gates on neither: the performance gate is the
