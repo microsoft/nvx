@@ -1760,6 +1760,24 @@ Expected effects:
 | Monotonic time that includes the downtime | Right after resume, the guest kernel runs the timer work that came due during the downtime (kworkers, softirqs, and RCU) and first-touches cold pages doing so: at one vCPU about 1.4 ms on MSHV, 2.2 ms on KVM, and 17 ms on WHP (26 ms at two vCPUs), where a first touch costs about 1 ms. It falls inside the gated restore metric whatever the helper's priority. On MSHV the cost is per 2 MiB chunk: the root driver resolves the first touch of each chunk with 512 copy-on-write copies of the private snapshot mapping, about 1.1 ms. A one-vCPU restore touches about 24 chunks, 25 ms of its restore on both the time ABI and the legacy path, and the time ABI's catch-up adds about one chunk |
 | No time ABI console lines in production | Each console byte costs one or two port exits, about 10 to 12 µs on bare-metal KVM and an estimated 20 to 45 µs nested on Azure. Without the boot marker (about 110 bytes) and the restore marker (about 117 bytes), boots and restores save 1 to 5 ms, enough to fail the gate on nested Azure KVM; violation events still print |
 
+**The first second after a restore.** Not all post-resume work finishes
+before readiness. At resume the guest runs every timer that came
+due during the downtime: the kernel's, those that came due during the VMM's
+restore setup (the legacy path stopped guest time during that setup, so its
+guest ran them later), and the discipline's poll when the downtime outlasts
+the poll period. Restore repair also steps the clock, which the kernel
+follows with its RTC write, and the restore checks start 150 ms after the
+acknowledgement. Readiness doesn't wait for this work, but a request made
+during it does, most where first touches of restored RAM are expensive. On
+the Azure WHP runners, an exit requested right at readiness takes 7 to 9 ms
+longer than on the legacy path
+(`openvmm_snapshot_restore_guest_exit_teardown`: +31% and +37%, and +24% on
+bare metal). Requested 0.3 s after readiness it takes 3.5 ms longer, and
+from 1 s on the difference is within noise. On nested Azure KVM, a network
+restore that follows the shell-snapshot benchmarks' captures and restores
+is about 12 ms (8.5%) slower and is no slower on its own, which fits the
+same work faulting in restored RAM from a colder host page cache.
+
 Expected wins are tracked separately and do not relax the gate.
 
 **`cpu_us` budgets.** Each backend budgets the CPU time of each phase's
