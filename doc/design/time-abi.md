@@ -1519,7 +1519,7 @@ every change, and `nvx-time status` reads it. The sandbox agent bind-mounts
 | `last_downtime_ns` | `D` of the last restore |
 | `last_downtime_source` | `monotonic` or `utc` |
 | `synchronized` | 1 when the last accepted sample is at most 128 s old |
-| `offset_ns` | Last measured `theta` |
+| `offset_ns` | Last measured `theta`. Until the first discipline poll, the boot check's or restore repair's `theta` from before its step |
 | `uncertainty_ns` | Last accepted `epsilon` |
 | `frequency_ppb` | Current kernel frequency correction |
 | `samples`, `rejected_samples` | Sample counters |
@@ -1960,7 +1960,7 @@ can use as the fleet restore matrix.
 | Simulated rate beyond tolerance: `dest-rate-offset-ppm=+251` | One host per backend | `E_TSC_RATE_TOLERANCE` |
 | Downtime bounds: `downtime-add-s=2592001`; `force-utc-downtime` with `utc-offset-ms=-<n>`, `n` above the elapsed time | One host per backend | `E_DOWNTIME_EXCESSIVE`; `E_DOWNTIME_NEGATIVE` |
 | Sample uncertainty: `sample-delay-us=200`; then `sample-delay-us=3000` on restore and on cold boot | One host per backend | Restored and running, with `last_sample_error=G_SAMPLE_UNCERTAIN` in `nvx-time status`; `G_REPAIR_SAMPLE` (195); `G_CONFORMANCE_C12` (193) |
-| Wall-clock convergence, for 12 minutes after a restore and after a cold boot, with the host's UTC rate `r` measured over 60 s alongside (Linux: `CLOCK_REALTIME` against `CLOCK_MONOTONIC_RAW`; Windows: UTC against QPC) | One host per backend | No step after the initial one; `synchronized=1`; `frequency_ppb` moving toward `r`; and `abs(theta)` at most 512 s × `abs(r)` + 1 ms at every accepted poll, which leaves room for four skipped polls in a row. Skipped polls are reported, and fail the case only through that bound |
+| Wall-clock convergence, for 12 minutes after a restore and after a cold boot, with the host's UTC rate `r` measured over 60 s alongside (Linux: `CLOCK_REALTIME` against `CLOCK_MONOTONIC_RAW`; Windows: UTC against QPC) | One host per backend | No step after the initial one; `synchronized=1`; `frequency_ppb` moving toward `r`; and `abs(theta)` at most 512 s × `abs(r)` + 1 ms at every accepted discipline poll, which leaves room for four skipped polls in a row. The checks start at the first discipline poll: the boot check's and restore repair's own samples are taken before their steps (at cold boot, the RTC's whole-second error). Skipped polls are reported with their count and longest run, and fail the case only through that bound |
 | Across VMs of one generation | Between two 8370C Azure WHP runners, and between two 8573C ones. KVM and MSHV have no usable pair of one generation, so the simulated host reboot covers their cross-host path | Restored |
 | Across generations | An 8370C Azure WHP runner to an 8573C one; bare-metal Skylake-SP KVM to nested Azure 8370C KVM; bare-metal Skylake-SP MSHV to nested Azure 8573C MSHV | `E_CPU_GENERATION` |
 | Backend that cannot offer invariant TSC to its guests, on a host OS that sees it | The Azure WHP runners and nested Azure MSHV | Restored; the guest has `constant_tsc` and `nonstop_tsc`; `H4` and `H6` pass |
