@@ -9,8 +9,7 @@ runs:
       run: |
         set -euo pipefail
         endpoint="unix:///run/user/$(id -u)/docker.sock"
-        config="$RUNNER_TEMP/nvx-docker-config"
-        mkdir -p "$config"
+        config=$(mktemp -d "$RUNNER_TEMP/nvx-docker-config.XXXXXX")
         security=$(DOCKER_CONFIG="$config" DOCKER_HOST="$endpoint" docker info --format '{{json .SecurityOptions}}')
         if [[ "$security" != *name=rootless* ]]; then
           echo "::error::The CI runner does not have a rootless Docker daemon" >&2
