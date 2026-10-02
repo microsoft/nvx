@@ -896,6 +896,15 @@ state units are quiesced, capture:
 
 Each of these failures is a rollback-safe capture failure.
 
+No backend stops guest time for a capture: the guest TSC keeps running while
+the VPs are stopped. So a capture that rolls back leaves the guest's clocks
+continuous, and the guest sees the quiesce as elapsed time, as it would a long
+preemption. On the bare-metal WHP host, the guest's `CLOCK_MONOTONIC` covered
+quiesce windows of 0.39 to 0.65 s within 2.2 ms of the host interval, and
+`CLOCK_REALTIME` minus `CLOCK_MONOTONIC` moved by at most 0.14 µs. On the
+bare-metal KVM host, `CLOCK_MONOTONIC` stayed within −0.38 to +0.40 ms of the
+host over requests of 0.2 to 1.1 s.
+
 **Machine contract changes.** `SnapshotMachineContract` retires protobuf
 fields 11 (`capture_wall_clock`), 12 (`tsc_frequency_hz`), 13
 (`tsc_tolerance_ppm`), 14 (`cpu_contract`), 15 (`cpu_contract_sha256`), 17
@@ -1954,7 +1963,7 @@ can use as the fleet restore matrix.
 | Backend that cannot offer invariant TSC to its guests, on a host OS that sees it | The Azure WHP runners and nested Azure MSHV | Restored; the guest has `constant_tsc` and `nonstop_tsc`; `H4` and `H6` pass |
 | Across backends | Bare-metal KVM to bare-metal MSHV | `E_BACKEND_MISMATCH` |
 | Pre-v1 snapshot | Any | `E_SNAPSHOT_VERSION` |
-| Failed capture: in one VM, a request whose destination's parent the host made unwritable after launch, so that creating the staging directory fails after quiesce and OpenVMM rolls back; then, with the parent writable again and after 30 s idle, a second request | Each bare-metal host at 1 and 8 vCPUs, 3 times each; [CI's `snapshot-core`](../ci.md) exercises a request without a destination, which OpenVMM releases before preflight, and asserts that the guest continues once, that `nvx-time status` passes at `generation=0` with no restore, and that `rcu_cpu_stall_suppress` reads 0 | OpenVMM logs the rollback (`microVM snapshot failed before commit; attempting rollback`, then `microVM snapshot rollback succeeded; guest resumed`), with no time ABI code, and each failed request returns in the same VM: status bit 1 clear, `nvx-time status` passing at `generation=0`, the saved values back at their values before the request (`rcu_cpu_stall_suppress`, and on the debug kernel `soft_watchdog` and `hung_task_timeout_secs`) with no saved-values file left, and no 193, 194, or 195 and no clock message; the second request captures, which step 2 of the snapshot agent refuses while the first request's saved values remain, and its snapshot restores |
+| Failed capture: in one VM, a request whose destination's parent the host made unwritable to the OpenVMM process after launch, so that creating the staging directory fails after quiesce and OpenVMM rolls back (root's `CAP_DAC_OVERRIDE` and an administrator's backup and restore privileges bypass file permissions, so drop them first, or use an immutable or read-only mount); then, with the parent writable again and after 30 s idle, a second request | Each bare-metal host at 1 and 8 vCPUs, 3 times each; [CI's `snapshot-core`](../ci.md) exercises a request without a destination, which OpenVMM releases before preflight, and asserts that the guest continues once, that `nvx-time status` passes at `generation=0` with no restore, and that `rcu_cpu_stall_suppress` reads 0 | OpenVMM logs the rollback (`microVM snapshot failed before commit; attempting rollback`, then `microVM snapshot rollback succeeded; guest resumed`), with no time ABI code, and each failed request returns in the same VM: status bit 1 clear, `nvx-time status` passing at `generation=0` with `discontinuities` unchanged (from the capture's checks; `cancel-capture` records nothing), the saved values back at their values before the request (`rcu_cpu_stall_suppress`, and on the debug kernel `soft_watchdog` and `hung_task_timeout_secs`) with no saved-values file left, and no 193, 194, or 195 and no clock message; the second request captures, which step 2 of the snapshot agent refuses while the first request's saved values remain, and its snapshot restores |
 | Processor activation from one boot-online CPU to 2, 4, and 8 | All backends | Restored; warp probe passes |
 | Every tier and an untiered snapshot, restored more than once | All backends | Restored; each restore of a snapshot captured at `g = 0` carries `g = 1` and a new generation ID. OpenVMM cannot capture a restored process, so unit tests cover the generation arithmetic beyond one restore, including `E_GENERATION_EXHAUSTED` |
 
