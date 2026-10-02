@@ -2539,6 +2539,7 @@ class CiConfigurationTests(unittest.TestCase):
             / "require-rootless-docker"
             / "action.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn('endpoint="unix:///run/user/$(id -u)/docker.sock"', docker_action)
         self.assertIn('DOCKER_HOST="$endpoint" docker info', docker_action)
         self.assertIn('name=rootless', docker_action)
         if os.name != "posix":

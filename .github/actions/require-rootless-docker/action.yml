@@ -8,7 +8,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        endpoint=unix:///run/nvx-rootless-docker/docker.sock
+        endpoint="unix:///run/user/$(id -u)/docker.sock"
         security=$(DOCKER_HOST="$endpoint" docker info --format '{{json .SecurityOptions}}')
         if [[ "$security" != *name=rootless* ]]; then
           echo "::error::The CI runner does not have a rootless Docker daemon" >&2
