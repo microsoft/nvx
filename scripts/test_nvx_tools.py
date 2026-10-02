@@ -2509,7 +2509,7 @@ class CiConfigurationTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("expected_runner_labels=linux,${backend},virtual-machine", setup)
         self.assertIn("expected_runner_labels=$runner_labels", setup)
-        self.assertIn('runner_labels_override=true', setup)
+        self.assertIn("runner_labels_override=true", setup)
         self.assertNotIn("runs-on: ubuntu-latest", workflow)
         for name in (
             "quality",
@@ -2547,7 +2547,11 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn('DOCKER_CONFIG="$config" DOCKER_HOST="$endpoint"', docker_action)
         self.assertIn('DOCKER_HOST="$endpoint" docker info', docker_action)
         quality_action = (
-            BuildConstants.REPO_ROOT / ".github" / "actions" / "check-quality" / "action.yml"
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "check-quality"
+            / "action.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("if: runner.environment == 'github-hosted'", quality_action)
         self.assertIn("if: runner.environment == 'self-hosted'", quality_action)
@@ -2555,7 +2559,7 @@ class CiConfigurationTests(unittest.TestCase):
             'venv_dir=$(mktemp -d "$RUNNER_TEMP/nvx-quality-venv.XXXXXX")',
             quality_action,
         )
-        self.assertIn('name=rootless', docker_action)
+        self.assertIn("name=rootless", docker_action)
         if os.name != "posix":
             return
 
