@@ -39,10 +39,10 @@ def strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def positive_int(value: str) -> int:
+def positive_int(value: str, *, message: str = "must be greater than zero") -> int:
     parsed = int(value)
     if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
+        raise argparse.ArgumentTypeError(message)
     return parsed
 
 
