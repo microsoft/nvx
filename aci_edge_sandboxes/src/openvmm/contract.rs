@@ -8,7 +8,7 @@ pub(crate) const MICROVM_ABI_VERSION: u64 = 2;
 /// Control-console broker protocol version this crate speaks.
 pub(crate) const CONTROL_SESSION_PROTOCOL_VERSION: u64 = 1;
 /// Control contract revision this crate speaks.
-pub(crate) const CONTROL_CONTRACT_REVISION: &str = "nvx-microvm-v2-control-v1";
+pub(crate) const CONTROL_CONTRACT_REVISION: &str = "nvx-microvm-v2-control-v2";
 
 /// Returns whether the `openvmm` section of an NVX `SOURCE-MANIFEST.json` declares this contract.
 pub(crate) fn manifest_is_compatible(manifest: &serde_json::Value) -> bool {

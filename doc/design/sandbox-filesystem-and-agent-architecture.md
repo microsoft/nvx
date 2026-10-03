@@ -23,10 +23,11 @@ or snapshot-tier metadata alone.
 The public `nvx sandbox` command accepts one to three role-bearing EROFS lower
 images, a preformatted ext4 scratch image, an absolute entrypoint, and
 individual argument tokens. It supplies non-secret kernel-command-line
-configuration; environment variables, secrets, arguments containing
-whitespace, and sandbox snapshot orchestration are not supported by this
-command. Lower-level OpenVMM capture and restore do support sandbox blocks.
-See [Run](../run.md#experimental-single-workload-sandbox).
+configuration for one-shot runs. Managed execution carries bounded arguments
+and a per-execution environment over the authenticated control channel;
+one-shot environment variables, secrets, and sandbox snapshot orchestration
+are not supported by this command. Lower-level OpenVMM capture and restore do
+support sandbox blocks. See [Run](../run.md#experimental-single-workload-sandbox).
 
 The required kernel facilities are already enabled in the NVX microVM kernel
 configuration: virtio-blk, EROFS with compression and xattrs, overlayfs,
@@ -263,9 +264,10 @@ existing consoles; framed control traffic does not share an unstructured byte
 stream with them. OpenVMM owns the bounded outer framing, same-user local
 endpoint authorization, capability authentication, reconnect epochs, and
 receive-credit backpressure. The current guest protocol provides readiness,
-sequential command execution with bounded arguments and output, separate
-stdout/stderr, timeout and exit categories, cancellation, and graceful VM
-shutdown. The control device is never exposed inside the workload namespaces.
+sequential command execution with bounded arguments, per-execution
+environments and output, separate stdout/stderr, timeout and exit categories,
+cancellation, and graceful VM shutdown. The control device is never exposed
+inside the workload namespaces.
 
 While a workload runs, the agent keeps reading the control console. A `CANCEL`
 request that carries the workload's request ID kills the workload, and the exit

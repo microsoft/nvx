@@ -354,7 +354,7 @@ impl ExecRequest {
             process: ProcessSpec {
                 command,
                 cwd: None,
-                env: Vec::new(),
+                env: None,
                 inherit_default_env: None,
                 timeout: None,
             },
@@ -379,11 +379,26 @@ impl ExecRequest {
     /// Adds one `KEY=VALUE` environment entry.
     #[must_use]
     pub fn with_env(mut self, entry: impl Into<String>) -> Self {
-        self.process.env.push(entry.into());
+        self.process
+            .env
+            .get_or_insert_with(Vec::new)
+            .push(entry.into());
         self
     }
 
-    /// Selects whether the workload inherits the sandbox's default environment.
+    /// Sets the environment entries, including an explicitly empty environment.
+    #[must_use]
+    pub fn with_envs<I, S>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.process.env = Some(entries.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Selects whether a supplied environment is layered over the sandbox's default environment.
+    /// Ignored when the environment is omitted.
     #[must_use]
     pub fn with_inherit_default_env(mut self, inherit: bool) -> Self {
         self.process.inherit_default_env = Some(inherit);
@@ -417,9 +432,11 @@ pub struct ProcessSpec {
     pub command: Command,
     /// Working directory inside the sandbox.
     pub cwd: Option<String>,
-    /// Additional `KEY=VALUE` environment entries.
-    pub env: Vec<String>,
-    /// Whether the workload inherits the sandbox's default environment. `None` means `true`.
+    /// `KEY=VALUE` environment entries. `None` uses the backend's default environment; an empty
+    /// vector requests an empty environment unless `inherit_default_env` is `Some(true)`.
+    pub env: Option<Vec<String>>,
+    /// Whether `env` is layered over the sandbox's default environment. Ignored when `env` is
+    /// omitted; otherwise `None` means `false`.
     pub inherit_default_env: Option<bool>,
     /// Workload timeout. `None` or zero disables it. Serialized in milliseconds.
     pub timeout: Option<Duration>,
@@ -444,8 +461,8 @@ struct ProcessSpecWire {
     argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inherit_default_env: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,6 +657,28 @@ mod tests {
         assert_eq!(
             serialized,
             serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+    }
+
+    #[test]
+    fn exec_environment_distinguishes_omitted_and_empty() {
+        let omitted = ExecRequest::command_line("env");
+        assert_eq!(omitted.process.env, None);
+        assert_eq!(
+            serde_json::to_value(&omitted).unwrap(),
+            serde_json::json!({"process": {"commandLine": "env"}})
+        );
+
+        let empty = ExecRequest::command_line("env").with_envs(Vec::<String>::new());
+        assert_eq!(empty.process.env, Some(Vec::new()));
+        let serialized = serde_json::to_value(&empty).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({"process": {"commandLine": "env", "env": []}})
+        );
+        assert_eq!(
+            serde_json::from_value::<ExecRequest>(serialized).unwrap(),
+            empty
         );
     }
 

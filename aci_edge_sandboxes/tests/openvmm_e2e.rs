@@ -333,14 +333,77 @@ fn openvmm_lifecycle_on_a_real_hypervisor() {
         ExecRequest::command_line("sleep 30").with_timeout(Duration::from_millis(500)),
     );
     assert_eq!(timed_out.outcome, ExecOutcome::TimedOut);
+
+    let default_environment = run(&nvx, &sandbox_id, ExecRequest::argv(["/usr/bin/env"]));
+    let default_environment = String::from_utf8(default_environment.stdout).unwrap();
+    assert!(
+        default_environment
+            .lines()
+            .any(|entry| entry.starts_with("PATH=")),
+        "{default_environment}"
+    );
+    let ignored_inheritance_flag = run(
+        &nvx,
+        &sandbox_id,
+        ExecRequest::argv(["/usr/bin/env"]).with_inherit_default_env(false),
+    );
     assert_eq!(
-        nvx.exec(
+        String::from_utf8(ignored_inheritance_flag.stdout).unwrap(),
+        default_environment
+    );
+    let empty_environment = run(
+        &nvx,
+        &sandbox_id,
+        ExecRequest::argv(["/usr/bin/env"]).with_envs(Vec::<String>::new()),
+    );
+    assert!(empty_environment.stdout.is_empty(), "{empty_environment:?}");
+    let exact_environment = run(
+        &nvx,
+        &sandbox_id,
+        ExecRequest::argv(["/usr/bin/env"]).with_envs(["FOO=value with spaces", "EMPTY="]),
+    );
+    let exact_environment: std::collections::BTreeSet<_> =
+        String::from_utf8(exact_environment.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+    assert_eq!(
+        exact_environment,
+        ["EMPTY=".to_owned(), "FOO=value with spaces".to_owned()]
+            .into_iter()
+            .collect()
+    );
+    let inherited_environment = run(
+        &nvx,
+        &sandbox_id,
+        ExecRequest::argv(["/usr/bin/env"])
+            .with_env("FOO=layered")
+            .with_inherit_default_env(true),
+    );
+    let inherited_environment = String::from_utf8(inherited_environment.stdout).unwrap();
+    assert!(
+        inherited_environment
+            .lines()
+            .any(|entry| entry == "FOO=layered")
+    );
+    assert!(
+        inherited_environment
+            .lines()
+            .any(|entry| entry.starts_with("PATH="))
+    );
+    for (value, expected) in [("one", b"one".as_slice()), ("two", b"two".as_slice())] {
+        let output = run(
+            &nvx,
             &sandbox_id,
-            &ExecRequest::command_line("touch /tmp/rejected").with_env("MODE=test")
-        )
-        .unwrap_err()
-        .code(),
-        ErrorCode::PolicyValidation
+            ExecRequest::command_line("printf %s \"$FOO\"").with_env(format!("FOO={value}")),
+        );
+        assert_eq!(output.stdout, expected);
+    }
+    assert!(
+        shell(&nvx, &sandbox_id, "test -z \"${FOO+x}\"")
+            .outcome
+            .success()
     );
 
     // Cancellation kills every process of the workload and leaves the sandbox usable.

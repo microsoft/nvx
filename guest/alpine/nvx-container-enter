@@ -23,6 +23,9 @@ cp /lib/ld-musl-x86_64.so.1 "$tools/ld-musl-x86_64.so.1"
 cp /bin/setpriv "$tools/setpriv"
 cp -L /usr/lib/libcap-ng.so.0 "$tools/libcap-ng.so.0"
 cp -L /usr/lib/libeconf.so.0 "$tools/libeconf.so.0"
+if [ -n "${NVX_EXEC_CONFIG_FD:-}" ]; then
+    cp /sbin/nvx-managed-agent "$tools/nvx-managed-agent"
+fi
 chmod 0555 "$tools"/*
 mount -o remount,ro,nosuid,nodev "$tools"
 mount -t proc -o nosuid,nodev,noexec proc "$rootfs/proc"
@@ -57,6 +60,10 @@ ln -s /proc/self/fd/2 "$rootfs/dev/stderr"
 
 hostname "$hostname_value"
 export HOME="$workload_home" USER="$workload_name" LOGNAME="$workload_name"
+if [ -n "${NVX_EXEC_CONFIG_FD:-}" ]; then
+    set -- /.nvx-agent/nvx-managed-agent \
+        --exec-config-fd "$NVX_EXEC_CONFIG_FD" -- "$@"
+fi
 exec chroot "$rootfs" /.nvx-agent/ld-musl-x86_64.so.1 \
     --library-path /.nvx-agent \
     /.nvx-agent/setpriv \

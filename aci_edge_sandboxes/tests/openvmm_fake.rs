@@ -212,6 +212,53 @@ fn full_lifecycle_streams_output_and_keeps_state_until_stop() {
 }
 
 #[test]
+fn workload_environments_are_exact_and_isolated_per_execution() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let sandbox_id = nvx.provision(&ProvisionRequest::new()).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let execute = |request| {
+        nvx.exec(&sandbox_id, &request)
+            .unwrap()
+            .wait_with_output()
+            .unwrap()
+    };
+
+    let default = execute(ExecRequest::command_line("getenv PATH"));
+    assert!(!default.stdout.is_empty());
+
+    let empty = execute(ExecRequest::command_line("env").with_envs(Vec::<String>::new()));
+    assert!(empty.stdout.is_empty());
+    let ignored = execute(ExecRequest::command_line("getenv PATH").with_inherit_default_env(false));
+    assert_eq!(ignored.stdout, default.stdout);
+
+    let exact =
+        execute(ExecRequest::command_line("env").with_envs(["FOO=value with spaces", "EMPTY="]));
+    assert_eq!(exact.stdout, b"EMPTY=\nFOO=value with spaces\n");
+
+    let inherited = execute(
+        ExecRequest::command_line("getenv PATH")
+            .with_env("FOO=bar")
+            .with_inherit_default_env(true),
+    );
+    assert_eq!(inherited.stdout, default.stdout);
+
+    for (value, expected) in [("one", b"one".as_slice()), ("two", b"two".as_slice())] {
+        let output =
+            execute(ExecRequest::command_line("getenv FOO").with_env(format!("FOO={value}")));
+        assert_eq!(output.stdout, expected);
+    }
+    assert!(
+        execute(ExecRequest::command_line("getenv FOO"))
+            .stdout
+            .is_empty()
+    );
+
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
 fn state_machine_violations_use_contract_codes() {
     let fixture = Fixture::new();
     let nvx = fixture.nvx();
@@ -390,8 +437,6 @@ fn unsupported_requests_are_rejected_before_anything_runs() {
     let write = || ExecRequest::command_line("write rejected ran");
     for request in [
         write().with_cwd("relative"),
-        write().with_env("MODE=test"),
-        write().with_inherit_default_env(false),
         write().with_stdin(StdinMode::Piped),
         write().with_timeout(Duration::from_secs(2 * 60 * 60)),
         ExecRequest::argv(["relative/program"]),
@@ -520,6 +565,7 @@ fn guests_without_the_required_features_are_refused() {
         "host path mappings",
         "workload accounts",
         "workload containment",
+        "per-execution environments",
     ] {
         assert!(error.message().contains(feature), "{error}");
     }

@@ -261,7 +261,7 @@ mod tests {
 
     const COMPATIBLE_MANIFEST: &str = r#"{"openvmm":{"microvm_abi_version":2,
         "control_session_protocol_version":1,
-        "control_contract_revision":"nvx-microvm-v2-control-v1"}}"#;
+        "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#;
 
     fn release(root: &Path) {
         for artifact in [
