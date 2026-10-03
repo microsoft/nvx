@@ -144,15 +144,19 @@ class FieldParsingTests(unittest.TestCase):
                 {"boot", "capture", "restore"},
             )
         self.assertEqual(time_abi.check_cpu_budget_us("kvm", "boot", 1), 6_000)
-        self.assertEqual(time_abi.check_cpu_budget_us("kvm", "restore", 1), 6_500)
-        self.assertEqual(time_abi.check_cpu_budget_us("kvm", "restore", 8), 17_000)
-        self.assertEqual(time_abi.check_cpu_budget_us("mshv", "boot", 4), 5_250)
+        self.assertEqual(time_abi.check_cpu_budget_us("kvm", "capture", 1), 1_500)
+        self.assertEqual(time_abi.check_cpu_budget_us("kvm", "capture", 8), 4_300)
+        self.assertEqual(time_abi.check_cpu_budget_us("kvm", "restore", 1), 7_000)
+        self.assertEqual(time_abi.check_cpu_budget_us("kvm", "restore", 8), 21_000)
+        # The spec's binding MSHV boot cell: 4 vCPUs (4.94 ms measured).
+        self.assertEqual(time_abi.check_cpu_budget_us("mshv", "boot", 4), 6_000)
         self.assertEqual(time_abi.check_cpu_budget_us("mshv", "restore", 8), 6_000)
-        self.assertEqual(time_abi.check_cpu_budget_us("whp", "capture", 2), 1_400)
         self.assertEqual(time_abi.check_cpu_budget_us("whp", "restore", 1), 35_000)
-        # The spec's binding WHP cells: boot at 2 vCPUs (17.03 ms measured)
-        # and restore at 4 (42.20 ms).
-        self.assertEqual(time_abi.check_cpu_budget_us("whp", "boot", 2), 21_500)
+        # The spec's binding WHP cells: boot at 2 vCPUs (21.84 ms measured on an
+        # 8573C runner), capture at 1 (0.986 ms), and restore at 4 (42.20 ms).
+        self.assertEqual(time_abi.check_cpu_budget_us("whp", "boot", 2), 26_500)
+        self.assertEqual(time_abi.check_cpu_budget_us("whp", "capture", 1), 1_200)
+        self.assertEqual(time_abi.check_cpu_budget_us("whp", "capture", 2), 1_600)
         self.assertEqual(time_abi.check_cpu_budget_us("whp", "restore", 4), 53_000)
         self.assertIsNone(time_abi.check_cpu_budget_us("hvf", "boot", 1))
         self.assertIsNone(time_abi.check_cpu_budget_us("kvm", "runtime", 1))
