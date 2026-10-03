@@ -6637,6 +6637,10 @@ class GuestExitTests(unittest.TestCase):
             ((" 7",), 1),
             (("12a",), 1),
             (("99999999999999999999",), 1),
+            # Out of range after any digit, so the value never wraps.
+            (("4294967296",), 1),
+            (("4294967551",), 1),
+            (("00000000000000000255",), 255),
             # Decimal: the old script's printf read a leading zero as octal.
             (("010",), 10),
             (("7", "9"), 7),
