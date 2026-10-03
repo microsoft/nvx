@@ -60,15 +60,11 @@ version_at_least() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
 }
 
-report_invariant_tsc() {
-    # The host OS's invariant-TSC flag is evidence only. CI qualifies a runner
-    # on measured properties instead: the guest warp probe and the TSC rate
-    # stability (doc/ci.md, "Host qualification"; #211, #265).
-    if grep -Eq '^flags[[:space:]]*:.*[[:space:]]nonstop_tsc([[:space:]]|$)' "$1"; then
-        echo "host exposes an invariant TSC (nonstop_tsc)"
-    else
-        echo "warning: host does not expose an invariant TSC (nonstop_tsc); CI qualifies it on the measured warp and rate stability" >&2
-    fi
+require_invariant_tsc() {
+    # Guests on a host without an invariant TSC intermittently see cross-vCPU
+    # TSC warps, which make Linux mark the guest TSC unstable (#211).
+    grep -Eq '^flags[[:space:]]*:.*[[:space:]]nonstop_tsc([[:space:]]|$)' "$1" ||
+        die "host does not expose an invariant TSC (nonstop_tsc); redeploy the VM on a host that does"
 }
 
 validate_runner_name() {
@@ -822,7 +818,7 @@ case "$backend" in
     kvm | mshv) ;;
     *) die "--backend must be kvm or mshv" ;;
 esac
-report_invariant_tsc /proc/cpuinfo
+require_invariant_tsc /proc/cpuinfo
 [ "$(id -u)" -ne 0 ] || die "run this script as the SSH administrator, not root"
 require_command sudo
 sudo -n true || die "passwordless sudo is required"

@@ -2827,7 +2827,7 @@ class CiConfigurationTests(unittest.TestCase):
             ):
                 self.assertIn(firmware, configuration)
 
-    def test_runners_qualify_their_host_time_before_every_job(self):
+    def test_linux_runners_require_an_invariant_tsc(self):
         validate_runner = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -2839,10 +2839,82 @@ class CiConfigurationTests(unittest.TestCase):
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
         ).read_text(encoding="utf-8")
 
-        # The doctor replaces the nonstop_tsc check: the backend, the CPU
-        # fingerprint and generation, and the TSC rate stability. Jobs have no
-        # OpenVMM binary yet, so H2 skips OpenVMM's CPU profile check.
-        self.assertNotIn("Validate host TSC", validate_runner)
+        step = validate_runner.split("    - name: Validate host TSC\n", 1)[1]
+        step = step.split("\n\n    - name: ", 1)[0]
+        self.assertIn("      if: runner.os != 'Windows'\n", step)
+        check = "\n".join(
+            line.removeprefix("        ")
+            for line in step.split("      run: |\n", 1)[1].splitlines()
+        )
+        function = linux_setup.split("require_invariant_tsc() {\n", 1)[1]
+        function = "require_invariant_tsc() {\n" + function.split("\n}\n", 1)[0]
+        function += "\n}\n"
+        self.assertLess(
+            linux_setup.index("require_invariant_tsc /proc/cpuinfo\n"),
+            linux_setup.index('sudo -n true || die "passwordless sudo is required"'),
+        )
+        if os.name != "posix":
+            return
+
+        with tempfile.TemporaryDirectory() as temporary:
+            cpuinfo = Path(temporary) / "cpuinfo"
+            for flags, invariant in (
+                ("fpu tsc constant_tsc nonstop_tsc tsc_known_freq", True),
+                ("fpu tsc constant_tsc tsc_known_freq", False),
+                ("fpu tsc constant_tsc nonstop_tsc_x", False),
+            ):
+                cpuinfo.write_text(
+                    f"model name\t: Test CPU\nflags\t\t: {flags}\n",
+                    encoding="utf-8",
+                )
+                with self.subTest(flags=flags, check="validate-runner"):
+                    result = subprocess.run(
+                        ["bash", "-c", check.replace("/proc/cpuinfo", str(cpuinfo))],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, invariant, result.stderr)
+                    self.assertIn("CPU: Test CPU", result.stdout)
+                    self.assertEqual(
+                        "::error::Runner host does not expose an invariant TSC"
+                        in result.stderr,
+                        not invariant,
+                    )
+                with self.subTest(flags=flags, check="setup-linux-runner"):
+                    result = subprocess.run(
+                        [
+                            "sh",
+                            "-c",
+                            'die() { echo "$*" >&2; exit 1; }\n'
+                            f"{function}"
+                            f"require_invariant_tsc '{cpuinfo}'\n",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, invariant, result.stderr)
+
+    def test_runners_qualify_their_host_time_before_every_job(self):
+        validate_runner = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-runner"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        # The doctor adds to the nonstop_tsc gate, which stays first and
+        # fail-closed on Linux: the backend, the CPU fingerprint and
+        # generation, and the TSC rate stability. Jobs that haven't downloaded
+        # OpenVMM skip its CPU profile check (H2) and preflight (H3).
+        self.assertLess(
+            validate_runner.index("    - name: Validate host TSC\n"),
+            validate_runner.index("    - name: Qualify host time on Linux\n"),
+        )
         for name, shell, command, summary in (
             (
                 "Qualify host time on Linux",
@@ -2925,46 +2997,6 @@ class CiConfigurationTests(unittest.TestCase):
             validate_runner.index("Validate Linux toolchain"),
             validate_runner.index("Qualify host time on Linux"),
         )
-
-        # The runner setup records the host's invariant-TSC flag as evidence.
-        self.assertNotIn("require_invariant_tsc", linux_setup)
-        function = linux_setup.split("report_invariant_tsc() {\n", 1)[1]
-        function = "report_invariant_tsc() {\n" + function.split("\n}\n", 1)[0]
-        function += "\n}\n"
-        self.assertLess(
-            linux_setup.index("report_invariant_tsc /proc/cpuinfo\n"),
-            linux_setup.index('sudo -n true || die "passwordless sudo is required"'),
-        )
-        if os.name != "posix":
-            return
-
-        with tempfile.TemporaryDirectory() as temporary:
-            cpuinfo = Path(temporary) / "cpuinfo"
-            for flags, invariant in (
-                ("fpu tsc constant_tsc nonstop_tsc tsc_known_freq", True),
-                ("fpu tsc constant_tsc tsc_known_freq", False),
-                ("fpu tsc constant_tsc nonstop_tsc_x", False),
-            ):
-                cpuinfo.write_text(
-                    f"model name\t: Test CPU\nflags\t\t: {flags}\n",
-                    encoding="utf-8",
-                )
-                with self.subTest(flags=flags, check="setup-linux-runner"):
-                    result = subprocess.run(
-                        [
-                            "sh",
-                            "-c",
-                            'die() { echo "$*" >&2; exit 1; }\n'
-                            f"{function}"
-                            f"report_invariant_tsc '{cpuinfo}'\n",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual("warning:" in result.stderr, not invariant)
 
     def test_runner_setups_install_backend_native_openvmm_targets(self):
         linux_setup = (

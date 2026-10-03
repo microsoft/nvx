@@ -124,13 +124,41 @@ runs:
           throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
         }
 
-    # Time ABI host qualification (doc/design/time-abi.md, "Host
-    # qualification"): the backend, the CPU fingerprint and generation, and
-    # the TSC rate stability on its short CI schedule, and, in jobs that
-    # downloaded OpenVMM, its CPU profile check (H2) and preflight (H3). Other
-    # jobs qualify without OpenVMM. It replaces the nonstop_tsc check, which
-    # is now recorded as evidence only. The guest warp probe runs in the
-    # microVM scenarios, which boot the time ABI.
+    # Host time. On Linux, the nonstop_tsc gate stays fail-closed in front of
+    # the time ABI host qualification (doc/design/time-abi.md, "Host
+    # qualification"), which then checks the backend, the CPU fingerprint and
+    # generation, and the TSC rate stability on its short CI schedule, and,
+    # in jobs that downloaded OpenVMM, its CPU profile check (H2) and
+    # preflight (H3); other jobs qualify without OpenVMM. These checks are
+    # host-level, and the guest warp probe (H6) runs only in the microVM
+    # scenarios, so the gate keeps a host whose guests warp (#265) out of
+    # every other job.
+    - name: Validate host TSC
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Guests on a host without an invariant TSC intermittently see
+        # cross-vCPU TSC warps, which make Linux mark the guest TSC unstable
+        # (#211).
+        echo "Kernel: $(uname -r)"
+        echo "CPU: $(awk -F': ' '/^model name/ { print $2; exit }' /proc/cpuinfo)"
+        echo "Clocksource: $(cat /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || echo unknown)"
+        flags=" $(awk -F': ' '/^flags/ { print $2; exit }' /proc/cpuinfo) "
+        for flag in constant_tsc nonstop_tsc tsc_known_freq tsc_reliable; do
+          case "${flags}" in
+            *" ${flag} "*) echo "TSC flag ${flag}: present" ;;
+            *) echo "TSC flag ${flag}: absent" ;;
+          esac
+        done
+        case "${flags}" in
+          *" nonstop_tsc "*) ;;
+          *)
+            echo "::error::Runner host does not expose an invariant TSC (nonstop_tsc); redeploy the VM on a host that does" >&2
+            exit 1
+            ;;
+        esac
+
     - name: Qualify host time on Linux
       if: runner.os != 'Windows'
       shell: bash

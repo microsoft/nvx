@@ -157,26 +157,29 @@ development release, and performance persistence. The GitHub-hosted
 own key, so a kernel rebuild delays only the debug jobs, and a failed debug
 kernel build fails the required status check and blocks the release.
 
-Every job that uses the `validate-runner` action qualifies its runner for the
-time ABI with `nvx.py doctor --checks H1 H2 H4 --ci-schedule` (see
-[Host qualification](#host-qualification)): the backend, the CPU fingerprint
-and generation, and the TSC rate stability on its short schedule. The microVM
-and platform jobs run it after downloading OpenVMM and add OpenVMM's CPU
-profile check (H2) and preflight (H3), and keep the fingerprint as an artifact
-when the profile check fails; the other jobs pass `--no-openvmm`. This replaces
-the earlier `nonstop_tsc` check and takes a few seconds. It reports the CPU
-generation, the CPU profile that `auto` selects, and the measured TSC rate in
-the log and the job summary, and fails the job with a stable code when the
-runner is not qualified, for example `E_PROFILE_HOST_UNKNOWN` on an unknown CPU
-generation.
-Qualification gates only on measured properties, alike on every backend: the
-host OS's invariant-TSC flags and clocksource are recorded as evidence, and
-the guest warp probe in the microVM scenarios measures the skew that a host
-without an invariant TSC causes. On such an MSHV runner VM, never-restored
-guests hit cross-vCPU TSC warps when an idle host CPU woke (#211, #265), which
-is why the probe schedule includes idle gaps. Runner labels do not encode the
-generation; per-PR CI captures and restores on one runner, so generations
-never mix.
+Every job that uses the `validate-runner` action first requires an invariant
+TSC on a Linux runner (`nonstop_tsc` in `/proc/cpuinfo`) and fails without
+one, as before the time ABI. It then qualifies the runner for the time ABI
+with `nvx.py doctor --checks H1 H2 H4 --ci-schedule` (see [Host
+qualification](#host-qualification)): the backend, the CPU fingerprint and
+generation, and the TSC rate stability on its short schedule. The microVM and
+platform jobs run it after downloading OpenVMM and add OpenVMM's CPU profile
+check (H2) and preflight (H3), and keep the fingerprint as an artifact when
+the profile check fails; the other jobs pass `--no-openvmm`. This takes a few
+seconds. It reports the CPU generation, the CPU profile that `auto` selects,
+and the measured TSC rate in the log and the job summary, and fails the job
+with a stable code when the runner is not qualified, for example
+`E_PROFILE_HOST_UNKNOWN` on an unknown CPU generation. The doctor gates only
+on measured properties, alike on every backend: it records the host OS's
+invariant-TSC flags and clocksource as evidence, and the guest warp probe in
+the microVM scenarios measures the skew that a host without an invariant TSC
+causes. On such an MSHV runner VM, never-restored guests hit cross-vCPU TSC
+warps when an idle host CPU woke (#211, #265), which is why the probe schedule
+includes idle gaps. The `nonstop_tsc` gate stays in front of it until every
+job that runs guests also runs the warp probe: only the microVM jobs do, while
+the OpenVMM vmm-tests and the platform benchmarks run guests after host-level
+checks that such a host can pass. Runner labels do not encode the generation;
+per-PR CI captures and restores on one runner, so generations never mix.
 
 The warp probe replaced the `restore-tsc-sync` scenario, its test-only
 `clearcpuid=tsc_adjust` kernel option, the guest's scan of the kernel log for
@@ -304,17 +307,19 @@ override their default build paths. `--no-openvmm` qualifies a host without
 OpenVMM: H2 then checks the CPU identity and generation only, and H3 and H6
 cannot run.
 
-Qualification gates on measured properties, alike on every backend: the guest
+The doctor gates on measured properties, alike on every backend: the guest
 warp probe at 1 µs with its idle gaps (H6), the TSC rate stability (H4), and
 the CPU profile (H2 and H3). The host OS's invariant-TSC flags and clocksource
-are evidence only. In CI, `validate-runner` runs the cheap host-level checks
-H1, H2, and H4 in every job that uses it, on the short `--ci-schedule`. The
-microVM and platform jobs run it after downloading OpenVMM and the guest
-artifacts and add H2's CPU profile check and H3, so that H4 also compares the
-measured rate with the backend's native rate; the other jobs pass
-`--no-openvmm`. The guest warp probe needs a time ABI boot, so the microVM boot
-and restore scenarios run CI's warp schedule after every boot and restore and
-assert its verdict. H5 and H7 remain available for interactive qualification.
+are evidence only in the doctor. In CI, `validate-runner` keeps the
+`nonstop_tsc` gate on Linux runners in front of it, because only the microVM
+jobs run H6, and runs the cheap host-level checks H1, H2, and H4 in every job
+that uses it, on the short `--ci-schedule`. The microVM and platform jobs run
+it after downloading OpenVMM and the guest artifacts and add H2's CPU profile
+check and H3, so that H4 also compares the measured rate with the backend's
+native rate; the other jobs pass `--no-openvmm`. The guest warp probe needs a
+time ABI boot, so the microVM boot and restore scenarios run CI's warp
+schedule after every boot and restore and assert its verdict. H5 and H7 remain
+available for interactive qualification.
 
 ## Rust crate
 
