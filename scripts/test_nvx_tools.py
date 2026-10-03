@@ -588,6 +588,16 @@ class CliTests(unittest.TestCase):
             "azurelinux-initramfs-artifacts",
         )
 
+    def test_docker_artifacts_require_expected_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = build.DockerBuildConfig(artifact_destination=Path(temporary))
+            with (
+                patch.object(build, "require_tool"),
+                patch.object(build, "run_checked"),
+                self.assertRaisesRegex(common.ScriptError, "vmlinux"),
+            ):
+                build.build_docker_artifacts(config, "azurelinux")
+
     def test_ubuntu_run_selects_artifact_and_default_memory(self):
         args = nvx.parse_args(["run", "--guest", "ubuntu", "--dry-run"])
 

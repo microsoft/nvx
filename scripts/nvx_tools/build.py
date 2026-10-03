@@ -1125,6 +1125,12 @@ def _docker_destination(destination: Path) -> Path:
     return destination.resolve()
 
 
+def _require_docker_artifacts(destination: Path, expected: tuple[str, ...]) -> None:
+    missing = [name for name in expected if not (destination / name).is_file()]
+    if missing:
+        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
+
+
 def build_docker_linux_source(config: DockerBuildConfig) -> Path:
     """Build and export the pinned Linux corresponding-source archive."""
     require_tool(
@@ -1175,9 +1181,7 @@ def build_docker_artifacts(
         f"(kernel {KernelBuildConstants.VERSION}, {guest_label})"
     )
     run_checked(docker_build_command(config, target), cwd=BuildConstants.REPO_ROOT)
-    missing = [name for name in expected if not (destination / name).is_file()]
-    if missing:
-        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
+    _require_docker_artifacts(destination, expected)
     print(">> done:")
     for name in expected:
         path = destination / name
@@ -1201,6 +1205,4 @@ def build_docker_initramfs(config: DockerBuildConfig, guest: str) -> None:
     destination = _docker_destination(config.artifact_destination)
     print(f">> building {descriptor.distribution} initramfs into '{destination}'")
     run_checked(docker_build_command(config, target), cwd=BuildConstants.REPO_ROOT)
-    missing = [name for name in expected if not (destination / name).is_file()]
-    if missing:
-        raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")
+    _require_docker_artifacts(destination, expected)
