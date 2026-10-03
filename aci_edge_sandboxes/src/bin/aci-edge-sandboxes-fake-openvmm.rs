@@ -5,13 +5,18 @@
 //! input, serves the authenticated control console on the requested Unix socket or named pipe,
 //! and runs scripted workloads. Integration tests point `OpenVmmConfig::openvmm` at it.
 //!
-//! Workloads are `/bin/sh -c SCRIPT` or `/bin/echo ARGS...`. A script is a `;`-separated list
-//! of commands: `echo TEXT`, `echoerr TEXT`, `sleep MS`, `exit CODE`, `signal NUMBER`,
-//! `flood BYTES`, `write KEY VALUE`, `read KEY`, `fail`, and `launchfail`. Values written with
-//! `write` live in memory until the VM stops, like files in the guest's RAM root file system.
-//! A `CANCEL` request ends a sleeping workload with the cancelled outcome, and a client that
-//! disconnects during an exec abandons it, as the real guest agent does. `pwd` prints the
-//! working directory that the backend's `cd` prelude selects.
+//! Workloads are `/bin/sh -c SCRIPT` or `/bin/echo ARGS...`, optionally behind the backend's
+//! `cd` prelude or its `/usr/bin/env [-i] [--] [NAME=VALUE]... COMMAND...` wrapper. A script is a
+//! `;`-separated list of commands: `echo TEXT`, `echoerr TEXT`, `sleep MS`, `exit CODE`,
+//! `signal NUMBER`, `flood BYTES`, `write KEY VALUE`, `read KEY`, `env`, `printenv NAME`, `fail`,
+//! and `launchfail`. Values written with `write` live in memory until the VM stops, like files in
+//! the guest's RAM root file system. A `CANCEL` request ends a sleeping workload with the
+//! cancelled outcome, and a client that disconnects during an exec abandons it, as the real guest
+//! agent does. `pwd` prints the working directory that the backend's `cd` prelude selects. `env`
+//! and `printenv` print the workload's environment: the guest's default one (`PATH`, `TERM`,
+//! `HOME`, `USER`, and `LOGNAME`), as the `env` wrapper changes it. Like BusyBox's `env`, the
+//! wrapper without a command prints the environment, and it reads a program name that contains
+//! `=` as one more entry.
 //!
 //! Kernel command-line tokens adjust the emulation: `fake_exit_on_start=CODE` fails the launch,
 //! `fake_boot_delay_ms=MS` delays the control endpoint, `fake_crash_after_ms=MS` makes the VM
@@ -54,6 +59,66 @@ const APP_ERROR: u8 = 0xff;
 /// Control features of the current guest: cancellation, host path mappings, workload accounts,
 /// and workload containment.
 const GUEST_FEATURES: u32 = 0b1111;
+
+/// Variables that the real guest's default environment always has.
+const DEFAULT_ENVIRONMENT: [(&str, &str); 5] = [
+    ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"),
+    ("TERM", "linux"),
+    ("HOME", "/"),
+    ("USER", "nobody"),
+    ("LOGNAME", "nobody"),
+];
+
+type Environment = Vec<(String, String)>;
+
+fn default_environment() -> Environment {
+    DEFAULT_ENVIRONMENT
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+/// Sets a variable in place, or appends it, as `putenv` does.
+fn set_variable(environment: &mut Environment, name: &str, value: &str) {
+    match environment
+        .iter_mut()
+        .find(|(existing, _)| existing == name)
+    {
+        Some(entry) => value.clone_into(&mut entry.1),
+        None => environment.push((name.to_owned(), value.to_owned())),
+    }
+}
+
+/// Applies the arguments of `/usr/bin/env` to `environment` and returns its command, which is
+/// empty when `env` should print the environment.
+///
+/// It supports what the backend uses: `-i`, `--`, and `NAME=VALUE` entries. Like BusyBox's `env`,
+/// it reads every argument up to the command that contains `=` as an entry.
+fn apply_env<'a, 'b>(
+    arguments: &'b [&'a str],
+    environment: &mut Environment,
+) -> Result<&'b [&'a str], String> {
+    let mut index = 0;
+    while let Some(&argument) = arguments.get(index) {
+        if argument == "--" {
+            index += 1;
+            break;
+        }
+        if argument == "-i" {
+            environment.clear();
+        } else if argument.starts_with('-') {
+            return Err(format!("invalid option {argument}"));
+        } else {
+            break;
+        }
+        index += 1;
+    }
+    while let Some((name, value)) = arguments.get(index).and_then(|entry| entry.split_once('=')) {
+        set_variable(environment, name, value);
+        index += 1;
+    }
+    Ok(&arguments[index..])
+}
 
 struct Options {
     endpoint: String,
@@ -523,22 +588,51 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         };
         let timeout_ms = u32_at(payload, 0);
         const PRELUDE: &str = "cd -- \"$1\" || exit 125\nshift\n";
-        let words: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let (words, cwd) = match words.as_slice() {
-            ["/bin/sh", "-c", script, "/bin/sh", cwd, rest @ ..] if script.starts_with(PRELUDE) => {
-                let script = &script[PRELUDE.len()..];
-                let mut words = if script == "exec \"$@\"" {
-                    rest.to_vec()
-                } else {
-                    vec!["/bin/sh", "-c", script]
-                };
-                if words.is_empty() {
-                    words.push("/bin/true");
+        let mut environment = default_environment();
+        let mut cwd = "/".to_owned();
+        let mut words: Vec<&str> = argv.iter().map(String::as_str).collect();
+        // Runs the wrappers that the backend puts around a workload, in whatever order they nest.
+        loop {
+            match words.as_slice() {
+                ["/usr/bin/env", arguments @ ..] => match apply_env(arguments, &mut environment) {
+                    Ok([]) => {
+                        for (name, value) in &environment {
+                            let line = format!("{name}={value}\n");
+                            self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
+                        }
+                        return self.send_some(APP_EXIT, request_id, 0, b"exit");
+                    }
+                    Ok(command) => words = command.to_vec(),
+                    Err(message) => {
+                        let message = format!("env: {message}\n");
+                        self.send(APP_STDERR, request_id, 0, message.as_bytes())?;
+                        return self.send_some(APP_EXIT, request_id, 1, b"exit");
+                    }
+                },
+                ["/bin/sh", "-c", script, "/bin/sh", directory, rest @ ..]
+                    if script.starts_with(PRELUDE) =>
+                {
+                    let script = &script[PRELUDE.len()..];
+                    let mut command = if script == "exec \"$@\"" {
+                        rest.to_vec()
+                    } else {
+                        vec!["/bin/sh", "-c", script]
+                    };
+                    if command.is_empty() {
+                        command.push("/bin/true");
+                    }
+                    cwd = (*directory).to_owned();
+                    words = command;
                 }
-                (words, (*cwd).to_owned())
+                // The environment wrapper runs a program whose name contains `=` this way.
+                ["/bin/sh", "-c", "exec \"$@\"", "/bin/sh", command @ ..]
+                    if !command.is_empty() =>
+                {
+                    words = command.to_vec();
+                }
+                _ => break,
             }
-            _ => (words, "/".to_owned()),
-        };
+        }
         let script = match words.as_slice() {
             ["/bin/sh", "-c", script] => (*script).to_owned(),
             ["/bin/echo", words @ ..] => format!("echo {}", words.join(" ")),
@@ -626,6 +720,19 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                 "pwd" => {
                     let line = format!("{cwd}\n");
                     self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
+                }
+                "env" => {
+                    for (name, value) in &environment {
+                        let line = format!("{name}={value}\n");
+                        self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
+                    }
+                }
+                "printenv" => {
+                    if let Some((_, value)) = environment.iter().find(|(name, _)| name == argument)
+                    {
+                        let line = format!("{value}\n");
+                        self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
+                    }
                 }
                 "fail" => return self.send_some(APP_EXIT, request_id, 125, b"failed"),
                 "launchfail" => {

@@ -2,7 +2,8 @@
 #![cfg(feature = "testing")]
 
 use std::io::{Read, Write};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -182,6 +183,85 @@ fn piped_stdin_reaches_the_workload() {
     stdout.read_to_end(&mut output).unwrap();
     assert_eq!(output, b"from the caller");
     assert!(execution.wait().unwrap().success());
+}
+
+#[test]
+fn exec_handlers_see_the_requested_environment() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    let nvx = AciEdgeSandbox::new(MockBackend::new().with_exec_handler(move |request| {
+        let process = &request.process;
+        recorder
+            .lock()
+            .unwrap()
+            .push((process.env.clone(), process.inherit_default_env));
+        MockExec::default()
+    }));
+    let sandbox_id = running(&nvx);
+    for request in [
+        ExecRequest::command_line("env"),
+        ExecRequest::command_line("env").with_environment(Vec::<String>::new()),
+        ExecRequest::command_line("env").with_environment(["FOO=bar", "EMPTY="]),
+        ExecRequest::command_line("env")
+            .with_env("FOO=bar baz")
+            .with_inherit_default_env(true),
+    ] {
+        nvx.exec(&sandbox_id, &request)
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+    }
+    let owned = |entries: &[&str]| Some(entries.iter().map(|entry| (*entry).to_owned()).collect());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            (None, None),
+            (owned(&[]), None),
+            (owned(&["FOO=bar", "EMPTY="]), None),
+            (owned(&["FOO=bar baz"]), Some(true)),
+        ]
+    );
+}
+
+#[test]
+fn environment_modes_follow_the_backend_capabilities() {
+    // Like MXC's IsolationSession, this backend can layer entries over its default environment
+    // but cannot replace it, so only requests that layer or keep the default one can run.
+    let mut capabilities = MockBackend::full_capabilities();
+    capabilities.exec.clear_default_env = false;
+    let ran = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&ran);
+    let nvx = AciEdgeSandbox::new(
+        MockBackend::new()
+            .with_capabilities(capabilities)
+            .with_exec_handler(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                MockExec::default()
+            }),
+    );
+    let sandbox_id = running(&nvx);
+    for request in [
+        ExecRequest::command_line("env").with_env("FOO=bar"),
+        ExecRequest::command_line("env").with_environment(Vec::<String>::new()),
+    ] {
+        let error = nvx.exec(&sandbox_id, &request).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::PolicyValidation, "{request:?}");
+        assert!(error.message().contains("process.env"), "{error}");
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    for request in [
+        ExecRequest::command_line("env"),
+        ExecRequest::command_line("env").with_inherit_default_env(false),
+        ExecRequest::command_line("env")
+            .with_env("FOO=bar")
+            .with_inherit_default_env(true),
+    ] {
+        nvx.exec(&sandbox_id, &request)
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 3);
 }
 
 #[test]

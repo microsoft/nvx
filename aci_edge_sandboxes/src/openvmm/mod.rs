@@ -35,7 +35,8 @@
 //! | `process.commandLine` | n/a | run as `/bin/sh -c <commandLine>`, at most 4096 bytes |
 //! | `process.cwd` | n/a | an absolute guest path, entered before the workload runs |
 //! | `process.timeout` | n/a | up to one hour |
-//! | `process.env`, `inheritDefaultEnv: false`, piped stdin | n/a | rejected |
+//! | `process.env`, `inheritDefaultEnv` | n/a | applied before the workload runs; see below |
+//! | piped standard input | n/a | rejected |
 //!
 //! Host paths share OpenVMM's single virtio-fs export: the backend exports the deepest directory
 //! that contains every mapped path to a guest directory that only the guest's root can enter, and
@@ -46,6 +47,16 @@
 //! [`OpenVmmConfig::workload_uid`] and [`OpenVmmConfig::workload_gid`] (see
 //! [`OpenVmmConfig::map_host_identity`] for Linux hosts) with no capabilities, read end-of-file on
 //! standard input, and may produce at most 1 MiB of combined output.
+//!
+//! # Environment
+//!
+//! Each execution starts from its own environment, so nothing carries over from an earlier one.
+//! Without `process.env`, the workload gets the guest's default environment: `PATH`, `TERM`,
+//! and the `HOME`, `USER`, and `LOGNAME` of the workload identity, plus a few variables that the
+//! guest's boot leaves behind. It never inherits the host's variables. Supplied entries, even an
+//! empty list, are the complete environment, unless `inheritDefaultEnv` layers them over the
+//! default one. The guest agent has no environment field, so the backend starts the workload
+//! through `env`, and the entries count toward the 64 arguments that the agent accepts.
 //!
 //! # Concurrency and cancellation
 //!
@@ -63,6 +74,7 @@
 mod artifacts;
 mod config;
 mod contract;
+mod environment;
 mod filesystem;
 mod launch;
 mod network;
@@ -361,10 +373,11 @@ fn prepare_exec(process: &ProcessSpec) -> Result<(Vec<String>, u32)> {
             .map(|_| ())
             .map_err(|error| Error::policy_validation(error.0))
     };
-    // The cwd wrapper's /bin/sh must not hide an invalid program in the original argv.
+    // The wrappers' /bin/sh and env must not hide an invalid program in the original argv.
     if let Command::Argv(arguments) = &process.command {
         validate(arguments)?;
     }
+    let argv = environment::apply(process, argv)?;
     validate(&argv)?;
     Ok((argv, timeout_ms))
 }
@@ -441,6 +454,8 @@ impl Backend for OpenVmmBackend {
         capabilities.filesystem.readwrite_paths = true;
         capabilities.filesystem.denied_paths = true;
         capabilities.exec.cwd = true;
+        capabilities.exec.env = true;
+        capabilities.exec.clear_default_env = true;
         capabilities
     }
 
@@ -943,6 +958,43 @@ mod tests {
             workload_argv(&relative.process).unwrap_err().code(),
             ErrorCode::PolicyValidation
         );
+    }
+
+    #[test]
+    fn environments_wrap_the_working_directory_prelude() {
+        let request = ExecRequest::command_line("pwd")
+            .with_cwd("/tmp")
+            .with_env("FOO=bar baz");
+        let (argv, timeout_ms) = prepare_exec(&request.process).unwrap();
+        assert_eq!(timeout_ms, 0);
+        assert_eq!(
+            argv,
+            [
+                "/usr/bin/env",
+                "-i",
+                "--",
+                "FOO=bar baz",
+                "/bin/sh",
+                "-c",
+                "cd -- \"$1\" || exit 125\nshift\npwd",
+                "/bin/sh",
+                "/tmp",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_environment_wrapper_does_not_hide_invalid_programs() {
+        for request in [
+            ExecRequest::argv(["relative-program"]).with_env("FOO=bar"),
+            ExecRequest::argv(["relative-program"]).with_environment(Vec::<String>::new()),
+        ] {
+            assert_eq!(
+                prepare_exec(&request.process).unwrap_err().code(),
+                ErrorCode::PolicyValidation,
+                "{request:?}"
+            );
+        }
     }
 
     #[test]
