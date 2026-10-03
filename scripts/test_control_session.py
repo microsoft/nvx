@@ -254,11 +254,8 @@ class ControlSessionTests(unittest.TestCase):
             control_session.APP_EXEC_ENVIRONMENT_PRESENT
             | control_session.APP_EXEC_INHERIT_DEFAULT_ENV,
         )
-        cleared = payload_for(None, False)
-        self.assertEqual(
-            struct.unpack("<HH", cleared[8:12]),
-            (control_session.APP_EXEC_ENVIRONMENT_PRESENT, 0),
-        )
+        ignored = payload_for(None, False)
+        self.assertEqual(ignored, omitted)
 
     def test_exec_rejects_invalid_environments_before_sending(self):
         client, server = socket.socketpair()

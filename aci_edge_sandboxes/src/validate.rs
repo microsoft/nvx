@@ -209,9 +209,11 @@ pub(crate) fn exec_capabilities(request: &ExecRequest, capabilities: &Capabiliti
     if process.env.is_some() && !supported.env {
         return unsupported("process.env");
     }
-    let inherits_default = process.inherit_default_env.unwrap_or(process.env.is_none());
-    if !inherits_default && !supported.clear_default_env {
-        return unsupported("process.inheritDefaultEnv: false");
+    if process.env.is_some()
+        && process.inherit_default_env != Some(true)
+        && !supported.clear_default_env
+    {
+        return unsupported("replacing the default environment with process.env");
     }
     if let (Some(timeout), Some(maximum)) = (process.timeout, supported.max_timeout_ms)
         && duration_millis(timeout) > maximum
@@ -439,7 +441,6 @@ mod tests {
             ExecRequest::command_line("pwd").with_cwd("/tmp"),
             ExecRequest::command_line("env").with_env("A=B"),
             ExecRequest::command_line("env").with_envs(Vec::<String>::new()),
-            ExecRequest::command_line("env").with_inherit_default_env(false),
             ExecRequest::command_line("sleep 2").with_timeout(Duration::from_secs(2)),
         ] {
             assert_eq!(
@@ -452,6 +453,11 @@ mod tests {
             &ExecRequest::command_line("true")
                 .with_inherit_default_env(true)
                 .with_timeout(Duration::from_secs(1)),
+            &capabilities,
+        )
+        .unwrap();
+        exec_capabilities(
+            &ExecRequest::command_line("true").with_inherit_default_env(false),
             &capabilities,
         )
         .unwrap();

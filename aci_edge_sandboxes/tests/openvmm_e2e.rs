@@ -342,6 +342,15 @@ fn openvmm_lifecycle_on_a_real_hypervisor() {
             .any(|entry| entry.starts_with("PATH=")),
         "{default_environment}"
     );
+    let ignored_inheritance_flag = run(
+        &nvx,
+        &sandbox_id,
+        ExecRequest::argv(["/usr/bin/env"]).with_inherit_default_env(false),
+    );
+    assert_eq!(
+        String::from_utf8(ignored_inheritance_flag.stdout).unwrap(),
+        default_environment
+    );
     let empty_environment = run(
         &nvx,
         &sandbox_id,

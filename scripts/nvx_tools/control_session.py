@@ -375,9 +375,7 @@ class ControlSession:
 
         if inherit_default_env is not None and type(inherit_default_env) is not bool:
             raise TypeError("managed exec environment inheritance must be a boolean")
-        inherits_default = (
-            environment is None if inherit_default_env is None else inherit_default_env
-        )
+        inherits_default = environment is None or inherit_default_env is True
         encoded_environment: list[bytes] = []
         if environment is not None:
             if len(environment) > APP_MAX_ENVIRONMENT:
@@ -398,9 +396,6 @@ class ControlSession:
                         "KEY=VALUE strings of at most 4096 bytes"
                     )
                 encoded_environment.append(struct.pack("<I", len(value)) + value)
-        elif not inherits_default:
-            environment = ()
-
         if environment is None:
             payload = struct.pack("<IHH", timeout_ms, len(arguments), 0) + b"".join(
                 encoded

@@ -737,9 +737,9 @@ fn decode_exec(payload: &[u8]) -> Option<Exec> {
         }
         let entry = String::from_utf8(payload.get(offset..offset + length)?.to_vec()).ok()?;
         offset += length;
-        if !entry
+        if entry
             .split_once('=')
-            .is_some_and(|(name, _)| !name.is_empty())
+            .is_none_or(|(name, _)| name.is_empty())
         {
             return None;
         }

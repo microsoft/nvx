@@ -397,7 +397,8 @@ impl ExecRequest {
         self
     }
 
-    /// Selects whether the workload inherits the sandbox's default environment.
+    /// Selects whether a supplied environment is layered over the sandbox's default environment.
+    /// Ignored when the environment is omitted.
     #[must_use]
     pub fn with_inherit_default_env(mut self, inherit: bool) -> Self {
         self.process.inherit_default_env = Some(inherit);
@@ -434,8 +435,8 @@ pub struct ProcessSpec {
     /// `KEY=VALUE` environment entries. `None` uses the backend's default environment; an empty
     /// vector requests an empty environment unless `inherit_default_env` is `Some(true)`.
     pub env: Option<Vec<String>>,
-    /// Whether `env` is layered over the sandbox's default environment. When omitted, the
-    /// default environment is inherited only when `env` is omitted.
+    /// Whether `env` is layered over the sandbox's default environment. Ignored when `env` is
+    /// omitted; otherwise `None` means `false`.
     pub inherit_default_env: Option<bool>,
     /// Workload timeout. `None` or zero disables it. Serialized in milliseconds.
     pub timeout: Option<Duration>,

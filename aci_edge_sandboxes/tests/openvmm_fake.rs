@@ -229,8 +229,8 @@ fn workload_environments_are_exact_and_isolated_per_execution() {
 
     let empty = execute(ExecRequest::command_line("env").with_envs(Vec::<String>::new()));
     assert!(empty.stdout.is_empty());
-    let cleared = execute(ExecRequest::command_line("env").with_inherit_default_env(false));
-    assert!(cleared.stdout.is_empty());
+    let ignored = execute(ExecRequest::command_line("getenv PATH").with_inherit_default_env(false));
+    assert_eq!(ignored.stdout, default.stdout);
 
     let exact =
         execute(ExecRequest::command_line("env").with_envs(["FOO=value with spaces", "EMPTY="]));

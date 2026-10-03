@@ -367,12 +367,8 @@ fn exec_timeout_ms(process: &ProcessSpec) -> Result<u32> {
 fn prepare_exec(process: &ProcessSpec) -> Result<PreparedExec<'_>> {
     let argv = workload_argv(process)?;
     let timeout_ms = exec_timeout_ms(process)?;
-    let inherit_default_env = process.inherit_default_env.unwrap_or(process.env.is_none());
-    let environment = match (&process.env, inherit_default_env) {
-        (Some(environment), _) => Some(environment.as_slice()),
-        (None, false) => Some([].as_slice()),
-        (None, true) => None,
-    };
+    let environment = process.env.as_deref();
+    let inherit_default_env = environment.is_none() || process.inherit_default_env == Some(true);
     let validate_argv = |arguments: &[String]| {
         protocol::encode_exec_payload(arguments, timeout_ms, None, true)
             .map(|_| ())
