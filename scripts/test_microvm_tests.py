@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import argparse
+import ast
 import io
 import json
 import os
@@ -1447,6 +1448,75 @@ class MicrovmTests(unittest.TestCase):
         failed.close.assert_called_once_with()
         console.close()
         connected.close.assert_called_once_with()
+
+    def test_every_openvmm_process_success_path_waits(self):
+        # close() never raises, so a late violation or a 193-195 power-off is
+        # only caught by wait(), which scans the output to EOF and checks the
+        # exit status. Every scenario's OpenVMM context must therefore reach
+        # wait() on its success path: unconditionally, with no early exit.
+        source = Path(microvm_tests.__file__).read_text(encoding="utf-8")
+        blocks = 0
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.With):
+                continue
+            for item in node.items:
+                call = item.context_expr
+                if not (
+                    isinstance(call, ast.Call)
+                    and ast.unparse(call.func) == "OpenvmmProcess"
+                ):
+                    continue
+                blocks += 1
+                assert isinstance(item.optional_vars, ast.Name)
+                name = item.optional_vars.id
+                statements = list(node.body)
+                # A try body whose only handler is finally is unconditional.
+                while (
+                    len(statements) == 1
+                    and isinstance(statements[0], ast.Try)
+                    and not statements[0].handlers
+                ):
+                    statements = list(statements[0].body)
+                with self.subTest(line=node.lineno):
+                    self.assertTrue(
+                        any(
+                            f"{name}.wait(" in ast.unparse(statement)
+                            and not isinstance(
+                                statement, (ast.If, ast.For, ast.While, ast.Try)
+                            )
+                            for statement in statements
+                        )
+                    )
+                    self.assertFalse(
+                        any(
+                            isinstance(sub, (ast.Return, ast.Break, ast.Continue))
+                            for sub in ast.walk(node)
+                        )
+                    )
+        self.assertGreater(blocks, 30)
+
+    def test_every_tcp_console_is_monitored_and_cold_boot_shells_are_queried(self):
+        tree = ast.parse(Path(microvm_tests.__file__).read_text(encoding="utf-8"))
+        connects = [
+            {keyword.arg: ast.unparse(keyword.value) for keyword in node.keywords}
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and ast.unparse(node.func) == "TcpConsole.connect"
+        ]
+        # The managed lifecycle, the console-snapshot capture and restore, and
+        # the snapshot-tier capture, restore, and gate-timeout restore.
+        self.assertEqual(len(connects), 6)
+        for keywords in connects:
+            self.assertRegex(
+                keywords.get("monitor", ""), r"^TimeAbiMonitor\(\w*command\)$"
+            )
+        # Only the cold boots whose shell is on the virtio console ask for
+        # nvx-time status. Restores never ask, and in the managed lifecycle
+        # init starts the managed agent instead of a shell.
+        self.assertEqual(
+            [k["monitor"] for k in connects if k.get("time_abi_status") == "True"],
+            ["TimeAbiMonitor(capture_command)"] * 2,
+        )
 
     def test_snapshot_core_script_handles_no_clocksource(self):
         # The time ABI fixes the clocksource on every backend, so snapshot-core

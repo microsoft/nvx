@@ -1018,6 +1018,81 @@ class RunnerWiringTests(unittest.TestCase):
         console.close()
         peer.close()
 
+    def test_tcp_console_finish_scans_the_tail(self):
+        # A violation after the last awaited marker still fails the scenario,
+        # including an unterminated final line.
+        connection, peer = socket.socketpair()
+        console = openvmm_process.TcpConsole(connection, TimeAbiMonitor(KVM_BOOT))
+        peer.sendall(b"READY\n")
+        console.wait_for(b"READY", 1.0)
+        peer.sendall(VIOLATION.rstrip(b"\n"))
+        peer.close()
+        with self.assertRaisesRegex(TimeAbiFailure, "G_RCU_STALL"):
+            console.finish()
+        self.assertIn(b"G_RCU_STALL", console.finish(check=False))
+        with self.assertRaisesRegex(TimeAbiFailure, "G_RCU_STALL"):
+            console.finish()
+
+        # Error paths keep the tail in the log without raising over the error.
+        connection, peer = socket.socketpair()
+        console = openvmm_process.TcpConsole(connection, TimeAbiMonitor(KVM_BOOT))
+        peer.sendall(VIOLATION)
+        peer.close()
+        self.assertEqual(console.finish(check=False), VIOLATION)
+
+    def test_tcp_console_queries_a_cold_boot_before_the_first_input(self):
+        connection, peer = socket.socketpair()
+        peer.settimeout(1.0)
+        monitor = TimeAbiMonitor(KVM_BOOT)
+        console = openvmm_process.TcpConsole(connection, monitor, time_abi_status=True)
+        peer.sendall(b"NVX-GUEST-BOOT-OK: alpine\n")
+        console.wait_for(b"NVX-GUEST-BOOT-OK", 1.0)
+        peer.sendall((BOOT_LINE + RUNTIME_LINE + STATUS_OK).encode())
+        console.send_bytes(b"INPUT\n")
+        console.send_bytes(b"MORE\n")
+        expected = time_abi.status_script().encode() + b"INPUT\nMORE\n"
+        sent = b""
+        while len(sent) < len(expected):
+            sent += peer.recv(4096)
+        self.assertEqual(sent, expected)
+        self.assertEqual(monitor.status_queries, 1)
+        self.assertIsNotNone(monitor.boot)
+        console.close()
+        peer.close()
+
+        # A query without a passing boot line fails before the input is sent.
+        connection, peer = socket.socketpair()
+        console = openvmm_process.TcpConsole(
+            connection, TimeAbiMonitor(KVM_BOOT), time_abi_status=True
+        )
+        peer.sendall(b"NVX-GUEST-BOOT-OK: alpine\n")
+        console.wait_for(b"NVX-GUEST-BOOT-OK", 1.0)
+        peer.sendall(STATUS_OK.encode())
+        with self.assertRaisesRegex(TimeAbiFailure, "boot marker"):
+            console.send_bytes(b"INPUT\n")
+        console.close()
+        peer.close()
+
+    def test_tcp_console_queries_only_cold_boots_that_ask(self):
+        for command, enabled in (
+            (MSHV_RESTORE, True),
+            (KVM_BOOT, False),
+        ):
+            with self.subTest(command=command, enabled=enabled):
+                connection, peer = socket.socketpair()
+                peer.settimeout(1.0)
+                monitor = TimeAbiMonitor(command)
+                console = openvmm_process.TcpConsole(
+                    connection, monitor, time_abi_status=enabled
+                )
+                peer.sendall(b"NVX-GUEST-BOOT-OK: alpine\n")
+                console.wait_for(b"NVX-GUEST-BOOT-OK", 1.0)
+                console.send_bytes(b"Z")
+                self.assertEqual(peer.recv(4096), b"Z")
+                self.assertEqual(monitor.status_queries, 0)
+                console.close()
+                peer.close()
+
 
 def doctor_context(root: Path, backend: str = "kvm") -> doctor.DoctorContext:
     return doctor.DoctorContext(

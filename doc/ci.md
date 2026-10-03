@@ -26,7 +26,8 @@ one-vCPU smoke set, under the same time ABI checks; the debug-kernel jobs skip
 it, as they skip the Ubuntu tests. Failure logs from the NVX layer are uploaded
 per backend.
 Every harness launch, in the tests and the benchmarks, scans the OpenVMM
-console for the guest's [time ABI](design/time-abi.md) output. An
+console for the guest's [time ABI](design/time-abi.md) output, and the tests
+scan every virtio console they read over TCP the same way, to its end. An
 `NVX-TIME-ABI-VIOLATION` event or a failed `NVX-TIME-ABI` conformance line
 fails the scenario at once with the guest's code and detail. Guests keep the
 console quiet, because every console byte costs a port exit. Only the initial
@@ -36,8 +37,12 @@ middle of a scenario. A guest prints one `NVX-TIME-ABI` line per recorded
 check phase (boot, then capture and restore after a restore) and a runtime
 line only when `/sbin/nvx-time status` asks, after waiting up to 30 s for
 pending checks. The test runners ask after every cold boot whose shell is on
-the OpenVMM console, before any other input, and wait for the query to exit,
-so the console's echo of later input cannot split its lines. The query must
+a console the harness reads, the OpenVMM console or a virtio console over
+TCP, before any other input, and wait for the query to exit, so the console's
+echo of later input cannot split its lines. Cold boots with no shell there are
+only scanned: one-shot workloads, and the managed lifecycle, where init starts
+the managed agent instead of a shell. A failing boot check still powers them
+off with status 193, which fails the run. The query must
 exit 0 with a passing `NVX-TIME-ABI` boot line, which reports ABI version 1,
 generation 0, a plausible TSC rate, and the backend's LAPIC rate; a missing
 line means the guest image or OpenVMM does not implement the ABI, a check

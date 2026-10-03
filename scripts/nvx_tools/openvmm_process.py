@@ -266,6 +266,13 @@ class OpenvmmProcess:
         return OpenvmmProcessResult(returncode, bytes(self._output))
 
     def close(self) -> None:
+        """Stop OpenVMM if it still runs, and keep its output in the log.
+
+        It never raises a time ABI failure, so the error that led here on a
+        failure path surfaces unmasked. Every scenario's success path ends in
+        ``wait``, which scans the output to EOF and checks the exit status
+        (``test_every_openvmm_process_success_path_waits``).
+        """
         if not self._finished and self.process.poll() is None:
             terminate(self.process)
         self._drain_available()
@@ -274,6 +281,7 @@ class OpenvmmProcess:
         self._finished = True
 
     def _drain_available(self) -> None:
+        """Keep the output still queued; failure paths only, so no scan."""
         while True:
             try:
                 chunk = self._chunks.get_nowait()
@@ -310,11 +318,19 @@ class TcpConsole:
         self,
         connection: socket.socket,
         monitor: TimeAbiMonitor | None = None,
+        *,
+        time_abi_status: bool = False,
     ) -> None:
         self._connection = connection
         self._output = bytearray()
         self._search_offset = 0
         self._monitor = monitor
+        self._query_status = (
+            time_abi_status and monitor is not None and monitor.cold_boot
+        )
+        self._status_sent = False
+        self._closed = False
+        self._failure: TimeAbiFailure | None = None
 
     @classmethod
     def connect(
@@ -323,8 +339,16 @@ class TcpConsole:
         timeout: float,
         *,
         monitor: TimeAbiMonitor | None = None,
+        time_abi_status: bool = False,
     ) -> TcpConsole:
-        """Connect to a virtio console; ``monitor`` checks its time ABI lines."""
+        """Connect to a virtio console.
+
+        ``monitor`` scans the console's output for the time ABI, as
+        OpenvmmProcess scans OpenVMM's. With ``time_abi_status``, a
+        cold-booted guest whose shell is on this console answers a time ABI
+        status query before the scenario's first input, the same contract as
+        OpenvmmProcess's ``time_abi_status``.
+        """
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -334,7 +358,7 @@ class TcpConsole:
                 except BaseException:
                     connection.close()
                     raise
-                return cls(connection, monitor)
+                return cls(connection, monitor, time_abi_status=time_abi_status)
             except OSError as error:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
@@ -347,7 +371,36 @@ class TcpConsole:
             self._monitor.feed(chunk)
 
     def send_bytes(self, data: bytes) -> None:
+        self._query_status_first()
         self._connection.sendall(data)
+
+    def _query_status_first(self) -> None:
+        if (
+            not self._query_status
+            or self._status_sent
+            # The guest's shell is not on this console, or has not booted.
+            or not any(marker in self._output for marker in _GUEST_BOOT_MARKERS)
+        ):
+            return
+        assert self._monitor is not None
+        self._status_sent = True
+        self._connection.sendall(status_script().encode())
+        deadline = time.monotonic() + STATUS_TIMEOUT_SECONDS
+        while self._monitor.status_queries == 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "nvx-time status did not exit within "
+                    f"{STATUS_TIMEOUT_SECONDS:g}s on the TCP console"
+                )
+            self._connection.settimeout(min(remaining, 0.25))
+            try:
+                chunk = self._connection.recv(4096)
+            except TimeoutError:
+                continue
+            if not chunk:
+                raise RuntimeError("TCP console closed before nvx-time status exited")
+            self._consume(chunk)
 
     @property
     def output(self) -> bytes:
@@ -400,16 +453,37 @@ class TcpConsole:
                 raise RuntimeError(f"TCP console closed before line marker {marker!r}")
             self._consume(chunk)
 
-    def finish(self) -> bytes:
-        self._connection.settimeout(0.1)
-        try:
-            while chunk := self._connection.recv(4096):
-                self._output.extend(chunk)
-        except (TimeoutError, ConnectionError, OSError):
-            pass
-        finally:
-            self._connection.close()
+    def finish(self, *, check: bool = True) -> bytes:
+        """Drain the console until it goes quiet, close it, and return its output.
+
+        The drained bytes reach the monitor too, so a violation or failed check
+        that arrived after the last awaited marker still fails the scenario.
+        Error paths pass ``check=False``: the monitor still scans the bytes for
+        the log, but nothing is raised over the error being handled.
+        """
+        if not self._closed:
+            self._closed = True
+            self._connection.settimeout(0.1)
+            try:
+                while chunk := self._connection.recv(4096):
+                    try:
+                        self._consume(chunk)
+                    except TimeAbiFailure as error:
+                        # Keep draining, so the log holds everything.
+                        self._failure = self._failure or error
+            except (TimeoutError, ConnectionError, OSError):
+                pass
+            finally:
+                self._connection.close()
+            if self._monitor is not None:
+                try:
+                    self._monitor.finish()
+                except TimeAbiFailure as error:
+                    self._failure = self._failure or error
+        if check and self._failure is not None:
+            raise self._failure
         return bytes(self._output)
 
     def close(self) -> None:
+        self._closed = True
         self._connection.close()
