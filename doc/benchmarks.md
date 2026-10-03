@@ -437,14 +437,23 @@ Snapshot capture always enables `OPENVMM_STARTUP_PROFILE=1` to measure generatio
 process-relative clock. Missing, duplicate, wrong-process, or non-monotonic capture boundaries
 are errors, not a fallback to console timing. Full profile retention and host resource counters
 remain opt-in through `--snapshot-profile` or the `snapshot-profile` suite. Other benchmark
-subprocesses remove the variable unless profiling is requested. OpenVMM emits one ASCII record per phase
-with the versioned `OPENVMM_SNAPSHOT_PROFILE_V1` prefix. Each record contains:
+subprocesses remove the variable unless profiling is requested. OpenVMM writes one ASCII record per
+phase to stderr with the versioned `OPENVMM_SNAPSHOT_PROFILE_V1` prefix. Each record contains:
 
 - `operation`, `phase`, and `exclusive`, where exclusive phases are disjoint intervals and
 	non-exclusive phases are cumulative milestones that may contain nested work;
 - monotonic `duration_ns` and process-relative `process_elapsed_ns`, plus the emitting `pid`;
 - phase-specific `logical_bytes`, `allocated_bytes`, `gpa_faults`, and `populated_bytes` when
 	available.
+
+OpenVMM relays the guest console to stdout from its own thread, with no ordering against its
+stderr writes, so either stream can split a line of the other when they share a terminal or
+pipe. Snapshot capture and launch measurements therefore read stderr through a separate pipe:
+they parse profile records only from stderr and match guest markers only on the console. Their
+logs and error reports interleave the two streams by whole lines. Because the streams are read
+independently, a record written before a guest marker can arrive after it. Snapshot capture, and
+launch measurements that keep a profile or a log, read both streams to their end within the
+configured timeout and fail if either stream does not end.
 
 With full profiling, the coordinator retains every record in `profile.raw_samples`. It derives
 `capture.snapshot_generation` from the OpenVMM clock and adds observer-defined
