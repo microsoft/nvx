@@ -3580,6 +3580,20 @@ static void start_restore(struct daemon *daemon)
         return;
     }
     g_generation = (uint32_t)state.generation;
+    // A restore handed off by the restore timer: its readiness path ran from
+    // the capture request's return, which the restore record places
+    // restore_elapsed_us before the clock step at last_step_realtime_ns, to
+    // DEFERRED_START_NS before step 13 was due.
+    if (daemon->readiness_us < 0) {
+        int64_t ready = daemon->restore_due_ns - DEFERRED_START_NS;
+        int64_t start = restore_start_ns(
+            clock_ns(CLOCK_MONOTONIC), clock_ns(CLOCK_REALTIME),
+            state.last_step_realtime_ns,
+            state.checks[PHASE_RESTORE].elapsed_us);
+
+        daemon->readiness_us =
+            ready > start ? (ready - start) / NSEC_PER_USEC : 0;
+    }
     if (read_text(RESTORE_PATH, text, sizeof(text)) >= 0) {
         new_count = parse_restore_record(text, &generation, new_cpus);
         if (new_count < 0) {
@@ -3676,16 +3690,13 @@ static void handle_signals(struct daemon *daemon)
 }
 
 // The restore timer expired: a restore helper armed it DEFERRED_START_NS
-// after its readiness path ended, so step 13 is due now. The readiness path
-// ran from the capture request's return, which the restore record places
-// restore_elapsed_us before the clock step at last_step_realtime_ns, to
-// DEFERRED_START_NS ago.
+// after its readiness path ended, so step 13 is due now. start_restore
+// derives the readiness path's wall time from the state it loads, so that
+// the load counts as the daemon's preparation (READINESS_US -1 asks for it).
 static void handle_restore_timer(struct daemon *daemon)
 {
-    struct time_state state;
     uint64_t expirations;
     int64_t now = clock_ns(CLOCK_MONOTONIC);
-    int64_t start;
 
     if (read(daemon->restore_timer, &expirations, sizeof(expirations)) !=
         sizeof(expirations))
@@ -3693,15 +3704,7 @@ static void handle_restore_timer(struct daemon *daemon)
     daemon->restore_pending = true;
     daemon->restore_due_ns = now;
     daemon->last_accepted_ns = now - DEFERRED_START_NS;
-    daemon->readiness_us = 0;
-    if (state_load(&state) == 0) {
-        start = restore_start_ns(now, clock_ns(CLOCK_REALTIME),
-                                 state.last_step_realtime_ns,
-                                 state.checks[PHASE_RESTORE].elapsed_us);
-        if (now - DEFERRED_START_NS > start)
-            daemon->readiness_us =
-                (now - DEFERRED_START_NS - start) / NSEC_PER_USEC;
-    }
+    daemon->readiness_us = -1;
 }
 
 // Moves descriptor FD to TARGET, close-on-exec, for the timers that capture
@@ -4729,7 +4732,8 @@ static int cmd_restore_finish(int argc, char **argv)
         fprintf(stderr, "nvx-time: ioperm: %s\n", strerror(errno));
         return 1;
     }
-    start = restore_start_ns(clock_ns(CLOCK_MONOTONIC), clock_ns(CLOCK_REALTIME),
+    start = restore_start_ns(clock_ns(CLOCK_MONOTONIC),
+                             clock_ns(CLOCK_REALTIME),
                              state.last_step_realtime_ns,
                              state.checks[PHASE_RESTORE].elapsed_us);
     daemon = daemon_pid();
