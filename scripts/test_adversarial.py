@@ -558,6 +558,12 @@ class AdversarialBrokerTests(unittest.TestCase):
 
 
 class AdversarialOracleTests(unittest.TestCase):
+    @staticmethod
+    def _wait_for_process_exit(pid: int) -> None:
+        deadline = time.monotonic() + 2.0
+        while _process_running(pid) and time.monotonic() < deadline:
+            time.sleep(0.025)
+
     def test_linux_child_reaping_rescans_reparented_descendants(self) -> None:
         with (
             patch(
@@ -761,6 +767,7 @@ class AdversarialOracleTests(unittest.TestCase):
                     self.assertEqual(len(unrelated), 1)
                     self.assertIsNone(unrelated[0].poll())
                     owned_pid = int(owned_pid_path.read_text(encoding="utf-8"))
+                    self._wait_for_process_exit(owned_pid)
                     self.assertFalse(_process_running(owned_pid))
                 finally:
                     if owned_pid_path.exists():
@@ -796,6 +803,7 @@ class AdversarialOracleTests(unittest.TestCase):
                     contain_process_tree=True,
                 )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        self._wait_for_process_exit(child_pid)
         self.assertFalse(_process_running(child_pid))
 
     def test_contained_guest_runner_normal_exit_kills_descendants(self) -> None:
@@ -824,6 +832,7 @@ class AdversarialOracleTests(unittest.TestCase):
             )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
         self.assertIn("SYNTHETIC-COMPLETE", result["text"])
+        self._wait_for_process_exit(child_pid)
         self.assertFalse(_process_running(child_pid))
 
     def test_process_timeout_bounds_blocked_stdin_writer(self) -> None:
@@ -868,9 +877,7 @@ class AdversarialOracleTests(unittest.TestCase):
                 contained_by_parent=True,
             )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-            deadline = time.monotonic() + 2.0
-            while _process_running(child_pid) and time.monotonic() < deadline:
-                time.sleep(0.025)
+            self._wait_for_process_exit(child_pid)
         self.assertTrue(result.timed_out)
         self.assertTrue(result.teardown_complete)
         self.assertFalse(_process_running(child_pid))
@@ -900,9 +907,7 @@ class AdversarialOracleTests(unittest.TestCase):
                 contained_by_parent=True,
             )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-            deadline = time.monotonic() + 2.0
-            while _process_running(child_pid) and time.monotonic() < deadline:
-                time.sleep(0.025)
+            self._wait_for_process_exit(child_pid)
         self.assertFalse(result.timed_out)
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.teardown_complete)
@@ -995,6 +1000,7 @@ class AdversarialOracleTests(unittest.TestCase):
                         self.assertFalse(result.timed_out)
                         self.assertEqual(result.returncode, expected_returncode)
                         self.assertTrue(result.teardown_complete)
+                        self._wait_for_process_exit(owned_pid)
                         self.assertFalse(_process_running(owned_pid))
                         self.assertIsNone(unrelated.poll())
                     finally:
@@ -1178,6 +1184,8 @@ class AdversarialOracleTests(unittest.TestCase):
                     int(command_pid_path.read_text(encoding="utf-8")),
                     int(descendant_pid_path.read_text(encoding="utf-8")),
                 ]
+                for pid in owned_pids:
+                    self._wait_for_process_exit(pid)
                 self.assertTrue(all(not _process_running(pid) for pid in owned_pids))
                 self.assertIsNone(unrelated.poll())
             finally:
@@ -1200,6 +1208,13 @@ class AdversarialOracleTests(unittest.TestCase):
                     timeout=2.0,
                 ):
                     pass
+                deadline = time.monotonic() + 2.0
+                while (
+                    session.network_canary.connections == 0
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+                self.assertGreaterEqual(session.network_canary.connections, 1)
                 session.canary_path.write_bytes(b"modified")
                 sample = session.watchdog.sample(event="unit-test")
                 self.assertFalse(sample["host_canary_intact"])

@@ -2578,7 +2578,8 @@ class CiConfigurationTests(unittest.TestCase):
             r"\{[ \t]*\n.*?^[ \t]*\}[ \t]*(?:\n|$)",
             setup.replace("\r\n", "\n"),
         )
-        self.assertIsNotNone(match, "label validation function was not found")
+        if match is None:
+            raise AssertionError("label validation function was not found")
         function = match.group(0)
         for labels, valid in (
             ("linux,kvm,virtual-machine", True),
