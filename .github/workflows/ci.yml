@@ -41,6 +41,24 @@ jobs:
       - name: Check code quality
         uses: ./.github/actions/check-quality
 
+  aci-edge-sandboxes:
+    name: aci-edge-sandboxes / ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check aci_edge_sandboxes
+        uses: ./.github/actions/check-aci-edge-sandboxes
+
   openvmm-changes:
     name: Detect CI workload inputs
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -109,7 +127,7 @@ jobs:
             run_workloads "At least one non-documentation file changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           fi
 
-          relevant_paths='^(openvmm($|/)|\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests|run-platform)\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|sccache|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|scripts/setup/|kernel/|alpine/|guest/|ubuntu/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
+          relevant_paths='^(openvmm($|/)|aci_edge_sandboxes/|\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests|run-platform)\.yml$|\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|sccache|setup-curl|validate-nvx|validate-runner)/|scripts/nvx\.py$|scripts/nvx_tools/|scripts/setup/|kernel/|alpine/|guest/|ubuntu/|docker/Dockerfile$|SOURCE-MANIFEST\.json$)'
           if grep -Eq "${relevant_paths}" "${changed_files}"; then
             run_tests "At least one OpenVMM test input changed between \`${BASE_SHA}\` and \`${HEAD_SHA}\`."
           else
@@ -1047,6 +1065,7 @@ jobs:
     needs:
       - debug-kernel
       - quality
+      - aci-edge-sandboxes
       - openvmm-vmm-tests
       - openvmm-unit-tests
       - nvx-microvm-tests-kvm
@@ -1066,6 +1085,7 @@ jobs:
         !cancelled() &&
         needs.debug-kernel.result == 'success' &&
         needs.quality.result == 'success' &&
+        needs.aci-edge-sandboxes.result == 'success' &&
         (
           needs.openvmm-vmm-tests.result == 'success' ||
           needs.openvmm-vmm-tests.result == 'skipped'
@@ -1149,6 +1169,7 @@ jobs:
     name: Required status check
     needs:
       - quality
+      - aci-edge-sandboxes
       - openvmm-changes
       - artifacts
       - debug-kernel
@@ -1188,6 +1209,7 @@ jobs:
           RUN_TESTS: ${{ needs.openvmm-changes.outputs.run-tests }}
           RUN_WORKLOADS: ${{ needs.openvmm-changes.outputs.run-workloads }}
           QUALITY_RESULT: ${{ needs.quality.result }}
+          ACI_EDGE_SANDBOXES_RESULT: ${{ needs.aci-edge-sandboxes.result }}
           CHANGES_RESULT: ${{ needs.openvmm-changes.result }}
           ARTIFACTS_RESULT: ${{ needs.artifacts.result }}
           DEBUG_KERNEL_RESULT: ${{ needs.debug-kernel.result }}

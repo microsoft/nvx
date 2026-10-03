@@ -15,6 +15,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `guest` | Common guest sources plus Alpine-control-specific helpers |
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
+| `aci_edge_sandboxes` | Rust crate `aci_edge_sandboxes`: state-aware sandbox API with an OpenVMM backend |
 | `openvmm` | Private OpenVMM submodule pinned to `microvm/mshv` |
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Retained NVX build and benchmark implementation |
@@ -65,6 +66,14 @@ nvx/
 |   |-- COPYING-LINUX            Linux copyright and license notice
 |   |-- config-microvm           MicroVM kernel configuration
 |   `-- config-microvm-debug     CI debug-kernel fragment (watchdogs on)
+|-- aci_edge_sandboxes/                      Rust crate `aci_edge_sandboxes` for the state-aware sandbox API
+|   |-- src/                     Facade, contract model, and backends
+|   |   |-- openvmm/             Default backend that drives the openvmm binary
+|   |   `-- bin/                 aci-edge-sandboxes-fake-openvmm test double
+|   |-- examples/                Runnable lifecycle example
+|   |-- tests/                   Mock, fake-OpenVMM, and real-hypervisor tests
+|   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
+|   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     Private OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
@@ -82,6 +91,7 @@ nvx/
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   |-- collect_ubuntu_sources.py Ubuntu source collection
 |   |   |-- guests.py           Typed guest descriptors
+|   |   |-- aci_edge_sandboxes_tests.py     Real-hypervisor aci_edge_sandboxes lifecycle test harness
 |   |   |-- ubuntu.py           Verified Ubuntu rootfs and EROFS preparation
 |   |   `-- create_linux_source_archive.py Linux source packaging
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
@@ -158,6 +168,15 @@ source. `COPYING-LINUX` records the upstream Linux copyright and license
 notice. See the [build guide](build.md#building-the-packaged-linux-source) for
 kernel-specific details.
 
+### `aci_edge_sandboxes/`
+
+The Rust crate `aci_edge_sandboxes`, which exposes the five-phase state-aware sandbox lifecycle
+(provision, start, exec, stop, and deprovision) to consumers such as MXC. It
+defines the contract types, a pluggable backend trait, and the default backend,
+which launches the `openvmm` binary and speaks the guest agent's control
+protocol. The crate builds independently of the OpenVMM submodule. See its
+[README](../aci_edge_sandboxes/README.md) for the API, the policy honor matrix, and tests.
+
 ### `openvmm/`
 
 A private Git submodule pinned by `.gitmodules` and the parent repository's Git
@@ -212,6 +231,7 @@ covering those utilities.
 | `data/runs/` | Raw benchmark logs and per-platform artifacts |
 | `dist/` | Staged binary and source release archives |
 | `openvmm/target/` | Rust build output produced inside the OpenVMM submodule |
+| `aci_edge_sandboxes/target/` | Rust build output of the `aci_edge_sandboxes` crate |
 | `.ruff_cache/` | Ruff's local lint cache |
 | `__pycache__/` | Python bytecode caches that may appear below Python source directories |
 

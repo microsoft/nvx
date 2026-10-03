@@ -65,6 +65,7 @@ python scripts\nvx.py run
 - [Run](doc/run.md) - Instructions for running NVX.
 - [Benchmark](doc/benchmarks.md) - Instructions for benchmarking NVX.
 - [Command-line reference](doc/usage.md) - Complete `scripts/nvx.py` command and option reference.
+- [Rust API](aci_edge_sandboxes/README.md) - The `aci_edge_sandboxes` crate for driving the sandbox lifecycle from Rust.
 
 ### Development
 

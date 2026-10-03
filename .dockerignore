@@ -5,6 +5,7 @@
 build
 data
 dist
+aci_edge_sandboxes
 openvmm
 third_party
 **/__pycache__

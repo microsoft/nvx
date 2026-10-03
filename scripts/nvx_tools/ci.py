@@ -29,6 +29,7 @@ from .common import (
 OPENVMM_TEST_BACKENDS = ("kvm", "mshv", "whp")
 REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "quality": "QUALITY_RESULT",
+    "aci-edge-sandboxes": "ACI_EDGE_SANDBOXES_RESULT",
     "openvmm-changes": "CHANGES_RESULT",
     "artifacts": "ARTIFACTS_RESULT",
     "debug-kernel": "DEBUG_KERNEL_RESULT",
@@ -103,6 +104,7 @@ def required_ci_expected_results(
     repository_jobs_enabled = event_name == "push" or same_repository
     expected = {
         "quality": "success",
+        "aci-edge-sandboxes": "success",
         "openvmm-changes": "success",
         REQUIRED_CI_ARTIFACT_JOB: "success" if run_workloads else "skipped",
         REQUIRED_CI_DEBUG_KERNEL_JOB: "success" if run_workloads else "skipped",

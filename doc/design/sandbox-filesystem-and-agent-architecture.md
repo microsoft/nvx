@@ -264,8 +264,54 @@ stream with them. OpenVMM owns the bounded outer framing, same-user local
 endpoint authorization, capability authentication, reconnect epochs, and
 receive-credit backpressure. The current guest protocol provides readiness,
 sequential command execution with bounded arguments and output, separate
-stdout/stderr, timeout and exit categories, and graceful VM shutdown. The
-control device is never exposed inside the workload namespaces.
+stdout/stderr, timeout and exit categories, cancellation, and graceful VM
+shutdown. The control device is never exposed inside the workload namespaces.
+
+While a workload runs, the agent keeps reading the control console. A `CANCEL`
+request that carries the workload's request ID kills the workload, and the exit
+report then uses the `cancelled` category with status 137. Without sandbox
+layers, the agent runs each workload directly in the guest's root file system,
+inside the `nvx-exec` cgroup; termination writes that cgroup's `cgroup.kill`,
+which also reaches processes in other sessions or process groups. When the
+workload's first process exits, the agent kills what remains and reaps the
+orphans it inherits as PID 1, so no workload process outlives its exec.
+It reports the outcome only after `cgroup.events` verifies that the cgroup is
+empty. A failed kill, unreadable or malformed events file, or settlement timeout
+reports `containment-failed` instead. Every subsequent direct execution also
+requires verified emptiness, so a control-session reset cannot bypass a failed
+containment check.
+
+Without sandbox layers, host directories reach workloads through OpenVMM's
+single virtio-fs export. The host exports the deepest directory that contains
+every mapped path to `/run/nvx/hostfs/root`; before it accepts control traffic,
+the agent makes `/run/nvx/hostfs` root-only and bind-mounts each mapped path
+named by an `nvx_map=SOURCE,TARGET,ro|rw` kernel token (percent-encoded paths,
+`SOURCE` relative to the export), remounting each bind `nosuid,nodev` and, for
+`ro`, read-only. OpenVMM's export deny list hides denied paths. A
+`nvx_workload_account=create` token lets the managed init create an account for
+a host-selected non-root identity that the image lacks, which Linux hosts use
+to run workloads under the host user's IDs. An image account that already uses
+the UID but names another primary group or lacks a usable home is replaced.
+A `CANCEL` for a workload that already finished is ignored. Any other request
+during an execution is refused as `busy`. A reset means the host session that
+could observe the workload is gone: the agent kills the workload, sends nothing
+more for it, and acknowledges the new epoch, so the next session does not wait
+for an abandoned workload.
+
+A host cannot tell from a successful readiness probe whether the image enforces
+the behaviors it depends on: an older guest boots and answers, but ignores
+`nvx_map=` tokens and `CANCEL` requests. A `FEATURES` request, which carries no
+payload, therefore asks which control behaviors the image provides. The agent
+answers `READY` with a four-byte little-endian bit mask: `CANCEL` (bit 0),
+`HOST_MAPPINGS` (bit 1), `WORKLOAD_ACCOUNT` (bit 2, provided by the managed
+init and reported by the agent, because both ship in one initramfs), and
+`EXEC_CGROUP` (bit 3). Without sandbox layers all four are provided; with them,
+only `CANCEL` and `WORKLOAD_ACCOUNT`. An agent that predates the request
+refuses it as `unsupported-operation`, which a host reads as no features, so a
+host terminates a guest that lacks a feature it needs instead of running
+workloads without the policy it asked for. During an execution the request is
+refused as `busy`. A feature bit is added together with the behavior it names;
+hosts ignore bits they do not know and trailing bytes of the answer.
 
 The remaining production operation families are:
 

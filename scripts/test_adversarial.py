@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import ctypes
 import hashlib
 import json
@@ -58,12 +59,15 @@ from nvx_tools.adversarial_executor import (
 )
 from nvx_tools.adversarial_oracles import (
     BoundedProcessResult,
+    NetworkCanary,
     OracleSession,
     _freeze_linux_process_tree,
+    _linux_process_exited,
     _reap_linux_children,
     _reap_linux_descendants,
     _WindowsJob,
     run_bounded_process,
+    terminate_process_tree,
 )
 from nvx_tools.benchmark import InteractiveProcess, run_guest_script
 from nvx_tools.build_constants import (
@@ -312,6 +316,12 @@ def _fake_executor_client_type(
             return None
 
     return FakeExecutorClient
+
+
+def _process_exited(pid: int) -> bool:
+    if sys.platform.startswith("linux"):
+        return _linux_process_exited(pid)
+    return not _process_running(pid)
 
 
 class AdversarialBrokerTests(unittest.TestCase):
@@ -676,6 +686,64 @@ class AdversarialOracleTests(unittest.TestCase):
         self.assertEqual(events, ["observe", "observe", "observe", "enumerate"])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
+    def test_process_tree_cleanup_waits_for_reparented_descendants(self) -> None:
+        process = MagicMock()
+        process.pid = 100
+        process.poll.return_value = None
+        with (
+            patch(
+                "nvx_tools.adversarial_oracles._freeze_linux_process_tree",
+                return_value=[300, 200, 100],
+            ),
+            patch("nvx_tools.adversarial_oracles.os.kill"),
+            patch(
+                "nvx_tools.adversarial_oracles.os.waitpid",
+                side_effect=ChildProcessError,
+            ),
+            patch(
+                "nvx_tools.adversarial_oracles._linux_process_exited",
+                side_effect=(False, True, True),
+            ) as exited,
+            patch("nvx_tools.adversarial_oracles.time.sleep"),
+        ):
+            terminate_process_tree(process, process_group=False)
+
+        self.assertEqual(exited.call_args_list, [call(300), call(300), call(200)])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
+    def test_process_tree_cleanup_times_out_on_running_reparented_descendant(
+        self,
+    ) -> None:
+        process = MagicMock()
+        process.pid = 100
+        process.poll.return_value = None
+        with (
+            patch(
+                "nvx_tools.adversarial_oracles._freeze_linux_process_tree",
+                return_value=[200, 100],
+            ),
+            patch("nvx_tools.adversarial_oracles.os.kill"),
+            patch(
+                "nvx_tools.adversarial_oracles.os.waitpid",
+                side_effect=ChildProcessError,
+            ),
+            patch(
+                "nvx_tools.adversarial_oracles._linux_process_exited",
+                return_value=False,
+            ),
+            patch(
+                "nvx_tools.adversarial_oracles.time.monotonic",
+                side_effect=(100.0, 106.0),
+            ),
+            patch("nvx_tools.adversarial_oracles.time.sleep"),
+            self.assertRaisesRegex(
+                ScriptError,
+                "timed out reaping descendant process 200",
+            ),
+        ):
+            terminate_process_tree(process, process_group=False)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
     def test_contained_guest_runner_cleans_threaded_detached_child_only(self) -> None:
         for completion_marker in (b"SYNTHETIC-COMPLETE", b"NEVER-COMPLETE"):
             with tempfile.TemporaryDirectory() as temporary:
@@ -761,12 +829,13 @@ class AdversarialOracleTests(unittest.TestCase):
                     self.assertEqual(len(unrelated), 1)
                     self.assertIsNone(unrelated[0].poll())
                     owned_pid = int(owned_pid_path.read_text(encoding="utf-8"))
-                    self.assertFalse(_process_running(owned_pid))
+                    self.assertTrue(_process_exited(owned_pid))
                 finally:
                     if owned_pid_path.exists():
                         owned_pid = int(owned_pid_path.read_text(encoding="utf-8"))
                         if _process_running(owned_pid):
-                            os.kill(owned_pid, 9)
+                            with contextlib.suppress(ProcessLookupError):
+                                os.kill(owned_pid, 9)
                     if unrelated:
                         unrelated[0].kill()
                         unrelated[0].wait()
@@ -796,7 +865,7 @@ class AdversarialOracleTests(unittest.TestCase):
                     contain_process_tree=True,
                 )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-        self.assertFalse(_process_running(child_pid))
+        self.assertTrue(_process_exited(child_pid))
 
     def test_contained_guest_runner_normal_exit_kills_descendants(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1178,14 +1247,27 @@ class AdversarialOracleTests(unittest.TestCase):
                     int(command_pid_path.read_text(encoding="utf-8")),
                     int(descendant_pid_path.read_text(encoding="utf-8")),
                 ]
-                self.assertTrue(all(not _process_running(pid) for pid in owned_pids))
+                self.assertTrue(all(_process_exited(pid) for pid in owned_pids))
                 self.assertIsNone(unrelated.poll())
             finally:
                 for pid in owned_pids:
                     if _process_running(pid):
-                        os.kill(pid, 9)
+                        with contextlib.suppress(ProcessLookupError):
+                            os.kill(pid, 9)
                 unrelated.kill()
                 unrelated.wait()
+
+    def test_network_canary_counts_connections_queued_at_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            canary = NetworkCanary(Path(temporary) / "network-canary.jsonl")
+            with socket.create_connection(("127.0.0.1", canary.port), timeout=2.0):
+                pass
+            # Stop before the accept thread runs, leaving the connection queued.
+            canary._stop.set()
+            canary.start()
+            canary.close()
+        self.assertEqual(canary.connections, 1)
+        self.assertIsNone(canary.error)
 
     def test_filesystem_and_network_canaries_detect_policy_violations(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

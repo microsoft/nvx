@@ -1,0 +1,71 @@
+[package]
+name = "aci_edge_sandboxes"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Rust interface to the ACI Edge Sandboxes lifecycle"
+license = "MIT"
+repository = "https://github.com/microsoft/nvx"
+readme = "README.md"
+keywords = ["sandbox", "microvm", "openvmm", "virtualization"]
+categories = ["virtualization", "api-bindings"]
+publish = false
+# Lets the build scripts of dependents read the staged bundle as `DEP_ACI_EDGE_SANDBOXES_ARTIFACTS_DIR`.
+links = "aci_edge_sandboxes"
+
+[features]
+default = ["openvmm"]
+# The default backend, which drives the `openvmm` binary directly.
+openvmm = []
+# Stages the OpenVMM executable, guest kernel, and control initramfs at build time; see
+# `Artifacts::bundled`. The build script downloads the release pinned in `artifacts.json`, or
+# copies the release directory named by `ACI_EDGE_SANDBOXES_BUNDLE_DIR`.
+bundled = ["openvmm", "dep:sha2"]
+# Tokio-based asynchronous wrappers around the synchronous core.
+async = ["dep:tokio"]
+# Test doubles: an in-memory `MockBackend` and the `aci-edge-sandboxes-fake-openvmm` binary.
+testing = []
+
+[dependencies]
+getrandom = "0.4"
+serde = { version = "1.0.200", features = ["derive"] }
+serde_json = "1.0.120"
+thiserror = "2"
+tokio = { version = "1.40", default-features = false, features = ["rt", "sync"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2.160" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[build-dependencies]
+serde_json = "1.0.120"
+sha2 = { version = "0.10", optional = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "io-util", "time"] }
+
+[[bin]]
+name = "aci-edge-sandboxes-fake-openvmm"
+path = "src/bin/aci-edge-sandboxes-fake-openvmm.rs"
+required-features = ["testing", "openvmm"]
+doc = false
+
+[[example]]
+name = "lifecycle"
+required-features = ["openvmm"]
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "warn"

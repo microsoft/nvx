@@ -42,11 +42,17 @@ test uses the ACPI-free, MP-enabled `build/vmlinux` and
 `build/initramfs.cpio.gz` artifacts. The phase-1 lifecycle and TTRPC interface
 tests continue to use OpenVMM's packaged guest artifacts.
 
-On a Linux host, build either initramfs directly:
+On a Linux host, build the Alpine or Ubuntu initramfs directly:
 
 ```bash
 python3 scripts/nvx.py build-initramfs --guest alpine
 python3 scripts/nvx.py build-initramfs --guest ubuntu
+```
+
+Build the Azure Linux initramfs through Docker:
+
+```bash
+python3 scripts/nvx.py build-initramfs --guest azurelinux
 ```
 
 The default build produces:

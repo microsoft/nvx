@@ -82,12 +82,46 @@ resolve_workload_identity() {
     [ -d "$workload_home" ] && [ ! -L "$workload_home" ] ||
         workload_fatal "configured workload home is unavailable"
 }
+# Gives a host-selected workload identity an account that resolves. Only
+# managed workloads that map host files under the host user's own IDs ask for
+# it; the identity itself remains host-owned and non-root. An image account that
+# already uses the UID with another primary group or an unusable home is
+# replaced, since workloads run under the numeric IDs either way.
+ensure_workload_account() {
+    case "$workload_uid" in
+        '' | 0 | *[!0-9]*) return 0 ;;
+    esac
+    case "$workload_gid" in
+        '' | 0 | *[!0-9]*) return 0 ;;
+    esac
+    if ! awk -F: -v gid="$workload_gid" '$3 == gid { found = 1 } END { exit !found }' \
+        /etc/group; then
+        printf 'nvx:x:%s:\n' "$workload_gid" >>/etc/group ||
+            workload_fatal "failed to create the workload group"
+    fi
+    # Keep an image account that already resolves; a failed resolution only
+    # ends this subshell.
+    if (
+        workload_fatal() { exit 1; }
+        resolve_workload_identity
+    ); then
+        return 0
+    fi
+    if awk -F: -v uid="$workload_uid" '$3 != uid' /etc/passwd >/etc/passwd.nvx &&
+        printf 'nvx:x:%s:%s:NVX workload:/tmp:/sbin/nologin\n' \
+            "$workload_uid" "$workload_gid" >>/etc/passwd.nvx &&
+        mv -f /etc/passwd.nvx /etc/passwd; then
+        return 0
+    fi
+    workload_fatal "failed to create the workload account"
+}
 nvx_exec=
 nvx_exec_seen=false
 workload_uid=
 workload_gid=
 workload_lifecycle=one-shot
 control_tty=
+workload_account=
 # Kernel command-line tokens are deliberately split on spaces.
 # shellcheck disable=SC2086
 set -f
@@ -103,6 +137,7 @@ for token in $cmdline; do
         nvx_workload_gid=*) workload_gid=${token#*=} ;;
         nvx_lifecycle=*) workload_lifecycle=${token#*=} ;;
         nvx_control_tty=*) control_tty=${token#*=} ;;
+        nvx_workload_account=*) workload_account=${token#*=} ;;
     esac
 done
 set +f
@@ -211,6 +246,9 @@ fi
 case "$workload_lifecycle" in
     one-shot) ;;
     managed)
+        if [ "$workload_account" = create ]; then
+            ensure_workload_account
+        fi
         resolve_workload_identity
         [ "$control_tty" = hvc2 ] ||
             workload_fatal "managed lifecycle requires the dedicated control tty"

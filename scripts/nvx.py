@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import cast
 
 from nvx_tools import sandbox_lifecycle
+from nvx_tools.aci_edge_sandboxes_tests import (
+    configure_parser as configure_aci_edge_sandboxes_test_parser,
+)
 from nvx_tools.adversarial import configure_parser as configure_adversarial_parser
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
 from nvx_tools.build import (
@@ -772,6 +775,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="qualify this host for the NVX time ABI",
     )
     configure_doctor_parser(doctor)
+
+    aci_edge_sandboxes_tests = subparsers.add_parser(
+        "test-aci-edge-sandboxes",
+        help="run the aci_edge_sandboxes crate lifecycle test on a real hypervisor",
+    )
+    configure_aci_edge_sandboxes_test_parser(aci_edge_sandboxes_tests)
 
     adversarial_tests = subparsers.add_parser(
         "test-adversarial",

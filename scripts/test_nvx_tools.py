@@ -4,6 +4,7 @@
 import argparse
 import ast
 import contextlib
+import errno
 import hashlib
 import http.client
 import http.server
@@ -34,6 +35,7 @@ from unittest.mock import MagicMock, call, patch
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
 from nvx_tools import (  # noqa: E402
+    aci_edge_sandboxes_tests,
     archive,
     azurelinux,
     benchmark,
@@ -1876,8 +1878,54 @@ class CiTests(unittest.TestCase):
 
 
 class CiConfigurationTests(unittest.TestCase):
+    def test_ci_needs_reference_declared_jobs(self):
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        jobs = set(
+            re.findall(
+                r"^  ([A-Za-z0-9_-]+):$",
+                workflow.split("jobs:\n", 1)[1],
+                re.MULTILINE,
+            )
+        )
+        for job_name in sorted(jobs):
+            job = _workflow_job(workflow, job_name)
+            match = re.search(r"^    needs:(.*)$", job, re.MULTILINE)
+            if match is None:
+                continue
+            inline = match.group(1).strip()
+            if inline:
+                dependencies = {name.strip() for name in inline.strip("[]").split(",")}
+            else:
+                dependencies = set(
+                    re.findall(
+                        r"^      - ([A-Za-z0-9_-]+)$",
+                        job.split("    if:", 1)[0],
+                        re.MULTILINE,
+                    )
+                )
+            with self.subTest(job=job_name):
+                self.assertLessEqual(
+                    dependencies,
+                    jobs,
+                    f"undefined job dependencies: {dependencies - jobs}",
+                )
+        required = _workflow_job(workflow, "required-status-check")
+        self.assertIn("      - aci-edge-sandboxes\n", required)
+
+    def test_development_release_requires_successful_crate_checks(self):
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        release_job = _workflow_job(workflow, "release")
+        self.assertIn("      - aci-edge-sandboxes\n", release_job)
+        predicate = release_job.split("    if:", 1)[1].split("    runs-on:", 1)[0]
+        self.assertIn("needs.aci-edge-sandboxes.result == 'success' &&", predicate)
+        self.assertNotIn("needs.aci-edge-sandboxes.result == 'skipped'", predicate)
+
     def test_required_ci_result_policy(self):
-        always_successful = {"quality", "openvmm-changes"}
+        always_successful = {"quality", "aci-edge-sandboxes", "openvmm-changes"}
         builds = set(ci.REQUIRED_CI_BUILD_JOBS)
         openvmm_tests = set(ci.REQUIRED_CI_OPENVMM_TEST_JOBS)
         openvmm_artifact_tests = set(ci.REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS)
@@ -2529,9 +2577,10 @@ class CiConfigurationTests(unittest.TestCase):
             ),
             2,
         )
-        # The debug run replaces the Ubuntu and Azure Linux guest tests rather
-        # than adding to them.
-        self.assertEqual(microvm_workflow.count("!inputs.debug-kernel"), 7)
+        # The debug run replaces the Ubuntu and Azure Linux guest tests and the
+        # crate lifecycle test, which boots the production kernel, rather than
+        # adding to them.
+        self.assertEqual(microvm_workflow.count("!inputs.debug-kernel"), 9)
 
     def test_benchmarks_rely_on_the_microvm_correctness_jobs(self):
         # #286: the benchmark action ran a second smp-lapic gate before
@@ -6578,6 +6627,168 @@ class GuestExitTests(unittest.TestCase):
         )
 
 
+class ManagedAgentCgroupTests(unittest.TestCase):
+    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
+
+    def setUp(self):
+        if sys.platform != "linux":
+            self.skipTest("the managed agent requires Linux")
+        compiler = shutil.which("cc") or shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("C compiler is unavailable")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.cgroup = root / "cgroup"
+        self.cgroup.mkdir()
+        (self.cgroup / "cgroup.procs").touch()
+        self.execution = self.cgroup / "nvx-exec"
+        self.execution.mkdir()
+        self.events = self.execution / "cgroup.events"
+        self.events.write_bytes(b"populated 0\nfrozen 0\n")
+        (self.execution / "cgroup.kill").touch()
+        source = root / "cgroup-test.c"
+        source.write_text(
+            f"""#define CGROUP_ROOT {json.dumps(str(self.cgroup))}
+#define main managed_agent_main
+#include {json.dumps(str(self.SOURCE))}
+#undef main
+int main(int argc, char **argv)
+{{
+    int result;
+    if (argc != 2) {{
+        return 2;
+    }}
+    errno = 0;
+    if (strcmp(argv[1], "retry") == 0) {{
+        struct control_session session = {{.fd = STDOUT_FILENO}};
+        struct agent_config config = {{.direct = 1}};
+        char *command[] = {{"/bin/true", NULL}};
+        result = run_exec(&session, &config, 42, 0, command);
+        return result == 0 ? run_exec(&session, &config, 43, 0, command) : result;
+    }}
+    if (strcmp(argv[1], "population") == 0) {{
+        result = exec_cgroup_populated();
+    }} else if (strcmp(argv[1], "settle") == 0) {{
+        result = settle_exec_cgroup();
+    }} else {{
+        return 2;
+    }}
+    printf("%d %d\\n", result, errno);
+    return 0;
+}}
+""",
+            encoding="utf-8",
+        )
+        self.helper = root / "cgroup-test"
+        flags = [
+            flag
+            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
+            if flag != "-static"
+        ]
+        result = subprocess.run(
+            [compiler, *flags, "-o", str(self.helper), str(source)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def _check(self, mode: str) -> tuple[int, int]:
+        result = subprocess.run(
+            [str(self.helper), mode],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value, status = result.stdout.split()
+        return int(value), int(status)
+
+    def _assert_further_exec_refused(self):
+        result = subprocess.run(
+            [str(self.helper), "retry"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        frames = result.stdout
+        for expected_id in (42, 43):
+            outer = ManagedAgentStopTests.OUTER
+            app = ManagedAgentStopTests.APP
+            *_, length = outer.unpack(frames[: outer.size])
+            frame = frames[outer.size : outer.size + length]
+            _, _, kind, _, request_id, status, payload_len = app.unpack(
+                frame[: app.size]
+            )
+            payload = frame[app.size :]
+            self.assertEqual((kind, request_id, status), (0xFF, expected_id, 125))
+            self.assertEqual(payload_len, len(payload))
+            self.assertEqual(payload, b"containment-failed")
+            frames = frames[outer.size + length :]
+        self.assertEqual(frames, b"")
+
+    def test_population_requires_a_valid_unique_field(self):
+        for value in (0, 1):
+            with self.subTest(value=value):
+                self.events.write_text(f"populated {value}\nfrozen 0\n")
+                self.assertEqual(self._check("population")[0], value)
+        for contents in (
+            b"",
+            b"frozen 0\n",
+            b"populated 0",
+            b"populated 2\n",
+            b"populated 01\n",
+            b"populated 0\npopulated 1\n",
+            b"populated 0\n\x00frozen 0\n",
+        ):
+            with self.subTest(contents=contents):
+                self.events.write_bytes(contents)
+                self.assertEqual(self._check("population"), (-1, errno.EPROTO))
+        self.events.write_bytes(b"populated 0\n" + b"x" * 256)
+        self.assertEqual(self._check("population"), (-1, errno.EOVERFLOW))
+
+    def test_missing_and_unreadable_events_are_errors(self):
+        self.events.unlink()
+        self.assertEqual(self._check("population"), (-1, errno.ENOENT))
+        self._assert_further_exec_refused()
+        self.events.mkdir()
+        self.assertEqual(self._check("population"), (-1, errno.EISDIR))
+        self._assert_further_exec_refused()
+
+    def test_settlement_verifies_emptiness(self):
+        self.assertEqual(self._check("settle")[0], 0)
+        self.assertEqual((self.execution / "cgroup.kill").read_bytes(), b"1")
+
+    def test_settlement_does_not_hide_kill_or_verification_failures(self):
+        self.events.write_bytes(b"populated 1\n")
+        (self.execution / "cgroup.kill").unlink()
+        self.assertEqual(self._check("settle"), (-1, errno.ENOENT))
+        self._assert_further_exec_refused()
+        (self.execution / "cgroup.kill").touch()
+        self.events.unlink()
+        self.assertEqual(self._check("settle"), (-1, errno.ENOENT))
+        self._assert_further_exec_refused()
+
+    def test_populated_cgroup_at_deadline_is_not_settled(self):
+        self.events.write_bytes(b"populated 1\n")
+        started = time.monotonic()
+        self.assertEqual(self._check("settle"), (-1, errno.ETIMEDOUT))
+        self.assertGreaterEqual(time.monotonic() - started, 1.9)
+        self._assert_further_exec_refused()
+
+    def test_malformed_events_refuse_further_exec_until_verified_empty(self):
+        self.events.write_bytes(b"frozen 0\n")
+        self.assertEqual(self._check("settle"), (-1, errno.EPROTO))
+        self._assert_further_exec_refused()
+        self.events.write_bytes(b"populated 0\nfrozen 0\n")
+        self.assertEqual(self._check("population")[0], 0)
+        self.assertEqual(self._check("settle")[0], 0)
+
+
 class ManagedAgentStopTests(unittest.TestCase):
     SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
     OUTER = struct.Struct("<4sHBB16sQQI")
@@ -6638,8 +6849,13 @@ class ManagedAgentStopTests(unittest.TestCase):
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5)
+        if process.stderr is not None:
+            process.stderr.close()
 
-    def test_sandbox_agent_returns_to_init_agent_after_stop(self):
+    def _open_session(
+        self, rootfs: str
+    ) -> tuple[subprocess.Popen[bytes], int, bytes, float]:
+        """Starts an agent and completes the attach and reset handshake."""
         if sys.platform != "linux":
             self.skipTest("the managed agent requires a Linux pseudo-terminal")
         import pty
@@ -6651,7 +6867,7 @@ class ManagedAgentStopTests(unittest.TestCase):
             [
                 str(self.agent),
                 os.ttyname(slave),
-                "/run/nvx/rootfs",
+                rootfs,
                 "nvx-sandbox",
                 "65534",
                 "65534",
@@ -6670,6 +6886,29 @@ class ManagedAgentStopTests(unittest.TestCase):
         os.write(master, self._record(3, instance, 7))
         record_type, sequence, credit = self._read_record(master, deadline)
         self.assertEqual((record_type, sequence, len(credit)), (4, 0, 4))
+        return process, master, instance, deadline
+
+    def _request(
+        self, rootfs: str, kind: int, payload: bytes = b""
+    ) -> tuple[int, int, int, bytes]:
+        """Sends one request to a fresh agent; returns the kind, request ID, status, and payload of its answer."""
+        _, master, instance, deadline = self._open_session(rootfs)
+        frame = self.APP.pack(b"NVXC", 1, kind, 0, 42, 0, len(payload)) + payload
+        os.write(master, self._record(5, instance, 8, frame))
+        self.assertEqual(self._read_record(master, deadline)[0], 9)
+        record_type, _, answer = self._read_record(master, deadline)
+        self.assertEqual(record_type, 5)
+        _, _, answered, _, request_id, status, length = self.APP.unpack(
+            answer[: self.APP.size]
+        )
+        body = answer[self.APP.size :]
+        self.assertEqual(length, len(body))
+        return answered, request_id, status, body
+
+    def test_sandbox_agent_returns_to_init_agent_after_stop(self):
+        if sys.platform != "linux":
+            self.skipTest("the managed agent requires a Linux pseudo-terminal")
+        process, master, instance, deadline = self._open_session("/run/nvx/rootfs")
         stop = self.APP.pack(b"NVXC", 1, 3, 0, 42, 0, 0)
         os.write(master, self._record(5, instance, 8, stop))
         self.assertEqual(self._read_record(master, deadline)[0], 9)
@@ -6680,6 +6919,226 @@ class ManagedAgentStopTests(unittest.TestCase):
 
         _, stderr = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 0, stderr)
+
+    def test_agent_advertises_the_control_features_of_its_mode(self):
+        cancel, host_mappings, workload_account, exec_cgroup = 1, 2, 4, 8
+        for rootfs, expected in (
+            # Only the direct agent maps host paths and gives each workload a cgroup.
+            ("-", cancel | host_mappings | workload_account | exec_cgroup),
+            ("/run/nvx/rootfs", cancel | workload_account),
+        ):
+            with self.subTest(rootfs=rootfs):
+                kind, request_id, status, body = self._request(rootfs, 5)
+                self.assertEqual((kind, request_id, status), (0x81, 42, 0))
+                self.assertEqual(struct.unpack("<I", body), (expected,))
+
+    def test_agent_refuses_a_features_request_with_a_payload(self):
+        kind, request_id, status, body = self._request("-", 5, b"abc")
+        self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
+        self.assertEqual(body, b"invalid-request")
+
+
+class AciSandboxRunnerTests(unittest.TestCase):
+    def _artifacts(self, root: Path) -> dict[str, Path]:
+        names = {
+            KernelBuildConstants.BINARY_NAME: b"kernel",
+            AlpineBuildConstants.INITRAMFS_NAME: b"initrd",
+            "openvmm": b"vmm",
+        }
+        paths: dict[str, Path] = {}
+        for name, contents in names.items():
+            paths[name] = root / name
+            paths[name].write_bytes(contents)
+        return paths
+
+    def _environment(self, root: Path, paths: dict[str, Path]) -> dict[str, str]:
+        def artifact(name: str) -> Path:
+            return root / name
+
+        def openvmm() -> Path:
+            return paths["openvmm"]
+
+        with (
+            patch.object(aci_edge_sandboxes_tests, "artifact_path", artifact),
+            patch.object(aci_edge_sandboxes_tests, "openvmm_binary_path", openvmm),
+        ):
+            return aci_edge_sandboxes_tests.e2e_environment(
+                "kvm", root / "state", root / "out"
+            )
+
+    def test_cli_registers_the_lifecycle_test(self):
+        args = nvx.parse_args(["test-aci-edge-sandboxes", "--backend", "mshv"])
+
+        self.assertEqual(args.backend, "mshv")
+        self.assertEqual(args.cargo, "cargo")
+        self.assertFalse(hasattr(args, "scratch_template"))
+        self.assertIs(
+            args.handler, aci_edge_sandboxes_tests.command_test_aci_edge_sandboxes
+        )
+
+    def test_environment_resolves_repository_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._artifacts(root)
+            environment = self._environment(root, paths)
+
+            self.assertEqual(environment["ACI_EDGE_SANDBOXES_E2E_HYPERVISOR"], "kvm")
+            self.assertEqual(
+                Path(environment["ACI_EDGE_SANDBOXES_E2E_OPENVMM"]),
+                paths["openvmm"].resolve(),
+            )
+            self.assertEqual(
+                Path(environment["ACI_EDGE_SANDBOXES_E2E_INITRD"]),
+                paths[AlpineBuildConstants.INITRAMFS_NAME].resolve(),
+            )
+            self.assertEqual(
+                Path(environment["ACI_EDGE_SANDBOXES_E2E_STATE_ROOT"]),
+                (root / "state").resolve(),
+            )
+            self.assertFalse(
+                any(
+                    name.startswith("ACI_EDGE_SANDBOXES_E2E_DISTRO")
+                    for name in environment
+                )
+            )
+            self.assertNotIn("ACI_EDGE_SANDBOXES_E2E_SCRATCH", environment)
+
+    def test_environment_requires_the_alpine_initramfs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._artifacts(root)
+            paths[AlpineBuildConstants.INITRAMFS_NAME].unlink()
+            with self.assertRaisesRegex(common.ScriptError, "Alpine initramfs"):
+                self._environment(root, paths)
+
+    def test_command_runs_only_the_ignored_lifecycle_test(self):
+        command = aci_edge_sandboxes_tests.e2e_command("cargo")
+
+        self.assertEqual(command[:2], ["cargo", "test"])
+        self.assertEqual(
+            Path(command[command.index("--manifest-path") + 1]),
+            BuildConstants.REPO_ROOT / "aci_edge_sandboxes" / "Cargo.toml",
+        )
+        self.assertIn("--locked", command)
+        self.assertEqual(command[command.index("--test") + 1], "openvmm_e2e")
+        self.assertEqual(command[-2:], ["--ignored", "--nocapture"])
+
+    def test_handler_returns_the_test_status(self):
+        observed: list[str] = []
+
+        def fake_run(
+            command: list[str], *, env: dict[str, str], check: bool
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertFalse(check)
+            self.assertEqual(command, aci_edge_sandboxes_tests.e2e_command("cargo"))
+            observed.append(env["ACI_EDGE_SANDBOXES_E2E_STATE_ROOT"])
+            return subprocess.CompletedProcess(command, 3)
+
+        def fake_environment(
+            backend: str, state_root: Path, output_dir: Path
+        ) -> dict[str, str]:
+            self.assertEqual(backend, "whp")
+            return {"ACI_EDGE_SANDBOXES_E2E_STATE_ROOT": os.fspath(state_root)}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args = argparse.Namespace(
+                backend="whp",
+                output_dir=Path(temporary) / "results",
+                cargo="cargo",
+            )
+            with (
+                patch.object(aci_edge_sandboxes_tests, "validate_openvmm_test_backend"),
+                patch.object(
+                    aci_edge_sandboxes_tests, "e2e_environment", fake_environment
+                ),
+                patch.object(aci_edge_sandboxes_tests.subprocess, "run", fake_run),
+            ):
+                self.assertEqual(
+                    aci_edge_sandboxes_tests.command_test_aci_edge_sandboxes(args), 3
+                )
+            self.assertTrue((Path(temporary) / "results").is_dir())
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(Path(observed[0]).name, "state")
+
+    def _run_leaving(
+        self, records: dict[str, object] | None, *, interrupt: bool = False
+    ) -> tuple[Path, str]:
+        """Runs the handler with a test command that leaves one sandbox provisioned.
+
+        The sandbox gets `records` as extra state files; `None` leaves only the lock
+        directories that deprovisioning keeps. Returns the state root that the command
+        used and the handler's standard error.
+        """
+        state_roots: list[Path] = []
+
+        def fake_environment(
+            backend: str, state_root: Path, output_dir: Path
+        ) -> dict[str, str]:
+            state_roots.append(state_root)
+            return {}
+
+        def fake_run(
+            command: list[str], *, env: dict[str, str], check: bool
+        ) -> subprocess.CompletedProcess[bytes]:
+            (state_roots[0] / "filesystem" / ".locks").mkdir(parents=True)
+            if records is not None:
+                sandbox = state_roots[0] / "network" / ("a" * 32)
+                sandbox.mkdir(parents=True)
+                (sandbox / "sandbox.json").write_text("{}", encoding="utf-8")
+                for name, record in records.items():
+                    (sandbox / name).write_text(json.dumps(record), encoding="utf-8")
+            if interrupt:
+                raise KeyboardInterrupt
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args = argparse.Namespace(
+                backend="kvm", output_dir=Path(temporary) / "results", cargo="cargo"
+            )
+            with (
+                patch.object(aci_edge_sandboxes_tests, "validate_openvmm_test_backend"),
+                patch.object(
+                    aci_edge_sandboxes_tests, "e2e_environment", fake_environment
+                ),
+                patch.object(aci_edge_sandboxes_tests.subprocess, "run", fake_run),
+                patch("sys.stderr", io.StringIO()) as stderr,
+            ):
+                if interrupt:
+                    with self.assertRaises(KeyboardInterrupt):
+                        aci_edge_sandboxes_tests.command_test_aci_edge_sandboxes(args)
+                else:
+                    self.assertEqual(
+                        aci_edge_sandboxes_tests.command_test_aci_edge_sandboxes(args),
+                        0,
+                    )
+        state_root = state_roots[0]
+        if state_root.parent.exists():
+            self.addCleanup(shutil.rmtree, state_root.parent, True)
+        return state_root, stderr.getvalue()
+
+    def test_handler_deletes_state_once_every_sandbox_is_deprovisioned(self):
+        state_root, stderr = self._run_leaving(None)
+
+        self.assertFalse(state_root.parent.exists())
+        self.assertEqual(stderr, "")
+
+    def test_handler_keeps_state_of_sandboxes_left_provisioned(self):
+        state_root, stderr = self._run_leaving({"runtime.json": {"pid": 4242}})
+
+        sandbox = state_root / "network" / ("a" * 32)
+        self.assertTrue((sandbox / "runtime.json").is_file())
+        self.assertIn(f"kept {state_root}", stderr)
+        self.assertIn(f"{sandbox} (OpenVMM pid 4242)", stderr)
+
+    def test_handler_keeps_state_when_the_test_is_interrupted(self):
+        state_root, stderr = self._run_leaving(
+            {"launch.json": {"process": {"pid": 77}}}, interrupt=True
+        )
+
+        sandbox = state_root / "network" / ("a" * 32)
+        self.assertTrue((sandbox / "launch.json").is_file())
+        self.assertIn(f"{sandbox} (OpenVMM pid 77)", stderr)
 
 
 class SandboxTests(unittest.TestCase):

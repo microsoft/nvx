@@ -1,0 +1,108 @@
+name: Check aci_edge_sandboxes
+description: Format, lint, document, and test the aci_edge_sandboxes crate
+
+inputs:
+  toolchain:
+    description: >-
+      Rust toolchain used for formatting, linting, and tests. It matches the toolchain
+      pinned by MXC, the crate's primary consumer.
+    required: false
+    default: "1.93"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchains
+      id: toolchains
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      run: |
+        set -euo pipefail
+        msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+        test -n "${msrv}"
+        rustup toolchain install "${{ inputs.toolchain }}" --profile minimal \
+          --component clippy,rustfmt
+        rustup toolchain install "${msrv}" --profile minimal
+        echo "msrv=${msrv}" >> "${GITHUB_OUTPUT}"
+
+    - name: Check formatting
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      run: cargo "+${{ inputs.toolchain }}" fmt --check
+
+    - name: Lint
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      env:
+        # --all-features enables `bundled`; stage nothing instead of downloading a release.
+        ACI_EDGE_SANDBOXES_BUNDLE: skip
+      run: |
+        set -euo pipefail
+        cargo "+${{ inputs.toolchain }}" clippy --locked --all-targets --all-features \
+          -- -D warnings
+        cargo "+${{ inputs.toolchain }}" clippy --locked --lib --no-default-features \
+          -- -D warnings
+
+    - name: Test
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      env:
+        # --all-features enables `bundled`; stage nothing instead of downloading a release.
+        ACI_EDGE_SANDBOXES_BUNDLE: skip
+      run: |
+        set -euo pipefail
+        cargo "+${{ inputs.toolchain }}" test --locked --all-features
+        cargo "+${{ inputs.toolchain }}" test --locked
+
+    - name: Check artifact bundling
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      run: |
+        set -euo pipefail
+        bundle=$(mktemp -d)
+        executable=openvmm
+        bundle_dir="${bundle}"
+        if [[ "${RUNNER_OS}" == Windows ]]; then
+          executable=openvmm.exe
+          bundle_dir=$(cygpath -w "${bundle}")
+        fi
+        mkdir -p "${bundle}/bin" "${bundle}/guest"
+        printf openvmm > "${bundle}/bin/${executable}"
+        printf kernel > "${bundle}/guest/vmlinux"
+        printf initramfs > "${bundle}/guest/initramfs.cpio.gz"
+        cp ../SOURCE-MANIFEST.json "${bundle}/"
+        (cd "${bundle}" && sha256sum "bin/${executable}" guest/vmlinux \
+          guest/initramfs.cpio.gz SOURCE-MANIFEST.json > SHA256SUMS)
+        ACI_EDGE_SANDBOXES_BUNDLE_DIR="${bundle_dir}" cargo "+${{ inputs.toolchain }}" test --locked --lib \
+          --features bundled artifacts
+
+    - name: Build documentation
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      env:
+        ACI_EDGE_SANDBOXES_BUNDLE: skip
+        RUSTDOCFLAGS: -D warnings
+      run: cargo "+${{ inputs.toolchain }}" doc --locked --no-deps --all-features
+
+    - name: Check the minimum supported Rust version
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      env:
+        # --all-features enables `bundled`; stage nothing instead of downloading a release.
+        ACI_EDGE_SANDBOXES_BUNDLE: skip
+      run: >-
+        cargo "+${{ steps.toolchains.outputs.msrv }}" check
+        --locked --all-targets --all-features
+
+    - name: Check the macOS build
+      if: runner.os == 'Linux'
+      shell: bash
+      working-directory: aci_edge_sandboxes
+      env:
+        # --all-features enables `bundled`; stage nothing instead of downloading a release.
+        ACI_EDGE_SANDBOXES_BUNDLE: skip
+      run: |
+        set -euo pipefail
+        rustup target add --toolchain "${{ inputs.toolchain }}" aarch64-apple-darwin
+        cargo "+${{ inputs.toolchain }}" check --locked --all-targets --all-features \
+          --target aarch64-apple-darwin

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -30,12 +31,28 @@
 #define APP_PING 1U
 #define APP_EXEC 2U
 #define APP_STOP 3U
+#define APP_CANCEL 4U
+#define APP_FEATURES 5U
 #define APP_READY 0x81U
 #define APP_STDOUT 0x82U
 #define APP_STDERR 0x83U
 #define APP_EXIT 0x84U
 #define APP_STOPPED 0x85U
 #define APP_ERROR 0xffU
+
+/*
+ * Control features that a host can rely on, advertised in the answer to
+ * FEATURES. The host refuses an image that lacks a feature it needs, so a
+ * behavior that a host depends on needs a bit here and in the host's copy
+ * (aci_edge_sandboxes, src/openvmm/protocol.rs). The init script of the image provides
+ * FEATURE_WORKLOAD_ACCOUNT; the agent speaks for it because both ship in one
+ * initramfs. An agent that predates FEATURES refuses the request as an
+ * unsupported operation, which the host reads as no features.
+ */
+#define FEATURE_CANCEL (1U << 0)
+#define FEATURE_HOST_MAPPINGS (1U << 1)
+#define FEATURE_WORKLOAD_ACCOUNT (1U << 2)
+#define FEATURE_EXEC_CGROUP (1U << 3)
 
 #define MAX_ARGUMENTS 64U
 #define MAX_ARGUMENT_LEN 4096U
@@ -44,6 +61,15 @@
 #define MAX_TIMEOUT_MS (60U * 60U * 1000U)
 #define PORTB_CONSOLE 0xe9
 #define AGENT_STOPPED 1
+#ifndef CGROUP_ROOT
+#define CGROUP_ROOT "/sys/fs/cgroup"
+#endif
+#define EXEC_CGROUP CGROUP_ROOT "/nvx-exec"
+#define HOSTFS_DIR "/run/nvx/hostfs"
+#define HOSTFS_ROOT HOSTFS_DIR "/root"
+#define MAP_TOKEN "nvx_map="
+#define MAX_COMMAND_LINE 4096U
+#define MAX_GUEST_PATH 4096U
 
 struct outer_record {
     uint8_t type;
@@ -255,6 +281,230 @@ static int write_outer_record(
         return -1;
     }
     return payload_len == 0 || write_all(fd, payload, payload_len) == 0 ? 0 : -1;
+}
+
+static int hex_digit(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    return -1;
+}
+
+/* Decodes a percent-encoded field of length `length` into a NUL-terminated string. */
+static int percent_decode(const char *input, size_t length, char *output, size_t capacity)
+{
+    size_t index;
+    size_t used = 0;
+
+    for (index = 0; index < length; ++index) {
+        char value = input[index];
+
+        if (value == '%') {
+            int high;
+            int low;
+
+            if (index + 2 >= length) {
+                return -1;
+            }
+            high = hex_digit(input[index + 1]);
+            low = hex_digit(input[index + 2]);
+            if (high < 0 || low < 0) {
+                return -1;
+            }
+            value = (char)((high << 4) | low);
+            index += 2;
+        }
+        if (value == '\0' || used + 1 >= capacity) {
+            return -1;
+        }
+        output[used++] = value;
+    }
+    output[used] = '\0';
+    return 0;
+}
+
+/* Accepts a /-separated path without empty, "." (unless alone), or ".." components. */
+static int safe_path(const char *path, int absolute)
+{
+    const char *component = path;
+
+    if (absolute) {
+        if (path[0] != '/') {
+            return 0;
+        }
+        component = path + 1;
+        if (*component == '\0') {
+            return 0;
+        }
+    } else if (strcmp(path, ".") == 0) {
+        return 1;
+    }
+    while (*component != '\0') {
+        const char *end = strchr(component, '/');
+        size_t length = end == NULL ? strlen(component) : (size_t)(end - component);
+
+        if (length == 0 || (length == 1 && component[0] == '.') ||
+            (length == 2 && component[0] == '.' && component[1] == '.')) {
+            return 0;
+        }
+        component += length;
+        if (*component == '/') {
+            ++component;
+            if (*component == '\0') {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Creates every missing directory of `path` up to, and optionally including, its last component. */
+static int make_directories(const char *path, int include_last)
+{
+    char buffer[MAX_GUEST_PATH];
+    size_t index;
+    size_t length = strlen(path);
+
+    if (length >= sizeof(buffer)) {
+        return -1;
+    }
+    memcpy(buffer, path, length + 1);
+    for (index = 1; index <= length; ++index) {
+        if (buffer[index] == '/' || (buffer[index] == '\0' && include_last)) {
+            char saved = buffer[index];
+
+            buffer[index] = '\0';
+            if (mkdir(buffer, 0755) != 0 && errno != EEXIST) {
+                return -1;
+            }
+            buffer[index] = saved;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Bind-mounts each mapped host path at its guest target. The host's export is
+ * mounted at HOSTFS_ROOT, whose parent only root may enter, so workloads reach
+ * mapped paths only through these bind mounts. Every token has the form
+ * nvx_map=SOURCE,TARGET,ro|rw with percent-encoded paths; SOURCE is relative to
+ * the export, and "." is the export itself.
+ */
+static int setup_host_mappings(void)
+{
+    char command_line[MAX_COMMAND_LINE];
+    char *token;
+    char *cursor;
+    ssize_t count;
+    int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    int prepared = 0;
+
+    if (fd < 0) {
+        return -1;
+    }
+    count = read(fd, command_line, sizeof(command_line) - 1);
+    close(fd);
+    if (count < 0) {
+        return -1;
+    }
+    command_line[count] = '\0';
+
+    for (token = strtok_r(command_line, " \n", &cursor); token != NULL;
+         token = strtok_r(NULL, " \n", &cursor)) {
+        char source[MAX_GUEST_PATH];
+        char target[MAX_GUEST_PATH];
+        char host[MAX_GUEST_PATH + sizeof(HOSTFS_ROOT) + 1];
+        const char *fields = token + strlen(MAP_TOKEN);
+        const char *first;
+        const char *second;
+        struct stat status;
+        unsigned long flags = MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV;
+
+        if (strncmp(token, MAP_TOKEN, strlen(MAP_TOKEN)) != 0) {
+            continue;
+        }
+        first = strchr(fields, ',');
+        second = first == NULL ? NULL : strchr(first + 1, ',');
+        if (second == NULL || strchr(second + 1, ',') != NULL ||
+            percent_decode(fields, (size_t)(first - fields), source, sizeof(source)) != 0 ||
+            percent_decode(first + 1, (size_t)(second - first - 1), target, sizeof(target)) !=
+                0 ||
+            !safe_path(source, 0) || !safe_path(target, 1)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (strcmp(second + 1, "ro") == 0) {
+            flags |= MS_RDONLY;
+        } else if (strcmp(second + 1, "rw") != 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (!prepared) {
+            struct stat parent;
+            struct stat export;
+
+            /* The export must be a mount of its own, inside a root-only directory. */
+            if (stat(HOSTFS_DIR, &parent) != 0 || stat(HOSTFS_ROOT, &export) != 0 ||
+                parent.st_dev == export.st_dev || chown(HOSTFS_DIR, 0, 0) != 0 ||
+                chmod(HOSTFS_DIR, 0700) != 0) {
+                return -1;
+            }
+            prepared = 1;
+        }
+        if (strcmp(source, ".") == 0) {
+            snprintf(host, sizeof(host), "%s", HOSTFS_ROOT);
+        } else {
+            snprintf(host, sizeof(host), "%s/%s", HOSTFS_ROOT, source);
+        }
+        if (lstat(host, &status) != 0) {
+            return -1;
+        }
+        if (S_ISDIR(status.st_mode)) {
+            if (make_directories(target, 1) != 0) {
+                return -1;
+            }
+        } else if (S_ISREG(status.st_mode)) {
+            struct stat existing;
+
+            if (make_directories(target, 0) != 0) {
+                return -1;
+            }
+            /*
+             * An existing target may lie inside an earlier read-only bind, where
+             * even O_CREAT with write access fails, so only a missing one is made.
+             */
+            if (lstat(target, &existing) != 0) {
+                int file;
+
+                if (errno != ENOENT) {
+                    return -1;
+                }
+                file = open(target, O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
+                if (file < 0) {
+                    return -1;
+                }
+                close(file);
+            } else if (!S_ISREG(existing.st_mode)) {
+                errno = EINVAL;
+                return -1;
+            }
+        } else {
+            errno = EINVAL;
+            return -1;
+        }
+        if (mount(host, target, NULL, MS_BIND, NULL) != 0 ||
+            mount(NULL, target, NULL, flags, NULL) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static int send_guest_attach(int fd)
@@ -481,6 +731,199 @@ static int release_container_barrier(const char *path)
     return result;
 }
 
+/*
+ * Direct-mode workloads run in the guest's own root file system, contained by
+ * a cgroup that every process of the workload inherits, whatever session or
+ * process group it moves to. Killing the cgroup ends all of them.
+ */
+static int prepare_exec_cgroup(void)
+{
+    struct stat status;
+
+    if (stat(CGROUP_ROOT "/cgroup.procs", &status) != 0) {
+        if (mkdir(CGROUP_ROOT, 0755) != 0 && errno != EEXIST) {
+            return -1;
+        }
+        if (mount("cgroup2", CGROUP_ROOT, "cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) !=
+            0) {
+            return -1;
+        }
+    }
+    return mkdir(EXEC_CGROUP, 0755) == 0 || errno == EEXIST ? 0 : -1;
+}
+
+static int join_exec_cgroup(void)
+{
+    char buffer[32];
+    int fd = open(EXEC_CGROUP "/cgroup.procs", O_WRONLY | O_CLOEXEC);
+    int length;
+    int result;
+
+    if (fd < 0) {
+        return -1;
+    }
+    length = snprintf(buffer, sizeof(buffer), "%ld\n", (long)getpid());
+    result = length > 0 && (size_t)length < sizeof(buffer)
+                 ? write_all(fd, buffer, (size_t)length)
+                 : -1;
+    close(fd);
+    return result;
+}
+
+static int kill_exec_cgroup(void)
+{
+    int fd = open(EXEC_CGROUP "/cgroup.kill", O_WRONLY | O_CLOEXEC);
+    int result;
+    int status;
+
+    if (fd < 0) {
+        goto error;
+    }
+    result = write_all(fd, "1", 1);
+    status = errno;
+    if (close(fd) != 0 && result == 0) {
+        goto error;
+    }
+    if (result == 0) {
+        return 0;
+    }
+    errno = status;
+error:
+    status = errno;
+    portb_error("exec-cgroup-kill", status);
+    errno = status;
+    return -1;
+}
+
+static int exec_cgroup_populated(void)
+{
+    char buffer[256];
+    char *line;
+    size_t length = 0;
+    int populated = -1;
+    int fd = open(EXEC_CGROUP "/cgroup.events", O_RDONLY | O_CLOEXEC);
+
+    if (fd < 0) {
+        return -1;
+    }
+    for (;;) {
+        ssize_t count = read(fd, buffer + length, sizeof(buffer) - 1 - length);
+
+        if (count > 0) {
+            length += (size_t)count;
+            if (length < sizeof(buffer) - 1) {
+                continue;
+            }
+            errno = EOVERFLOW;
+        } else if (count == 0) {
+            break;
+        } else if (errno == EINTR) {
+            continue;
+        }
+        {
+            int status = errno;
+
+            close(fd);
+            errno = status;
+            return -1;
+        }
+    }
+    if (close(fd) != 0) {
+        return -1;
+    }
+    if (length == 0 || buffer[length - 1] != '\n' ||
+        memchr(buffer, '\0', length) != NULL) {
+        errno = EPROTO;
+        return -1;
+    }
+    buffer[length] = '\0';
+    line = buffer;
+    while (*line != '\0') {
+        char *end = strchr(line, '\n');
+
+        *end = '\0';
+        if (strncmp(line, "populated", 9) == 0) {
+            if (populated >= 0 ||
+                (strcmp(line, "populated 0") != 0 && strcmp(line, "populated 1") != 0)) {
+                errno = EPROTO;
+                return -1;
+            }
+            populated = line[10] == '1';
+        }
+        line = end + 1;
+    }
+    if (populated < 0) {
+        errno = EPROTO;
+    }
+    return populated;
+}
+
+/*
+ * Reaps exited children without blocking. The agent runs as PID 1, so besides
+ * the workload's direct child it inherits every orphaned workload process.
+ */
+static void reap_children(pid_t child, int *child_exited, int *wait_status)
+{
+    for (;;) {
+        int status;
+        pid_t pid = waitpid(-1, &status, WNOHANG);
+
+        if (pid < 0 && errno == EINTR) {
+            continue;
+        }
+        if (pid <= 0) {
+            return;
+        }
+        if (pid == child && !*child_exited) {
+            *child_exited = 1;
+            *wait_status = status;
+        }
+    }
+}
+
+/* Kills what is left of a direct-mode workload and waits until it is gone. */
+static int settle_exec_cgroup(void)
+{
+    const struct timespec delay = {
+        .tv_sec = 0,
+        .tv_nsec = 10U * 1000U * 1000U,
+    };
+    int exited = 1;
+    int status = 0;
+    unsigned int attempt;
+
+    if (kill_exec_cgroup() != 0) {
+        return -1;
+    }
+    for (attempt = 0; attempt <= 200; ++attempt) {
+        int populated;
+
+        reap_children(0, &exited, &status);
+        populated = exec_cgroup_populated();
+        if (populated < 0) {
+            return -1;
+        }
+        if (populated == 0) {
+            return 0;
+        }
+        if (attempt == 200) {
+            break;
+        }
+        nanosleep(&delay, NULL);
+    }
+    errno = ETIMEDOUT;
+    return -1;
+}
+
+/* Kills the workload: its process group, and in direct mode its whole cgroup. */
+static void terminate_workload(const struct agent_config *config, pid_t child)
+{
+    kill(-child, SIGKILL);
+    if (config->direct) {
+        (void)kill_exec_cgroup();
+    }
+}
+
 static void exec_direct(
     const struct agent_config *config,
     char *const workload_argv[])
@@ -489,6 +932,9 @@ static void exec_direct(
     size_t index = 0;
     size_t workload_index = 0;
 
+    if (join_exec_cgroup() != 0) {
+        _exit(125);
+    }
     setenv("HOME", config->home, 1);
     setenv("USER", config->user, 1);
     setenv("LOGNAME", config->user, 1);
@@ -644,6 +1090,85 @@ static int stream_output(
     }
 }
 
+/* Outcome of control traffic observed while a workload runs. */
+enum exec_control {
+    EXEC_CONTROL_NONE,
+    EXEC_CONTROL_CANCEL,
+    EXEC_CONTROL_SESSION_LOST,
+    EXEC_CONTROL_FAILED,
+};
+
+/*
+ * Handles one control record that arrives while the workload with request ID
+ * `exec_id` runs. CANCEL for that workload asks for its termination. A RESET
+ * means the host that could observe the workload is gone: the broker has
+ * started a new epoch and drops anything sent for the old one. Other requests
+ * are refused, because executions are sequential.
+ */
+static enum exec_control handle_exec_control(
+    struct control_session *session,
+    uint64_t exec_id)
+{
+    struct outer_record record;
+    struct app_request request;
+    enum exec_control result = EXEC_CONTROL_NONE;
+
+    if (read_outer_record(session->fd, &record) != 0) {
+        portb_error("exec-outer-read", errno);
+        return EXEC_CONTROL_FAILED;
+    }
+    if (record.type == OUTER_RESET) {
+        result = acknowledge_reset(session, &record) == 0
+                     ? EXEC_CONTROL_SESSION_LOST
+                     : EXEC_CONTROL_FAILED;
+        free_outer_record(&record);
+        return result;
+    }
+    if (record.type != OUTER_DATA || record.sequence != session->host_sequence ||
+        record.epoch != session->epoch ||
+        memcmp(record.instance_id, session->instance_id, 16) != 0 ||
+        parse_app_request(record.payload, record.payload_len, &request) != 0) {
+        portb_error("exec-record", record.type);
+        free_outer_record(&record);
+        return EXEC_CONTROL_FAILED;
+    }
+    ++session->host_sequence;
+    if (send_credit(session, record.payload_len) != 0) {
+        free_outer_record(&record);
+        return EXEC_CONTROL_FAILED;
+    }
+    if (request.kind == APP_CANCEL) {
+        if (request.payload_len == 0 && request.request_id == exec_id) {
+            result = EXEC_CONTROL_CANCEL;
+        }
+    } else if (send_app_error(session, request.request_id, 16, "busy") != 0) {
+        result = EXEC_CONTROL_FAILED;
+    }
+    free_outer_record(&record);
+    return result;
+}
+
+/* Discards output of a workload whose host is gone; returns 1 at end-of-file. */
+static int drain_output(int fd)
+{
+    uint8_t buffer[OUTPUT_CHUNK_BYTES];
+    ssize_t count;
+
+    for (;;) {
+        count = read(fd, buffer, sizeof(buffer));
+        if (count > 0) {
+            continue;
+        }
+        if (count == 0) {
+            return 1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return errno == EAGAIN || errno == EWOULDBLOCK ? 0 : -1;
+    }
+}
+
 static int run_exec(
     struct control_session *session,
     const struct agent_config *config,
@@ -661,9 +1186,24 @@ static int run_exec(
     int stderr_open = 1;
     int timed_out = 0;
     int output_limited = 0;
+    int cancelled = 0;
+    int session_lost = 0;
+    int stragglers_killed = 0;
     int wait_status = 0;
     int child_exited = 0;
 
+    if (config->direct && prepare_exec_cgroup() != 0) {
+        portb_error("exec-cgroup", errno);
+        return send_app_error(session, request_id, 125, "launch-failed");
+    }
+    if (config->direct) {
+        int populated = exec_cgroup_populated();
+
+        if (populated != 0) {
+            portb_error("exec-cgroup-verify", populated < 0 ? errno : EBUSY);
+            return send_app_error(session, request_id, 125, "containment-failed");
+        }
+    }
     if (!config->direct) {
         unlink(barrier);
         if (mkfifo(barrier, 0600) != 0) {
@@ -717,7 +1257,7 @@ static int run_exec(
         (!config->direct &&
          (write_pid_to_cgroup(child) != 0 ||
           release_container_barrier(barrier) != 0))) {
-        kill(-child, SIGKILL);
+        terminate_workload(config, child);
         waitpid(child, NULL, 0);
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
@@ -728,7 +1268,7 @@ static int run_exec(
     started = monotonic_milliseconds();
 
     while (!child_exited || stdout_open || stderr_open) {
-        struct pollfd descriptors[2];
+        struct pollfd descriptors[3];
         int poll_result;
         int stdout_result = 0;
         int stderr_result = 0;
@@ -739,17 +1279,59 @@ static int run_exec(
         descriptors[1].fd = stderr_open ? stderr_pipe[0] : -1;
         descriptors[1].events = POLLIN | POLLHUP;
         descriptors[1].revents = 0;
-        poll_result = poll(descriptors, 2, 25);
+        /* After a reset the old session is gone; later records belong to the main loop. */
+        descriptors[2].fd = session_lost ? -1 : session->fd;
+        descriptors[2].events = POLLIN;
+        descriptors[2].revents = 0;
+        poll_result = poll(descriptors, 3, 25);
         if (poll_result < 0 && errno != EINTR) {
-            kill(-child, SIGKILL);
+            terminate_workload(config, child);
+        }
+        if (!session_lost && descriptors[2].revents != 0) {
+            switch (handle_exec_control(session, request_id)) {
+            case EXEC_CONTROL_NONE:
+                break;
+            case EXEC_CONTROL_CANCEL:
+                if (!child_exited && !cancelled) {
+                    cancelled = 1;
+                    terminate_workload(config, child);
+                }
+                break;
+            case EXEC_CONTROL_SESSION_LOST:
+                session_lost = 1;
+                terminate_workload(config, child);
+                break;
+            case EXEC_CONTROL_FAILED:
+                terminate_workload(config, child);
+                waitpid(child, NULL, 0);
+                if (stdout_open) {
+                    close(stdout_pipe[0]);
+                }
+                if (stderr_open) {
+                    close(stderr_pipe[0]);
+                }
+                return -1;
+            }
         }
         if (stdout_open && descriptors[0].revents != 0) {
-            stdout_result = stream_output(
-                session, request_id, stdout_pipe[0], APP_STDOUT, &output_bytes);
+            stdout_result = session_lost
+                                ? drain_output(stdout_pipe[0])
+                                : stream_output(
+                                      session,
+                                      request_id,
+                                      stdout_pipe[0],
+                                      APP_STDOUT,
+                                      &output_bytes);
         }
         if (stderr_open && descriptors[1].revents != 0) {
-            stderr_result = stream_output(
-                session, request_id, stderr_pipe[0], APP_STDERR, &output_bytes);
+            stderr_result = session_lost
+                                ? drain_output(stderr_pipe[0])
+                                : stream_output(
+                                      session,
+                                      request_id,
+                                      stderr_pipe[0],
+                                      APP_STDERR,
+                                      &output_bytes);
         }
         if (stdout_result == 1) {
             close(stdout_pipe[0]);
@@ -761,28 +1343,41 @@ static int run_exec(
         }
         if (stdout_result < 0 || stderr_result < 0) {
             output_limited = stdout_result == -2 || stderr_result == -2;
-            kill(-child, SIGKILL);
+            terminate_workload(config, child);
         }
-        if (!child_exited) {
-            pid_t result = waitpid(child, &wait_status, WNOHANG);
-            if (result == child) {
-                child_exited = 1;
-            } else if (result < 0 && errno != EINTR) {
-                kill(-child, SIGKILL);
-            }
+        reap_children(child, &child_exited, &wait_status);
+        /* Processes the workload left behind must not hold its output open. */
+        if (child_exited && config->direct && !stragglers_killed &&
+            (stdout_open || stderr_open)) {
+            stragglers_killed = 1;
+            (void)kill_exec_cgroup();
         }
         if (!child_exited && timeout_ms != 0 &&
             monotonic_milliseconds() - started >= timeout_ms) {
             timed_out = 1;
-            kill(-child, SIGKILL);
+            terminate_workload(config, child);
         }
-        if ((timed_out || output_limited) && !child_exited) {
+        if ((timed_out || output_limited || cancelled || session_lost) && !child_exited) {
             if (waitpid(child, &wait_status, 0) == child) {
                 child_exited = 1;
             }
         }
     }
 
+    if (config->direct && settle_exec_cgroup() != 0) {
+        portb_error("exec-cgroup-settle", errno);
+        return session_lost
+                   ? 0
+                   : send_app_error(session, request_id, 125, "containment-failed");
+    }
+    if (session_lost) {
+        /* Nothing may be sent for the abandoned exec once the new epoch is acknowledged. */
+        return 0;
+    }
+    if (cancelled) {
+        return send_app_frame(
+            session, APP_EXIT, request_id, 128 + SIGKILL, "cancelled", 9);
+    }
     if (timed_out) {
         return send_app_frame(
             session, APP_EXIT, request_id, 124, "timeout", 7);
@@ -809,6 +1404,17 @@ static int run_exec(
         session, APP_EXIT, request_id, 125, "failed", 6);
 }
 
+/* Direct mode alone sets up host mappings and a cgroup for each workload. */
+static uint32_t agent_features(const struct agent_config *config)
+{
+    uint32_t features = FEATURE_CANCEL | FEATURE_WORKLOAD_ACCOUNT;
+
+    if (config->direct) {
+        features |= FEATURE_HOST_MAPPINGS | FEATURE_EXEC_CGROUP;
+    }
+    return features;
+}
+
 static int handle_data_record(
     struct control_session *session,
     const struct agent_config *config,
@@ -816,6 +1422,7 @@ static int handle_data_record(
 {
     struct app_request request;
     char **workload_argv = NULL;
+    uint8_t features[4];
     uint32_t timeout_ms = 0;
     int result;
 
@@ -864,6 +1471,22 @@ static int handle_data_record(
             session, config, request.request_id, timeout_ms, workload_argv);
         free_arguments(workload_argv);
         return result;
+    case APP_CANCEL:
+        /* The targeted workload already finished and reported its outcome. */
+        return 0;
+    case APP_FEATURES:
+        if (request.payload_len != 0) {
+            return send_app_error(
+                session, request.request_id, 22, "invalid-request");
+        }
+        write_u32(features, agent_features(config));
+        return send_app_frame(
+            session,
+            APP_READY,
+            request.request_id,
+            0,
+            features,
+            sizeof(features));
     case APP_STOP:
         if (request.payload_len != 0 ||
             send_app_frame(
@@ -959,6 +1582,16 @@ int main(int argc, char **argv)
             STDERR_FILENO,
             "NVX-MANAGED-ERROR: stage=control-open status=%d\n",
             status);
+        return finish_agent(&config, 125);
+    }
+    if (config.direct && setup_host_mappings() != 0) {
+        int status = errno;
+        portb_error("host-mappings", status);
+        dprintf(
+            STDERR_FILENO,
+            "NVX-MANAGED-ERROR: stage=host-mappings status=%d\n",
+            status);
+        close(session.fd);
         return finish_agent(&config, 125);
     }
     if (configure_control_tty(session.fd) != 0) {

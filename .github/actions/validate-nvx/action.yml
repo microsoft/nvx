@@ -17,6 +17,7 @@ runs:
         python3 scripts/nvx.py test-openvmm-unit --help
         python3 scripts/nvx.py test-openvmm --help
         python3 scripts/nvx.py test-microvm --help
+        python3 scripts/nvx.py test-aci-edge-sandboxes --help
         python3 scripts/nvx.py test-adversarial --help
         python3 scripts/nvx.py benchmark --help
         python3 scripts/nvx.py doctor --help
@@ -41,6 +42,8 @@ runs:
         python scripts\nvx.py test-openvmm --help
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py test-microvm --help
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python scripts\nvx.py test-aci-edge-sandboxes --help
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\nvx.py test-adversarial --help
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
