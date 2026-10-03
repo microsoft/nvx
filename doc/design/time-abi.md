@@ -1782,24 +1782,40 @@ Expected effects:
 | Monotonic time that includes the downtime | Right after resume, the guest kernel runs the timer work that came due during the downtime (kworkers, softirqs, and RCU) and first-touches cold pages doing so: at one vCPU about 1.4 ms on MSHV, 2.2 ms on KVM, and 17 ms on WHP (26 ms at two vCPUs). On WHP each restored 4 KiB page that the guest first touches costs about 50 µs of wall time on bare metal and about 70 to 95 µs on the Azure runners: a nested page fault, about 11 µs of it in the hypervisor on bare metal and the rest resolved by the root, which the VMM never sees. WHP's lazily registered 2 MiB chunks add about 90 µs each, all before readiness, and on bare metal a WHP restore's latency after the VPs are released is roughly the pages it touches times 53 µs. It falls inside the gated restore metric whatever the helper's priority. On MSHV the cost is per 2 MiB chunk: the root driver resolves the first touch of each chunk with 512 copy-on-write copies of the private snapshot mapping, about 1.1 ms. A one-vCPU restore touches about 24 chunks, 25 ms of its restore on both the time ABI and the legacy path, and the time ABI's catch-up adds about one chunk |
 | No time ABI console lines in production | Each console byte costs one or two port exits, about 10 to 12 µs on bare-metal KVM and an estimated 20 to 45 µs nested on Azure. Without the boot marker (about 110 bytes) and the restore marker (about 117 bytes), boots and restores save 1 to 5 ms, enough to fail the gate on nested Azure KVM; violation events still print |
 
-**The first second after a restore.** Not all post-resume work finishes before
-readiness. At resume the guest runs every timer that came due during the
-downtime: the kernel's, those that came due during the VMM's restore setup
-(the legacy path stopped guest time during that setup, so its guest ran them
-later), and the discipline's poll when the downtime outlasts the poll period.
-Restore repair also steps the clock, which the kernel follows with its RTC
-write, and the restore checks start 150 ms after the acknowledgement.
-Readiness doesn't wait for this work, but a request made during it does, most
-where first touches of restored RAM are expensive. On the Azure WHP runners,
-an exit requested right at readiness takes 7 to 9 ms longer than on the legacy
-path (`openvmm_snapshot_restore_guest_exit_teardown`: +31% and +37%, and +24%
-on bare metal). Requested 0.3 s after readiness it takes 3.5 ms longer, and
-from 1 s on the difference is within noise. End to end, from process launch to
-exit, a WHP restore under the time ABI is at most about 2 ms slower than on
-the legacy path, and up to 6 ms faster on bare metal. On nested Azure KVM, a
-network restore that follows the shell-snapshot benchmarks' captures and
-restores is about 12 ms (8.5%) slower and is no slower on its own, which fits
-the same work faulting in restored RAM from a colder host page cache.
+**Right after a restore.** Not all post-resume work finishes before readiness.
+At resume the guest runs every timer that came due during the downtime: the
+kernel's, those that came due during the VMM's restore setup (the legacy path
+stopped guest time during that setup, so its guest ran them later; it left out
+about 400 ms of a nested Azure KVM restore and 7 to 12 ms on bare-metal KVM,
+but only 1 to 2 ms on WHP), and the discipline's poll when the downtime
+outlasts the poll period. Restore repair also steps the clock, which the
+kernel follows with its RTC write, and the restore checks start 150 ms after
+the acknowledgement. Readiness doesn't wait for this work.
+
+The first process that a restored guest starts pays a separate cost. An
+untiered restore with nothing to activate starts no process before readiness,
+while the legacy path's status read forked and executed one there, which
+first-touched the guest kernel's fork, exec, and exit paths. Under the time
+ABI the first process after readiness touches them instead, about 80 to 110
+more pages than on the legacy path, which matters where first touches of
+restored RAM are expensive. On the Azure WHP runners, the first process after
+readiness, an exit the gate requests, took 6.7 and 8.8 ms longer than on the
+legacy path (`openvmm_snapshot_restore_guest_exit_teardown`: +31% and +37%,
+and +24% on bare metal). None of the time ABI's post-resume work, the kernel's
+RTC write included, runs in that window; one small process started ahead of
+the exit removes 64 to 92% of the difference. On bare metal the cost is a
+shift: readiness comes 9.5 ms earlier, and readiness plus the exit takes
+4.7 ms less. On the Azure runners readiness isn't earlier, and the difference
+from process launch to exit isn't significant (point estimates from −1.9 to
++4.0 ms).
+
+On nested Azure KVM, a network restore that follows the shell-snapshot
+benchmarks' captures and restores is up to about 12 ms (8.5%) slower, by an
+amount that varies from run to run, and is no slower on its own. Neither arm
+takes major faults. The time ABI's restore makes about 4% more KVM exits, 26
+of them port I/O, mostly the restore packet's read, and more retried EPT
+faults and remote TLB flushes, each of which costs more on a nested runner,
+depending on the host's state.
 
 Expected wins are tracked separately and do not relax the gate.
 
