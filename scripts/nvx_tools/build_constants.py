@@ -65,10 +65,12 @@ class KernelBuildConstants:
         "CONFIG_EROFS_FS_ZIP_ZSTD=y",
         "CONFIG_EXT4_FS=y",
         "CONFIG_MEMCG=y",
+        "CONFIG_NET_NS=y",
         "CONFIG_OVERLAY_FS=y",
         "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
         "CONFIG_SECCOMP_FILTER=y",
         "CONFIG_UNIX=y",
+        "CONFIG_VETH=y",
         "CONFIG_VIRTIO_BLK=y",
     )
 

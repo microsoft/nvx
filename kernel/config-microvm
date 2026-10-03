@@ -908,14 +908,16 @@ CONFIG_PT_RECLAIM=y
 # end of Memory Management options
 
 #
-# Networking support (minimal: Unix sockets and IPv4 over a virtio-net-mmio NIC for --net)
+# Networking support (Unix sockets, IPv4, and guest-internal network namespaces)
 #
 CONFIG_NET=y
+CONFIG_NET_NS=y
 CONFIG_UNIX=y
 CONFIG_INET=y
 # CONFIG_IPV6 is not set
 CONFIG_NETDEVICES=y
 CONFIG_NET_CORE=y
+CONFIG_VETH=y
 CONFIG_VIRTIO_NET=y
 
 #
