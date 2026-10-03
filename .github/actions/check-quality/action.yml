@@ -4,6 +4,17 @@ description: Run NVX linting, typing, and formatting checks
 runs:
   using: composite
   steps:
+    - name: Require PowerShell on self-hosted runner
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v pwsh >/dev/null 2>&1; then
+          echo "::error::PowerShell is required for CI syntax validation on this runner" >&2
+          exit 1
+        fi
+        pwsh --version
+
     - name: Set up Python (GitHub-hosted)
       if: runner.environment == 'github-hosted'
       uses: actions/setup-python@v6

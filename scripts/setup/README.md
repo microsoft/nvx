@@ -78,11 +78,13 @@ used for guest artifacts and quality checks requires rootless Docker; jobs
 validate the daemon, remove the per-job Docker configuration directory after
 each job, and never fall back to the host-root Docker socket. Self-hosted
 quality jobs use an isolated Python virtual environment; the Linux runner
-bootstrap installs `python3-venv` on Debian/Ubuntu. Keep push-only jobs that
+bootstrap installs `python3-venv` on Debian/Ubuntu. Utility host provisioning
+must also install `pwsh` for the quality job's syntax check; that job checks
+for PowerShell before installing development tools. Keep push-only jobs that
 consume write credentials on a different runner.
 Linux provisioning runs through the SSH administrator, but the listener and
 workflow jobs run as the dedicated `nvx-runner` account, which has neither sudo
-nor Docker access.
+nor access to the host-root Docker daemon.
 Linux provisioning and check mode stop unless the host CPU exposes an invariant
 TSC (`nonstop_tsc` in `/proc/cpuinfo`). Guests on an Azure VM without one hit
 cross-vCPU TSC warps during CPU activation, so redeploy such a VM instead of
