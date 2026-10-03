@@ -1,7 +1,7 @@
 ---
 name: code-reusability
-description: Reuse one existing NVX tooling helper at a second call site
-intent: Reduce NVX tooling maintenance cost by reusing one existing internal helper at a second proven call site without changing public behavior or repeating rejected work.
+description: Reuse one existing NVX tooling or aci_edge_sandboxes helper at a second call site
+intent: Reduce NVX maintenance cost by reusing one existing internal helper in the tooling or the aci_edge_sandboxes crate at a second proven call site without changing public behavior or repeating rejected work.
 on:
   schedule: hourly
   workflow_dispatch:
@@ -57,22 +57,26 @@ changing public behavior.
 
 A qualifying candidate pairs an existing helper that already has at least one
 caller with a second call site that reimplements the same behavior inline: a
-Python helper in `scripts/nvx.py` or `scripts/nvx_tools/`, or a function in one
-allowlisted shell script whose second call site is in the same script. Prove
-that the helper's results, errors, and messages match the inline code for every
-input the second site can pass, citing both definitions.
+Python helper in `scripts/nvx.py` or `scripts/nvx_tools/`, a function in one
+allowlisted shell script whose second call site is in the same script, or a
+function in `aci_edge_sandboxes/src/`. Prove that the helper's results, errors,
+and messages match the inline code for every input the second site can pass,
+citing both definitions.
 
 Replace the inline logic with a call to the helper. When a Python helper needs
 a change to serve the second site, keep it minimal and backward compatible: a
 keyword parameter whose default preserves every existing caller, or a move to
 an existing shared module such as `scripts/nvx_tools/common.py` when the second
-site is in another module. Do not add a new helper, module, class, public entry
-point, or cross-file shell sourcing, and do not change existing callers'
-behavior.
+site is in another module. A crate helper may change only by widening a private
+`fn` to `pub(crate)` for a second module; a new parameter or generic would
+touch every caller, so reject that candidate. Do not add a new helper, module,
+class, trait, macro, public entry point, or cross-file shell sourcing, and do
+not change existing callers' behavior.
 
 Preserve the second site's user-visible behavior, including CLI output, error
-messages, and exit codes. For Python, cover it with an existing or new focused
-test and keep the helper's existing tests passing.
+codes and messages, and exit codes. For Python, cover it with an existing or
+new focused test and keep the helper's existing tests passing; for the crate,
+do the same with a unit or integration test that runs without a hypervisor.
 
 Reject cosmetic call-site rewrites, reuse that needs behavior-changing
 adaptation, and speculative reuse at a call site that does not exist yet.

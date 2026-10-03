@@ -1,7 +1,7 @@
 ---
 name: code-deduplication
-description: Remove one small instance of repeated NVX tooling logic
-intent: Reduce NVX tooling maintenance cost by removing one novel, validated instance of repeated internal logic without new public abstractions or repeated rejected work.
+description: Remove one small instance of repeated NVX tooling or aci_edge_sandboxes logic
+intent: Reduce NVX maintenance cost by removing one novel, validated instance of repeated internal logic in the tooling or the aci_edge_sandboxes crate, without new public abstractions or repeated rejected work.
 on:
   schedule: hourly
   workflow_dispatch:
@@ -56,24 +56,29 @@ Remove one small instance of repeated internal logic without creating a new
 public abstraction.
 
 A qualifying candidate has at least two inline copies of the same non-trivial
-logic in `scripts/nvx.py`, `scripts/nvx_tools/`, or one allowlisted shell
-script: the same computation, validation, parsing, or command sequence with the
-same inputs, results, and errors, not merely code with a similar shape.
-Consolidate every copy into one helper:
+logic in `scripts/nvx.py`, `scripts/nvx_tools/`, one allowlisted shell
+script, or the sources of `aci_edge_sandboxes/src/`: the same computation,
+validation, parsing, or command sequence with the same inputs, results, and
+errors, not merely code with a similar shape. Consolidate every copy into one
+helper:
 
 - keep the helper private to the module that owns the concern or, when the
   copies span modules, place it beside related helpers in an existing shared
-  module such as `scripts/nvx_tools/common.py`;
-- do not add modules, classes, protocols, registries, configuration, CLI
-  surface, or parameters that the existing copies do not need;
+  module such as `scripts/nvx_tools/common.py`; in the crate, use a private
+  `fn` in the module that owns the concern or, when the copies span modules, a
+  `pub(crate)` `fn` in an existing module that every copy's module already
+  uses;
+- do not add modules, classes, traits, macros, generics, protocols, registries,
+  configuration, CLI surface, public items, Cargo features, or parameters that
+  the existing copies do not need;
 - in shell, use a function within the same script, and never add shared shell
   files or cross-file sourcing.
 
 Preserve every call site's behavior exactly, including results, exception
-types, and messages. Prove equivalence with the existing tests that cover each
-call site, add a focused test only where a copy lacks coverage, and update mock
-targets that move with the logic. Excluding tests, the patch should delete more
-lines than it adds.
+types or error codes, and messages. Prove equivalence with the existing tests
+that cover each call site, add a focused test only where a copy lacks coverage,
+and update mock targets that move with the logic. Excluding tests, the patch
+should delete more lines than it adds.
 
 Reject near-duplicates whose differences matter, test-only deduplication, and
 consolidation that needs flags or branches to preserve divergent behavior. When
