@@ -1428,6 +1428,15 @@ class DoctorTests(unittest.TestCase):
                 completed(line.replace("backend=kvm", "backend=mshv")),
                 "verified backend mshv",
             ),
+            # Without H2 in the same run, H3 still requires a catalog profile.
+            (
+                completed(line.replace(" cpu_profile=intel.icelake-sp.v1", "")),
+                "verified no catalog CPU profile: cpu_profile=none",
+            ),
+            (
+                completed(line.replace("intel.icelake-sp.v1", "interim.host.kvm.v1")),
+                "verified no catalog CPU profile: cpu_profile=interim.host.kvm.v1",
+            ),
         )
         for result_value, message in cases:
             with self.subTest(message=message):
@@ -1438,6 +1447,8 @@ class DoctorTests(unittest.TestCase):
         for selected, passed in (
             ("intel.icelake-sp.v2", True),
             ("intel.skylake-sp.v1", False),
+            # A revision is the lineage plus .v and a number.
+            ("intel.icelake-sp.v2-rc", False),
             # OpenVMM selects catalog profiles, so an interim one is a regression.
             ("interim.host.kvm.v1", False),
         ):
@@ -1797,24 +1808,39 @@ class DoctorTests(unittest.TestCase):
                 ),
             ):
                 self.assertFalse(doctor.check_utc(context).passed)
-        # Output that names no source, such as a localized w32tm's, fails H7
-        # instead of passing as an unknown source.
-        for incomplete in (
-            "Sprungindikator: 0(keine Warnung)\nQuelle: time.windows.com,0x9\n",
-            "Leap Indicator: 0(no warning)\nStratum: 2\n",
-            "Stratum: 2\nSource: VM IC Time Synchronization Provider\n",
-            status.replace("0(no warning)", "unknown"),
+        # Output H7 can't read, such as a localized w32tm's, fails it with a
+        # stable leading phrase instead of passing as an unknown source.
+        unverified = "cannot verify host UTC synchronization: "
+        for outcome in (
+            completed(
+                "Sprungindikator: 0(keine Warnung)\nQuelle: time.windows.com,0x9\n"
+            ),
+            completed("Leap Indicator: 0(no warning)\nStratum: 2\n"),
+            completed("Stratum: 2\nSource: VM IC Time Synchronization Provider\n"),
+            completed(status.replace("0(no warning)", "unknown")),
+            completed("The service has not been started. (0x80070426)\n", 1),
+            subprocess.TimeoutExpired(["w32tm"], 30),
         ):
             with (
                 patch.object(doctor, "host_is_windows", return_value=True),
-                patch.object(
-                    doctor.subprocess, "run", return_value=completed(incomplete)
-                ),
+                patch.object(doctor.subprocess, "run", side_effect=[outcome]),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 (result,) = doctor.run_checks(context, ("H7",))
-            self.assertFalse(result.passed, incomplete)
-            self.assertIn("cannot verify the host time source", result.detail)
+            self.assertFalse(result.passed, result.detail)
+            self.assertTrue(result.detail.startswith(unverified), result.detail)
+        # So does an adjtimex clock state Linux doesn't define, or no adjtimex.
+        with (
+            patch.object(doctor, "host_is_windows", return_value=False),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with patch.object(doctor, "_linux_clock_state", return_value=(6, 0)):
+                (unknown_state,) = doctor.run_checks(context, ("H7",))
+            with patch.object(doctor.ctypes, "CDLL", side_effect=OSError("no libc")):
+                (no_adjtimex,) = doctor.run_checks(context, ("H7",))
+        for result in (unknown_state, no_adjtimex):
+            self.assertFalse(result.passed, result.detail)
+            self.assertTrue(result.detail.startswith(unverified), result.detail)
 
     def test_run_prints_lines_writes_the_summary_and_fails_closed(self):
         def passing(check: str):
@@ -1863,6 +1889,23 @@ class DoctorTests(unittest.TestCase):
         text = summary.read_text(encoding="utf-8")
         self.assertIn("**fail** | rustc is required", text)
         self.assertIn("Generation: `emeraldrapids`", text)
+
+        # Unreadable values that break a computation, such as a zero rate,
+        # fail only their own check, and the later checks still run.
+        def arithmetic(context: doctor.DoctorContext) -> doctor.CheckResult:
+            del context
+            raise ZeroDivisionError("float division by zero")
+
+        stdout = io.StringIO()
+        with (
+            patch.dict(doctor.CHECKS, {"H2": arithmetic, "H5": passing("H5")}),
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(doctor.run(arguments), 1)
+        self.assertIn(
+            'check=H2 status=fail detail="float division by zero"', stdout.getvalue()
+        )
+        self.assertIn("check=H5 status=pass", stdout.getvalue())
 
     def test_run_selects_the_cpu_fingerprint_or_runs_without_openvmm(self):
         seen: list[Path | None] = []

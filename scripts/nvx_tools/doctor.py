@@ -29,6 +29,7 @@ from .ci import OPENVMM_TEST_BACKENDS
 from .common import ScriptError, artifact_path, openvmm_binary_path
 from .time_abi import (
     CI_WARP_GAPS,
+    CPU_GENERATIONS,
     LAPIC_HZ,
     MAX_TSC_HZ,
     MIN_TSC_HZ,
@@ -98,6 +99,10 @@ CLOCKSOURCE_PATH = Path(
 CPUINFO_PATH = Path("/proc/cpuinfo")
 ADJTIMEX_TIME_ERROR = 5
 ADJTIMEX_STA_UNSYNC = 0x0040
+# Every H7 failure to read the host's synchronization state starts with this
+# phrase; a clock that is not synchronized starts "host UTC is not
+# synchronized" instead.
+UTC_UNVERIFIED = "cannot verify host UTC synchronization"
 WHP_CAPABILITY_HYPERVISOR_PRESENT = 0
 
 
@@ -410,7 +415,8 @@ def _rust_unescape(match: re.Match[str]) -> str:
 
 def _same_profile_lineage(selected: str, expected: str) -> bool:
     """Whether ``selected`` is a revision of the profile ``expected`` names."""
-    return selected.startswith(expected.rpartition(".v")[0] + ".v")
+    lineage = re.escape(expected.rpartition(".v")[0])
+    return re.fullmatch(rf"{lineage}\.v\d+", selected) is not None
 
 
 def _check_cpu_profile(
@@ -585,7 +591,16 @@ def check_openvmm_preflight(context: DoctorContext) -> CheckResult:
         )
     expected_profile = context.facts.get("profile", "none")
     selected_profile = fields.get("cpu_profile", "")
-    if expected_profile != "none" and not _same_profile_lineage(
+    # A missing or unknown profile fails even when H2 doesn't run with H3.
+    if not any(
+        _same_profile_lineage(selected_profile, generation.profile_id)
+        for generation in CPU_GENERATIONS
+    ):
+        problems.append(
+            "OpenVMM verified no catalog CPU profile: "
+            f"cpu_profile={selected_profile or 'none'}"
+        )
+    elif expected_profile != "none" and not _same_profile_lineage(
         selected_profile, expected_profile
     ):
         problems.append(
@@ -833,11 +848,18 @@ def check_guest_warp(context: DoctorContext) -> CheckResult:
 
 def _linux_clock_state() -> tuple[int, int]:
     """Return adjtimex's clock state and status without changing the clock."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    buffer = ctypes.create_string_buffer(256)
-    state = int(libc.adjtimex(buffer))
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        buffer = ctypes.create_string_buffer(256)
+        state = int(libc.adjtimex(buffer))
+    except (AttributeError, OSError) as error:
+        raise ScriptError(
+            f"{UTC_UNVERIFIED}: adjtimex is unavailable: {error}"
+        ) from error
     if state < 0:
-        raise ScriptError(f"adjtimex failed: {os.strerror(ctypes.get_errno())}")
+        raise ScriptError(
+            f"{UTC_UNVERIFIED}: adjtimex failed: {os.strerror(ctypes.get_errno())}"
+        )
     # struct timex: unsigned modes, then the long offset, freq, maxerror, and
     # esterror fields, then the int status.
     status = int.from_bytes(buffer.raw[40:44], sys.byteorder)
@@ -845,16 +867,19 @@ def _linux_clock_state() -> tuple[int, int]:
 
 
 def _windows_time_source() -> tuple[bool, str]:
-    completed = subprocess.run(
-        ["w32tm", "/query", "/status"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ["w32tm", "/query", "/status"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise ScriptError(f"{UTC_UNVERIFIED}: w32tm /query /status: {error}") from error
     if completed.returncode != 0:
         raise ScriptError(
-            "w32tm /query /status failed: "
+            f"{UTC_UNVERIFIED}: w32tm /query /status failed: "
             + (completed.stdout.strip() or completed.stderr.strip())
         )
     fields: dict[str, str] = {}
@@ -869,7 +894,7 @@ def _windows_time_source() -> tuple[bool, str]:
     # fails rather than certify an unverified one.
     if not source or not leap.startswith(("0", "1", "2", "3")):
         raise ScriptError(
-            "cannot verify the host time source: w32tm /query /status reported "
+            f"{UTC_UNVERIFIED}: w32tm /query /status reported "
             f"source={source or 'none'} leap_indicator={leap or 'none'}"
         )
     unsynchronized = (
@@ -889,6 +914,10 @@ def check_utc(context: DoctorContext) -> CheckResult:
         return CheckResult("H7", True, detail)
     state, status = _linux_clock_state()
     detail = f"adjtimex state={state} status=0x{status:04x}"
+    if state > ADJTIMEX_TIME_ERROR:
+        return CheckResult(
+            "H7", False, f"{UTC_UNVERIFIED}: unknown clock state; {detail}"
+        )
     if state == ADJTIMEX_TIME_ERROR or status & ADJTIMEX_STA_UNSYNC:
         return CheckResult(
             "H7", False, f"host UTC is not synchronized (STA_UNSYNC); {detail}"
@@ -916,10 +945,13 @@ def run_checks(context: DoctorContext, checks: Sequence[str]) -> list[CheckResul
         try:
             result = CHECKS[check](context)
         except (
+            ArithmeticError,
+            IndexError,
             KeyError,
             OSError,
             RuntimeError,
             subprocess.SubprocessError,
+            TypeError,
             ValueError,
         ) as error:
             first = str(error).splitlines()[0] if str(error) else type(error).__name__
