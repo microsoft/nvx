@@ -465,7 +465,8 @@ python3 scripts/nvx.py sandbox start \
   --state-dir /run/user/1000/nvx-example
 python3 scripts/nvx.py sandbox exec \
   --state-dir /run/user/1000/nvx-example \
-  --entrypoint /usr/bin/python3 --arg=/work/agent.py \
+  --entrypoint /usr/bin/python3 --arg=/work/agent.py --cwd /work \
+  --environment-file /run/user/1000/nvx-example-environment.json \
   --outcome-report /run/user/1000/nvx-example-exec.json
 python3 scripts/nvx.py sandbox exec \
   --state-dir /run/user/1000/nvx-example \
@@ -480,12 +481,52 @@ Lifecycle transitions fail closed: `start` rejects an already-running or stale
 runtime record, `exec` and `stop` require a live OpenVMM process, and
 `deprovision` refuses to remove a running sandbox or unknown files. Managed
 workload arguments use the bounded control protocol rather than the kernel
-command line and may contain whitespace. The workload sees one machine ID for
-the life of the VM. On `stop`, the guest agent unmounts the live share, overlay,
-layers, and scratch in dependency order before the VM powers off, as it does
-when a one-shot workload exits. The legacy operation-less `sandbox`
+command line and may contain whitespace. Managed execution can select an
+absolute working directory and either repeated inline `KEY=VALUE` entries or a
+UTF-8 JSON-array environment file. The two environment forms are mutually
+exclusive. Omission inherits the guest bootstrap environment, not the host
+environment: `PATH=/usr/sbin:/usr/bin:/sbin:/bin`, `TERM=linux`, and `HOME`,
+`USER`, and `LOGNAME` resolved from the fixed workload identity. An empty file
+array requests an empty environment. Inline values are visible in host process arguments
+and should not be used for secrets. These options apply only to managed
+`sandbox exec`; one-shot execution rejects them. The workload sees one machine
+ID for the life of the VM. On `stop`, the guest agent unmounts the live share,
+overlay, layers, and scratch in dependency order before the VM powers off, as it
+does when a one-shot workload exits. The legacy operation-less `sandbox`
 form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
 request to retain VM state.
+
+Environment files are limited to 1 MiB of UTF-8 JSON. Environments contain at
+most 256 unique, nonempty names. Each `KEY=VALUE` entry and working-directory
+path is limited to 4096 UTF-8 bytes; the combined execution request must also
+fit the existing 64 KiB control-payload bound.
+
+The explicit `test-microvm --scenario managed-exec-config --backend BACKEND`
+scenario is the authoritative acceptance for these public options. It invokes
+`scripts/nvx.py sandbox provision`, `start`, `exec`, `stop`, and `deprovision`
+as subprocesses with an Alpine control guest and an Ubuntu workload layer. It
+checks sequential distinct CWD and exact-environment requests followed by
+omitted defaults. It resolves the selected UID 65534 account from the Ubuntu
+workload's own passwd database through a public managed `getent` execution,
+then requires exactly the documented `PATH`, `TERM`, `HOME`, `USER`, and
+`LOGNAME` values. Unrelated guest bootstrap and shell-provided entries are
+permitted because omission inherits the guest bootstrap environment; prior
+request entries and the internal execution-config descriptor must not leak.
+It also checks public
+rejection of relative CWD and out-of-range `uint32`
+timeouts, timeout recovery, stdout/stderr forwarding, and typed exec outcome
+reports. It requires `build/ubuntu-distro.erofs`, its manifest, and the
+`build/ubuntu-smoke-scratch.ext4` template produced by the guest-artifact build.
+CI invokes it separately on every backend; it is not included in the default
+scenario set because downloaded packages do not include the scratch template.
+Empty environments are measured with `/usr/bin/env`, not a shell that can
+synthesize its own variables. The scenario retains bounded subprocess argument
+and status observations, typed exec outcomes, and OpenVMM logs. Inline
+environment values are redacted from the retained command observations.
+
+Decoder, helper, and direct control-session tests remain useful supplemental
+coverage for protocol boundaries and guest implementation details. They do not
+replace or establish support through the public `nvx.py sandbox` interface.
 
 `run --outcome-report PATH` and one-shot `sandbox run --outcome-report PATH`
 forward OpenVMM's bounded local JSON report. Managed `sandbox exec` writes only

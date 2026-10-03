@@ -93,6 +93,24 @@ jobs:
           --backend "${{ inputs.backend }}"
           --output-dir "build/test-results/microvm-${{ inputs.backend }}"
 
+      - name: Run public managed execution configuration on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --scenario managed-exec-config
+          --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
+
+      - name: Run public managed execution configuration on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          python scripts\nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --scenario managed-exec-config
+          --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
+
       - name: Run Ubuntu guest smoke tests on Linux
         if: runner.os != 'Windows'
         shell: bash
@@ -537,6 +555,7 @@ jobs:
         with:
           name: nvx-microvm-tests-${{ inputs.backend }}
           path: |
+            build/test-results/public-exec-${{ inputs.backend }}
             build/test-results/microvm-${{ inputs.backend }}
             build/test-results/ubuntu-${{ inputs.backend }}
             build/test-results/ubuntu-kvm-extended

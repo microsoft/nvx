@@ -346,6 +346,7 @@ awk -F: -v gid="$workload_gid" '$3 == gid { found = 1 } END { exit !found }' \
 case "$workload_home" in /*) ;; *) fatal "configured workload home is invalid" ;; esac
 [ -d "$rootfs$workload_home" ] && [ ! -L "$rootfs$workload_home" ] ||
     fatal "configured workload home is unavailable"
+
 workload_lifecycle=$(cmdline_value nvx_lifecycle || true)
 [ -n "$workload_lifecycle" ] || workload_lifecycle=one-shot
 case "$workload_lifecycle" in

@@ -19,6 +19,12 @@ APP_HEADER = struct.Struct("<4sBBHQiI")
 OUTER_MAX_PAYLOAD = 65_536
 APP_MAX_ARGUMENTS = 64
 APP_MAX_ARGUMENT_BYTES = 4096
+APP_MAX_ENVIRONMENT = 256
+APP_MAX_ENVIRONMENT_BYTES = 4096
+APP_MAX_CWD_BYTES = 4096
+APP_EXEC_EXTENDED = 1
+APP_EXEC_CWD_PRESENT = 1
+APP_EXEC_ENVIRONMENT_PRESENT = 2
 
 OUTER_HOST_ATTACH = 2
 OUTER_RESET = 3
@@ -39,6 +45,33 @@ APP_ERROR = 0xFF
 MANAGED_EXIT_CATEGORIES = frozenset(
     {"exit", "timeout", "output-limit", "signal", "failed"}
 )
+
+
+def encode_exec_environment(environment: tuple[str, ...]) -> tuple[bytes, ...]:
+    if len(environment) > APP_MAX_ENVIRONMENT:
+        raise ValueError("managed exec environment exceeds 256 entries")
+    names: set[str] = set()
+    encoded: list[bytes] = []
+    for entry in environment:
+        if type(entry) is not str:
+            raise TypeError("managed exec environment entries must be strings")
+        name, separator, _value = entry.partition("=")
+        value = entry.encode("utf-8")
+        if (
+            not separator
+            or not name
+            or "\0" in entry
+            or len(value) > APP_MAX_ENVIRONMENT_BYTES
+        ):
+            raise ValueError(
+                "managed exec environment entries must be non-empty "
+                "KEY=VALUE strings of at most 4096 bytes"
+            )
+        if name in names:
+            raise ValueError(f"managed exec environment contains duplicate key: {name}")
+        names.add(name)
+        encoded.append(value)
+    return tuple(encoded)
 
 
 @dataclass(frozen=True)
@@ -348,6 +381,8 @@ class ControlSession:
         *,
         timeout_ms: int,
         response_timeout: float,
+        cwd: str | None = None,
+        environment: tuple[str, ...] | None = None,
     ) -> ManagedExecResult:
         if not 0 < response_timeout < float("inf"):
             raise ValueError(
@@ -357,15 +392,62 @@ class ControlSession:
             raise ValueError("managed exec requires 1 through 64 arguments")
         encoded: list[bytes] = []
         for argument in arguments:
+            if type(argument) is not str:
+                raise TypeError("managed exec arguments must be strings")
             value = argument.encode("utf-8")
             if not value or len(value) > APP_MAX_ARGUMENT_BYTES or b"\0" in value:
                 raise ValueError("managed exec argument is empty or exceeds 4096 bytes")
             encoded.append(struct.pack("<I", len(value)) + value)
         if not arguments[0].startswith("/"):
             raise ValueError("managed exec entrypoint must be absolute")
-        if not 0 <= timeout_ms <= 3_600_000:
-            raise ValueError("managed exec timeout must be 0 through 3600000 ms")
-        payload = struct.pack("<IHH", timeout_ms, len(arguments), 0) + b"".join(encoded)
+        if type(timeout_ms) is not int:
+            raise TypeError("managed exec timeout must be an integer")
+        if not 0 <= timeout_ms <= 0xFFFFFFFF:
+            raise ValueError("managed exec timeout must be 0 through 4294967295 ms")
+
+        flags = 0
+        encoded_cwd = b""
+        if cwd is not None:
+            if type(cwd) is not str:
+                raise TypeError("managed exec working directory must be a string")
+            encoded_cwd = cwd.encode("utf-8")
+            if (
+                not encoded_cwd
+                or len(encoded_cwd) > APP_MAX_CWD_BYTES
+                or b"\0" in encoded_cwd
+                or not cwd.startswith("/")
+            ):
+                raise ValueError(
+                    "managed exec working directory must be an absolute path "
+                    "of at most 4096 bytes"
+                )
+            flags |= APP_EXEC_CWD_PRESENT
+
+        encoded_environment: list[bytes] = []
+        if environment is not None:
+            for value in encode_exec_environment(environment):
+                encoded_environment.append(struct.pack("<I", len(value)) + value)
+            flags |= APP_EXEC_ENVIRONMENT_PRESENT
+
+        if flags == 0:
+            payload = struct.pack("<IHH", timeout_ms, len(arguments), 0) + b"".join(
+                encoded
+            )
+        else:
+            payload = (
+                struct.pack(
+                    "<IHHHHI",
+                    timeout_ms,
+                    len(arguments),
+                    APP_EXEC_EXTENDED,
+                    flags,
+                    len(encoded_environment),
+                    len(encoded_cwd),
+                )
+                + b"".join(encoded)
+                + encoded_cwd
+                + b"".join(encoded_environment)
+            )
         if len(payload) + APP_HEADER.size > OUTER_MAX_PAYLOAD:
             raise ValueError("managed exec request exceeds the protocol limit")
 

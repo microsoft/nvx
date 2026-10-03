@@ -57,6 +57,7 @@ from .common import (
 from .control_session import ControlSession
 from .egress_policy import CompiledEgressPolicy, compile_policy_file
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
+from .managed_exec_tests import run_managed_exec_configuration
 from .openvmm_process import OpenvmmProcess, TcpConsole
 
 MICROVM_TEST_SCENARIOS = (
@@ -72,6 +73,7 @@ MICROVM_TEST_SCENARIOS = (
     "lifecycle",
     "l3-l4-egress-policy",
     "managed-lifecycle",
+    "managed-exec-config",
     "network-snapshot",
     "restore-memory",
     "restore-processors",
@@ -89,7 +91,12 @@ MICROVM_TEST_SCENARIOS = (
 )
 UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
 SANDBOX_CONTROL_SCENARIOS = frozenset(
-    ("sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
+    (
+        "managed-exec-config",
+        "sandbox-blocks",
+        "scratch-snapshot",
+        "snapshot-tiers",
+    )
 )
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -778,16 +785,21 @@ def run_managed_lifecycle(
                         (
                             "/bin/sh",
                             "-c",
-                            "printf managed-state >/tmp/nvx-managed-state; "
-                            "printf first-exec",
+                            "/bin/touch nvx-managed-state; "
+                            'printf \'%s|%s|%s\' "$PWD" "$EMPTY" "$COMPLEX"',
                         ),
                         timeout_ms=5_000,
                         response_timeout=timeout,
+                        cwd="/tmp",
+                        environment=(
+                            "EMPTY=",
+                            "COMPLEX=space = \N{SNOWMAN}",
+                        ),
                     )
                 if (
                     first.returncode != 0
                     or first.category != "exit"
-                    or first.stdout != b"first-exec"
+                    or first.stdout != "/tmp||space = \N{SNOWMAN}".encode()
                     or first.stderr
                 ):
                     raise RuntimeError(
@@ -797,11 +809,53 @@ def run_managed_lifecycle(
                 with ControlSession.connect(
                     Path(endpoint_value), capability, timeout
                 ) as session:
+                    empty_environment = session.exec(
+                        ("/usr/bin/env",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        environment=(),
+                    )
+                    exact_environment = session.exec(
+                        ("/usr/bin/env",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        environment=("EMPTY=", "COMPLEX=space = \N{SNOWMAN}"),
+                    )
+                    if (
+                        empty_environment.returncode != 0
+                        or empty_environment.stdout
+                        or empty_environment.stderr
+                        or exact_environment.returncode != 0
+                        or exact_environment.stderr
+                        or exact_environment.stdout
+                        != "EMPTY=\nCOMPLEX=space = \N{SNOWMAN}\n".encode()
+                    ):
+                        raise RuntimeError(
+                            "managed exec did not preserve the exact exec environment"
+                        )
+                    for workload_timeout in (0, 3_600_001, 86_400_000, 0xFFFFFFFF):
+                        boundary = session.exec(
+                            ("/bin/true",),
+                            timeout_ms=workload_timeout,
+                            response_timeout=timeout,
+                        )
+                        if (
+                            boundary.returncode != 0
+                            or boundary.category != "exit"
+                            or boundary.stdout
+                            or boundary.stderr
+                        ):
+                            raise RuntimeError(
+                                "managed exec rejected a valid uint32 timeout"
+                            )
                     second = session.exec(
                         (
                             "/bin/sh",
                             "-c",
-                            "cat /tmp/nvx-managed-state; printf second-exec",
+                            "pwd; test -f /tmp/nvx-managed-state; "
+                            'test "${COMPLEX-unset}" = unset; '
+                            "test ! -e /run/nvx/workload-machine-id; "
+                            "printf second-exec",
                         ),
                         timeout_ms=5_000,
                         response_timeout=timeout,
@@ -811,11 +865,34 @@ def run_managed_lifecycle(
                         timeout_ms=100,
                         response_timeout=timeout,
                     )
+                    after_timeout = session.exec(
+                        ("/bin/sh", "-c", "printf still-usable"),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                    )
+                    missing_cwd = session.exec(
+                        ("/bin/true",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        cwd="/does-not-exist",
+                    )
+                    file_cwd = session.exec(
+                        ("/bin/true",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        cwd="/etc/passwd",
+                    )
+                    inaccessible_cwd = session.exec(
+                        ("/bin/true",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        cwd="/root",
+                    )
                     session.stop(timeout)
                 if (
                     second.returncode != 0
                     or second.category != "exit"
-                    or second.stdout != b"managed-statesecond-exec"
+                    or second.stdout != b"/\nsecond-exec"
                     or second.stderr
                 ):
                     raise RuntimeError(
@@ -823,6 +900,29 @@ def run_managed_lifecycle(
                     )
                 if timed_out.returncode != 124 or timed_out.category != "timeout":
                     raise RuntimeError("managed workload timeout was not reported")
+                if (
+                    after_timeout.returncode != 0
+                    or after_timeout.category != "exit"
+                    or after_timeout.stdout != b"still-usable"
+                    or after_timeout.stderr
+                ):
+                    raise RuntimeError(
+                        "managed guest was not usable after a workload timeout"
+                    )
+                for description, failed_cwd in (
+                    ("missing", missing_cwd),
+                    ("file", file_cwd),
+                    ("inaccessible", inaccessible_cwd),
+                ):
+                    if (
+                        failed_cwd.returncode != 125
+                        or failed_cwd.category != "exit"
+                        or b"cannot use working directory" not in failed_cwd.stderr
+                    ):
+                        raise RuntimeError(
+                            f"{description} managed working directory did not "
+                            "fail clearly"
+                        )
                 result = process.wait(timeout=timeout)
                 if result != 0:
                     raise RuntimeError(
@@ -4067,6 +4167,7 @@ def run(args: argparse.Namespace) -> int:
             scenario
             for scenario in MICROVM_TEST_SCENARIOS
             if scenario not in unsupported_scenarios
+            and scenario != "managed-exec-config"
         )
     else:
         scenarios = tuple(dict.fromkeys(args.scenario))
@@ -4187,6 +4288,13 @@ def run(args: argparse.Namespace) -> int:
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+        )
+    if "managed-exec-config" in scenarios:
+        print(
+            f"Running public managed execution configuration on OpenVMM/{args.backend}"
+        )
+        run_managed_exec_configuration(
+            args.backend, timeout=args.timeout, output_dir=output_dir
         )
     if "managed-lifecycle" in scenarios:
         print(f"Running managed microVM lifecycle on OpenVMM/{args.backend}")

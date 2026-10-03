@@ -10,7 +10,7 @@ runs:
       run: |
         set -euo pipefail
         python3 -m compileall -q scripts
-        python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_egress_policy.py -v
+        python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_egress_policy.py scripts/test_control_session.py scripts/test_managed_agent.py -v
         python3 scripts/test_adversarial.py -v
         python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
         python3 scripts/nvx.py --help
@@ -28,7 +28,7 @@ runs:
         $ErrorActionPreference = "Stop"
         python -m compileall -q scripts
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_egress_policy.py -v
+        python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_egress_policy.py scripts/test_control_session.py scripts/test_managed_agent.py -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\test_adversarial.py -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

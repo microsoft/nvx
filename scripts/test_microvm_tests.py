@@ -21,6 +21,7 @@ from nvx_tools import (  # noqa: E402
     benchmark,
     common,
     control_session,
+    managed_exec_tests,
     microvm_tests,
     openvmm_process,
 )
@@ -125,6 +126,441 @@ class MicrovmTestParserTests(unittest.TestCase):
 
         self.assertEqual(args.guest, "ubuntu")
         self.assertIsNone(args.memory_mib)
+
+
+class PublicManagedExecAcceptanceTests(unittest.TestCase):
+    def _run_acceptance(
+        self,
+        root: Path,
+        *,
+        bad_pwd_output: bool = False,
+        malformed_outcome: bool = False,
+        outcome_mutation: str | None = None,
+        start_returncode: int = 0,
+        stop_returncode: int = 0,
+        default_environment: bytes = (
+            b"PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+            b"TERM=linux\nHOME=/nonexistent\nUSER=nobody\nLOGNAME=nobody\n"
+            b"SHLVL=1\nnvx_workload_uid=65534\nnvx_hostname=nvx\n"
+        ),
+        evidence_failure: bool = False,
+        command_log: list[list[str]] | None = None,
+    ) -> tuple[list[list[str]], list[dict[str, object]]]:
+        distro = root / "ubuntu-distro.erofs"
+        distro.write_bytes(b"distro")
+        distro.with_name("ubuntu-distro.erofs.manifest.json").write_text(
+            json.dumps({"uuid": "12345678-1234-1234-1234-123456789abc"}),
+            encoding="utf-8",
+        )
+        scratch = root / "ubuntu-smoke-scratch.ext4"
+        scratch.write_bytes(b"scratch")
+        output_dir = root / "results"
+        commands: list[list[str]] = command_log if command_log is not None else []
+        options: list[dict[str, object]] = []
+        real_copyfile = shutil.copyfile
+
+        def artifact(name: str) -> Path:
+            return {
+                "ubuntu-distro.erofs": distro,
+                "ubuntu-smoke-scratch.ext4": scratch,
+            }[name]
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        def copyfile(source: Path | str, destination: Path | str) -> Path | str:
+            if (
+                evidence_failure
+                and Path(destination) == output_dir / "public-exec-openvmm.log"
+            ):
+                raise OSError("injected evidence failure")
+            return real_copyfile(source, destination)
+
+        def run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            commands.append(command)
+            options.append(kwargs)
+            operation = command[3]
+            state = Path(command[command.index("--state-dir") + 1])
+            if operation == "provision":
+                state.mkdir(parents=True, exist_ok=True)
+            if operation == "start":
+                state.mkdir(parents=True, exist_ok=True)
+                (state / "openvmm.log").write_text("bounded log\n", encoding="utf-8")
+                if start_returncode:
+                    return subprocess.CompletedProcess(
+                        command, start_returncode, b"", b"start failed"
+                    )
+            if operation == "stop":
+                return subprocess.CompletedProcess(
+                    command, stop_returncode, b"", b"stop failed"
+                )
+            if operation == "deprovision":
+                if stop_returncode:
+                    return subprocess.CompletedProcess(
+                        command,
+                        1,
+                        b"",
+                        b"sandbox must be stopped before deprovision",
+                    )
+                shutil.rmtree(state)
+            if operation != "exec":
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            cwd = command[command.index("--cwd") + 1] if "--cwd" in command else "/"
+            timeout_ms = (
+                command[command.index("--exec-timeout-ms") + 1]
+                if "--exec-timeout-ms" in command
+                else "0"
+            )
+            if not cwd.startswith("/"):
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    b"",
+                    b"managed exec working directory must be an absolute path\n",
+                )
+            if int(timeout_ms) < 0 or int(timeout_ms) > 0xFFFFFFFF:
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    b"",
+                    b"managed exec timeout must be 0 through 4294967295 ms\n",
+                )
+
+            entrypoint = command[command.index("--entrypoint") + 1]
+            stdout = b""
+            stderr = b""
+            returncode = 0
+            category = "exit"
+            if entrypoint == "/bin/pwd":
+                stdout = (
+                    b"x" * (managed_exec_tests.DIAGNOSTIC_LIMIT + 10)
+                    if bad_pwd_output
+                    else f"{cwd}\n".encode()
+                )
+            elif entrypoint == "/usr/bin/env":
+                if "--environment-file" in command:
+                    environment_file = Path(
+                        command[command.index("--environment-file") + 1]
+                    )
+                    entries = json.loads(environment_file.read_text(encoding="utf-8"))
+                    stdout = (
+                        b"" if not entries else ("\n".join(entries) + "\n").encode()
+                    )
+                elif "--environment" in command:
+                    entries = [
+                        command[index + 1]
+                        for index, value in enumerate(command)
+                        if value == "--environment"
+                    ]
+                    stdout = ("\n".join(entries) + "\n").encode()
+                else:
+                    stdout = default_environment
+            elif entrypoint == "/usr/bin/getent":
+                stdout = b"nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
+            elif entrypoint == "/bin/sleep":
+                returncode = 124
+                category = "timeout"
+            elif cwd in ("/does-not-exist", "/etc/passwd", "/root"):
+                returncode = 125
+                stderr = b"cannot use working directory\n"
+            elif entrypoint == "/bin/sh":
+                stdout = b"public stdout"
+                stderr = b"public stderr"
+                returncode = 7
+
+            if "--outcome-report" in command:
+                report = Path(command[command.index("--outcome-report") + 1])
+                payload: dict[str, object] = {
+                    "schema_version": 1,
+                    "operation_id": "1" * 32,
+                    "outcome": {
+                        "operation": "exec",
+                        "category": category,
+                        "status_code": True if malformed_outcome else returncode,
+                    },
+                }
+                if outcome_mutation == "extra-top-level":
+                    payload["extra"] = "unexpected"
+                elif outcome_mutation == "missing-top-level":
+                    del payload["operation_id"]
+                elif outcome_mutation == "extra-outcome":
+                    cast(dict[str, object], payload["outcome"])["extra"] = "unexpected"
+                elif outcome_mutation == "missing-outcome":
+                    del cast(dict[str, object], payload["outcome"])["category"]
+                elif outcome_mutation == "float-schema":
+                    payload["schema_version"] = 1.0
+                elif outcome_mutation == "float-status":
+                    cast(dict[str, object], payload["outcome"])["status_code"] = float(
+                        returncode
+                    )
+                report.write_text(
+                    json.dumps(payload),
+                    encoding="utf-8",
+                )
+            return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+        with (
+            patch.object(managed_exec_tests, "artifact_path", side_effect=artifact),
+            patch.object(managed_exec_tests, "require_file", side_effect=require),
+            patch.object(managed_exec_tests.subprocess, "run", side_effect=run),
+            patch.object(managed_exec_tests.shutil, "copyfile", side_effect=copyfile),
+        ):
+            managed_exec_tests.run_managed_exec_configuration(
+                "whp", timeout=2, output_dir=output_dir
+            )
+        return commands, options
+
+    def test_public_acceptance_observes_full_cli_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands, options = self._run_acceptance(root)
+            records = json.loads(
+                (root / "results" / "public-exec-checks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            exit_outcome = json.loads(
+                (root / "results" / "public-exec-exit-outcome.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            timeout_outcome = json.loads(
+                (root / "results" / "public-exec-timeout-outcome.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        exec_commands = [command for command in commands if command[3] == "exec"]
+        self.assertTrue(
+            all(
+                command[:3]
+                == [
+                    sys.executable,
+                    str(BuildConstants.REPO_ROOT / "scripts" / "nvx.py"),
+                    "sandbox",
+                ]
+                for command in commands
+            )
+        )
+        self.assertTrue(
+            all(
+                option
+                == {
+                    "cwd": BuildConstants.REPO_ROOT,
+                    "capture_output": True,
+                    "timeout": 12,
+                }
+                for option in options
+            )
+        )
+        state_directories = {
+            command[command.index("--state-dir") + 1] for command in commands
+        }
+        self.assertEqual(len(state_directories), 1)
+        self.assertTrue(
+            any(
+                "--cwd" in command and command[command.index("--cwd") + 1] == "relative"
+                for command in exec_commands
+            )
+        )
+        for value in ("-1", str(0x100000000)):
+            self.assertTrue(
+                any(
+                    "--exec-timeout-ms" in command
+                    and command[command.index("--exec-timeout-ms") + 1] == value
+                    for command in exec_commands
+                )
+            )
+        self.assertTrue(any("--outcome-report" in command for command in exec_commands))
+        self.assertEqual(
+            [record["operation"] for record in records[:2]], ["provision", "start"]
+        )
+        self.assertEqual(records[-1]["operation"], "deprovision")
+        self.assertTrue(all(record["state_exists"] for record in records[:-1]))
+        self.assertFalse(records[-1]["state_exists"])
+        self.assertTrue(all(isinstance(record.get("argv"), list) for record in records))
+        recorded_argv = [value for record in records for value in record["argv"]]
+        self.assertIn("<redacted>", recorded_argv)
+        self.assertNotIn("SECOND=inline value", recorded_argv)
+        self.assertEqual(exit_outcome["outcome"]["category"], "exit")
+        self.assertEqual(exit_outcome["outcome"]["status_code"], 7)
+        self.assertEqual(timeout_outcome["outcome"]["category"], "timeout")
+        self.assertEqual(timeout_outcome["outcome"]["status_code"], 124)
+        fixture_root = Path(state_directories.pop()).parent
+        self.assertFalse(fixture_root.exists())
+
+    def test_public_acceptance_preserves_test_and_cleanup_failures(self):
+        commands: list[list[str]] = []
+        fixture_root: Path | None = None
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "unexpected output.*cleanup.*stop failed",
+                ) as raised:
+                    self._run_acceptance(
+                        Path(temporary),
+                        bad_pwd_output=True,
+                        stop_returncode=9,
+                        command_log=commands,
+                    )
+            fixture_root = Path(
+                commands[0][commands[0].index("--state-dir") + 1]
+            ).parent
+            self.assertIn("10 bytes omitted", str(raised.exception))
+            self.assertLess(
+                len(str(raised.exception)), managed_exec_tests.DIAGNOSTIC_LIMIT + 512
+            )
+        finally:
+            if fixture_root is None and commands:
+                fixture_root = Path(
+                    commands[0][commands[0].index("--state-dir") + 1]
+                ).parent
+            if fixture_root is not None and fixture_root.exists():
+                shutil.rmtree(fixture_root)
+
+    def test_public_acceptance_rejects_malformed_outcome_packet(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError, "outcome has unexpected typed fields"
+            ):
+                self._run_acceptance(Path(temporary), malformed_outcome=True)
+
+    def test_public_acceptance_rejects_outcome_shape_mutations(self):
+        for mutation in (
+            "extra-top-level",
+            "missing-top-level",
+            "extra-outcome",
+            "missing-outcome",
+            "float-schema",
+            "float-status",
+        ):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "outcome has unexpected typed fields"
+                ):
+                    self._run_acceptance(Path(temporary), outcome_mutation=mutation)
+
+    def test_public_acceptance_rejects_default_environment_mutations(self):
+        valid = {
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "TERM": "linux",
+            "HOME": "/nonexistent",
+            "USER": "nobody",
+            "LOGNAME": "nobody",
+            "SHLVL": "1",
+            "nvx_workload_uid": "65534",
+        }
+        required_names = ("PATH", "TERM", "HOME", "USER", "LOGNAME")
+        mutations = [
+            *[
+                (f"wrong-{name}", {**valid, name: f"wrong-{value}"})
+                for name, value in valid.items()
+                if name in required_names
+            ],
+            *[
+                (
+                    f"missing-{missing}",
+                    {name: value for name, value in valid.items() if name != missing},
+                )
+                for missing in required_names
+            ],
+            *[
+                (f"leaked-{name}", {**valid, name: "leaked"})
+                for name in (
+                    "EMPTY",
+                    "COMPLEX",
+                    "SECOND",
+                    "ORDER",
+                    "NVX_EXEC_CONFIG_FD",
+                )
+            ],
+        ]
+        for mutation, environment in mutations:
+            output = "".join(
+                f"{name}={value}\n" for name, value in environment.items()
+            ).encode()
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "did not match workload defaults"
+                ):
+                    self._run_acceptance(Path(temporary), default_environment=output)
+
+    def test_public_acceptance_allows_unrelated_bootstrap_environment(self):
+        environment = (
+            b"PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+            b"TERM=linux\nHOME=/nonexistent\nUSER=nobody\nLOGNAME=nobody\n"
+            b"SHLVL=1\nnvx_layer=distro\nnvx_workload_uid=65534\n"
+            b"nvx_workload_gid=65534\nnvx_hostname=nvx\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            self._run_acceptance(Path(temporary), default_environment=environment)
+
+    def test_evidence_failure_still_deprovisions_stopped_sandbox(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands: list[list[str]] = []
+            with self.assertRaisesRegex(RuntimeError, "injected evidence failure"):
+                self._run_acceptance(
+                    root,
+                    evidence_failure=True,
+                    command_log=commands,
+                )
+            records = json.loads(
+                (root / "results" / "public-exec-checks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertIn("deprovision", [command[3] for command in commands])
+        self.assertEqual(records[-1]["operation"], "deprovision")
+        fixture_root = Path(commands[0][commands[0].index("--state-dir") + 1]).parent
+        self.assertFalse(fixture_root.exists())
+
+    def test_failed_start_deprovisions_safely_stopped_sandbox(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            commands: list[list[str]] = []
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
+                self._run_acceptance(
+                    Path(temporary),
+                    start_returncode=9,
+                    command_log=commands,
+                )
+
+        self.assertIn("deprovision", [command[3] for command in commands])
+        fixture_root = Path(commands[0][commands[0].index("--state-dir") + 1]).parent
+        self.assertFalse(fixture_root.exists())
+
+    def test_failed_stop_attempts_guarded_deprovision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            commands: list[list[str]] = []
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "stop failed.*sandbox must be stopped before deprovision.*"
+                "managed fixture preserved for recovery",
+            ) as raised:
+                self._run_acceptance(
+                    Path(temporary),
+                    stop_returncode=9,
+                    command_log=commands,
+                )
+
+        self.assertIn("deprovision", [command[3] for command in commands])
+        fixture_root = Path(commands[0][commands[0].index("--state-dir") + 1]).parent
+        self.assertIn(str(fixture_root), str(raised.exception))
+        self.assertTrue((fixture_root / "state" / "openvmm.log").is_file())
+        self.assertTrue((fixture_root / "scratch.ext4").is_file())
+        shutil.rmtree(fixture_root)
+        self.assertFalse(fixture_root.exists())
 
 
 class GuestIdentityScriptTests(unittest.TestCase):
@@ -2972,6 +3408,48 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(
             [entry.kwargs["force_lapic_timer"] for entry in run_smp.call_args_list],
             [False, False, True, True],
+        )
+
+    def test_runner_dispatches_public_managed_exec_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--scenario",
+                    "managed-exec-config",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_managed_exec_configuration") as run,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            run.assert_called_once_with(
+                "whp", timeout=args.timeout, output_dir=output_dir
+            )
+
+    def test_managed_container_launch_prepares_identity_and_static_helper(self):
+        root = Path(__file__).resolve().parent.parent
+        bootstrap = (root / "guest" / "common" / "nvx-init-agent").read_text()
+        launcher = (root / "guest" / "alpine" / "nvx-container-enter").read_text()
+        self.assertLess(
+            bootstrap.index('>"$runtime/workload-machine-id"'),
+            bootstrap.index("    /sbin/nvx-managed-agent \\"),
+        )
+        self.assertIn(
+            "set -- /.nvx-agent/nvx-managed-agent \\\n"
+            '        --exec-config-fd "$NVX_EXEC_CONFIG_FD" -- "$@"',
+            launcher,
         )
 
     def test_runner_uses_ubuntu_artifact_and_default_memory(self):

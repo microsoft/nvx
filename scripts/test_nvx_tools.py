@@ -791,6 +791,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(execute.sandbox_arg, ["-c", "echo managed"])
         self.assertEqual(execute.exec_timeout_ms, 5000)
 
+        configured = nvx.parse_args(
+            [
+                "sandbox",
+                "exec",
+                "--state-dir",
+                "state",
+                "--cwd",
+                "/work tree",
+                "--environment",
+                "EMPTY=",
+                "--environment",
+                "VALUE=space = value",
+            ]
+        )
+        self.assertEqual(configured.cwd, "/work tree")
+        self.assertEqual(
+            configured.environment,
+            ["EMPTY=", "VALUE=space = value"],
+        )
+
         report = nvx.parse_args(
             [
                 "sandbox",
@@ -802,6 +822,146 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(report.outcome_report, Path("exec-outcome.json"))
+
+    def test_sandbox_exec_forwards_explicit_empty_environment_and_cwd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment_file = Path(temporary) / "environment.json"
+            environment_file.write_text("[]", encoding="utf-8")
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "exec",
+                    "--state-dir",
+                    "state",
+                    "--cwd",
+                    "/work",
+                    "--environment-file",
+                    str(environment_file),
+                ]
+            )
+            result = sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b"")
+            with (
+                patch.object(
+                    sandbox_lifecycle,
+                    "exec_workload",
+                    return_value=result,
+                ) as execute,
+                self.assertRaises(SystemExit) as exit_context,
+            ):
+                nvx.command_sandbox(args)
+
+        self.assertEqual(exit_context.exception.code, 0)
+        execute.assert_called_once_with(
+            Path("state"),
+            ("/bin/sh",),
+            timeout_ms=0,
+            response_timeout=60.0,
+            cwd="/work",
+            environment=(),
+        )
+
+    def test_sandbox_exec_rejects_ambiguous_or_one_shot_environment(self):
+        both = nvx.parse_args(
+            [
+                "sandbox",
+                "exec",
+                "--state-dir",
+                "state",
+                "--environment",
+                "A=1",
+                "--environment-file",
+                "environment.json",
+            ]
+        )
+        with self.assertRaisesRegex(common.ScriptError, "mutually exclusive"):
+            nvx.command_sandbox(both)
+
+        one_shot = nvx.parse_args(["sandbox", "run", "--environment", "A=1"])
+        with self.assertRaisesRegex(common.ScriptError, "require.*exec"):
+            nvx.command_sandbox(one_shot)
+
+    def test_sandbox_environment_file_is_bounded_before_state_access(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "environment.json"
+            path.write_bytes(b" " * (1024 * 1024 + 1))
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "exec",
+                    "--state-dir",
+                    "absent-state",
+                    "--environment-file",
+                    str(path),
+                ]
+            )
+            with (
+                patch.object(sandbox_lifecycle, "exec_workload") as execute,
+                self.assertRaisesRegex(common.ScriptError, "exceeds.*byte limit"),
+            ):
+                nvx.command_sandbox(args)
+            execute.assert_not_called()
+
+    def test_sandbox_environment_is_validated_before_state_access(self):
+        too_many = [
+            value
+            for index in range(257)
+            for value in ("--environment", f"KEY{index}=value")
+        ]
+        cases = (
+            (too_many, "exceeds 256 entries"),
+            (["--environment", "NO_EQUALS"], "non-empty KEY=VALUE"),
+            (["--environment", "=empty-key"], "non-empty KEY=VALUE"),
+            (["--environment", "KEY=embedded\0nul"], "non-empty KEY=VALUE"),
+            (
+                ["--environment", "KEY=" + "\N{SNOWMAN}" * 1365],
+                "at most 4096 bytes",
+            ),
+            (
+                ["--environment", "DUPLICATE=one", "--environment", "DUPLICATE=two"],
+                "duplicate key",
+            ),
+        )
+        for environment_args, message in cases:
+            with self.subTest(message=message):
+                args = nvx.parse_args(
+                    [
+                        "sandbox",
+                        "exec",
+                        "--state-dir",
+                        "absent-state",
+                        *environment_args,
+                    ]
+                )
+                with (
+                    patch.object(sandbox_lifecycle, "exec_workload") as execute,
+                    self.assertRaisesRegex(common.ScriptError, message),
+                ):
+                    nvx.command_sandbox(args)
+                execute.assert_not_called()
+
+    def test_sandbox_environment_file_entries_are_validated_before_state_access(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "environment.json"
+            path.write_text(
+                json.dumps(["DUPLICATE=one", "DUPLICATE=two"]),
+                encoding="utf-8",
+            )
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "exec",
+                    "--state-dir",
+                    "absent-state",
+                    "--environment-file",
+                    str(path),
+                ]
+            )
+            with (
+                patch.object(sandbox_lifecycle, "exec_workload") as execute,
+                self.assertRaisesRegex(common.ScriptError, "duplicate key"),
+            ):
+                nvx.command_sandbox(args)
+            execute.assert_not_called()
 
     def test_network_requires_explicit_portable_profile(self):
         args = nvx.parse_args(
@@ -5860,9 +6020,12 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "retry") == 0) {{
         struct control_session session = {{.fd = STDOUT_FILENO}};
         struct agent_config config = {{.direct = 1}};
+        struct exec_config exec_config = {{0}};
         char *command[] = {{"/bin/true", NULL}};
-        result = run_exec(&session, &config, 42, 0, command);
-        return result == 0 ? run_exec(&session, &config, 43, 0, command) : result;
+        result = run_exec(&session, &config, 42, 0, command, &exec_config);
+        return result == 0
+                   ? run_exec(&session, &config, 43, 0, command, &exec_config)
+                   : result;
     }}
     if (strcmp(argv[1], "population") == 0) {{
         result = exec_cgroup_populated();

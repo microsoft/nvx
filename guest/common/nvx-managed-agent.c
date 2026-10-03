@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -56,9 +57,13 @@
 
 #define MAX_ARGUMENTS 64U
 #define MAX_ARGUMENT_LEN 4096U
+#define MAX_ENVIRONMENT 256U
+#define EXEC_EXTENDED 1U
+#define EXEC_CWD_PRESENT 1U
+#define EXEC_ENVIRONMENT_PRESENT 2U
 #define MAX_OUTPUT_BYTES (1024U * 1024U)
 #define OUTPUT_CHUNK_BYTES 32768U
-#define MAX_TIMEOUT_MS (60U * 60U * 1000U)
+#define CONTAINER_BARRIER_ATTEMPTS 500U
 #define PORTB_CONSOLE 0xe9
 #define AGENT_STOPPED 1
 #ifndef CGROUP_ROOT
@@ -104,6 +109,13 @@ struct agent_config {
     const char *user;
     const char *home;
     int direct;
+};
+
+struct exec_config {
+    char *cwd;
+    char **environment;
+    uint16_t environment_count;
+    int environment_present;
 };
 
 static uint16_t read_u16(const uint8_t *bytes)
@@ -718,17 +730,71 @@ static int write_pid_to_cgroup(pid_t pid)
     return close(fd);
 }
 
-static int release_container_barrier(const char *path)
+static int write_container_barrier(int fd)
 {
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    struct sigaction ignored = {0};
+    struct sigaction previous;
     int result;
+    int status;
 
-    if (fd < 0) {
+    ignored.sa_handler = SIG_IGN;
+    if (sigemptyset(&ignored.sa_mask) != 0 ||
+        sigaction(SIGPIPE, &ignored, &previous) != 0) {
         return -1;
     }
     result = write_all(fd, "start\n", 6);
-    close(fd);
+    status = errno;
+    if (sigaction(SIGPIPE, &previous, NULL) != 0) {
+        return -1;
+    }
+    if (result != 0) {
+        errno = status;
+    }
     return result;
+}
+
+/* Returns 0 after writing, 1 for an unreaped child exit, or -1 on failure. */
+static int release_container_barrier(const char *path, pid_t child)
+{
+    unsigned int attempt;
+
+    for (attempt = 0; attempt < CONTAINER_BARRIER_ATTEMPTS; ++attempt) {
+        int fd = open(path, O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+
+        if (fd >= 0) {
+            int result = write_container_barrier(fd);
+
+            close(fd);
+            return result;
+        }
+        if (errno != ENXIO && errno != EINTR) {
+            return -1;
+        }
+        if (child > 0) {
+            siginfo_t information = {0};
+
+            if (waitid(
+                    P_PID,
+                    (id_t)child,
+                    &information,
+                    WEXITED | WNOHANG | WNOWAIT) != 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -1;
+            }
+            if (information.si_pid == child) {
+                return 1;
+            }
+        }
+        {
+            const struct timespec delay = {.tv_nsec = 10000000L};
+
+            nanosleep(&delay, NULL);
+        }
+    }
+    errno = ETIMEDOUT;
+    return -1;
 }
 
 /*
@@ -926,18 +992,25 @@ static void terminate_workload(const struct agent_config *config, pid_t child)
 
 static void exec_direct(
     const struct agent_config *config,
+    const char *config_fd,
     char *const workload_argv[])
 {
-    char *arguments[MAX_ARGUMENTS + 16];
+    char *arguments[MAX_ARGUMENTS + 20];
     size_t index = 0;
     size_t workload_index = 0;
 
     if (join_exec_cgroup() != 0) {
         _exit(125);
     }
-    setenv("HOME", config->home, 1);
-    setenv("USER", config->user, 1);
-    setenv("LOGNAME", config->user, 1);
+    if (setenv("HOME", config->home, 1) != 0 ||
+        setenv("USER", config->user, 1) != 0 ||
+        setenv("LOGNAME", config->user, 1) != 0) {
+        dprintf(
+            STDERR_FILENO,
+            "nvx-managed-agent: cannot configure workload environment: %s\n",
+            strerror(errno));
+        _exit(125);
+    }
     arguments[index++] = "setpriv";
     arguments[index++] = "--reuid";
     arguments[index++] = (char *)config->uid;
@@ -948,7 +1021,11 @@ static void exec_direct(
     arguments[index++] = "--bounding-set=-all";
     arguments[index++] = "--inh-caps=-all";
     arguments[index++] = "--ambient-caps=-all";
-    while (workload_argv[workload_index] != NULL && index + 1 < MAX_ARGUMENTS + 16) {
+    arguments[index++] = "/sbin/nvx-managed-agent";
+    arguments[index++] = "--exec-config-fd";
+    arguments[index++] = (char *)config_fd;
+    arguments[index++] = "--";
+    while (workload_argv[workload_index] != NULL && index + 1 < MAX_ARGUMENTS + 20) {
         arguments[index++] = workload_argv[workload_index++];
     }
     arguments[index] = NULL;
@@ -959,6 +1036,7 @@ static void exec_direct(
 static void exec_sandbox(
     const struct agent_config *config,
     const char *barrier,
+    const char *config_fd,
     char *const workload_argv[])
 {
     char *arguments[MAX_ARGUMENTS + 10];
@@ -973,6 +1051,13 @@ static void exec_sandbox(
     arguments[index++] = (char *)config->gid;
     arguments[index++] = (char *)config->user;
     arguments[index++] = (char *)config->home;
+    if (setenv("NVX_EXEC_CONFIG_FD", config_fd, 1) != 0) {
+        dprintf(
+            STDERR_FILENO,
+            "nvx-managed-agent: cannot export execution configuration: %s\n",
+            strerror(errno));
+        _exit(125);
+    }
     while (workload_argv[workload_index] != NULL && index + 1 < MAX_ARGUMENTS + 10) {
         arguments[index++] = workload_argv[workload_index++];
     }
@@ -985,20 +1070,46 @@ static int decode_exec_payload(
     const uint8_t *payload,
     uint32_t payload_len,
     uint32_t *timeout_ms,
-    char ***workload_argv)
+    char ***workload_argv,
+    struct exec_config *config)
 {
     uint16_t argc;
+    uint16_t extension;
+    uint16_t flags = 0;
+    uint16_t environment_count = 0;
+    uint32_t cwd_len = 0;
     uint32_t offset = 8;
     char **arguments;
     uint16_t index;
 
+    memset(config, 0, sizeof(*config));
     if (payload_len < 8) {
         return -1;
     }
     *timeout_ms = read_u32(payload);
     argc = read_u16(payload + 4);
-    if (read_u16(payload + 6) != 0 || argc == 0 || argc > MAX_ARGUMENTS ||
-        *timeout_ms > MAX_TIMEOUT_MS) {
+    extension = read_u16(payload + 6);
+    if (argc == 0 || argc > MAX_ARGUMENTS) {
+        return -1;
+    }
+    if (extension == EXEC_EXTENDED) {
+        if (payload_len < 16) {
+            return -1;
+        }
+        flags = read_u16(payload + 8);
+        environment_count = read_u16(payload + 10);
+        cwd_len = read_u32(payload + 12);
+        offset = 16;
+        if ((flags & ~(EXEC_CWD_PRESENT | EXEC_ENVIRONMENT_PRESENT)) != 0 ||
+            ((flags & EXEC_CWD_PRESENT) == 0 && cwd_len != 0) ||
+            ((flags & EXEC_CWD_PRESENT) != 0 &&
+             (cwd_len == 0 || cwd_len > MAX_ARGUMENT_LEN)) ||
+            ((flags & EXEC_ENVIRONMENT_PRESENT) == 0 &&
+             environment_count != 0) ||
+            environment_count > MAX_ENVIRONMENT) {
+            return -1;
+        }
+    } else if (extension != 0) {
         return -1;
     }
     arguments = calloc((size_t)argc + 1, sizeof(*arguments));
@@ -1025,8 +1136,71 @@ static int decode_exec_payload(
         arguments[index][length] = '\0';
         offset += length;
     }
-    if (offset != payload_len || arguments[0][0] != '/') {
+    if (arguments[0][0] != '/' ||
+        (extension == 0 && offset != payload_len)) {
         goto fail;
+    }
+    if (extension == EXEC_EXTENDED) {
+        if (cwd_len != 0) {
+            if (cwd_len > payload_len - offset ||
+                memchr(payload + offset, '\0', cwd_len) != NULL ||
+                payload[offset] != '/') {
+                goto fail;
+            }
+            config->cwd = malloc((size_t)cwd_len + 1);
+            if (config->cwd == NULL) {
+                goto fail;
+            }
+            memcpy(config->cwd, payload + offset, cwd_len);
+            config->cwd[cwd_len] = '\0';
+            offset += cwd_len;
+        }
+        if ((flags & EXEC_ENVIRONMENT_PRESENT) != 0) {
+            config->environment = calloc(
+                (size_t)environment_count + 1, sizeof(*config->environment));
+            if (config->environment == NULL) {
+                goto fail;
+            }
+            config->environment_present = 1;
+            config->environment_count = environment_count;
+            for (index = 0; index < environment_count; ++index) {
+                uint32_t length;
+                const uint8_t *equals;
+
+                if (offset > payload_len || payload_len - offset < 4) {
+                    goto fail;
+                }
+                length = read_u32(payload + offset);
+                offset += 4;
+                if (length == 0 || length > MAX_ARGUMENT_LEN ||
+                    length > payload_len - offset ||
+                    memchr(payload + offset, '\0', length) != NULL) {
+                    goto fail;
+                }
+                equals = memchr(payload + offset, '=', length);
+                if (equals == NULL || equals == payload + offset) {
+                    goto fail;
+                }
+                for (uint16_t previous = 0; previous < index; ++previous) {
+                    size_t name_length = (size_t)(equals - (payload + offset));
+                    const char *prior = config->environment[previous];
+                    if (strcspn(prior, "=") == name_length &&
+                        memcmp(prior, payload + offset, name_length) == 0) {
+                        goto fail;
+                    }
+                }
+                config->environment[index] = malloc((size_t)length + 1);
+                if (config->environment[index] == NULL) {
+                    goto fail;
+                }
+                memcpy(config->environment[index], payload + offset, length);
+                config->environment[index][length] = '\0';
+                offset += length;
+            }
+        }
+        if (offset != payload_len) {
+            goto fail;
+        }
     }
     *workload_argv = arguments;
     return 0;
@@ -1036,6 +1210,15 @@ fail:
         free(arguments[index]);
     }
     free(arguments);
+    free(config->cwd);
+    config->cwd = NULL;
+    if (config->environment != NULL) {
+        for (index = 0; index < config->environment_count; ++index) {
+            free(config->environment[index]);
+        }
+        free(config->environment);
+        config->environment = NULL;
+    }
     return -1;
 }
 
@@ -1050,6 +1233,184 @@ static void free_arguments(char **arguments)
         free(arguments[index]);
     }
     free(arguments);
+}
+
+static void free_exec_config(struct exec_config *config)
+{
+    uint16_t index;
+
+    free(config->cwd);
+    for (index = 0; index < config->environment_count; ++index) {
+        free(config->environment[index]);
+    }
+    free(config->environment);
+    memset(config, 0, sizeof(*config));
+}
+
+static int write_exec_config(int fd, const struct exec_config *config)
+{
+    uint8_t header[8];
+    uint16_t flags = 0;
+    uint16_t index;
+
+    if (config->cwd != NULL) {
+        flags |= EXEC_CWD_PRESENT;
+    }
+    if (config->environment_present) {
+        flags |= EXEC_ENVIRONMENT_PRESENT;
+    }
+    write_u16(header, flags);
+    write_u16(header + 2, config->environment_count);
+    write_u32(header + 4, config->cwd == NULL ? 0 : (uint32_t)strlen(config->cwd));
+    if (write_all(fd, header, sizeof(header)) != 0 ||
+        (config->cwd != NULL &&
+         write_all(fd, config->cwd, strlen(config->cwd)) != 0)) {
+        return -1;
+    }
+    for (index = 0; index < config->environment_count; ++index) {
+        uint32_t length = (uint32_t)strlen(config->environment[index]);
+        uint8_t encoded_length[4];
+
+        write_u32(encoded_length, length);
+        if (write_all(fd, encoded_length, sizeof(encoded_length)) != 0 ||
+            write_all(fd, config->environment[index], length) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int create_exec_config_fd(const struct exec_config *config)
+{
+    int fd = memfd_create("nvx-exec-config", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+
+    if (fd < 0) {
+        return -1;
+    }
+    /* A sealed, bounded anonymous file avoids depending on pipe capacity. */
+    if (write_exec_config(fd, config) != 0 ||
+        lseek(fd, 0, SEEK_SET) < 0 ||
+        fcntl(fd, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int launch_workload(int argc, char **argv)
+{
+    char *end = NULL;
+    long descriptor;
+    uint8_t header[8];
+    uint16_t flags;
+    uint16_t environment_count;
+    uint32_t cwd_len;
+    char *cwd = NULL;
+    char **environment = NULL;
+    uint16_t index;
+
+    if (argc < 5 || strcmp(argv[1], "--exec-config-fd") != 0 ||
+        strcmp(argv[3], "--") != 0 || argv[4][0] != '/') {
+        return 125;
+    }
+    errno = 0;
+    descriptor = strtol(argv[2], &end, 10);
+    if (errno != 0 || end == argv[2] || *end != '\0' ||
+        descriptor < 0 || descriptor > INT32_MAX ||
+        read_exact((int)descriptor, header, sizeof(header)) != 0) {
+        return 125;
+    }
+    flags = read_u16(header);
+    environment_count = read_u16(header + 2);
+    cwd_len = read_u32(header + 4);
+    if ((flags & ~(EXEC_CWD_PRESENT | EXEC_ENVIRONMENT_PRESENT)) != 0 ||
+        environment_count > MAX_ENVIRONMENT ||
+        ((flags & EXEC_CWD_PRESENT) == 0 && cwd_len != 0) ||
+        ((flags & EXEC_CWD_PRESENT) != 0 &&
+         (cwd_len == 0 || cwd_len > MAX_ARGUMENT_LEN)) ||
+        ((flags & EXEC_ENVIRONMENT_PRESENT) == 0 &&
+         environment_count != 0)) {
+        return 125;
+    }
+    if (cwd_len != 0) {
+        cwd = malloc((size_t)cwd_len + 1);
+        if (cwd == NULL || read_exact((int)descriptor, cwd, cwd_len) != 0) {
+            free(cwd);
+            return 125;
+        }
+        cwd[cwd_len] = '\0';
+    }
+    environment = calloc(
+        (size_t)environment_count + 1, sizeof(*environment));
+    if (environment == NULL) {
+        free(cwd);
+        return 125;
+    }
+    for (index = 0; index < environment_count; ++index) {
+        uint8_t encoded_length[4];
+        uint32_t length;
+
+        if (read_exact((int)descriptor, encoded_length, 4) != 0) {
+            goto fail;
+        }
+        length = read_u32(encoded_length);
+        if (length == 0 || length > MAX_ARGUMENT_LEN) {
+            goto fail;
+        }
+        environment[index] = malloc((size_t)length + 1);
+        if (environment[index] == NULL ||
+            read_exact((int)descriptor, environment[index], length) != 0) {
+            goto fail;
+        }
+        if (memchr(environment[index], '\0', length) != NULL ||
+            environment[index][0] == '=' ||
+            memchr(environment[index], '=', length) == NULL) {
+            goto fail;
+        }
+        environment[index][length] = '\0';
+    }
+    close((int)descriptor);
+    if (cwd != NULL &&
+        (cwd[0] != '/' || memchr(cwd, '\0', cwd_len) != NULL)) {
+        dprintf(STDERR_FILENO, "nvx-managed-agent: invalid working directory\n");
+        goto fail;
+    }
+    if (unsetenv("NVX_EXEC_CONFIG_FD") != 0) {
+        goto fail;
+    }
+    if ((flags & EXEC_ENVIRONMENT_PRESENT) != 0) {
+        if (clearenv() != 0) {
+            goto fail;
+        }
+        for (index = 0; index < environment_count; ++index) {
+            if (putenv(environment[index]) != 0) {
+                goto fail;
+            }
+            environment[index] = NULL;
+        }
+    }
+    if (chdir(cwd == NULL ? "/" : cwd) != 0) {
+        dprintf(
+            STDERR_FILENO,
+            "nvx-managed-agent: cannot use working directory %s: %s\n",
+            cwd == NULL ? "/" : cwd,
+            strerror(errno));
+        goto fail;
+    }
+    execv(argv[4], &argv[4]);
+    dprintf(
+        STDERR_FILENO,
+        "nvx-managed-agent: cannot execute workload: %s\n",
+        strerror(errno));
+
+fail:
+    free(cwd);
+    for (index = 0; index < environment_count; ++index) {
+        free(environment[index]);
+    }
+    free(environment);
+    return 125;
 }
 
 static int stream_output(
@@ -1174,11 +1535,13 @@ static int run_exec(
     const struct agent_config *config,
     uint64_t request_id,
     uint32_t timeout_ms,
-    char **workload_argv)
+    char **workload_argv,
+    const struct exec_config *exec_config)
 {
     const char *barrier = "/run/nvx/managed-container-start";
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
+    int exec_config_fd = -1;
     pid_t child;
     uint64_t started;
     size_t output_bytes = 0;
@@ -1191,6 +1554,7 @@ static int run_exec(
     int stragglers_killed = 0;
     int wait_status = 0;
     int child_exited = 0;
+    int launch_failed = 0;
 
     if (config->direct && prepare_exec_cgroup() != 0) {
         portb_error("exec-cgroup", errno);
@@ -1210,11 +1574,20 @@ static int run_exec(
             return send_app_error(session, request_id, 125, "launch-failed");
         }
     }
-    if (pipe2(stdout_pipe, O_CLOEXEC) != 0 || pipe2(stderr_pipe, O_CLOEXEC) != 0) {
+    if (pipe2(stdout_pipe, O_CLOEXEC) != 0 ||
+        pipe2(stderr_pipe, O_CLOEXEC) != 0 ||
+        (exec_config_fd = create_exec_config_fd(exec_config)) < 0) {
         unlink(barrier);
         if (stdout_pipe[0] >= 0) {
             close(stdout_pipe[0]);
             close(stdout_pipe[1]);
+        }
+        if (stderr_pipe[0] >= 0) {
+            close(stderr_pipe[0]);
+            close(stderr_pipe[1]);
+        }
+        if (exec_config_fd >= 0) {
+            close(exec_config_fd);
         }
         return send_app_error(session, request_id, 125, "launch-failed");
     }
@@ -1225,13 +1598,20 @@ static int run_exec(
         close(stdout_pipe[1]);
         close(stderr_pipe[0]);
         close(stderr_pipe[1]);
+        close(exec_config_fd);
         unlink(barrier);
         return send_app_error(session, request_id, 125, "launch-failed");
     }
     if (child == 0) {
         int null_fd;
+        char config_fd[32];
 
         setpgid(0, 0);
+        if (fcntl(exec_config_fd, F_SETFD, 0) != 0 ||
+            snprintf(
+                config_fd, sizeof(config_fd), "%d", exec_config_fd) <= 0) {
+            _exit(125);
+        }
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
         null_fd = open("/dev/null", O_RDONLY);
@@ -1244,19 +1624,28 @@ static int run_exec(
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
         if (config->direct) {
-            exec_direct(config, workload_argv);
+            exec_direct(config, config_fd, workload_argv);
         }
-        exec_sandbox(config, barrier, workload_argv);
+        exec_sandbox(config, barrier, config_fd, workload_argv);
     }
 
     setpgid(child, child);
+    close(exec_config_fd);
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
-    if (make_nonblocking(stdout_pipe[0]) != 0 ||
-        make_nonblocking(stderr_pipe[0]) != 0 ||
-        (!config->direct &&
-         (write_pid_to_cgroup(child) != 0 ||
-          release_container_barrier(barrier) != 0))) {
+    launch_failed = make_nonblocking(stdout_pipe[0]) != 0 ||
+                    make_nonblocking(stderr_pipe[0]) != 0;
+    if (!launch_failed && !config->direct) {
+        int barrier_result;
+
+        if (write_pid_to_cgroup(child) != 0) {
+            launch_failed = 1;
+        } else {
+            barrier_result = release_container_barrier(barrier, child);
+            launch_failed = barrier_result < 0;
+        }
+    }
+    if (launch_failed) {
         terminate_workload(config, child);
         waitpid(child, NULL, 0);
         close(stdout_pipe[0]);
@@ -1423,6 +1812,7 @@ static int handle_data_record(
     struct app_request request;
     char **workload_argv = NULL;
     uint8_t features[4];
+    struct exec_config exec_config = {0};
     uint32_t timeout_ms = 0;
     int result;
 
@@ -1463,13 +1853,20 @@ static int handle_data_record(
                 request.payload,
                 request.payload_len,
                 &timeout_ms,
-                &workload_argv) != 0) {
+                &workload_argv,
+                &exec_config) != 0) {
             return send_app_error(
                 session, request.request_id, 22, "invalid-request");
         }
         result = run_exec(
-            session, config, request.request_id, timeout_ms, workload_argv);
+            session,
+            config,
+            request.request_id,
+            timeout_ms,
+            workload_argv,
+            &exec_config);
         free_arguments(workload_argv);
+        free_exec_config(&exec_config);
         return result;
     case APP_CANCEL:
         /* The targeted workload already finished and reported its outcome. */
@@ -1564,6 +1961,9 @@ int main(int argc, char **argv)
     struct agent_config config;
     int result;
 
+    if (argc >= 2 && strcmp(argv[1], "--exec-config-fd") == 0) {
+        return launch_workload(argc, argv);
+    }
     if (argc != 8) {
         return 125;
     }
