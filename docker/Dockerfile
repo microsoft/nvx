@@ -65,8 +65,11 @@ RUN set -eux; \
     for helper in nvx-reseed nvx-mmio-write nvx-port-io nvx-console-pending nvx-managed-agent; do \
         cc -static -Os -s -Wall -Wextra -Werror -o "/out/helpers/$helper" "/repo/guest/common/$helper.c"; \
     done; \
-    musl-gcc -static -Os -s -Wall -Wextra -Werror -o /out/helpers/nvx-exit \
-        /repo/guest/common/nvx-exit.c; \
+    for helper in nvx-time nvx-exit; do \
+        musl-gcc -static -Os -s -Wall -Wextra -Werror -o "/out/helpers/$helper" "/repo/guest/common/$helper.c"; \
+    done; \
+    musl-gcc -std=gnu11 -static -O2 -pthread -s -Wall -Wextra -Werror -o /out/helpers/nvx-time-probe \
+        /repo/guest/common/nvx-time-probe.c; \
     cc -nostdlib -static -Os -fno-builtin -fno-pie -fno-stack-protector -no-pie \
         -Wl,--build-id=none -Wl,-z,noexecstack -s -o /out/helpers/nvx-device-io \
         /repo/guest/common/nvx-device-io.c
