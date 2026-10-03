@@ -34,7 +34,8 @@ nvx/
 |   |-- skills/                  Copilot development workflow skills
 |   |-- specula/                 Incremental formal verification integration
 |   |-- workflows/adversarial.yml Trusted scheduled/manual adversarial campaigns
-|   `-- workflows/ci.yml         Main build, test, and benchmark workflow
+|   |-- workflows/ci.yml         Main build, test, and benchmark workflow
+|   `-- workflows/copilot-setup-steps.yml Copilot cloud agent environment
 |-- guest/                       Guest-owned scripts and static helpers
 |   |-- common/                  Shared init, lifecycle, console, and test helpers
 |   |-- alpine/                  Alpine-control container entry helpers

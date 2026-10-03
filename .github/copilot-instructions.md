@@ -40,6 +40,37 @@
   `nvx-debug`, or `nvx-benchmark`. Never expose `.nvx-hosts.json` or authentication
   material.
 
+## Copilot Cloud Agent Sessions
+
+- Sessions started from GitHub, such as from an issue, a pull request, or the
+  agents panel, run on a GitHub-hosted Ubuntu runner that
+  [copilot-setup-steps](./workflows/copilot-setup-steps.yml) prepares. It
+  initializes `openvmm/`; installs Python with `requirements-dev.txt`, Rust stable
+  with the OpenVMM test targets, the `aci_edge_sandboxes` toolchains, and
+  cargo-nextest; grants `/dev/kvm` access; and pulls the pinned shell linter
+  images. When CI has cached them for the checked-out inputs, it also restores the
+  guest artifacts into `build/` and the KVM OpenVMM binary into
+  `openvmm/target/release/openvmm`. `NVX_COPILOT_SETUP=complete` confirms that
+  every setup step finished.
+- The session ends 59 minutes after it starts, setup included, on 4 vCPUs. Run the
+  narrowest affected check first. Rebuild OpenVMM only when the `openvmm` gitlink
+  changed or the cached binary is missing, and guest artifacts only when their
+  inputs changed. Leave `test-openvmm-unit`, `test-openvmm`,
+  `build-guest --guest all`, `verify-guest-determinism`, and `benchmark` to CI.
+- Build trees are large. Check `df -h .` before a build, keep one OpenVMM build
+  profile at a time, and delete trees you no longer need with `cargo clean` or
+  `docker builder prune -af`. The setup disables incremental compilation and
+  limits Cargo debug info to line tables to save space.
+- The agent firewall allows GitHub, crates.io, rustup, PyPI, npm, Docker Hub, MCR,
+  and the Debian, Ubuntu, and Alpine package archives, but blocks other hosts such
+  as `cdn.kernel.org`. Do not retry blocked downloads. The pinned Linux archive is
+  already in `.cache/downloads`; for other blocked inputs, rely on CI.
+- With KVM access, run affected microVM scenarios with
+  `python3 scripts/nvx.py test-microvm --backend kvm --scenario NAME`, passing only
+  the `--processors` counts the change needs, and `aci_edge_sandboxes` backend
+  changes with `python3 scripts/nvx.py test-aci-edge-sandboxes --backend kvm`.
+  MSHV and WHP are never available there.
+
 ## Pull Requests And CI
 
 - Ask whether a pull request should be Draft or Ready before creating it. Draft

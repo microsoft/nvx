@@ -197,3 +197,30 @@ must collect controller transcripts and complete target logs into
 access-controlled security storage. See
 [Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
 for the architecture and operational contract.
+
+## Copilot environments
+
+[`copilot-setup-steps.yml`](../.github/workflows/copilot-setup-steps.yml)
+prepares the GitHub-hosted runner of Copilot cloud agent sessions, including
+sessions started from the GitHub web interface. The session's 59-minute limit
+includes these steps, so they only install pinned tools, restore caches, and
+stage downloads; they never compile NVX or OpenVMM. The workflow initializes
+the public OpenVMM submodule without a deploy key, grants access to the
+runner's `/dev/kvm`, and installs Python, Rust, and cargo-nextest at the
+versions that `check-quality`, `check-aci-edge-sandboxes`, the crate manifest,
+and the Linux runner bootstrap pin. It restores the shared guest artifacts
+through the `restore-only` input of
+[`build-guest-artifacts`](../.github/actions/build-guest-artifacts/action.yml)
+and the KVM OpenVMM binary that `build-openvmm` caches for the pinned revision,
+so agents can run microVM tests without rebuilding either. Because the agent
+firewall blocks `cdn.kernel.org`, the workflow also stages the pinned Linux
+archive for native kernel builds. When a runner has a separate `/mnt` disk with
+more free space than `/`, it mounts the workspace there. Copilot skips the
+remaining setup steps after a failure, so optional steps only warn, and the
+last step sets `NVX_COPILOT_SETUP=complete`. Pushes that change the workflow or
+the files it reads versions from run it as a normal workflow.
+
+Copilot code review uses
+[`copilot-code-review.yml`](../.github/workflows/copilot-code-review.yml)
+instead. Reviews do not build code, so it only checks out the repository and
+installs the `gh-aw` extension for the MCP server in `.github/mcp.json`.
