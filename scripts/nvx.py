@@ -816,7 +816,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument(
         "--memory-mib",
         type=int,
-        help="guest RAM; defaults to 128 MiB for Alpine and 256 MiB for Ubuntu",
+        help=(
+            "guest RAM in MiB (default by --guest: "
+            + ", ".join(
+                f"{name} {guest_descriptor(name).default_memory_mib}"
+                for name in GUEST_NAMES
+            )
+            + ")"
+        ),
     )
     run.add_argument("--memory-capacity-mib", type=int)
     run.add_argument("--processors", type=int, choices=(1, 2, 4, 8), default=1)

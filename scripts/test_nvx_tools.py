@@ -395,6 +395,26 @@ class CliTests(unittest.TestCase):
             "initramfs-azurelinux.cpio.gz",
         )
 
+    def test_run_help_and_usage_state_each_guest_memory_default(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
+            nvx.parse_args(["run", "--help"])
+        help_text = " ".join(stdout.getvalue().split())
+        usage = (BuildConstants.REPO_ROOT / "doc" / "usage.md").read_text(
+            encoding="utf-8"
+        )
+        row = next(
+            line
+            for line in usage.splitlines()
+            if line.startswith("| `--memory-mib MIB`")
+        )
+        labels = {"alpine": "Alpine", "ubuntu": "Ubuntu", "azurelinux": "Azure Linux"}
+        for name in guests.GUEST_NAMES:
+            default = guests.guest_descriptor(name).default_memory_mib
+            with self.subTest(guest=name):
+                self.assertIn(f"{name} {default}", help_text)
+                self.assertIn(f"{default} for {labels[name]}", row)
+
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
             [
