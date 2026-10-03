@@ -862,14 +862,22 @@ def _windows_time_source() -> tuple[bool, str]:
         name, separator, value = line.partition(":")
         if separator:
             fields[name.strip()] = value.strip()
-    source = fields.get("Source", "unknown")
+    source = fields.get("Source", "")
     leap = fields.get("Leap Indicator", "")
+    # w32tm prints its labels in the display language. Output without both
+    # English labels and a 0-3 leap indicator names no source, so the check
+    # fails rather than certify an unverified one.
+    if not source or not leap.startswith(("0", "1", "2", "3")):
+        raise ScriptError(
+            "cannot verify the host time source: w32tm /query /status reported "
+            f"source={source or 'none'} leap_indicator={leap or 'none'}"
+        )
     unsynchronized = (
         leap.startswith("3")
         or "Local CMOS Clock" in source
         or "Free-running System Clock" in source
     )
-    return not unsynchronized, f"source={source} leap_indicator={leap or 'unknown'}"
+    return not unsynchronized, f"source={source} leap_indicator={leap}"
 
 
 def check_utc(context: DoctorContext) -> CheckResult:

@@ -1797,6 +1797,24 @@ class DoctorTests(unittest.TestCase):
                 ),
             ):
                 self.assertFalse(doctor.check_utc(context).passed)
+        # Output that names no source, such as a localized w32tm's, fails H7
+        # instead of passing as an unknown source.
+        for incomplete in (
+            "Sprungindikator: 0(keine Warnung)\nQuelle: time.windows.com,0x9\n",
+            "Leap Indicator: 0(no warning)\nStratum: 2\n",
+            "Stratum: 2\nSource: VM IC Time Synchronization Provider\n",
+            status.replace("0(no warning)", "unknown"),
+        ):
+            with (
+                patch.object(doctor, "host_is_windows", return_value=True),
+                patch.object(
+                    doctor.subprocess, "run", return_value=completed(incomplete)
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                (result,) = doctor.run_checks(context, ("H7",))
+            self.assertFalse(result.passed, incomplete)
+            self.assertIn("cannot verify the host time source", result.detail)
 
     def test_run_prints_lines_writes_the_summary_and_fails_closed(self):
         def passing(check: str):
