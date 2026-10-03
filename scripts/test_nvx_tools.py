@@ -10888,6 +10888,20 @@ class PositiveIntTests(unittest.TestCase):
             common.positive_int("not-an-int")
 
 
+class PositiveFloatTests(unittest.TestCase):
+    def test_accepts_positive_finite_float(self):
+        self.assertEqual(benchmark.positive_float("1.5"), 1.5)
+
+    def test_rejects_nonpositive_and_nonfinite_values(self):
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    argparse.ArgumentTypeError,
+                    "^must be finite and greater than 0$",
+                ):
+                    benchmark.positive_float(value)
+
+
 class GitOutputTests(unittest.TestCase):
     def test_runs_git_from_repository_root_and_strips_output(self):
         completed = MagicMock(stdout=" output \n")

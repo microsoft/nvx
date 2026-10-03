@@ -15,6 +15,7 @@ import errno
 import io
 import ipaddress
 import json
+import math
 import os
 import queue
 import re
@@ -538,8 +539,8 @@ def apply_benchmark_suite_defaults(args: argparse.Namespace) -> None:
 
 def positive_float(value: str) -> float:
     parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than 0")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than 0")
     return parsed
 
 
