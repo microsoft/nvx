@@ -140,7 +140,8 @@ complete per-scenario logs under
 
 The Alpine initramfs includes the sandbox PID-1 bootstrap, its container namespace
 helpers, the static `nvx-device-io` benchmark helper, the static `nvx-port-io`
-restore packet helper, the static `nvx-time-probe` guest time probe, and the
+port helper (single-byte port reads and writes, and the VM generation ID read),
+the static `nvx-time-probe` guest time probe, and the
 static `nvx-time` guest time component under `/sbin`. The probe measures TSC and
 clock read latency, reports the guest's clock, clocksource, TSC flags, and
 hypervisor identity, and runs the cross-vCPU warp test that the
