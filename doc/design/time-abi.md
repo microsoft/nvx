@@ -1365,9 +1365,9 @@ acknowledgement.
    `restore_generation=g` in the same state-file update, so that
    `nvx-time status` waits for this restore.
 9. Run the existing processor and memory activation.
-10. Run the existing entropy and identity repair for the tier. The RTC-based
-    wall-clock refresh is removed; `instance-checkpoint` restores also get
-    step 8.
+10. Run the existing entropy and identity repair for the restore path
+    ([restore entropy](#restore-entropy)). The RTC-based wall-clock refresh
+    is removed; `instance-checkpoint` restores also get step 8.
 11. Defer the restore checks to step 13: `C1`, `C2`, and `C5` on newly
     onlined CPUs; `C3` for CPU 0; `C6`; and `C10`. They do not wait, and a
     failure still emits its violation event and powers off with status 193.
@@ -1420,6 +1420,32 @@ this deferred work, within its 30 s bound. The watcher and the discipline
 always run at normal priority, and stall suppression stays set until the
 release. Repair failures emit a violation event and power off with status
 195.
+
+### Restore entropy
+
+Restoring a snapshot also restores the guest kernel's CRNG state, so every
+restore packet carries 64 bytes of fresh host entropy. Step 10 uses them
+according to the restore path; the tiers follow the clone and resume
+policies of [Time and entropy](snapshot-and-restore.md#time-and-entropy):
+
+| Restore path | Guest CRNG | Machine identity |
+| --- | --- | --- |
+| `platform` or `workload-start` tier (clone policy) | Reseeded before the acknowledgement: `nvx-reseed` credits the 64 bytes to the kernel entropy pool (`RNDADDENTROPY`) and forces a CRNG reseed (`RNDRESEEDCRNG`) | Machine ID and hostname refreshed; the runtime hook runs if present, and `workload-start` requires it |
+| Untiered, with processors or memory to activate | Reseeded before the acknowledgement, as for the clone policy | Refreshed as for the clone policy |
+| `instance-checkpoint` tier (resume policy) | Not reseeded, by design: only the generation ID is refreshed | Preserved |
+| Untiered, with nothing to activate (`online_vp_count` and `memory_range_count` both 0) | Not reseeded: `nvx-time` writes the 64 bytes to `/run/nvx/restore-entropy` for the caller of `nvx-snapshot` | Preserved |
+
+Each path's handling is unchanged from before the time ABI. v1 changes only
+the delivery: the agent used to read packets v1 to v3 a byte at a time, and
+on the last path it did not read the packet, leaving it to its caller. It
+now reads packet v4 on every restore, for the time fields, and checks `g`
+and the generation-ID change first (step 7).
+
+On the last path, VMs restored from one snapshot share the snapshot's CRNG
+state until something reseeds it, such as a caller that credits
+`/run/nvx/restore-entropy` with `nvx-reseed`. Whether that path should
+reseed before readiness, given that one snapshot can be restored more than
+once, is an open policy question; v1 keeps the existing behavior.
 
 ### RCU grace period release
 
