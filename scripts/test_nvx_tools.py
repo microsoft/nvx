@@ -10887,6 +10887,10 @@ class PositiveIntTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             common.positive_int("not-an-int")
 
+    def test_accepts_custom_error_message(self):
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "^must be at least 1$"):
+            common.positive_int("0", message="must be at least 1")
+
 
 class GitOutputTests(unittest.TestCase):
     def test_runs_git_from_repository_root_and_strips_output(self):

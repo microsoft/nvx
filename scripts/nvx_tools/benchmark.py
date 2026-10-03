@@ -12,6 +12,7 @@ import contextlib
 import ctypes
 import datetime as dt
 import errno
+import functools
 import io
 import ipaddress
 import json
@@ -505,11 +506,7 @@ def configure_parser(
     parser.set_defaults(handler=run)
 
 
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return parsed
+positive_int = functools.partial(common.positive_int, message="must be at least 1")
 
 
 def apply_benchmark_suite_defaults(args: argparse.Namespace) -> None:
