@@ -2114,8 +2114,10 @@ class MicrovmTests(unittest.TestCase):
 
     def test_smp_exercises_the_counting_lapic_without_a_duplicate_scenario(self):
         # The time ABI hides TSC-deadline on every backend, so the ordinary
-        # smp scenario already exercises the one-shot counting LAPIC (#286).
+        # smp scenario already exercises the one-shot counting LAPIC, and no
+        # default suite also runs smp-lapic (#286).
         self.assertNotIn("smp-lapic", microvm_tests.MICROVM_TEST_SCENARIOS)
+        self.assertNotIn("smp-lapic", microvm_tests.DEBUG_KERNEL_SCENARIOS)
         text = (b"NVX-SMP-PROBE-OK\r\n" + _warp_probe_output(4)).decode()
         with patch.object(
             microvm_tests, "run_guest_script", return_value={"text": text}
@@ -2135,7 +2137,122 @@ class MicrovmTests(unittest.TestCase):
         self.assertTrue(
             script.startswith(benchmark.smp_probe_script(4, exit_guest=False))
         )
+        self.assertNotIn("tsc_deadline_timer", script)
         self.assertEqual(marker, time_abi.WARP_PROBE_COMPLETION_MARKER)
+
+    def test_smp_lapic_remains_an_explicit_scenario(self):
+        # #286 keeps `test-microvm --scenario smp-lapic` for local use.
+        self.assertEqual(microvm_tests.MICROVM_EXPLICIT_SCENARIOS, ("smp-lapic",))
+        args = nvx.parse_args(
+            ["test-microvm", "--backend", "kvm", "--scenario", "smp-lapic"]
+        )
+        self.assertEqual(args.scenario, ["smp-lapic"])
+
+    def test_smp_lapic_asserts_the_counting_lapic_facts(self):
+        rates = f"tsc_hz=2793437000 lapic_hz={time_abi.LAPIC_HZ['kvm']}"
+        passing = (
+            f"NVX-TIME-ABI: v=1 phase=boot status=ok cpus=4 {rates} "
+            "generation=0 elapsed_us=2390\r\n"
+            "NVX-TIME-ABI: v=1 phase=runtime status=synchronized generation=0 "
+            "discontinuities=0 offset_ns=-1200 uncertainty_ns=900 "
+            "rejected_samples=0 last_sample_error=none\r\n"
+            "NVX-TIME-STATUS-EXIT status=0\r\n"
+            "NVX-SMP-LAPIC-COUNTING-OK\r\n"
+            "NVX-SMP-PROBE-OK\r\n" + _warp_probe_output(4).decode()
+        )
+
+        def run_smp_lapic(text: str) -> MagicMock:
+            with patch.object(
+                microvm_tests, "run_guest_script", return_value={"text": text}
+            ) as run:
+                microvm_tests.run_smp(
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "kvm",
+                    4,
+                    memory_mib=128,
+                    timeout=60,
+                    log_path=Path("smp-lapic-4.log"),
+                    counting_lapic=True,
+                )
+            return run
+
+        command, script, marker = run_smp_lapic(passing).call_args.args
+        self.assertEqual(command[command.index("--cmdline") + 1], "quiet loglevel=0")
+        self.assertTrue(script.startswith(microvm_tests.counting_lapic_script(4)))
+        self.assertIn(benchmark.smp_probe_script(4, exit_guest=False), script)
+        self.assertEqual(marker, time_abi.WARP_PROBE_COMPLETION_MARKER)
+        for text, message in (
+            (
+                passing.replace("NVX-SMP-LAPIC-COUNTING-OK\r\n", ""),
+                "without the counting-LAPIC marker",
+            ),
+            (passing.replace("cpus=4 tsc_hz", "cpus=2 tsc_hz"), "cpus=2 is not 4"),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                run_smp_lapic(text)
+
+    def test_counting_lapic_check_requires_the_counting_lapic_on_every_cpu(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = (
+            microvm_tests.counting_lapic_script(2)
+            .replace("/proc/cpuinfo", "cpuinfo")
+            .replace("/sys/devices/system/clockevents/", "clockevents/")
+        )
+        for name, flags, devices, status, expected in (
+            ("counting", "fpu tsc apic", ("lapic", "lapic"), 0, "COUNTING-OK"),
+            (
+                "deadline-flag",
+                "fpu tsc_deadline_timer apic",
+                ("lapic", "lapic"),
+                89,
+                "SMP-LAPIC-FAIL tsc-deadline-exposed",
+            ),
+            (
+                "deadline-device",
+                "fpu tsc apic",
+                ("lapic", "lapic-deadline"),
+                89,
+                "SMP-LAPIC-FAIL cpu=1 clockevent=lapic-deadline",
+            ),
+            (
+                "missing-device",
+                "fpu tsc apic",
+                ("lapic",),
+                89,
+                "SMP-LAPIC-FAIL cpu=1 clockevent=none",
+            ),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "cpuinfo").write_text(
+                    f"processor\t: 0\nflags\t\t: {flags}\n", encoding="ascii"
+                )
+                for cpu, device in enumerate(devices):
+                    directory = root / "clockevents" / f"clockevent{cpu}"
+                    directory.mkdir(parents=True)
+                    (directory / "current_device").write_text(
+                        device + "\n", encoding="ascii"
+                    )
+                result = subprocess.run(
+                    [shell],
+                    cwd=root,
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode, status, result.stdout + result.stderr
+                )
+                self.assertIn(expected, result.stdout)
 
     def test_virtio_net_uses_portable_endpoint_policy(self):
         with (
@@ -3633,7 +3750,7 @@ class MicrovmTests(unittest.TestCase):
             args = argparse.Namespace(
                 backend="whp",
                 guest="alpine",
-                scenario=["smp", "smp"],
+                scenario=["smp", "smp", "smp-lapic", "smp-lapic"],
                 processors=[2, 2, 8],
                 memory_mib=128,
                 timeout=60.0,
@@ -3658,11 +3775,15 @@ class MicrovmTests(unittest.TestCase):
         run_lifecycle.assert_not_called()
         self.assertEqual(
             [entry.args[4] for entry in run_smp.call_args_list],
-            [2, 8],
+            [2, 8, 2, 8],
         )
         self.assertEqual(
             [entry.kwargs["log_path"].name for entry in run_smp.call_args_list],
-            ["smp-2.log", "smp-8.log"],
+            ["smp-2.log", "smp-8.log", "smp-lapic-2.log", "smp-lapic-8.log"],
+        )
+        self.assertEqual(
+            [entry.kwargs["counting_lapic"] for entry in run_smp.call_args_list],
+            [False, False, True, True],
         )
 
     def test_runner_uses_ubuntu_artifact_and_default_memory(self):

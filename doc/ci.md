@@ -263,7 +263,10 @@ to succeed. `Publish development release` and `Persist performance
 baseline` run only on `dev` pushes in which every microVM test job succeeded or
 was skipped. The pull-request `Performance regression gate` reads only the
 platform jobs' results and publishes nothing. The counting LAPIC that the
-benchmarks depend on is covered by the `smp` scenario of those jobs. The workflow uses the read-only OpenVMM deploy key stored in the
+benchmarks depend on is covered by the `smp` scenario of those jobs.
+`smp-lapic` repeats `smp` with the counting-LAPIC facts asserted, for explicit
+local use only; no CI job runs it. [Benchmarks](benchmarks.md#ci-collection)
+lists the jobs that consume, gate, publish, or persist the results. The workflow uses the read-only OpenVMM deploy key stored in the
 `OPENVMM_DEPLOY_KEY` Actions secret to fetch the private submodule at its pinned
 commit. Shared guest binaries and development release packages move through
 short-lived workflow artifacts alongside the OpenVMM handoff and benchmark

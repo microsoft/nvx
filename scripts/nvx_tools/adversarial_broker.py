@@ -45,7 +45,7 @@ _SAFE_SCENARIOS = frozenset(
         "restore-processors",
         "sandbox-blocks",
         "scratch-snapshot",
-        "smp",
+        "smp-lapic",
         "smp-snapshot",
         "snapshot-core",
         "snapshot-tiers",

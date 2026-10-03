@@ -323,8 +323,11 @@ LAPIC calibration is not success. A counter frozen at 12 can indicate Linux's
 `APIC timer disabled due to verification failure`; increasing the poll budget cannot repair it.
 The time ABI hides the TSC-deadline timer on every backend, so every guest uses the one-shot
 counting LAPIC, and the `smp` scenario that the microVM correctness jobs run at 1, 2, 4, and 8
-vCPUs covers it. There is no separate `lapic=notscdeadline` scenario or pre-benchmark LAPIC
-gate.
+vCPUs covers it. The benchmarks run no LAPIC gate of their own (#286), and no guest boots with
+`lapic=notscdeadline`. `test-microvm --scenario smp-lapic` remains for explicit local use: it runs
+`smp` and also asserts that no CPU lists `tsc_deadline_timer`, that each online CPU's clockevent
+device is the counting `lapic`, and that the boot line reports the backend's LAPIC rate for every
+CPU. No default suite or CI job runs it, so nothing runs twice.
 Captures do not wait for a clocksource: under the time ABI, Linux registers the `tsc`
 clocksource at `device_initcall`, before any guest work, so no capture can observe the
 transitional `tsc-early` window.
@@ -512,6 +515,22 @@ collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 metrics and every configured attempt. Each backend job publishes its p50 tables and one-vCPU lifecycle diagnostics to
 `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
 latest base-branch history.
+
+These jobs consume, gate, publish, or persist the KVM benchmark results (#286); MSHV and WHP
+follow the same flow with their own platform jobs:
+- `Platform / Linux / KVM / Virtual machine` (`platform-kvm`) runs the benchmarks and publishes the
+  results: the run-scoped `benchmark-linux-kvm-virtual-machine-<run-id>` artifact, the per-attempt
+  diagnostics artifact, and the p50 tables in its step summary.
+- `Performance regression gate` (`performance-gate`, pull requests only) consumes the three
+  platform artifacts once all three platform jobs succeeded and gates them against the base
+  branch's history. It publishes and persists nothing.
+- `Persist performance baseline` (`performance-persist`, `dev` pushes only) consumes them and
+  persists them to `data/*.csv`.
+- `Publish development release` (`release`, `dev` pushes only) doesn't read them, but it and
+  `performance-persist` run only when the three platform jobs succeeded and every correctness
+  job, `nvx-microvm-tests-kvm` included, succeeded or was skipped.
+- `Required status check` fails unless every job that the change schedules, including
+  `platform-kvm`, `performance-gate`, and `nvx-microvm-tests-kvm`, has its expected result.
 
 Linux CI uses a reduced device contract of zero warmups and one retained attempt. Windows CI
 discards one warmup and retains five attempts so file initialization cannot dominate its p50.

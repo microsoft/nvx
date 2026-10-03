@@ -43,7 +43,7 @@
     },
     {
       "id": "interrupt-topology-boundary",
-      "scenario": "smp",
+      "scenario": "smp-lapic",
       "description": "Exercise repeated interrupt and timer progress across the supported virtual processor topology.",
       "coverage": [
         "lapic",
@@ -56,7 +56,7 @@
     },
     {
       "id": "processor-interrupt-churn",
-      "scenario": "smp",
+      "scenario": "smp-lapic",
       "description": "Repeat bounded multi-processor scheduling, timer, and interrupt progress to expose CPU-side hangs or leaks.",
       "coverage": [
         "cpu-churn",

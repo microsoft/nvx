@@ -118,6 +118,12 @@ DEBUG_KERNEL_SCENARIOS = (
     "restore-downtime",
     "snapshot-tiers",
 )
+# Scenarios that run only when named, never in a default suite. The time ABI
+# hides TSC-deadline on every backend, so `smp` already runs on the one-shot
+# counting LAPIC; `smp-lapic` repeats it and asserts the counting-LAPIC facts,
+# for explicit local use (#286).
+MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic",)
+SMP_LAPIC_COUNTING_MARKER = b"NVX-SMP-LAPIC-COUNTING-OK"
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
@@ -239,8 +245,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--scenario",
         action="append",
-        choices=MICROVM_TEST_SCENARIOS,
-        help="scenario to run; repeat to select multiple (default: all)",
+        choices=(*MICROVM_TEST_SCENARIOS, *MICROVM_EXPLICIT_SCENARIOS),
+        help=(
+            "scenario to run; repeat to select multiple (default: all except "
+            "smp-lapic, which runs only when named)"
+        ),
     )
     parser.add_argument(
         "--debug-kernel",
@@ -1117,6 +1126,32 @@ def run_console_exit(
                 )
 
 
+def counting_lapic_script(processors: int) -> str:
+    """Return a guest check that every CPU runs the one-shot counting LAPIC.
+
+    The time ABI hides TSC-deadline, so no CPU lists ``tsc_deadline_timer``,
+    and each online CPU's clockevent device is ``lapic``, not
+    ``lapic-deadline``.
+    """
+    return (
+        "if grep -qw tsc_deadline_timer /proc/cpuinfo; then\n"
+        "    echo SMP-LAPIC-FAIL tsc-deadline-exposed\n"
+        "    exit 89\n"
+        "fi\n"
+        "cpu=0\n"
+        f'while [ "$cpu" -lt {processors} ]; do\n'
+        "    device=$(cat /sys/devices/system/clockevents/clockevent$cpu/"
+        "current_device 2>/dev/null)\n"
+        '    if [ "$device" != lapic ]; then\n'
+        '        echo "SMP-LAPIC-FAIL cpu=$cpu clockevent=${device:-none}"\n'
+        "        exit 89\n"
+        "    fi\n"
+        "    cpu=$((cpu + 1))\n"
+        "done\n"
+        f"echo {SMP_LAPIC_COUNTING_MARKER.decode()}\n"
+    )
+
+
 def run_smp(
     executable: Path,
     kernel: Path,
@@ -1127,6 +1162,7 @@ def run_smp(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    counting_lapic: bool = False,
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -1137,11 +1173,16 @@ def run_smp(
         "quiet loglevel=0",
         processors=processors,
     )
-    result = run_guest_script(
-        command,
+    script = (
         smp_probe_script(processors, exit_guest=False)
         + warp_probe_script()
-        + "nvx-exit 0\n",
+        + "nvx-exit 0\n"
+    )
+    if counting_lapic:
+        script = counting_lapic_script(processors) + script
+    result = run_guest_script(
+        command,
+        script,
         WARP_PROBE_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
@@ -1152,6 +1193,21 @@ def run_smp(
             f"{processors}-vCPU guest finished without the SMP probe marker "
             f"{SMP_PROBE_COMPLETION_MARKER.decode()!r}"
         )
+    if counting_lapic:
+        if not contains_output_line(output, SMP_LAPIC_COUNTING_MARKER):
+            raise RuntimeError(
+                f"{processors}-vCPU guest finished without the counting-LAPIC "
+                f"marker {SMP_LAPIC_COUNTING_MARKER.decode()!r}"
+            )
+        # The boot line must also report the backend's LAPIC rate for all
+        # the CPUs; the status query alone doesn't check the CPU count.
+        monitor = TimeAbiMonitor(command)
+        monitor.feed(output)
+        monitor.finish()
+        try:
+            monitor.require_boot("the counting-LAPIC check", online_cpus=processors)
+        except TimeAbiFailure as error:
+            raise RuntimeError(f"{processors}-vCPU smp-lapic: {error}") from error
     check_warp_probe(
         result["text"],
         cpus=processors,
@@ -4725,10 +4781,12 @@ def run(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             output_dir=output_dir,
         )
-    if "smp" in scenarios:
+    for scenario, counting_lapic in (("smp", False), ("smp-lapic", True)):
+        if scenario not in scenarios:
+            continue
         for processors in dict.fromkeys(args.processors):
             print(
-                f"Running microVM smp correctness ({processors} vCPU) "
+                f"Running microVM {scenario} correctness ({processors} vCPU) "
                 f"on OpenVMM/{args.backend}"
             )
             run_smp(
@@ -4739,7 +4797,8 @@ def run(args: argparse.Namespace) -> int:
                 processors,
                 memory_mib=args.memory_mib,
                 timeout=args.timeout,
-                log_path=output_dir / f"smp-{processors}.log",
+                log_path=output_dir / f"{scenario}-{processors}.log",
+                counting_lapic=counting_lapic,
             )
     if "sandbox-blocks" in scenarios:
         print(f"Running microVM sandbox-block correctness on OpenVMM/{args.backend}")
