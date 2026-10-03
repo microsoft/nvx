@@ -2046,10 +2046,12 @@ every backend. Production paths print no marker, so the matrix driver runs
 `/sbin/nvx-time status` over the console after shell-ready and after every
 restore. CI runs it after every cold boot whose shell is on a console the
 harness reads, and after every restore in the `smp-snapshot`,
-`restore-processors`, and `restore-downtime` scenarios. CI's other restores
-and its guests without a shell, the managed lifecycle and one-shot workloads,
-are only scanned for violation events; a failed check still powers the guest
-off with status 193. Each query requires exit status 0 and, after a restore,
+`restore-processors`, `restore-downtime`, and `snapshot-tiers` scenarios,
+except `snapshot-tiers`' gate-timeout check, whose guest OpenVMM stops at the
+restore gate on purpose. CI's other restores and its guests without a shell,
+the managed lifecycle and one-shot workloads, are only scanned for violation
+events; a failed check still powers the guest off with status 193. Each query
+requires exit status 0 and, after a restore,
 a `phase=restore` line with `status=ok`, the restored `generation`, and
 `cpus` equal to the online CPUs; after a cold boot, a `phase=boot` line with
 `generation=0`. During fleet validation (`p6`), the matrix driver records
