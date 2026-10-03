@@ -1071,8 +1071,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--openvmm", type=Path, help="OpenVMM binary for H2, H3, and H6"
     )
-    parser.add_argument("--kernel", type=Path, help="guest kernel for H6")
-    parser.add_argument("--initrd", type=Path, help="guest initramfs for H6")
+    parser.add_argument("--kernel", type=Path, help="guest kernel for H3 and H6")
+    parser.add_argument("--initrd", type=Path, help="guest initramfs for H3 and H6")
     openvmm = parser.add_mutually_exclusive_group()
     openvmm.add_argument(
         "--cpu-fingerprint",

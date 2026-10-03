@@ -36,6 +36,7 @@ python3 scripts/nvx.py performance gate --help
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
 | `test-microvm` | Run NVX Linux and device correctness tests through OpenVMM. |
+| `doctor` | Qualify this host for the NVX time ABI. |
 | `test-aci-edge-sandboxes` | Run the `aci_edge_sandboxes` Rust crate lifecycle test on a real hypervisor. |
 | `test-adversarial` | Run a brokered Copilot-driven adversarial campaign. |
 | `build` | Build the guest artifacts and OpenVMM. |
@@ -203,6 +204,7 @@ prerequisite is missing.
 python3 scripts/nvx.py build
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
+    [--debug-kernel]
     [--skip-restore]
     [--backend {kvm,mshv,whp}]
 ```
@@ -242,6 +244,7 @@ python3 scripts/nvx.py test-microvm
     --backend {kvm,mshv,whp}
     [--guest {alpine,ubuntu,azurelinux}]
     [--scenario SCENARIO]...
+    [--debug-kernel]
     [--processors {1,2,4,8} ...]
     [--memory-mib MIB]
     [--timeout SECONDS]
@@ -256,9 +259,51 @@ uses the one-shot counting LAPIC. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
 the sandbox-control-dependent `snapshot-tiers` scenario. Ubuntu also rejects
-the Alpine-prompt-specific `console-snapshot` scenario. The
-command requires `build/vmlinux`, the selected initramfs, and
+the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
+the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
+detectors the guest's time ABI watcher reports; without `--scenario`, it runs
+only the same-host restore scenarios `smp`, `smp-snapshot`,
+`restore-processors`, `restore-downtime`, and `snapshot-tiers`. The command
+requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug` and its
+`build/vmlinux-debug.config`), the selected initramfs, and
 `openvmm/target/release/openvmm[.exe]`.
+
+### `doctor`
+
+```text
+python3 scripts/nvx.py doctor
+    --backend {kvm,mshv,whp}
+    [--checks ID ...]
+    [--openvmm PATH]
+    [--kernel PATH]
+    [--initrd PATH]
+    [--cpu-fingerprint PATH | --no-openvmm]
+    [--ci-schedule]
+    [--probe-dir PATH]
+    [--summary PATH]
+    [--timeout SECONDS]
+```
+
+Qualifies this host for the [time ABI](design/time-abi.md#host-qualification).
+It runs the selected checks in spec order, prints one
+`NVX-DOCTOR: check=<id> status=<pass|fail> detail="..."` line per check, and
+exits with status 1 if any check fails. A check fails, and never passes, when
+it can't read a fact it gates on. [CI](ci.md#host-qualification) describes each
+check and the subset that CI runs.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--backend {kvm,mshv,whp}` | required | Select the backend to qualify. |
+| `--checks ID ...` | `H1` to `H7` | Run only these checks, from `H1` to `H7`, in spec order. |
+| `--openvmm PATH` | `openvmm/target/release/openvmm[.exe]` | Select the OpenVMM binary for `H2`, `H3`, and `H6`. |
+| `--kernel PATH` | `build/vmlinux` | Select the guest kernel for `H3` and `H6`. |
+| `--initrd PATH` | `build/initramfs.cpio.gz` | Select the guest initramfs for `H3` and `H6`. |
+| `--cpu-fingerprint PATH` | `nvx-cpu-fingerprint-<backend>.json` in the probe directory | Select where `H2` writes OpenVMM's CPU fingerprint. |
+| `--no-openvmm` | off | Qualify without an OpenVMM binary. `H2` then checks the CPU identity and generation but not the CPU profile, and `--checks` must exclude `H3` and `H6`, which boot OpenVMM. |
+| `--ci-schedule` | off | Run `H4` and `H6` on CI's short schedules: 3 rate samples 1 s apart instead of 13 samples 10 s apart, and two warp-probe runs instead of five. |
+| `--probe-dir PATH` | `$RUNNER_TOOL_CACHE/nvx-host-time-probe`, or `build/host-time-probe` | Select the cache directory for the host probe, which the doctor builds with `rustc`. |
+| `--summary PATH` | none | Append a Markdown summary, for example to `$GITHUB_STEP_SUMMARY`. |
+| `--timeout SECONDS` | `120` | Set the seconds allowed for each probe or guest. |
 
 ### `test-aci-edge-sandboxes`
 

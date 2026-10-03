@@ -334,6 +334,59 @@ def _write_release_fixture(
 
 
 class CliTests(unittest.TestCase):
+    def test_usage_documents_every_command_and_option(self):
+        # doc/usage.md is the CLI reference: every command has a row in its
+        # command table and a section that names exactly the options of the
+        # command's --help usage.
+        option = re.compile(r"(?<![\w-])--[a-z0-9]+(?:-[a-z0-9]+)*(?![\w*-])")
+
+        def usage_of(*command: str) -> str:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
+                nvx.parse_args([*command, "--help"])
+            return stdout.getvalue().split("\n\n", 1)[0]
+
+        def subcommands(usage: str) -> list[str]:
+            # A subcommand list reads "{a,b} ...", which argparse may wrap
+            # before the dots; an option's repeated choices read
+            # "{a,b} [{a,b} ...]".
+            match = re.search(r"(?<!\[)\{([a-z0-9,-]+)\}\s+\.\.\.(?!\])", usage)
+            return match.group(1).split(",") if match else []
+
+        document = (BuildConstants.REPO_ROOT / "doc" / "usage.md").read_text(
+            encoding="utf-8"
+        )
+
+        def section(title: str, level: int) -> str:
+            match = re.search(
+                rf"^{'#' * level} `{re.escape(title)}`\n(.*?)(?=^#{{2,{level}}} |\Z)",
+                document,
+                re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"doc/usage.md has no section for {title}")
+            return match.group(1) if match else ""
+
+        table = document.split("## Commands\n", 1)[1].split("\n## ", 1)[0]
+        commands = subcommands(usage_of())
+        self.assertEqual(
+            set(re.findall(r"^\| `([a-z0-9-]+)` \|", table, re.MULTILINE)),
+            set(commands),
+        )
+        for name in commands:
+            usage = usage_of(name)
+            nested = subcommands(usage)
+            section(name, 3)
+            targets = (
+                [((name, child), 4) for child in nested] if nested else [((name,), 3)]
+            )
+            for command, level in targets:
+                title = " ".join(command)
+                with self.subTest(command=title):
+                    self.assertEqual(
+                        set(option.findall(section(title, level))),
+                        set(option.findall(usage_of(*command))),
+                    )
+
     def test_guest_selection_includes_azure_linux(self):
         args = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
         self.assertEqual(args.guest, "azurelinux")
