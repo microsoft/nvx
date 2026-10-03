@@ -1,11 +1,31 @@
 name: "Copilot Setup Steps"
 
-# This workflow configures the environment for GitHub Copilot Agent with gh-aw MCP server
+# Prepares the GitHub-hosted runner of Copilot cloud agent sessions, including
+# sessions started from the GitHub web interface. The session time limit
+# includes these steps, so they only install pinned tools, restore CI caches,
+# and stage downloads that the agent firewall blocks; they never compile NVX or
+# OpenVMM. A failed step would make Copilot skip every later step, so each step
+# after checkout continues on error, and the last step reports the outcome in
+# NVX_COPILOT_SETUP. Copilot code review uses copilot-code-review.yml instead.
 on:
   workflow_dispatch:
+  # Revalidate the setup when the workflow or a file that its steps take
+  # versions, requirements, metadata, or code from changes. The openvmm entry
+  # matches updates of the submodule pin.
   push:
     paths:
       - .github/workflows/copilot-setup-steps.yml
+      - .github/actions/build-guest-artifacts/action.yml
+      - .github/actions/check-aci-edge-sandboxes/action.yml
+      - .github/actions/check-quality/action.yml
+      - .gitmodules
+      - SOURCE-MANIFEST.json
+      - aci_edge_sandboxes/Cargo.toml
+      - openvmm
+      - requirements-dev.txt
+      - scripts/nvx.py
+      - scripts/nvx_tools/**
+      - scripts/setup/setup-linux-runner.sh
 
 permissions:
   contents: read
@@ -15,22 +35,337 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The job MUST be called 'copilot-setup-steps' to be recognized by GitHub Copilot Agent
+  # Copilot only recognizes a job with this exact name.
   copilot-setup-steps:
     name: Copilot Setup Steps
     runs-on: ubuntu-latest
-
-    # Set minimal permissions for setup steps
-    # Copilot Agent receives its own token with appropriate permissions
     permissions:
       contents: read
 
     steps:
+      # Some runner types have a small root disk and a separate, larger /mnt
+      # disk. Mount the workspace there so OpenVMM, crate, and guest build
+      # outputs cannot exhaust /.
+      - name: Place the workspace on the largest disk
+        id: workspace
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          available_gib() {
+            df --output=avail -k "$1" | awk 'NR == 2 { print int($1 / 1048576) }'
+          }
+          root_gib=$(available_gib /)
+          scratch_gib=0
+          if [[ -d /mnt && "$(stat -c %d /mnt)" != "$(stat -c %d /)" ]]; then
+            scratch_gib=$(available_gib /mnt)
+          fi
+          echo "Free space: / ${root_gib} GiB, separate /mnt ${scratch_gib} GiB"
+          if (( scratch_gib > root_gib )); then
+            workspace=/mnt/nvx-workspace
+            sudo mkdir -p "${workspace}"
+            sudo chown "$(id -u):$(id -g)" "${workspace}"
+            mkdir -p "${GITHUB_WORKSPACE}"
+            cp -a "${GITHUB_WORKSPACE}/." "${workspace}/"
+            sudo mount --bind "${workspace}" "${GITHUB_WORKSPACE}"
+            echo "Mounted ${workspace} at ${GITHUB_WORKSPACE}"
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
       - name: Install gh-aw extension
+        id: gh-aw
+        continue-on-error: true
         uses: github/gh-aw-actions/setup-cli@5e508589e03a7757a7e05b26e834292f5445bfb6 # v0.88.7
         with:
           version: v0.88.7
+
+      # The OpenVMM submodule is public, so it needs no deploy key here.
+      - name: Initialize the OpenVMM submodule
+        id: openvmm
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if git -c protocol.version=2 submodule update --init --depth 1 -- openvmm; then
+              break
+            fi
+            if (( attempt == 3 )); then
+              exit 1
+            fi
+            sleep $(( attempt * 10 ))
+          done
+          git -C openvmm log -1 --format='OpenVMM %H %s'
+
+      # Read the versions that CI and the runner bootstrap pin, so this
+      # environment follows their updates.
+      - name: Resolve pinned tool versions
+        id: versions
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate_toolchain=$(sed -n '/^  toolchain:/,/^  [^ ]/ s/^    default: "\(.*\)"$/\1/p' \
+            .github/actions/check-aci-edge-sandboxes/action.yml)
+          crate_msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' aci_edge_sandboxes/Cargo.toml)
+          nextest=$(sed -n 's/^CARGO_NEXTEST_VERSION=//p' scripts/setup/setup-linux-runner.sh)
+          {
+            echo "crate-toolchain=${crate_toolchain}"
+            echo "crate-msrv=${crate_msrv}"
+            echo "nextest=${nextest}"
+          } | tee -a "${GITHUB_OUTPUT}"
+          test -n "${crate_toolchain}" && test -n "${crate_msrv}" && test -n "${nextest}"
+
+      # OpenVMM builds with stable plus its guest, UEFI, and musl targets. The
+      # aci_edge_sandboxes checks use the MXC toolchain, the crate MSRV, and a
+      # macOS target. OpenVMM keeps full debug info in release builds, so the
+      # session limits debug info and disables incremental artifacts to save
+      # disk space and link time.
+      - name: Install Rust toolchains
+        id: rust
+        continue-on-error: true
+        shell: bash
+        env:
+          CRATE_TOOLCHAIN: ${{ steps.versions.outputs.crate-toolchain }}
+          CRATE_MSRV: ${{ steps.versions.outputs.crate-msrv }}
+        run: |
+          set -euo pipefail
+          {
+            echo "CARGO_INCREMENTAL=0"
+            echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+            echo "CARGO_PROFILE_RELEASE_DEBUG=line-tables-only"
+          } >> "${GITHUB_ENV}"
+          rustup toolchain install stable --profile minimal \
+            --component clippy,rustfmt \
+            --target x86_64-unknown-linux-musl,x86_64-unknown-none,x86_64-unknown-uefi
+          rustup default stable
+          rustup toolchain install "${CRATE_TOOLCHAIN}" --profile minimal \
+            --component clippy,rustfmt --target aarch64-apple-darwin
+          rustup toolchain install "${CRATE_MSRV}" --profile minimal
+          rustup toolchain list
+
+      - name: Install cargo-nextest
+        id: nextest
+        continue-on-error: true
+        shell: bash
+        env:
+          NEXTEST_VERSION: ${{ steps.versions.outputs.nextest }}
+        run: |
+          set -euo pipefail
+          cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin"
+          mkdir -p "${cargo_bin}"
+          curl --fail --location --silent --show-error --retry 5 --retry-all-errors \
+            "https://get.nexte.st/${NEXTEST_VERSION}/linux" | tar -xzf - -C "${cargo_bin}"
+          cargo nextest --version
+
+      - name: Grant KVM access
+        id: kvm
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::notice::/dev/kvm is unavailable; hypervisor-backed tests must run in CI"
+            exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-nvx-kvm.rules > /dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle
+          if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+          ls -l /dev/kvm
+          if ! grep -qw nonstop_tsc /proc/cpuinfo; then
+            echo "::notice::The host CPU has no invariant TSC; snapshot restore tests may be unstable"
+          fi
+
+      - name: Restore guest artifacts built by CI
+        id: guest-artifacts
+        continue-on-error: true
+        uses: ./.github/actions/build-guest-artifacts
+        with:
+          restore-only: "true"
+
+      # CI saves OpenVMM binaries from self-hosted runners whose cache steps
+      # only see GNU tar and gzip. Restoring needs the same compression method.
+      - name: Prepare OpenVMM cache restore
+        id: openvmm-cache
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_tools="${RUNNER_TEMP}/nvx-gzip-cache-tools"
+          mkdir -p "${cache_tools}"
+          ln -sf "$(command -v tar)" "${cache_tools}/tar"
+          ln -sf "$(command -v gzip)" "${cache_tools}/gzip"
+          {
+            echo "path=${cache_tools}"
+            echo "sha=$(git rev-parse :openvmm)"
+          } >> "${GITHUB_OUTPUT}"
+
+      # The key and paths must match the build-openvmm action's KVM binary cache.
+      - name: Restore the OpenVMM binary built by CI
+        id: openvmm-binary
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env:
+          PATH: ${{ steps.openvmm-cache.outputs.path }}
+        with:
+          path: |
+            build/openvmm.provenance.json
+            openvmm/target/release/openvmm
+          key: openvmm-binary-v6-kvm-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm-cache.outputs.sha }}
+
+      # Native guest builds are the in-session way to rebuild guest artifacts.
+      # Install the Debian/Ubuntu prerequisites listed in doc/setup.md. Alpine's
+      # apk runs package triggers in an unprivileged user namespace, which the
+      # Ubuntu runner's AppArmor policy denies by default.
+      - name: Prepare native guest builds
+        id: native-builds
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            bc binutils bison build-essential ca-certificates cpio curl erofs-utils flex \
+            gzip libelf-dev libssl-dev rsync tar xz-utils zstd
+          userns_policy=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -e "${userns_policy}" ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      # The agent firewall blocks cdn.kernel.org and cdimage.ubuntu.com, even
+      # inside containers, so stage the pinned archives where native kernel and
+      # Ubuntu guest builds look for them.
+      - name: Download the pinned Linux and Ubuntu Base archives
+        id: archives
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+
+          sys.path.insert(0, "scripts")
+          from nvx_tools.build_constants import (
+              BuildConstants,
+              KernelBuildConstants,
+              UbuntuBuildConstants,
+          )
+          from nvx_tools.common import cache_root, download_verified
+
+          downloads = cache_root() / BuildConstants.DOWNLOAD_DIRECTORY_NAME
+          failed = False
+          for url, name, sha256 in (
+              (
+                  KernelBuildConstants.URL,
+                  KernelBuildConstants.UPSTREAM_ARCHIVE_NAME,
+                  KernelBuildConstants.SHA256,
+              ),
+              (
+                  UbuntuBuildConstants.BASE_URL,
+                  UbuntuBuildConstants.BASE_ARCHIVE_NAME,
+                  UbuntuBuildConstants.BASE_SHA256,
+              ),
+          ):
+              try:
+                  download_verified(url, downloads / name, sha256)
+              except Exception as error:
+                  print(f"::error::Could not stage {name}: {error}")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+      - name: Pull the pinned shell linter images
+        id: linters
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          images=$(grep -Eo '(koalaman/shellcheck-alpine|mvdan/shfmt)@sha256:[0-9a-f]{64}' \
+            .github/actions/check-quality/action.yml | sort -u)
+          test -n "${images}"
+          for image in ${images}; do
+            docker pull --quiet "${image}"
+          done
+
+      # validate-nvx runs the CLI tests with the runner image's Python 3, and
+      # Ruff and Pyright target Python 3.10 through pyproject.toml, so install
+      # the development tools into a virtual environment on the image's Python.
+      # Pyright downloads its language server on first use; do that here too.
+      - name: Install Python development tools
+        id: python-tools
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          venv="${HOME}/.venv/nvx"
+          python3 -m venv "${venv}"
+          "${venv}/bin/python" -m pip install --requirement requirements-dev.txt
+          "${venv}/bin/python" -m ruff --version
+          "${venv}/bin/python" -m pyright --version
+          echo "${venv}/bin" >> "${GITHUB_PATH}"
+
+      - name: Verify and summarize the environment
+        shell: bash
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          set -uo pipefail
+          mapfile -t failed < <(
+            jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"
+          )
+          if ! python3 scripts/nvx.py verify; then
+            failed+=(verify)
+          fi
+          openvmm=openvmm/target/release/openvmm
+          if [[ -f "${openvmm}" ]] && ! "${openvmm}" --help > /dev/null 2>&1; then
+            echo "::warning::The cached OpenVMM binary does not run here; removing it"
+            rm -f "${openvmm}" build/openvmm.provenance.json
+          fi
+
+          status=complete
+          if (( ${#failed[@]} > 0 )); then
+            status=incomplete
+          fi
+          failed_list=$(IFS=,; echo "${failed[*]}")
+          {
+            echo "NVX_COPILOT_SETUP=${status}"
+            echo "NVX_COPILOT_SETUP_FAILED=${failed_list}"
+          } >> "${GITHUB_ENV}"
+
+          present() {
+            if [[ -e "$1" ]]; then echo yes; else echo no; fi
+          }
+          kvm=no
+          if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+            kvm=yes
+          fi
+          {
+            echo "### NVX Copilot environment"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Setup status | ${status} |"
+            echo "| Failed steps | ${failed_list:-none} |"
+            echo "| CPUs / memory | $(nproc) / $(free -g | awk '/^Mem:/ { print $2 }') GiB |"
+            echo "| Workspace free space | $(df -h --output=avail . | tail -n 1 | tr -d ' ') |"
+            echo "| KVM access | ${kvm} |"
+            echo "| Guest kernel / Alpine initramfs | $(present build/vmlinux) / $(present build/initramfs.cpio.gz) |"
+            echo "| Ubuntu initramfs / distro layer | $(present build/initramfs-ubuntu.cpio.gz) / $(present build/ubuntu-distro.erofs) |"
+            echo "| Azure Linux initramfs | $(present build/initramfs-azurelinux.cpio.gz) |"
+            echo "| OpenVMM binary for the pinned revision | $(present "${openvmm}") |"
+            echo "| Rust | $(rustc --version 2>&1) |"
+            echo "| Python | $(python3 --version 2>&1) |"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+          if [[ "${status}" != complete ]]; then
+            echo "::error::Copilot setup is incomplete; failed steps: ${failed_list}"
+            exit 1
+          fi

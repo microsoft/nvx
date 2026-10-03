@@ -197,3 +197,43 @@ must collect controller transcripts and complete target logs into
 access-controlled security storage. See
 [Copilot-driven adversarial testing](design/copilot-adversarial-testing.md)
 for the architecture and operational contract.
+
+## Copilot environments
+
+[`copilot-setup-steps.yml`](../.github/workflows/copilot-setup-steps.yml)
+prepares the GitHub-hosted runner of Copilot cloud agent sessions, including
+sessions started from the GitHub web interface. The session's 59-minute limit
+includes these steps, so they only install pinned tools, restore caches, and
+stage downloads; they never compile NVX or OpenVMM. The workflow initializes
+the public OpenVMM submodule without a deploy key, grants access to the
+runner's `/dev/kvm`, installs the Python development tools into a virtual
+environment on the image's Python 3, which `validate-nvx` also uses, and
+installs Rust and cargo-nextest at the versions that
+`check-aci-edge-sandboxes`, the crate manifest, and the Linux runner bootstrap
+pin. It restores the shared guest artifacts
+through the `restore-only` input of
+[`build-guest-artifacts`](../.github/actions/build-guest-artifacts/action.yml)
+and the KVM OpenVMM binary that `build-openvmm` caches for the pinned revision,
+so agents can run microVM tests without rebuilding either. Because the agent
+firewall blocks `cdn.kernel.org` and `cdimage.ubuntu.com`, even inside
+containers, the workflow also installs the native guest build prerequisites,
+allows the unprivileged user namespaces that Alpine's `apk` uses for package
+triggers, and stages the pinned Linux and Ubuntu Base archives, so agents can
+rebuild guest artifacts with `build-guest --native`. When a runner has a
+separate `/mnt` disk with more free space than `/`, it mounts the workspace
+there. A failed step would make Copilot skip every later setup step, so each
+step after checkout continues on error. The last step sets `NVX_COPILOT_SETUP`
+to `complete` or `incomplete`, lists failed step IDs in
+`NVX_COPILOT_SETUP_FAILED`, and fails the run when setup is incomplete.
+Copilot always runs the version on `dev`, even for sessions based on other
+branches, so changes reach agent sessions only after they merge. Pushes run it
+as a normal workflow for validation when they change the workflow or a file
+that its steps take versions, requirements, metadata, or code from: the
+`build-guest-artifacts` action, the files that pin its Rust, cargo-nextest,
+and shell linter versions, `requirements-dev.txt`, `SOURCE-MANIFEST.json`,
+`.gitmodules`, the OpenVMM submodule pin, and the NVX CLI and its modules.
+
+Copilot code review uses
+[`copilot-code-review.yml`](../.github/workflows/copilot-code-review.yml)
+instead. Reviews do not build code, so it only checks out the repository and
+installs the `gh-aw` extension for the MCP server in `.github/mcp.json`.

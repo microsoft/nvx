@@ -201,7 +201,8 @@ copilot --version
 The harness performs its own non-interactive authenticated smoke prompt and
 fails preflight if it cannot complete. It deliberately does not install
 Copilot CLI or run `copilot login`. The repository's
-`.github/workflows/copilot-setup-steps.yml` installs `gh-aw`; it does not
+`.github/workflows/copilot-setup-steps.yml` prepares Copilot cloud agent
+sessions but does not install or authenticate Copilot CLI, so it does not
 satisfy this prerequisite.
 
 Production campaigns also require an administrator-owned, no-argument

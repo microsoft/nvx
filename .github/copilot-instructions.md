@@ -40,6 +40,45 @@
   `nvx-debug`, or `nvx-benchmark`. Never expose `.nvx-hosts.json` or authentication
   material.
 
+## Copilot Cloud Agent Sessions
+
+- Sessions started from GitHub, such as from an issue, a pull request, or the
+  agents panel, run on a GitHub-hosted Ubuntu runner that
+  [copilot-setup-steps](./workflows/copilot-setup-steps.yml) prepares. It
+  initializes `openvmm/`; installs `requirements-dev.txt` into a Python virtual
+  environment on `PATH`, Rust stable with the OpenVMM test targets, the
+  `aci_edge_sandboxes` toolchains, cargo-nextest, and the native guest build
+  prerequisites; grants `/dev/kvm` access; pulls the pinned shell linter images;
+  and stages the pinned Linux and Ubuntu Base archives in `.cache/downloads`.
+  When CI has cached them for the checked-out inputs, it also restores the guest
+  artifacts into `build/` and the KVM OpenVMM binary into
+  `openvmm/target/release/openvmm`. `NVX_COPILOT_SETUP` is `complete` when every
+  setup step succeeded; otherwise it is `incomplete` and `NVX_COPILOT_SETUP_FAILED`
+  lists the failed step IDs from that workflow.
+- The session ends 59 minutes after it starts, setup included, on 4 vCPUs. Run the
+  narrowest affected check first. Rebuild OpenVMM, which takes about 5 minutes and
+  4 GB, only when the `openvmm` gitlink changed or the cached binary is missing,
+  and guest artifacts only when their inputs changed. Leave `test-openvmm-unit`,
+  `test-openvmm`, `build-guest --guest all`, `verify-guest-determinism`, and
+  `benchmark` to CI.
+- Build trees are large. Check `df -h .` before a build, keep one OpenVMM build
+  profile at a time, and delete trees you no longer need with `cargo clean` or
+  `docker builder prune -af`. The setup disables incremental compilation and
+  limits Cargo debug info to line tables to save space.
+- The agent firewall allows GitHub, crates.io, rustup, PyPI, npm, Docker Hub, MCR,
+  and the Debian, Ubuntu, and Alpine package archives. It blocks other hosts, such
+  as `cdn.kernel.org` and `cdimage.ubuntu.com`, even inside containers, so
+  Docker-based `build-guest` cannot download Linux. Rebuild guest artifacts
+  natively from the staged archives with
+  `python3 scripts/nvx.py build-guest --native`, which takes about 5 minutes,
+  adding `--guest ubuntu` for the Ubuntu guest. Do not retry blocked downloads;
+  rely on CI for inputs that remain blocked.
+- With KVM access, run affected microVM scenarios with
+  `python3 scripts/nvx.py test-microvm --backend kvm --scenario NAME`, passing only
+  the `--processors` counts the change needs, and `aci_edge_sandboxes` backend
+  changes with `python3 scripts/nvx.py test-aci-edge-sandboxes --backend kvm`.
+  MSHV and WHP are never available there.
+
 ## Pull Requests And CI
 
 - Ask whether a pull request should be Draft or Ready before creating it. Draft

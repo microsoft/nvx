@@ -1,6 +1,14 @@
 name: Build guest artifacts
 description: Cache or build the pinned Linux kernel and guest images
 
+inputs:
+  restore-only:
+    description: >-
+      Only restore cached artifacts; skip Docker builds, determinism checks,
+      and cache saves for artifacts that miss the cache
+    required: false
+    default: "false"
+
 outputs:
   kernel-cache-key:
     description: Exact cache key for the Linux kernel artifacts
@@ -117,7 +125,7 @@ runs:
         enableCrossOsArchive: true
 
     - name: Build Linux kernel (Docker)
-      if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: >-
         docker build
@@ -127,7 +135,7 @@ runs:
         .
 
     - name: Save Linux kernel (zstd)
-      if: steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-linux-kernel-zstd.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: |
@@ -138,7 +146,7 @@ runs:
         enableCrossOsArchive: true
 
     - name: Build Alpine disk image (Docker)
-      if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: >-
         docker build
@@ -148,7 +156,7 @@ runs:
         .
 
     - name: Save Alpine disk image (zstd)
-      if: steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-alpine-image-zstd.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: |
@@ -159,7 +167,7 @@ runs:
         enableCrossOsArchive: true
 
     - name: Build Ubuntu initramfs (Docker)
-      if: steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: >-
         docker build
@@ -170,8 +178,11 @@ runs:
 
     - name: Verify Ubuntu artifact determinism (Docker)
       if: >-
-        steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true' ||
-        steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
+        inputs.restore-only != 'true' &&
+        (
+          steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true' ||
+          steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
+        )
       shell: bash
       run: >-
         docker build
@@ -180,7 +191,7 @@ runs:
         .
 
     - name: Save Ubuntu initramfs (zstd)
-      if: steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-ubuntu-initramfs-zstd.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: |
@@ -190,7 +201,7 @@ runs:
         enableCrossOsArchive: true
 
     - name: Build Azure Linux initramfs (Docker)
-      if: steps.cache-azurelinux-initramfs-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-azurelinux-initramfs-zstd.outputs.cache-hit != 'true'
       shell: bash
       env:
         AZURELINUX_IMAGE: ${{ steps.guest-versions.outputs.azurelinux-image }}
@@ -205,7 +216,7 @@ runs:
         .
 
     - name: Save Azure Linux initramfs (zstd)
-      if: steps.cache-azurelinux-initramfs-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-azurelinux-initramfs-zstd.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: |
@@ -215,7 +226,7 @@ runs:
         enableCrossOsArchive: true
 
     - name: Build Ubuntu distro layer (Docker)
-      if: steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
       shell: bash
       run: >-
         docker build
@@ -225,7 +236,7 @@ runs:
         .
 
     - name: Save Ubuntu distro layer (zstd)
-      if: steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
+      if: inputs.restore-only != 'true' && steps.cache-ubuntu-distro-zstd.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: |
@@ -238,6 +249,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        mkdir -p build
         rm -f build/ubuntu-smoke-scratch.ext4
         truncate --size 64M build/ubuntu-smoke-scratch.ext4
         mkfs.ext4 -q -F -m 0 \
