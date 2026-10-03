@@ -60,5 +60,20 @@
     ],
     "source_output": "build/sources/ubuntu",
     "erofs_converter_format": 1
+  },
+  "azurelinux": {
+    "distribution": "Azure Linux",
+    "version": "3.0",
+    "architecture": "x86_64",
+    "image": "mcr.microsoft.com/azurelinux/base/core@sha256:c877612270d1ee2d6ab2bc1f64bfe38ab697ac50be325154ee5129fce89c17e4",
+    "package_lock": "azurelinux/packages.lock.json",
+    "package_lock_sha256": "f2014a858f46482778f138b374f80c36df389206ae677870d58a7e919bec182b",
+    "guest_sources": [
+      "guest/common",
+      "azurelinux/packages.lock.json"
+    ],
+    "package_manifests": [
+      "build/initramfs-azurelinux.cpio.gz.packages.json"
+    ]
   }
 }

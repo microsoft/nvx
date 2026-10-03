@@ -143,6 +143,40 @@ jobs:
           --scenario filesystem-snapshot
           --output-dir "build/test-results/ubuntu-${{ inputs.backend }}"
 
+      - name: Run Azure Linux guest smoke tests on Linux
+        if: runner.os != 'Windows' && !inputs.debug-kernel
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --guest azurelinux
+          --processors 1
+          --scenario guest-boot
+          --scenario guest-identity
+          --scenario console-exit
+          --scenario virtio-net
+          --scenario network-snapshot
+          --scenario workload-identity
+          --scenario managed-lifecycle
+          --output-dir "build/test-results/azurelinux-${{ inputs.backend }}"
+
+      - name: Run Azure Linux guest smoke tests on Windows
+        if: runner.os == 'Windows' && !inputs.debug-kernel
+        shell: powershell
+        run: >-
+          python scripts\nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --guest azurelinux
+          --processors 1
+          --scenario guest-boot
+          --scenario guest-identity
+          --scenario console-exit
+          --scenario virtio-net
+          --scenario network-snapshot
+          --scenario workload-identity
+          --scenario managed-lifecycle
+          --output-dir "build/test-results/azurelinux-${{ inputs.backend }}"
+
       - name: Run extended Ubuntu guest tests on Linux/KVM
         if: inputs.backend == 'kvm' && !inputs.debug-kernel
         shell: bash
@@ -509,4 +543,5 @@ jobs:
             build/test-results/microvm-${{ inputs.backend }}-debug
             build/test-results/ubuntu-${{ inputs.backend }}
             build/test-results/ubuntu-kvm-extended
+            build/test-results/azurelinux-${{ inputs.backend }}
           if-no-files-found: warn

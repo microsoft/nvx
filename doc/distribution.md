@@ -7,7 +7,7 @@ python3 scripts/nvx.py package --binary-only
 ```
 
 Binary-only mode requires an explicit acknowledgement because the matching
-Linux, Alpine, and Ubuntu source must be published separately.
+Linux, Alpine, Ubuntu, and Azure Linux source must be published separately.
 
 First materialize the release sources:
 
@@ -33,6 +33,12 @@ source/nvx-linux-source-6.18.38.tar.gz
 source/nvx-alpine-source-0.1.0.tar.gz
 source/nvx-ubuntu-source-0.1.0.tar.gz
 ```
+
+`collect-sources` does not collect Azure Linux corresponding source, so
+`--include-source` omits `initramfs-azurelinux.cpio.gz` and its package
+manifest from the staged release and from the packaged `SOURCE-MANIFEST.json`.
+Distribute the Azure Linux guest only from a binary-only package while its
+corresponding source is published separately.
 
 Linux is GPL-2.0-only, so a distributor of `vmlinux` must make its complete
 corresponding source available. Alpine packages retain their individual

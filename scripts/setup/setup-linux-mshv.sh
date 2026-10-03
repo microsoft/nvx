@@ -213,7 +213,8 @@ check_guest_bundle() {
     for name in vmlinux vmlinux.config initramfs.cpio.gz \
         initramfs.cpio.gz.packages.json initramfs-ubuntu.cpio.gz \
         initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
-        ubuntu-distro.erofs.manifest.json REVISION SHA256SUMS; do
+        ubuntu-distro.erofs.manifest.json initramfs-azurelinux.cpio.gz \
+        initramfs-azurelinux.cpio.gz.packages.json REVISION SHA256SUMS; do
         [ -f "${bundle_path}/${name}" ] ||
             die "missing guest bundle file: ${bundle_path}/${name}"
     done
@@ -237,7 +238,8 @@ create_guest_bundle() {
     for name in vmlinux vmlinux.config initramfs.cpio.gz \
         initramfs.cpio.gz.packages.json initramfs-ubuntu.cpio.gz \
         initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
-        ubuntu-distro.erofs.manifest.json; do
+        ubuntu-distro.erofs.manifest.json initramfs-azurelinux.cpio.gz \
+        initramfs-azurelinux.cpio.gz.packages.json; do
         source_path="${workspace}/build/${name}"
         [ -f "$source_path" ] || die "missing guest artifact: $source_path"
         cp "$source_path" "$bundle_path"
@@ -248,7 +250,8 @@ create_guest_bundle() {
         sha256sum vmlinux vmlinux.config initramfs.cpio.gz \
             initramfs.cpio.gz.packages.json initramfs-ubuntu.cpio.gz \
             initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
-            ubuntu-distro.erofs.manifest.json REVISION >SHA256SUMS
+            ubuntu-distro.erofs.manifest.json initramfs-azurelinux.cpio.gz \
+            initramfs-azurelinux.cpio.gz.packages.json REVISION >SHA256SUMS
     )
     check_guest_bundle "$bundle_path"
 }

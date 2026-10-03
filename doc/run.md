@@ -27,6 +27,9 @@ python3 scripts/nvx.py run --guest ubuntu
 
 Ubuntu defaults to 512 MiB and prints `NVX-GUEST-BOOT-OK: ubuntu`. It is
 Ubuntu userland with the NVX kernel, not a stock Ubuntu kernel or systemd VM.
+Boot Azure Linux 3.0 userland the same way with `--guest azurelinux`. The
+kernel unpacks its rootfs into a RAM filesystem capped at half of guest memory,
+so it defaults to 512 MiB, and it prints `NVX-GUEST-BOOT-OK: azurelinux`.
 Exit cleanly from the guest with:
 
 ```sh
@@ -237,6 +240,7 @@ translations and additions:
 | --- | --- |
 | `--guest alpine` | `--initrd .../initramfs.cpio.gz` on a fresh boot |
 | `--guest ubuntu` | `--initrd .../initramfs-ubuntu.cpio.gz` and a 512 MiB default on a fresh boot |
+| `--guest azurelinux` | `--initrd .../initramfs-azurelinux.cpio.gz` and a 512 MiB default on a fresh boot |
 | `--hypervisor auto` | `--hypervisor kvm` on Linux or `--hypervisor whp` on Windows |
 | `--memory-mib N` | `--memory NM` |
 | `--memory-capacity-mib N` | `--memory-capacity NM` on a fresh boot |

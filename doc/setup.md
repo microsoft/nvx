@@ -34,8 +34,8 @@ For Debian/Ubuntu hosts:
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  bc binutils bison build-essential ca-certificates cpio curl flex gzip \
-  libelf-dev libssl-dev musl-tools python3 rsync tar xz-utils
+  bc binutils bison build-essential ca-certificates cpio curl erofs-utils flex \
+  gzip libelf-dev libssl-dev musl-tools python3 rsync tar xz-utils zstd
 ```
 
 `musl-tools` provides `musl-gcc`, which native initramfs builds use for the

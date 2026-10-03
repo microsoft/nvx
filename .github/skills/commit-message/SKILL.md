@@ -1,9 +1,8 @@
 ---
-name: "Commit Message"
-description: "Generate a repository-conformant commit message for the currently staged changes"
-agent: "agent"
+name: commit-message
+description: Generate a repository-conformant commit message for the currently staged changes
+disable-model-invocation: true
 ---
-
 # Suggest a Commit Message
 
 Generate a commit message for the **currently staged** changes only. Do not stage,
@@ -24,13 +23,17 @@ producing a message.
      only the relevant ranges.
 2. Discover the repository's commit-message conventions from explicit contributor
    guidance, templates, hooks, lint configuration, and other repository-local rules,
-   then inspect recent commit history for established style. Do not assume any file
-   location, language, package manager, hook path, lint tool, subject format, scope
-   vocabulary, or length limit. Do not use unstaged file contents as evidence.
+   then inspect recent commit history for established style. Exclude merge commits
+   and automation-authored commits, such as `github-actions[bot]` baseline updates,
+   from that evidence. Do not assume any file location, language, package manager,
+   hook path, lint tool, subject format, scope vocabulary, or length limit. Do not
+   use unstaged file contents as evidence.
 3. Prefer enforceable configuration over documentation and documentation over recent
-   history. Resolve the staged change's intent, then write a message that follows the
-   discovered format and style. Use the fallback rules below only when the repository
-   provides no convention.
+   history. Treat history as a convention only when recent human-authored commits
+   follow it consistently; when it is mixed, follow the style of commits already on
+   the current branch, if any. Resolve the staged change's intent, then write a
+   message that follows the discovered format and style. Use the fallback rules below
+   only when the repository provides no convention.
 4. Output the final message inside one fenced ```text block so it can be copied as-is.
 
 ## Subject Line
@@ -53,8 +56,11 @@ producing a message.
   if none exists, wrap prose at about 72 columns.
 - Group details only when that improves clarity for a multi-part change.
 - Reference issues, pull requests, breaking changes, co-authors, or other metadata only
-  when justified by the staged diff or explicit user input, and use the repository's
-  established syntax. Never fabricate identifiers or trailers.
+  when justified by the staged diff, explicit user input, or your own contribution to
+  the staged changes in the current session, and use the repository's established
+  syntax. For example, add an assistant co-author trailer, spelled exactly as recent
+  human-authored commits spell it, only when you helped produce the staged changes.
+  Never fabricate identifiers or trailers.
 - Mention validation commands only when evidenced and useful to future readers.
 
 ## Fallback Example
@@ -74,4 +80,5 @@ return current data.
 - Use repository-specific conventions only when supported by repository evidence.
 - Do not infer motivation, issue references, validation results, or compatibility
   effects that the staged diff and explicit user input do not establish.
+- Never add CI-control directives such as `[skip ci]` unless the user explicitly asks.
 - Do not run any mutating git command. Output the message and stop.

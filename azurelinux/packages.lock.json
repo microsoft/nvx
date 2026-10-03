@@ -1,0 +1,88 @@
+{
+  "format": 1,
+  "release": "3.0",
+  "architecture": "x86_64",
+  "image": "mcr.microsoft.com/azurelinux/base/core@sha256:c877612270d1ee2d6ab2bc1f64bfe38ab697ac50be325154ee5129fce89c17e4",
+  "packages": [
+    {
+      "name": "audit-libs",
+      "version": "3.1.2",
+      "release": "1.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/a/audit-libs-3.1.2-1.azl3.x86_64.rpm",
+      "sha256": "6df10d8524dc393c5e941150ee5c7696afd6c4e9ffb222f185e32deaa8c77cfa"
+    },
+    {
+      "name": "busybox",
+      "version": "1.36.1",
+      "release": "27.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/b/busybox-1.36.1-27.azl3.x86_64.rpm",
+      "sha256": "177fc49658c3500727f800e4887997d2272d4126cc5e48f2a1669f1294e1b341"
+    },
+    {
+      "name": "cracklib",
+      "version": "2.9.11",
+      "release": "1.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/c/cracklib-2.9.11-1.azl3.x86_64.rpm",
+      "sha256": "0c14f9774b2fcfeeb3ef6cb4e288c55d2898231dad3ef3795d6c61ae6358646d"
+    },
+    {
+      "name": "cracklib-dicts",
+      "version": "2.9.11",
+      "release": "1.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/c/cracklib-dicts-2.9.11-1.azl3.x86_64.rpm",
+      "sha256": "357bee24f08c6bee1ffed0b3c9e3c96f3dc5eb843c8ca0bd0c28000905e63d6d"
+    },
+    {
+      "name": "file-libs",
+      "version": "5.45",
+      "release": "1.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/f/file-libs-5.45-1.azl3.x86_64.rpm",
+      "sha256": "431961503ca3bb30cb78510008ba073ab50f35b2e425432db0ad1d6bc027d9d4"
+    },
+    {
+      "name": "libcap-ng",
+      "version": "0.8.4",
+      "release": "1.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/l/libcap-ng-0.8.4-1.azl3.x86_64.rpm",
+      "sha256": "8581adc2486084581ae829ea79b7a929cb788c08c5fb35550eb4e44973426feb"
+    },
+    {
+      "name": "libxcrypt",
+      "version": "4.4.36",
+      "release": "2.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/l/libxcrypt-4.4.36-2.azl3.x86_64.rpm",
+      "sha256": "57e076b44c9d4c1316f7b9a602443a764322c2ef1d98eba873e1b3c732ca52e6"
+    },
+    {
+      "name": "pam",
+      "version": "1.5.3",
+      "release": "5.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/p/pam-1.5.3-5.azl3.x86_64.rpm",
+      "sha256": "2698aec4e3ab1755b53a5a1c60686abe42bf9c6e4f69b9f12aaac843a6fe6d18"
+    },
+    {
+      "name": "util-linux",
+      "version": "2.40.2",
+      "release": "6.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/u/util-linux-2.40.2-6.azl3.x86_64.rpm",
+      "sha256": "1ffbe83ccc12dccb01b1f166b1dab6dd76ad64856c3c608a5bbb7b85cac2e688"
+    },
+    {
+      "name": "util-linux-libs",
+      "version": "2.40.2",
+      "release": "6.azl3",
+      "architecture": "x86_64",
+      "url": "https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/u/util-linux-libs-2.40.2-6.azl3.x86_64.rpm",
+      "sha256": "6f3cec843ebe30e194b666650c7ef045edc43e7f46434212fa15481ccc2a962d"
+    }
+  ]
+}

@@ -8,6 +8,7 @@
 *.sh text eol=lf
 *.sh.in text eol=lf
 ubuntu/packages.lock.json text eol=lf
+azurelinux/packages.lock.json text eol=lf
 guest/* text eol=lf
 guest/**/* text eol=lf
 Dockerfile text eol=lf

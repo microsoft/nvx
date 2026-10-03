@@ -275,7 +275,8 @@ THIRD_PARTY_NOTICES.md
 SHA256SUMS
 ```
 
-Packages built with `--include-source` additionally contain `source/`.
+Packages built with `--include-source` additionally contain `source/` and omit
+the Azure Linux guest artifacts, whose corresponding source is not collected.
 `SHA256SUMS` has sorted `SHA256  relative/path` entries using POSIX separators
 for every packaged file, including `SOURCE-MANIFEST.json`, except
 `SHA256SUMS` itself.

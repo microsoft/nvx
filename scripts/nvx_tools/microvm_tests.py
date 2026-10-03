@@ -105,8 +105,9 @@ MICROVM_TEST_SCENARIOS = (
     "virtio-net",
     "workload-identity",
 )
-UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(
-    ("console-snapshot", "sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
+UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
+SANDBOX_CONTROL_SCENARIOS = frozenset(
+    ("sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
 )
 # The spec runs the same-host restore cases on the CI debug kernel, whose
 # soft-lockup and hung-task detectors the guest's time ABI watcher reports.
@@ -4468,24 +4469,25 @@ def run(args: argparse.Namespace) -> int:
     )
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    unsupported_scenarios: set[str] = set()
+    if descriptor.name == "ubuntu":
+        unsupported_scenarios.update(UBUNTU_UNSUPPORTED_SCENARIOS)
+    if not descriptor.sandbox_control:
+        unsupported_scenarios.update(SANDBOX_CONTROL_SCENARIOS)
     if args.scenario is None:
         defaults = DEBUG_KERNEL_SCENARIOS if debug_kernel else MICROVM_TEST_SCENARIOS
         scenarios = tuple(
-            scenario
-            for scenario in defaults
-            if descriptor.name != "ubuntu"
-            or scenario not in UBUNTU_UNSUPPORTED_SCENARIOS
+            scenario for scenario in defaults if scenario not in unsupported_scenarios
         )
     else:
         scenarios = tuple(dict.fromkeys(args.scenario))
-        unsupported: set[str] = set()
-        if descriptor.name == "ubuntu":
-            for scenario in UBUNTU_UNSUPPORTED_SCENARIOS:
-                if scenario in scenarios:
-                    unsupported.add(scenario)
+        unsupported = set(scenarios) & unsupported_scenarios
         if unsupported:
+            guest_label = (
+                "Ubuntu" if descriptor.name == "ubuntu" else descriptor.distribution
+            )
             raise ScriptError(
-                "Ubuntu guest does not support correctness scenario(s): "
+                f"{guest_label} guest does not support correctness scenario(s): "
                 + ", ".join(sorted(unsupported))
             )
 

@@ -161,6 +161,8 @@ jobs:
             build/initramfs.provenance.json
             build/initramfs-ubuntu.cpio.gz
             build/initramfs-ubuntu.cpio.gz.packages.json
+            build/initramfs-azurelinux.cpio.gz
+            build/initramfs-azurelinux.cpio.gz.packages.json
             build/ubuntu-distro.erofs
             build/ubuntu-distro.erofs.manifest.json
             build/ubuntu-smoke-scratch.ext4

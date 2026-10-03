@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
 from nvx_tools import (  # noqa: E402
     archive,
+    azurelinux,
     benchmark,
     build,
     build_config,
@@ -50,6 +51,7 @@ from nvx_tools import (  # noqa: E402
 )
 from nvx_tools.build_constants import (  # noqa: E402
     AlpineBuildConstants,
+    AzureLinuxBuildConstants,
     BuildConstants,
     DockerBuildConstants,
     InitramfsBuildConstants,
@@ -113,8 +115,10 @@ def _write_release_fixture(
     binary = openvmm_dir / "target" / "release" / binary_name
     revision = "0bc357bbcf3a654b63dfb51f1103c5751bf3d31f"
     guest_names = ReleaseBuildConstants.GUEST_ARTIFACT_NAMES
-    source_files = set(build._initramfs_source_files()) | set(
-        ubuntu.customization_files()
+    source_files = (
+        set(build._initramfs_source_files())
+        | set(ubuntu.customization_files())
+        | set(azurelinux.input_files())
     )
     for source in source_files:
         destination = root / source.relative_to(BuildConstants.REPO_ROOT)
@@ -153,6 +157,24 @@ def _write_release_fixture(
             ),
             encoding="utf-8",
         )
+    (build_dir / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "format": AzureLinuxBuildConstants.PACKAGE_MANIFEST_VERSION,
+                "guest": AzureLinuxBuildConstants.GUEST_NAME,
+                "artifact": AzureLinuxBuildConstants.INITRAMFS_NAME,
+                "artifact_sha256": common.sha256_file(
+                    build_dir / AzureLinuxBuildConstants.INITRAMFS_NAME
+                ),
+                "package_manifest_format": (
+                    AzureLinuxBuildConstants.PACKAGE_MANIFEST_FORMAT
+                ),
+                "image": AzureLinuxBuildConstants.IMAGE,
+                "input_sha256": azurelinux.input_sha256(),
+            }
+        ),
+        encoding="utf-8",
+    )
     generated_config = build_dir / "vmlinux.config"
     generated_config.write_text(
         "\n".join(
@@ -224,6 +246,27 @@ def _write_release_fixture(
             "source_output": "build/sources/ubuntu",
             "erofs_converter_format": UbuntuBuildConstants.EROFS_FORMAT,
         },
+        "azurelinux": {
+            "distribution": "Azure Linux",
+            "version": AzureLinuxBuildConstants.VERSION,
+            "architecture": AzureLinuxBuildConstants.ARCHITECTURE,
+            "image": AzureLinuxBuildConstants.IMAGE,
+            "package_lock": "azurelinux/packages.lock.json",
+            "package_lock_sha256": azurelinux.package_lock_sha256(),
+            "guest_sources": [
+                *(
+                    path.as_posix()
+                    for path in AzureLinuxBuildConstants.GUEST_SOURCE_DIRECTORIES
+                ),
+                "azurelinux/packages.lock.json",
+            ],
+            "package_manifests": [
+                (
+                    Path(BuildConstants.BUILD_DIRECTORY_NAME)
+                    / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
+                ).as_posix()
+            ],
+        },
     }
     (root / "SOURCE-MANIFEST.json").write_text(
         json.dumps(manifest),
@@ -289,6 +332,14 @@ def _write_release_fixture(
 
 
 class CliTests(unittest.TestCase):
+    def test_guest_selection_includes_azure_linux(self):
+        args = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
+        self.assertEqual(args.guest, "azurelinux")
+        self.assertEqual(
+            guests.guest_descriptor(args.guest).initramfs_name,
+            "initramfs-azurelinux.cpio.gz",
+        )
+
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
             [
@@ -496,6 +547,16 @@ class CliTests(unittest.TestCase):
         ubuntu_initramfs = nvx.parse_args(["build-initramfs", "--guest", "ubuntu"])
         self.assertEqual(ubuntu_initramfs.guest, "ubuntu")
 
+        azurelinux_initramfs = nvx.parse_args(
+            ["build-initramfs", "--guest", "azurelinux"]
+        )
+        with patch("nvx.build_docker_initramfs") as build_docker_initramfs:
+            nvx.command_build_initramfs(azurelinux_initramfs)
+        build_docker_initramfs.assert_called_once_with(
+            build.DockerBuildConfig(artifact_destination=BuildConstants.BUILD_DIR),
+            "azurelinux",
+        )
+
         distro = nvx.parse_args(
             [
                 "build-distro-layer",
@@ -512,6 +573,30 @@ class CliTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit):
             nvx.parse_args(["run", "--guest", "all"])
+
+    def test_docker_initramfs_rejects_native_guest(self):
+        with self.assertRaisesRegex(
+            common.ScriptError, "Alpine Linux.*do not require Docker"
+        ):
+            build.build_docker_initramfs(build.DockerBuildConfig(), "alpine")
+
+    def test_docker_initramfs_requires_expected_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = build.DockerBuildConfig(artifact_destination=Path(temporary))
+            with (
+                patch.object(build, "require_tool"),
+                patch.object(build, "run_checked") as run_checked,
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "initramfs-azurelinux.cpio.gz",
+                ),
+            ):
+                build.build_docker_initramfs(config, "azurelinux")
+        command = run_checked.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--target") + 1],
+            "azurelinux-initramfs-artifacts",
+        )
 
     def test_ubuntu_run_selects_artifact_and_default_memory(self):
         args = nvx.parse_args(["run", "--guest", "ubuntu", "--dry-run"])
@@ -534,6 +619,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             Path(command[command.index("--initrd") + 1]).name,
             "initramfs-ubuntu.cpio.gz",
+        )
+
+    def test_azurelinux_run_selects_artifact_and_default_memory(self):
+        args = nvx.parse_args(["run", "--guest", "azurelinux", "--dry-run"])
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with (
+            patch.object(nvx, "require_file", side_effect=require),
+            patch.object(
+                nvx,
+                "_format_command",
+                return_value="formatted",
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[command.index("--memory") + 1], "512M")
+        self.assertEqual(
+            Path(command[command.index("--initrd") + 1]).name,
+            "initramfs-azurelinux.cpio.gz",
         )
 
     def test_restore_rejects_ubuntu_guest_selection(self):
@@ -2421,8 +2529,9 @@ class CiConfigurationTests(unittest.TestCase):
             ),
             2,
         )
-        # The debug run replaces the Ubuntu tests rather than adding to them.
-        self.assertEqual(microvm_workflow.count("!inputs.debug-kernel"), 5)
+        # The debug run replaces the Ubuntu and Azure Linux guest tests rather
+        # than adding to them.
+        self.assertEqual(microvm_workflow.count("!inputs.debug-kernel"), 7)
 
     def test_benchmarks_rely_on_the_microvm_correctness_jobs(self):
         # #286: the benchmark action ran a second smp-lapic gate before
@@ -4076,16 +4185,14 @@ class BuildTests(unittest.TestCase):
             patch.object(build, "build_distro_layer") as distro,
         ):
             all_guests = build_config.BuildConfig(guest="all", native_guest=True)
-            build.build_guest(all_guests)
-            kernel.assert_called_once_with(all_guests.kernel)
-            self.assertEqual(
-                initramfs.call_args_list,
-                [
-                    call(all_guests.initramfs_config("alpine")),
-                    call(all_guests.initramfs_config("ubuntu")),
-                ],
-            )
-            distro.assert_called_once_with(all_guests.distro_layer_config())
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "Azure Linux initramfs builds require Docker",
+            ):
+                build.build_guest(all_guests)
+            kernel.assert_not_called()
+            initramfs.assert_not_called()
+            distro.assert_not_called()
 
     def test_combined_build_passes_explicit_backend_to_openvmm_build(self):
         config = build_config.BuildConfig(
@@ -4128,14 +4235,15 @@ class BuildTests(unittest.TestCase):
             patch.object(
                 release,
                 "_guest_release_inputs",
-                return_value=((), (), ()),
-            ),
+                return_value=((), (), (), ()),
+            ) as guest_release_inputs,
             patch.object(release, "collect_alpine_sources"),
             patch.object(release, "collect_ubuntu_sources"),
             patch.object(release, "build_docker_linux_source") as linux_source,
         ):
             release.collect_release_sources(config)
 
+        guest_release_inputs.assert_called_once_with(include_azurelinux=False)
         linux_source.assert_called_once_with(config)
 
     def test_records_openvmm_revision_cleanliness_and_executable_hash(self):
@@ -4387,9 +4495,10 @@ class BuildTests(unittest.TestCase):
             },
         )
 
-    def test_guest_descriptors_preserve_alpine_and_select_ubuntu_outputs(self):
+    def test_guest_descriptors_preserve_alpine_and_select_guest_outputs(self):
         alpine = guests.guest_descriptor("alpine")
         ubuntu_guest = guests.guest_descriptor("ubuntu")
+        azurelinux_guest = guests.guest_descriptor("azurelinux")
 
         self.assertEqual(alpine.initramfs_name, "initramfs.cpio.gz")
         self.assertEqual(alpine.default_memory_mib, 128)
@@ -4400,6 +4509,102 @@ class BuildTests(unittest.TestCase):
         )
         self.assertEqual(ubuntu_guest.default_memory_mib, 512)
         self.assertFalse(ubuntu_guest.sandbox_control)
+        self.assertEqual(
+            azurelinux_guest.initramfs_name,
+            "initramfs-azurelinux.cpio.gz",
+        )
+        self.assertEqual(azurelinux_guest.default_memory_mib, 512)
+        self.assertFalse(azurelinux_guest.sandbox_control)
+
+    def test_azurelinux_manifest_and_package_lock_match_build_pins(self):
+        manifest = json.loads(
+            (BuildConstants.REPO_ROOT / "SOURCE-MANIFEST.json").read_text(
+                encoding="utf-8"
+            )
+        )["azurelinux"]
+        self.assertEqual(manifest["image"], AzureLinuxBuildConstants.IMAGE)
+        self.assertEqual(manifest["package_lock"], "azurelinux/packages.lock.json")
+        self.assertEqual(
+            manifest["package_lock_sha256"],
+            azurelinux.package_lock_sha256(),
+        )
+        packages = azurelinux.load_package_lock()
+        self.assertEqual(
+            {"busybox", "util-linux"} - {package["name"] for package in packages},
+            set(),
+        )
+        for package in packages:
+            self.assertTrue(
+                package["url"].startswith(
+                    f"{AzureLinuxBuildConstants.REPOSITORY_URL}/Packages/"
+                )
+            )
+        attributes = (BuildConstants.REPO_ROOT / ".gitattributes").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("azurelinux/packages.lock.json text eol=lf", attributes)
+
+    def test_azurelinux_package_lock_rejects_unpinned_records(self):
+        document = json.loads(
+            azurelinux.package_lock_path().read_text(encoding="utf-8")
+        )
+        first = document["packages"][0]
+        cases: tuple[tuple[str, dict[str, object], str], ...] = (
+            ("image", {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"}, "image"),
+            (
+                "url",
+                {
+                    "packages": [
+                        {**first, "url": first["url"].replace("/prod/", "/preview/")},
+                        *document["packages"][1:],
+                    ]
+                },
+                "must be fetched from",
+            ),
+            (
+                "sha256",
+                {
+                    "packages": [
+                        {**first, "sha256": "0" * 63},
+                        *document["packages"][1:],
+                    ]
+                },
+                "invalid SHA-256",
+            ),
+            (
+                "order",
+                {"packages": list(reversed(document["packages"]))},
+                "sorted by name",
+            ),
+        )
+        for name, update, message in cases:
+            with (
+                self.subTest(case=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                path = Path(temporary) / "packages.lock.json"
+                path.write_text(json.dumps({**document, **update}), encoding="utf-8")
+                with self.assertRaisesRegex(common.ScriptError, message):
+                    azurelinux.load_package_lock(path)
+
+    def test_azurelinux_download_packages_verifies_each_locked_rpm(self):
+        destination = Path("rpms")
+        with patch.object(azurelinux, "download_verified") as download_verified:
+            downloaded = azurelinux.download_packages(destination)
+
+        packages = azurelinux.load_package_lock()
+        self.assertEqual(
+            download_verified.call_args_list,
+            [
+                call(
+                    package["url"],
+                    destination / package["url"].rsplit("/", maxsplit=1)[-1],
+                    package["sha256"],
+                )
+                for package in packages
+            ],
+        )
+        self.assertEqual(len(downloaded), len(packages))
 
     def test_ubuntu_manifest_and_package_lock_match_build_pins(self):
         manifest = json.loads(
@@ -5030,6 +5235,7 @@ class BuildTests(unittest.TestCase):
             "KERNEL_INPUT_HASH",
             "ALPINE_INPUT_HASH",
             "UBUNTU_INPUT_HASH",
+            "AZURELINUX_INPUT_HASH",
         ):
             with self.subTest(cache=cache_name):
                 cache_input = next(
@@ -5039,6 +5245,35 @@ class BuildTests(unittest.TestCase):
                 )
                 self.assertIn("'scripts/nvx_tools/build_config.py'", cache_input)
                 self.assertIn("'scripts/nvx_tools/build_constants.py'", cache_input)
+
+    def test_ci_azurelinux_cache_key_covers_build_input_digest(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        cache_input = next(
+            line
+            for line in action.splitlines()
+            if line.strip().startswith("AZURELINUX_INPUT_HASH:")
+        )
+        patterns = cache_input.split("'")[1::2]
+        self.assertIn("scripts/nvx_tools/azurelinux.py", patterns)
+        for path in azurelinux.input_files():
+            relative = path.relative_to(BuildConstants.REPO_ROOT).as_posix()
+            with self.subTest(path=relative):
+                self.assertTrue(
+                    any(
+                        relative == pattern
+                        or (
+                            pattern.endswith("/**")
+                            and relative.startswith(pattern[:-2])
+                        )
+                        for pattern in patterns
+                    )
+                )
 
     def test_kernel_input_config_uses_canonical_lf_line_endings(self):
         attributes = (BuildConstants.REPO_ROOT / ".gitattributes").read_text(
@@ -5159,6 +5394,187 @@ class BuildTests(unittest.TestCase):
         )
         self.assertIn("ARG EROFS_UTILS_VERSION=1.5-1", dockerfile)
         self.assertIn("erofs-utils=${EROFS_UTILS_VERSION}", dockerfile)
+
+    def test_azurelinux_initramfs_uses_locked_busybox_applets(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        base_stage = dockerfile.split("FROM base AS kernel", 1)[0]
+        self.assertNotIn("busybox", base_stage)
+        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        self.assertIn("ln -sf ../sbin/busybox /rootfs/usr/bin/busybox", azure_stage)
+        applets = (
+            azure_stage.split("for utility in ", 1)[1]
+            .split("; do", 1)[0]
+            .replace("\\\n", " ")
+            .split()
+        )
+        for applet in ("sh", "arp", "nc", "wget", "mdev", "ifconfig", "route"):
+            self.assertIn(applet, applets)
+        # util-linux provides these; the BusyBox applets lack required options.
+        self.assertNotIn("setpriv", applets)
+        self.assertNotIn("unshare", applets)
+        launcher = (
+            BuildConstants.REPO_ROOT
+            / "guest"
+            / "common"
+            / "nvx-container-launch-azurelinux"
+        ).read_text(encoding="utf-8")
+        self.assertIn("exec unshare --mount --pid --uts --fork --kill-child", launcher)
+        self.assertIn(
+            "busybox", [package["name"] for package in azurelinux.load_package_lock()]
+        )
+
+    def test_azurelinux_initramfs_gives_nobody_a_home(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        self.assertIn(
+            "sed -i 's#^\\(nobody:[^:]*:65534:65534:[^:]*:\\)/dev/null:"
+            "#\\1/nonexistent:#'",
+            azure_stage,
+        )
+        self.assertIn(
+            "grep -q '^nobody:[^:]*:65534:65534:[^:]*:/nonexistent:' "
+            "/rootfs/etc/passwd",
+            azure_stage,
+        )
+        self.assertIn("install -d -m 0755 /rootfs/nonexistent", azure_stage)
+
+    def test_azurelinux_rootfs_installs_only_locked_rpms(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("tdnf install", dockerfile)
+        packages_stage = dockerfile.split("FROM base AS azurelinux-packages", 1)[1]
+        self.assertIn(
+            "from nvx_tools.azurelinux import download_packages",
+            packages_stage.split("\nFROM ", 1)[0],
+        )
+        rootfs_stage = dockerfile.split(
+            "FROM ${AZURELINUX_IMAGE} AS azurelinux-rootfs", 1
+        )[1].split("\nFROM ", 1)[0]
+        self.assertIn(
+            "COPY --from=azurelinux-packages /out/rpms/ /tmp/azurelinux-rpms/",
+            rootfs_stage,
+        )
+        checksig = rootfs_stage.index("rpm --checksig /tmp/azurelinux-rpms/*.rpm")
+        install = rootfs_stage.index("rpm --upgrade --verbose --hash")
+        self.assertLess(checksig, install)
+
+    def test_azurelinux_manifest_uses_package_metadata(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("rpm -qa --queryformat", dockerfile)
+        self.assertIn("if name == 'gpg-pubkey':", dockerfile)
+        self.assertNotIn("'type': 'deb'", dockerfile)
+        self.assertIn("'packages': json.loads", dockerfile)
+
+    def test_azurelinux_initramfs_packs_normalized_rootfs(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        cleanup = azure_stage.index(
+            "rm -rf /rootfs/usr/lib/sysimage/tdnf /rootfs/var/cache/tdnf \\\n"
+            "    /rootfs/var/cache/ldconfig /rootfs/var/lib/rpm"
+        )
+        normalize = azure_stage.index(
+            "find . -exec touch --no-dereference "
+            f"--date=@{InitramfsBuildConstants.TIMESTAMP} {{}} +"
+        )
+        pack = azure_stage.index("find . -print0 | LC_ALL=C sort -z | cpio")
+        self.assertLess(cleanup, normalize)
+        self.assertLess(normalize, pack)
+
+    def test_azurelinux_manifest_records_shared_input_digest(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        self.assertIn("from nvx_tools.azurelinux import input_sha256", azure_stage)
+        self.assertIn(
+            "'input_sha256': input_sha256(\n"
+            "        image=os.environ['AZURELINUX_IMAGE'],\n"
+            "        version=os.environ['AZURELINUX_VERSION'],\n"
+            "    ),",
+            azure_stage,
+        )
+
+    def test_azurelinux_input_digest_tracks_guest_sources_and_dockerfile(self):
+        checkout_digest = azurelinux.input_sha256()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for source in azurelinux.input_files():
+                destination = root / source.relative_to(BuildConstants.REPO_ROOT)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            with patch.object(BuildConstants, "REPO_ROOT", root):
+                baseline = azurelinux.input_sha256()
+                self.assertEqual(baseline, checkout_digest)
+                self.assertNotEqual(
+                    azurelinux.input_sha256(image="example.invalid/other@sha256:0"),
+                    baseline,
+                )
+                self.assertNotEqual(azurelinux.input_sha256(version="3.1"), baseline)
+                for relative in (
+                    "guest/common/init",
+                    "docker/Dockerfile",
+                    "azurelinux/packages.lock.json",
+                    "scripts/nvx_tools/azurelinux.py",
+                    "scripts/nvx_tools/build_constants.py",
+                    "scripts/nvx_tools/common.py",
+                ):
+                    with self.subTest(path=relative):
+                        path = root / relative
+                        original = path.read_bytes()
+                        path.write_bytes(original + b"\n# changed\n")
+                        self.assertNotEqual(azurelinux.input_sha256(), baseline)
+                        path.write_bytes(original)
+                        self.assertEqual(azurelinux.input_sha256(), baseline)
+                unrelated = root / "guest" / "ubuntu" / "nvx-bashrc"
+                unrelated.parent.mkdir(parents=True, exist_ok=True)
+                unrelated.write_text("changed\n", encoding="utf-8")
+                self.assertEqual(azurelinux.input_sha256(), baseline)
+
+    def test_guest_init_runs_virtfs_helper_from_installed_path(self):
+        installed: list[Path] = []
+
+        def install(_source: Path, destination: Path) -> dict[str, str]:
+            installed.append(destination)
+            return {}
+
+        root = Path("rootfs")
+        with (
+            patch.object(build, "_install", side_effect=install),
+            patch.object(build, "_build_static_helper", return_value={}),
+            patch.object(build, "_build_device_io_helper", return_value={}),
+        ):
+            build._install_guest_files(
+                build_config.InitramfsBuildConfig(work=Path("work")),
+                root,
+                guests.ALPINE_GUEST,
+            )
+        self.assertIn(root / "sbin" / "nvx-hostmount", installed)
+
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_sbin_scripts = azure_stage.split(
+            "install -m 0755 /repo/guest/common/init /rootfs/init\n", 1
+        )[1].split("/rootfs/sbin/", 1)[0]
+        self.assertIn("/repo/guest/common/nvx-hostmount", azure_sbin_scripts)
+        init_script = (
+            BuildConstants.REPO_ROOT / "guest" / "common" / "init"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '/sbin/nvx-hostmount || fatal "virtfs: failed to mount live host directory"',
+            init_script,
+        )
+        self.assertNotIn("/usr/sbin/nvx-hostmount", init_script)
 
     def test_openvmm_ci_downloads_guest_artifacts(self):
         workflow = (
@@ -9972,8 +10388,135 @@ class ReleaseTests(unittest.TestCase):
                 manifest["linux"]["config_sha256"],
                 common.sha256_file(destination / "guest" / "vmlinux.config"),
             )
+            self.assertEqual(
+                manifest["azurelinux"]["initramfs_sha256"],
+                common.sha256_file(
+                    destination / "guest" / AzureLinuxBuildConstants.INITRAMFS_NAME
+                ),
+            )
+            self.assertEqual(
+                manifest["azurelinux"]["initramfs_package_manifest_sha256"],
+                common.sha256_file(
+                    destination
+                    / "guest"
+                    / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
+                ),
+            )
             common.verify_sha256_sums(destination)
             self.assertIn("binary-only package", stderr.getvalue())
+
+    def test_source_package_omits_azure_linux_artifacts(self):
+        for azurelinux_built in (True, False):
+            with (
+                self.subTest(azurelinux_built=azurelinux_built),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                paths, kernel_inputs, revision = _write_release_fixture(root)
+                build_dir = paths["build"]
+                if not azurelinux_built:
+                    for name in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES:
+                        (build_dir / name).unlink()
+                self._package_source_release_without_azure_linux(
+                    root, paths, kernel_inputs, revision
+                )
+
+    def _package_source_release_without_azure_linux(
+        self,
+        root: Path,
+        paths: dict[str, Path],
+        kernel_inputs: dict[str, object],
+        revision: str,
+    ) -> None:
+        build_dir = paths["build"]
+        source_dir = paths["source"]
+        openvmm_dir = paths["openvmm"]
+        binary = paths["binary"]
+        destination = root / "staged"
+        stderr = io.StringIO()
+        linux_source_archive = (
+            source_dir
+            / KernelBuildConstants.SOURCE_DIRECTORY_NAME
+            / KernelBuildConstants.SOURCE_ARCHIVE_NAME
+        )
+        linux_source_archive.parent.mkdir(parents=True, exist_ok=True)
+        linux_source_archive.write_bytes(b"linux-source")
+
+        def artifact_path(name: str) -> Path:
+            return build_dir / name
+
+        def write_source_archive(output: Path, *_args: object) -> None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(output.name.encode("ascii"))
+
+        with (
+            patch.object(BuildConstants, "REPO_ROOT", root),
+            patch.object(BuildConstants, "SOURCE_DIR", source_dir),
+            patch.object(
+                UbuntuBuildConstants,
+                "PACKAGE_LOCK",
+                root / "ubuntu" / "packages.lock.json",
+            ),
+            patch.object(OpenVMMBuildConstants, "DIRECTORY", openvmm_dir),
+            patch.object(
+                release,
+                "artifact_path",
+                side_effect=artifact_path,
+            ),
+            patch.object(release, "openvmm_binary_path", return_value=binary),
+            patch.object(
+                release,
+                "kernel_provenance_inputs",
+                return_value=kernel_inputs,
+            ),
+            patch.object(
+                release,
+                "openvmm_git_state",
+                return_value=(revision, True),
+            ),
+            patch.object(release, "_validate_alpine_sources"),
+            patch.object(release, "_validate_ubuntu_sources"),
+            patch.object(release, "_validate_linux_source_archive"),
+            patch.object(
+                release,
+                "_project_source_archive",
+                side_effect=write_source_archive,
+            ) as project_source_archive,
+            patch.object(
+                release,
+                "_alpine_source_archive",
+                side_effect=write_source_archive,
+            ),
+            patch.object(
+                release,
+                "_ubuntu_source_archive",
+                side_effect=write_source_archive,
+            ),
+            patch("sys.stderr", stderr),
+        ):
+            release.package_release(
+                version="1.0.0",
+                destination=destination,
+                include_source=True,
+                force=False,
+            )
+
+        for name in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES:
+            self.assertFalse((destination / "guest" / name).exists())
+        for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
+            if name in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES:
+                continue
+            self.assertTrue((destination / "guest" / name).is_file())
+        self.assertNotIn(
+            build_dir / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
+            project_source_archive.call_args.args[2],
+        )
+        manifest = json.loads(
+            (destination / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("azurelinux", manifest)
+        common.verify_sha256_sums(destination)
+        self.assertIn("omits the Azure Linux guest", stderr.getvalue())
 
     def test_runtime_provenance_validation_uses_required_paths(self):
         build_dir = Path("build")
@@ -10123,7 +10666,128 @@ class ReleaseTests(unittest.TestCase):
                         "Ubuntu artifact manifest does not match",
                     ),
                 ):
-                    release._guest_release_inputs()
+                    release._guest_release_inputs(include_azurelinux=True)
+
+    def test_guest_release_inputs_reject_stale_azurelinux_initramfs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            (build_dir / AzureLinuxBuildConstants.INITRAMFS_NAME).write_bytes(
+                b"stale artifact"
+            )
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Azure Linux initramfs manifest is invalid",
+                ),
+            ):
+                release._guest_release_inputs(include_azurelinux=True)
+
+    def test_guest_release_inputs_reject_unpinned_azurelinux_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            manifest_path = build_dir / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["image"] = "mcr.microsoft.com/azurelinux/base/core@sha256:" + (
+                "0" * 64
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Azure Linux initramfs manifest is invalid",
+                ),
+            ):
+                release._guest_release_inputs(include_azurelinux=True)
+
+    def test_guest_release_inputs_reject_stale_azurelinux_build_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            manifest_path = build_dir / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
+            current_manifest = manifest_path.read_text(encoding="utf-8")
+            with (
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(
+                    UbuntuBuildConstants,
+                    "PACKAGE_LOCK",
+                    root / "ubuntu" / "packages.lock.json",
+                ),
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+            ):
+                release._guest_release_inputs(include_azurelinux=True)
+                with self.subTest(case="missing digest"):
+                    document = json.loads(current_manifest)
+                    del document["input_sha256"]
+                    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        common.ScriptError,
+                        "Azure Linux initramfs manifest does not match the "
+                        "current build inputs",
+                    ):
+                        release._guest_release_inputs(include_azurelinux=True)
+                manifest_path.write_text(current_manifest, encoding="utf-8")
+                with self.subTest(case="edited Dockerfile"):
+                    dockerfile = root / "docker" / "Dockerfile"
+                    dockerfile.write_text(
+                        dockerfile.read_text(encoding="utf-8") + "# changed\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        common.ScriptError,
+                        "Azure Linux initramfs manifest does not match the "
+                        "current build inputs",
+                    ):
+                        release._guest_release_inputs(include_azurelinux=True)
+
+    def test_guest_release_inputs_require_azurelinux_only_when_included(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            for name in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES:
+                (build_dir / name).unlink()
+            with patch.object(
+                release,
+                "artifact_path",
+                side_effect=build_dir.joinpath,
+            ):
+                guest_names, _alpine, _ubuntu, azurelinux_manifests = (
+                    release._guest_release_inputs(include_azurelinux=False)
+                )
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "required guest artifact initramfs-azurelinux.cpio.gz not found",
+                ):
+                    release._guest_release_inputs(include_azurelinux=True)
+
+        self.assertEqual(
+            guest_names,
+            [
+                name
+                for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES
+                if name not in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES
+            ],
+        )
+        self.assertEqual(azurelinux_manifests, [])
 
     def test_guest_release_inputs_reject_stale_ubuntu_source_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -10145,7 +10809,7 @@ class ReleaseTests(unittest.TestCase):
                     "Ubuntu artifact manifest does not match",
                 ),
             ):
-                release._guest_release_inputs()
+                release._guest_release_inputs(include_azurelinux=True)
 
     def test_package_rejects_tampered_source_metadata_without_replacing_output(self):
         cases: tuple[tuple[str, str, object, str], ...] = (
@@ -10506,6 +11170,76 @@ class ReleaseTests(unittest.TestCase):
                     (build_dir / name).read_bytes(),
                     name.encode("ascii"),
                 )
+
+    def test_source_release_archive_removes_stale_azure_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_root = root / "package" / "nvx-1.2.3-test"
+            binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+            binary = package_root / "bin" / binary_name
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"openvmm")
+            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
+                if name in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES:
+                    continue
+                guest = package_root / "guest" / name
+                guest.parent.mkdir(parents=True, exist_ok=True)
+                guest.write_bytes(name.encode("ascii"))
+            for name in (
+                OpenVMMBuildConstants.PROVENANCE_NAME,
+                KernelBuildConstants.PROVENANCE_NAME,
+            ):
+                provenance = package_root / "provenance" / name
+                provenance.parent.mkdir(parents=True, exist_ok=True)
+                provenance.write_bytes(name.encode("ascii"))
+            (package_root / "SOURCE-MANIFEST.json").write_text(
+                json.dumps({"linux": {}, "alpine": {}, "ubuntu": {}}),
+                encoding="utf-8",
+            )
+            common.write_sha256_sums(package_root)
+
+            if os.name == "nt":
+                archive_path = root / "nvx-1.2.3-windows-whp.zip"
+                with zipfile.ZipFile(archive_path, "w") as package:
+                    for path in package_root.rglob("*"):
+                        package.write(path, path.relative_to(package_root.parent))
+            else:
+                archive_path = root / "nvx-1.2.3-linux-kvm.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as package:
+                    package.add(package_root, arcname=package_root.name)
+
+            build_dir = root / "runtime" / "build"
+            binary_destination = (
+                root / "runtime" / "openvmm" / "target" / "release" / binary_name
+            )
+            build_dir.mkdir(parents=True)
+            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
+                (build_dir / name).write_bytes(b"stale " + name.encode("ascii"))
+
+            def artifact_path(name: str) -> Path:
+                return build_dir / name
+
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=artifact_path,
+                ),
+                patch.object(
+                    release,
+                    "openvmm_binary_path",
+                    return_value=binary_destination,
+                ),
+            ):
+                release._install_release_archive(archive_path)
+
+            self.assertEqual(binary_destination.read_bytes(), b"openvmm")
+            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
+                destination = build_dir / name
+                if name in ReleaseBuildConstants.AZURELINUX_ARTIFACT_NAMES:
+                    self.assertFalse(destination.exists())
+                else:
+                    self.assertEqual(destination.read_bytes(), name.encode("ascii"))
 
 
 class PositiveIntTests(unittest.TestCase):
