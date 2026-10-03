@@ -168,7 +168,7 @@ Run all lint and formatting checks before submitting a change:
 python3 -m ruff check scripts .github/specula
 shellcheck --shell=sh \
   guest/common/init guest/alpine/nvx-container-enter \
-  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/alpine/nvx-container-launch \
   guest/common/nvx-hostmount guest/common/nvx-identity-probe \
   guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
@@ -180,7 +180,7 @@ python3 -m pyright --pythonplatform Windows
 python3 -m ruff format --check scripts .github/specula
 shfmt -d -ln posix -i 4 -ci \
   guest/common/init guest/alpine/nvx-container-enter \
-  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/alpine/nvx-container-launch \
   guest/common/nvx-hostmount guest/common/nvx-identity-probe \
   guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
@@ -219,7 +219,7 @@ Apply the configured Python and POSIX shell formatters with:
 python3 -m ruff format scripts .github/specula
 shfmt -w -ln posix -i 4 -ci \
   guest/common/init guest/alpine/nvx-container-enter \
-  guest/alpine/nvx-container-launch guest/common/nvx-exit \
+  guest/alpine/nvx-container-launch \
   guest/common/nvx-hostmount guest/common/nvx-identity-probe \
   guest/common/nvx-init-agent guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \

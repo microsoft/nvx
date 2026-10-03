@@ -382,7 +382,6 @@ policy. The implementation keeps genuinely common sources in a neutral
 
 ```text
 guest/common/init
-guest/common/nvx-exit
 guest/common/nvx-hostmount
 guest/common/nvx-init-agent
 guest/common/nvx-managed-agent.c

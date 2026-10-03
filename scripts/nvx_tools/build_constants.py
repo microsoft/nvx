@@ -299,10 +299,11 @@ class InitramfsBuildConstants:
         "nvx-console-pending",
         "nvx-managed-agent",
     )
-    # Time tools are linked against musl: a static glibc binary adds about
-    # 700 KB to the initramfs, and every unpacked kilobyte delays cold boot.
+    # Time tools and nvx-exit are linked against musl: a static glibc binary
+    # adds about 700 KB to the initramfs, and every unpacked kilobyte delays
+    # cold boot. nvx-exit is also a restored guest's usual first exec.
     MUSL_COMPILER: Final = "musl-gcc"
-    MUSL_STATIC_HELPERS: Final = ("nvx-time",)
+    MUSL_STATIC_HELPERS: Final = ("nvx-time", "nvx-exit")
     TIME_PROBE_NAME: Final = "nvx-time-probe"
     TIME_PROBE_CFLAGS: Final = (
         "-std=gnu11",

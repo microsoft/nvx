@@ -6078,6 +6078,90 @@ class SandboxSmokeShareTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
 
 
+class GuestExitTests(unittest.TestCase):
+    """nvx-exit's arguments, and its single one-byte write at port 0x604."""
+
+    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-exit.c"
+    PORT = 0x604
+
+    def setUp(self):
+        if sys.platform != "linux":
+            self.skipTest("nvx-exit builds on Linux")
+        compiler = shutil.which("cc") or shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("C compiler is unavailable")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        # A regular file stands in for /dev/port, so no test writes a port.
+        self.device = root / "port"
+        flags = [
+            flag
+            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
+            if flag != "-static"
+        ]
+        self.binaries: dict[str, Path] = {}
+        for name, device in (("ok", self.device), ("missing", root / "no" / "port")):
+            binary = root / f"nvx-exit-{name}"
+            result = subprocess.run(
+                [
+                    compiler,
+                    *flags,
+                    f'-DNVX_EXIT_DEVICE="{device}"',
+                    "-o",
+                    str(binary),
+                    str(self.SOURCE),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.binaries[name] = binary
+
+    def _run(self, name: str, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [str(self.binaries[name]), *arguments],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+    def test_writes_the_exit_code_as_one_byte_at_the_control_port(self):
+        cases = (
+            ((), 1),
+            (("",), 1),
+            (("0",), 0),
+            (("37",), 37),
+            (("255",), 255),
+            (("256",), 1),
+            (("-1",), 1),
+            (("+5",), 1),
+            ((" 7",), 1),
+            (("12a",), 1),
+            (("99999999999999999999",), 1),
+            # Decimal: the old script's printf read a leading zero as octal.
+            (("010",), 10),
+            (("7", "9"), 7),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                self.device.write_bytes(b"")
+                result = self._run("ok", *arguments)
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr), (0, b"", b"")
+                )
+                self.assertEqual(
+                    self.device.read_bytes(), bytes(self.PORT) + bytes([expected])
+                )
+
+    def test_fails_silently_when_the_port_cannot_be_opened(self):
+        result = self._run("missing", "0")
+        self.assertEqual(
+            (result.returncode, result.stdout, result.stderr), (1, b"", b"")
+        )
+
+
 class ManagedAgentStopTests(unittest.TestCase):
     SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
     OUTER = struct.Struct("<4sHBB16sQQI")

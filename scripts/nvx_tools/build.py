@@ -781,7 +781,6 @@ def _install_guest_files(
     helpers: dict[str, dict[str, str]] = {}
     scripts = [
         ("init", common / "init", root / "init"),
-        ("nvx-exit", common / "nvx-exit", root / "sbin" / "nvx-exit"),
         (
             "nvx-hostmount",
             common / "nvx-hostmount",
