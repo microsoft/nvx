@@ -3,6 +3,7 @@
 
 import argparse
 import ast
+import inspect
 import io
 import json
 import os
@@ -1906,6 +1907,33 @@ class MicrovmTests(unittest.TestCase):
         self.assertIn("/sbin/nvx-snapshot\n", checkpoint)
         self.assertIn("captured-workload-id", checkpoint)
         self.assertNotIn("@CAPTURE_ACTION@", checkpoint)
+
+    def test_restored_tier_guests_report_their_restore_checks_before_exiting(self):
+        # The debug-kernel lane gates on snapshot-tiers, so every restored tier
+        # guest waits for its deferred restore checks before it exits.
+        status = microvm_tests.status_script().rstrip("\n")
+        for tier in ("platform", "workload-start", "instance-checkpoint"):
+            with self.subTest(tier=tier):
+                script = microvm_tests._snapshot_tier_script(tier)
+                self.assertNotIn("@STATUS_QUERY@", script)
+                self.assertLess(
+                    script.index(f"NVX-TIER-{tier.upper()}-LAYER-"),
+                    script.index(f"set +e\n{status}\n"),
+                )
+                # The guest waits for the host's byte, so the query's lines
+                # reach the console before nvx-exit stops the VM.
+                self.assertTrue(
+                    script.endswith(
+                        f"{status}\ndd if=/dev/hvc1 bs=1 count=1 >/dev/null 2>&1\n"
+                        "nvx-exit 0\n"
+                    )
+                )
+        runner = inspect.getsource(microvm_tests._run_snapshot_tier)
+        self.assertIn("_check_restore_status(\n            restore_console,", runner)
+        self.assertLess(
+            runner.index("console.wait_for_time_abi_status(STATUS_TIMEOUT_SECONDS)"),
+            runner.index('console.send_bytes(b"Z")\n                restored = '),
+        )
 
     def test_snapshot_tier_entry_points_reject_unsupported_tiers(self):
         with self.assertRaisesRegex(ValueError, "unsupported snapshot tier 'invalid'"):

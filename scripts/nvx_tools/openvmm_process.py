@@ -453,6 +453,31 @@ class TcpConsole:
                 raise RuntimeError(f"TCP console closed before line marker {marker!r}")
             self._consume(chunk)
 
+    def wait_for_time_abi_status(self, timeout: float) -> None:
+        """Wait until the guest's next ``nvx-time status`` query exits.
+
+        The monitor validates what the query printed when its exit line
+        arrives, so a failed or pending check raises here.
+        """
+        if self._monitor is None:
+            raise ValueError("TCP console has no time ABI monitor")
+        before = self._monitor.status_queries
+        deadline = time.monotonic() + timeout
+        while self._monitor.status_queries == before:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"nvx-time status did not exit within {timeout:g}s on the TCP console"
+                )
+            self._connection.settimeout(min(remaining, 0.25))
+            try:
+                chunk = self._connection.recv(4096)
+            except TimeoutError:
+                continue
+            if not chunk:
+                raise RuntimeError("TCP console closed before nvx-time status exited")
+            self._consume(chunk)
+
     def finish(self, *, check: bool = True) -> bytes:
         """Drain the console until it goes quiet, close it, and return its output.
 

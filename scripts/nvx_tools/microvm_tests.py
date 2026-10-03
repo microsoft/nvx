@@ -4201,6 +4201,13 @@ echo {repair_marker}"""
         REPAIR_ACTION=repair_action,
         RELEASED_MARKER=f"{prefix}-RELEASED",
         LAYER_MARKER=f"{prefix}-LAYER-",
+        # After the tier's assertions, the restored guest asks nvx-time status,
+        # which waits for the restore's deferred checks, the debug kernel's
+        # watchdogs among them, and prints the restore line; the script turns
+        # off set -e first, so a failing status still reports its exit status.
+        # It then waits for one byte from the host before nvx-exit, so the
+        # query's lines reach the virtio console before the VM stops.
+        STATUS_QUERY=status_script().rstrip("\n"),
     )
 
 
@@ -4370,6 +4377,11 @@ def _run_snapshot_tier(
                     console.wait_for(workload_marker, timeout)
                 console.wait_for(released_marker, timeout)
                 console.wait_for(expected_layer, timeout)
+                # The guest's status query waits for the restore's deferred
+                # checks. It then waits for one byte from here before nvx-exit,
+                # so the query's lines reach the console before the VM stops.
+                console.wait_for_time_abi_status(STATUS_TIMEOUT_SECONDS)
+                console.send_bytes(b"Z")
                 restored = process.wait(timeout)
                 restore_console = console.finish()
                 console = None
@@ -4386,6 +4398,14 @@ def _run_snapshot_tier(
             raise RuntimeError(f"{tier} input crossed the restore gate")
         if restore_lines.count(expected_layer) != 1:
             raise RuntimeError(f"{tier} restore observed the wrong layer binding")
+        # The restored guest's status query, after the tier's assertions, must
+        # report a passing restore line, so the deferred restore checks ran.
+        _check_restore_status(
+            restore_console,
+            restore_command,
+            processors=int(restore_command[restore_command.index("--processors") + 1]),
+            context=f"{tier} restore",
+        )
         if _snapshot_fingerprint(snapshot) != fingerprint:
             raise RuntimeError(f"{tier} restore modified snapshot payloads")
 

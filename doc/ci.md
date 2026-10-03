@@ -139,20 +139,25 @@ per backend and phase. `elapsed_us` is wall time, including waits behind the
 workload, and has no budget. CI gates on neither: the performance gate is the
 A/B comparison outside CI.
 
-The `nvx-microvm-debug-{kvm,mshv,whp}` jobs run
-`test-microvm --debug-kernel` on the CI debug kernel (`build/vmlinux-debug`,
-built from `kernel/config-microvm-debug`), whose soft-lockup and hung-task
-detectors production kernels leave out. It selects the same-host restore
-scenarios `smp`, `smp-snapshot`, `restore-processors`, `restore-downtime`, and
+The `nvx-microvm-debug-{kvm,mshv,whp}` jobs run `test-microvm --debug-kernel`
+on the CI debug kernel (`build/vmlinux-debug`, built from
+`kernel/config-microvm-debug`), whose soft-lockup and hung-task detectors
+production kernels leave out. It selects the same-host restore scenarios
+`smp`, `smp-snapshot`, `restore-processors`, `restore-downtime`, and
 `snapshot-tiers`. Any RCU stall, soft lockup, or hung task makes the guest's
-time ABI watcher power off with status 194, which fails the run. The harness
-refuses a kernel whose `vmlinux-debug.config` lacks the detectors, because the
-guest's `C11` check passes vacuously without them. To bound the cost, pull
-requests run the debug kernel on KVM only and `dev` pushes run it on every
-backend; each job takes about five minutes on its own runner, in parallel with
-the other microVM jobs. The jobs gate the required status check, the
-development release, and performance persistence. The GitHub-hosted
-`debug-kernel` job builds the debug kernel beside the shared `artifacts` job
+time ABI watcher power off with status 194, which fails the run. Every guest
+those scenarios restore asks `nvx-time status` before it exits
+(`snapshot-tiers` after its tier assertions), which waits for the restore's
+deferred checks and must report a passing restore line, so no restore leaves
+its checks pending. The one exception is `snapshot-tiers`' gate-timeout check,
+whose guest OpenVMM stops at the restore gate on purpose. The harness refuses
+a kernel whose `vmlinux-debug.config` lacks the detectors, because the guest's
+`C11` check passes vacuously without them. To bound the cost, pull requests
+run the debug kernel on KVM only and `dev` pushes run it on every backend;
+each job takes about five minutes on its own runner, in parallel with the
+other microVM jobs. The jobs gate the required status check, the development
+release, and performance persistence. The GitHub-hosted `debug-kernel` job
+builds the debug kernel beside the shared `artifacts` job
 (`build-guest-artifacts` with `guest-images: "false"`) and caches it under its
 own key, so a kernel rebuild delays only the debug jobs, and a failed debug
 kernel build fails the required status check and blocks the release.

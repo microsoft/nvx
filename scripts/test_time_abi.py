@@ -1073,6 +1073,29 @@ class RunnerWiringTests(unittest.TestCase):
         console.close()
         peer.close()
 
+    def test_tcp_console_waits_for_a_status_query_to_exit(self):
+        connection, peer = socket.socketpair()
+        monitor = TimeAbiMonitor(MSHV_RESTORE)
+        console = openvmm_process.TcpConsole(connection, monitor)
+        restore = RESTORE_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
+        peer.sendall((restore + RUNTIME_LINE + STATUS_OK).encode())
+        console.wait_for_time_abi_status(1.0)
+        self.assertEqual(monitor.status_queries, 1)
+        self.assertEqual(len(monitor.restores), 1)
+        # A query that reports no restore line fails when it exits.
+        peer.sendall(STATUS_OK.encode())
+        monitor.restores.clear()
+        with self.assertRaisesRegex(TimeAbiFailure, "restore marker"):
+            console.wait_for_time_abi_status(1.0)
+        with self.assertRaisesRegex(TimeoutError, "did not exit"):
+            console.wait_for_time_abi_status(0.2)
+        console.close()
+        peer.close()
+        unmonitored = socket.socket()
+        self.addCleanup(unmonitored.close)
+        with self.assertRaisesRegex(ValueError, "no time ABI monitor"):
+            openvmm_process.TcpConsole(unmonitored).wait_for_time_abi_status(1.0)
+
     def test_tcp_console_queries_only_cold_boots_that_ask(self):
         for command, enabled in (
             (MSHV_RESTORE, True),

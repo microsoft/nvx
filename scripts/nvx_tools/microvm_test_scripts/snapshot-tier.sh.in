@@ -28,4 +28,7 @@ echo @RELEASED_MARKER@
 blockdev --flushbufs /dev/vda
 value="$(dd if=/dev/vda bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]')"
 echo "@LAYER_MARKER@$value"
+set +e
+@STATUS_QUERY@
+dd if=/dev/hvc1 bs=1 count=1 >/dev/null 2>&1
 nvx-exit 0
