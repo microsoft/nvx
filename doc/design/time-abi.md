@@ -1792,28 +1792,40 @@ outlasts the poll period. Restore repair also steps the clock, which the
 kernel follows with its RTC write, and the restore checks start 150 ms after
 the acknowledgement. Readiness doesn't wait for this work.
 
-The first process that a restored guest starts pays a separate cost. An
-untiered restore with nothing to activate starts no process before readiness,
-while the legacy path's status read forked and executed one there, which
-first-touched the guest kernel's fork, exec, and exit paths. Under the time
-ABI the first process after readiness touches them instead, about 80 to 110
-more pages than on the legacy path, which matters where first touches of
-restored RAM are expensive. On the Azure WHP runners, the first process after
-readiness, an exit the gate requests, took 6.7 and 8.8 ms longer than on the
-legacy path (`openvmm_snapshot_restore_guest_exit_teardown`: +31% and +37%,
-and +24% on bare metal). None of the time ABI's post-resume work, the kernel's
-RTC write included, runs in that window; one small process started ahead of
-the exit removes 64 to 92% of the difference. On bare metal the cost is a
-shift: readiness comes 9.5 ms earlier, and readiness plus the exit takes
-4.7 ms less. On the Azure runners readiness isn't earlier, and the difference
-from process launch to exit isn't significant (point estimates from −1.9 to
-+4.0 ms).
+The first process that a restored guest starts pays a separate cost. A plain
+(untiered) restore with nothing to activate starts no process before
+readiness, while the legacy path's status read forked and executed one there,
+which first-touched the guest kernel's fork, exec, and exit paths. Under the
+time ABI the first process after readiness touches them instead, about 80 to
+110 more pages than on the legacy path, which matters where first touches of
+restored RAM are expensive: on the Azure WHP runners, the first process after
+readiness takes about 5 to 9 ms longer than on the legacy path, while
+readiness itself is unchanged. None of the time ABI's post-resume work, the
+kernel's RTC write included, runs while it does, and one small process started
+ahead of it removes 64 to 92% of the difference. On bare metal the cost is a
+shift: readiness comes 9.5 ms earlier, and readiness plus the first process
+takes 4.7 ms less. On the Azure runners, from process launch to exit, the
+difference is about +2 to +4 ms or less and isn't significant.
+
+The gate's teardown metric (`openvmm_snapshot_restore_guest_exit_teardown`)
+times such a first process: an exit requested right at readiness. Without a
+faster `nvx-exit`, the time ABI would be about 5 to 9 ms (31 to 37%) slower
+there than the legacy path on the Azure WHP runners, which would fail the
+gate, and 24% slower on bare metal. The metric passes because `nvx-exit` is a
+single static executable, which makes every guest exit faster, with or without
+the time ABI: with it, the metric measured 20% below the legacy path on bare
+metal and 30% below on an Azure 8573C runner. That offsets the cost in the
+gate rather than removing it: the first command after a plain restore still
+pays it on nested Azure WHP. The remedy, a working-set prefetch that populates
+the pages a restore touches before its vCPUs run, is a follow-up after v1.
 
 On nested Azure KVM, a network restore that follows the shell-snapshot
 benchmarks' captures and restores is up to about 12 ms (8.5%) slower, by an
-amount that varies from run to run, and is no slower on its own. Neither arm
-takes major faults. The time ABI's restore makes about 4% more KVM exits, 26
-of them port I/O, mostly the restore packet's read, and more retried EPT
+amount that varies from run to run, and is no slower on its own. Of the
+difference, 5.7 ms comes before the first good network probe and 2.9 ms in the
+teardown after it; the static `nvx-exit` doesn't measurably change it. Neither
+arm takes major faults. The time ABI's restore makes about 4% more KVM exits,
+26 of them port I/O, mostly the restore packet's read, and more retried EPT
 faults and remote TLB flushes, each of which costs more on a nested runner,
 depending on the host's state.
 
