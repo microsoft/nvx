@@ -1,0 +1,31 @@
+name: Require rootless Docker
+description: Use only the isolated, unprivileged daemon for Docker-based CI jobs
+
+outputs:
+  config_dir:
+    description: Per-job Docker client configuration directory to remove after the job
+    value: ${{ steps.select.outputs.config_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select rootless daemon
+      id: select
+      shell: bash
+      run: |
+        set -euo pipefail
+        runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        endpoint="unix://$runtime_dir/docker.sock"
+        config=$(mktemp -d "$RUNNER_TEMP/nvx-docker-config.XXXXXX")
+        printf 'config_dir=%s\n' "$config" >> "$GITHUB_OUTPUT"
+        printf 'DOCKER_CONFIG=%s\n' "$config" >> "$GITHUB_ENV"
+        if ! security=$(DOCKER_CONFIG="$config" DOCKER_HOST="$endpoint" docker info --format '{{json .SecurityOptions}}' 2>&1); then
+          echo "::error::Rootless Docker is unavailable at $endpoint: $security" >&2
+          exit 1
+        fi
+        if [[ "$security" != *name=rootless* ]]; then
+          echo "::error::The CI runner's Docker daemon at $endpoint is not rootless" >&2
+          exit 1
+        fi
+        DOCKER_CONFIG="$config" DOCKER_HOST="$endpoint" docker buildx version
+        printf 'DOCKER_HOST=%s\n' "$endpoint" >> "$GITHUB_ENV"

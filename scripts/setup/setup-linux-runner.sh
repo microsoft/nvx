@@ -22,6 +22,8 @@ runner_directory_is_default=true
 runner_name=
 runner_service_account=nvx-runner
 runner_token=
+runner_labels=
+runner_labels_override=false
 runner_package_directory=
 removed_service_name=
 trusted_tool_root=/opt/nvx
@@ -39,6 +41,7 @@ Bootstrap a Linux Azure VM for NVX GitHub Actions jobs.
 Options:
     --backend BACKEND       Virtualization backend: kvm or mshv
     --runner-name NAME      Register a runner with this unique name
+    --runner-labels LABELS  Override the default backend labels (comma-separated)
     --repository-url URL    Runner repository URL (default: ${repository_url})
     --runner-directory PATH Runner installation path (default: ${runner_directory})
     --runner-token-stdin    Read a short-lived registration token from stdin
@@ -71,6 +74,14 @@ validate_runner_name() {
     case "$1" in
         '' | .* | *..* | *[!A-Za-z0-9_.-]*)
             die "invalid runner name: $1"
+            ;;
+    esac
+}
+
+validate_runner_labels() {
+    case "$1" in
+        '' | ,* | *, | *,,* | *[!A-Za-z0-9_,.-]*)
+            die "invalid runner labels: $1"
             ;;
     esac
 }
@@ -411,7 +422,7 @@ install_packages() {
             bc binutils bison build-essential ca-certificates cmake cpio curl diffutils \
             flex git gzip iproute2 iptables \
             libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
-            pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
+            pkg-config protobuf-compiler python3 python3-venv rsync tar util-linux xz-utils \
             zstd
     elif command -v tdnf >/dev/null 2>&1; then
         run_as_root tdnf install -y \
@@ -783,6 +794,12 @@ while [ "$#" -gt 0 ]; do
             configure_runner=true
             shift 2
             ;;
+        --runner-labels)
+            [ "$#" -ge 2 ] || die "--runner-labels requires a value"
+            runner_labels=$2
+            runner_labels_override=true
+            shift 2
+            ;;
         --repository-url)
             [ "$#" -ge 2 ] || die "--repository-url requires a value"
             repository_url=$2
@@ -830,6 +847,10 @@ runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
 runner_sccache_dir=${runner_directory}/_work/_sccache
 runner_labels_file=${runner_directory}/.nvx-labels
 expected_runner_labels=linux,${backend},virtual-machine
+if [ "$runner_labels_override" = true ]; then
+    validate_runner_labels "$runner_labels"
+    expected_runner_labels=$runner_labels
+fi
 
 if [ "$check_only" = false ]; then
     install_packages
