@@ -5312,18 +5312,27 @@ class BuildTests(unittest.TestCase):
             / "build-guest-artifacts"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        for cache_name in (
+        cache_names = (
             "KERNEL_INPUT_HASH",
+            "DEBUG_KERNEL_INPUT_HASH",
             "ALPINE_INPUT_HASH",
             "UBUNTU_INPUT_HASH",
             "AZURELINUX_INPUT_HASH",
-        ):
+        )
+        # Every artifact, both kernels included, builds inside the image that
+        # docker/Dockerfile pins, so a toolchain change must miss every cache.
+        self.assertEqual(
+            action.count("--file docker/Dockerfile"),
+            action.count("docker build"),
+        )
+        for cache_name in cache_names:
             with self.subTest(cache=cache_name):
                 cache_input = next(
                     line
                     for line in action.splitlines()
                     if line.strip().startswith(f"{cache_name}:")
                 )
+                self.assertIn("'docker/Dockerfile'", cache_input)
                 self.assertIn("'scripts/nvx_tools/build_config.py'", cache_input)
                 self.assertIn("'scripts/nvx_tools/build_constants.py'", cache_input)
 
