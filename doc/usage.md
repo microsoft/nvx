@@ -442,6 +442,8 @@ python3 scripts/nvx.py sandbox
     [--memory-mib MIB]
     [--timeout SECONDS]
     [--exec-timeout-ms MILLISECONDS]
+    [--environment KEY=VALUE]...
+    [--environment-file PATH]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
     [--mount-deny HOST_PATH]...
@@ -478,6 +480,8 @@ launches.
 | `--memory-mib MIB` | `256` | Set guest memory in MiB. |
 | `--timeout SECONDS` | `60` | Set the control response timeout for managed `start`, `exec`, and `stop`. |
 | `--exec-timeout-ms MILLISECONDS` | `0` | Set the managed `exec` guest workload timeout; zero disables it. |
+| `--environment KEY=VALUE` | omitted | Set the exact environment for managed `exec`; repeat for multiple entries. Omission uses the guest default environment. |
+| `--environment-file PATH` | omitted | Read the exact managed `exec` environment from a UTF-8 JSON array of `KEY=VALUE` strings. An empty array requests an empty environment. Mutually exclusive with `--environment`. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Live-share one host directory at the absolute target inside the container rootfs for `run` or `provision`; defaults to `ro`. An `rw` share accepts guest-created symbolic links, which the host never follows. `/`, `/etc`, and the `/proc`, `/sys`, `/dev`, and `/.nvx-agent` trees are reserved. |
 | `--mount-deny HOST_PATH` | none | Hide one existing file or directory inside the `--mount` host directory; relative paths are resolved inside it. Repeat to deny multiple paths. |

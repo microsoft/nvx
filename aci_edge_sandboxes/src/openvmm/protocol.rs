@@ -43,10 +43,16 @@ pub(crate) const CAPABILITY_LEN: usize = 32;
 pub(crate) const MAX_ARGUMENTS: usize = 64;
 /// Largest encoded size of one workload argument.
 pub(crate) const MAX_ARGUMENT_BYTES: usize = 4096;
+/// Largest number of workload environment entries.
+pub(crate) const MAX_ENVIRONMENT: usize = 256;
 /// Largest workload timeout the guest agent accepts.
 pub(crate) const MAX_TIMEOUT_MS: u32 = 60 * 60 * 1000;
 /// Largest combined stdout and stderr volume the guest agent forwards for one execution.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+const EXEC_EXTENDED: u16 = 1;
+const EXEC_ENVIRONMENT_PRESENT: u16 = 1 << 1;
+const EXEC_INHERIT_DEFAULT_ENV: u16 = 1 << 2;
 
 /// Protocol violation detected while encoding or decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,11 +179,15 @@ pub(crate) fn decode_app(frame: &[u8]) -> Result<AppFrame<'_>, ProtocolError> {
 /// Encodes the payload of an `EXEC` request.
 ///
 /// The guest agent requires 1 to [`MAX_ARGUMENTS`] non-empty arguments without NUL bytes, each
-/// at most [`MAX_ARGUMENT_BYTES`] long, an absolute program path, and a timeout of at most
-/// [`MAX_TIMEOUT_MS`] (zero disables it).
+/// at most [`MAX_ARGUMENT_BYTES`] long, an absolute program path, at most [`MAX_ENVIRONMENT`]
+/// `KEY=VALUE` environment entries, and a timeout of at most [`MAX_TIMEOUT_MS`] (zero disables
+/// it). `None` preserves the legacy payload and requests the guest's default environment;
+/// `Some`, including an empty slice, carries an explicit per-execution environment.
 pub(crate) fn encode_exec_payload(
     argv: &[String],
     timeout_ms: u32,
+    environment: Option<&[String]>,
+    inherit_default_env: bool,
 ) -> Result<Vec<u8>, ProtocolError> {
     if argv.is_empty() || argv.len() > MAX_ARGUMENTS {
         return Err(violation(format!(
@@ -192,16 +202,57 @@ pub(crate) fn encode_exec_payload(
             "exec timeout must not exceed {MAX_TIMEOUT_MS} ms"
         )));
     }
+    if environment.is_none() && !inherit_default_env {
+        return Err(violation(
+            "exec must supply an environment when default inheritance is disabled",
+        ));
+    }
+    let environment_count = environment.map_or(0, <[String]>::len);
+    if environment_count > MAX_ENVIRONMENT {
+        return Err(violation(format!(
+            "exec environment must not exceed {MAX_ENVIRONMENT} entries"
+        )));
+    }
     let count = u16::try_from(argv.len()).unwrap_or(u16::MAX);
     let mut payload = Vec::new();
     payload.extend_from_slice(&timeout_ms.to_le_bytes());
     payload.extend_from_slice(&count.to_le_bytes());
-    payload.extend_from_slice(&0u16.to_le_bytes());
+    if environment.is_some() {
+        let mut flags = EXEC_ENVIRONMENT_PRESENT;
+        if inherit_default_env {
+            flags |= EXEC_INHERIT_DEFAULT_ENV;
+        }
+        payload.extend_from_slice(&EXEC_EXTENDED.to_le_bytes());
+        payload.extend_from_slice(&flags.to_le_bytes());
+        payload.extend_from_slice(
+            &u16::try_from(environment_count)
+                .unwrap_or(u16::MAX)
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(&0u32.to_le_bytes());
+    } else {
+        payload.extend_from_slice(&0u16.to_le_bytes());
+    }
     for argument in argv {
         let bytes = argument.as_bytes();
         if bytes.is_empty() || bytes.len() > MAX_ARGUMENT_BYTES || bytes.contains(&0) {
             return Err(violation(format!(
                 "exec arguments must be 1 to {MAX_ARGUMENT_BYTES} bytes without NUL characters"
+            )));
+        }
+        let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        payload.extend_from_slice(&length.to_le_bytes());
+        payload.extend_from_slice(bytes);
+    }
+    for entry in environment.into_iter().flatten() {
+        let bytes = entry.as_bytes();
+        let valid = entry
+            .split_once('=')
+            .is_some_and(|(name, _)| !name.is_empty());
+        if !valid || bytes.len() > MAX_ARGUMENT_BYTES || bytes.contains(&0) {
+            return Err(violation(format!(
+                "exec environment entries must be KEY=VALUE strings of at most \
+                 {MAX_ARGUMENT_BYTES} bytes without NUL characters"
             )));
         }
         let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
@@ -234,16 +285,23 @@ impl GuestFeatures {
     pub(crate) const WORKLOAD_ACCOUNT: Self = Self(1 << 2);
     /// Runs each workload in a cgroup of its own and kills whatever it leaves behind.
     pub(crate) const EXEC_CGROUP: Self = Self(1 << 3);
+    /// Applies an explicit environment independently to each workload execution.
+    pub(crate) const EXEC_ENVIRONMENT: Self = Self(1 << 4);
     /// The features that the openvmm backend depends on.
     pub(crate) const REQUIRED: Self = Self(
-        Self::CANCEL.0 | Self::HOST_MAPPINGS.0 | Self::WORKLOAD_ACCOUNT.0 | Self::EXEC_CGROUP.0,
+        Self::CANCEL.0
+            | Self::HOST_MAPPINGS.0
+            | Self::WORKLOAD_ACCOUNT.0
+            | Self::EXEC_CGROUP.0
+            | Self::EXEC_ENVIRONMENT.0,
     );
 
-    const NAMES: [(Self, &'static str); 4] = [
+    const NAMES: [(Self, &'static str); 5] = [
         (Self::CANCEL, "cancellation"),
         (Self::HOST_MAPPINGS, "host path mappings"),
         (Self::WORKLOAD_ACCOUNT, "workload accounts"),
         (Self::EXEC_CGROUP, "workload containment"),
+        (Self::EXEC_ENVIRONMENT, "per-execution environments"),
     ];
 
     /// Decodes the payload of a features response.
@@ -366,7 +424,7 @@ mod tests {
     #[test]
     fn exec_payload_matches_the_python_client() {
         let argv = ["/bin/sh", "-c", "echo hi"].map(String::from);
-        let payload = encode_exec_payload(&argv, 5000).unwrap();
+        let payload = encode_exec_payload(&argv, 5000, None, true).unwrap();
         assert_eq!(
             hex(&payload),
             concat!(
@@ -379,15 +437,52 @@ mod tests {
     }
 
     #[test]
+    fn exec_payload_distinguishes_explicit_environments() {
+        let argv = ["/bin/env".to_owned()];
+        let environment = ["FOO=a b".to_owned(), "EMPTY=".to_owned()];
+        let payload = encode_exec_payload(&argv, 0, Some(&environment), false).unwrap();
+        assert_eq!(
+            hex(&payload),
+            concat!(
+                "0000000001000100",
+                "0200020000000000",
+                "080000002f62696e2f656e76",
+                "07000000464f4f3d612062",
+                "06000000454d5054593d",
+            )
+        );
+        let empty = encode_exec_payload(&argv, 0, Some(&[]), false).unwrap();
+        assert_eq!(&empty[6..16], &[1, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+        let inherited = encode_exec_payload(&argv, 0, Some(&environment), true).unwrap();
+        assert_eq!(&inherited[8..10], &6u16.to_le_bytes());
+    }
+
+    #[test]
     fn exec_payload_enforces_agent_limits() {
         let argument = |value: &str| vec![value.to_owned()];
-        assert!(encode_exec_payload(&argument("bin/sh"), 0).is_err());
-        assert!(encode_exec_payload(&[], 0).is_err());
-        assert!(encode_exec_payload(&argument("/bin/sh"), MAX_TIMEOUT_MS + 1).is_err());
-        assert!(encode_exec_payload(&argument(&format!("/{}", "a".repeat(4096))), 0).is_err());
-        assert!(encode_exec_payload(&vec!["/bin/true".to_owned(); 65], 0).is_err());
-        assert!(encode_exec_payload(&["/bin/echo".to_owned(), String::new()], 0).is_err());
-        assert!(encode_exec_payload(&vec!["/bin/true".to_owned(); 64], MAX_TIMEOUT_MS).is_ok());
+        let encode = |argv: &[String], timeout| encode_exec_payload(argv, timeout, None, true);
+        assert!(encode(&argument("bin/sh"), 0).is_err());
+        assert!(encode(&[], 0).is_err());
+        assert!(encode(&argument("/bin/sh"), MAX_TIMEOUT_MS + 1).is_err());
+        assert!(encode(&argument(&format!("/{}", "a".repeat(4096))), 0).is_err());
+        assert!(encode(&vec!["/bin/true".to_owned(); 65], 0).is_err());
+        assert!(encode(&["/bin/echo".to_owned(), String::new()], 0).is_err());
+        assert!(encode(&vec!["/bin/true".to_owned(); 64], MAX_TIMEOUT_MS).is_ok());
+        assert!(
+            encode_exec_payload(
+                &argument("/bin/env"),
+                0,
+                Some(&vec!["A=B".to_owned(); MAX_ENVIRONMENT + 1]),
+                false,
+            )
+            .is_err()
+        );
+        for entry in ["NOVALUE", "=value", &format!("A={}", "x".repeat(4096))] {
+            assert!(
+                encode_exec_payload(&argument("/bin/env"), 0, Some(&[entry.to_owned()]), false,)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -446,7 +541,8 @@ mod tests {
             [
                 "host path mappings",
                 "workload accounts",
-                "workload containment"
+                "workload containment",
+                "per-execution environments",
             ]
         );
         assert!(GuestFeatures::decode(&[1, 0, 0]).is_err());
@@ -475,6 +571,7 @@ mod tests {
             ("HOST_MAPPINGS", GuestFeatures::HOST_MAPPINGS),
             ("WORKLOAD_ACCOUNT", GuestFeatures::WORKLOAD_ACCOUNT),
             ("EXEC_CGROUP", GuestFeatures::EXEC_CGROUP),
+            ("EXEC_ENVIRONMENT", GuestFeatures::EXEC_ENVIRONMENT),
         ] {
             let bit = feature.0.trailing_zeros();
             definitions.push(format!("#define FEATURE_{name} (1U << {bit})"));

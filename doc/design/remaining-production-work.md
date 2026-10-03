@@ -31,9 +31,11 @@ bootstrap, and its private mount policy must not be described as that profile.
 Azure Files, secret/content volumes, and other optional mounts remain undesigned.
 Guest-side CIFS, a scratch-backed temporary directory, or an explicit small
 content attachment are possible directions, not supported extra device slots
-in the fixed ABI. Secure environment delivery through the proposed launch
-region is distinct from secret-volume delivery. Scratch cannot currently grow
-online; capacity exhaustion and whole-file copy-up remain workload concerns.
+in the fixed ABI. Managed executions deliver bounded environments through a
+sealed anonymous file inside the guest; snapshot-time launch configuration and
+secret-volume delivery remain distinct proposed features. Scratch cannot
+currently grow online; capacity exhaustion and whole-file copy-up remain
+workload concerns.
 
 ## Distribution extensions (Proposed)
 

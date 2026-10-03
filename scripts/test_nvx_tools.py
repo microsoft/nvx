@@ -195,7 +195,7 @@ def _write_release_fixture(
         "openvmm": {
             "microvm_abi_version": 2,
             "control_session_protocol_version": 1,
-            "control_contract_revision": "nvx-microvm-v2-control-v1",
+            "control_contract_revision": "nvx-microvm-v2-control-v2",
         },
         "linux": {
             "version": "6.18.38",
@@ -791,6 +791,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(execute.sandbox_arg, ["-c", "echo managed"])
         self.assertEqual(execute.exec_timeout_ms, 5000)
 
+        configured = nvx.parse_args(
+            [
+                "sandbox",
+                "exec",
+                "--state-dir",
+                "state",
+                "--environment",
+                "EMPTY=",
+                "--environment",
+                "VALUE=space = value",
+            ]
+        )
+        self.assertEqual(
+            configured.environment,
+            ["EMPTY=", "VALUE=space = value"],
+        )
+
         report = nvx.parse_args(
             [
                 "sandbox",
@@ -802,6 +819,81 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(report.outcome_report, Path("exec-outcome.json"))
+
+    def test_sandbox_exec_forwards_explicit_empty_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment_file = Path(temporary) / "environment.json"
+            environment_file.write_text("[]", encoding="utf-8")
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "exec",
+                    "--state-dir",
+                    "state",
+                    "--environment-file",
+                    str(environment_file),
+                ]
+            )
+            result = sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b"")
+            with (
+                patch.object(
+                    sandbox_lifecycle,
+                    "exec_workload",
+                    return_value=result,
+                ) as execute,
+                self.assertRaises(SystemExit) as exit_context,
+            ):
+                nvx.command_sandbox(args)
+
+        self.assertEqual(exit_context.exception.code, 0)
+        execute.assert_called_once_with(
+            Path("state"),
+            ("/bin/sh",),
+            timeout_ms=0,
+            response_timeout=60.0,
+            environment=(),
+        )
+
+    def test_sandbox_exec_rejects_ambiguous_or_one_shot_environment(self):
+        both = nvx.parse_args(
+            [
+                "sandbox",
+                "exec",
+                "--state-dir",
+                "state",
+                "--environment",
+                "A=1",
+                "--environment-file",
+                "environment.json",
+            ]
+        )
+        with self.assertRaisesRegex(common.ScriptError, "mutually exclusive"):
+            nvx.command_sandbox(both)
+
+        one_shot = nvx.parse_args(["sandbox", "run", "--environment", "A=1"])
+        with self.assertRaisesRegex(common.ScriptError, "require sandbox exec"):
+            nvx.command_sandbox(one_shot)
+
+    def test_sandbox_environment_file_is_bounded_before_state_access(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "environment.json"
+            path.write_bytes(b" " * (1024 * 1024 + 1))
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "exec",
+                    "--state-dir",
+                    "absent-state",
+                    "--environment-file",
+                    str(path),
+                ]
+            )
+            with (
+                patch.object(sandbox_lifecycle, "exec_workload") as execute,
+                self.assertRaisesRegex(common.ScriptError, "exceeds.*byte limit"),
+            ):
+                nvx.command_sandbox(args)
+            execute.assert_not_called()
 
     def test_network_requires_explicit_portable_profile(self):
         args = nvx.parse_args(
@@ -4318,7 +4410,7 @@ class BuildTests(unittest.TestCase):
             {
                 "microvm_abi_version": 2,
                 "control_session_protocol_version": 1,
-                "control_contract_revision": "nvx-microvm-v2-control-v1",
+                "control_contract_revision": "nvx-microvm-v2-control-v2",
             },
         )
 
@@ -5860,9 +5952,12 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "retry") == 0) {{
         struct control_session session = {{.fd = STDOUT_FILENO}};
         struct agent_config config = {{.direct = 1}};
+        struct exec_config exec_config = {{0}};
         char *command[] = {{"/bin/true", NULL}};
-        result = run_exec(&session, &config, 42, 0, command);
-        return result == 0 ? run_exec(&session, &config, 43, 0, command) : result;
+        result = run_exec(&session, &config, 42, 0, command, &exec_config);
+        return result == 0
+                   ? run_exec(&session, &config, 43, 0, command, &exec_config)
+                   : result;
     }}
     if (strcmp(argv[1], "population") == 0) {{
         result = exec_cgroup_populated();
@@ -6118,11 +6213,20 @@ class ManagedAgentStopTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, stderr)
 
     def test_agent_advertises_the_control_features_of_its_mode(self):
-        cancel, host_mappings, workload_account, exec_cgroup = 1, 2, 4, 8
+        cancel, host_mappings, workload_account, exec_cgroup, environment = (
+            1,
+            2,
+            4,
+            8,
+            16,
+        )
         for rootfs, expected in (
             # Only the direct agent maps host paths and gives each workload a cgroup.
-            ("-", cancel | host_mappings | workload_account | exec_cgroup),
-            ("/run/nvx/rootfs", cancel | workload_account),
+            (
+                "-",
+                cancel | host_mappings | workload_account | exec_cgroup | environment,
+            ),
+            ("/run/nvx/rootfs", cancel | workload_account | environment),
         ):
             with self.subTest(rootfs=rootfs):
                 kind, request_id, status, body = self._request(rootfs, 5)
@@ -6133,6 +6237,48 @@ class ManagedAgentStopTests(unittest.TestCase):
         kind, request_id, status, body = self._request("-", 5, b"abc")
         self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
         self.assertEqual(body, b"invalid-request")
+
+    def test_exec_config_helper_applies_exact_and_inherited_environments(self):
+        def execute(entries: tuple[str, ...], inherit: bool) -> set[bytes]:
+            flags = 2 | (4 if inherit else 0)
+            payload = bytearray(struct.pack("<HH", flags, len(entries)))
+            for entry in entries:
+                encoded = entry.encode()
+                payload.extend(struct.pack("<I", len(encoded)))
+                payload.extend(encoded)
+            with tempfile.TemporaryFile() as config:
+                config.write(payload)
+                config.seek(0)
+                descriptor = config.fileno()
+                result = subprocess.run(
+                    [
+                        str(self.agent),
+                        "--exec-config-fd",
+                        str(descriptor),
+                        "--",
+                        "/usr/bin/env",
+                    ],
+                    capture_output=True,
+                    env={
+                        "DEFAULT": "kept",
+                        "NVX_EXEC_CONFIG_FD": str(descriptor),
+                    },
+                    pass_fds=(descriptor,),
+                    timeout=5,
+                    check=False,
+                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return set(result.stdout.splitlines())
+
+        self.assertEqual(execute((), False), set())
+        self.assertEqual(
+            execute(("FOO=value with spaces", "EMPTY="), False),
+            {b"FOO=value with spaces", b"EMPTY="},
+        )
+        self.assertEqual(
+            execute(("FOO=layered",), True),
+            {b"DEFAULT=kept", b"FOO=layered"},
+        )
 
 
 class AciSandboxRunnerTests(unittest.TestCase):
@@ -10007,7 +10153,7 @@ class ReleaseTests(unittest.TestCase):
             )
             self.assertEqual(
                 manifest["openvmm"]["control_contract_revision"],
-                "nvx-microvm-v2-control-v1",
+                "nvx-microvm-v2-control-v2",
             )
             self.assertEqual(
                 manifest["linux"]["kernel_sha256"],

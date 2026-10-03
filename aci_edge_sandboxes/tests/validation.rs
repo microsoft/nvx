@@ -90,6 +90,8 @@ fn exec_validation_and_execution_share_guest_policy_checks() {
         ExecRequest::argv(["/bin/echo".to_owned(), "x".repeat(4097)]).with_cwd("/tmp"),
         ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4096))),
         ExecRequest::command_line("true").with_timeout(Duration::from_millis(3_600_001)),
+        ExecRequest::command_line("true").with_envs(vec!["A=B"; 257]),
+        ExecRequest::command_line("true").with_env(format!("A={}", "x".repeat(4095))),
     ] {
         assert_exec_rejected(&client, &request);
     }
@@ -109,6 +111,8 @@ fn exec_validation_accepts_the_exact_guest_limits() {
         ExecRequest::command_line("x".repeat(4096 - cwd_prelude.len())).with_cwd("/tmp"),
         ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4095))),
         ExecRequest::command_line("true").with_timeout(Duration::from_millis(3_600_000)),
+        ExecRequest::command_line("true").with_envs(vec!["A=B"; 256]),
+        ExecRequest::command_line("true").with_env(format!("A={}", "x".repeat(4094))),
     ] {
         client.validate_exec(&request).unwrap();
         client.backend().validate_exec(&request).unwrap();
@@ -219,7 +223,7 @@ fn structural_and_capability_errors_precede_backend_policy_checks() {
     let request = ExecRequest::argv(["relative-program"]).with_env("KEY=value");
     let error = client.validate_exec(&request).unwrap_err();
     assert_eq!(error.code(), ErrorCode::PolicyValidation);
-    assert!(error.message().contains("process.env"));
+    assert!(error.message().contains("absolute guest path"));
     assert_eq!(
         client
             .validate_provision(&ProvisionRequest::new().with_memory_mib(0))

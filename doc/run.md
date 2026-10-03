@@ -466,6 +466,7 @@ python3 scripts/nvx.py sandbox start \
 python3 scripts/nvx.py sandbox exec \
   --state-dir /run/user/1000/nvx-example \
   --entrypoint /usr/bin/python3 --arg=/work/agent.py \
+  --environment 'MODE=managed execution' --environment 'EMPTY=' \
   --outcome-report /run/user/1000/nvx-example-exec.json
 python3 scripts/nvx.py sandbox exec \
   --state-dir /run/user/1000/nvx-example \
@@ -479,13 +480,16 @@ python3 scripts/nvx.py sandbox deprovision \
 Lifecycle transitions fail closed: `start` rejects an already-running or stale
 runtime record, `exec` and `stop` require a live OpenVMM process, and
 `deprovision` refuses to remove a running sandbox or unknown files. Managed
-workload arguments use the bounded control protocol rather than the kernel
-command line and may contain whitespace. The workload sees one machine ID for
-the life of the VM. On `stop`, the guest agent unmounts the live share, overlay,
-layers, and scratch in dependency order before the VM powers off, as it does
-when a one-shot workload exits. The legacy operation-less `sandbox`
-form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
-request to retain VM state.
+workload arguments and per-execution environment entries use the bounded
+control protocol rather than the kernel command line and may contain
+whitespace. Omitting `--environment` and `--environment-file` uses the guest
+default environment; supplied entries replace it, and an empty JSON array
+requests an empty environment. Values are isolated between executions. The
+workload sees one machine ID for the life of the VM. On `stop`, the guest agent
+unmounts the live share, overlay, layers, and scratch in dependency order
+before the VM powers off, as it does when a one-shot workload exits. The legacy
+operation-less `sandbox` form is `sandbox run`; it remains one-shot and rejects
+`--state-dir` or any request to retain VM state.
 
 `run --outcome-report PATH` and one-shot `sandbox run --outcome-report PATH`
 forward OpenVMM's bounded local JSON report. Managed `sandbox exec` writes only

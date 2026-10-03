@@ -117,7 +117,7 @@ enforce, and report state-machine violations with the codes listed in the
 | `OpenVmmConfig::new` | Explicit paths |
 
 The release and repository constructors require the `SOURCE-MANIFEST.json`
-control contract `nvx-microvm-v2-control-v1`. The initramfs is the Alpine
+control contract `nvx-microvm-v2-control-v2`. The initramfs is the Alpine
 image: its userland is the workloads' environment, and its managed agent
 serves the control console.
 
@@ -208,9 +208,11 @@ Windows and `$XDG_STATE_HOME/nvx/sandboxes` (default
 - **Exec** connects to the control console, authenticates, and streams the
   workload's output live. The agent runs the workload through `setpriv` as the
   workload identity, with no capabilities and `no_new_privs`, in a cgroup of
-  its own. When the workload's first process exits, the agent kills whatever
-  it left behind, including processes in other sessions, so no workload
-  process outlives its exec.
+  its own. Each execution independently uses the guest default environment,
+  replaces it with `process.env`, or layers `process.env` over it when
+  `inheritDefaultEnv` is true. When the workload's first process exits, the
+  agent kills whatever it left behind, including processes in other sessions,
+  so no workload process outlives its exec.
 - **Stop** asks the guest to shut down. If the guest does not finish within
   `stop_timeout`, OpenVMM is terminated. Everything the workloads wrote is
   discarded, because the root file system lives in guest memory.
@@ -238,7 +240,7 @@ terminate the VM when the caller exits.
 | `process.argv` (ACI Edge Sandboxes extension) | n/a | applied; absolute program, up to 64 arguments of 4096 bytes |
 | `process.cwd` | n/a | an absolute guest path; a missing directory ends the workload with status 125 |
 | `process.timeout` | n/a | applied, up to 3,600,000 ms |
-| `process.env`, `inheritDefaultEnv: false` | n/a | rejected |
+| `process.env`, `inheritDefaultEnv` | n/a | applied per execution; omitted `env` inherits defaults, supplied `env` replaces them unless inheritance is true |
 | Piped standard input | n/a | rejected; the workload reads end-of-file |
 
 Workloads run as the configured non-root identity and may write at most 1 MiB

@@ -175,6 +175,116 @@ class ControlSessionTests(unittest.TestCase):
         session.close()
         server.close()
 
+    def test_exec_distinguishes_omitted_empty_and_inherited_environments(self):
+        def payload_for(
+            environment: tuple[str, ...] | None,
+            inherit_default_env: bool | None = None,
+        ) -> bytes:
+            client, server = socket.socketpair()
+            session = control_session.ControlSession(
+                control_session._SocketStream(client)
+            )
+            session._instance_id = bytes.fromhex("44" * 16)
+            session._epoch = 1
+            captured = bytearray()
+
+            def serve() -> None:
+                *_, frame = _read_outer(server)
+                header = control_session.APP_HEADER.unpack(
+                    frame[: control_session.APP_HEADER.size]
+                )
+                captured.extend(frame[control_session.APP_HEADER.size :])
+                _write_app(
+                    server,
+                    instance_id=session._instance_id,
+                    sequence=0,
+                    kind=control_session.APP_EXIT,
+                    request_id=header[4],
+                    status=0,
+                    payload=b"exit",
+                )
+                server.close()
+
+            worker = threading.Thread(target=serve)
+            worker.start()
+            session.exec(
+                ("/bin/true",),
+                timeout_ms=0,
+                response_timeout=5,
+                environment=environment,
+                inherit_default_env=inherit_default_env,
+            )
+            worker.join(timeout=5)
+            session.close()
+            return bytes(captured)
+
+        omitted = payload_for(None)
+        self.assertEqual(struct.unpack("<H", omitted[6:8])[0], 0)
+
+        empty = payload_for(())
+        self.assertEqual(
+            struct.unpack("<HHH", empty[6:12]),
+            (
+                control_session.APP_EXEC_EXTENDED,
+                control_session.APP_EXEC_ENVIRONMENT_PRESENT,
+                0,
+            ),
+        )
+
+        exact = payload_for(("FOO=value with spaces", "EMPTY="))
+        extension, flags, count, reserved = struct.unpack("<HHHI", exact[6:16])
+        self.assertEqual(extension, control_session.APP_EXEC_EXTENDED)
+        self.assertEqual(flags, control_session.APP_EXEC_ENVIRONMENT_PRESENT)
+        self.assertEqual((count, reserved), (2, 0))
+        offset = 16
+        argument_length = struct.unpack("<I", exact[offset : offset + 4])[0]
+        offset += 4 + argument_length
+        entries: list[str] = []
+        for _ in range(count):
+            length = struct.unpack("<I", exact[offset : offset + 4])[0]
+            offset += 4
+            entries.append(exact[offset : offset + length].decode())
+            offset += length
+        self.assertEqual(entries, ["FOO=value with spaces", "EMPTY="])
+        self.assertEqual(offset, len(exact))
+
+        inherited = payload_for(("FOO=layered",), True)
+        self.assertEqual(
+            struct.unpack("<H", inherited[8:10])[0],
+            control_session.APP_EXEC_ENVIRONMENT_PRESENT
+            | control_session.APP_EXEC_INHERIT_DEFAULT_ENV,
+        )
+        cleared = payload_for(None, False)
+        self.assertEqual(
+            struct.unpack("<HH", cleared[8:12]),
+            (control_session.APP_EXEC_ENVIRONMENT_PRESENT, 0),
+        )
+
+    def test_exec_rejects_invalid_environments_before_sending(self):
+        client, server = socket.socketpair()
+        session = control_session.ControlSession(control_session._SocketStream(client))
+        for environment in (
+            ("NOVALUE",),
+            ("=value",),
+            (f"A={'x' * 4096}",),
+            tuple("A=B" for _ in range(257)),
+        ):
+            with (
+                self.subTest(environment=len(environment)),
+                self.assertRaisesRegex(ValueError, "environment"),
+            ):
+                session.exec(
+                    ("/bin/true",),
+                    timeout_ms=0,
+                    response_timeout=1,
+                    environment=environment,
+                )
+        server.setblocking(False)
+        with self.assertRaises(BlockingIOError):
+            server.recv(1)
+        session.close()
+        server.close()
+
     def test_exec_rejects_invalid_response_timeout_before_sending(self):
         client, server = socket.socketpair()
         session = control_session.ControlSession(control_session._SocketStream(client))

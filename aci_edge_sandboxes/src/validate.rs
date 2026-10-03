@@ -170,7 +170,7 @@ pub(crate) fn exec_structure(request: &ExecRequest) -> Result<()> {
         }
         no_nul(cwd, "process.cwd")?;
     }
-    for entry in &process.env {
+    for entry in process.env.iter().flatten() {
         let valid = entry
             .split_once('=')
             .is_some_and(|(name, _)| !name.is_empty());
@@ -206,10 +206,11 @@ pub(crate) fn exec_capabilities(request: &ExecRequest, capabilities: &Capabiliti
     if process.cwd.is_some() && !supported.cwd {
         return unsupported("process.cwd");
     }
-    if !process.env.is_empty() && !supported.env {
+    if process.env.is_some() && !supported.env {
         return unsupported("process.env");
     }
-    if process.inherit_default_env == Some(false) && !supported.clear_default_env {
+    let inherits_default = process.inherit_default_env.unwrap_or(process.env.is_none());
+    if !inherits_default && !supported.clear_default_env {
         return unsupported("process.inheritDefaultEnv: false");
     }
     if let (Some(timeout), Some(maximum)) = (process.timeout, supported.max_timeout_ms)
@@ -437,6 +438,7 @@ mod tests {
             ExecRequest::command_line("cat").with_stdin(StdinMode::Piped),
             ExecRequest::command_line("pwd").with_cwd("/tmp"),
             ExecRequest::command_line("env").with_env("A=B"),
+            ExecRequest::command_line("env").with_envs(Vec::<String>::new()),
             ExecRequest::command_line("env").with_inherit_default_env(false),
             ExecRequest::command_line("sleep 2").with_timeout(Duration::from_secs(2)),
         ] {
@@ -451,6 +453,14 @@ mod tests {
                 .with_inherit_default_env(true)
                 .with_timeout(Duration::from_secs(1)),
             &capabilities,
+        )
+        .unwrap();
+        let mut environment = capabilities.clone();
+        environment.exec.env = true;
+        environment.exec.clear_default_env = true;
+        exec_capabilities(
+            &ExecRequest::command_line("env").with_envs(Vec::<String>::new()),
+            &environment,
         )
         .unwrap();
     }

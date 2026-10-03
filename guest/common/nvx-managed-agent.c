@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -53,9 +54,14 @@
 #define FEATURE_HOST_MAPPINGS (1U << 1)
 #define FEATURE_WORKLOAD_ACCOUNT (1U << 2)
 #define FEATURE_EXEC_CGROUP (1U << 3)
+#define FEATURE_EXEC_ENVIRONMENT (1U << 4)
 
 #define MAX_ARGUMENTS 64U
 #define MAX_ARGUMENT_LEN 4096U
+#define MAX_ENVIRONMENT 256U
+#define EXEC_EXTENDED 1U
+#define EXEC_ENVIRONMENT_PRESENT (1U << 1)
+#define EXEC_INHERIT_DEFAULT_ENV (1U << 2)
 #define MAX_OUTPUT_BYTES (1024U * 1024U)
 #define OUTPUT_CHUNK_BYTES 32768U
 #define MAX_TIMEOUT_MS (60U * 60U * 1000U)
@@ -104,6 +110,13 @@ struct agent_config {
     const char *user;
     const char *home;
     int direct;
+};
+
+struct exec_config {
+    char **environment;
+    uint16_t environment_count;
+    int environment_present;
+    int inherit_default_env;
 };
 
 static uint16_t read_u16(const uint8_t *bytes)
@@ -926,9 +939,10 @@ static void terminate_workload(const struct agent_config *config, pid_t child)
 
 static void exec_direct(
     const struct agent_config *config,
+    const char *config_fd,
     char *const workload_argv[])
 {
-    char *arguments[MAX_ARGUMENTS + 16];
+    char *arguments[MAX_ARGUMENTS + 20];
     size_t index = 0;
     size_t workload_index = 0;
 
@@ -948,7 +962,13 @@ static void exec_direct(
     arguments[index++] = "--bounding-set=-all";
     arguments[index++] = "--inh-caps=-all";
     arguments[index++] = "--ambient-caps=-all";
-    while (workload_argv[workload_index] != NULL && index + 1 < MAX_ARGUMENTS + 16) {
+    if (config_fd != NULL) {
+        arguments[index++] = "/sbin/nvx-managed-agent";
+        arguments[index++] = "--exec-config-fd";
+        arguments[index++] = (char *)config_fd;
+        arguments[index++] = "--";
+    }
+    while (workload_argv[workload_index] != NULL && index + 1 < MAX_ARGUMENTS + 20) {
         arguments[index++] = workload_argv[workload_index++];
     }
     arguments[index] = NULL;
@@ -959,6 +979,7 @@ static void exec_direct(
 static void exec_sandbox(
     const struct agent_config *config,
     const char *barrier,
+    const char *config_fd,
     char *const workload_argv[])
 {
     char *arguments[MAX_ARGUMENTS + 10];
@@ -973,6 +994,13 @@ static void exec_sandbox(
     arguments[index++] = (char *)config->gid;
     arguments[index++] = (char *)config->user;
     arguments[index++] = (char *)config->home;
+    if (config_fd != NULL && setenv("NVX_EXEC_CONFIG_FD", config_fd, 1) != 0) {
+        dprintf(
+            STDERR_FILENO,
+            "nvx-managed-agent: cannot export execution environment: %s\n",
+            strerror(errno));
+        _exit(125);
+    }
     while (workload_argv[workload_index] != NULL && index + 1 < MAX_ARGUMENTS + 10) {
         arguments[index++] = workload_argv[workload_index++];
     }
@@ -985,9 +1013,13 @@ static int decode_exec_payload(
     const uint8_t *payload,
     uint32_t payload_len,
     uint32_t *timeout_ms,
-    char ***workload_argv)
+    char ***workload_argv,
+    struct exec_config *config)
 {
     uint16_t argc;
+    uint16_t extension;
+    uint16_t flags = 0;
+    uint16_t environment_count = 0;
     uint32_t offset = 8;
     char **arguments;
     uint16_t index;
@@ -997,8 +1029,25 @@ static int decode_exec_payload(
     }
     *timeout_ms = read_u32(payload);
     argc = read_u16(payload + 4);
-    if (read_u16(payload + 6) != 0 || argc == 0 || argc > MAX_ARGUMENTS ||
-        *timeout_ms > MAX_TIMEOUT_MS) {
+    extension = read_u16(payload + 6);
+    if (argc == 0 || argc > MAX_ARGUMENTS || *timeout_ms > MAX_TIMEOUT_MS) {
+        return -1;
+    }
+    if (extension == EXEC_EXTENDED) {
+        if (payload_len < 16) {
+            return -1;
+        }
+        flags = read_u16(payload + 8);
+        environment_count = read_u16(payload + 10);
+        offset = 16;
+        if ((flags &
+             ~(EXEC_ENVIRONMENT_PRESENT | EXEC_INHERIT_DEFAULT_ENV)) != 0 ||
+            (flags & EXEC_ENVIRONMENT_PRESENT) == 0 ||
+            environment_count > MAX_ENVIRONMENT ||
+            read_u32(payload + 12) != 0) {
+            return -1;
+        }
+    } else if (extension != 0) {
         return -1;
     }
     arguments = calloc((size_t)argc + 1, sizeof(*arguments));
@@ -1025,7 +1074,47 @@ static int decode_exec_payload(
         arguments[index][length] = '\0';
         offset += length;
     }
-    if (offset != payload_len || arguments[0][0] != '/') {
+    if (arguments[0][0] != '/') {
+        goto fail;
+    }
+    if (extension == EXEC_EXTENDED) {
+        config->environment = calloc(
+            (size_t)environment_count + 1, sizeof(*config->environment));
+        if (config->environment == NULL) {
+            goto fail;
+        }
+        config->environment_present = 1;
+        config->inherit_default_env =
+            (flags & EXEC_INHERIT_DEFAULT_ENV) != 0;
+        config->environment_count = environment_count;
+        for (index = 0; index < environment_count; ++index) {
+            uint32_t length;
+            const uint8_t *equals;
+
+            if (offset > payload_len || payload_len - offset < 4) {
+                goto fail;
+            }
+            length = read_u32(payload + offset);
+            offset += 4;
+            if (length == 0 || length > MAX_ARGUMENT_LEN ||
+                length > payload_len - offset ||
+                memchr(payload + offset, '\0', length) != NULL) {
+                goto fail;
+            }
+            equals = memchr(payload + offset, '=', length);
+            if (equals == NULL || equals == payload + offset) {
+                goto fail;
+            }
+            config->environment[index] = malloc((size_t)length + 1);
+            if (config->environment[index] == NULL) {
+                goto fail;
+            }
+            memcpy(config->environment[index], payload + offset, length);
+            config->environment[index][length] = '\0';
+            offset += length;
+        }
+    }
+    if (offset != payload_len) {
         goto fail;
     }
     *workload_argv = arguments;
@@ -1036,6 +1125,13 @@ fail:
         free(arguments[index]);
     }
     free(arguments);
+    if (config->environment != NULL) {
+        for (index = 0; index < config->environment_count; ++index) {
+            free(config->environment[index]);
+        }
+        free(config->environment);
+        memset(config, 0, sizeof(*config));
+    }
     return -1;
 }
 
@@ -1050,6 +1146,148 @@ static void free_arguments(char **arguments)
         free(arguments[index]);
     }
     free(arguments);
+}
+
+static void free_exec_config(struct exec_config *config)
+{
+    uint16_t index;
+
+    for (index = 0; index < config->environment_count; ++index) {
+        free(config->environment[index]);
+    }
+    free(config->environment);
+    memset(config, 0, sizeof(*config));
+}
+
+static int write_exec_config(int fd, const struct exec_config *config)
+{
+    uint8_t header[4];
+    uint16_t flags = EXEC_ENVIRONMENT_PRESENT;
+    uint16_t index;
+
+    if (config->inherit_default_env) {
+        flags |= EXEC_INHERIT_DEFAULT_ENV;
+    }
+    write_u16(header, flags);
+    write_u16(header + 2, config->environment_count);
+    if (write_all(fd, header, sizeof(header)) != 0) {
+        return -1;
+    }
+    for (index = 0; index < config->environment_count; ++index) {
+        uint32_t length = (uint32_t)strlen(config->environment[index]);
+        uint8_t encoded_length[4];
+
+        write_u32(encoded_length, length);
+        if (write_all(fd, encoded_length, sizeof(encoded_length)) != 0 ||
+            write_all(fd, config->environment[index], length) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int create_exec_config_fd(const struct exec_config *config)
+{
+    int fd = memfd_create("nvx-exec-config", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+
+    if (fd < 0) {
+        return -1;
+    }
+    if (write_exec_config(fd, config) != 0 ||
+        lseek(fd, 0, SEEK_SET) < 0 ||
+        fcntl(
+            fd,
+            F_ADD_SEALS,
+            F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int launch_workload(int argc, char **argv)
+{
+    char *end = NULL;
+    long descriptor;
+    uint8_t header[4];
+    uint16_t flags;
+    uint16_t environment_count;
+    char **environment;
+    uint16_t index;
+
+    if (argc < 5 || strcmp(argv[1], "--exec-config-fd") != 0 ||
+        strcmp(argv[3], "--") != 0 || argv[4][0] != '/') {
+        return 125;
+    }
+    errno = 0;
+    descriptor = strtol(argv[2], &end, 10);
+    if (errno != 0 || end == argv[2] || *end != '\0' ||
+        descriptor < 0 || descriptor > INT32_MAX ||
+        read_exact((int)descriptor, header, sizeof(header)) != 0) {
+        return 125;
+    }
+    flags = read_u16(header);
+    environment_count = read_u16(header + 2);
+    if ((flags &
+         ~(EXEC_ENVIRONMENT_PRESENT | EXEC_INHERIT_DEFAULT_ENV)) != 0 ||
+        (flags & EXEC_ENVIRONMENT_PRESENT) == 0 ||
+        environment_count > MAX_ENVIRONMENT) {
+        return 125;
+    }
+    environment = calloc(
+        (size_t)environment_count + 1, sizeof(*environment));
+    if (environment == NULL) {
+        return 125;
+    }
+    for (index = 0; index < environment_count; ++index) {
+        uint8_t encoded_length[4];
+        uint32_t length;
+
+        if (read_exact((int)descriptor, encoded_length, 4) != 0) {
+            goto fail;
+        }
+        length = read_u32(encoded_length);
+        if (length == 0 || length > MAX_ARGUMENT_LEN) {
+            goto fail;
+        }
+        environment[index] = malloc((size_t)length + 1);
+        if (environment[index] == NULL ||
+            read_exact(
+                (int)descriptor, environment[index], length) != 0) {
+            goto fail;
+        }
+        if (memchr(environment[index], '\0', length) != NULL ||
+            environment[index][0] == '=' ||
+            memchr(environment[index], '=', length) == NULL) {
+            goto fail;
+        }
+        environment[index][length] = '\0';
+    }
+    close((int)descriptor);
+    if (unsetenv("NVX_EXEC_CONFIG_FD") != 0) {
+        goto fail;
+    }
+    if ((flags & EXEC_INHERIT_DEFAULT_ENV) == 0 && clearenv() != 0) {
+        goto fail;
+    }
+    for (index = 0; index < environment_count; ++index) {
+        if (putenv(environment[index]) != 0) {
+            goto fail;
+        }
+        environment[index] = NULL;
+    }
+    execv(argv[4], &argv[4]);
+    dprintf(
+        STDERR_FILENO,
+        "nvx-managed-agent: cannot execute workload: %s\n",
+        strerror(errno));
+
+fail:
+    for (index = 0; index < environment_count; ++index) {
+        free(environment[index]);
+    }
+    free(environment);
+    return 125;
 }
 
 static int stream_output(
@@ -1174,11 +1412,13 @@ static int run_exec(
     const struct agent_config *config,
     uint64_t request_id,
     uint32_t timeout_ms,
-    char **workload_argv)
+    char **workload_argv,
+    const struct exec_config *exec_config)
 {
     const char *barrier = "/run/nvx/managed-container-start";
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
+    int exec_config_fd = -1;
     pid_t child;
     uint64_t started;
     size_t output_bytes = 0;
@@ -1210,11 +1450,21 @@ static int run_exec(
             return send_app_error(session, request_id, 125, "launch-failed");
         }
     }
-    if (pipe2(stdout_pipe, O_CLOEXEC) != 0 || pipe2(stderr_pipe, O_CLOEXEC) != 0) {
+    if (pipe2(stdout_pipe, O_CLOEXEC) != 0 ||
+        pipe2(stderr_pipe, O_CLOEXEC) != 0 ||
+        (exec_config->environment_present &&
+         (exec_config_fd = create_exec_config_fd(exec_config)) < 0)) {
         unlink(barrier);
         if (stdout_pipe[0] >= 0) {
             close(stdout_pipe[0]);
             close(stdout_pipe[1]);
+        }
+        if (stderr_pipe[0] >= 0) {
+            close(stderr_pipe[0]);
+            close(stderr_pipe[1]);
+        }
+        if (exec_config_fd >= 0) {
+            close(exec_config_fd);
         }
         return send_app_error(session, request_id, 125, "launch-failed");
     }
@@ -1225,13 +1475,26 @@ static int run_exec(
         close(stdout_pipe[1]);
         close(stderr_pipe[0]);
         close(stderr_pipe[1]);
+        if (exec_config_fd >= 0) {
+            close(exec_config_fd);
+        }
         unlink(barrier);
         return send_app_error(session, request_id, 125, "launch-failed");
     }
     if (child == 0) {
         int null_fd;
+        char config_fd[32];
+        const char *config_fd_argument = NULL;
 
         setpgid(0, 0);
+        if (exec_config_fd >= 0) {
+            if (fcntl(exec_config_fd, F_SETFD, 0) != 0 ||
+                snprintf(
+                    config_fd, sizeof(config_fd), "%d", exec_config_fd) <= 0) {
+                _exit(125);
+            }
+            config_fd_argument = config_fd;
+        }
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
         null_fd = open("/dev/null", O_RDONLY);
@@ -1244,12 +1507,15 @@ static int run_exec(
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
         if (config->direct) {
-            exec_direct(config, workload_argv);
+            exec_direct(config, config_fd_argument, workload_argv);
         }
-        exec_sandbox(config, barrier, workload_argv);
+        exec_sandbox(config, barrier, config_fd_argument, workload_argv);
     }
 
     setpgid(child, child);
+    if (exec_config_fd >= 0) {
+        close(exec_config_fd);
+    }
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
     if (make_nonblocking(stdout_pipe[0]) != 0 ||
@@ -1407,7 +1673,8 @@ static int run_exec(
 /* Direct mode alone sets up host mappings and a cgroup for each workload. */
 static uint32_t agent_features(const struct agent_config *config)
 {
-    uint32_t features = FEATURE_CANCEL | FEATURE_WORKLOAD_ACCOUNT;
+    uint32_t features =
+        FEATURE_CANCEL | FEATURE_WORKLOAD_ACCOUNT | FEATURE_EXEC_ENVIRONMENT;
 
     if (config->direct) {
         features |= FEATURE_HOST_MAPPINGS | FEATURE_EXEC_CGROUP;
@@ -1422,6 +1689,7 @@ static int handle_data_record(
 {
     struct app_request request;
     char **workload_argv = NULL;
+    struct exec_config exec_config = {0};
     uint8_t features[4];
     uint32_t timeout_ms = 0;
     int result;
@@ -1463,13 +1731,20 @@ static int handle_data_record(
                 request.payload,
                 request.payload_len,
                 &timeout_ms,
-                &workload_argv) != 0) {
+                &workload_argv,
+                &exec_config) != 0) {
             return send_app_error(
                 session, request.request_id, 22, "invalid-request");
         }
         result = run_exec(
-            session, config, request.request_id, timeout_ms, workload_argv);
+            session,
+            config,
+            request.request_id,
+            timeout_ms,
+            workload_argv,
+            &exec_config);
         free_arguments(workload_argv);
+        free_exec_config(&exec_config);
         return result;
     case APP_CANCEL:
         /* The targeted workload already finished and reported its outcome. */
@@ -1564,6 +1839,9 @@ int main(int argc, char **argv)
     struct agent_config config;
     int result;
 
+    if (argc >= 2 && strcmp(argv[1], "--exec-config-fd") == 0) {
+        return launch_workload(argc, argv);
+    }
     if (argc != 8) {
         return 125;
     }

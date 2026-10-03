@@ -19,6 +19,11 @@ APP_HEADER = struct.Struct("<4sBBHQiI")
 OUTER_MAX_PAYLOAD = 65_536
 APP_MAX_ARGUMENTS = 64
 APP_MAX_ARGUMENT_BYTES = 4096
+APP_MAX_ENVIRONMENT = 256
+
+APP_EXEC_EXTENDED = 1
+APP_EXEC_ENVIRONMENT_PRESENT = 1 << 1
+APP_EXEC_INHERIT_DEFAULT_ENV = 1 << 2
 
 OUTER_HOST_ATTACH = 2
 OUTER_RESET = 3
@@ -348,6 +353,8 @@ class ControlSession:
         *,
         timeout_ms: int,
         response_timeout: float,
+        environment: tuple[str, ...] | None = None,
+        inherit_default_env: bool | None = None,
     ) -> ManagedExecResult:
         if not 0 < response_timeout < float("inf"):
             raise ValueError(
@@ -365,7 +372,56 @@ class ControlSession:
             raise ValueError("managed exec entrypoint must be absolute")
         if not 0 <= timeout_ms <= 3_600_000:
             raise ValueError("managed exec timeout must be 0 through 3600000 ms")
-        payload = struct.pack("<IHH", timeout_ms, len(arguments), 0) + b"".join(encoded)
+
+        if inherit_default_env is not None and type(inherit_default_env) is not bool:
+            raise TypeError("managed exec environment inheritance must be a boolean")
+        inherits_default = (
+            environment is None if inherit_default_env is None else inherit_default_env
+        )
+        encoded_environment: list[bytes] = []
+        if environment is not None:
+            if len(environment) > APP_MAX_ENVIRONMENT:
+                raise ValueError("managed exec environment exceeds 256 entries")
+            for entry in environment:
+                if type(entry) is not str:
+                    raise TypeError("managed exec environment entries must be strings")
+                name, separator, _value = entry.partition("=")
+                value = entry.encode("utf-8")
+                if (
+                    not separator
+                    or not name
+                    or b"\0" in value
+                    or len(value) > APP_MAX_ARGUMENT_BYTES
+                ):
+                    raise ValueError(
+                        "managed exec environment entries must be non-empty "
+                        "KEY=VALUE strings of at most 4096 bytes"
+                    )
+                encoded_environment.append(struct.pack("<I", len(value)) + value)
+        elif not inherits_default:
+            environment = ()
+
+        if environment is None:
+            payload = struct.pack("<IHH", timeout_ms, len(arguments), 0) + b"".join(
+                encoded
+            )
+        else:
+            flags = APP_EXEC_ENVIRONMENT_PRESENT
+            if inherits_default:
+                flags |= APP_EXEC_INHERIT_DEFAULT_ENV
+            payload = (
+                struct.pack(
+                    "<IHHHHI",
+                    timeout_ms,
+                    len(arguments),
+                    APP_EXEC_EXTENDED,
+                    flags,
+                    len(encoded_environment),
+                    0,
+                )
+                + b"".join(encoded)
+                + b"".join(encoded_environment)
+            )
         if len(payload) + APP_HEADER.size > OUTER_MAX_PAYLOAD:
             raise ValueError("managed exec request exceeds the protocol limit")
 

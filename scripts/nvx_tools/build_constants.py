@@ -103,7 +103,7 @@ class OpenVMMBuildConstants:
     PROVENANCE_FORMAT: Final = 1
     MICROVM_ABI_VERSION: Final = 2
     CONTROL_SESSION_PROTOCOL_VERSION: Final = 1
-    CONTROL_CONTRACT_REVISION: Final = "nvx-microvm-v2-control-v1"
+    CONTROL_CONTRACT_REVISION: Final = "nvx-microvm-v2-control-v2"
 
 
 class AlpineBuildConstants:

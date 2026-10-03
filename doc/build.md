@@ -170,7 +170,7 @@ existing `dist/` version. Its `SOURCE-MANIFEST.json` records the package
 version and exact hashes for OpenVMM, Linux, the generated kernel config, and
 the unchanged Alpine initramfs. The OpenVMM section advertises microVM ABI 2,
 control-session protocol 1, and contract
-`nvx-microvm-v2-control-v1`; product guest-agent metadata is intentionally not
+`nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
 part of this platform manifest.
 
 A binary release directory has this layout:

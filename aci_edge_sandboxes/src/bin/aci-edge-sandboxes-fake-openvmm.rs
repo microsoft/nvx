@@ -7,8 +7,9 @@
 //!
 //! Workloads are `/bin/sh -c SCRIPT` or `/bin/echo ARGS...`. A script is a `;`-separated list
 //! of commands: `echo TEXT`, `echoerr TEXT`, `sleep MS`, `exit CODE`, `signal NUMBER`,
-//! `flood BYTES`, `write KEY VALUE`, `read KEY`, `fail`, and `launchfail`. Values written with
-//! `write` live in memory until the VM stops, like files in the guest's RAM root file system.
+//! `flood BYTES`, `write KEY VALUE`, `read KEY`, `getenv KEY`, `fail`, and `launchfail`. Values
+//! written with `write` live in memory until the VM stops, like files in the guest's RAM root file
+//! system.
 //! A `CANCEL` request ends a sleeping workload with the cancelled outcome, and a client that
 //! disconnects during an exec abandons it, as the real guest agent does. `pwd` prints the
 //! working directory that the backend's `cd` prelude selects.
@@ -52,8 +53,13 @@ const APP_STOPPED: u8 = 0x85;
 const APP_ERROR: u8 = 0xff;
 
 /// Control features of the current guest: cancellation, host path mappings, workload accounts,
-/// and workload containment.
-const GUEST_FEATURES: u32 = 0b1111;
+/// workload containment, and per-execution environments.
+const GUEST_FEATURES: u32 = 0b1_1111;
+
+const EXEC_EXTENDED: u16 = 1;
+const EXEC_ENVIRONMENT_PRESENT: u16 = 1 << 1;
+const EXEC_INHERIT_DEFAULT_ENV: u16 = 1 << 2;
+const MAX_ENVIRONMENT: usize = 256;
 
 struct Options {
     endpoint: String,
@@ -299,6 +305,12 @@ struct Guest {
     values: BTreeMap<String, String>,
 }
 
+struct Exec {
+    argv: Vec<String>,
+    environment: Option<Vec<String>>,
+    inherit_default_env: bool,
+}
+
 enum Flow {
     Continue,
     Exit,
@@ -518,12 +530,29 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         payload: &[u8],
         guest: &mut Guest,
     ) -> io::Result<Option<()>> {
-        let Some(argv) = decode_exec(payload) else {
+        let Some(exec) = decode_exec(payload) else {
             return self.send_some(APP_ERROR, request_id, 22, b"invalid-request");
         };
+        let mut environment = if exec.inherit_default_env {
+            BTreeMap::from([
+                ("HOME".to_owned(), "/home/nvx".to_owned()),
+                ("LOGNAME".to_owned(), "nvx".to_owned()),
+                (
+                    "PATH".to_owned(),
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
+                ),
+                ("USER".to_owned(), "nvx".to_owned()),
+            ])
+        } else {
+            BTreeMap::new()
+        };
+        for entry in exec.environment.iter().flatten() {
+            let (name, value) = entry.split_once('=').unwrap();
+            environment.insert(name.to_owned(), value.to_owned());
+        }
         let timeout_ms = u32_at(payload, 0);
         const PRELUDE: &str = "cd -- \"$1\" || exit 125\nshift\n";
-        let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let words: Vec<&str> = exec.argv.iter().map(String::as_str).collect();
         let (words, cwd) = match words.as_slice() {
             ["/bin/sh", "-c", script, "/bin/sh", cwd, rest @ ..] if script.starts_with(PRELUDE) => {
                 let script = &script[PRELUDE.len()..];
@@ -623,6 +652,18 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                         self.send(APP_STDOUT, request_id, 0, value.as_bytes())?;
                     }
                 }
+                "getenv" => {
+                    if let Some(value) = environment.get(argument) {
+                        self.send(APP_STDOUT, request_id, 0, value.as_bytes())?;
+                    }
+                }
+                "env" => {
+                    let listing: String = environment
+                        .iter()
+                        .map(|(name, value)| format!("{name}={value}\n"))
+                        .collect();
+                    self.send(APP_STDOUT, request_id, 0, listing.as_bytes())?;
+                }
                 "pwd" => {
                     let line = format!("{cwd}\n");
                     self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
@@ -653,20 +694,62 @@ impl<S: Read + Write + Pending> Session<'_, S> {
     }
 }
 
-fn decode_exec(payload: &[u8]) -> Option<Vec<String>> {
-    if payload.len() < 8 || payload[6..8] != [0, 0] {
+fn decode_exec(payload: &[u8]) -> Option<Exec> {
+    if payload.len() < 8 {
         return None;
     }
+    let extension = u16::from_le_bytes(payload[6..8].try_into().ok()?);
     let count = usize::from(u16::from_le_bytes([payload[4], payload[5]]));
-    let mut offset = 8;
+    let (flags, environment_count, mut offset) = match extension {
+        0 => (0, 0, 8),
+        EXEC_EXTENDED if payload.len() >= 16 => {
+            let flags = u16::from_le_bytes(payload[8..10].try_into().ok()?);
+            let environment_count =
+                usize::from(u16::from_le_bytes(payload[10..12].try_into().ok()?));
+            let valid_flags = EXEC_ENVIRONMENT_PRESENT | EXEC_INHERIT_DEFAULT_ENV;
+            if flags & !valid_flags != 0
+                || flags & EXEC_ENVIRONMENT_PRESENT == 0
+                || environment_count > MAX_ENVIRONMENT
+                || payload[12..16] != [0; 4]
+            {
+                return None;
+            }
+            (flags, environment_count, 16)
+        }
+        _ => return None,
+    };
     let mut argv = Vec::with_capacity(count);
     for _ in 0..count {
         let length = u32_at(payload.get(offset..offset + 4)?, 0) as usize;
         offset += 4;
+        if length == 0 || length > 4096 {
+            return None;
+        }
         argv.push(String::from_utf8(payload.get(offset..offset + length)?.to_vec()).ok()?);
         offset += length;
     }
-    (offset == payload.len() && !argv.is_empty()).then_some(argv)
+    let mut environment = Vec::with_capacity(environment_count);
+    for _ in 0..environment_count {
+        let length = u32_at(payload.get(offset..offset + 4)?, 0) as usize;
+        offset += 4;
+        if length == 0 || length > 4096 {
+            return None;
+        }
+        let entry = String::from_utf8(payload.get(offset..offset + length)?.to_vec()).ok()?;
+        offset += length;
+        if !entry
+            .split_once('=')
+            .is_some_and(|(name, _)| !name.is_empty())
+        {
+            return None;
+        }
+        environment.push(entry);
+    }
+    (offset == payload.len() && !argv.is_empty()).then_some(Exec {
+        argv,
+        environment: (extension == EXEC_EXTENDED).then_some(environment),
+        inherit_default_env: extension == 0 || flags & EXEC_INHERIT_DEFAULT_ENV != 0,
+    })
 }
 
 /// Authenticates one client and serves it until it disconnects or stops the VM.

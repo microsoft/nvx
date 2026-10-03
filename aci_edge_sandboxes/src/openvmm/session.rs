@@ -209,9 +209,12 @@ impl ControlSession {
         &mut self,
         argv: &[String],
         timeout_ms: u32,
+        environment: Option<&[String]>,
+        inherit_default_env: bool,
         deadline: Instant,
     ) -> Result<u64, SessionError> {
-        let payload = protocol::encode_exec_payload(argv, timeout_ms)?;
+        let payload =
+            protocol::encode_exec_payload(argv, timeout_ms, environment, inherit_default_env)?;
         let request_id = request_id()?;
         self.send_app(APP_EXEC, request_id, &payload, Some(deadline))?;
         Ok(request_id)
@@ -520,7 +523,9 @@ mod tests {
         let mut session =
             ControlSession::attach(transport, &[1; CAPABILITY_LEN], deadline()).unwrap();
         let argv = ["/bin/sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()];
-        let request_id = session.start_exec(&argv, 1000, deadline()).unwrap();
+        let request_id = session
+            .start_exec(&argv, 1000, None, true, deadline())
+            .unwrap();
         let records = host_records(&output.lock().unwrap());
         let (record_type, sequence, frame) = &records[1];
         assert_eq!((*record_type, *sequence), (OUTER_DATA, 0));

@@ -784,6 +784,47 @@ def run_managed_lifecycle(
                         timeout_ms=5_000,
                         response_timeout=timeout,
                     )
+                    default_environment = session.exec(
+                        ("/usr/bin/env",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                    )
+                    empty_environment = session.exec(
+                        ("/usr/bin/env",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        environment=(),
+                    )
+                    exact_environment = session.exec(
+                        ("/usr/bin/env",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        environment=("FOO=value with spaces", "EMPTY="),
+                    )
+                    inherited_environment = session.exec(
+                        ("/usr/bin/env",),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        environment=("FOO=layered",),
+                        inherit_default_env=True,
+                    )
+                    environment_one = session.exec(
+                        ("/bin/sh", "-c", 'printf %s "$FOO"'),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        environment=("FOO=one",),
+                    )
+                    environment_two = session.exec(
+                        ("/bin/sh", "-c", 'printf %s "$FOO"'),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                        environment=("FOO=two",),
+                    )
+                    environment_after = session.exec(
+                        ("/bin/sh", "-c", 'test -z "${FOO+x}"'),
+                        timeout_ms=5_000,
+                        response_timeout=timeout,
+                    )
                 if (
                     first.returncode != 0
                     or first.category != "exit"
@@ -792,6 +833,39 @@ def run_managed_lifecycle(
                 ):
                     raise RuntimeError(
                         "first managed workload returned an invalid result"
+                    )
+                if not any(
+                    entry.startswith(b"PATH=")
+                    for entry in default_environment.stdout.splitlines()
+                ):
+                    raise RuntimeError(
+                        "managed workload omitted the default environment"
+                    )
+                if empty_environment.returncode != 0 or empty_environment.stdout:
+                    raise RuntimeError(
+                        "managed workload did not receive an empty environment"
+                    )
+                if set(exact_environment.stdout.splitlines()) != {
+                    b"FOO=value with spaces",
+                    b"EMPTY=",
+                }:
+                    raise RuntimeError(
+                        "managed workload did not receive its exact environment"
+                    )
+                inherited_lines = inherited_environment.stdout.splitlines()
+                if b"FOO=layered" not in inherited_lines or not any(
+                    entry.startswith(b"PATH=") for entry in inherited_lines
+                ):
+                    raise RuntimeError(
+                        "managed workload did not inherit and layer its environment"
+                    )
+                if (
+                    environment_one.stdout != b"one"
+                    or environment_two.stdout != b"two"
+                    or environment_after.returncode != 0
+                ):
+                    raise RuntimeError(
+                        "managed workload environments leaked between executions"
                     )
 
                 with ControlSession.connect(

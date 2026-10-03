@@ -11,8 +11,9 @@
 //! - **start** launches a detached OpenVMM process with the managed lifecycle, passes it a fresh
 //!   32-byte capability through standard input, and waits until the guest agent answers on the
 //!   authenticated control console. The agent must also advertise the control features this
-//!   backend depends on (cancellation, host path mappings, workload accounts, and workload
-//!   containment). A guest image that lacks one is terminated and start fails with
+//!   backend depends on (cancellation, host path mappings, workload accounts, workload
+//!   containment, and per-execution environments). A guest image that lacks one is terminated and
+//!   start fails with
 //!   [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable), because such an
 //!   image would silently ignore the policy or request that needs the feature.
 //! - **exec** runs the workload through the control console and streams its output live.
@@ -35,7 +36,8 @@
 //! | `process.commandLine` | n/a | run as `/bin/sh -c <commandLine>`, at most 4096 bytes |
 //! | `process.cwd` | n/a | an absolute guest path, entered before the workload runs |
 //! | `process.timeout` | n/a | up to one hour |
-//! | `process.env`, `inheritDefaultEnv: false`, piped stdin | n/a | rejected |
+//! | `process.env`, `inheritDefaultEnv` | n/a | applied per execution |
+//! | piped stdin | n/a | rejected |
 //!
 //! Host paths share OpenVMM's single virtio-fs export: the backend exports the deepest directory
 //! that contains every mapped path to a guest directory that only the guest's root can enter, and
@@ -44,8 +46,10 @@
 //! 256 OpenVMM rules are rejected. Egress denied without allow rules, with ingress denied,
 //! attaches no network device. Workloads run as the fixed non-root identity of
 //! [`OpenVmmConfig::workload_uid`] and [`OpenVmmConfig::workload_gid`] (see
-//! [`OpenVmmConfig::map_host_identity`] for Linux hosts) with no capabilities, read end-of-file on
-//! standard input, and may produce at most 1 MiB of combined output.
+//! [`OpenVmmConfig::map_host_identity`] for Linux hosts) with no capabilities. Each execution
+//! independently inherits the guest default environment, replaces it with `process.env`, or
+//! layers `process.env` over it when `inheritDefaultEnv` is true. Workloads read end-of-file on
+//! standard input and may produce at most 1 MiB of combined output.
 //!
 //! # Concurrency and cancellation
 //!
@@ -295,6 +299,13 @@ impl OpenVmmBackend {
 /// workload with status 125 before it runs.
 const CWD_PRELUDE: &str = "cd -- \"$1\" || exit 125\nshift\n";
 
+struct PreparedExec<'a> {
+    argv: Vec<String>,
+    timeout_ms: u32,
+    environment: Option<&'a [String]>,
+    inherit_default_env: bool,
+}
+
 fn workload_argv(process: &ProcessSpec) -> Result<Vec<String>> {
     let too_long = || {
         Error::policy_validation(format!(
@@ -353,20 +364,32 @@ fn exec_timeout_ms(process: &ProcessSpec) -> Result<u32> {
         })
 }
 
-fn prepare_exec(process: &ProcessSpec) -> Result<(Vec<String>, u32)> {
+fn prepare_exec(process: &ProcessSpec) -> Result<PreparedExec<'_>> {
     let argv = workload_argv(process)?;
     let timeout_ms = exec_timeout_ms(process)?;
-    let validate = |arguments: &[String]| {
-        protocol::encode_exec_payload(arguments, timeout_ms)
+    let inherit_default_env = process.inherit_default_env.unwrap_or(process.env.is_none());
+    let environment = match (&process.env, inherit_default_env) {
+        (Some(environment), _) => Some(environment.as_slice()),
+        (None, false) => Some([].as_slice()),
+        (None, true) => None,
+    };
+    let validate_argv = |arguments: &[String]| {
+        protocol::encode_exec_payload(arguments, timeout_ms, None, true)
             .map(|_| ())
             .map_err(|error| Error::policy_validation(error.0))
     };
     // The cwd wrapper's /bin/sh must not hide an invalid program in the original argv.
     if let Command::Argv(arguments) = &process.command {
-        validate(arguments)?;
+        validate_argv(arguments)?;
     }
-    validate(&argv)?;
-    Ok((argv, timeout_ms))
+    protocol::encode_exec_payload(&argv, timeout_ms, environment, inherit_default_env)
+        .map_err(|error| Error::policy_validation(error.0))?;
+    Ok(PreparedExec {
+        argv,
+        timeout_ms,
+        environment,
+        inherit_default_env,
+    })
 }
 
 /// Returns the calling user's IDs when workloads that map host paths should use them; see
@@ -430,6 +453,8 @@ impl Backend for OpenVmmBackend {
         capabilities.exec.command_line = true;
         capabilities.exec.argv = true;
         capabilities.exec.cancel = true;
+        capabilities.exec.env = true;
+        capabilities.exec.clear_default_env = true;
         capabilities.exec.max_timeout_ms = Some(MAX_TIMEOUT_MS.into());
         capabilities.exec.max_output_bytes = Some(MAX_OUTPUT_BYTES as u64);
         capabilities.network.egress_allow = true;
@@ -653,7 +678,12 @@ impl Backend for OpenVmmBackend {
         request: &ExecRequest,
         io: ExecIo,
     ) -> Result<Box<dyn ExecControl>> {
-        let (argv, timeout_ms) = prepare_exec(&request.process)?;
+        let PreparedExec {
+            argv,
+            timeout_ms,
+            environment,
+            inherit_default_env,
+        } = prepare_exec(&request.process)?;
         let (runtime, capability) = {
             let _guard = self.store.lock(sandbox_id)?;
             self.store.load(sandbox_id)?;
@@ -675,7 +705,13 @@ impl Backend for OpenVmmBackend {
                 .and_then(|transport| ControlSession::attach(transport, &capability, deadline))
                 .map_err(|error| self.session_error(sandbox_id, error))?;
         let request_id = session
-            .start_exec(&argv, timeout_ms, deadline)
+            .start_exec(
+                &argv,
+                timeout_ms,
+                environment,
+                inherit_default_env,
+                deadline,
+            )
             .map_err(|error| self.session_error(sandbox_id, error))?;
         let response_deadline = (timeout_ms > 0).then(|| {
             Instant::now()
