@@ -4,7 +4,8 @@ name: "Copilot Setup Steps"
 # sessions started from the GitHub web interface. The session time limit
 # includes these steps, so they only install pinned tools, restore CI caches,
 # and stage downloads that the agent firewall blocks; they never compile NVX or
-# OpenVMM. Copilot code review uses copilot-code-review.yml instead.
+# OpenVMM. Copilot skips the remaining steps after a failed step, so optional
+# steps warn instead of failing. Copilot code review uses copilot-code-review.yml.
 on:
   workflow_dispatch:
   push:
@@ -31,24 +32,13 @@ jobs:
       contents: read
 
     steps:
-      # OpenVMM, Rust crate, and Docker guest builds need tens of gigabytes. The
-      # hosted runner's separate /mnt disk usually has more free space than /,
-      # so mount the workspace and the Docker data root there before checkout.
-      - name: Move build storage to the largest disk
+      # Some runner types have a small root disk and a separate, larger /mnt
+      # disk. Mount the workspace there so OpenVMM, crate, and guest build
+      # outputs cannot exhaust /.
+      - name: Place the workspace on the largest disk
         shell: bash
         run: |
           set -euo pipefail
-          # TEMPORARY DIAGNOSTICS
-          nproc; free -h; lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT || true
-          df -h; ls -l /dev/kvm || true
-          grep -m1 -ow nonstop_tsc /proc/cpuinfo || echo "no nonstop_tsc"
-          docker info --format 'driver={{.Driver}} root={{.DockerRootDir}} version={{.ServerVersion}} {{.DriverStatus}}' || true
-          sudo du -sh /var/lib/docker /var/lib/containerd 2>/dev/null || true
-          sudo cat /etc/docker/daemon.json || true
-          echo "CARGO_HOME=${CARGO_HOME:-unset} RUSTUP_HOME=${RUSTUP_HOME:-unset}"
-          du -sh ~/.cargo ~/.rustup 2>/dev/null || true
-          rustup toolchain list || true
-          # END TEMPORARY DIAGNOSTICS
           available_gib() {
             df --output=avail -k "$1" | awk 'NR == 2 { print int($1 / 1048576) }'
           }
@@ -57,35 +47,16 @@ jobs:
           if [[ -d /mnt && "$(stat -c %d /mnt)" != "$(stat -c %d /)" ]]; then
             scratch_gib=$(available_gib /mnt)
           fi
-          echo "Free space: / ${root_gib} GiB, /mnt ${scratch_gib} GiB"
-          if (( scratch_gib <= root_gib )); then
-            echo "Keeping build storage on /"
-            exit 0
+          echo "Free space: / ${root_gib} GiB, separate /mnt ${scratch_gib} GiB"
+          if (( scratch_gib > root_gib )); then
+            workspace=/mnt/nvx-workspace
+            sudo mkdir -p "${workspace}"
+            sudo chown "$(id -u):$(id -g)" "${workspace}"
+            mkdir -p "${GITHUB_WORKSPACE}"
+            cp -a "${GITHUB_WORKSPACE}/." "${workspace}/"
+            sudo mount --bind "${workspace}" "${GITHUB_WORKSPACE}"
+            echo "Mounted ${workspace} at ${GITHUB_WORKSPACE}"
           fi
-
-          storage=/mnt/nvx
-          sudo mkdir -p "${storage}/workspace" "${storage}/docker"
-          sudo chown "$(id -u):$(id -g)" "${storage}/workspace"
-          mkdir -p "${GITHUB_WORKSPACE}"
-          cp -a "${GITHUB_WORKSPACE}/." "${storage}/workspace/"
-          sudo mount --bind "${storage}/workspace" "${GITHUB_WORKSPACE}"
-
-          daemon_config=/etc/docker/daemon.json
-          original_config=$(mktemp)
-          if sudo test -s "${daemon_config}"; then
-            sudo cp "${daemon_config}" "${original_config}"
-          else
-            echo '{}' > "${original_config}"
-          fi
-          jq --arg root "${storage}/docker" '. + {"data-root": $root}' \
-            "${original_config}" | sudo tee "${daemon_config}" > /dev/null
-          if ! sudo systemctl restart docker || ! docker info > /dev/null 2>&1; then
-            echo "::warning::Docker could not use ${storage}/docker; restoring its default data root"
-            sudo cp "${original_config}" "${daemon_config}"
-            sudo systemctl restart docker
-          fi
-          echo "Docker data root: $(docker info --format '{{.DockerRootDir}}')"
-          df -h / /mnt
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,52 +84,65 @@ jobs:
           done
           git -C openvmm log -1 --format='OpenVMM %H %s'
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.10"
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-
-      # Pyright downloads its language server on first use; do that here.
-      - name: Install Python development tools
+      # Read the versions that CI and the runner bootstrap pin, so this
+      # environment follows their updates.
+      - name: Resolve pinned tool versions
+        id: versions
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --requirement requirements-dev.txt
-          python -m ruff --version
-          python -m pyright --version
-
-      # OpenVMM builds with stable plus its guest, UEFI, and musl targets. The
-      # aci_edge_sandboxes checks use the MXC toolchain, its MSRV, and macOS.
-      - name: Install Rust toolchains
-        shell: bash
-        run: |
-          set -euo pipefail
+          python=$(sed -n 's/^ *python-version: "\(.*\)"$/\1/p' \
+            .github/actions/check-quality/action.yml)
           crate_toolchain=$(sed -n '/^  toolchain:/,/^  [^ ]/ s/^    default: "\(.*\)"$/\1/p' \
             .github/actions/check-aci-edge-sandboxes/action.yml)
           crate_msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' aci_edge_sandboxes/Cargo.toml)
-          test -n "${crate_toolchain}"
-          test -n "${crate_msrv}"
+          nextest=$(sed -n 's/^CARGO_NEXTEST_VERSION=//p' scripts/setup/setup-linux-runner.sh)
+          for value in "${python}" "${crate_toolchain}" "${crate_msrv}" "${nextest}"; do
+            test -n "${value}"
+          done
+          {
+            echo "python=${python}"
+            echo "crate-toolchain=${crate_toolchain}"
+            echo "crate-msrv=${crate_msrv}"
+            echo "nextest=${nextest}"
+          } | tee -a "${GITHUB_OUTPUT}"
+
+      # OpenVMM builds with stable plus its guest, UEFI, and musl targets. The
+      # aci_edge_sandboxes checks use the MXC toolchain, the crate MSRV, and a
+      # macOS target. OpenVMM keeps full debug info in release builds, so the
+      # session limits debug info and disables incremental artifacts to save
+      # disk space and link time.
+      - name: Install Rust toolchains
+        shell: bash
+        env:
+          CRATE_TOOLCHAIN: ${{ steps.versions.outputs.crate-toolchain }}
+          CRATE_MSRV: ${{ steps.versions.outputs.crate-msrv }}
+        run: |
+          set -euo pipefail
           rustup toolchain install stable --profile minimal \
             --component clippy,rustfmt \
             --target x86_64-unknown-linux-musl,x86_64-unknown-none,x86_64-unknown-uefi
           rustup default stable
-          rustup toolchain install "${crate_toolchain}" --profile minimal \
+          rustup toolchain install "${CRATE_TOOLCHAIN}" --profile minimal \
             --component clippy,rustfmt --target aarch64-apple-darwin
-          rustup toolchain install "${crate_msrv}" --profile minimal
+          rustup toolchain install "${CRATE_MSRV}" --profile minimal
           rustup toolchain list
+          {
+            echo "CARGO_INCREMENTAL=0"
+            echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+            echo "CARGO_PROFILE_RELEASE_DEBUG=line-tables-only"
+          } >> "${GITHUB_ENV}"
 
       - name: Install cargo-nextest
         shell: bash
+        env:
+          NEXTEST_VERSION: ${{ steps.versions.outputs.nextest }}
         run: |
           set -euo pipefail
-          version=$(sed -n 's/^CARGO_NEXTEST_VERSION=//p' scripts/setup/setup-linux-runner.sh)
-          test -n "${version}"
           cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin"
           mkdir -p "${cargo_bin}"
           curl --fail --location --silent --show-error --retry 5 --retry-all-errors \
-            "https://get.nexte.st/${version}/linux" | tar -xzf - -C "${cargo_bin}"
+            "https://get.nexte.st/${NEXTEST_VERSION}/linux" | tar -xzf - -C "${cargo_bin}"
           cargo nextest --version
 
       - name: Grant KVM access
@@ -220,7 +204,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          if ! python3 - <<'PY'
           import sys
 
           sys.path.insert(0, "scripts")
@@ -235,16 +219,49 @@ jobs:
               KernelBuildConstants.SHA256,
           )
           PY
+          then
+            echo "::warning::Could not stage the Linux source archive"
+          fi
 
       - name: Pull the pinned shell linter images
         shell: bash
         run: |
           set -euo pipefail
-          grep -Eo '(koalaman/shellcheck-alpine|mvdan/shfmt)@sha256:[0-9a-f]{64}' \
-            .github/actions/check-quality/action.yml | sort -u |
-            while read -r image; do
-              docker pull --quiet "${image}"
-            done
+          images=$(grep -Eo '(koalaman/shellcheck-alpine|mvdan/shfmt)@sha256:[0-9a-f]{64}' \
+            .github/actions/check-quality/action.yml | sort -u)
+          for image in ${images}; do
+            if ! docker pull --quiet "${image}"; then
+              echo "::warning::Could not pull ${image}"
+            fi
+          done
+
+      # If the pinned Python cannot be installed, for example after a runner
+      # image upgrade, the next step falls back to the image's Python.
+      - name: Set up Python
+        id: python
+        continue-on-error: true
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Pyright downloads its language server on first use; do that here too.
+      - name: Install Python development tools
+        shell: bash
+        env:
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "${PYTHON_OUTCOME}" != success ]]; then
+            echo "::warning::The pinned Python is unavailable; using $(python3 --version)"
+          fi
+          venv="${HOME}/.venv/nvx"
+          python3 -m venv "${venv}"
+          "${venv}/bin/python" -m pip install --requirement requirements-dev.txt
+          "${venv}/bin/python" -m ruff --version
+          "${venv}/bin/python" -m pyright --version
+          echo "${venv}/bin" >> "${GITHUB_PATH}"
 
       - name: Verify and summarize the environment
         shell: bash
@@ -264,10 +281,7 @@ jobs:
           if [[ -r /dev/kvm && -w /dev/kvm ]]; then
             kvm=yes
           fi
-          {
-            echo "CARGO_INCREMENTAL=0"
-            echo "NVX_COPILOT_SETUP=complete"
-          } >> "${GITHUB_ENV}"
+          echo "NVX_COPILOT_SETUP=complete" >> "${GITHUB_ENV}"
           {
             echo "### NVX Copilot environment"
             echo
@@ -275,17 +289,11 @@ jobs:
             echo "| --- | --- |"
             echo "| CPUs / memory | $(nproc) / $(free -g | awk '/^Mem:/ { print $2 }') GiB |"
             echo "| Workspace free space | $(df -h --output=avail . | tail -n 1 | tr -d ' ') |"
-            echo "| Root free space | $(df -h --output=avail / | tail -n 1 | tr -d ' ') |"
             echo "| KVM access | ${kvm} |"
-            echo "| Guest kernel and Alpine initramfs | $(present build/vmlinux) / $(present build/initramfs.cpio.gz) |"
-            echo "| Ubuntu initramfs and distro layer | $(present build/initramfs-ubuntu.cpio.gz) / $(present build/ubuntu-distro.erofs) |"
+            echo "| Guest kernel / Alpine initramfs | $(present build/vmlinux) / $(present build/initramfs.cpio.gz) |"
+            echo "| Ubuntu initramfs / distro layer | $(present build/initramfs-ubuntu.cpio.gz) / $(present build/ubuntu-distro.erofs) |"
+            echo "| Azure Linux initramfs | $(present build/initramfs-azurelinux.cpio.gz) |"
             echo "| OpenVMM binary for the pinned revision | $(present "${openvmm}") |"
             echo "| Rust | $(rustc --version) |"
             echo "| Python | $(python3 --version) |"
           } | tee -a "${GITHUB_STEP_SUMMARY}"
-          # TEMPORARY DIAGNOSTICS
-          df -h
-          du -sh ~/.cargo ~/.rustup ~/.cache 2>/dev/null || true
-          sudo du -sh /var/lib/docker /var/lib/containerd /mnt/nvx/docker 2>/dev/null || true
-          ls -la build openvmm/target/release 2>/dev/null || true
-          # END TEMPORARY DIAGNOSTICS
