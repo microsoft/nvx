@@ -2171,10 +2171,12 @@ Removed from NVX:
 - Harness: `tsc=reliable` and `no_timer_check` in `BASE_TUNING`; per-backend
   `clocksource=` tokens; `stable_clocksource_wait_script` and the
   capture-time clocksource waits; the KVM and WHP branches of
-  `snapshot-core`; the `smp-lapic` scenarios (`lapic=notscdeadline`), which
-  duplicate `smp`; `restore-tsc-sync`, `clearcpuid=tsc_adjust`, and the
-  fresh-boot TSC control, which the warp probe replaces; and the dmesg greps
-  in `restore-processors.sh`, which the watcher replaces. The
+  `snapshot-core`; `smp-lapic`'s `lapic=notscdeadline` boot, its runs in CI,
+  and the benchmarks' LAPIC gate, which `smp` makes redundant now that every
+  guest uses the counting LAPIC (#286; the scenario remains for explicit
+  local use); `restore-tsc-sync`, `clearcpuid=tsc_adjust`, and the fresh-boot
+  TSC control, which the warp probe replaces; and the dmesg greps in
+  `restore-processors.sh`, which the watcher replaces. The
   `cold_start_clocksource` benchmark scenario passes `clocksource=tsc` on
   every backend.
 
