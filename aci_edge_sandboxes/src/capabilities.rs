@@ -44,9 +44,11 @@ pub struct ExecCapabilities {
     pub cancel: bool,
     /// Honors `process.cwd`.
     pub cwd: bool,
-    /// Honors `process.env`.
+    /// Honors `process.env` layered over the default environment
+    /// (`process.inheritDefaultEnv: true`).
     pub env: bool,
-    /// Honors `process.inheritDefaultEnv: false`.
+    /// Honors `process.env` as the complete environment (`process.inheritDefaultEnv` omitted or
+    /// `false`), including an empty list, so the default environment is cleared.
     pub clear_default_env: bool,
     /// Runs multiple executions against one sandbox simultaneously instead of serializing them.
     pub concurrent: bool,

@@ -9,7 +9,7 @@ use std::time::Duration;
 use aci_edge_sandboxes::openvmm::{Hypervisor, OpenVmmConfig};
 use aci_edge_sandboxes::{
     Access, AciEdgeSandbox, ErrorCode, ExecIo, ExecRequest, FilesystemPolicy, NetworkPolicy,
-    NetworkPort, NetworkRule, OutputSink, Protocol, ProvisionRequest, SandboxId,
+    NetworkPort, NetworkRule, OutputSink, Protocol, ProvisionRequest, SandboxId, StdinMode,
 };
 
 fn config(directory: &tempfile::TempDir) -> OpenVmmConfig {
@@ -75,6 +75,10 @@ fn assert_exec_rejected(client: &AciEdgeSandbox, request: &ExecRequest) {
     assert_eq!(error.code(), ErrorCode::PolicyValidation);
 }
 
+fn entries(count: usize) -> Vec<String> {
+    (0..count).map(|index| format!("V{index}=x")).collect()
+}
+
 #[test]
 fn exec_validation_and_execution_share_guest_policy_checks() {
     let (directory, client) = client();
@@ -82,6 +86,7 @@ fn exec_validation_and_execution_share_guest_policy_checks() {
     for request in [
         ExecRequest::argv(["relative-program"]),
         ExecRequest::argv(["relative-program"]).with_cwd("/tmp"),
+        ExecRequest::argv(["relative-program"]).with_env("KEY=value"),
         ExecRequest::command_line("pwd").with_cwd("relative"),
         ExecRequest::command_line("x".repeat(4097)),
         ExecRequest::argv(["/bin/echo".to_owned(), "x".repeat(4097)]),
@@ -90,6 +95,18 @@ fn exec_validation_and_execution_share_guest_policy_checks() {
         ExecRequest::argv(["/bin/echo".to_owned(), "x".repeat(4097)]).with_cwd("/tmp"),
         ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4096))),
         ExecRequest::command_line("true").with_timeout(Duration::from_millis(3_600_001)),
+        // `env`, `-i`, and `--` take three of the 64 arguments, and each entry takes one.
+        ExecRequest::command_line("true").with_environment(entries(59)),
+        ExecRequest::command_line("true")
+            .with_environment(entries(60))
+            .with_inherit_default_env(true),
+        ExecRequest::command_line("true")
+            .with_cwd("/tmp")
+            .with_environment(entries(57)),
+        ExecRequest::argv(vec!["/bin/true"; 61]).with_env("A=b"),
+        ExecRequest::command_line("true").with_env(format!("A={}", "x".repeat(4095))),
+        ExecRequest::command_line("true")
+            .with_environment(vec![format!("A={}", "x".repeat(4094)); 20]),
     ] {
         assert_exec_rejected(&client, &request);
     }
@@ -109,6 +126,21 @@ fn exec_validation_accepts_the_exact_guest_limits() {
         ExecRequest::command_line("x".repeat(4096 - cwd_prelude.len())).with_cwd("/tmp"),
         ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4095))),
         ExecRequest::command_line("true").with_timeout(Duration::from_millis(3_600_000)),
+        ExecRequest::command_line("true").with_environment(entries(58)),
+        ExecRequest::command_line("true")
+            .with_environment(entries(59))
+            .with_inherit_default_env(true),
+        ExecRequest::command_line("true")
+            .with_cwd("/tmp")
+            .with_environment(entries(56)),
+        ExecRequest::argv(vec!["/bin/true"; 60]).with_env("A=b"),
+        ExecRequest::argv(["/opt/a=b/run"]).with_env("A=b"),
+        ExecRequest::command_line("x".repeat(4096)).with_env("A=b"),
+        ExecRequest::command_line("true").with_env(format!("A={}", "x".repeat(4094))),
+        ExecRequest::command_line("true").with_environment(Vec::<String>::new()),
+        ExecRequest::command_line("true")
+            .with_environment(Vec::<String>::new())
+            .with_inherit_default_env(true),
     ] {
         client.validate_exec(&request).unwrap();
         client.backend().validate_exec(&request).unwrap();
@@ -216,10 +248,16 @@ fn structural_and_capability_errors_precede_backend_policy_checks() {
             .code(),
         ErrorCode::MalformedRequest
     );
-    let request = ExecRequest::argv(["relative-program"]).with_env("KEY=value");
+    let request = ExecRequest::argv(["relative-program"]).with_stdin(StdinMode::Piped);
     let error = client.validate_exec(&request).unwrap_err();
     assert_eq!(error.code(), ErrorCode::PolicyValidation);
-    assert!(error.message().contains("process.env"));
+    assert!(error.message().contains("standard input"), "{error}");
+    // A malformed entry is a structural error, which precedes the program check too.
+    let request = ExecRequest::argv(["relative-program"]).with_env("KEY");
+    assert_eq!(
+        client.validate_exec(&request).unwrap_err().code(),
+        ErrorCode::MalformedRequest
+    );
     assert_eq!(
         client
             .validate_provision(&ProvisionRequest::new().with_memory_mib(0))

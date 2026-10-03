@@ -238,11 +238,51 @@ terminate the VM when the caller exits.
 | `process.argv` (ACI Edge Sandboxes extension) | n/a | applied; absolute program, up to 64 arguments of 4096 bytes |
 | `process.cwd` | n/a | an absolute guest path; a missing directory ends the workload with status 125 |
 | `process.timeout` | n/a | applied, up to 3,600,000 ms |
-| `process.env`, `inheritDefaultEnv: false` | n/a | rejected |
+| `process.env`, `process.inheritDefaultEnv` | n/a | applied; see [Environment](#environment) |
 | Piped standard input | n/a | rejected; the workload reads end-of-file |
 
 Workloads run as the configured non-root identity and may write at most 1 MiB
 of combined output. Larger output ends with `Failed(OutputLimitExceeded)`.
+
+### Environment
+
+Each execution starts from its own environment, so nothing carries over from an
+earlier one. `process.env` and `process.inheritDefaultEnv` follow MXC's schema:
+
+| `process.env` | `inheritDefaultEnv` | The workload gets |
+| --- | --- | --- |
+| omitted | ignored | the default environment |
+| `[]` | `false` (default) | an empty environment |
+| `[]` | `true` | the default environment |
+| `["FOO=bar", "EMPTY="]` | `false` (default) | exactly `FOO=bar` and `EMPTY=` |
+| `["FOO=bar"]` | `true` | the default environment plus `FOO`; an entry replaces the default of the same name |
+
+The default environment is the guest's own and never holds host variables:
+`PATH=/usr/sbin:/usr/bin:/sbin:/bin`, `TERM=linux`, and the `HOME`, `USER`, and
+`LOGNAME` of the workload identity, plus a few variables that the guest's boot
+leaves behind (`SHLVL`, `PWD`, and kernel parameters such as `nvx_lifecycle`),
+which workloads should not rely on.
+
+In Rust, `ProcessSpec::env` is `None` when `process.env` is omitted and `Some`
+of an empty list for `[]`. `ExecRequest::with_env` adds an entry,
+`ExecRequest::with_environment` sets the list, and
+`ExecRequest::with_inherit_default_env` sets the flag.
+
+- Entries are `KEY=VALUE` strings. A value may hold anything but NUL, such as
+  spaces, quotes, newlines, `=`, or nothing at all, and the workload receives it
+  as written, without shell interpretation. An entry without `=` or with an empty
+  name is `malformed_request`. When a name repeats, the last entry wins.
+- The guest agent has no environment field, so the backend starts the workload
+  through `/usr/bin/env`. The agent runs it after dropping its privileges, so the
+  entries reach only the workload, which keeps its identity, no capabilities,
+  and `no_new_privs`.
+- Entries travel as arguments of `env`, so they share the guest agent's limit of
+  64 arguments of 4096 bytes with the workload's own arguments. A `commandLine`
+  leaves room for 58 entries (59 when layered, 56 with a working directory), and
+  a longer list or entry is `policy_validation`, before anything runs.
+- A shell can add variables to an empty environment: BusyBox's `sh` sets `PWD`
+  and `SHLVL`. Run `/usr/bin/env` through `process.argv` to see exactly the
+  environment that was requested.
 
 ### Host paths
 
@@ -385,8 +425,8 @@ python3 scripts/nvx.py test-aci-edge-sandboxes --backend kvm   # real VM (reposi
   discovered artifacts.
 - `nvx.py test-aci-edge-sandboxes` runs the ignored `openvmm_e2e` tests against a real
   hypervisor with the repository's kernel and Alpine initramfs: the lifecycle,
-  host path mapping, and network rules. CI runs them on Linux/KVM, Linux/MSHV,
-  and Windows/WHP.
+  host path mapping, network rules, and exec environments. CI runs them on
+  Linux/KVM, Linux/MSHV, and Windows/WHP.
 
 ## MXC integration
 
@@ -405,6 +445,7 @@ An MXC `StatefulSandboxBackend` adapter maps onto this crate as follows:
 | `policy.readonly_paths`, `readwrite_paths`, `denied_paths` | `FilesystemPolicy` with the same host paths |
 | `policy.network_egress` rules | `EgressPolicy` rules, field for field |
 | `working_directory` | `ExecRequest::with_cwd(guest_path(...))` |
+| `process.env`, `process.inheritDefaultEnv` | `ProcessSpec::env`, `None` when omitted, and `inherit_default_env`, or `ExecRequest::with_environment` and `with_inherit_default_env`; see [Environment](#environment) |
 
 A proof-of-concept MXC adapter, `nvx_backend`, implements this mapping. It
 runs each phase in its own process against a real VM and consumes exec pipes
@@ -417,6 +458,6 @@ The crate is not published to a registry. A Cargo git dependency on
 
 ## Limitations
 
-The following require guest control-protocol work and are rejected today:
-live standard input, `env`, and a cleared default environment. Guest state does
-not survive a stop.
+Live standard input requires guest control-protocol work and is rejected today.
+Environment entries share the guest agent's argument limit; see
+[Environment](#environment). Guest state does not survive a stop.

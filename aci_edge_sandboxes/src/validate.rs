@@ -170,7 +170,7 @@ pub(crate) fn exec_structure(request: &ExecRequest) -> Result<()> {
         }
         no_nul(cwd, "process.cwd")?;
     }
-    for entry in &process.env {
+    for entry in process.env.iter().flatten() {
         let valid = entry
             .split_once('=')
             .is_some_and(|(name, _)| !name.is_empty());
@@ -206,11 +206,18 @@ pub(crate) fn exec_capabilities(request: &ExecRequest, capabilities: &Capabiliti
     if process.cwd.is_some() && !supported.cwd {
         return unsupported("process.cwd");
     }
-    if !process.env.is_empty() && !supported.env {
-        return unsupported("process.env");
-    }
-    if process.inherit_default_env == Some(false) && !supported.clear_default_env {
-        return unsupported("process.inheritDefaultEnv: false");
+    if process.env.is_some() {
+        let layered = process.inherit_default_env == Some(true);
+        if layered && !supported.env {
+            return unsupported(
+                "process.env layered over the default environment (inheritDefaultEnv: true)",
+            );
+        }
+        if !layered && !supported.clear_default_env {
+            return unsupported(
+                "process.env as the complete environment (inheritDefaultEnv omitted or false)",
+            );
+        }
     }
     if let (Some(timeout), Some(maximum)) = (process.timeout, supported.max_timeout_ms)
         && duration_millis(timeout) > maximum
@@ -417,6 +424,8 @@ mod tests {
             ExecRequest::argv(["/bin/echo", ""]),
             ExecRequest::command_line("echo").with_env("NOVALUE"),
             ExecRequest::command_line("echo").with_env("=value"),
+            ExecRequest::command_line("echo").with_env("A=b\0c"),
+            ExecRequest::command_line("echo").with_environment(["A=1", "B"]),
             ExecRequest::command_line("echo").with_cwd(""),
             ExecRequest::command_line("echo\0"),
         ] {
@@ -426,7 +435,13 @@ mod tests {
                 "{request:?}"
             );
         }
-        exec_structure(&ExecRequest::command_line("echo").with_env("A=")).unwrap();
+        for request in [
+            ExecRequest::command_line("echo").with_env("A="),
+            ExecRequest::command_line("echo").with_env("A=b=c and spaces"),
+            ExecRequest::command_line("echo").with_environment(Vec::<String>::new()),
+        ] {
+            exec_structure(&request).unwrap();
+        }
     }
 
     #[test]
@@ -436,8 +451,6 @@ mod tests {
             ExecRequest::argv(["/bin/true"]),
             ExecRequest::command_line("cat").with_stdin(StdinMode::Piped),
             ExecRequest::command_line("pwd").with_cwd("/tmp"),
-            ExecRequest::command_line("env").with_env("A=B"),
-            ExecRequest::command_line("env").with_inherit_default_env(false),
             ExecRequest::command_line("sleep 2").with_timeout(Duration::from_secs(2)),
         ] {
             assert_eq!(
@@ -453,5 +466,55 @@ mod tests {
             &capabilities,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn environments_need_the_capability_of_their_mode() {
+        let default = ExecRequest::command_line("env");
+        let ignored = [
+            default.clone().with_inherit_default_env(true),
+            default.clone().with_inherit_default_env(false),
+        ];
+        let layered = [
+            default
+                .clone()
+                .with_env("A=B")
+                .with_inherit_default_env(true),
+            default
+                .clone()
+                .with_environment(Vec::<String>::new())
+                .with_inherit_default_env(true),
+        ];
+        let replacing = [
+            default.clone().with_env("A=B"),
+            default
+                .clone()
+                .with_env("A=B")
+                .with_inherit_default_env(false),
+            default.clone().with_environment(Vec::<String>::new()),
+        ];
+        for (env, clear_default_env) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut capabilities = capabilities();
+            capabilities.exec.env = env;
+            capabilities.exec.clear_default_env = clear_default_env;
+            for (requests, supported) in [
+                (&ignored[..], true),
+                (&layered[..], env),
+                (&replacing[..], clear_default_env),
+            ] {
+                for request in requests {
+                    let result = exec_capabilities(request, &capabilities);
+                    if supported {
+                        result.unwrap();
+                    } else {
+                        let error = result.unwrap_err();
+                        assert_eq!(error.code(), ErrorCode::PolicyValidation, "{request:?}");
+                        assert!(error.message().contains("process.env"), "{error}");
+                    }
+                }
+            }
+            exec_capabilities(&default, &capabilities).unwrap();
+        }
     }
 }
