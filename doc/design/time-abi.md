@@ -1634,7 +1634,13 @@ with `H4` and `H6` on their long schedules. The `validate-runner` action runs
 and every CI microVM boot and restore scenario runs the CI warp schedule;
 `H5` and `H7` run in `doctor` only. Both tools print one
 `NVX-DOCTOR: check=<id> status=<pass|fail> detail=...` line per check and
-fail if any check fails. The time checks replace the `nonstop_tsc` check.
+fail if any check fails. In CI, `validate-runner` first requires
+`nonstop_tsc` in `/proc/cpuinfo` on Linux runners and fails without it, as
+before the time ABI, and the Linux runner setup script requires it at
+provisioning. This gate stays until every job that runs guests also runs
+`H6`: only the microVM jobs do, while the OpenVMM vmm-tests and the platform
+benchmarks run guests after host-level checks, which a host without an
+invariant TSC can pass.
 
 | ID | Check |
 | --- | --- |
@@ -1739,11 +1745,11 @@ of the warps in #265:
 
 ### Qualification gates
 
-Qualification gates alike on every backend, on measured properties only: the
+The doctor qualifies alike on every backend, on measured properties only: the
 CPU profile (`H2`, `H3`), rate stability (`H4`), and the idle-scheduled warp
-probe (`H6`, and the CI schedule in every microVM job). The host OS's
-invariant-TSC bit and the host clocksource are recorded as evidence and never
-gate, on any backend:
+probe (`H6`, and the CI schedule in every microVM job). It records the host
+OS's invariant-TSC bit and the host clocksource as evidence and never gates
+on them, on any backend:
 
 - On Azure, WHP and nested MSHV cannot offer the invariant-TSC bit to their
   guests through their feature banks, although the host OS sees an invariant
@@ -1760,8 +1766,9 @@ gate, on any backend:
 
 That 8370C MSHV runner, whose host OS lacks the bit and which showed the
 #265 warps, is out of rotation and unqualified because our account cannot run
-guests there, not because of this rule; its host-level warp probe saw
-backward steps of at most 2.1 ns.
+guests there, not because of the doctor's rules; CI's `nonstop_tsc` gate
+would also reject it. Its host-level warp probe saw backward steps of at
+most 2.1 ns.
 
 ### Generations and runner placement
 
@@ -2035,11 +2042,16 @@ parser; four-byte portb reads; and the generation counter.
 
 **Conformance.** The boot and restore checks pass at 1, 2, 4, and 8 vCPUs on
 all 18 registered hosts, plus the exhaustive CI check and the warp probe on
-every backend. Production paths print no marker, so CI scenarios and the
-matrix driver run `/sbin/nvx-time status` over the console after shell-ready
-and after every restore. They require exit status 0 and, after a restore, a
-`phase=restore` line with `status=ok`, the restored `generation`, and `cpus`
-equal to the online CPUs; after a cold boot, a `phase=boot` line with
+every backend. Production paths print no marker, so the matrix driver runs
+`/sbin/nvx-time status` over the console after shell-ready and after every
+restore. CI runs it after every cold boot whose shell is on a console the
+harness reads, and after every restore in the `smp-snapshot`,
+`restore-processors`, and `restore-downtime` scenarios. CI's other restores
+and its guests without a shell, the managed lifecycle and one-shot workloads,
+are only scanned for violation events; a failed check still powers the guest
+off with status 193. Each query requires exit status 0 and, after a restore,
+a `phase=restore` line with `status=ok`, the restored `generation`, and
+`cpus` equal to the online CPUs; after a cold boot, a `phase=boot` line with
 `generation=0`. During fleet validation (`p6`), the matrix driver records
 each phase's `cpu_us`, and every recorded sample must be within the
 backend's budget for that phase in
@@ -2163,7 +2175,6 @@ Removed from NVX:
   in `restore-processors.sh`, which the watcher replaces. The
   `cold_start_clocksource` benchmark scenario passes `clocksource=tsc` on
   every backend.
-- CI: the `nonstop_tsc` runner check, replaced by host qualification.
 
 Migration impact:
 
