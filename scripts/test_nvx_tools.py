@@ -2563,6 +2563,7 @@ class CiConfigurationTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("if: runner.environment == 'github-hosted'", quality_action)
         self.assertIn("if: runner.environment == 'self-hosted'", quality_action)
+        self.assertIn("PowerShell is required for CI syntax validation", quality_action)
         self.assertNotIn("GITHUB_PATH", quality_action)
         self.assertIn(
             'venv_dir=$(mktemp -d "$RUNNER_TEMP/nvx-quality-venv.XXXXXX")',
