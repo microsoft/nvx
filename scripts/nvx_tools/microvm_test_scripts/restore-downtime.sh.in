@@ -1,0 +1,18 @@
+set -eu
+minimum=@MIN_UPTIME_SECONDS@
+sleep @SETTLE_SECONDS@
+stalls="$(cat /sys/kernel/rcu_stall_count)"
+uptime="$(cut -d. -f1 /proc/uptime)"
+echo "NVX-RESTORE-DOWNTIME stalls=$stalls uptime_s=$uptime"
+if [ "$stalls" -ne 0 ]; then
+    echo "NVX-RESTORE-DOWNTIME-FAIL rcu_stall_count=$stalls"
+    nvx-exit 98
+    exit 98
+fi
+if [ "$uptime" -lt "$minimum" ]; then
+    echo "NVX-RESTORE-DOWNTIME-FAIL uptime_s=$uptime minimum=$minimum"
+    nvx-exit 99
+    exit 99
+fi
+echo NVX-RESTORE-DOWNTIME-OK
+nvx-exit 0

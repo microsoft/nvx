@@ -36,6 +36,7 @@ python3 scripts/nvx.py performance gate --help
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `test-openvmm` | Run self-contained OpenVMM microVM control-plane tests. |
 | `test-microvm` | Run NVX Linux and device correctness tests through OpenVMM. |
+| `doctor` | Qualify this host for the NVX time ABI. |
 | `test-aci-edge-sandboxes` | Run the `aci_edge_sandboxes` Rust crate lifecycle test on a real hypervisor. |
 | `test-adversarial` | Run a brokered Copilot-driven adversarial campaign. |
 | `build` | Build the guest artifacts and OpenVMM. |
@@ -115,20 +116,24 @@ revision and is used before packaging kernel provenance inputs.
 python3 scripts/nvx.py build-guest
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
+    [--debug-kernel]
 ```
 
 By default, builds the guest kernel and initramfs with Docker. `--native`
 builds the selected artifacts directly on Linux instead. Alpine is the
 default. Azure Linux does not support `--native` and always builds through
 Docker. `--guest all` also builds the Ubuntu EROFS distro layer.
+`--debug-kernel` also builds the CI debug kernel, `build/vmlinux-debug`; see
+[Build](build.md#ci-debug-kernel).
 
 ### `build-kernel`
 
 ```console
-python3 scripts/nvx.py build-kernel
+python3 scripts/nvx.py build-kernel [--debug]
 ```
 
 Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
+`--debug` builds the CI debug variant instead of the production kernel.
 
 ### `build-initramfs`
 
@@ -199,6 +204,7 @@ prerequisite is missing.
 python3 scripts/nvx.py build
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
+    [--debug-kernel]
     [--skip-restore]
     [--backend {kvm,mshv,whp}]
 ```
@@ -238,6 +244,7 @@ python3 scripts/nvx.py test-microvm
     --backend {kvm,mshv,whp}
     [--guest {alpine,ubuntu,azurelinux}]
     [--scenario SCENARIO]...
+    [--debug-kernel]
     [--processors {1,2,4,8} ...]
     [--memory-mib MIB]
     [--timeout SECONDS]
@@ -246,13 +253,57 @@ python3 scripts/nvx.py test-microvm
 
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
-it, every scenario supported by the selected guest runs. Alpine remains the
+it, every scenario supported by the selected guest runs, except `smp-lapic`,
+which runs only when named: it repeats `smp` and also asserts that every CPU
+uses the one-shot counting LAPIC. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
 the sandbox-control-dependent `snapshot-tiers` scenario. Ubuntu also rejects
-the Alpine-prompt-specific `console-snapshot` scenario. The
-command requires `build/vmlinux`, the selected initramfs, and
+the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
+the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
+detectors the guest's time ABI watcher reports; without `--scenario`, it runs
+only the same-host restore scenarios `smp`, `smp-snapshot`,
+`restore-processors`, `restore-downtime`, and `snapshot-tiers`. The command
+requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug` and its
+`build/vmlinux-debug.config`), the selected initramfs, and
 `openvmm/target/release/openvmm[.exe]`.
+
+### `doctor`
+
+```text
+python3 scripts/nvx.py doctor
+    --backend {kvm,mshv,whp}
+    [--checks ID ...]
+    [--openvmm PATH]
+    [--kernel PATH]
+    [--initrd PATH]
+    [--cpu-fingerprint PATH | --no-openvmm]
+    [--ci-schedule]
+    [--probe-dir PATH]
+    [--summary PATH]
+    [--timeout SECONDS]
+```
+
+Qualifies this host for the [time ABI](design/time-abi.md#host-qualification).
+It runs the selected checks in spec order, prints one
+`NVX-DOCTOR: check=<id> status=<pass|fail> detail="..."` line per check, and
+exits with status 1 if any check fails. A check fails, and never passes, when
+it can't read a fact it gates on. [CI](ci.md#host-qualification) describes each
+check and the subset that CI runs.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--backend {kvm,mshv,whp}` | required | Select the backend to qualify. |
+| `--checks ID ...` | `H1` to `H7` | Run only these checks, from `H1` to `H7`, in spec order. |
+| `--openvmm PATH` | `openvmm/target/release/openvmm[.exe]` | Select the OpenVMM binary for `H2`, `H3`, and `H6`. |
+| `--kernel PATH` | `build/vmlinux` | Select the guest kernel for `H3` and `H6`. |
+| `--initrd PATH` | `build/initramfs.cpio.gz` | Select the guest initramfs for `H3` and `H6`. |
+| `--cpu-fingerprint PATH` | `nvx-cpu-fingerprint-<backend>.json` in the probe directory | Select where `H2` writes OpenVMM's CPU fingerprint. |
+| `--no-openvmm` | off | Qualify without an OpenVMM binary. `H2` then checks the CPU identity and generation but not the CPU profile, and `--checks` must exclude `H3` and `H6`, which boot OpenVMM. |
+| `--ci-schedule` | off | Run `H4` and `H6` on CI's short schedules: 3 rate samples 1 s apart instead of 13 samples 10 s apart, and two warp-probe runs instead of five. |
+| `--probe-dir PATH` | `$RUNNER_TOOL_CACHE/nvx-host-time-probe`, or `build/host-time-probe` | Select the cache directory for the host probe, which the doctor builds with `rustc`. |
+| `--summary PATH` | none | Append a Markdown summary, for example to `$GITHUB_STEP_SUMMARY`. |
+| `--timeout SECONDS` | `120` | Set the seconds allowed for each probe or guest. |
 
 ### `test-aci-edge-sandboxes`
 
@@ -397,7 +448,7 @@ python3 scripts/nvx.py run
 | `--guest {alpine,ubuntu,azurelinux}` | `alpine` | Select Alpine, Ubuntu, or Azure Linux userland with the same NVX kernel. This option is not used for snapshot restore. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
-| `--memory-mib MIB` | guest-specific | Set guest memory in MiB. Defaults to 128 for Alpine, 256 for Ubuntu, and 512 for Azure Linux. |
+| `--memory-mib MIB` | guest-specific | Set guest memory in MiB. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux. |
 | `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count. |
 | `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose one host directory to the absolute guest target. An `rw` mapping accepts guest-created symbolic links, which the host never follows. Active snapshot restore requires the same canonical path, target, and mode; a dormant-slot restore may attach a new mapping that the resumed guest mounts explicitly. |
@@ -574,9 +625,9 @@ reject incomplete inputs for their respective workload sets.
 `--require-shell-snapshot-restore-512` accepts only the canonical 512 MiB
 restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
-result, producing the 31-metric microVM CI result. A directory whose metadata
+result, producing the 29-metric microVM CI result. A directory whose metadata
 selects `device-io` is collected as five additional ABI-2, one-vCPU `ops/s`
-metrics; CI merges them into a 36-metric one-vCPU result.
+metrics; CI merges them into a 34-metric one-vCPU result.
 `--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
 
 #### `performance validate-openvmm`

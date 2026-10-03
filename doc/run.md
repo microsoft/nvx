@@ -25,7 +25,7 @@ A successful Alpine boot prints both `ALPINE-MICROVM-BOOT-OK` and
 python3 scripts/nvx.py run --guest ubuntu
 ```
 
-Ubuntu defaults to 256 MiB and prints `NVX-GUEST-BOOT-OK: ubuntu`. It is
+Ubuntu defaults to 512 MiB and prints `NVX-GUEST-BOOT-OK: ubuntu`. It is
 Ubuntu userland with the NVX kernel, not a stock Ubuntu kernel or systemd VM.
 Boot Azure Linux 3.0 userland the same way with `--guest azurelinux`. The
 kernel unpacks its rootfs into a RAM filesystem capped at half of guest memory,
@@ -95,10 +95,11 @@ If the artifacts are already installed in the repository layout, use
 `openvmm/target/release/openvmm[.exe]`, `build/vmlinux`, and
 `build/initramfs.cpio.gz` instead of the paths above.
 
-For Ubuntu userland, use 256 MiB initially and select
+For Ubuntu userland, use 512 MiB and select
 `guest/initramfs-ubuntu.cpio.gz` or
-`build/initramfs-ubuntu.cpio.gz` as the initrd. The kernel path remains
-unchanged.
+`build/initramfs-ubuntu.cpio.gz` as the initrd. Below 320 MiB, the kernel
+cannot unpack the whole Ubuntu initramfs and boots a truncated root. The
+kernel path remains unchanged.
 
 Direct OpenVMM launches accept generic directional network defaults:
 
@@ -238,7 +239,7 @@ translations and additions:
 | `nvx.py run` | Direct OpenVMM option |
 | --- | --- |
 | `--guest alpine` | `--initrd .../initramfs.cpio.gz` on a fresh boot |
-| `--guest ubuntu` | `--initrd .../initramfs-ubuntu.cpio.gz` and a 256 MiB default on a fresh boot |
+| `--guest ubuntu` | `--initrd .../initramfs-ubuntu.cpio.gz` and a 512 MiB default on a fresh boot |
 | `--guest azurelinux` | `--initrd .../initramfs-azurelinux.cpio.gz` and a 512 MiB default on a fresh boot |
 | `--hypervisor auto` | `--hypervisor kvm` on Linux or `--hypervisor whp` on Windows |
 | `--memory-mib N` | `--memory NM` |
@@ -247,9 +248,11 @@ translations and additions:
 | `--dry-run` | No equivalent; this only prints the generated command |
 
 Always include `--single-process`. When restoring, omit `--memory`, `--kernel`,
-and `--initrd`, and add `--restore-entropy`; the wrapper adds this option
-automatically. Do not pass `--guest ubuntu` during restore; the captured RAM
-and machine contract already identify the restored guest. For example:
+and `--initrd`. Every restore gives the guest fresh entropy through the time
+ABI's restore packet, so `--restore-entropy` is no longer needed; OpenVMM still
+accepts it without effect. Do not pass `--guest ubuntu` during restore; the
+captured RAM and machine contract already identify the restored guest. For
+example:
 
 ```bash
 ./bin/openvmm \
@@ -258,7 +261,6 @@ and machine contract already identify the restored guest. For example:
   --processors 8 \
   --hypervisor kvm \
   --restore-snapshot /var/lib/nvx/snapshot \
-  --restore-entropy \
   --restore-processors 4 \
   --restore-memory 1024M \
   --restore-ready-path /run/nvx/restore-ready.sock

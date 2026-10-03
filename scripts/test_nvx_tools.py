@@ -3,6 +3,7 @@
 
 import argparse
 import ast
+import contextlib
 import errno
 import hashlib
 import http.client
@@ -184,6 +185,8 @@ def _write_release_fixture(
                 *KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
                 *KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
                 *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
+                *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+                *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
             )
         )
         + "\n",
@@ -331,6 +334,59 @@ def _write_release_fixture(
 
 
 class CliTests(unittest.TestCase):
+    def test_usage_documents_every_command_and_option(self):
+        # doc/usage.md is the CLI reference: every command has a row in its
+        # command table and a section that names exactly the options of the
+        # command's --help usage.
+        option = re.compile(r"(?<![\w-])--[a-z0-9]+(?:-[a-z0-9]+)*(?![\w*-])")
+
+        def usage_of(*command: str) -> str:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
+                nvx.parse_args([*command, "--help"])
+            return stdout.getvalue().split("\n\n", 1)[0]
+
+        def subcommands(usage: str) -> list[str]:
+            # A subcommand list reads "{a,b} ...", which argparse may wrap
+            # before the dots; an option's repeated choices read
+            # "{a,b} [{a,b} ...]".
+            match = re.search(r"(?<!\[)\{([a-z0-9,-]+)\}\s+\.\.\.(?!\])", usage)
+            return match.group(1).split(",") if match else []
+
+        document = (BuildConstants.REPO_ROOT / "doc" / "usage.md").read_text(
+            encoding="utf-8"
+        )
+
+        def section(title: str, level: int) -> str:
+            match = re.search(
+                rf"^{'#' * level} `{re.escape(title)}`\n(.*?)(?=^#{{2,{level}}} |\Z)",
+                document,
+                re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"doc/usage.md has no section for {title}")
+            return match.group(1) if match else ""
+
+        table = document.split("## Commands\n", 1)[1].split("\n## ", 1)[0]
+        commands = subcommands(usage_of())
+        self.assertEqual(
+            set(re.findall(r"^\| `([a-z0-9-]+)` \|", table, re.MULTILINE)),
+            set(commands),
+        )
+        for name in commands:
+            usage = usage_of(name)
+            nested = subcommands(usage)
+            section(name, 3)
+            targets = (
+                [((name, child), 4) for child in nested] if nested else [((name,), 3)]
+            )
+            for command, level in targets:
+                title = " ".join(command)
+                with self.subTest(command=title):
+                    self.assertEqual(
+                        set(option.findall(section(title, level))),
+                        set(option.findall(usage_of(*command))),
+                    )
+
     def test_guest_selection_includes_azure_linux(self):
         args = nvx.parse_args(["build-initramfs", "--guest", "azurelinux"])
         self.assertEqual(args.guest, "azurelinux")
@@ -338,6 +394,26 @@ class CliTests(unittest.TestCase):
             guests.guest_descriptor(args.guest).initramfs_name,
             "initramfs-azurelinux.cpio.gz",
         )
+
+    def test_run_help_and_usage_state_each_guest_memory_default(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
+            nvx.parse_args(["run", "--help"])
+        help_text = " ".join(stdout.getvalue().split())
+        usage = (BuildConstants.REPO_ROOT / "doc" / "usage.md").read_text(
+            encoding="utf-8"
+        )
+        row = next(
+            line
+            for line in usage.splitlines()
+            if line.startswith("| `--memory-mib MIB`")
+        )
+        labels = {"alpine": "Alpine", "ubuntu": "Ubuntu", "azurelinux": "Azure Linux"}
+        for name in guests.GUEST_NAMES:
+            default = guests.guest_descriptor(name).default_memory_mib
+            with self.subTest(guest=name):
+                self.assertIn(f"{name} {default}", help_text)
+                self.assertIn(f"{default} for {labels[name]}", row)
 
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(
@@ -530,6 +606,15 @@ class CliTests(unittest.TestCase):
     def test_guest_selection_cli_contract(self):
         default_build = nvx.parse_args(["build-guest"])
         self.assertEqual(default_build.guest, "alpine")
+        self.assertFalse(default_build.debug_kernel)
+
+        debug_guest = nvx.parse_args(["build-guest", "--debug-kernel"])
+        self.assertTrue(debug_guest.debug_kernel)
+        self.assertTrue(nvx._build_config(debug_guest).debug_kernel)
+        self.assertTrue(nvx.parse_args(["build", "--debug-kernel"]).debug_kernel)
+
+        self.assertFalse(nvx.parse_args(["build-kernel"]).debug)
+        self.assertTrue(nvx.parse_args(["build-kernel", "--debug"]).debug)
 
         all_guests = nvx.parse_args(["build-guest", "--guest", "all"])
         self.assertEqual(all_guests.guest, "all")
@@ -605,7 +690,7 @@ class CliTests(unittest.TestCase):
             nvx.command_run(args)
 
         command = format_command.call_args.args[0]
-        self.assertEqual(command[command.index("--memory") + 1], "256M")
+        self.assertEqual(command[command.index("--memory") + 1], "512M")
         self.assertEqual(
             Path(command[command.index("--initrd") + 1]).name,
             "initramfs-ubuntu.cpio.gz",
@@ -1224,7 +1309,6 @@ class CliTests(unittest.TestCase):
                 "mshv",
                 "--restore-snapshot",
                 "snapshot",
-                "--restore-entropy",
                 "--restore-processors",
                 "2",
                 "--restore-ready-path",
@@ -1388,6 +1472,13 @@ class CliTests(unittest.TestCase):
         self.assertIsInstance(
             build_kernel.call_args.args[0],
             build_config.KernelBuildConfig,
+        )
+        self.assertFalse(build_kernel.call_args.args[0].debug)
+        with patch.object(nvx, "build_kernel") as build_debug_kernel:
+            nvx.command_build_kernel(argparse.Namespace(debug=True))
+        self.assertEqual(
+            build_debug_kernel.call_args.args[0],
+            build_config.KernelBuildConfig.debug_variant(),
         )
         self.assertIsInstance(
             build_initramfs.call_args.args[0],
@@ -1912,7 +2003,9 @@ class CiConfigurationTests(unittest.TestCase):
         openvmm_tests = set(ci.REQUIRED_CI_OPENVMM_TEST_JOBS)
         openvmm_artifact_tests = set(ci.REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS)
         microvm_tests = set(ci.REQUIRED_CI_MICROVM_TEST_JOBS)
-        artifacts = {ci.REQUIRED_CI_ARTIFACT_JOB}
+        debug_kernel = set(ci.REQUIRED_CI_MICROVM_DEBUG_JOBS)
+        debug_kernel_push = set(ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS)
+        artifacts = {ci.REQUIRED_CI_ARTIFACT_JOB, ci.REQUIRED_CI_DEBUG_KERNEL_JOB}
         platforms = set(ci.REQUIRED_CI_PLATFORM_JOBS)
         cases = (
             ("pull_request", True, False, False, always_successful),
@@ -1944,6 +2037,7 @@ class CiConfigurationTests(unittest.TestCase):
                 | openvmm_tests
                 | openvmm_artifact_tests
                 | microvm_tests
+                | debug_kernel
                 | artifacts
                 | platforms
                 | {"performance-gate"},
@@ -1990,6 +2084,8 @@ class CiConfigurationTests(unittest.TestCase):
                 | openvmm_tests
                 | openvmm_artifact_tests
                 | microvm_tests
+                | debug_kernel
+                | debug_kernel_push
                 | platforms,
             ),
         )
@@ -2315,6 +2411,21 @@ class CiConfigurationTests(unittest.TestCase):
                 "openvmm-windows-msvc",
                 "run-nvx-microvm-tests.yml",
             ),
+            "nvx-microvm-debug-kvm": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "nvx-microvm-debug-mshv": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "run-nvx-microvm-tests.yml",
+            ),
+            "nvx-microvm-debug-whp": (
+                "build-openvmm-windows-msvc",
+                "openvmm-windows-msvc",
+                "run-nvx-microvm-tests.yml",
+            ),
             "platform-kvm": (
                 "build-openvmm-linux-gnu",
                 "openvmm-linux-gnu",
@@ -2334,8 +2445,13 @@ class CiConfigurationTests(unittest.TestCase):
         for job_name, (producer, artifact, reusable_workflow) in consumers.items():
             with self.subTest(consumer=job_name):
                 job = _workflow_job(workflow, job_name)
+                debug_kernel = (
+                    "debug-kernel, "
+                    if job_name.startswith("nvx-microvm-debug-")
+                    else ""
+                )
                 self.assertIn(
-                    f"needs: [artifacts, {producer}, openvmm-changes]",
+                    f"needs: [artifacts, {debug_kernel}{producer}, openvmm-changes]",
                     job,
                 )
                 self.assertIn(f"needs.{producer}.result == 'success'", job)
@@ -2363,8 +2479,8 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertEqual(build_workflow.count("overwrite: true"), 2)
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
         for consumer_workflow, download_count in (
-            (microvm_workflow, 3),
-            (platform_workflow, 2),
+            (microvm_workflow, 4),
+            (platform_workflow, 3),
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
             self.assertIn("path: build", consumer_workflow)
@@ -2461,6 +2577,112 @@ class CiConfigurationTests(unittest.TestCase):
         for job_name in ("platform-kvm", "platform-mshv", "platform-whp"):
             self.assertIn(job_name, performance_gate_job)
             self.assertIn(f"needs.{job_name}.result", performance_gate_job)
+
+    def test_ci_runs_the_debug_kernel_on_kvm_per_pull_request_and_all_on_dev(self):
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        microvm_workflow = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "run-nvx-microvm-tests.yml"
+        ).read_text(encoding="utf-8")
+
+        artifacts = _workflow_job(workflow, "artifacts")
+        self.assertNotIn("debug-kernel", artifacts)
+        self.assertNotIn("vmlinux-debug", artifacts)
+        # The debug kernel builds on GitHub-hosted capacity beside the shared
+        # artifacts, under the same condition, and only the debug jobs wait.
+        debug_build = _workflow_job(workflow, "debug-kernel")
+        self.assertIn("runs-on: ubuntu-latest", debug_build)
+        self.assertIn('debug-kernel: "true"', debug_build)
+        self.assertIn('guest-images: "false"', debug_build)
+        self.assertIn("name: guest-debug-kernel", debug_build)
+        for name in (
+            KernelBuildConstants.DEBUG_BINARY_NAME,
+            KernelBuildConstants.DEBUG_CONFIG_NAME,
+        ):
+            self.assertIn(f"build/{name}\n", debug_build)
+
+        def condition(job: str) -> str:
+            return job[job.index("    if: >-\n") : job.index("    runs-on:")]
+
+        self.assertEqual(condition(debug_build), condition(artifacts))
+        for consumer in ("release", "performance-persist"):
+            with self.subTest(consumer=consumer):
+                job = _workflow_job(workflow, consumer)
+                self.assertIn("      - debug-kernel\n", job)
+                self.assertIn("needs.debug-kernel.result == 'success' &&", job)
+        kvm = _workflow_job(workflow, "nvx-microvm-debug-kvm")
+        self.assertIn("github.event.pull_request.head.repo.full_name", kvm)
+        for job_name in ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS:
+            with self.subTest(job=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn("github.event_name == 'push' &&", job)
+                self.assertNotIn("pull_request", job)
+        for job_name in (
+            *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
+            *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
+        ):
+            with self.subTest(job=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn("debug-kernel: true", job)
+                self.assertIn("needs.debug-kernel.result == 'success' &&", job)
+                self.assertIn(job_name, ci.REQUIRED_CI_RESULT_ENVIRONMENTS)
+                for consumer in ("release", "performance-persist"):
+                    self.assertIn(
+                        f"needs.{job_name}.result == 'success' ||\n"
+                        f"          needs.{job_name}.result == 'skipped'",
+                        _workflow_job(workflow, consumer),
+                    )
+
+        self.assertIn("      debug-kernel:\n", microvm_workflow)
+        self.assertIn("        type: boolean\n", microvm_workflow)
+        download = microvm_workflow.index("name: guest-debug-kernel")
+        self.assertIn(
+            "if: inputs.debug-kernel",
+            microvm_workflow[download - 120 : download],
+        )
+        self.assertEqual(
+            microvm_workflow.count(
+                "${{ inputs.debug-kernel && '--debug-kernel' || '' }}"
+            ),
+            2,
+        )
+        # The debug run replaces the Ubuntu and Azure Linux guest tests and the
+        # crate lifecycle test, which boots the production kernel, rather than
+        # adding to them.
+        self.assertEqual(microvm_workflow.count("!inputs.debug-kernel"), 9)
+
+    def test_benchmarks_rely_on_the_microvm_correctness_jobs(self):
+        # #286: the benchmark action ran a second smp-lapic gate before
+        # acceptance. The microVM correctness jobs already gate the required
+        # status, the development release, and performance persistence.
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("test-microvm", action)
+        self.assertNotIn("lapic-correctness", action)
+        for job_name in ci.REQUIRED_CI_MICROVM_TEST_JOBS:
+            with self.subTest(job=job_name):
+                self.assertIn(job_name, ci.REQUIRED_CI_RESULT_ENVIRONMENTS)
+                for consumer in ("release", "performance-persist"):
+                    job = _workflow_job(workflow, consumer)
+                    self.assertIn(f"      - {job_name}\n", job)
+                    self.assertIn(
+                        f"needs.{job_name}.result == 'success' ||\n"
+                        f"          needs.{job_name}.result == 'skipped'",
+                        job,
+                    )
 
     def test_ci_runs_openvmm_tests_and_unit_tests_on_each_backend(self):
         workflow = (
@@ -2748,6 +2970,106 @@ class CiConfigurationTests(unittest.TestCase):
                         check=False,
                     )
                     self.assertEqual(result.returncode == 0, invariant, result.stderr)
+
+    def test_runners_qualify_their_host_time_before_every_job(self):
+        validate_runner = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-runner"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        # The doctor adds to the nonstop_tsc gate, which stays first and
+        # fail-closed on Linux: the backend, the CPU fingerprint and
+        # generation, and the TSC rate stability. Jobs that haven't downloaded
+        # OpenVMM skip its CPU profile check (H2) and preflight (H3).
+        self.assertLess(
+            validate_runner.index("    - name: Validate host TSC\n"),
+            validate_runner.index("    - name: Qualify host time on Linux\n"),
+        )
+        for name, shell, command, summary in (
+            (
+                "Qualify host time on Linux",
+                "bash",
+                "python3 scripts/nvx.py doctor",
+                '--summary "${GITHUB_STEP_SUMMARY}"',
+            ),
+            (
+                "Qualify host time on Windows",
+                "powershell",
+                "python scripts\\nvx.py doctor",
+                '--summary "$env:GITHUB_STEP_SUMMARY"',
+            ),
+        ):
+            with self.subTest(step=name):
+                step = validate_runner.split(f"    - name: {name}\n", 1)[1]
+                step = step.split("\n\n", 1)[0]
+                self.assertIn(f"      shell: {shell}\n", step)
+                self.assertIn(command, step)
+                self.assertIn('--backend "${{ inputs.backend }}"', step)
+                self.assertIn("--checks H1 H2 H4\n", step)
+                fingerprint = (
+                    '"${RUNNER_TEMP}/nvx-cpu-fingerprint.json"'
+                    if shell == "bash"
+                    else '"$env:RUNNER_TEMP\\nvx-cpu-fingerprint.json"'
+                )
+                self.assertIn(
+                    "${{ inputs.verify-openvmm == 'true' && "
+                    f"'H3 --cpu-fingerprint {fingerprint}' || '--no-openvmm' }}}}\n",
+                    step,
+                )
+                self.assertIn("--ci-schedule\n", step)
+                self.assertIn(summary, step)
+        args = nvx.parse_args(
+            ["doctor", "--backend", "kvm", "--checks", "H1", "H2", "H4", "H3"]
+            + ["--cpu-fingerprint", "fingerprint.json", "--ci-schedule"]
+        )
+        self.assertEqual(args.checks, ["H1", "H2", "H4", "H3"])
+        self.assertEqual(args.cpu_fingerprint, Path("fingerprint.json"))
+        args = nvx.parse_args(
+            ["doctor", "--backend", "kvm", "--checks", "H1", "H2", "H4"]
+            + ["--no-openvmm", "--ci-schedule"]
+        )
+        self.assertTrue(args.no_openvmm)
+        self.assertTrue(args.ci_schedule)
+        self.assertIn("  verify-openvmm:\n", validate_runner)
+        self.assertIn('    default: "false"\n', validate_runner)
+        # A failed CPU profile check keeps OpenVMM's fingerprint.
+        upload = validate_runner.split("    - name: Upload the CPU fingerprint\n")[1]
+        upload = upload.split("\n\n", 1)[0]
+        self.assertIn("if: failure() && inputs.verify-openvmm == 'true'\n", upload)
+        self.assertIn("path: ${{ runner.temp }}/nvx-cpu-fingerprint.json\n", upload)
+        self.assertIn("if-no-files-found: ignore\n", upload)
+        # Jobs that run OpenVMM qualify the runner after downloading it.
+        benchmark = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("download-artifact", benchmark)
+        for workflow_name in ("run-nvx-microvm-tests.yml", "run-platform.yml"):
+            with self.subTest(workflow=workflow_name):
+                workflow = (
+                    BuildConstants.REPO_ROOT / ".github" / "workflows" / workflow_name
+                ).read_text(encoding="utf-8")
+                validate = workflow.index("      - name: Validate runner\n")
+                self.assertEqual(workflow.count("      - name: Validate runner\n"), 1)
+                self.assertIn(
+                    'verify-openvmm: "true"', workflow[validate : validate + 220]
+                )
+                for step in (
+                    "      - name: Download guest artifacts\n",
+                    "      - name: Download OpenVMM executable\n",
+                    "      - name: Make OpenVMM executable\n",
+                ):
+                    self.assertLess(workflow.index(step), validate)
+        self.assertLess(
+            validate_runner.index("Validate Linux toolchain"),
+            validate_runner.index("Qualify host time on Linux"),
+        )
 
     def test_runner_setups_install_backend_native_openvmm_targets(self):
         linux_setup = (
@@ -3369,6 +3691,9 @@ class BuildConstantsTests(unittest.TestCase):
             KernelBuildConstants.BINARY_NAME,
             KernelBuildConstants.CONFIG_NAME,
             KernelBuildConstants.PROVENANCE_NAME,
+            KernelBuildConstants.DEBUG_BINARY_NAME,
+            KernelBuildConstants.DEBUG_CONFIG_NAME,
+            KernelBuildConstants.DEBUG_PROVENANCE_NAME,
             OpenVMMBuildConstants.GNU_RUST_TARGET,
             OpenVMMBuildConstants.MUSL_RUST_TARGET,
             OpenVMMBuildConstants.WINDOWS_RUST_TARGET,
@@ -4125,6 +4450,8 @@ class BuildTests(unittest.TestCase):
                         *KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
                         *KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
                         *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
+                        *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+                        *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
                     )
                 )
                 + "\n",
@@ -4334,7 +4661,7 @@ class BuildTests(unittest.TestCase):
             ubuntu_guest.initramfs_name,
             "initramfs-ubuntu.cpio.gz",
         )
-        self.assertEqual(ubuntu_guest.default_memory_mib, 256)
+        self.assertEqual(ubuntu_guest.default_memory_mib, 512)
         self.assertFalse(ubuntu_guest.sandbox_control)
         self.assertEqual(
             azurelinux_guest.initramfs_name,
@@ -5058,18 +5385,27 @@ class BuildTests(unittest.TestCase):
             / "build-guest-artifacts"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        for cache_name in (
+        cache_names = (
             "KERNEL_INPUT_HASH",
+            "DEBUG_KERNEL_INPUT_HASH",
             "ALPINE_INPUT_HASH",
             "UBUNTU_INPUT_HASH",
             "AZURELINUX_INPUT_HASH",
-        ):
+        )
+        # Every artifact, both kernels included, builds inside the image that
+        # docker/Dockerfile pins, so a toolchain change must miss every cache.
+        self.assertEqual(
+            action.count("--file docker/Dockerfile"),
+            action.count("docker build"),
+        )
+        for cache_name in cache_names:
             with self.subTest(cache=cache_name):
                 cache_input = next(
                     line
                     for line in action.splitlines()
                     if line.strip().startswith(f"{cache_name}:")
                 )
+                self.assertIn("'docker/Dockerfile'", cache_input)
                 self.assertIn("'scripts/nvx_tools/build_config.py'", cache_input)
                 self.assertIn("'scripts/nvx_tools/build_constants.py'", cache_input)
 
@@ -5106,10 +5442,85 @@ class BuildTests(unittest.TestCase):
         attributes = (BuildConstants.REPO_ROOT / ".gitattributes").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "kernel/config-microvm text eol=lf",
-            attributes.splitlines(),
+        for path in (
+            KernelBuildConstants.INPUT_CONFIG,
+            KernelBuildConstants.DEBUG_CONFIG_FRAGMENT,
+        ):
+            with self.subTest(path=path):
+                self.assertIn(
+                    f"{path.as_posix()} text eol=lf",
+                    attributes.splitlines(),
+                )
+
+    def test_ci_debug_kernel_is_opt_in_and_keyed_by_its_fragment(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        cache_input = next(
+            line
+            for line in action.splitlines()
+            if line.strip().startswith("DEBUG_KERNEL_INPUT_HASH:")
         )
+        for path in (
+            "kernel/config-microvm",
+            "kernel/config-microvm-debug",
+            "kernel/patches/**",
+            "scripts/nvx_tools/build.py",
+            "scripts/nvx_tools/build_constants.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"'{path}'", cache_input)
+        kernel_input = next(
+            line
+            for line in action.splitlines()
+            if line.strip().startswith("KERNEL_INPUT_HASH:")
+        )
+        self.assertNotIn("config-microvm-debug", kernel_input)
+        build_step = _composite_action_step(action, "Build Linux debug kernel (Docker)")
+        self.assertIn("inputs.debug-kernel == 'true'", build_step)
+        self.assertIn(
+            f"--target {DockerBuildConstants.DEBUG_KERNEL_TARGET}", build_step
+        )
+        self.assertIn('default: "false"', action)
+        for name in DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES:
+            with self.subTest(artifact=name):
+                self.assertEqual(
+                    [line.strip() for line in action.splitlines()].count(
+                        f"build/{name}"
+                    ),
+                    2,
+                )
+
+    def test_ci_guest_images_input_leaves_only_the_debug_kernel(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        guard = "inputs.guest-images == 'true'"
+        self.assertIn("  guest-images:\n", action)
+        self.assertIn('default: "true"', action)
+        steps = [
+            line.strip().removeprefix("- name: ")
+            for line in action.splitlines()
+            if line.startswith("    - name: ")
+        ]
+        debug_steps = {name for name in steps if "debug kernel" in name}
+        self.assertEqual(len(debug_steps), 3)
+        always = {"Resolve guest artifact versions", "Resolve guest cache keys"}
+        for name in steps:
+            with self.subTest(step=name):
+                step = _composite_action_step(action, name)
+                if name in debug_steps or name in always:
+                    self.assertNotIn("guest-images", step)
+                else:
+                    self.assertIn(guard, step)
 
     def test_ci_guest_cache_keys_include_shared_build_modules(self):
         action = (
@@ -5316,7 +5727,7 @@ class BuildTests(unittest.TestCase):
         )
         azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
         azure_sbin_scripts = azure_stage.split(
-            "install -m 0755 /repo/guest/common/nvx-exit", 1
+            "install -m 0755 /repo/guest/common/init /rootfs/init\n", 1
         )[1].split("/rootfs/sbin/", 1)[0]
         self.assertIn("/repo/guest/common/nvx-hostmount", azure_sbin_scripts)
         init_script = (
@@ -5480,6 +5891,428 @@ class BuildTests(unittest.TestCase):
                 KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG[0],
             ):
                 build._assert_shared_status_kernel_config(config)
+
+    def test_checked_in_config_meets_time_abi_kernel_contract(self):
+        config = BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG
+        build._assert_time_abi_kernel_config(config)
+        build._assert_hardening_kernel_config(config)
+        build._assert_watchdog_kernel_config(config, debug=False)
+        configured = config.read_text(encoding="utf-8").splitlines()
+        for removed in (
+            "CONFIG_CPU_FREQ=y",
+            "CONFIG_X86_INTEL_PSTATE=y",
+            "CONFIG_SCHED_MC_PRIO=y",
+            "CONFIG_HYPERV=y",
+            "CONFIG_KVM_GUEST=y",
+            "CONFIG_PARAVIRT_CLOCK=y",
+            "CONFIG_HALTPOLL_CPUIDLE=y",
+            "CONFIG_ARCH_CPUIDLE_HALTPOLL=y",
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, configured)
+        self.assertFalse(
+            any(line.startswith("CONFIG_CPU_FREQ_") for line in configured)
+        )
+
+    def test_time_abi_kernel_config_requires_every_setting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            for missing in KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG:
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(
+                            setting
+                            for setting in KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG
+                            if setting != missing
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(common.ScriptError, missing):
+                        build._assert_time_abi_kernel_config(config)
+
+    def test_hardening_kernel_config_requires_every_setting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            for missing in KernelBuildConstants.REQUIRED_HARDENING_CONFIG:
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(
+                            setting
+                            for setting in KernelBuildConstants.REQUIRED_HARDENING_CONFIG
+                            if setting != missing
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(common.ScriptError, re.escape(missing)):
+                        build._assert_hardening_kernel_config(config)
+
+    def test_hardening_kernel_config_rejects_loadable_modules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            config.write_text(
+                "\n".join(
+                    (*KernelBuildConstants.REQUIRED_HARDENING_CONFIG, "CONFIG_FOO=m")
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(common.ScriptError, "CONFIG_FOO=m"):
+                build._assert_hardening_kernel_config(config)
+
+    def test_watchdog_kernel_config_separates_production_and_debug(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            config.write_text(
+                "\n".join(KernelBuildConstants.REQUIRED_DEBUG_CONFIG) + "\n",
+                encoding="utf-8",
+            )
+            build._assert_watchdog_kernel_config(config, debug=True)
+            with self.assertRaisesRegex(common.ScriptError, "debug-only watchdogs"):
+                build._assert_watchdog_kernel_config(config, debug=False)
+
+            config.write_text("CONFIG_DEBUG_KERNEL=y\n", encoding="utf-8")
+            build._assert_watchdog_kernel_config(config, debug=False)
+            with self.assertRaisesRegex(
+                common.ScriptError, "CONFIG_SOFTLOCKUP_DETECTOR=y"
+            ):
+                build._assert_watchdog_kernel_config(config, debug=True)
+
+    def test_kernel_config_fragment_replaces_base_assignments(self):
+        base = "\n".join(
+            (
+                "#",
+                "# Kernel hacking",
+                "#",
+                "# CONFIG_DEBUG_KERNEL is not set",
+                "CONFIG_RCU_CPU_STALL_TIMEOUT=21",
+                "CONFIG_UNRELATED=y",
+            )
+        )
+        fragment = "\n".join(
+            (
+                "# Comment lines and blank lines are ignored.",
+                "",
+                "CONFIG_DEBUG_KERNEL=y",
+                "# CONFIG_DEBUG_MISC is not set",
+                "CONFIG_RCU_CPU_STALL_TIMEOUT=21",
+            )
+        )
+        self.assertEqual(
+            build.merge_kernel_config_fragment(base, fragment).splitlines(),
+            [
+                "#",
+                "# Kernel hacking",
+                "#",
+                "CONFIG_UNRELATED=y",
+                "CONFIG_DEBUG_KERNEL=y",
+                "# CONFIG_DEBUG_MISC is not set",
+                "CONFIG_RCU_CPU_STALL_TIMEOUT=21",
+            ],
+        )
+        for invalid, message in (
+            ("DEBUG_KERNEL=y\n", "line 1 is invalid"),
+            ("# only a comment\n", "assigns no symbols"),
+            (
+                "CONFIG_DEBUG_KERNEL=y\n# CONFIG_DEBUG_KERNEL is not set\n",
+                "more than once",
+            ),
+        ):
+            with self.subTest(fragment=invalid):
+                with self.assertRaisesRegex(common.ScriptError, message):
+                    build.merge_kernel_config_fragment(base, invalid)
+
+    def test_checked_in_debug_fragment_only_adds_watchdogs(self):
+        base = (BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        fragment = (
+            BuildConstants.REPO_ROOT / KernelBuildConstants.DEBUG_CONFIG_FRAGMENT
+        ).read_text(encoding="utf-8")
+        merged = build.merge_kernel_config_fragment(base, fragment).splitlines()
+        for setting in KernelBuildConstants.REQUIRED_DEBUG_CONFIG:
+            with self.subTest(setting=setting):
+                self.assertIn(setting, merged)
+        for setting in (
+            "# CONFIG_DEBUG_MISC is not set",
+            "# CONFIG_RCU_TRACE is not set",
+            "# CONFIG_X86_DEBUG_FPU is not set",
+            "CONFIG_RCU_CPU_STALL_TIMEOUT=21",
+        ):
+            with self.subTest(setting=setting):
+                self.assertIn(setting, merged)
+        self.assertNotIn("# CONFIG_DEBUG_KERNEL is not set", merged)
+        for setting in KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG:
+            with self.subTest(time_abi=setting):
+                self.assertIn(setting, merged)
+
+    def test_debug_kernel_build_applies_fragment_and_records_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_config = root / KernelBuildConstants.INPUT_CONFIG
+            input_config.parent.mkdir(parents=True)
+            input_config.write_text(
+                "\n".join(
+                    (
+                        *KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,
+                        *KernelBuildConstants.REQUIRED_VIRTIO_CONSOLE_CONFIG,
+                        *KernelBuildConstants.REQUIRED_SHARED_STATUS_CONFIG,
+                        *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
+                        *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+                        *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
+                        "# CONFIG_DEBUG_KERNEL is not set",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fragment = root / KernelBuildConstants.DEBUG_CONFIG_FRAGMENT
+            fragment.write_text(
+                "# debug fixture\n"
+                + "\n".join(KernelBuildConstants.REQUIRED_DEBUG_CONFIG)
+                + "\n",
+                encoding="utf-8",
+            )
+            patch_path = root / KernelBuildConstants.PATCH_DIRECTORY / "example.patch"
+            patch_path.parent.mkdir()
+            patch_path.write_text("patch", encoding="utf-8")
+            source = root / "source"
+            source.mkdir()
+            output_directory = root / "output"
+            output_directory.mkdir()
+            production_provenance = (
+                output_directory / KernelBuildConstants.PROVENANCE_NAME
+            )
+            production_provenance.write_text("production", encoding="utf-8")
+            config = build_config.KernelBuildConfig(
+                work=root / "work-debug",
+                output=output_directory / KernelBuildConstants.DEBUG_BINARY_NAME,
+                debug=True,
+            )
+
+            with patch.object(BuildConstants, "REPO_ROOT", root):
+                source_fingerprint = build._kernel_source_fingerprint()
+
+            def run_build(command: object, **_kwargs: object) -> None:
+                if isinstance(command, list) and command[-1] == "vmlinux":
+                    (config.work / "vmlinux").write_bytes(b"debug kernel")
+
+            with (
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(build, "_require_linux"),
+                patch.object(build, "require_tool", return_value="tool"),
+                patch.object(
+                    build,
+                    "prepare_kernel_source",
+                    return_value=(source, source_fingerprint),
+                ),
+                patch.object(build, "run_checked", side_effect=run_build),
+            ):
+                build.build_kernel(config)
+
+            generated = (
+                output_directory / KernelBuildConstants.DEBUG_CONFIG_NAME
+            ).read_text(encoding="utf-8")
+            self.assertIn("CONFIG_DEBUG_KERNEL=y", generated.splitlines())
+            self.assertNotIn("# CONFIG_DEBUG_KERNEL is not set", generated)
+            provenance = json.loads(
+                (
+                    output_directory / KernelBuildConstants.DEBUG_PROVENANCE_NAME
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                provenance["debug_config_fragment"],
+                {
+                    "path": KernelBuildConstants.DEBUG_CONFIG_FRAGMENT.as_posix(),
+                    "sha256": common.sha256_file(fragment),
+                },
+            )
+            self.assertEqual(
+                provenance["input_config"]["sha256"], common.sha256_file(input_config)
+            )
+            self.assertEqual(
+                provenance["kernel_sha256"],
+                hashlib.sha256(b"debug kernel").hexdigest(),
+            )
+            self.assertEqual(
+                production_provenance.read_text(encoding="utf-8"), "production"
+            )
+            self.assertIn(
+                "debug_config_fragment_sha256",
+                (config.work / KernelBuildConstants.BUILD_STAMP_NAME).read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertEqual(
+                config.provenance_name, KernelBuildConstants.DEBUG_PROVENANCE_NAME
+            )
+            self.assertEqual(
+                build_config.KernelBuildConfig().provenance_name,
+                KernelBuildConstants.PROVENANCE_NAME,
+            )
+            self.assertNotIn("debug_config_fragment", build.kernel_provenance_inputs())
+
+    def test_guest_build_adds_debug_kernel_only_when_requested(self):
+        with (
+            patch.object(build, "build_kernel") as kernel,
+            patch.object(build, "build_initramfs"),
+            patch.object(build, "build_docker_debug_kernel") as docker_debug,
+        ):
+            native = build_config.BuildConfig(native_guest=True, debug_kernel=True)
+            build.build_guest(native)
+            self.assertEqual(
+                kernel.call_args_list,
+                [
+                    call(native.kernel),
+                    call(build_config.KernelBuildConfig.debug_variant()),
+                ],
+            )
+            docker_debug.assert_not_called()
+
+        with (
+            patch.object(build, "build_docker_artifacts") as docker,
+            patch.object(build, "build_docker_debug_kernel") as docker_debug,
+        ):
+            portable = build_config.BuildConfig(debug_kernel=True)
+            build.build_guest(portable)
+            docker.assert_called_once_with(portable.docker, "alpine")
+            docker_debug.assert_called_once_with(portable.docker)
+
+        with (
+            patch.object(build, "build_docker_artifacts"),
+            patch.object(build, "build_docker_debug_kernel") as docker_debug,
+        ):
+            build.build_guest(build_config.BuildConfig())
+            docker_debug.assert_not_called()
+
+        debug = build_config.KernelBuildConfig.debug_variant()
+        self.assertTrue(debug.debug)
+        self.assertEqual(debug.output.name, KernelBuildConstants.DEBUG_BINARY_NAME)
+        self.assertEqual(
+            debug.work.name, KernelBuildConstants.DEBUG_WORK_DIRECTORY_NAME
+        )
+
+    def test_guest_files_build_time_probe_with_its_own_flags(self):
+        source = BuildConstants.REPO_ROOT / "guest" / "common" / "nvx-time-probe.c"
+        header = source.read_text(encoding="utf-8").splitlines()[:2]
+        self.assertEqual(
+            header,
+            [
+                "// Copyright (c) Microsoft Corporation.",
+                "// Licensed under the MIT License.",
+            ],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            work = Path(temporary) / "work"
+            for directory in (root / "sbin", root / "etc", work):
+                directory.mkdir(parents=True)
+            commands: list[list[str]] = []
+
+            def compile_helper(
+                command: list[str | os.PathLike[str]], **_kwargs: object
+            ) -> None:
+                commands.append([os.fspath(part) for part in command])
+                output = Path(command[command.index("-o") + 1])
+                output.write_bytes(f"static-elf {output.name}".encode())
+
+            def find_tool(name: str) -> str:
+                return name
+
+            with (
+                patch.object(build, "require_tool", side_effect=find_tool),
+                patch.object(build, "run_checked", side_effect=compile_helper),
+            ):
+                helpers = build._install_guest_files(
+                    build_config.InitramfsBuildConfig(work=work),
+                    root,
+                    guests.guest_descriptor("alpine"),
+                )
+
+        probe = InitramfsBuildConstants.TIME_PROBE_NAME
+        flags_by_source = {
+            Path(command[-1]).stem: command[1 : command.index("-o")]
+            for command in commands
+        }
+        compiler_by_source = {
+            Path(command[-1]).stem: command[0] for command in commands
+        }
+        self.assertEqual(
+            flags_by_source[probe], list(InitramfsBuildConstants.TIME_PROBE_CFLAGS)
+        )
+        self.assertIn("-pthread", flags_by_source[probe])
+        musl = InitramfsBuildConstants.MUSL_COMPILER
+        self.assertEqual(compiler_by_source[probe], musl)
+        for name in InitramfsBuildConstants.STATIC_HELPERS:
+            with self.subTest(helper=name):
+                self.assertEqual(
+                    flags_by_source[name],
+                    list(InitramfsBuildConstants.STATIC_HELPER_CFLAGS),
+                )
+                self.assertEqual(compiler_by_source[name], "cc")
+        for name in InitramfsBuildConstants.MUSL_STATIC_HELPERS:
+            with self.subTest(helper=name):
+                self.assertEqual(
+                    flags_by_source[name],
+                    list(InitramfsBuildConstants.STATIC_HELPER_CFLAGS),
+                )
+                self.assertEqual(compiler_by_source[name], musl)
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("        musl-tools \\\n", dockerfile)
+        self.assertEqual(helpers[probe]["source_sha256"], common.sha256_file(source))
+        self.assertEqual(
+            helpers[probe]["binary_sha256"],
+            hashlib.sha256(f"static-elf {probe}".encode()).hexdigest(),
+        )
+
+    def test_docker_debug_kernel_target_exports_debug_artifacts(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "FROM base AS kernel-debug\n"
+            "RUN python3 scripts/nvx.py build-kernel --debug\n",
+            dockerfile,
+        )
+        self.assertIn(
+            f"FROM scratch AS {DockerBuildConstants.DEBUG_KERNEL_TARGET}", dockerfile
+        )
+        for name in DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES:
+            with self.subTest(artifact=name):
+                self.assertIn(
+                    f"COPY --from=kernel-debug /repo/build/{name} /{name}", dockerfile
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+
+            def export(_command: object, **_kwargs: object) -> None:
+                for name in DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES:
+                    (destination / name).write_bytes(b"artifact")
+
+            config = build_config.DockerBuildConfig(artifact_destination=destination)
+            with (
+                patch.object(build, "require_tool", return_value="docker"),
+                patch.object(build, "run_checked", side_effect=export) as run,
+            ):
+                build.build_docker_debug_kernel(config)
+            command = run.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--target") + 1],
+                DockerBuildConstants.DEBUG_KERNEL_TARGET,
+            )
+
+            for name in DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES:
+                (destination / name).unlink()
+            with (
+                patch.object(build, "require_tool", return_value="docker"),
+                patch.object(build, "run_checked"),
+                self.assertRaisesRegex(common.ScriptError, "did not produce"),
+            ):
+                build.build_docker_debug_kernel(config)
 
 
 def _posix_shell() -> str | None:
@@ -5822,6 +6655,94 @@ class SandboxSmokeShareTests(unittest.TestCase):
         self.share.chmod(0o755)
         result = self._run('check_share "$share" ro')
         self.assertEqual(result.returncode, 1, result.stdout)
+
+
+class GuestExitTests(unittest.TestCase):
+    """nvx-exit's arguments, and its single one-byte write at port 0x604."""
+
+    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-exit.c"
+    PORT = 0x604
+
+    def setUp(self):
+        if sys.platform != "linux":
+            self.skipTest("nvx-exit builds on Linux")
+        compiler = shutil.which("cc") or shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("C compiler is unavailable")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        # A regular file stands in for /dev/port, so no test writes a port.
+        self.device = root / "port"
+        flags = [
+            flag
+            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
+            if flag != "-static"
+        ]
+        self.binaries: dict[str, Path] = {}
+        for name, device in (("ok", self.device), ("missing", root / "no" / "port")):
+            binary = root / f"nvx-exit-{name}"
+            result = subprocess.run(
+                [
+                    compiler,
+                    *flags,
+                    f'-DNVX_EXIT_DEVICE="{device}"',
+                    "-o",
+                    str(binary),
+                    str(self.SOURCE),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.binaries[name] = binary
+
+    def _run(self, name: str, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [str(self.binaries[name]), *arguments],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+    def test_writes_the_exit_code_as_one_byte_at_the_control_port(self):
+        cases = (
+            ((), 1),
+            (("",), 1),
+            (("0",), 0),
+            (("37",), 37),
+            (("255",), 255),
+            (("256",), 1),
+            (("-1",), 1),
+            (("+5",), 1),
+            ((" 7",), 1),
+            (("12a",), 1),
+            (("99999999999999999999",), 1),
+            # Out of range after any digit, so the value never wraps.
+            (("4294967296",), 1),
+            (("4294967551",), 1),
+            (("00000000000000000255",), 255),
+            # Decimal: the old script's printf read a leading zero as octal.
+            (("010",), 10),
+            (("7", "9"), 7),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                self.device.write_bytes(b"")
+                result = self._run("ok", *arguments)
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr), (0, b"", b"")
+                )
+                self.assertEqual(
+                    self.device.read_bytes(), bytes(self.PORT) + bytes([expected])
+                )
+
+    def test_fails_silently_when_the_port_cannot_be_opened(self):
+        result = self._run("missing", "0")
+        self.assertEqual(
+            (result.returncode, result.stdout, result.stderr), (1, b"", b"")
+        )
 
 
 class ManagedAgentCgroupTests(unittest.TestCase):
@@ -7393,7 +8314,6 @@ class BenchmarkTests(unittest.TestCase):
                 result = benchmark.capture_snapshot(
                     ["openvmm"],
                     snapshot,
-                    backend="whp",
                     processors=1,
                     timeout=5,
                     snapshot_profile=profiled,
@@ -7943,6 +8863,8 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("--processors") + 1], "8")
         self.assertEqual(command[command.index("--restore-processors") + 1], "4")
+        # Restore packet v4 gives every restore fresh entropy.
+        self.assertNotIn("--restore-entropy", command)
 
     def test_snapshot_restore_command_sets_memory_target_separately(self):
         command = benchmark.snapshot_restore_command(
@@ -8008,10 +8930,50 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(benchmark.parse_dd_rate(output, 1), 268.4)
         self.assertEqual(benchmark.parse_dd_rate(output, 2), 1600.0)
         self.assertEqual(benchmark.network_gateway("10.0.0.2/24"), "10.0.0.1")
-        self.assertEqual(
-            benchmark.clocksource_parameter("kvm"), "clocksource=kvm-clock"
+
+    def test_benchmark_command_lines_carry_no_clock_tuning(self):
+        # Under time ABI v1 the hypervisor identity gives Linux its TSC and
+        # LAPIC rates and trust, so the lifecycle line tunes no clock and the
+        # cold-start clocksource variant selects tsc on every backend.
+        for token in (
+            "tsc=",
+            "no_timer_check",
+            "clocksource=",
+            "tsc_early_khz=",
+            "lapic_timer_hz=",
+        ):
+            self.assertNotIn(token, benchmark.BASE_TUNING)
+        args = argparse.Namespace(
+            runs=1,
+            warmups=0,
+            memory_mib=128,
+            processors=1,
+            timeout=10.0,
+            teardown_mode="guest-exit",
         )
-        self.assertEqual(benchmark.clocksource_parameter("mshv"), "clocksource=tsc")
+        for backend in ("kvm", "mshv", "whp"):
+            commands: list[list[str]] = []
+
+            def fake_benchmark(
+                command: list[str],
+                commands: list[list[str]] = commands,
+                **_kwargs: object,
+            ):
+                commands.append(command)
+                return {"samples_ms": [100.0]}
+
+            with (
+                self.subTest(backend=backend),
+                patch.object(benchmark, "benchmark", side_effect=fake_benchmark),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                benchmark.benchmark_cold_start_workload(
+                    args, Path("openvmm"), Path("vmlinux"), Path("initrd"), backend
+                )
+            cmdlines = [command[command.index("--cmdline") + 1] for command in commands]
+            self.assertIn("quiet loglevel=0 clocksource=tsc", cmdlines)
+            self.assertFalse(any("kvm-clock" in cmdline for cmdline in cmdlines))
+            self.assertIn("  clocksource=tsc          :", stdout.getvalue())
 
     def test_smp_probe_uses_explicit_topology_and_worker_rendezvous(self):
         script = benchmark.smp_probe_script(4)
@@ -8073,7 +9035,6 @@ class BenchmarkTests(unittest.TestCase):
     def test_prepare_snapshot_capture_stages_waiting_controller(self):
         script = benchmark.prepare_snapshot_capture_script(
             4,
-            backend="whp",
             teardown_mode="guest-exit",
             network_gateway="10.0.0.1",
             ioapic_irq=10,
@@ -8092,19 +9053,13 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertIn("IFS= read -r trigger\n", script)
         self.assertIn("echo NVX-SNAPSHOT-DISPATCHED\n", script)
-        self.assertIn('while [ "$(cat "$clock_path")" = tsc-early ]', script)
-        self.assertIn(
-            "SMP-CLOCKSOURCE-FAIL expected=stable actual=$current_clocksource",
-            script,
-        )
         self.assertIn(
             "/sbin/nvx-snapshot\necho OPENVMM-SNAPSHOT-RESTORE-OK\nnvx-exit 0\n",
             script,
         )
         host_terminated = benchmark.prepare_snapshot_capture_script(
-            4, backend="kvm", teardown_mode="host-terminate"
+            4, teardown_mode="host-terminate"
         )
-        self.assertNotIn("clock_tries", host_terminated)
         self.assertNotIn("nvx-exit 0", host_terminated)
         self.assertTrue(
             script.endswith(
@@ -8115,24 +9070,18 @@ class BenchmarkTests(unittest.TestCase):
             )
         )
 
-    def test_mshv_and_whp_capture_after_linux_leaves_tsc_early(self):
-        wait = benchmark.stable_clocksource_wait_script()
-        for backend, waits in (("mshv", True), ("whp", True), ("kvm", False)):
-            with self.subTest(backend=backend):
-                script = benchmark.prepare_snapshot_capture_script(
-                    1, backend=backend, teardown_mode="guest-exit"
-                )
-                probe = script.split("<<'NVX_SMP_PROBE_SCRIPT'\n", 1)[1]
-                probe = probe.split("NVX_SMP_PROBE_SCRIPT\n", 1)[0]
-                self.assertEqual(probe.startswith(wait), waits)
-                self.assertEqual("SMP-CLOCKSOURCE-FAIL expected=stable" in probe, waits)
-                if waits:
-                    # The wait and its check run before the probe completes, so
-                    # the host requests the snapshot only after tsc-early is gone.
-                    self.assertLess(
-                        probe.index("SMP-CLOCKSOURCE-FAIL"),
-                        probe.index("NVX-SMP-PROBE-OK"),
-                    )
+    def test_capture_does_not_wait_for_a_clocksource(self):
+        # The time ABI registers the tsc clocksource at device_initcall on
+        # every backend, so no capture waits for Linux to leave tsc-early.
+        script = benchmark.prepare_snapshot_capture_script(
+            1, teardown_mode="guest-exit"
+        )
+        probe = script.split("<<'NVX_SMP_PROBE_SCRIPT'\n", 1)[1]
+        probe = probe.split("NVX_SMP_PROBE_SCRIPT\n", 1)[0]
+        self.assertEqual(probe, benchmark.smp_probe_script(1, exit_guest=False))
+        for text in ("clocksource", "tsc-early", "clock_tries"):
+            self.assertNotIn(text, script)
+        self.assertFalse(hasattr(benchmark, "stable_clocksource_wait_script"))
 
     def test_output_marker_must_be_a_complete_line(self):
         marker = benchmark.RESTORE_MARKER
@@ -8541,9 +9490,9 @@ class BenchmarkTests(unittest.TestCase):
             "capture_snapshot",
             return_value=(1.0, 1.0, 1.0, 1024),
         ) as capture:
-            benchmark.benchmark_snapshot_capture(args, "whp", ["openvmm"])
+            benchmark.benchmark_snapshot_capture(args, ["openvmm"])
 
-        self.assertEqual(capture.call_args.kwargs["backend"], "whp")
+        self.assertNotIn("backend", capture.call_args.kwargs)
         self.assertEqual(capture.call_args.kwargs["processors"], 8)
         self.assertEqual(capture.call_args.kwargs["teardown_mode"], "guest-exit")
 
@@ -8862,7 +9811,6 @@ class BenchmarkTests(unittest.TestCase):
             with patch.object(benchmark, "capture_snapshot", side_effect=capture):
                 result = benchmark.benchmark_snapshot_capture(
                     args,
-                    "kvm",
                     ["openvmm"],
                     retained_snapshot_path=retained,
                 )

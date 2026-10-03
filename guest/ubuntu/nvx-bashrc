@@ -1,2 +1,5 @@
 PS1='nvx-ubuntu# '
+# Bracketed paste prefixes the output of every accepted line with an escape
+# sequence, so a console reader that matches lines would miss the first one.
+bind 'set enable-bracketed-paste off'
 printf '%s\n' 'NVX-GUEST-BOOT-OK: ubuntu'

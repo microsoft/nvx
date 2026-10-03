@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -118,12 +119,62 @@ def _assert_shared_status_kernel_config(path: Path) -> None:
     )
 
 
-def assert_required_kernel_config(path: Path) -> None:
+def _assert_time_abi_kernel_config(path: Path) -> None:
+    _assert_kernel_config(
+        path,
+        KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+        "kernel configuration does not meet the NVX time ABI: ",
+    )
+
+
+def _assert_hardening_kernel_config(path: Path) -> None:
+    _assert_kernel_config(
+        path,
+        KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
+        "kernel configuration does not keep runtime code read-only: ",
+    )
+    modules = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("CONFIG_") and line.endswith("=m")
+    ]
+    if modules:
+        raise ScriptError(
+            "kernel configuration builds loadable modules, which are never "
+            "shipped: " + ", ".join(modules)
+        )
+
+
+def _assert_watchdog_kernel_config(path: Path, *, debug: bool) -> None:
+    if debug:
+        _assert_kernel_config(
+            path,
+            KernelBuildConstants.REQUIRED_DEBUG_CONFIG,
+            "debug kernel configuration lacks the CI watchdogs: ",
+        )
+        return
+    configured = set(path.read_text(encoding="utf-8").splitlines())
+    enabled = [
+        setting
+        for setting in KernelBuildConstants.DEBUG_WATCHDOG_CONFIG
+        if setting in configured
+    ]
+    if enabled:
+        raise ScriptError(
+            "production kernel configuration enables debug-only watchdogs: "
+            + ", ".join(enabled)
+        )
+
+
+def assert_required_kernel_config(path: Path, *, debug: bool = False) -> None:
     """Validate the generated configuration required by the NVX platform."""
     _assert_direct_boot_kernel_config(path)
     _assert_virtio_console_kernel_config(path)
     _assert_sandbox_kernel_config(path)
     _assert_shared_status_kernel_config(path)
+    _assert_time_abi_kernel_config(path)
+    _assert_hardening_kernel_config(path)
+    _assert_watchdog_kernel_config(path, debug=debug)
 
 
 def _require_linux(workflow: str) -> None:
@@ -224,14 +275,21 @@ def _kernel_source_fingerprint() -> str:
 def _kernel_provenance_inputs(
     source_fingerprint: str,
     input_config_sha256: str,
+    debug_config_fragment_sha256: str | None = None,
 ) -> dict[str, object]:
-    return {
+    inputs: dict[str, object] = {
         "source": json.loads(source_fingerprint),
         "input_config": {
             "path": KernelBuildConstants.INPUT_CONFIG.as_posix(),
             "sha256": input_config_sha256,
         },
     }
+    if debug_config_fragment_sha256 is not None:
+        inputs["debug_config_fragment"] = {
+            "path": KernelBuildConstants.DEBUG_CONFIG_FRAGMENT.as_posix(),
+            "sha256": debug_config_fragment_sha256,
+        }
+    return inputs
 
 
 def kernel_provenance_inputs() -> dict[str, object]:
@@ -240,6 +298,43 @@ def kernel_provenance_inputs() -> dict[str, object]:
         _kernel_source_fingerprint(),
         sha256_file(BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG),
     )
+
+
+def _kernel_config_symbol(line: str) -> str | None:
+    if line.startswith("CONFIG_") and "=" in line:
+        return line.split("=", 1)[0]
+    if line.startswith("# CONFIG_") and line.endswith(" is not set"):
+        return line[2 : -len(" is not set")]
+    return None
+
+
+def merge_kernel_config_fragment(base: str, fragment: str) -> str:
+    """Apply a Kconfig fragment the way ``merge_config.sh`` does.
+
+    Every symbol the fragment assigns replaces the base assignment, so
+    ``olddefconfig`` sees one value per symbol.
+    """
+    assignments: list[str] = []
+    for number, line in enumerate(fragment.splitlines(), start=1):
+        symbol = _kernel_config_symbol(line)
+        if symbol is not None:
+            assignments.append(line)
+        elif line and not line.startswith("#"):
+            raise ScriptError(
+                f"kernel config fragment line {number} is invalid: {line}"
+            )
+    if not assignments:
+        raise ScriptError("kernel config fragment assigns no symbols")
+    symbols = [_kernel_config_symbol(line) for line in assignments]
+    if len(set(symbols)) != len(symbols):
+        raise ScriptError("kernel config fragment assigns a symbol more than once")
+    replaced = set(symbols)
+    kept = [
+        line
+        for line in base.splitlines()
+        if _kernel_config_symbol(line) not in replaced
+    ]
+    return "\n".join((*kept, *assignments)) + "\n"
 
 
 def _initramfs_source_files() -> tuple[Path, ...]:
@@ -412,12 +507,16 @@ def build_guest(config: BuildConfig) -> None:
                 "require Docker"
             )
         build_kernel(config.kernel)
+        if config.debug_kernel:
+            build_kernel(KernelBuildConfig.debug_variant())
         for guest in config.selected_guests():
             build_initramfs(config.initramfs_config(guest))
         if config.guest == "all":
             build_distro_layer(config.distro_layer_config())
         return
     build_docker_artifacts(config.docker, config.guest)
+    if config.debug_kernel:
+        build_docker_debug_kernel(config.docker)
 
 
 def build_all(config: BuildConfig) -> None:
@@ -496,13 +595,15 @@ def _build_static_helper(
     work: Path,
     source: Path,
     destination: Path,
+    cflags: tuple[str, ...] = InitramfsBuildConstants.STATIC_HELPER_CFLAGS,
+    compiler_name: str = "cc",
 ) -> dict[str, str]:
-    compiler = require_tool("cc")
+    compiler = require_tool(compiler_name)
     output = work / source.stem
     run_checked(
         [
             compiler,
-            *InitramfsBuildConstants.STATIC_HELPER_CFLAGS,
+            *cflags,
             "-o",
             output,
             source,
@@ -691,7 +792,6 @@ def _install_guest_files(
     helpers: dict[str, dict[str, str]] = {}
     scripts = [
         ("init", common / "init", root / "init"),
-        ("nvx-exit", common / "nvx-exit", root / "sbin" / "nvx-exit"),
         (
             "nvx-hostmount",
             common / "nvx-hostmount",
@@ -760,6 +860,21 @@ def _install_guest_files(
             common / f"{name}.c",
             root / "sbin" / name,
         )
+    for name in InitramfsBuildConstants.MUSL_STATIC_HELPERS:
+        helpers[name] = _build_static_helper(
+            config.work,
+            common / f"{name}.c",
+            root / "sbin" / name,
+            compiler_name=InitramfsBuildConstants.MUSL_COMPILER,
+        )
+    probe = InitramfsBuildConstants.TIME_PROBE_NAME
+    helpers[probe] = _build_static_helper(
+        config.work,
+        common / f"{probe}.c",
+        root / "sbin" / probe,
+        InitramfsBuildConstants.TIME_PROBE_CFLAGS,
+        compiler_name=InitramfsBuildConstants.MUSL_COMPILER,
+    )
     helpers["nvx-device-io"] = _build_device_io_helper(
         config.work,
         root / "sbin" / "nvx-device-io",
@@ -1033,18 +1148,31 @@ def build_kernel(config: KernelBuildConfig) -> None:
         require_tool(tool)
     source, source_fingerprint = prepare_kernel_source(config)
     input_config = BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG
-    input_config_sha256 = sha256_file(input_config)
+    input_config_bytes = input_config.read_bytes()
+    input_config_sha256 = hashlib.sha256(input_config_bytes).hexdigest()
+    fragment = (
+        BuildConstants.REPO_ROOT / KernelBuildConstants.DEBUG_CONFIG_FRAGMENT
+        if config.debug
+        else None
+    )
+    fragment_bytes = fragment.read_bytes() if fragment is not None else None
+    fragment_sha256 = (
+        hashlib.sha256(fragment_bytes).hexdigest()
+        if fragment_bytes is not None
+        else None
+    )
     provenance_inputs = _kernel_provenance_inputs(
         source_fingerprint,
         input_config_sha256,
+        fragment_sha256,
     )
-    build_fingerprint = json.dumps(
-        {
-            "source": source_fingerprint,
-            "input_config_sha256": input_config_sha256,
-        },
-        sort_keys=True,
-    )
+    build_inputs: dict[str, str] = {
+        "source": source_fingerprint,
+        "input_config_sha256": input_config_sha256,
+    }
+    if fragment_sha256 is not None:
+        build_inputs["debug_config_fragment_sha256"] = fragment_sha256
+    build_fingerprint = json.dumps(build_inputs, sort_keys=True)
     build_stamp = config.work / KernelBuildConstants.BUILD_STAMP_NAME
     cached_build_fingerprint = (
         build_stamp.read_text(encoding="utf-8") if build_stamp.is_file() else None
@@ -1054,16 +1182,24 @@ def build_kernel(config: KernelBuildConfig) -> None:
     config.work.mkdir(parents=True, exist_ok=True)
     build_stamp.write_text(build_fingerprint, encoding="utf-8")
     kernel_config = config.work / KernelBuildConstants.BUILD_CONFIG_NAME
-    provenance_path = config.output.with_name(KernelBuildConstants.PROVENANCE_NAME)
+    provenance_path = config.output.with_name(config.provenance_name)
     provenance_path.unlink(missing_ok=True)
-    shutil.copy2(input_config, kernel_config)
-    if sha256_file(kernel_config) != input_config_sha256:
-        raise ScriptError("kernel input config changed while it was being copied")
+    if fragment_bytes is None:
+        kernel_config.write_bytes(input_config_bytes)
+    else:
+        print(f">> applying {KernelBuildConstants.DEBUG_CONFIG_FRAGMENT.as_posix()}")
+        kernel_config.write_text(
+            merge_kernel_config_fragment(
+                input_config_bytes.decode("utf-8"),
+                fragment_bytes.decode("utf-8"),
+            ),
+            encoding="utf-8",
+        )
     make = ["make", "-C", source, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
-    assert_required_kernel_config(kernel_config)
+    assert_required_kernel_config(kernel_config, debug=config.debug)
     jobs = os.cpu_count() or 1
-    print(f">> building vmlinux with {jobs} jobs")
+    print(f">> building {config.output.name} with {jobs} jobs")
     run_checked([*make, f"-j{jobs}", KernelBuildConstants.BINARY_NAME])
     config.output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(config.work / KernelBuildConstants.BINARY_NAME, config.output)
@@ -1074,6 +1210,7 @@ def build_kernel(config: KernelBuildConfig) -> None:
     if (
         _kernel_source_fingerprint() != source_fingerprint
         or sha256_file(input_config) != input_config_sha256
+        or (fragment is not None and sha256_file(fragment) != fragment_sha256)
     ):
         config.output.unlink(missing_ok=True)
         generated_config.unlink(missing_ok=True)
@@ -1175,6 +1312,31 @@ def build_docker_artifacts(
         f"(kernel {KernelBuildConstants.VERSION}, {guest_label})"
     )
     run_checked(docker_build_command(config, target), cwd=BuildConstants.REPO_ROOT)
+    _require_docker_outputs(destination, expected)
+
+
+def build_docker_debug_kernel(config: DockerBuildConfig) -> None:
+    """Build the CI debug kernel variant through the Docker pipeline."""
+    require_tool(
+        "docker",
+        "docker was not found on PATH; install Docker with the Linux engine first",
+    )
+    destination = _docker_destination(config.artifact_destination)
+    print(
+        f">> building the debug Linux kernel into '{destination}' "
+        f"(kernel {KernelBuildConstants.VERSION}, "
+        f"{KernelBuildConstants.DEBUG_CONFIG_FRAGMENT.as_posix()})"
+    )
+    run_checked(
+        docker_build_command(config, DockerBuildConstants.DEBUG_KERNEL_TARGET),
+        cwd=BuildConstants.REPO_ROOT,
+    )
+    _require_docker_outputs(
+        destination, DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES
+    )
+
+
+def _require_docker_outputs(destination: Path, expected: tuple[str, ...]) -> None:
     missing = [name for name in expected if not (destination / name).is_file()]
     if missing:
         raise ScriptError(f"Docker build did not produce: {', '.join(missing)}")

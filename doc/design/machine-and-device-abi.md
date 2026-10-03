@@ -22,6 +22,13 @@ level interrupt is neither lost nor treated as an edge while reconstructing
 the backend. Serial UARTs, debugcon, Hyper-V power management, gameport, PCI,
 firmware helpers, and standard-PC missing-port shims are absent.
 
+The guest's clocks follow [NVX time ABI v1](time-abi.md) on every backend: a
+minimal Hyper-V identity whose MSRs declare the TSC and LAPIC rates, served by
+the `time-abi` state unit; the TSC as the only clocksource; the LAPIC timer in
+one-shot mode at the backend's fixed rate (1 GHz on KVM, 200 MHz on MSHV and
+WHP); and a PIT that the guest disables at boot. Capture rejects a periodic or
+TSC-deadline LAPIC timer and a periodically counting PIT channel 0.
+
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
 flowchart TB
@@ -61,8 +68,9 @@ flowchart TB
 
 | Port | Device | Behavior |
 | ---: | --- | --- |
-| `0xe9` | portb data | Raw byte input and output; reads consume one pending byte and zero-fill the remaining access width. |
-| `0xea` | portb status | Bit 0 reports pending host input, bit 1 reports a fresh restore packet, bit 2 reports a processor target, bit 3 reports a version-3 memory target, bit 4 reports one or more memory-expansion ranges, and bit 5 reports the fixed generation-ID selector. Writing `0xa5` after restore selects the one-time restore packet. Writing `0xa6` selects the current 16-byte generation ID; it may be selected repeatedly and remains stable for the lifetime of one VM process. |
+| `0xe9` | portb data | Raw byte input and output; console reads consume one pending byte and zero-fill the remaining access width. With the restore packet or generation ID selected, a 1-, 2-, or 4-byte read returns that many bytes of the record, zero-filled past its end. |
+| `0xea` | portb status | Bit 0 reports pending host input, bit 1 reports a fresh restore packet, bit 2 reports a processor target, bit 3 reports a memory target, bit 4 reports one or more memory-expansion ranges, bit 5 reports the fixed generation-ID selector, and bit 6 reports the time-sample window, which always exists. Writing `0xa5` after restore selects the one-time [restore packet](time-abi.md#restore-packet). Writing `0xa6` selects the current 16-byte generation ID; it may be selected repeatedly and remains stable for the lifetime of one VM process. Writing `0xa7` latches a fresh [time sample](time-abi.md#time-sample) into the window without changing the `0xe9` selection. |
+| `0xeb` | portb time window | A 1-, 2-, or 4-byte read returns the next bytes of the latched time sample, zero-filled past its end or when none is latched. The window is not saved state. |
 | `0x604` | shutdown | The first output byte becomes the process status carried with the VM power-off request. Reads return all ones. |
 | `0x605` | snapshot request | Reads return all ones. Writes are coalesced and routed asynchronously to the capture controller. Zero requests fresh scratch and a nonzero first byte requests paired scratch. |
 
@@ -72,8 +80,8 @@ backpressure by stopping host reads when its buffer is full. Pending bytes are
 saved so capture does not silently lose VMM-owned I/O. While host input is
 gated for a snapshot boundary or post-restore repair, portb stops reading its
 host endpoint, returns zero for console data reads, and clears the
-input-available status bit; guest output, the generation ID, and any restore
-packet remain available.
+input-available status bit; guest output, the generation ID, any restore
+packet, and the time-sample window remain available.
 
 Guest-requested process exit drains the portb endpoint and, when present, its
 host stdout relay before reporting completion. The combined drain has a

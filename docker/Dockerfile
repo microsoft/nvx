@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gzip \
         libelf-dev \
         libssl-dev \
+        musl-tools \
         patch \
         python3 \
         rsync \
@@ -38,6 +39,9 @@ COPY LICENSE README.md SOURCE-MANIFEST.json THIRD_PARTY_NOTICES.md /repo/
 
 FROM base AS kernel
 RUN python3 scripts/nvx.py build-kernel
+
+FROM base AS kernel-debug
+RUN python3 scripts/nvx.py build-kernel --debug
 
 FROM base AS initramfs
 RUN python3 scripts/nvx.py build-initramfs --guest alpine
@@ -61,6 +65,11 @@ RUN set -eux; \
     for helper in nvx-reseed nvx-mmio-write nvx-port-io nvx-console-pending nvx-managed-agent; do \
         cc -static -Os -s -Wall -Wextra -Werror -o "/out/helpers/$helper" "/repo/guest/common/$helper.c"; \
     done; \
+    for helper in nvx-time nvx-exit; do \
+        musl-gcc -static -Os -s -Wall -Wextra -Werror -o "/out/helpers/$helper" "/repo/guest/common/$helper.c"; \
+    done; \
+    musl-gcc -std=gnu11 -static -O2 -pthread -s -Wall -Wextra -Werror -o /out/helpers/nvx-time-probe \
+        /repo/guest/common/nvx-time-probe.c; \
     cc -nostdlib -static -Os -fno-builtin -fno-pie -fno-stack-protector -no-pie \
         -Wl,--build-id=none -Wl,-z,noexecstack -s -o /out/helpers/nvx-device-io \
         /repo/guest/common/nvx-device-io.c
@@ -97,8 +106,7 @@ COPY --from=azurelinux-helpers /out/helpers/ /rootfs/sbin/
 RUN <<'EOF'
 set -eux
 install -m 0755 /repo/guest/common/init /rootfs/init
-install -m 0755 /repo/guest/common/nvx-exit \
-    /repo/guest/common/nvx-hostmount \
+install -m 0755 /repo/guest/common/nvx-hostmount \
     /repo/guest/common/nvx-identity-probe \
     /repo/guest/common/nvx-snapshot \
     /repo/guest/common/nvx-virtio-restore-probe \
@@ -200,6 +208,11 @@ FROM scratch AS kernel-artifacts
 COPY --from=kernel /repo/build/vmlinux /vmlinux
 COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
 COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
+
+FROM scratch AS kernel-debug-artifacts
+COPY --from=kernel-debug /repo/build/vmlinux-debug /vmlinux-debug
+COPY --from=kernel-debug /repo/build/vmlinux-debug.config /vmlinux-debug.config
+COPY --from=kernel-debug /repo/build/vmlinux-debug.provenance.json /vmlinux-debug.provenance.json
 
 FROM scratch AS initramfs-artifacts
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz

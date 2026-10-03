@@ -69,6 +69,7 @@ from nvx_tools.common import (
 from nvx_tools.create_linux_source_archive import (
     configure_parser as configure_linux_source_archive_parser,
 )
+from nvx_tools.doctor import configure_parser as configure_doctor_parser
 from nvx_tools.egress_policy import compile_policy_file
 from nvx_tools.guests import GUEST_NAMES, guest_descriptor
 from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_parser
@@ -162,6 +163,7 @@ def _build_config(args: argparse.Namespace) -> BuildConfig:
     return BuildConfig(
         guest=getattr(args, "guest", InitramfsBuildConstants.DEFAULT_GUEST),
         native_guest=getattr(args, "native", False),
+        debug_kernel=getattr(args, "debug_kernel", False),
         openvmm=_openvmm_build_config(args),
     )
 
@@ -170,8 +172,12 @@ def command_build_guest(args: argparse.Namespace) -> None:
     build_guest(_build_config(args))
 
 
-def command_build_kernel(_: argparse.Namespace) -> None:
-    build_kernel(KernelBuildConfig())
+def command_build_kernel(args: argparse.Namespace) -> None:
+    build_kernel(
+        KernelBuildConfig.debug_variant()
+        if getattr(args, "debug", False)
+        else KernelBuildConfig()
+    )
 
 
 def command_build_initramfs(args: argparse.Namespace) -> None:
@@ -360,9 +366,7 @@ def command_run(args: argparse.Namespace) -> None:
         _hypervisor(args.hypervisor),
     ]
     if args.restore_snapshot is not None:
-        command.extend(
-            ["--restore-snapshot", str(args.restore_snapshot), "--restore-entropy"]
-        )
+        command.extend(["--restore-snapshot", str(args.restore_snapshot)])
         if args.restore_processors is not None:
             command.extend(["--restore-processors", str(args.restore_processors)])
         if args.restore_memory_mib is not None:
@@ -610,6 +614,14 @@ def _add_guest_options(
         action="store_true",
         help="build directly on Linux instead of using Docker",
     )
+    parser.add_argument(
+        "--debug-kernel",
+        action="store_true",
+        help=(
+            "also build the CI debug kernel (build/vmlinux-debug), which adds "
+            "the soft-lockup, hung-task, and RCU stall diagnostics"
+        ),
+    )
 
 
 def _add_openvmm_options(parser: argparse.ArgumentParser) -> None:
@@ -638,6 +650,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     kernel = subparsers.add_parser(
         "build-kernel",
         help="fetch, patch, and build the pinned kernel natively on Linux",
+    )
+    kernel.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "build the CI debug variant (build/vmlinux-debug) by applying "
+            "kernel/config-microvm-debug"
+        ),
     )
     kernel.set_defaults(handler=command_build_kernel)
 
@@ -750,6 +770,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     configure_microvm_test_parser(microvm_tests)
 
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="qualify this host for the NVX time ABI",
+    )
+    configure_doctor_parser(doctor)
+
     aci_edge_sandboxes_tests = subparsers.add_parser(
         "test-aci-edge-sandboxes",
         help="run the aci_edge_sandboxes crate lifecycle test on a real hypervisor",
@@ -790,7 +816,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument(
         "--memory-mib",
         type=int,
-        help="guest RAM; defaults to 128 MiB for Alpine and 256 MiB for Ubuntu",
+        help=(
+            "guest RAM in MiB (default by --guest: "
+            + ", ".join(
+                f"{name} {guest_descriptor(name).default_memory_mib}"
+                for name in GUEST_NAMES
+            )
+            + ")"
+        ),
     )
     run.add_argument("--memory-capacity-mib", type=int)
     run.add_argument("--processors", type=int, choices=(1, 2, 4, 8), default=1)

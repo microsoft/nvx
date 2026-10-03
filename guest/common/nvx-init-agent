@@ -230,7 +230,8 @@ teardown() {
 }
 
 mkdir -p "$layers" "$scratch" "$rootfs"
-mount -t tmpfs -o mode=755,nosuid,nodev tmpfs /run ||
+# init mounts /run before the time ABI boot check, whose state lives there.
+mountpoint -q /run || mount -t tmpfs -o mode=755,nosuid,nodev tmpfs /run ||
     fatal "failed to mount runtime tmpfs"
 mkdir -p "$layers" "$scratch" "$rootfs"
 configure_cgroups

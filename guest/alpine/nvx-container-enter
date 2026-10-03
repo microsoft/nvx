@@ -43,6 +43,19 @@ rm -f "$rootfs/etc/machine-id"
 mount --bind "$workload_machine_id" "$rootfs/etc/machine-id"
 mount -o remount,bind,ro,nosuid,nodev "$rootfs/etc/machine-id"
 
+# Workloads read the time ABI discontinuity state at the guest's path. No
+# path component may be an image symlink, which would redirect the mount.
+time_state=$rootfs
+for component in run nvx time; do
+    time_state=$time_state/$component
+    if [ -L "$time_state" ] || { [ -e "$time_state" ] && [ ! -d "$time_state" ]; }; then
+        exit 125
+    fi
+    mkdir -p "$time_state"
+done
+mount --bind /run/nvx/time "$time_state"
+mount -o remount,bind,ro,nosuid,nodev,noexec "$time_state"
+
 mknod -m 666 "$rootfs/dev/null" c 1 3
 mknod -m 666 "$rootfs/dev/zero" c 1 5
 mknod -m 666 "$rootfs/dev/full" c 1 7

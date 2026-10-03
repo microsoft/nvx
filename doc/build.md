@@ -139,8 +139,31 @@ complete per-scenario logs under
 `build/test-results/microvm` by default.
 
 The Alpine initramfs includes the sandbox PID-1 bootstrap, its container namespace
-helpers, the static `nvx-device-io` benchmark helper, and the static
-`nvx-port-io` restore packet helper under `/sbin`. The matching kernel enables
+helpers, the static `nvx-device-io` benchmark helper, the static `nvx-port-io`
+port helper (single-byte port reads and writes, and the VM generation ID read),
+the static `nvx-time-probe` guest time probe, and the
+static `nvx-time` guest time component under `/sbin`. The probe measures TSC and
+clock read latency, reports the guest's clock, clocksource, TSC flags, and
+hypervisor identity, and runs the cross-vCPU warp test that the
+[time ABI](design/time-abi.md#cross-vcpu-skew-bound) uses to enforce its 1 µs
+skew bound. `nvx-time` implements the time ABI's
+[guest obligations](design/time-abi.md#guest-obligations): the conformance
+checks, the violation watcher, the restore packet v4 and time-sample parsers,
+the snapshot agent's time steps, and the wall-clock discipline. Before
+shell-ready it only steps the clock to host UTC; the other boot checks run in
+the background, and the production console shows no time ABI line except a
+violation event. `nvx-time status` prints every recorded check (boot, capture,
+and restore) and the runtime state on demand, after waiting for pending
+checks, for CI and test harnesses. Its boot check
+also fails when the kernel's boot-time W+X audit reports a writable and
+executable mapping. `nvx-time exhaustive` runs the CI-only exhaustive check
+(checks X1 to X6 on every online CPU); it reports and exits, and production
+boots never run it. The
+`--report-only` flag (or the `nvx_time_abi=report-only` kernel command-line
+token) reports violations without powering off, for runs against VMMs that
+predate the ABI. Both time tools are linked statically against musl
+(`musl-gcc`): with static glibc each would add about 700 KB to the initramfs,
+and every unpacked kilobyte delays cold boot. The matching kernel enables
 virtio-blk, compressed EROFS, overlayfs, ext4 scratch, memory cgroups, and
 cgroup BPF. The build fails if `olddefconfig` drops any required option. The
 APK manifest records the `blkid` and `util-linux` tools used by the bootstrap
@@ -161,9 +184,75 @@ The native kernel build caches the verified and patched source under
 `.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
 generated config as `build/vmlinux.config`, and fails if ACPI is enabled,
 PVH remains enabled, or the MP-table, APIC, IOAPIC, and command-line
-virtio-mmio requirements are missing. Changing an archive hash or patch
-invalidates both source and object caches; changing the input configuration
-invalidates the object cache.
+virtio-mmio requirements are missing. It also enforces the time-ABI settings:
+`CONFIG_HYPERVISOR_GUEST` and `CONFIG_PARAVIRT` stay on, while `CONFIG_HYPERV`,
+`CONFIG_KVM_GUEST`, and `CONFIG_CPU_FREQ` stay off. The guest identifies the
+hypervisor only through the time ABI's Hyper-V identity, so the KVM guest code,
+kvmclock, and the haltpoll idle driver would be dead code. Without cpufreq,
+`intel_pstate` cannot probe MSRs the microVM does not implement, so no `#GP`
+traces are printed with interrupts disabled during boot. `CONFIG_SCHED_MC_PRIO`
+is off as well because it selects both cpufreq and `intel_pstate`. Production
+kernels must not enable the soft-lockup or hung-task detectors. Changing an
+archive hash or patch invalidates both source and object caches; changing the
+input configuration invalidates the object cache.
+
+The kernel keeps the code it generates at run time read-only. On x86, only
+`CONFIG_STRICT_MODULE_RWX` makes such memory read-only and executable
+(`CONFIG_ARCH_HAS_EXECMEM_ROX`), and it requires `CONFIG_MODULES`. Without it,
+the thunk pages of the Indirect Target Selection (ITS) mitigation stay writable
+and executable when the mitigation patches indirect branches at boot, which it
+does unless Spectre v2 uses retpolines. The kernel therefore supports modules
+but never builds or ships one:
+
+- the build fails if any option is set to `m`;
+- `CONFIG_MODPROBE_PATH` is empty, so the kernel never starts a module helper;
+- `CONFIG_TRIM_UNUSED_KSYMS` drops every symbol export, about 200 KB that would
+  otherwise push the kernel's data past the next 2 MiB boundary;
+- init writes 1 to `/proc/sys/kernel/modules_disabled` before anything else
+  runs.
+
+When the mitigation patches indirect branches, the read-only executable cache
+takes one 2 MiB block of guest memory. `CONFIG_DEBUG_WX` audits the kernel page
+tables at boot, and the `nvx-time` boot check fails if the audit reports a
+writable and executable mapping.
+
+## CI debug kernel
+
+CI proves that snapshot restores never trip the kernel watchdogs with a debug
+variant of the same kernel:
+
+```bash
+python3 scripts/nvx.py build-guest --debug-kernel
+python3 scripts/nvx.py build-kernel --debug   # native, Linux only
+```
+
+The variant applies the
+[`kernel/config-microvm-debug`](../kernel/config-microvm-debug) fragment on top
+of `kernel/config-microvm`. Each assignment in the fragment replaces the
+matching base assignment before `olddefconfig`. It enables `DEBUG_KERNEL`, the
+soft-lockup and hung-task detectors, and extra RCU stall diagnostics. It pins
+the production RCU stall timeouts and turns off the debug options that
+`DEBUG_KERNEL` would otherwise enable by default. The build fails if the
+detectors are missing from the generated config. CI can shorten the soft-lockup
+and hung-task thresholds for one boot with `watchdog_thresh=` and
+`sysctl.kernel.hung_task_timeout_secs=`. The RCU stall timeout stays at the
+production value because the time ABI's
+[conformance check C8](design/time-abi.md#conformance-checks-and-the-nvx-time-abi-marker)
+requires it.
+
+The variant builds in `build/linux-debug`, so it never invalidates the
+production object cache, and it produces:
+
+```text
+build/vmlinux-debug
+build/vmlinux-debug.config
+build/vmlinux-debug.provenance.json
+```
+
+Its provenance has the production fields plus a `debug_config_fragment` path
+and SHA-256. The debug kernel is a CI artifact and is never packaged. The
+`build-guest-artifacts` action caches and builds it only when its
+`debug-kernel` input is `true`.
 
 Release packaging stages and verifies a complete output before replacing an
 existing `dist/` version. Its `SOURCE-MANIFEST.json` records the package

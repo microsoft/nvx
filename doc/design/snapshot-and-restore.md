@@ -4,7 +4,7 @@
 
 ## Tier contract
 
-Version-5 sandbox snapshots encode the tier, restore policy, and a consumed
+Sandbox snapshots encode the tier, restore policy, and a consumed
 configuration-section bitmask. The validator accepts only these combinations:
 
 | Tier | Restore policy | Scratch | Consumed sections | Intended author and sharing scope |
@@ -46,7 +46,9 @@ tier, clone/resume, and fresh/paired scratch combinations are rejected. For
 paired scratch, the guest snapshot helper first freezes the workload cgroup
 with a bounded wait, calls `sync`, and freezes the mounted filesystem. Its
 fresh-scratch mode instead requires scratch to be unmounted. A rejected capture
-thaws every guest-owned barrier; failure to thaw terminates the VM.
+thaws every guest-owned barrier and then releases the stall-detector
+suppression ([snapshot agent](time-abi.md#snapshot-agent)); failure to thaw or
+release terminates the VM.
 
 1. gate host input and defer completion of the snapshot-port write;
 2. stop the vCPU at the I/O boundary while completing the write, so saved state
@@ -57,6 +59,7 @@ thaws every guest-owned barrier; failure to thaw terminates the VM.
 4. quiesce the remaining device workers and VM time in dependency order,
    including bounded virtio-blk queue drain;
 5. save the exact state-unit inventory, processor state, device-private state,
+   the [time contract and CPU profile record](time-abi.md#snapshot-manifest),
    and memory;
 6. copy and flush state, memory, and any paired scratch into a unique sibling
    staging directory;
@@ -93,7 +96,7 @@ sequenceDiagram
    else Capture accepted
       Controller->>Worker: Quiesce for snapshot
       Worker->>Units: Stop and save in dependency order
-      Units-->>Controller: State, inventory, CPU, and clock contract
+      Units-->>Controller: State, inventory, time contract, and CPU profile
       Controller->>Storage: Copy state, memory, and optional scratch
       Controller->>Storage: Publish with no-replace rename
       Controller->>Worker: Terminate committed source
@@ -245,9 +248,9 @@ The manifest is authoritative for:
 - effective command line and digest;
 - exact device order, stable IDs, state-unit names, MMIO/PMIO ranges, IRQs,
   transport, feature masks, and queue limits;
-- the canonical CPU compatibility contract (vendor, CPUID results, XSAVE
-  layout, and processor features) and its digest, TSC and LAPIC timer
-  frequencies, capture wall clock, and downtime clock policy;
+- the time contract (the declared TSC and LAPIC rates, VP 0's TSC paired with
+  a host time sample, the host identities, and the generation counter) and the
+  CPU profile record (the pinned profile and the effective CPUID);
 - required host attachments and their policies;
 - block roles, access, geometry, layer identities, and scratch policy;
 - snapshot tier, clone/resume policy, and consumed configuration sections;
@@ -256,13 +259,12 @@ The manifest is authoritative for:
 
 Snapshot paths and repeated fields are bounded. Restore rejects truncated,
 oversized, malformed, wrong-type, path-escaping, symlinked, incompatible,
-missing, extra, or reordered state before guest execution. New snapshots use
-version 5. It does not store or validate embedded checksums for `state.bin` or
-`memory.bin`; a same-length change to either payload is therefore outside the
-validation contract. Paired scratch is checked because it must match captured
-filesystem state. Versions 2 through 4 remain readable; versions 2 and 3 cannot
-describe sandbox blocks, and version 4 predates tier metadata. Legacy version-2
-checksum fields are accepted without re-hashing either payload. Snapshot
+missing, extra, or reordered state before guest execution. Every snapshot uses
+manifest version 6; any other version or format magic is rejected with
+`E_SNAPSHOT_VERSION`, which asks for a recapture. The manifest does not store
+or validate embedded checksums for `state.bin` or `memory.bin`; a same-length
+change to either payload is therefore outside the validation contract. Paired
+scratch is checked because it must match captured filesystem state. Snapshot
 directories rely on host access control, while
 authenticated export or transport belongs outside the default local artifact
 format.
@@ -297,10 +299,14 @@ Restore proceeds in the opposite direction from capture:
    file;
 5. construct the partition and exact device inventory with the selected active
    RAM and the snapshot's immutable capacity;
-6. compare the destination CPU, TSC, topology, device, and queue contract with
-   the saved contract;
+6. run the [time ABI preflight](time-abi.md#restore-algorithm) (backend, CPU
+   profile and generation, rates, and downtime), compare the destination
+   topology, device, and queue contract with the saved contract, and check the
+   partition's effective CPUID against the snapshot's record;
 7. restore VM time, chipset and virtio state, partition state, and vCPU state,
-   then advance the guest clocks by the host downtime;
+   then set every VP's TSC at one host instant with read-back, advance the
+   LAPIC timers, VM time, RTC, and PIT by the downtime, and seal the restore
+   packet's time fields;
 8. finish reconnecting host resources;
 9. start the state units, with external input gated first when tier policy,
    processor activation, or nonempty RAM expansion requires guest repair, and
@@ -337,9 +343,10 @@ actions. The restored VM stays paused until the client resumes it; that resume
 publishes the readiness event, and a publication failure fails the resume and
 tears the VM down.
 
-The partition must exist before OpenVMM can derive its effective destination
-CPU contract. This does not expose a partially restored guest: contract
-comparison and all saved-state validation still complete before a vCPU runs.
+The partition must exist before OpenVMM can read the CPUID it presents and
+check it against the effective CPUID. This does not expose a partially
+restored guest: these checks and all saved-state validation still complete
+before a vCPU runs.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff"}}}%%
@@ -371,18 +378,21 @@ flushes `resume.claim`; duplicate and concurrent restores fail before worker
 construction, and a later startup failure does not make the checkpoint
 reusable. Initial compatibility is same-backend: KVM snapshots restore on
 compatible KVM hosts, MSHV on compatible MSHV hosts, and WHP on compatible WHP
-hosts. Cross-backend conversion and standalone NVX snapshot import are not
-supported.
+hosts, of the CPU generation the snapshot's profile names. Cross-backend
+conversion and standalone NVX snapshot import are not supported.
 
 ## Template compatibility and placement
 
 A template represents a compatibility class, not an arbitrary fleet image.
-The class includes the backend, CPU and TSC contract, guest kernel and
-agent build, effective command line, device roles and geometry, network
-identity/policy, and consumed layer identities. Deployment must rebuild or
-recertify templates on relevant rollouts; the VMM's actual compatibility and
-saved-state checks, not a promise about every build with the same version
-string, remain authoritative.
+The class includes the backend, CPU profile and generation, the
+[effective CPUID](time-abi.md#cpu-profiles) that the OpenVMM build computes
+for that profile and topology, guest kernel and agent build, effective command
+line, device roles and geometry, network identity/policy, and consumed layer
+identities. Deployment must rebuild or recertify templates on relevant
+rollouts: an OpenVMM build that computes a different effective CPUID, for
+example a different cache topology, rejects earlier templates with
+`E_CPU_SURFACE`. The VMM's actual compatibility and saved-state checks, not a
+promise about every build with the same version string, remain authoritative.
 
 Processor capacity and captured RAM geometry are immutable, but the opt-in
 activation contracts below allow one template to serve several online CPU
@@ -429,9 +439,9 @@ contract remains backend-independent:
 
 MSHV creates application processors lazily while binding their VP runners, so
 discarding suffix binders before that boundary avoids creating processors that
-this restore will not run. Restored-TSC alignment on MSHV therefore covers only
-the created VPs; the hypervisor rejects register access to a VP that was never
-created. KVM and WHP deliberately retain their existing full-capacity
+this restore will not run. The synchronized TSC set on MSHV therefore covers
+only the created VPs; the hypervisor rejects register access to a VP that was
+never created. KVM and WHP deliberately retain their existing full-capacity
 construction path, including when an explicit online target is sent to the
 guest.
 
@@ -446,14 +456,13 @@ also fails explicitly instead of indexing nonexistent runtime state. The
 original immutable snapshot remains reusable for independent restores at
 other valid targets.
 
-After host-side state restoration, a processor-only activation uses the
-version-2 private restore packet to carry `N` to the Alpine agent. Portb status
-bit 2 distinguishes it from a legacy version-1 entropy packet. If the same
-restore also selects a RAM target, version 3 carries both targets. While
-external input remains gated, the agent onlines CPUs from `B` through `N-1`,
-verifies that the kernel's online-CPU set is exactly the requested prefix,
-and acknowledges through PMIO `0x605`. OpenVMM stops at that post-write
-boundary, releases host input, and then resumes the guest.
+After host-side state restoration, the
+[restore packet](time-abi.md#restore-packet) carries `N` to the Alpine agent as
+its online VP count, and portb status bit 2 advertises it; a RAM target travels
+in the same packet. While external input remains gated, the agent onlines CPUs
+from `B` through `N-1`, verifies that the kernel's online-CPU set is exactly the
+requested prefix, and acknowledges through PMIO `0x605`. OpenVMM stops at that
+post-write boundary, releases host input, and then resumes the guest.
 
 A fixed-capacity `N`-vCPU snapshot and a capacity-`C`, boot-online-`B` template
 restored to `N` therefore reach the same online prefix but do not contain the
@@ -478,8 +487,7 @@ by a snapshot from the active amount selected for one restored process:
   without the capability rejects an explicit target.
 
 The management RPC exposes the same capture capacity and per-launch target,
-together with the processor target, gate timeout, fresh-entropy request, and
-readiness endpoint.
+together with the processor target, gate timeout, and readiness endpoint.
 
 The selected expansion is always a prefix of the contract's canonical ranges
 in logical RAM order. OpenVMM maps the captured ranges privately from
@@ -489,101 +497,62 @@ runs. Expansion bytes are neither read from nor written back to the snapshot,
 so independent restores may choose different valid targets without changing
 the reusable artifact.
 
-An explicit RAM target selects restore-packet version 3:
-
-```text
-OPENVMM_ENTROPY_V3\0
-u8 optional_online_vp_count
-u8 expansion_range_count
-repeated { little-endian u64 gpa_start, little-endian u64 length }
-64 bytes fresh entropy
-```
-
-Portb status bit 3 identifies the memory-target packet and bit 4 indicates that
-the selected target contains at least one expansion range. Version 3 may carry
-a processor target in the same transaction. For a nonempty expansion,
-OpenVMM keeps external input gated while the Alpine agent verifies the
-128-MiB block size and each range, probes missing blocks through the Linux
+An explicit RAM target sets the restore packet's `MEMORY_TARGET` flag, and the
+packet lists the selected expansion ranges as `(u64 gpa_start, u64 length)`
+pairs ([layout](time-abi.md#restore-packet)). Portb status bit 3 mirrors the
+flag and bit 4 indicates that the selected target contains at least one
+expansion range. The same packet may carry a processor target. For a nonempty
+expansion, OpenVMM keeps external input gated while the Alpine agent verifies
+the 128-MiB block size and each range, probes missing blocks through the Linux
 memory-block probe interface, onlines them and verifies their online state, and
 then completes entropy and generation-ID repair before acknowledging PMIO
 `0x605`. Any malformed range or add/online failure terminates the restore.
 
-An explicit base-size target has a zero range count. For an untiered blockless
-restore, the agent emits the deterministic zero-add marker without consuming
-the packet or entering a restore-gate transaction; a tiered restore still uses
-its existing gate. This mechanism is one-shot restore repair, not a general
+An explicit base-size target has a zero range count. Unless the tier or a
+processor target gates the restore, the packet's `ACK_REQUIRED` flag is clear,
+and the agent emits the deterministic zero-add marker without a restore-gate
+transaction. This mechanism is one-shot restore repair, not a general
 post-readiness memory-hotplug interface.
 
 ## Time and entropy
 
-Cold microVM boots receive a canonical `lapic_timer_hz` kernel parameter from
-the backend's reported LAPIC clock frequency. The NVX kernel uses this known rate
-instead of comparing LAPIC interrupts with scheduling-sensitive emulated PIT
-interrupts during boot. Without it, delayed PIT delivery can cause Linux to disable
-a working LAPIC timer. Native calibration remains available when no frequency is
-reported, and the TSC-deadline path is unchanged. A platform snapshot's saved
-command-line parameter, when present, must agree with its APIC frequency contract.
+Every microVM uses [NVX time ABI v1](time-abi.md), which defines the guest's
+clocks on every backend:
 
-The machine contract records the guest TSC frequency with zero tolerance, but
-a cold-booted Linux guest would otherwise calibrate its own, slightly
-different rate against emulated timers. A boot that can publish a snapshot
-therefore also receives the backend-reported TSC frequency as
-`tsc_early_khz`; ordinary boots keep the guest's normal TSC discovery. A
-platform snapshot's command line must carry exactly the recorded value. Under
-the versioned CPU contract, WHP runs the guest TSC at a fixed 1 GHz when the
-host supports that rate and otherwise keeps the host frequency; MSHV exposes no
-TSC-deadline mode because it does not reliably deliver those events to
-direct-boot guests.
-
-Capture records a coherent processor and clock boundary. Restore advances TSC,
-VM time, RTC, PIT/LAPIC deadlines, and the KVM paravirtual clock by nonnegative
-host downtime, then reanchors them before vCPUs start. A destination that
-cannot reproduce the saved CPU or clock contract is rejected rather than
-silently changing guest behavior. The current restore path rejects negative
-downtime and elapsed host downtime greater than 30 days. One-shot and periodic
-LAPIC timers advance by the downtime at the LAPIC timer frequency. A timer that
-the downtime expires, including a TSC deadline that the advanced counter has
-passed or that was already overdue, is delivered by queueing its interrupt in
-the restored LAPIC state; an expired TSC deadline is then disarmed. Exact
-deadline read-back is excluded from state comparison because a deadline can
-expire between restore and read-back. Every backend reads back each advanced
-counter before resume and rejects a discarded or incomplete adjustment.
-Versioned MSHV CPU contracts do not expose `IA32_TSC_ADJUST` because snapshot
-state cannot preserve that register independently of `IA32_TSC`; Linux
-therefore does not interpret OpenVMM's host-side TSC correction as per-vCPU
-firmware adjustment skew.
-
-KVM advances each VP's TSC through its TSC offset rather than a counter write,
-because KVM can discard a sub-second counter write as a synchronization
-attempt; a host without TSC-offset control fails restore explicitly. KVM also
-saves and restores the paravirtual-clock MSRs exactly. For restored SMP on
-MSHV and WHP, partition time is frozen while the instantiated VP counters are
-aligned before execution, avoiding skew introduced by sequential host register
-writes. WHP additionally uses a partition-reference-time-based TSC model for
-restored SMP timestamp reads, including `RDTSC`/`RDTSCP` and TSC MSR reads. An
-intentional guest TSC adjustment returns that VP to its guest-programmed
-hardware counter. This backend repair is not general cross-host TSC-frequency
-conversion.
-
+- The guest sees a minimal Hyper-V identity with the declared TSC and LAPIC
+  rates in MSRs, a CPU profile pinned for its CPU generation, an invariant TSC
+  as its clocksource, and the LAPIC timer at the backend's fixed rate. The
+  command line carries no clock tokens
+  ([guest-visible contract](time-abi.md#guest-visible-contract)).
+- Capture records the time contract and the CPU profile record in the
+  [manifest](time-abi.md#snapshot-manifest).
+- Restore requires the same backend and CPU generation, a native TSC rate
+  within 250 ppm of the declared rate, and an exactly equal LAPIC rate. It
+  measures the downtime with same-boot host monotonic time or the host UTC
+  delta, sets every VP's TSC at one host instant with read-back, and advances
+  the LAPIC timers, VM time, RTC, and PIT before the first VP runs
+  ([restore algorithm](time-abi.md#restore-algorithm)). Any failure rejects
+  the restore with a stable code; there is no fallback.
+- After restore, the guest's snapshot agent sets the wall clock from the
+  restore packet's host UTC sample and re-checks conformance
+  ([snapshot agent](time-abi.md#snapshot-agent)).
 Replaying a snapshot also replays the guest's in-memory random-number-generator
-state. Tiered restore, processor activation, and an explicit RAM target each
-cause OpenVMM to create a fresh one-time packet and expose it through the portb
-status/data protocol; callers may also request that packet directly. Every
-microVM process receives a fresh 16-byte generation ID before vCPU entry. The
-ID is not serialized, and the VMM-owned value is not restored from device
-state. When a restore packet exists, the ID is its first 16 entropy bytes;
-otherwise it is generated independently. This keeps the gated repair path from
-adding port reads. The Alpine agent keeps the prior ID in its captured process
-state, rejects a restored ID that did not change, and exports the refreshed
-value to the runtime hook before releasing the gate.
+state. Every restore therefore exposes a fresh one-time
+[restore packet](time-abi.md#restore-packet) through the portb status/data
+protocol; with the time fields and any targets, it carries 64 bytes of fresh
+entropy. Every microVM process receives a fresh 16-byte generation ID before
+vCPU entry. The ID is not serialized, and the VMM-owned value is not restored
+from device state. On restore, the ID is the packet's first 16 entropy bytes;
+on cold boot it is generated independently. This keeps the gated repair path
+from adding port reads. The Alpine agent keeps the prior ID in its captured
+process state, rejects a restored ID that did not change, and exports the
+refreshed value to the runtime hook before releasing the gate.
 
 For clone policy, the Alpine restore path credits the seed, including the
 generation ID, to the kernel entropy pool, forces a kernel CRNG reseed,
-refreshes wall clock and machine identity, and requires the workload-start
-runtime hook to reset runtime-owned RNG state before accepting work. RTC
-update-in-progress is polled with a bounded read loop rather than a timer
-sleep because guest timers are not authoritative until this wall-clock repair
-completes. The workload's `/etc/machine-id` is a read-only bind of a
+refreshes machine identity, and requires the workload-start runtime hook to
+reset runtime-owned RNG state before accepting work. The workload's
+`/etc/machine-id` is a read-only bind of a
 runtime-tmpfs file, so the agent can refresh it while scratch remains frozen;
 the agent also updates the workload's UTS namespace before acknowledgement. It
 then acknowledges the VMM gate before thawing scratch and the workload cgroup.

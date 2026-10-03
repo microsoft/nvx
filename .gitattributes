@@ -13,5 +13,6 @@ guest/* text eol=lf
 guest/**/* text eol=lf
 Dockerfile text eol=lf
 kernel/config-microvm text eol=lf
+kernel/config-microvm-debug text eol=lf
 
 .github/workflows/*.lock.yml linguist-generated=true

@@ -32,6 +32,7 @@ REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "aci-edge-sandboxes": "ACI_EDGE_SANDBOXES_RESULT",
     "openvmm-changes": "CHANGES_RESULT",
     "artifacts": "ARTIFACTS_RESULT",
+    "debug-kernel": "DEBUG_KERNEL_RESULT",
     "build-openvmm-linux-gnu": "BUILD_LINUX_GNU_RESULT",
     "build-openvmm-linux-musl": "BUILD_LINUX_MUSL_RESULT",
     "build-openvmm-windows-msvc": "BUILD_WINDOWS_MSVC_RESULT",
@@ -40,6 +41,9 @@ REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "nvx-microvm-tests-kvm": "MICROVM_KVM_RESULT",
     "nvx-microvm-tests-mshv": "MICROVM_MSHV_RESULT",
     "nvx-microvm-tests-whp": "MICROVM_WHP_RESULT",
+    "nvx-microvm-debug-kvm": "MICROVM_DEBUG_KVM_RESULT",
+    "nvx-microvm-debug-mshv": "MICROVM_DEBUG_MSHV_RESULT",
+    "nvx-microvm-debug-whp": "MICROVM_DEBUG_WHP_RESULT",
     "platform-kvm": "PLATFORM_KVM_RESULT",
     "platform-mshv": "PLATFORM_MSHV_RESULT",
     "platform-whp": "PLATFORM_WHP_RESULT",
@@ -58,7 +62,16 @@ REQUIRED_CI_MICROVM_TEST_JOBS = (
     "nvx-microvm-tests-mshv",
     "nvx-microvm-tests-whp",
 )
+# The CI debug kernel runs on KVM for every pull request and on every backend
+# for dev pushes.
+REQUIRED_CI_MICROVM_DEBUG_JOBS = ("nvx-microvm-debug-kvm",)
+REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS = (
+    "nvx-microvm-debug-mshv",
+    "nvx-microvm-debug-whp",
+)
 REQUIRED_CI_ARTIFACT_JOB = "artifacts"
+# GitHub-hosted, beside the shared artifacts; only the debug jobs wait for it.
+REQUIRED_CI_DEBUG_KERNEL_JOB = "debug-kernel"
 REQUIRED_CI_PLATFORM_JOBS = (
     "platform-kvm",
     "platform-mshv",
@@ -94,6 +107,7 @@ def required_ci_expected_results(
         "aci-edge-sandboxes": "success",
         "openvmm-changes": "success",
         REQUIRED_CI_ARTIFACT_JOB: "success" if run_workloads else "skipped",
+        REQUIRED_CI_DEBUG_KERNEL_JOB: "success" if run_workloads else "skipped",
         "performance-gate": (
             "success"
             if event_name == "pull_request"
@@ -128,7 +142,18 @@ def required_ci_expected_results(
             for job in (
                 *REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS,
                 *REQUIRED_CI_MICROVM_TEST_JOBS,
+                *REQUIRED_CI_MICROVM_DEBUG_JOBS,
             )
+        }
+    )
+    expected.update(
+        {
+            job: (
+                "success"
+                if event_name == "push" and run_tests and run_workloads
+                else "skipped"
+            )
+            for job in REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS
         }
     )
     expected.update(

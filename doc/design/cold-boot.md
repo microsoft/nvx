@@ -95,21 +95,17 @@ tokens. A fresh boot then appends host-owned tokens in this order:
 2. the optional fixed workload identity (`nvx_workload_uid=` and
    `nvx_workload_gid=`) and workload lifecycle (`nvx_lifecycle=`);
 3. `nvx_snapshot_tier=<tier>` for a capture with sandbox blocks;
-4. the backend-reported TSC frequency as `tsc_early_khz=` when the boot can
-   publish a snapshot, and the backend-reported LAPIC timer frequency as
-   `lapic_timer_hz=` whenever the backend reports one;
-5. device-discovery tokens in fixed address order: network, filesystem, boot
+4. device-discovery tokens in fixed address order: network, filesystem, boot
    console, sandbox blocks, and the control console followed by
    `nvx_control_tty=hvc2`; and
-6. network bootstrap tokens, including gateway DNS only when the egress
+5. network bootstrap tokens, including gateway DNS only when the egress
    policy permits it, followed by filesystem bootstrap tokens for an active
    HostFs export.
 
-The worker inserts the frequency tokens before device discovery and before any
-`--` delimiter. When it propagates a frequency, a caller-supplied token for the
-same parameter is accepted only when it matches the backend value and is then
-rewritten in canonical form; conflicting, duplicate, or malformed values fail
-the boot.
+The command line carries no clock parameter: the guest reads its TSC and
+LAPIC rates from the [time ABI](time-abi.md#rates) MSRs, and a
+`tsc_early_khz=` or `lapic_timer_hz=` token, from the caller or a snapshot,
+fails with `E_CMDLINE_CLOCK_TOKEN`.
 
 Callers may not supply `earlycon=`, `console=`, `virtio_mmio.device=`,
 `virtnet_ip=`, `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`, `virtfs_dir=`,

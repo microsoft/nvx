@@ -1649,6 +1649,8 @@ def verify_source_tree() -> None:
         "CONFIG_VIRTIO_FS=y",
         "CONFIG_FUSE_FS=y",
         *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
+        *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+        *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
     ):
         if setting not in config.splitlines():
             raise ScriptError(f"{config_path} is missing {setting}")

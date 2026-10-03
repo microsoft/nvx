@@ -116,7 +116,7 @@ ext4/EROFS root:
 - the xe9 and shared-status patches required by the microVM ABI.
 
 The kernel intentionally omits functionality found in a general Ubuntu kernel,
-including loadable modules, PCI, IPv6, user namespaces, fanotify, and
+including module loading, PCI, IPv6, user namespaces, fanotify, and
 SquashFS. Ubuntu support therefore means Ubuntu userland under the NVX kernel
 policy, not compatibility with every Ubuntu workload or host-integration
 feature.
@@ -243,12 +243,15 @@ Initial descriptors:
 | Guest | Initramfs | Default memory | Sandbox control |
 | --- | --- | ---: | --- |
 | `alpine` | `initramfs.cpio.gz` | 128 MiB | yes |
-| `ubuntu` | `initramfs-ubuntu.cpio.gz` | 256 MiB initially | no |
+| `ubuntu` | `initramfs-ubuntu.cpio.gz` | 512 MiB | no |
 
-The Ubuntu memory default is an engineering starting point, not a permanent
-ABI. Ubuntu Base contains approximately 86 MiB of uncompressed regular-file
-payload before supplemental packages and NVX helpers. CI must measure the
-actual boot high-water mark before documenting a supported minimum.
+The Ubuntu memory default is an engineering choice, not a permanent ABI. The
+initramfs unpacks to about 100 MiB in about 6,700 files, and the kernel
+unpacks it into a tmpfs root capped at half of RAM. At 256 MiB the unpack
+fails (`Initramfs unpacking failed: write error`) and the guest boots with a
+truncated root that cannot take writes such as `/etc/machine-id`. The
+smallest size measured to unpack it completely is 320 MiB, and 512 MiB leaves
+room for the image to grow and for the workload.
 
 ### Common build operations
 
@@ -379,7 +382,6 @@ policy. The implementation keeps genuinely common sources in a neutral
 
 ```text
 guest/common/init
-guest/common/nvx-exit
 guest/common/nvx-hostmount
 guest/common/nvx-init-agent
 guest/common/nvx-managed-agent.c
@@ -433,7 +435,10 @@ The Ubuntu initramfs boot remains identical to Alpine at the machine level:
 2. OpenVMM loads the selected Ubuntu initramfs as the Linux direct initrd.
 3. OpenVMM prepends its xe9/hvc console parameters and fixed virtio-mmio
    discovery.
-4. `/init` mounts procfs, sysfs, devtmpfs, and tmpfs.
+4. `/init` mounts procfs, sysfs, and devtmpfs, switches kernel module loading
+   off, mounts `/run`, and runs the time ABI boot step (`nvx-time boot`),
+   which steps the clock to host UTC and leaves the other boot checks and the
+   time daemon running in the background, before it mounts tmpfs.
 5. `/init` configures loopback, optional static networking, and optional
    HostFs.
 6. `/init` handles an explicit `nvx_exec` workload or opens a root shell.
@@ -462,7 +467,11 @@ The first supported Ubuntu initramfs must provide:
 - HostFs mounting;
 - clean `/sbin/nvx-exit`;
 - SMP boot with 1, 2, 4, and 8 vCPUs; and
-- snapshot and restore for blockless test scenarios.
+- snapshot and restore for blockless test scenarios, including the time ABI
+  guest obligations that the common `nvx-time` and `nvx-snapshot` implement
+  for every guest: the boot conformance check, the violation watcher and
+  wall-clock discipline, restore packet v4 with CPU activation, and the RCU
+  grace-period release.
 
 Alpine-only benchmark scenarios that depend on extra shell tools may remain
 Alpine-only initially. The test selector must reject unsupported Ubuntu

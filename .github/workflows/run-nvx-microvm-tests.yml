@@ -19,6 +19,13 @@ on:
         description: Base name of the compatible OpenVMM artifacts
         required: true
         type: string
+      debug-kernel:
+        description: >-
+          Run the same-host restore scenarios on the CI debug kernel instead
+          of the full suite and the Ubuntu tests
+        required: false
+        type: boolean
+        default: false
     secrets:
       OPENVMM_DEPLOY_KEY:
         description: SSH deploy key used to checkout OpenVMM
@@ -38,11 +45,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate runner
-        uses: ./.github/actions/validate-runner
-        with:
-          backend: ${{ inputs.backend }}
-
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
 
@@ -58,6 +60,13 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: guest-artifacts
+          path: build
+
+      - name: Download guest debug kernel
+        if: inputs.debug-kernel
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-debug-kernel
           path: build
 
       - name: Download OpenVMM executable
@@ -77,13 +86,21 @@ jobs:
         shell: bash
         run: chmod +x openvmm/target/release/openvmm
 
+      # Qualification verifies the downloaded OpenVMM's time ABI preflight.
+      - name: Validate runner
+        uses: ./.github/actions/validate-runner
+        with:
+          backend: ${{ inputs.backend }}
+          verify-openvmm: "true"
+
       - name: Run NVX microVM tests on Linux
         if: runner.os != 'Windows'
         shell: bash
         run: >-
           python3 scripts/nvx.py test-microvm
           --backend "${{ inputs.backend }}"
-          --output-dir "build/test-results/microvm-${{ inputs.backend }}"
+          ${{ inputs.debug-kernel && '--debug-kernel' || '' }}
+          --output-dir "build/test-results/microvm-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}"
 
       - name: Run NVX microVM tests on Windows
         if: runner.os == 'Windows'
@@ -91,10 +108,11 @@ jobs:
         run: >-
           python scripts\nvx.py test-microvm
           --backend "${{ inputs.backend }}"
-          --output-dir "build/test-results/microvm-${{ inputs.backend }}"
+          ${{ inputs.debug-kernel && '--debug-kernel' || '' }}
+          --output-dir "build/test-results/microvm-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}"
 
       - name: Run Ubuntu guest smoke tests on Linux
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !inputs.debug-kernel
         shell: bash
         run: >-
           python3 scripts/nvx.py test-microvm
@@ -110,7 +128,7 @@ jobs:
           --output-dir "build/test-results/ubuntu-${{ inputs.backend }}"
 
       - name: Run Ubuntu guest smoke tests on Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.debug-kernel
         shell: powershell
         run: >-
           python scripts\nvx.py test-microvm
@@ -126,7 +144,7 @@ jobs:
           --output-dir "build/test-results/ubuntu-${{ inputs.backend }}"
 
       - name: Run Azure Linux guest smoke tests on Linux
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !inputs.debug-kernel
         shell: bash
         run: >-
           python3 scripts/nvx.py test-microvm
@@ -143,7 +161,7 @@ jobs:
           --output-dir "build/test-results/azurelinux-${{ inputs.backend }}"
 
       - name: Run Azure Linux guest smoke tests on Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.debug-kernel
         shell: powershell
         run: >-
           python scripts\nvx.py test-microvm
@@ -160,7 +178,7 @@ jobs:
           --output-dir "build/test-results/azurelinux-${{ inputs.backend }}"
 
       - name: Run extended Ubuntu guest tests on Linux/KVM
-        if: inputs.backend == 'kvm'
+        if: inputs.backend == 'kvm' && !inputs.debug-kernel
         shell: bash
         run: >-
           python3 scripts/nvx.py test-microvm
@@ -174,7 +192,7 @@ jobs:
           --output-dir "build/test-results/ubuntu-kvm-extended"
 
       - name: Run Ubuntu sandbox layer smoke test on Linux
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !inputs.debug-kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -327,7 +345,7 @@ jobs:
           rm -rf "${share}" "${scratch}" "${outside}"
 
       - name: Run Ubuntu sandbox layer smoke test on Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.debug-kernel
         shell: powershell
         run: |
           $manifest = Get-Content -Raw build\ubuntu-distro.erofs.manifest.json |
@@ -516,7 +534,7 @@ jobs:
           Remove-Item -Recurse -Force $share, $scratch, $outside
 
       - name: Run aci_edge_sandboxes lifecycle test on Linux
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !inputs.debug-kernel
         shell: bash
         run: >-
           python3 scripts/nvx.py test-aci-edge-sandboxes
@@ -524,7 +542,7 @@ jobs:
           --output-dir "build/test-results/aci-edge-sandboxes-${{ inputs.backend }}"
 
       - name: Run aci_edge_sandboxes lifecycle test on Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.debug-kernel
         shell: powershell
         run: >-
           python scripts\nvx.py test-aci-edge-sandboxes
@@ -535,9 +553,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: nvx-microvm-tests-${{ inputs.backend }}
+          name: nvx-microvm-tests-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}
           path: |
             build/test-results/microvm-${{ inputs.backend }}
+            build/test-results/microvm-${{ inputs.backend }}-debug
             build/test-results/ubuntu-${{ inputs.backend }}
             build/test-results/ubuntu-kvm-extended
             build/test-results/azurelinux-${{ inputs.backend }}

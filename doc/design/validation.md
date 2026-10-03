@@ -23,7 +23,8 @@ are unchanged.
 
 The NVX-owned suite boots the same Linux-direct artifacts on the available native
 backend and covers IRQ0/RTC behavior, raw portb I/O, shutdown status, exact
-snapshot sequencing, repeated immutable restore, coherent downtime, fresh
+snapshot sequencing, repeated immutable restore, time ABI conformance and
+restore downtime, fresh
 generation IDs, `getrandom()` output, kernel UUIDs, temporary-file identifiers,
 entropy reseed, active console RX/TX, network policy and HTTP traffic, and live
 virtio-fs attachment revalidation, including a guest-created symbolic link held
@@ -65,7 +66,7 @@ and expanded allocation, and verifies artifact immutability. Unit coverage
 verifies that only an explicit MSHV processor target selects a runtime prefix,
 that the complete saved VP inventory is validated before filtering, that
 reduced-prefix saves are rejected, that dormant VP access fails cleanly, and
-that MSHV restored-TSC alignment targets only created VPs.
+that the MSHV synchronized TSC set targets only created VPs.
 Additional unit coverage exercises the control-console slot and attachment
 inventory, command-line spoofing rejection, the control-session record
 protocol against language-neutral golden vectors and boundary cases, the
@@ -75,11 +76,14 @@ the bounded outcome-report schema, egress-policy enforcement in the endpoint
 and virtio-net layers, the virtio-fs microVM profile and denied-path policy,
 state-unit quiesce and rollback, management exclusion at the snapshot
 boundary, management-RPC guest-exit propagation, output-drain completion and
-failures, and backend TSC repair. Hardware-dependent clock tests still require
-their native backend. A host-only benchmark measures snapshot publication,
-restore preparation, copy-on-write dirtying, and fresh-process restore
-preparation without booting a guest. Platform CI and the benchmark histories
-in `data/` provide the wider host matrix.
+failures, and the time ABI's rate, downtime, LAPIC, restore-packet, and
+manifest rules. Hardware-dependent time ABI tests, such as the synchronized TSC
+set, identity routing, and the CPU profile read-back, still require their
+native backend; the [time ABI test matrix](time-abi.md#test-matrix) lists the
+conformance, restore, soak, and performance coverage. A host-only benchmark
+measures snapshot publication, restore preparation, copy-on-write dirtying, and
+fresh-process restore preparation without booting a guest. Platform CI and the
+benchmark histories in `data/` provide the wider host matrix.
 
 The separate `test-adversarial` harness adaptively selects tracked
 deterministic primitives from these same process tests. Copilot has no tools

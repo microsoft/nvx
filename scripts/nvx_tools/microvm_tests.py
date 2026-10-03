@@ -26,6 +26,7 @@ from .benchmark import (
     SNAPSHOT_PROFILE_ENV,
     GuestCommandResult,
     GuestFailureReported,
+    contains_output_line,
     measure_once,
     parse_snapshot_profile_line,
     positive_float,
@@ -33,7 +34,6 @@ from .benchmark import (
     record_adversarial_openvmm_pid,
     smp_probe_script,
     snapshot_restore_command,
-    stable_clocksource_wait_script,
     workload_boot_command,
 )
 from .benchmark import (
@@ -58,6 +58,24 @@ from .control_session import ControlSession
 from .egress_policy import CompiledEgressPolicy, compile_policy_file
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .openvmm_process import OpenvmmProcess, TcpConsole
+from .time_abi import (
+    ABI_VERSION,
+    CHECK_CPU_BUDGET_US,
+    STATUS_TIMEOUT_SECONDS,
+    WARP_PROBE_COMPLETION_MARKER,
+    WARP_PROBE_FAILURE_MARKER,
+    WARP_SUMMARY_PREFIX,
+    TimeAbiFailure,
+    TimeAbiMonitor,
+    check_cpu_budget_us,
+    check_warp_probe,
+    describe_exit_status,
+    parse_fields,
+    parse_marker,
+    status_script,
+    warp_probe_script,
+    warp_rounds,
+)
 
 MICROVM_TEST_SCENARIOS = (
     "console-exit",
@@ -73,17 +91,17 @@ MICROVM_TEST_SCENARIOS = (
     "l3-l4-egress-policy",
     "managed-lifecycle",
     "network-snapshot",
+    "restore-downtime",
     "restore-memory",
     "restore-processors",
-    "restore-tsc-sync",
     "sandbox-blocks",
     "scratch-snapshot",
     "smp",
-    "smp-lapic",
     "smp-snapshot",
     "snapshot-core",
     "snapshot-tiers",
     "structured-outcome",
+    "time-abi-conformance",
     "virtio-net",
     "workload-identity",
 )
@@ -91,6 +109,21 @@ UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
 SANDBOX_CONTROL_SCENARIOS = frozenset(
     ("sandbox-blocks", "scratch-snapshot", "snapshot-tiers")
 )
+# The spec runs the same-host restore cases on the CI debug kernel, whose
+# soft-lockup and hung-task detectors the guest's time ABI watcher reports.
+DEBUG_KERNEL_SCENARIOS = (
+    "smp",
+    "smp-snapshot",
+    "restore-processors",
+    "restore-downtime",
+    "snapshot-tiers",
+)
+# Scenarios that run only when named, never in a default suite. The time ABI
+# hides TSC-deadline on every backend, so `smp` already runs on the one-shot
+# counting LAPIC; `smp-lapic` repeats it and asserts the counting-LAPIC facts,
+# for explicit local use (#286).
+MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic",)
+SMP_LAPIC_COUNTING_MARKER = b"NVX-SMP-LAPIC-COUNTING-OK"
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
@@ -144,17 +177,37 @@ BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
 GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
 GUEST_IDENTITY_COMPLETION_MARKER = b"NVX-GUEST-IDENTITY-OK"
 RESTORE_PROCESSORS_FAILURE_MARKER = b"NVX-RESTORE-PROCESSORS-FAIL"
-RESTORE_UNSTABLE_TSC_FAILURE = "NVX-RESTORE-PROCESSORS-FAIL unstable-tsc"
-# Records each VP's applied restore downtime and which restored MSHV APs were
-# aligned to the BSP counter.
-RESTORE_TSC_LOG_FILTER = (
-    "off,vmm_core::partition_unit::vp_set::tsc=debug,virt_mshv::x86_64::tsc=info"
-)
-TSC_CONTROL_PROCESSORS = 8
-TSC_CONTROL_ROUNDS = 20
-TSC_CONTROL_COMPLETION_MARKER = b"NVX-TSC-CONTROL-DONE"
-TSC_CONTROL_RESULT_PREFIX = "NVX-TSC-CONTROL-RESULT "
-HOST_CPUINFO = Path("/proc/cpuinfo")
+# Records the time ABI rates and restore clock report of each restore. These
+# records are written before the restored VPs run, so they never split a guest
+# console line; targets that log while the guest runs, such as virt_kvm's
+# hidden-MSR #GPs, could split a marker in the merged console stream.
+TIME_ABI_RESTORE_LOG_FILTER = "off,openvmm_core::worker::dispatch::time_abi=info"
+# The guest finishes a restore after the RCU grace-period release, which gives
+# up after rcu_cpu_stall_timeout (21 s), and the deferred C7 check.
+TIME_ABI_RESTORE_FINISH_SECONDS = 30.0
+# Every scenario captures a cold-booted guest (generation 0), and OpenVMM
+# cannot capture a restored one, so every restore carries generation 1.
+RESTORED_GENERATION = 1
+# The spec's long-downtime case: longer than the 21 s RCU stall timeout, at 1
+# and 8 vCPUs, with and without expedited grace periods.
+RESTORE_DOWNTIME_SECONDS = 30.0
+RESTORE_DOWNTIME_PROCESSORS = (1, 8)
+RESTORE_DOWNTIME_COMPLETION_MARKER = b"NVX-RESTORE-DOWNTIME-OK"
+RESTORE_DOWNTIME_PATH = "/tmp/nvx-restore-downtime"
+# Gives the RCU stall detector time to report a stall that the release of
+# the stall suppression exposed.
+RESTORE_DOWNTIME_SETTLE_SECONDS = 2
+# The guest's exhaustive CI check reports each check on each online CPU.
+TIME_ABI_EXHAUSTIVE_COMMAND = "/sbin/nvx-time exhaustive"
+TIME_ABI_EXHAUSTIVE_PREFIX = "NVX-TIME-ABI-EXHAUSTIVE: "
+TIME_ABI_EXHAUSTIVE_CHECKS = ("X1", "X2", "X3", "X4", "X5", "X6")
+TIME_ABI_EXHAUSTIVE_EXIT_PREFIX = "NVX-EXHAUSTIVE-EXIT status="
+TIME_ABI_EXHAUSTIVE_COMPLETION_MARKER = b"NVX-EXHAUSTIVE-DONE"
+TIME_ABI_EXHAUSTIVE_REPORTED_FAILURES = 8
+# One line per test-microvm run that sums up the time ABI evidence in its guest
+# logs, which CI uploads only for failed jobs.
+TIME_ABI_EVIDENCE_PREFIX = "NVX-TIME-ABI-EVIDENCE: "
+RESTORE_DOWNTIME_REPORT_PREFIX = "NVX-RESTORE-DOWNTIME "
 OUTCOME_TOP_LEVEL_FIELDS = frozenset(
     {
         "schema_version",
@@ -192,8 +245,20 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--scenario",
         action="append",
-        choices=MICROVM_TEST_SCENARIOS,
-        help="scenario to run; repeat to select multiple (default: all)",
+        choices=(*MICROVM_TEST_SCENARIOS, *MICROVM_EXPLICIT_SCENARIOS),
+        help=(
+            "scenario to run; repeat to select multiple (default: all except "
+            "smp-lapic, which runs only when named)"
+        ),
+    )
+    parser.add_argument(
+        "--debug-kernel",
+        action="store_true",
+        help=(
+            "boot the CI debug kernel (build/vmlinux-debug), which enables the "
+            "soft-lockup and hung-task detectors; selects the same-host restore "
+            "scenarios unless --scenario is given"
+        ),
     )
     parser.add_argument(
         "--processors",
@@ -245,6 +310,7 @@ def run_guest_script(
         log_path=log_path,
         boot_marker=BOOT_MARKER,
         contain_process_tree=contain_process_tree,
+        time_abi_status=True,
     )
 
 
@@ -252,7 +318,6 @@ def capture_snapshot(
     command: Sequence[str],
     snapshot_path: Path,
     *,
-    backend: str,
     timeout: float,
     windows_cpus: set[int] | None = None,
     processors: int | None = None,
@@ -267,7 +332,6 @@ def capture_snapshot(
     return _capture_snapshot(
         command,
         snapshot_path,
-        backend=backend,
         timeout=timeout,
         windows_cpus=windows_cpus,
         processors=processors,
@@ -279,6 +343,7 @@ def capture_snapshot(
         post_restore_script=post_restore_script,
         log_path=log_path,
         boot_marker=BOOT_MARKER,
+        time_abi_status=True,
     )
 
 
@@ -306,44 +371,6 @@ def _stage_script(
         f"cat >{path} <<'{delimiter}'\n".encode()
         + script.encode()
         + f"{delimiter}\nsh {path}\n".encode()
-    )
-
-
-def _snapshot_core_script(backend: str) -> str:
-    if backend == "kvm":
-        select_clocksource = (
-            "clock_tries=0\n"
-            "while ! grep -qw kvm-clock "
-            "/sys/devices/system/clocksource/clocksource0/available_clocksource "
-            "&& [ $clock_tries -lt 100 ]; do\n"
-            "    sleep 0.05\n"
-            "    clock_tries=$((clock_tries + 1))\n"
-            "done\n"
-            "grep -qw kvm-clock "
-            "/sys/devices/system/clocksource/clocksource0/available_clocksource "
-            "|| fail 46\n"
-            "echo kvm-clock >"
-            "/sys/devices/system/clocksource/clocksource0/current_clocksource"
-        )
-        validate_clocksource = (
-            '[ "$(cat /sys/devices/system/clocksource/clocksource0/'
-            'current_clocksource)" = kvm-clock ] || fail 46'
-        )
-    elif backend == "whp":
-        select_clocksource = stable_clocksource_wait_script()
-        validate_clocksource = (
-            '[ "$(cat /sys/devices/system/clocksource/clocksource0/'
-            'current_clocksource)" != tsc-early ] || fail 46'
-        )
-    elif backend == "mshv":
-        select_clocksource = ":"
-        validate_clocksource = ":"
-    else:
-        raise ValueError(f"unsupported snapshot-core backend {backend!r}")
-    return (
-        _read_script("snapshot-core.sh.in")
-        .replace("@SELECT_CLOCKSOURCE@", select_clocksource)
-        .replace("@VALIDATE_CLOCKSOURCE@", validate_clocksource)
     )
 
 
@@ -479,8 +506,10 @@ def _persist_console_log(
     output: bytes,
     log_path: Path,
 ) -> bytes:
+    # Only failure paths reach here with an open console; the monitor still
+    # scans the tail, but nothing is raised over the error being handled.
     if console is not None:
-        output = console.finish()
+        output = console.finish(check=False)
     log_path.write_bytes(output)
     return output
 
@@ -751,6 +780,7 @@ def run_managed_lifecycle(
             )
         )
         log_path = output_dir / "managed-lifecycle.log"
+        guest_log_path = output_dir / "managed-lifecycle-guest.log"
         process: subprocess.Popen[bytes] | None = None
         boot_console: TcpConsole | None = None
         with log_path.open("wb") as log:
@@ -769,7 +799,14 @@ def run_managed_lifecycle(
                     raise RuntimeError("failed to create control capability pipe")
                 process.stdin.write(capability)
                 process.stdin.close()
-                boot_console = TcpConsole.connect(boot_console_address, timeout)
+                # The guest console has no shell to query: init hands the boot
+                # to the managed agent, which serves the control console. The
+                # monitor still fails the run on a violation or failed check
+                # printed there, and a failed boot check powers the guest off
+                # with status 193, which fails the exit check below.
+                boot_console = TcpConsole.connect(
+                    boot_console_address, timeout, monitor=TimeAbiMonitor(command)
+                )
                 with ControlSession.connect(
                     Path(endpoint_value), capability, timeout
                 ) as session:
@@ -825,8 +862,10 @@ def run_managed_lifecycle(
                     raise RuntimeError("managed workload timeout was not reported")
                 result = process.wait(timeout=timeout)
                 if result != 0:
+                    reason = describe_exit_status(result)
                     raise RuntimeError(
                         f"managed OpenVMM process exited with status {result}"
+                        + (f": {reason}; see {log_path}" if reason else "")
                     )
                 report = _read_outcome_report(report_path)
                 _preserve_outcome_report(
@@ -845,11 +884,14 @@ def run_managed_lifecycle(
                     )
                 if not all(report["teardown"].values()):
                     raise RuntimeError("managed lifecycle reported incomplete teardown")
+                # Keep the guest log, then fail on anything the monitor found
+                # in the console's tail.
+                guest_log_path.write_bytes(boot_console.finish(check=False))
+                boot_console.finish()
+                boot_console = None
             finally:
                 if boot_console is not None:
-                    (output_dir / "managed-lifecycle-guest.log").write_bytes(
-                        boot_console.finish()
-                    )
+                    guest_log_path.write_bytes(boot_console.finish(check=False))
                 if process is not None and process.poll() is None:
                     process.terminate()
                     try:
@@ -1054,7 +1096,6 @@ def run_console_exit(
             capture_snapshot(
                 [*boot_command, "--snapshot-destination", str(snapshot_path)],
                 snapshot_path,
-                backend=backend,
                 timeout=timeout,
                 processors=processors,
                 post_restore_script=_render_script(
@@ -1085,6 +1126,32 @@ def run_console_exit(
                 )
 
 
+def counting_lapic_script(processors: int) -> str:
+    """Return a guest check that every CPU runs the one-shot counting LAPIC.
+
+    The time ABI hides TSC-deadline, so no CPU lists ``tsc_deadline_timer``,
+    and each online CPU's clockevent device is ``lapic``, not
+    ``lapic-deadline``.
+    """
+    return (
+        "if grep -qw tsc_deadline_timer /proc/cpuinfo; then\n"
+        "    echo SMP-LAPIC-FAIL tsc-deadline-exposed\n"
+        "    exit 89\n"
+        "fi\n"
+        "cpu=0\n"
+        f'while [ "$cpu" -lt {processors} ]; do\n'
+        "    device=$(cat /sys/devices/system/clockevents/clockevent$cpu/"
+        "current_device 2>/dev/null)\n"
+        '    if [ "$device" != lapic ]; then\n'
+        '        echo "SMP-LAPIC-FAIL cpu=$cpu clockevent=${device:-none}"\n'
+        "        exit 89\n"
+        "    fi\n"
+        "    cpu=$((cpu + 1))\n"
+        "done\n"
+        f"echo {SMP_LAPIC_COUNTING_MARKER.decode()}\n"
+    )
+
+
 def run_smp(
     executable: Path,
     kernel: Path,
@@ -1095,7 +1162,7 @@ def run_smp(
     memory_mib: int,
     timeout: float,
     log_path: Path,
-    force_lapic_timer: bool = False,
+    counting_lapic: bool = False,
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -1103,16 +1170,266 @@ def run_smp(
         kernel,
         initrd,
         memory_mib,
-        "quiet loglevel=0" + (" lapic=notscdeadline" if force_lapic_timer else ""),
+        "quiet loglevel=0",
         processors=processors,
     )
-    run_guest_script(
+    script = (
+        smp_probe_script(processors, exit_guest=False)
+        + warp_probe_script()
+        + "nvx-exit 0\n"
+    )
+    if counting_lapic:
+        script = counting_lapic_script(processors) + script
+    result = run_guest_script(
         command,
-        smp_probe_script(processors),
-        SMP_PROBE_COMPLETION_MARKER,
+        script,
+        WARP_PROBE_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
     )
+    output = result["text"].encode("utf-8")
+    if not contains_output_line(output, SMP_PROBE_COMPLETION_MARKER):
+        raise RuntimeError(
+            f"{processors}-vCPU guest finished without the SMP probe marker "
+            f"{SMP_PROBE_COMPLETION_MARKER.decode()!r}"
+        )
+    if counting_lapic:
+        if not contains_output_line(output, SMP_LAPIC_COUNTING_MARKER):
+            raise RuntimeError(
+                f"{processors}-vCPU guest finished without the counting-LAPIC "
+                f"marker {SMP_LAPIC_COUNTING_MARKER.decode()!r}"
+            )
+        # The boot line must also report the backend's LAPIC rate for all
+        # the CPUs; the status query alone doesn't check the CPU count.
+        monitor = TimeAbiMonitor(command)
+        monitor.feed(output)
+        monitor.finish()
+        try:
+            monitor.require_boot("the counting-LAPIC check", online_cpus=processors)
+        except TimeAbiFailure as error:
+            raise RuntimeError(f"{processors}-vCPU smp-lapic: {error}") from error
+    check_warp_probe(
+        result["text"],
+        cpus=processors,
+        context=f"{processors}-vCPU boot",
+        rounds=warp_rounds(processors),
+    )
+
+
+def _check_exhaustive_report(text: str, *, processors: int) -> None:
+    """Check that ``nvx-time exhaustive`` passed every check on every CPU."""
+    results: dict[tuple[str, int], dict[str, str]] = {}
+    summary: dict[str, str] | None = None
+    exit_status: str | None = None
+    problems: list[str] = []
+    for raw in text.splitlines():
+        line = raw.removesuffix("\r")
+        if line.startswith(TIME_ABI_EXHAUSTIVE_EXIT_PREFIX):
+            exit_status = line.removeprefix(TIME_ABI_EXHAUSTIVE_EXIT_PREFIX)
+            continue
+        if not line.startswith(TIME_ABI_EXHAUSTIVE_PREFIX):
+            continue
+        try:
+            fields = parse_fields(line.removeprefix(TIME_ABI_EXHAUSTIVE_PREFIX))
+            if fields.get("v") != ABI_VERSION:
+                raise ValueError(f"version {fields.get('v')!r} is not {ABI_VERSION}")
+            if "check" not in fields:
+                summary = fields
+                continue
+            key = (fields["check"], int(fields["cpu"]))
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(
+                f"time ABI exhaustive check: malformed line {line!r}: {error}"
+            ) from error
+        if key in results:
+            problems.append(f"{key[0]} reported cpu={key[1]} twice")
+        results[key] = fields
+    if exit_status is None:
+        raise RuntimeError(
+            "time ABI exhaustive check: the guest printed no exit status for "
+            f"{TIME_ABI_EXHAUSTIVE_COMMAND}"
+        )
+    if summary is None and not results:
+        raise RuntimeError(
+            f"time ABI exhaustive check: {TIME_ABI_EXHAUSTIVE_COMMAND} exited with "
+            f"status {exit_status} and reported nothing; the guest image does not "
+            "provide the exhaustive check"
+        )
+    failed = [
+        f"{check} cpu={cpu} failed: {fields.get('detail', '')}"
+        for (check, cpu), fields in sorted(results.items())
+        if fields.get("status") != "pass"
+    ]
+    if len(failed) > TIME_ABI_EXHAUSTIVE_REPORTED_FAILURES:
+        hidden = len(failed) - TIME_ABI_EXHAUSTIVE_REPORTED_FAILURES
+        failed = failed[:TIME_ABI_EXHAUSTIVE_REPORTED_FAILURES] + [
+            f"{hidden} more failed checks"
+        ]
+    problems.extend(failed)
+    for check in TIME_ABI_EXHAUSTIVE_CHECKS:
+        missing = [cpu for cpu in range(processors) if (check, cpu) not in results]
+        if missing:
+            problems.append(
+                f"{check} reported nothing for cpu {', '.join(map(str, missing))}"
+            )
+    if summary is None:
+        problems.append("no summary line")
+    else:
+        expected = {"status": "ok", "cpus": str(processors), "failures": "0"}
+        mismatched = [
+            f"{name}={summary.get(name)}"
+            for name, value in expected.items()
+            if summary.get(name) != value
+        ]
+        if mismatched:
+            problems.append(
+                f"summary reports {' '.join(mismatched)} for {processors} vCPUs"
+            )
+    if exit_status != "0":
+        problems.append(f"exit status {exit_status}")
+    if problems:
+        raise RuntimeError("time ABI exhaustive check: " + "; ".join(problems))
+
+
+def time_abi_evidence(output_dir: Path, backend: str | None = None) -> dict[str, str]:
+    """Sum up the time ABI evidence in the guest logs of one run.
+
+    nvx-time status prints every recorded phase, oldest first, and then its
+    runtime line, so a restored guest repeats its source's boot and capture
+    lines. Only each query's newest phase line counts: one boot per cold-boot
+    query and one restore per post-restore query. Where the guest reports a
+    check's CPU time (cpu_us), the evidence also counts the checks over
+    ``backend``'s CPU-time budget for their phase; it never gates on either.
+    """
+    offsets: list[int] = []
+    backward: list[int] = []
+    elapsed: dict[str, list[int]] = {"boot": [], "capture": [], "restore": []}
+    cpu: dict[str, list[int]] = {"boot": [], "capture": [], "restore": []}
+    over_budget: dict[str, int] = {"boot": 0, "capture": 0, "restore": 0}
+    exhaustive: list[str] = []
+    stalls: list[str] = []
+    for path in sorted(output_dir.rglob("*.log")):
+        newest: dict[str, str] | None = None
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.removesuffix("\r")
+            try:
+                if line.startswith(WARP_SUMMARY_PREFIX):
+                    fields = parse_fields(line.removeprefix(WARP_SUMMARY_PREFIX))
+                    offsets.append(int(fields["max_abs_offset_ns"]))
+                    backward.append(int(fields["max_backward_ns"]))
+                elif line.startswith(TIME_ABI_EXHAUSTIVE_PREFIX):
+                    fields = parse_fields(line.removeprefix(TIME_ABI_EXHAUSTIVE_PREFIX))
+                    if "check" not in fields:
+                        exhaustive.append(
+                            f"{fields['status']}/{fields['cpus']}/{fields['failures']}"
+                        )
+                elif line.startswith(RESTORE_DOWNTIME_REPORT_PREFIX):
+                    fields = parse_fields(
+                        line.removeprefix(RESTORE_DOWNTIME_REPORT_PREFIX)
+                    )
+                    stalls.append(fields["stalls"])
+                else:
+                    marker = parse_marker(line)
+                    if marker is None:
+                        continue
+                    if marker["phase"] != "runtime":
+                        newest = marker
+                        continue
+                    last, newest = newest, None
+                    if (
+                        last is None
+                        or last["status"] != "ok"
+                        or last["phase"] not in elapsed
+                    ):
+                        continue
+                    phase = last["phase"]
+                    elapsed[phase].append(int(last["elapsed_us"]))
+                    if "cpu_us" in last:
+                        cpu_us = int(last["cpu_us"])
+                        cpu[phase].append(cpu_us)
+                        budget = (
+                            None
+                            if backend is None
+                            else check_cpu_budget_us(backend, phase, int(last["cpus"]))
+                        )
+                        if budget is not None and cpu_us > budget:
+                            over_budget[phase] += 1
+            except (KeyError, ValueError):
+                continue
+    evidence: dict[str, str] = {}
+    if offsets:
+        evidence["warp_runs"] = str(len(offsets))
+        evidence["warp_max_abs_offset_ns"] = str(max(offsets))
+        evidence["warp_max_backward_ns"] = str(max(backward))
+    for phase, values in elapsed.items():
+        if values:
+            evidence[f"{phase}_markers"] = str(len(values))
+            evidence[f"{phase}_elapsed_us"] = f"{min(values)}-{max(values)}"
+        if cpu[phase]:
+            evidence[f"{phase}_cpu_us"] = f"{min(cpu[phase])}-{max(cpu[phase])}"
+            if backend is not None and phase in CHECK_CPU_BUDGET_US.get(backend, {}):
+                evidence[f"{phase}_cpu_over_budget"] = str(over_budget[phase])
+    if exhaustive:
+        evidence["exhaustive"] = ",".join(exhaustive)
+    if stalls:
+        evidence["downtime_stalls"] = ",".join(stalls)
+    return evidence
+
+
+def report_time_abi_evidence(
+    output_dir: Path, *, backend: str, guest: str, debug_kernel: bool
+) -> str | None:
+    """Print the run's evidence line and add it to the GitHub job summary."""
+    evidence = time_abi_evidence(output_dir, backend)
+    if not evidence:
+        return None
+    fields = {
+        "backend": backend,
+        "guest": guest,
+        "kernel": "debug" if debug_kernel else "default",
+        **evidence,
+    }
+    line = TIME_ABI_EVIDENCE_PREFIX + " ".join(f"{k}={v}" for k, v in fields.items())
+    print(line)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(f"\n`{line}`\n")
+    return line
+
+
+def run_time_abi_conformance(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    processors: int,
+    *,
+    memory_mib: int,
+    timeout: float,
+    log_path: Path,
+) -> None:
+    """Run the guest's exhaustive CI conformance check on every CPU."""
+    command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0",
+        processors=processors,
+    )
+    # One input line: the console echoes all of it before the check prints.
+    result = run_guest_script(
+        command,
+        f"{TIME_ABI_EXHAUSTIVE_COMMAND}; "
+        f'echo "{TIME_ABI_EXHAUSTIVE_EXIT_PREFIX}$?"; '
+        f"echo {TIME_ABI_EXHAUSTIVE_COMPLETION_MARKER.decode()}; nvx-exit 0\n",
+        TIME_ABI_EXHAUSTIVE_COMPLETION_MARKER,
+        timeout=timeout,
+        log_path=log_path,
+    )
+    _check_exhaustive_report(result["text"], processors=processors)
 
 
 def run_virtio_net(
@@ -2235,57 +2552,137 @@ def run_sandbox_blocks(
         )
 
 
+def _measure_restore(
+    command: Sequence[str],
+    *,
+    context: str,
+    environment: dict[str, str],
+    timeout: float,
+    log_path: Path,
+    failure_marker: bytes,
+) -> bytes:
+    """Restore a snapshot whose post-restore script ends with the restore
+    marker and a queued guest exit, and return the complete output."""
+    try:
+        measure_once(
+            command,
+            environment=environment,
+            timeout=timeout,
+            marker=RESTORE_MARKER,
+            marker_must_be_line=True,
+            guest_exit_prequeued=True,
+            log_path=log_path,
+            failure_marker=failure_marker,
+        )
+    except GuestFailureReported as error:
+        raise RuntimeError(
+            f"{context}: guest reported {error.line}\n"
+            f"--- OpenVMM output ---\n{error.output_tail}"
+        ) from error
+    return log_path.read_bytes()
+
+
+def _check_restore_warp(output: bytes, *, processors: int, context: str) -> None:
+    """Validate the warp probe that a post-restore script ran."""
+    if not contains_output_line(output, WARP_PROBE_COMPLETION_MARKER):
+        raise RuntimeError(f"{context}: the guest did not finish its warp probe")
+    check_warp_probe(
+        output.decode("utf-8", "replace"),
+        cpus=processors,
+        context=context,
+        rounds=warp_rounds(processors),
+    )
+
+
+def post_restore_checks() -> str:
+    """Return the guest checks that run after every restore of the restore
+    scenarios: the warp probe, then the time ABI status, which waits for the
+    restore's deferred checks."""
+    return warp_probe_script() + status_script()
+
+
+def _check_restore_status(
+    output: bytes,
+    command: Sequence[str],
+    *,
+    processors: int,
+    context: str,
+) -> dict[str, str]:
+    """Validate the restore line that the post-restore status query printed."""
+    monitor = TimeAbiMonitor(command)
+    try:
+        monitor.feed(output)
+        monitor.finish()
+        monitor.require_status("the restore checks finished")
+        return monitor.require_restore(
+            "the restore checks finished",
+            online_cpus=processors,
+            generation=RESTORED_GENERATION,
+        )
+    except TimeAbiFailure as error:
+        raise RuntimeError(f"{context}: {error}") from error
+
+
 def run_smp_snapshot(
     executable: Path,
     kernel: Path,
     initrd: Path,
     backend: str,
+    processor_counts: list[int],
     *,
     memory_mib: int,
     timeout: float,
     output_dir: Path,
 ) -> None:
-    processors = 2
-    with tempfile.TemporaryDirectory(prefix="nvx-smp-snapshot-") as temporary:
-        snapshot_path = Path(temporary) / "snapshot"
-        boot_command = workload_boot_command(
-            executable,
-            backend,
-            kernel,
-            initrd,
-            memory_mib,
-            "quiet loglevel=0",
-            processors=processors,
-        )
-        capture_snapshot(
-            [*boot_command, "--snapshot-destination", str(snapshot_path)],
-            snapshot_path,
-            backend=backend,
-            timeout=timeout,
-            processors=processors,
-            post_restore_script=smp_probe_script(processors, exit_guest=False),
-            log_path=output_dir / "smp-snapshot-capture.log",
-        )
-        fingerprint = _snapshot_fingerprint(snapshot_path)
-        for restore_index in range(2):
-            measure_once(
-                snapshot_restore_command(
+    counts = list(dict.fromkeys(processor_counts))
+    for processors in counts:
+        # The first snapshot is restored twice to prove that a restore leaves
+        # it reusable; the warp probe runs after every restore.
+        restores = 2 if processors == counts[0] else 1
+        with tempfile.TemporaryDirectory(prefix="nvx-smp-snapshot-") as temporary:
+            snapshot_path = Path(temporary) / "snapshot"
+            boot_command = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                processors=processors,
+            )
+            capture_snapshot(
+                [*boot_command, "--snapshot-destination", str(snapshot_path)],
+                snapshot_path,
+                timeout=timeout,
+                processors=processors,
+                post_restore_script=smp_probe_script(processors, exit_guest=False)
+                + post_restore_checks(),
+                log_path=output_dir / f"smp-snapshot-{processors}-capture.log",
+            )
+            fingerprint = _snapshot_fingerprint(snapshot_path)
+            for restore_index in range(restores):
+                context = f"{processors}-vCPU SMP restore {restore_index}"
+                restore_command = snapshot_restore_command(
                     executable,
                     backend,
                     snapshot_path,
                     processors=processors,
-                ),
-                environment=_restore_environment(),
-                timeout=timeout,
-                marker=RESTORE_MARKER,
-                marker_must_be_line=True,
-                guest_exit_prequeued=True,
-                log_path=output_dir / f"smp-snapshot-restore-{restore_index}.log",
-            )
-            if _snapshot_fingerprint(snapshot_path) != fingerprint:
-                raise RuntimeError(
-                    f"SMP restore {restore_index} modified snapshot artifacts"
                 )
+                output = _measure_restore(
+                    restore_command,
+                    context=context,
+                    environment=_restore_environment(),
+                    timeout=timeout,
+                    log_path=output_dir
+                    / f"smp-snapshot-{processors}-restore-{restore_index}.log",
+                    failure_marker=WARP_PROBE_FAILURE_MARKER,
+                )
+                _check_restore_warp(output, processors=processors, context=context)
+                _check_restore_status(
+                    output, restore_command, processors=processors, context=context
+                )
+                if _snapshot_fingerprint(snapshot_path) != fingerprint:
+                    raise RuntimeError(f"{context} modified snapshot artifacts")
 
 
 def _restore_vp_bindings(output: bytes) -> list[int]:
@@ -2336,94 +2733,6 @@ def _check_restore_vp_bindings(
         )
 
 
-def _tsc_control_verdict(text: str) -> str:
-    """Summarize the fresh-boot TSC control result printed by the guest."""
-    for line in text.splitlines():
-        line = line.removesuffix("\r")
-        if line.startswith(TSC_CONTROL_RESULT_PREFIX):
-            fields = line.removeprefix(TSC_CONTROL_RESULT_PREFIX)
-            state, _, activations = fields.partition(" activations=")
-            if state == "stable" and activations.isdecimal():
-                return (
-                    "fresh-boot TSC control: no TSC instability across "
-                    f"{activations} CPU activations without snapshot restore"
-                )
-            if state == "unstable" and activations.isdecimal():
-                return (
-                    "fresh-boot TSC control: Linux also found TSC instability "
-                    f"without snapshot restore after {activations} CPU activations"
-                )
-            break
-    return "fresh-boot TSC control did not report a result"
-
-
-def _host_invariant_tsc_note(cpuinfo: Path = HOST_CPUINFO) -> str:
-    """Report whether a Linux host CPU exposes an invariant TSC.
-
-    Guests on a host without one intermittently see cross-vCPU TSC warps
-    whether or not they were restored (#211).
-    """
-    try:
-        text = cpuinfo.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    for line in text.splitlines():
-        name, _, flags = line.partition(":")
-        if name.strip() == "flags":
-            if "nonstop_tsc" in flags.split():
-                return "host CPU exposes an invariant TSC (nonstop_tsc)\n"
-            return (
-                "host CPU does not expose an invariant TSC (nonstop_tsc); guests "
-                "on this host intermittently see cross-vCPU TSC warps\n"
-            )
-    return ""
-
-
-def run_fresh_boot_tsc_control(
-    executable: Path,
-    kernel: Path,
-    initrd: Path,
-    backend: str,
-    *,
-    memory_mib: int,
-    timeout: float,
-    log_path: Path,
-) -> str:
-    """Check whether a never-restored guest reproduces a restore TSC failure.
-
-    The guest boots every processor with Linux's cross-CPU TSC warp check
-    forced, then repeatedly reactivates each AP against CPU 0. The result only
-    classifies the failure that triggered it.
-    """
-    command = workload_boot_command(
-        executable,
-        backend,
-        kernel,
-        initrd,
-        memory_mib,
-        "quiet loglevel=0 clearcpuid=tsc_adjust",
-        processors=TSC_CONTROL_PROCESSORS,
-    )
-    script = _render_script(
-        "tsc-sync-control.sh.in",
-        PROCESSORS=str(TSC_CONTROL_PROCESSORS),
-        ROUNDS=str(TSC_CONTROL_ROUNDS),
-    )
-    try:
-        result = run_guest_script(
-            command,
-            script,
-            TSC_CONTROL_COMPLETION_MARKER,
-            timeout=timeout,
-            log_path=log_path,
-        )
-    except Exception as error:
-        # The control only annotates the restore failure that triggered it.
-        summary = str(error).splitlines()[0] if str(error) else type(error).__name__
-        return f"fresh-boot TSC control did not complete: {summary}"
-    return _tsc_control_verdict(result["text"])
-
-
 def run_restore_processors(
     executable: Path,
     kernel: Path,
@@ -2434,19 +2743,17 @@ def run_restore_processors(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
-    check_tsc_sync: bool = False,
 ) -> None:
     capacity = 8
     boot_online = 1
     cmdline = f"quiet loglevel=0 maxcpus={boot_online}"
-    script = _read_script("restore-processors.sh")
-    if check_tsc_sync:
-        cmdline += " clearcpuid=tsc_adjust"
-        script = _read_script("restore-tsc-sync.sh") + script
+    # The warp probe replaces the guest TSC warp guard: it measures the skew
+    # between every pair of CPUs, including the ones the restore activated.
+    script = _read_script("restore-processors.sh") + post_restore_checks()
     # The VP-binding lifecycle records identify the VPs that each restore
     # instantiates without changing restore behavior.
     environment = _restore_environment()
-    environment["OPENVMM_LOG"] = RESTORE_TSC_LOG_FILTER
+    environment["OPENVMM_LOG"] = TIME_ABI_RESTORE_LOG_FILTER
     environment[SNAPSHOT_PROFILE_ENV] = "1"
     with tempfile.TemporaryDirectory(prefix="nvx-restore-processors-") as temporary:
         snapshot_path = Path(temporary) / "snapshot"
@@ -2462,7 +2769,6 @@ def run_restore_processors(
         capture_snapshot(
             [*boot_command, "--snapshot-destination", str(snapshot_path)],
             snapshot_path,
-            backend=backend,
             timeout=timeout,
             processors=boot_online,
             post_restore_script=script,
@@ -2474,44 +2780,37 @@ def run_restore_processors(
         for target in targets:
             name = "untargeted" if target is None else str(target)
             online = boot_online if target is None else target
+            restore_command = snapshot_restore_command(
+                executable,
+                backend,
+                snapshot_path,
+                processors=capacity,
+                restore_processors=target,
+            )
+            output = _measure_restore(
+                restore_command,
+                context=_restore_label(target),
+                environment=environment,
+                timeout=timeout,
+                log_path=output_dir / f"restore-processors-{name}.log",
+                failure_marker=RESTORE_PROCESSORS_FAILURE_MARKER,
+            )
             marker = f"NVX-RESTORE-PROCESSORS-OK count={online}".encode()
-            log_path = output_dir / f"restore-processors-{name}.log"
-            try:
-                measure_once(
-                    snapshot_restore_command(
-                        executable,
-                        backend,
-                        snapshot_path,
-                        processors=capacity,
-                        restore_processors=target,
-                    ),
-                    environment=environment,
-                    timeout=timeout,
-                    marker=marker,
-                    marker_must_be_line=True,
-                    guest_exit_prequeued=True,
-                    log_path=log_path,
-                    failure_marker=RESTORE_PROCESSORS_FAILURE_MARKER,
-                )
-            except GuestFailureReported as error:
-                verdict = ""
-                if error.line == RESTORE_UNSTABLE_TSC_FAILURE:
-                    verdict = run_fresh_boot_tsc_control(
-                        executable,
-                        kernel,
-                        initrd,
-                        backend,
-                        memory_mib=memory_mib,
-                        timeout=timeout,
-                        log_path=output_dir / "restore-processors-tsc-control.log",
-                    )
-                    verdict += "\n" + _host_invariant_tsc_note()
+            if not contains_output_line(output, marker):
                 raise RuntimeError(
-                    f"{_restore_label(target)}: guest reported {error.line}\n"
-                    f"{verdict}--- OpenVMM output ---\n{error.output_tail}"
-                ) from error
+                    f"{_restore_label(target)} did not report {marker.decode()!r}"
+                )
+            _check_restore_warp(
+                output, processors=online, context=_restore_label(target)
+            )
+            _check_restore_status(
+                output,
+                restore_command,
+                processors=online,
+                context=_restore_label(target),
+            )
             _check_restore_vp_bindings(
-                log_path.read_bytes(),
+                output,
                 backend,
                 target=target,
                 capacity=capacity,
@@ -2520,6 +2819,97 @@ def run_restore_processors(
                 raise RuntimeError(
                     f"{_restore_label(target)} modified snapshot artifacts"
                 )
+
+
+def run_restore_downtime(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Restore snapshots after a downtime longer than the RCU stall timeout.
+
+    Every snapshot is captured first, so one shared downtime window covers
+    them all. The restored guest must finish its time ABI restore, report no
+    RCU stall, and show that monotonic time advanced by the downtime.
+    """
+    cases = [
+        (processors, expedited)
+        for processors in RESTORE_DOWNTIME_PROCESSORS
+        for expedited in (False, True)
+    ]
+    check = _render_script(
+        "restore-downtime.sh.in",
+        SETTLE_SECONDS=str(RESTORE_DOWNTIME_SETTLE_SECONDS),
+        MIN_UPTIME_SECONDS=str(int(RESTORE_DOWNTIME_SECONDS)),
+    )
+    environment = {"OPENVMM_LOG": TIME_ABI_RESTORE_LOG_FILTER}
+    with tempfile.TemporaryDirectory(prefix="nvx-restore-downtime-") as temporary:
+        snapshots: list[tuple[str, int, Path]] = []
+        for processors, expedited in cases:
+            name = f"{processors}-vcpu" + ("-expedited" if expedited else "")
+            cmdline = "quiet loglevel=0" + (
+                " rcupdate.rcu_expedited=1" if expedited else ""
+            )
+            snapshot_path = Path(temporary) / name
+            boot_command = workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                cmdline,
+                processors=processors,
+            )
+            # The restored guest keeps running after the restore marker so the
+            # harness can stage its downtime check; the post-restore status
+            # query waits for the restore to finish first.
+            capture_snapshot(
+                [*boot_command, "--snapshot-destination", str(snapshot_path)],
+                snapshot_path,
+                timeout=timeout,
+                processors=processors,
+                teardown_mode="host-terminate",
+                post_restore_script=post_restore_checks(),
+                log_path=output_dir / f"restore-downtime-{name}-capture.log",
+            )
+            snapshots.append((name, processors, snapshot_path))
+        restore_after = time.monotonic() + RESTORE_DOWNTIME_SECONDS
+        for name, processors, snapshot_path in snapshots:
+            time.sleep(max(0.0, restore_after - time.monotonic()))
+            context = f"{name} restore after a {RESTORE_DOWNTIME_SECONDS:g} s downtime"
+            with OpenvmmProcess(
+                snapshot_restore_command(
+                    executable,
+                    backend,
+                    snapshot_path,
+                    processors=processors,
+                ),
+                output_dir / f"restore-downtime-{name}.log",
+                environment=environment,
+            ) as process:
+                process.wait_for_line(RESTORE_MARKER, timeout)
+                process.wait_for_time_abi("restore", TIME_ABI_RESTORE_FINISH_SECONDS)
+                _stage_script(
+                    process, RESTORE_DOWNTIME_PATH, "NVX_RESTORE_DOWNTIME", check
+                )
+                process.wait_for_line(RESTORE_DOWNTIME_COMPLETION_MARKER, timeout)
+                result = process.wait(timeout)
+            if result.returncode != 0:
+                error = process.time_abi.exit_error(result.returncode)
+                raise RuntimeError(f"{context}: {error}")
+            _check_restore_warp(result.output, processors=processors, context=context)
+            try:
+                process.time_abi.require_status(context)
+                process.time_abi.require_restore(
+                    context, online_cpus=processors, generation=RESTORED_GENERATION
+                )
+            except TimeAbiFailure as error:
+                raise RuntimeError(f"{context}: {error}") from error
 
 
 def run_restore_memory(
@@ -2553,7 +2943,6 @@ def run_restore_memory(
                 str(snapshot_path),
             ],
             snapshot_path,
-            backend=backend,
             timeout=timeout,
             processors=1,
             post_restore_script=_read_script("restore-memory.sh"),
@@ -2594,6 +2983,60 @@ def run_restore_memory(
                 )
 
 
+CANCELED_CAPTURE_RCU_PREFIX = b"NVX-CANCELED-CAPTURE-RCU "
+CANCELED_CAPTURE_DONE_MARKER = b"NVX-CANCELED-CAPTURE-DONE"
+RCU_STALL_SUPPRESS_PATH = "/sys/module/rcupdate/parameters/rcu_cpu_stall_suppress"
+
+
+def canceled_capture_checks() -> str:
+    """Return the guest checks after a snapshot request that OpenVMM released:
+    the time ABI status, then whether RCU stall detection is still suppressed."""
+    rcu = CANCELED_CAPTURE_RCU_PREFIX.decode()
+    done = CANCELED_CAPTURE_DONE_MARKER.decode()
+    # A quote pair splits each marker, so the console's echo of the command,
+    # which the tty may wrap, never contains it.
+    return (
+        status_script()
+        + f'echo "{rcu[:4]}""{rcu[4:]}$(cat {RCU_STALL_SUPPRESS_PATH})"; '
+        + f'echo "{done[:4]}""{done[4:]}"\n'
+    )
+
+
+def check_canceled_capture(output: bytes, command: Sequence[str]) -> None:
+    """Check that a released snapshot request left the source as it was.
+
+    The snapshot agent saves and overrides the stall detectors' settings
+    before the request; when the request returns in the source, it removes its
+    barriers and restores the saved values (nvx-time cancel-capture). The
+    source then reports a passing status at generation 0 with no restore, and
+    RCU stall detection is no longer suppressed.
+    """
+    context = "after the released snapshot request"
+    monitor = TimeAbiMonitor(command)
+    try:
+        monitor.feed(output)
+        monitor.finish()
+        monitor.require_status("its checks finished")
+        monitor.require_boot("its checks finished")
+    except TimeAbiFailure as error:
+        raise RuntimeError(f"{context}: {error}") from error
+    if monitor.restores:
+        raise RuntimeError(
+            f"{context}: nvx-time status reported a restore at "
+            f"generation={monitor.restores[-1].get('generation')}, but the "
+            "request returned in the source"
+        )
+    try:
+        value = _single_marker_value(output, CANCELED_CAPTURE_RCU_PREFIX)
+    except RuntimeError as error:
+        raise RuntimeError(f"{context}: {error}") from error
+    if value != b"0":
+        raise RuntimeError(
+            f"{context}: rcu_cpu_stall_suppress is {value.decode(errors='replace')!r}, "
+            "not 0: the snapshot agent did not restore the value it saved"
+        )
+
+
 def run_snapshot_core(
     executable: Path,
     kernel: Path,
@@ -2620,6 +3063,12 @@ def run_snapshot_core(
         process.wait_for(BOOT_MARKER, timeout)
         process.send_line("nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK")
         process.wait_for_line(no_destination_marker, timeout)
+        checks_start = len(process.output)
+        process.send_bytes(canceled_capture_checks().encode())
+        process.wait_for_line(
+            CANCELED_CAPTURE_DONE_MARKER, max(timeout, STATUS_TIMEOUT_SECONDS)
+        )
+        check_canceled_capture(process.output[checks_start:], no_destination_command)
         process.send_line("nvx-exit 0")
         result = process.wait(timeout)
     if result.returncode != 0:
@@ -2652,7 +3101,7 @@ def run_snapshot_core(
                 process,
                 "/tmp/nvx-snapshot-core",
                 "NVX_SNAPSHOT_CORE",
-                _snapshot_core_script(backend),
+                _read_script("snapshot-core.sh"),
             )
             source = process.wait(timeout)
         if source.returncode != 0:
@@ -2802,7 +3251,14 @@ def run_console_snapshot(
             output_dir / "console-snapshot-capture-process.log",
         ) as process:
             try:
-                console = TcpConsole.connect(address, timeout)
+                # The guest's shell is on this virtio console, so it answers
+                # the cold boot's status query there.
+                console = TcpConsole.connect(
+                    address,
+                    timeout,
+                    monitor=TimeAbiMonitor(capture_command),
+                    time_abi_status=True,
+                )
                 console.wait_for(BOOT_MARKER, timeout)
                 console.wait_for(b"/ # ", timeout)
                 console.send_bytes(
@@ -2844,12 +3300,17 @@ def run_console_snapshot(
             )
             restored_console = b""
             console = None
+            restore_command = snapshot_restore_command(
+                executable, backend, snapshot_path
+            )
             with OpenvmmProcess(
-                snapshot_restore_command(executable, backend, snapshot_path),
+                restore_command,
                 output_dir / f"console-snapshot-restore-{restore_index}-process.log",
             ) as process:
                 try:
-                    console = TcpConsole.connect(address, timeout)
+                    console = TcpConsole.connect(
+                        address, timeout, monitor=TimeAbiMonitor(restore_command)
+                    )
                     if backend != "mshv":
                         console.wait_for_line(CONSOLE_RX_RESTORED_MARKER, timeout)
                         console.wait_for_line(CONSOLE_TX_DONE_MARKER, timeout)
@@ -3796,6 +4257,13 @@ echo {repair_marker}"""
         REPAIR_ACTION=repair_action,
         RELEASED_MARKER=f"{prefix}-RELEASED",
         LAYER_MARKER=f"{prefix}-LAYER-",
+        # After the tier's assertions, the restored guest asks nvx-time status,
+        # which waits for the restore's deferred checks, the debug kernel's
+        # watchdogs among them, and prints the restore line; the script turns
+        # off set -e first, so a failing status still reports its exit status.
+        # It then waits for one byte from the host before nvx-exit, so the
+        # query's lines reach the virtio console before the VM stops.
+        STATUS_QUERY=status_script().rstrip("\n"),
     )
 
 
@@ -3869,7 +4337,14 @@ def _run_snapshot_tier(
             output_dir / f"snapshot-tier-{tier}-capture-process.log",
         ) as process:
             try:
-                console = TcpConsole.connect(address, timeout)
+                # The guest's shell is on this virtio console, so it answers
+                # the cold boot's status query there.
+                console = TcpConsole.connect(
+                    address,
+                    timeout,
+                    monitor=TimeAbiMonitor(capture_command),
+                    time_abi_status=True,
+                )
                 console.wait_for(BOOT_MARKER, timeout)
                 script = _snapshot_tier_script(tier)
                 console.send_bytes(
@@ -3949,13 +4424,20 @@ def _run_snapshot_tier(
             output_dir / f"snapshot-tier-{tier}-restore-process.log",
         ) as process:
             try:
-                console = TcpConsole.connect(address, timeout)
+                console = TcpConsole.connect(
+                    address, timeout, monitor=TimeAbiMonitor(restore_command)
+                )
                 console.send_bytes(b"Z")
                 console.wait_for(repair_marker, timeout)
                 if workload_start:
                     console.wait_for(workload_marker, timeout)
                 console.wait_for(released_marker, timeout)
                 console.wait_for(expected_layer, timeout)
+                # The guest's status query waits for the restore's deferred
+                # checks. It then waits for one byte from here before nvx-exit,
+                # so the query's lines reach the console before the VM stops.
+                console.wait_for_time_abi_status(STATUS_TIMEOUT_SECONDS)
+                console.send_bytes(b"Z")
                 restored = process.wait(timeout)
                 restore_console = console.finish()
                 console = None
@@ -3972,6 +4454,14 @@ def _run_snapshot_tier(
             raise RuntimeError(f"{tier} input crossed the restore gate")
         if restore_lines.count(expected_layer) != 1:
             raise RuntimeError(f"{tier} restore observed the wrong layer binding")
+        # The restored guest's status query, after the tier's assertions, must
+        # report a passing restore line, so the deferred restore checks ran.
+        _check_restore_status(
+            restore_console,
+            restore_command,
+            processors=int(restore_command[restore_command.index("--processors") + 1]),
+            context=f"{tier} restore",
+        )
         if _snapshot_fingerprint(snapshot) != fingerprint:
             raise RuntimeError(f"{tier} restore modified snapshot payloads")
 
@@ -3991,7 +4481,9 @@ def _run_snapshot_tier(
                 output_dir / f"snapshot-tier-{tier}-timeout-process.log",
             ) as process:
                 try:
-                    timeout_console = TcpConsole.connect(address, timeout)
+                    timeout_console = TcpConsole.connect(
+                        address, timeout, monitor=TimeAbiMonitor(timeout_command)
+                    )
                     timeout_console.send_bytes(b"Z")
                     timed_out = process.wait(timeout)
                     timeout_output = timeout_console.finish()
@@ -4042,15 +4534,47 @@ def run_snapshot_tiers(
         )
 
 
+def require_debug_kernel(config: Path) -> None:
+    """Fail unless a kernel config enables the debug kernel's detectors.
+
+    The guest's C11 check passes vacuously on a kernel without them, so a
+    production kernel would otherwise pass the debug-kernel job.
+    """
+    lines = set(
+        require_file(config, "microVM debug kernel config")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    missing = [
+        option
+        for option in KernelBuildConstants.DEBUG_WATCHDOG_CONFIG
+        if option not in lines
+    ]
+    if missing:
+        raise ScriptError(
+            f"{config} is not the CI debug kernel config; it lacks "
+            + ", ".join(missing)
+        )
+
+
 def run(args: argparse.Namespace) -> int:
     validate_openvmm_test_backend(args.backend)
     descriptor = guest_descriptor(args.guest)
     if args.memory_mib is None:
         args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(
-        artifact_path(KernelBuildConstants.BINARY_NAME), "microVM Linux direct kernel"
-    )
+    debug_kernel = getattr(args, "debug_kernel", False)
+    if debug_kernel:
+        require_debug_kernel(artifact_path(KernelBuildConstants.DEBUG_CONFIG_NAME))
+        kernel = require_file(
+            artifact_path(KernelBuildConstants.DEBUG_BINARY_NAME),
+            "microVM Linux debug kernel",
+        )
+    else:
+        kernel = require_file(
+            artifact_path(KernelBuildConstants.BINARY_NAME),
+            "microVM Linux direct kernel",
+        )
     initrd = require_file(
         artifact_path(descriptor.initramfs_name),
         f"microVM {descriptor.distribution} initramfs",
@@ -4063,10 +4587,9 @@ def run(args: argparse.Namespace) -> int:
     if not descriptor.sandbox_control:
         unsupported_scenarios.update(SANDBOX_CONTROL_SCENARIOS)
     if args.scenario is None:
+        defaults = DEBUG_KERNEL_SCENARIOS if debug_kernel else MICROVM_TEST_SCENARIOS
         scenarios = tuple(
-            scenario
-            for scenario in MICROVM_TEST_SCENARIOS
-            if scenario not in unsupported_scenarios
+            scenario for scenario in defaults if scenario not in unsupported_scenarios
         )
     else:
         scenarios = tuple(dict.fromkeys(args.scenario))
@@ -4258,7 +4781,7 @@ def run(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             output_dir=output_dir,
         )
-    for scenario, force_lapic_timer in (("smp", False), ("smp-lapic", True)):
+    for scenario, counting_lapic in (("smp", False), ("smp-lapic", True)):
         if scenario not in scenarios:
             continue
         for processors in dict.fromkeys(args.processors):
@@ -4275,7 +4798,7 @@ def run(args: argparse.Namespace) -> int:
                 memory_mib=args.memory_mib,
                 timeout=args.timeout,
                 log_path=output_dir / f"{scenario}-{processors}.log",
-                force_lapic_timer=force_lapic_timer,
+                counting_lapic=counting_lapic,
             )
     if "sandbox-blocks" in scenarios:
         print(f"Running microVM sandbox-block correctness on OpenVMM/{args.backend}")
@@ -4306,6 +4829,7 @@ def run(args: argparse.Namespace) -> int:
             kernel,
             initrd,
             args.backend,
+            args.processors,
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
@@ -4324,20 +4848,19 @@ def run(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             output_dir=output_dir,
         )
-    if "restore-tsc-sync" in scenarios:
-        print(f"Running microVM restore TSC synchronization on OpenVMM/{args.backend}")
-        tsc_output_dir = output_dir / "restore-tsc-sync"
-        tsc_output_dir.mkdir(parents=True, exist_ok=True)
-        run_restore_processors(
+    if "restore-downtime" in scenarios:
+        print(
+            "Running microVM long-downtime restore correctness on "
+            f"OpenVMM/{args.backend}"
+        )
+        run_restore_downtime(
             executable,
             kernel,
             initrd,
             args.backend,
-            args.processors,
             memory_mib=args.memory_mib,
             timeout=args.timeout,
-            output_dir=tsc_output_dir,
-            check_tsc_sync=True,
+            output_dir=output_dir,
         )
     if "restore-memory" in scenarios:
         print(f"Running microVM restore-memory correctness on OpenVMM/{args.backend}")
@@ -4382,6 +4905,22 @@ def run(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             output_dir=output_dir,
         )
+    if "time-abi-conformance" in scenarios:
+        processors = max(args.processors)
+        print(
+            f"Running microVM time ABI conformance ({processors} vCPU) "
+            f"on OpenVMM/{args.backend}"
+        )
+        run_time_abi_conformance(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            processors,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            log_path=output_dir / "time-abi-conformance.log",
+        )
     if "virtio-net" in scenarios:
         print(f"Running microVM virtio-net correctness on OpenVMM/{args.backend}")
         run_virtio_net(
@@ -4394,5 +4933,11 @@ def run(args: argparse.Namespace) -> int:
             log_path=output_dir / "virtio-net.log",
         )
 
+    report_time_abi_evidence(
+        output_dir,
+        backend=args.backend,
+        guest=descriptor.name,
+        debug_kernel=debug_kernel,
+    )
     print(f"Wrote microVM correctness logs to {output_dir}")
     return 0

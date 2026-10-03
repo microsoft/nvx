@@ -5,6 +5,13 @@ inputs:
   backend:
     description: Virtualization backend expected on the runner
     required: true
+  verify-openvmm:
+    description: >-
+      Also check the CPU profile with the downloaded OpenVMM (doctor H2) and
+      verify its time ABI preflight (doctor H3); OpenVMM and the guest
+      artifacts must be in their build paths
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -117,6 +124,15 @@ runs:
           throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
         }
 
+    # Host time. On Linux, the nonstop_tsc gate stays fail-closed in front of
+    # the time ABI host qualification (doc/design/time-abi.md, "Host
+    # qualification"), which then checks the backend, the CPU fingerprint and
+    # generation, and the TSC rate stability on its short CI schedule, and,
+    # in jobs that downloaded OpenVMM, its CPU profile check (H2) and
+    # preflight (H3); other jobs qualify without OpenVMM. These checks are
+    # host-level, and the guest warp probe (H6) runs only in the microVM
+    # scenarios, so the gate keeps a host whose guests warp (#265) out of
+    # every other job.
     - name: Validate host TSC
       if: runner.os != 'Windows'
       shell: bash
@@ -143,6 +159,39 @@ runs:
             ;;
         esac
 
+    - name: Qualify host time on Linux
+      if: runner.os != 'Windows'
+      shell: bash
+      run: >-
+        python3 scripts/nvx.py doctor
+        --backend "${{ inputs.backend }}"
+        --checks H1 H2 H4
+        ${{ inputs.verify-openvmm == 'true' && 'H3 --cpu-fingerprint "${RUNNER_TEMP}/nvx-cpu-fingerprint.json"' || '--no-openvmm' }}
+        --ci-schedule
+        --summary "${GITHUB_STEP_SUMMARY}"
+
+    - name: Qualify host time on Windows
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: >-
+        python scripts\nvx.py doctor
+        --backend "${{ inputs.backend }}"
+        --checks H1 H2 H4
+        ${{ inputs.verify-openvmm == 'true' && 'H3 --cpu-fingerprint "$env:RUNNER_TEMP\nvx-cpu-fingerprint.json"' || '--no-openvmm' }}
+        --ci-schedule
+        --summary "$env:GITHUB_STEP_SUMMARY"
+
+    # A failed CPU profile check keeps OpenVMM's fingerprint, which names the
+    # host's whole CPU surface for a new generation or profile revision.
+    - name: Upload the CPU fingerprint
+      if: failure() && inputs.verify-openvmm == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        path: ${{ runner.temp }}/nvx-cpu-fingerprint.json
+        name: cpu-fingerprint-${{ github.job }}-${{ inputs.backend }}-${{ runner.name }}-attempt-${{ github.run_attempt }}
+        if-no-files-found: ignore
+        overwrite: true
+        retention-days: 7
     - name: Validate KVM
       if: inputs.backend == 'kvm'
       shell: bash

@@ -35,11 +35,16 @@ class KernelBuildConstants:
     BUILD_STAMP_NAME: Final = ".nvx-build.json"
     BUILD_CONFIG_NAME: Final = ".config"
     INPUT_CONFIG: Final = Path("kernel") / "config-microvm"
+    DEBUG_CONFIG_FRAGMENT: Final = Path("kernel") / "config-microvm-debug"
     PATCH_DIRECTORY: Final = Path("kernel") / "patches"
     BINARY_NAME: Final = "vmlinux"
     CONFIG_NAME: Final = f"{BINARY_NAME}.config"
     PROVENANCE_NAME: Final = "vmlinux.provenance.json"
     PROVENANCE_FORMAT: Final = 1
+    DEBUG_WORK_DIRECTORY_NAME: Final = "linux-debug"
+    DEBUG_BINARY_NAME: Final = "vmlinux-debug"
+    DEBUG_CONFIG_NAME: Final = f"{DEBUG_BINARY_NAME}.config"
+    DEBUG_PROVENANCE_NAME: Final = f"{DEBUG_BINARY_NAME}.provenance.json"
     REQUIRED_VIRTIO_CONSOLE_CONFIG: Final = (
         "CONFIG_HVC_DRIVER=y",
         "CONFIG_VIRTIO=y",
@@ -70,6 +75,37 @@ class KernelBuildConstants:
         "CONFIG_SECCOMP_FILTER=y",
         "CONFIG_UNIX=y",
         "CONFIG_VIRTIO_BLK=y",
+    )
+    REQUIRED_TIME_ABI_CONFIG: Final = (
+        "CONFIG_HYPERVISOR_GUEST=y",
+        "CONFIG_PARAVIRT=y",
+        "# CONFIG_HYPERV is not set",
+        "# CONFIG_KVM_GUEST is not set",
+        "# CONFIG_CPU_FREQ is not set",
+    )
+    # x86 makes runtime-generated code, such as the ITS mitigation thunks,
+    # read-only only through STRICT_MODULE_RWX (ARCH_HAS_EXECMEM_ROX), which
+    # needs MODULES. No module is ever built or shipped: there is no autoload
+    # helper, no symbol is exported, and init disables module loading before
+    # anything else runs.
+    REQUIRED_HARDENING_CONFIG: Final = (
+        "CONFIG_STRICT_KERNEL_RWX=y",
+        "CONFIG_MODULES=y",
+        "CONFIG_STRICT_MODULE_RWX=y",
+        "CONFIG_ARCH_HAS_EXECMEM_ROX=y",
+        'CONFIG_MODPROBE_PATH=""',
+        "CONFIG_TRIM_UNUSED_KSYMS=y",
+        "CONFIG_MITIGATION_ITS=y",
+        "CONFIG_DEBUG_WX=y",
+    )
+    DEBUG_WATCHDOG_CONFIG: Final = (
+        "CONFIG_SOFTLOCKUP_DETECTOR=y",
+        "CONFIG_DETECT_HUNG_TASK=y",
+    )
+    REQUIRED_DEBUG_CONFIG: Final = (
+        "CONFIG_DEBUG_KERNEL=y",
+        *DEBUG_WATCHDOG_CONFIG,
+        "CONFIG_RCU_CPU_STALL_CPUTIME=y",
     )
 
 
@@ -288,6 +324,22 @@ class InitramfsBuildConstants:
         "nvx-console-pending",
         "nvx-managed-agent",
     )
+    # Time tools and nvx-exit are linked against musl: a static glibc binary
+    # adds about 700 KB to the initramfs, and every unpacked kilobyte delays
+    # cold boot. nvx-exit is also a restored guest's usual first exec.
+    MUSL_COMPILER: Final = "musl-gcc"
+    MUSL_STATIC_HELPERS: Final = ("nvx-time", "nvx-exit")
+    TIME_PROBE_NAME: Final = "nvx-time-probe"
+    TIME_PROBE_CFLAGS: Final = (
+        "-std=gnu11",
+        "-static",
+        "-O2",
+        "-pthread",
+        "-s",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    )
 
 
 class DockerBuildConstants:
@@ -297,8 +349,14 @@ class DockerBuildConstants:
     AZURELINUX_TARGET: Final = "azurelinux-guest-artifacts"
     AZURELINUX_INITRAMFS_TARGET: Final = "azurelinux-initramfs-artifacts"
     ALL_GUESTS_TARGET: Final = "all-guest-artifacts"
+    DEBUG_KERNEL_TARGET: Final = "kernel-debug-artifacts"
     LINUX_SOURCE_TARGET: Final = "linux-source-artifacts"
     OUTPUT_TYPE: Final = "local"
+    DEBUG_KERNEL_ARTIFACT_NAMES: Final = (
+        KernelBuildConstants.DEBUG_BINARY_NAME,
+        KernelBuildConstants.DEBUG_CONFIG_NAME,
+        KernelBuildConstants.DEBUG_PROVENANCE_NAME,
+    )
     ALL_GUEST_ARTIFACT_NAMES: Final = (
         KernelBuildConstants.BINARY_NAME,
         KernelBuildConstants.CONFIG_NAME,

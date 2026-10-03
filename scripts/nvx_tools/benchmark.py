@@ -41,19 +41,19 @@ from .build_constants import (
     OpenVMMBuildConstants,
 )
 from .common import bytes_to_mib, sha256_file
+from .time_abi import TimeAbiMonitor, status_script
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
 TEARDOWN_TIMEOUT_SECONDS = 15.0
 PEAK_RSS_SAMPLE_ATTEMPTS = 3
 BASE_TUNING = (
-    "tsc=reliable no_timer_check random.trust_cpu=on "
-    "rcupdate.rcu_expedited=1 nokaslr mitigations=off "
+    "random.trust_cpu=on rcupdate.rcu_expedited=1 nokaslr mitigations=off "
     "cryptomgr.notests quiet loglevel=0"
 )
-CLOCKSOURCE_CURRENT_PATH = (
-    "/sys/devices/system/clocksource/clocksource0/current_clocksource"
-)
+# The cold-start clocksource variant selects the only clocksource the time ABI
+# allows, on every backend.
+COLD_START_CLOCKSOURCE = "clocksource=tsc"
 KVM_RESULT_PREFIX = "OPENVMM_KVM_RESULT="
 KVM_E2E_RESULT_PREFIX = "OPENVMM_KVM_E2E_RESULT="
 KVM_RESTORE_RESULT_PREFIX = "OPENVMM_KVM_RESTORE_RESULT="
@@ -1231,6 +1231,40 @@ def wait_for_process_exit(process: subprocess.Popen[bytes], timeout: float) -> i
     return process.wait(timeout=timeout)
 
 
+def drain_exited_output(
+    chunks: queue.Queue[bytes | None],
+    output: bytearray,
+    monitor: TimeAbiMonitor,
+    timeout: float = 1.0,
+) -> None:
+    """Consume the output an exited OpenVMM process left in the reader queue.
+
+    A time ABI power-off writes its violation event just before the exit, so
+    the event must reach the monitor before the exit status is classified.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            chunk = chunks.get(timeout=max(0.0, deadline - time.monotonic()))
+        except queue.Empty:
+            return
+        if chunk is None:
+            monitor.finish()
+            return
+        output.extend(chunk)
+        monitor.feed(chunk)
+
+
+def exit_status_after_eof(
+    process: subprocess.Popen[bytes], timeout: float = 5.0
+) -> int | None:
+    """Return the exit status of a process whose output reached EOF."""
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
 def contains_output_line(output: bytes | bytearray, marker: bytes) -> bool:
     return any(line.removesuffix(b"\r") == marker for line in output.split(b"\n"))
 
@@ -1496,11 +1530,13 @@ def measure_once(
 
     Peak RSS is None when OpenVMM exited before it could be sampled at the
     marker, which a prequeued guest exit makes possible. A completed output
-    line starting with ``failure_marker`` stops the launch immediately.
+    line starting with ``failure_marker`` stops the launch immediately, and so
+    does a time ABI violation event or failed conformance check.
     """
     started = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
+    monitor = TimeAbiMonitor(command)
     profile = (
         SnapshotProfileCollector(process.pid, started) if snapshot_profile else None
     )
@@ -1522,15 +1558,19 @@ def measure_once(
                 chunk = chunks.get(timeout=min(remaining, 0.25))
             except queue.Empty:
                 if process.poll() is not None:
-                    raise RuntimeError(
-                        f"OpenVMM exited with status {process.returncode}"
-                    ) from None
+                    drain_exited_output(chunks, output, monitor)
+                    monitor.check_exit(process.returncode)
+                    raise monitor.exit_error(process.returncode) from None
                 continue
             if chunk is None:
-                raise RuntimeError(f"OpenVMM exited with status {process.poll()}")
+                monitor.finish()
+                returncode = exit_status_after_eof(process)
+                monitor.check_exit(returncode)
+                raise monitor.exit_error(returncode)
             if profile is not None:
                 profile.feed(chunk)
             output.extend(chunk)
+            monitor.feed(chunk)
             if failure_marker is not None:
                 failure = completed_output_line_with_prefix(output, failure_marker)
                 if failure is not None:
@@ -1576,9 +1616,9 @@ def measure_once(
                 teardown_ms = (process_exited - teardown_started) / 1_000_000
                 wall_ms = (process_exited - started) / 1_000_000
                 if teardown_mode == "guest-exit" and returncode != 0:
-                    raise RuntimeError(
-                        f"OpenVMM exited with status {returncode} during teardown"
-                    )
+                    drain_exited_output(chunks, output, monitor)
+                    monitor.check_exit(returncode)
+                    raise monitor.exit_error(returncode, when="during teardown")
                 return elapsed_ms, peak_bytes, teardown_ms, wall_ms
             if len(output) > 1024 * 1024:
                 del output[: len(output) - 1024 * 1024]
@@ -1759,25 +1799,6 @@ def format_sample_summary(samples: Sequence[float], *, unit: str = "ms") -> str:
         f"{statistics.median(samples):.1f} {unit}  "
         f"(p95 {nearest_rank_percentile(samples, 95):.1f}, "
         f"min {min(samples):.1f}, max {max(samples):.1f}, n={len(samples)})"
-    )
-
-
-def clocksource_parameter(backend: str) -> str:
-    return "clocksource=kvm-clock" if backend == "kvm" else "clocksource=tsc"
-
-
-def stable_clocksource_wait_script() -> str:
-    """Wait up to five seconds for Linux to replace its tsc-early clocksource."""
-    return "\n".join(
-        (
-            f"clock_path={CLOCKSOURCE_CURRENT_PATH}",
-            "clock_tries=0",
-            'while [ "$(cat "$clock_path")" = tsc-early ] '
-            '&& [ "$clock_tries" -lt 100 ]; do',
-            "    sleep 0.05",
-            "    clock_tries=$((clock_tries + 1))",
-            "done",
-        )
     )
 
 
@@ -2131,7 +2152,15 @@ def run_guest_script(
     log_path: Path | None = None,
     boot_marker: bytes = BOOT_MARKER,
     contain_process_tree: bool = False,
+    time_abi_status: bool = False,
 ) -> GuestCommandResult:
+    """Run ``script`` once the guest boots and wait for ``completion_marker``.
+
+    With ``time_abi_status``, a cold boot first asks the guest for its time
+    ABI status and sends ``script`` only after the query exits, so the
+    guest's tty cannot echo script bytes into the status lines. The run
+    fails unless the guest reported a valid boot line.
+    """
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     started_ns = time.perf_counter_ns()
@@ -2141,6 +2170,8 @@ def run_guest_script(
         contain_process_tree=contain_process_tree,
     )
     process = interaction.process
+    monitor = TimeAbiMonitor(command)
+    query_status = time_abi_status and monitor.cold_boot
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
@@ -2150,6 +2181,7 @@ def run_guest_script(
     ).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
+    status_sent = False
     input_sent = False
     completed = False
     peak_bytes = 0
@@ -2173,8 +2205,16 @@ def run_guest_script(
             if chunk is None:
                 break
             output.extend(chunk)
+            monitor.feed(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
-            if not input_sent and boot_marker in output:
+            if query_status and not status_sent and boot_marker in output:
+                interaction.write_input(status_script().encode("utf-8"))
+                status_sent = True
+            if (
+                not input_sent
+                and boot_marker in output
+                and (not query_status or monitor.status_queries > 0)
+            ):
                 interaction.write_input(script.encode("utf-8"))
                 input_sent = True
             if input_sent and contains_output_line(output, completion_marker):
@@ -2186,10 +2226,14 @@ def run_guest_script(
                         time.monotonic() + TEARDOWN_TIMEOUT_SECONDS,
                     )
 
+        monitor.finish()
         returncode = process.wait()
+        monitor.check_exit(returncode)
         if teardown_mode == "guest-exit" and returncode != 0:
-            raise RuntimeError(f"OpenVMM exited with status {returncode}")
+            raise monitor.exit_error(returncode)
         if not input_sent:
+            if status_sent:
+                monitor.require_status("the guest exited")
             raise RuntimeError("guest exited before its boot marker")
         if not completed:
             raise RuntimeError(
@@ -2249,6 +2293,7 @@ def capture_automatic_snapshot(
     environment["OPENVMM_LOG"] = "off"
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
+    monitor = TimeAbiMonitor(command)
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
@@ -2270,10 +2315,13 @@ def capture_automatic_snapshot(
             if chunk is None:
                 break
             output.extend(chunk)
+            monitor.feed(chunk)
 
+        monitor.finish()
         returncode = process.wait()
+        monitor.check_exit(returncode)
         if returncode != 0:
-            raise RuntimeError(f"snapshot source exited with status {returncode}")
+            raise monitor.exit_error(returncode, "snapshot source")
         for marker in required_markers:
             if marker not in output:
                 raise RuntimeError(
@@ -2329,6 +2377,7 @@ def capture_device_restore_snapshot(
     environment["OPENVMM_LOG"] = "off"
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
+    monitor = TimeAbiMonitor(command)
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
     chunks: queue.Queue[bytes | None] = queue.Queue()
@@ -2353,11 +2402,12 @@ def capture_device_restore_snapshot(
             if chunk is None:
                 break
             output.extend(chunk)
+            monitor.feed(chunk)
+        monitor.finish()
         returncode = process.wait()
+        monitor.check_exit(returncode)
         if returncode != 0:
-            raise RuntimeError(
-                f"{device}/{mode} snapshot source exited with status {returncode}"
-            )
+            raise monitor.exit_error(returncode, f"{device}/{mode} snapshot source")
         markers = _device_restore_markers(
             output.decode("utf-8", "replace"), device, mode
         )
@@ -2400,6 +2450,7 @@ def run_device_restore_sample(
     started_ns = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
+    monitor = TimeAbiMonitor(command)
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
     chunks: queue.Queue[bytes | None] = queue.Queue()
@@ -2468,15 +2519,16 @@ def run_device_restore_sample(
                 break
             observed_ns = time.perf_counter_ns()
             output.extend(chunk)
+            monitor.feed(chunk)
             observe_chunk(chunk, observed_ns)
         if pending:
             observe_line(bytes(pending), time.perf_counter_ns())
             pending.clear()
+        monitor.finish()
         returncode = process.wait()
+        monitor.check_exit(returncode)
         if returncode != 0:
-            raise RuntimeError(
-                f"{device}/{mode} restore exited with status {returncode}"
-            )
+            raise monitor.exit_error(returncode, f"{device}/{mode} restore")
         for phase in ("restore-ready", "trigger", "io-success"):
             if phase not in phase_times:
                 raise RuntimeError(f"{device}/{mode} restore is missing {phase!r}")
@@ -2682,10 +2734,9 @@ def benchmark_cold_start_workload(
     command_prefix: Sequence[str] = (),
     windows_cpus: set[int] | None = None,
 ) -> None:
-    clocksource = clocksource_parameter(backend)
     scenarios = (
         ("base", None),
-        (clocksource, clocksource),
+        (COLD_START_CLOCKSOURCE, COLD_START_CLOCKSOURCE),
         ("tsc=reliable", "tsc=reliable"),
         ("no_timer_check", "no_timer_check"),
         ("random.trust_cpu=on", "random.trust_cpu=on"),
@@ -3218,33 +3269,17 @@ def smp_probe_script(
 def prepare_snapshot_capture_script(
     processors: int,
     *,
-    backend: str,
     teardown_mode: str,
     network_gateway: str | None = None,
     ioapic_irq: int | None = None,
     post_restore_script: str | None = None,
 ) -> str:
-    clocksource_ready = ""
-    # Until Linux replaces tsc-early, its periodic tick doesn't recover the
-    # jiffies that a restore's downtime skips. The clocksource watchdog can then
-    # compare tsc-early with jiffies across the restore and mark the TSC
-    # unstable. KVM guests leave tsc-early almost immediately after boot.
-    if backend in ("mshv", "whp"):
-        clocksource_ready = (
-            stable_clocksource_wait_script()
-            + "\n"
-            + 'current_clocksource="$(cat "$clock_path")"\n'
-            + '[ "$current_clocksource" != tsc-early ] || { '
-            + 'echo "SMP-CLOCKSOURCE-FAIL expected=stable '
-            + 'actual=$current_clocksource"; exit 80; }\n'
-        )
     probe = smp_probe_script(
         processors,
         exit_guest=False,
         network_gateway=network_gateway,
         ioapic_irq=ioapic_irq,
     )
-    probe = clocksource_ready + probe
     capture = _render_benchmark_script(
         "snapshot-capture-controller.sh.in",
         SMP_PROBE_PATH=SMP_PROBE_PATH,
@@ -3639,7 +3674,6 @@ def _benchmark_shell_snapshot_restore(
             str(snapshot_path),
         ],
         snapshot_path,
-        backend=backend,
         timeout=args.timeout,
         windows_cpus=windows_cpus,
         processors=args.processors,
@@ -4363,7 +4397,6 @@ def capture_snapshot(
     command: Sequence[str],
     snapshot_path: Path,
     *,
-    backend: str,
     timeout: float,
     windows_cpus: set[int] | None = None,
     processors: int | None = None,
@@ -4375,7 +4408,13 @@ def capture_snapshot(
     post_restore_script: str | None = None,
     log_path: Path | None = None,
     boot_marker: bytes = BOOT_MARKER,
+    time_abi_status: bool = False,
 ) -> tuple[float, float, float, int]:
+    """Boot a snapshot source, capture it, and return the capture timings.
+
+    With ``time_abi_status``, the source guest first answers a time ABI status
+    query, and the capture starts only after the query exits.
+    """
     if snapshot_path.exists():
         shutil.rmtree(snapshot_path)
     environment = os.environ.copy()
@@ -4384,6 +4423,8 @@ def capture_snapshot(
     process_started_ns = time.perf_counter_ns()
     interaction = InteractiveProcess(command, environment)
     process = interaction.process
+    monitor = TimeAbiMonitor(command)
+    query_status = time_abi_status and monitor.cold_boot
     profile = SnapshotProfileCollector(
         process.pid,
         process_started_ns,
@@ -4398,6 +4439,7 @@ def capture_snapshot(
     ).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
+    status_sent = False
     boot_seen = False
     snapshot_requested = False
     snapshot_started_ns = None
@@ -4444,15 +4486,16 @@ def capture_snapshot(
                 peak_bytes = _try_peak_rss(process, peak_bytes)
                 observe_snapshot_publication()
                 if process.poll() is not None and snapshot_published_ns is None:
-                    raise RuntimeError(
-                        f"OpenVMM exited with status {process.returncode}"
-                    ) from None
+                    drain_exited_output(chunks, output, monitor)
+                    monitor.check_exit(process.returncode)
+                    raise monitor.exit_error(process.returncode) from None
                 continue
             if chunk is None:
                 observe_snapshot_publication()
                 break
             profile.feed(chunk)
             output.extend(chunk)
+            monitor.feed(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
             if (
                 snapshot_requested
@@ -4460,7 +4503,19 @@ def capture_snapshot(
                 and contains_output_line(output, SNAPSHOT_GUEST_DISPATCH_MARKER)
             ):
                 snapshot_guest_dispatched_ns = time.perf_counter_ns()
-            if not boot_seen and boot_marker in output:
+            if (
+                not boot_seen
+                and query_status
+                and not status_sent
+                and (boot_marker in output)
+            ):
+                interaction.write_input(status_script().encode("utf-8"))
+                status_sent = True
+            if (
+                not boot_seen
+                and boot_marker in output
+                and (not query_status or monitor.status_queries > 0)
+            ):
                 boot_seen = True
                 if processors is None:
                     request_snapshot()
@@ -4468,7 +4523,6 @@ def capture_snapshot(
                     interaction.write_input(
                         prepare_snapshot_capture_script(
                             processors,
-                            backend=backend,
                             teardown_mode=teardown_mode,
                             network_gateway=smp_network_gateway,
                             ioapic_irq=smp_ioapic_irq,
@@ -4486,14 +4540,18 @@ def capture_snapshot(
             if len(output) > 1024 * 1024:
                 del output[: len(output) - 1024 * 1024]
 
+        monitor.finish()
         returncode = process.wait()
         source_exited_ns = time.perf_counter_ns()
+        monitor.check_exit(returncode)
         if snapshot_published_ns is None and snapshot_path.is_dir():
             snapshot_published_ns = source_exited_ns
+        if returncode != 0:
+            raise monitor.exit_error(returncode, "snapshot source")
+        if status_sent:
+            monitor.require_status("the snapshot source exited")
         if not snapshot_requested:
             raise RuntimeError("source guest exited before its snapshot request")
-        if returncode != 0:
-            raise RuntimeError(f"snapshot source exited with status {returncode}")
         if not snapshot_path.is_dir():
             raise RuntimeError(f"snapshot was not published at {snapshot_path}")
         if snapshot_guest_dispatched_ns is None:
@@ -4577,7 +4635,6 @@ def summarize_snapshot_samples(
 
 def benchmark_snapshot_capture(
     args: argparse.Namespace,
-    backend: str,
     boot_command: Sequence[str],
     *,
     windows_cpus: set[int] | None = None,
@@ -4609,7 +4666,6 @@ def benchmark_snapshot_capture(
                 capture_snapshot(
                     [*boot_command, "--snapshot-destination", str(snapshot_path)],
                     snapshot_path,
-                    backend=backend,
                     timeout=args.timeout,
                     windows_cpus=windows_cpus,
                     processors=args.processors,
@@ -4679,7 +4735,6 @@ def snapshot_restore_command(
         hypervisor,
         "--restore-snapshot",
         str(snapshot_path),
-        "--restore-entropy",
     ]
     if restore_processors is not None:
         command.extend(("--restore-processors", str(restore_processors)))
@@ -4733,7 +4788,6 @@ def benchmark_snapshot_restore(
                 str(generated_snapshot_path),
             ],
             generated_snapshot_path,
-            backend=hypervisor,
             timeout=args.timeout,
             windows_cpus=windows_cpus,
             processors=args.processors,
@@ -4895,7 +4949,6 @@ def benchmark_snapshot_profile_matrix(
             boot_command = make_boot_command(memory_mib)
             capture = benchmark_snapshot_capture(
                 profile_args,
-                backend,
                 boot_command,
                 windows_cpus=windows_cpus,
                 retained_snapshot_path=snapshot_path,
@@ -5345,7 +5398,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         "--initrd",
         str(stage / AlpineBuildConstants.INITRAMFS_NAME),
         "--cmdline",
-        f"clocksource=kvm-clock {BASE_TUNING}",
+        BASE_TUNING,
     ]
     if args.net is not None:
         append_network_arguments(boot_command, args.net, args.network_profile)
@@ -5363,7 +5416,6 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
             snapshot_path = Path(temp_dir) / "snapshot"
             snapshot_capture = benchmark_snapshot_capture(
                 args,
-                "kvm",
                 boot_command,
                 retained_snapshot_path=snapshot_path,
             )
@@ -5389,7 +5441,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         return 0
     if args.suite == "snapshot":
         print("Benchmarking OpenVMM/KVM snapshot capture", flush=True)
-        result = benchmark_snapshot_capture(args, "kvm", boot_command)
+        result = benchmark_snapshot_capture(args, boot_command)
         print_snapshot_summary("kvm", result)
         print(
             KVM_SNAPSHOT_RESULT_PREFIX + json.dumps(result, separators=(",", ":")),
@@ -5628,7 +5680,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 "--initrd",
                 str(initrd),
                 "--cmdline",
-                f"{'clocksource=kvm-clock ' if backend == 'kvm' else ''}{BASE_TUNING}",
+                BASE_TUNING,
             ]
             if args.net is not None:
                 append_network_arguments(command, args.net, args.network_profile)
@@ -5677,7 +5729,6 @@ def run_native_linux(args: argparse.Namespace) -> int:
             if run_snapshot:
                 result = benchmark_snapshot_capture(
                     args,
-                    backend,
                     boot_command,
                     retained_snapshot_path=retained_snapshot_path,
                 )
@@ -6180,7 +6231,6 @@ def run_benchmark(args: argparse.Namespace) -> int:
             print("Benchmarking OpenVMM/WHP snapshot capture", flush=True)
             whp_snapshot = benchmark_snapshot_capture(
                 args,
-                "whp",
                 whp_command(
                     boot_binaries["whp"],
                     kernel,

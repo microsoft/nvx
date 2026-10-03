@@ -1,9 +1,9 @@
 # Benchmark
 
 The supported OpenVMM benchmark coordinator provides acceptance and diagnostic suites, a
-23-metric microVM non-Python workload suite, and five device operation-rate metrics on
+21-metric microVM non-Python workload suite, and five device operation-rate metrics on
 Linux/KVM, Linux/MSHV, and Windows/WHP. At one vCPU, CI combines those workloads with eight
-128 MiB shell lifecycle metrics and reports all 36 median (p50) values. At 2, 4, and 8 vCPUs, CI records only
+128 MiB shell lifecycle metrics and reports all 34 median (p50) values. At 2, 4, and 8 vCPUs, CI records only
 `shell_snapshot_restore_512_mib`. Latency and resident-memory metrics are lower-is-better;
 throughput and operation-rate metrics are higher-is-better.
 
@@ -64,10 +64,10 @@ python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-
 Run the complete performance suite with:
 
 ```console
-# Linux/KVM: run all 23 metrics and write collector-compatible logs
+# Linux/KVM: run all 21 metrics and write collector-compatible logs
 python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu
 
-# Linux/MSHV: run all 23 metrics
+# Linux/MSHV: run all 21 metrics
 python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v2/1vcpu
 
 # Windows/WHP
@@ -238,15 +238,15 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Benchmark | Command | Description |
 | --- | --- | --- |
 | Shell lifecycle | `benchmark --suite e2e` | Measures cold start, snapshot generation, snapshot restore, teardown, and peak RSS using a shell-ready guest. |
-| All supported non-Python workloads | `benchmark --suite performance` | Runs 23 metrics and writes collector-compatible logs. |
+| All supported non-Python workloads | `benchmark --suite performance` | Runs 21 metrics and writes collector-compatible logs. |
 | Device operation rates | `benchmark --suite device-io` | Measures five random storage and UDP round-trip operation rates with resumable raw attempts. |
 | Cold start | `benchmark --suite cold-start` | Measures a quiet shell-ready baseline and isolated one-parameter kernel command-line variants. |
 | Virtual file system | `benchmark --suite virtfs` | Measures live host-directory throughput and verifies host-to-guest plus guest-to-host visibility in one running VM. |
-| Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with lifecycle-aligned snapshot restore at 64, 128, 256, and 512 MiB. |
+| Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with lifecycle-aligned snapshot restore at 128, 256, and 512 MiB. |
 | Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured lifecycle-aligned snapshot and measures only restore latency for the selected memory sizes. |
 | Restore-time vCPU activation | `benchmark --suite snapshot-restore-vcpu --processors 8` | Restores one boot-online-1, capacity-8 snapshot at online targets 1/2/4/8 and reports latency plus peak RSS. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
-| Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 64/128/256/512/1024 MiB warm/cold restores. |
+| Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 128/256/512/1024 MiB warm/cold restores. |
 | Virtio device restore profile | `benchmark --suite device-restore-profile` | Verifies active and driver-unbound deferred restore for console, network, and virtio-fs; emits standalone diagnostic JSON and raw logs. |
 
 ## Kernel command lines
@@ -259,18 +259,18 @@ Each benchmark boots the guest with a fixed kernel command line. Two bases recur
 OpenVMM owns `BASE`; each `--cmdline` value below is appended to it. Restore phases do not pass a
 command line and resume the one captured in the snapshot. OpenVMM also appends device-discovery
 tokens (`virtio_mmio.device=...` for an attached mount or NIC) and may replace `console=hvc0` with
-`console=hvc1` when a virtio console is selected. Snapshot-source boots additionally receive the
-backend-derived `tsc_early_khz=...` token. All cold microVM boots also receive
-`lapic_timer_hz=...` when the backend reports its LAPIC frequency. The NVX kernel uses
-that rate without calibrating or verifying the counting LAPIC against emulated PIT
-interrupts, whose delivery can be delayed or coalesced by host scheduling.
+`console=hvc1` when a virtio console is selected. It appends no clock token: under the
+[time ABI](design/time-abi.md#rates) the NVX kernel reads the TSC and LAPIC timer rates from the
+hypervisor identity's frequency MSRs and never calibrates either clock, and OpenVMM rejects a
+supplied `tsc_early_khz=` or `lapic_timer_hz=` token (`E_CMDLINE_CLOCK_TOKEN`). No benchmark
+command line tunes the clock or clocksource, except the `cold_start_clocksource` variant below.
 
 | Benchmark | Phase | Kernel command line |
 | --- | --- | --- |
-| Shell lifecycle | cold/capture | `BASE` plus the combined `BASE_TUNING` parameters; CI uses 128 MiB. |
+| Shell lifecycle | cold/capture | `BASE` plus `BASE_TUNING`: `random.trust_cpu=on rcupdate.rcu_expedited=1 nokaslr mitigations=off cryptomgr.notests quiet loglevel=0`; CI uses 128 MiB. |
 | Shell lifecycle | restore | restore (from the measured shell-ready snapshot) |
 | Cold start | baseline | `QUIET` |
-| Cold start | tuning variant | `QUIET` plus one of `clocksource=<backend>`, `tsc=reliable`, `no_timer_check`, `random.trust_cpu=on`, `rcupdate.rcu_expedited=1`, `nokaslr`, `mitigations=off`, or `cryptomgr.notests` |
+| Cold start | tuning variant | `QUIET` plus one of `clocksource=tsc`, `tsc=reliable`, `no_timer_check`, `random.trust_cpu=on`, `rcupdate.rcu_expedited=1`, `nokaslr`, `mitigations=off`, or `cryptomgr.notests` |
 | Virtual file system | guest runs | `QUIET` |
 | Device operation rates | guest runs | `QUIET`; virtio-net uses the portable profile at `10.0.0.2/24` |
 | Shell snapshot | cold | `QUIET` |
@@ -305,6 +305,12 @@ console-timed capture results, restore results without prequeued guest exit, mis
 any guest-exit teardown timeout. With at least ten samples, it also rejects snapshot-generation
 series whose p50 is more than 25% above p25; this prevents a transient host stall from entering
 performance history without hiding a uniformly slower product result.
+Every launch is scanned for the guest's time ABI output as in the
+[microVM correctness jobs](ci.md): a violation event or a time ABI power-off fails the run.
+Benchmarks never ask the guest for its time ABI status, as the correctness jobs do after cold
+boots and restores, so the guest prints nothing extra and the scan only parses output the harness
+already reads; it adds nothing to the measured intervals. The guest's boot check, which powers the
+guest off with status 193 if it fails, is part of `openvmm_cold_start`.
 Lifecycle capture runs a deterministic affinity-pinned worker on every vCPU
 before the snapshot request. Explicit correctness scenarios also stage a post-restore probe.
 The capture probe is outside the snapshot-generation timing interval. Each worker proves that it
@@ -315,15 +321,16 @@ to advance and remain at least as large as the worker's observed value.
 The check remains strict even on a one-vCPU guest: falling back to the PIT after a failed
 LAPIC calibration is not success. A counter frozen at 12 can indicate Linux's
 `APIC timer disabled due to verification failure`; increasing the poll budget cannot repair it.
-CI runs `test-microvm --scenario smp-lapic --processors 1 2 4 8` before acceptance.
-This repeats the normal SMP probe with `lapic=notscdeadline`, covering the counting
-LAPIC even on hosts that normally use TSC-deadline timers. The ordinary `smp` scenario
-retains the default timer selection.
-MSHV and WHP captures wait for Linux to replace the transitional `tsc-early` clocksource with
-its stable selected clocksource before starting this SMP validation. Until that switch, Linux
-uses a periodic tick that doesn't recover the jiffies skipped by a restore's downtime. The
-clocksource watchdog can then compare `tsc-early` with jiffies across the restore and mark the
-TSC unstable. KVM guests leave `tsc-early` almost immediately after boot.
+The time ABI hides the TSC-deadline timer on every backend, so every guest uses the one-shot
+counting LAPIC, and the `smp` scenario that the microVM correctness jobs run at 1, 2, 4, and 8
+vCPUs covers it. The benchmarks run no LAPIC gate of their own (#286), and no guest boots with
+`lapic=notscdeadline`. `test-microvm --scenario smp-lapic` remains for explicit local use: it runs
+`smp` and also asserts that no CPU lists `tsc_deadline_timer`, that each online CPU's clockevent
+device is the counting `lapic`, and that the boot line reports the backend's LAPIC rate for every
+CPU. No default suite or CI job runs it, so nothing runs twice.
+Captures do not wait for a clocksource: under the time ABI, Linux registers the `tsc`
+clocksource at `device_initcall`, before any guest work, so no capture can observe the
+transitional `tsc-early` window.
 The coordinator stages the probe and a capture controller in guest memory. The
 controller runs the first probe, blocks in `read`, and invokes `nvx-snapshot` when the
 host sends the trigger. The controller always emits `NVX-SNAPSHOT-DISPATCHED` immediately before
@@ -346,7 +353,7 @@ exactly one kernel parameter to the quiet baseline.
 | Metric | Description |
 | --- | --- |
 | `cold_start_base` | Quiet baseline with no additional tuning parameter. |
-| `cold_start_clocksource` | Baseline plus `clocksource=kvm-clock` on KVM or `clocksource=tsc` on MSHV/WHP. |
+| `cold_start_clocksource` | Baseline plus `clocksource=tsc` on every backend. Before the time ABI, KVM measured `clocksource=kvm-clock`, so KVM history before that change measures a different clocksource. |
 | `cold_start_tsc_reliable` | Baseline plus `tsc=reliable`. |
 | `cold_start_no_timer_check` | Baseline plus `no_timer_check`. |
 | `cold_start_random_trust_cpu` | Baseline plus `random.trust_cpu=on`. |
@@ -415,6 +422,10 @@ different so the cold metrics are not interchangeable.
 This lifecycle-aligned methodology supersedes the earlier pre-banner
 `shellsnap` capture. Historical `shell_snapshot_restore_*` values produced by
 that methodology are not comparable with newly collected values.
+
+The 64 MiB pair, `shell_snapshot_cold_64_mib` and
+`shell_snapshot_restore_64_mib`, was retired in #116. The platform CSVs in
+`data/` keep its results only as history; the last ones are `b8912df`'s.
 
 | Metric | Description |
 | --- | --- |
@@ -494,16 +505,32 @@ successful packets.
 ## CI collection
 
 `python scripts/nvx.py performance collect --require-shared-suite` rejects a workload result
-unless it contains exactly the 23 shared metrics. Supplying `--lifecycle-input` requires and merges
-the eight lifecycle metrics, producing a 31-metric one-vCPU result. CI collects the five device
+unless it contains exactly the 21 shared metrics. Supplying `--lifecycle-input` requires and merges
+the eight lifecycle metrics, producing a 29-metric one-vCPU result. CI collects the five device
 operation-rate metrics from their separate raw-log directory and merges them by ABI, processor
-count, commit, and metric, producing the final 36-metric ABI-2 one-vCPU result. Higher-vCPU
+count, commit, and metric, producing the final 34-metric ABI-2 one-vCPU result. Higher-vCPU
 collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 `shell_snapshot_restore_512_mib` plus canonical one-warmup/five-sample metadata for a 2-, 4-, or
 8-vCPU guest. A `device-io` directory is recognized from metadata and must contain exactly its five
 metrics and every configured attempt. Each backend job publishes its p50 tables and one-vCPU lifecycle diagnostics to
 `$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
 latest base-branch history.
+
+These jobs consume, gate, publish, or persist the KVM benchmark results (#286); MSHV and WHP
+follow the same flow with their own platform jobs:
+- `Platform / Linux / KVM / Virtual machine` (`platform-kvm`) runs the benchmarks and publishes the
+  results: the run-scoped `benchmark-linux-kvm-virtual-machine-<run-id>` artifact, the per-attempt
+  diagnostics artifact, and the p50 tables in its step summary.
+- `Performance regression gate` (`performance-gate`, pull requests only) consumes the three
+  platform artifacts once all three platform jobs succeeded and gates them against the base
+  branch's history. It publishes and persists nothing.
+- `Persist performance baseline` (`performance-persist`, `dev` pushes only) consumes them and
+  persists them to `data/*.csv`.
+- `Publish development release` (`release`, `dev` pushes only) doesn't read them, but it and
+  `performance-persist` run only when the three platform jobs succeeded and every correctness
+  job, `nvx-microvm-tests-kvm` included, succeeded or was skipped.
+- `Required status check` fails unless every job that the change schedules, including
+  `platform-kvm`, `performance-gate`, and `nvx-microvm-tests-kvm`, has its expected result.
 
 Linux CI uses a reduced device contract of zero warmups and one retained attempt. Windows CI
 discards one warmup and retains five attempts so file initialization cannot dominate its p50.

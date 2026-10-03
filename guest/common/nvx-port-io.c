@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 
 #include <errno.h>
 #include <fcntl.h>
@@ -7,27 +7,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #define PORT_MAX UINT16_MAX
-#define RESTORE_HEADER_SIZE 19
-#define RESTORE_ENTROPY_SIZE 64
-#define RESTORE_RANGE_SIZE 16
-#define RESTORE_PACKET_SELECT 0xa5
 #define GENERATION_ID_SELECT 0xa6
 #define GENERATION_ID_SIZE 16
 #define STATUS_GENERATION_ID_AVAILABLE 32
-#define RESTORE_PACKET_MAX_SIZE                                             \
-    (RESTORE_HEADER_SIZE + 2 + UINT8_MAX * RESTORE_RANGE_SIZE +            \
-     RESTORE_ENTROPY_SIZE)
-
-static const unsigned char RESTORE_HEADER_V1[RESTORE_HEADER_SIZE] =
-    "OPENVMM_ENTROPY_V1";
-static const unsigned char RESTORE_HEADER_V2[RESTORE_HEADER_SIZE] =
-    "OPENVMM_ENTROPY_V2";
-static const unsigned char RESTORE_HEADER_V3[RESTORE_HEADER_SIZE] =
-    "OPENVMM_ENTROPY_V3";
+#define PORTB_LOCK_DIRECTORY "/run/nvx"
+#define PORTB_LOCK_PATH PORTB_LOCK_DIRECTORY "/portb.lock"
 
 static int parse_u64(const char *text, uint64_t *value)
 {
@@ -102,6 +91,33 @@ static int read_port_bytes(int port, uint64_t offset, unsigned char *buffer,
     return 0;
 }
 
+// Selector transactions on portb are serialized with the time ABI's lock.
+static int lock_portb(void)
+{
+    int lock;
+
+    if (mkdir(PORTB_LOCK_DIRECTORY, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "nvx-port-io: mkdir %s: %s\n", PORTB_LOCK_DIRECTORY,
+                strerror(errno));
+        return -1;
+    }
+    lock = open(PORTB_LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, S_IRUSR | S_IWUSR);
+    if (lock < 0) {
+        fprintf(stderr, "nvx-port-io: open %s: %s\n", PORTB_LOCK_PATH,
+                strerror(errno));
+        return -1;
+    }
+    while (flock(lock, LOCK_EX) != 0) {
+        if (errno != EINTR) {
+            fprintf(stderr, "nvx-port-io: flock %s: %s\n", PORTB_LOCK_PATH,
+                    strerror(errno));
+            close(lock);
+            return -1;
+        }
+    }
+    return lock;
+}
+
 static int close_port(int port)
 {
     if (close(port) == 0) {
@@ -126,113 +142,26 @@ static int print_hex(const unsigned char *bytes, size_t size)
     return 0;
 }
 
-static uint64_t read_le_u64(const unsigned char *bytes)
-{
-    uint64_t value = 0;
-    for (size_t index = 0; index < sizeof(value); ++index) {
-        value |= (uint64_t)bytes[index] << (index * 8);
-    }
-    return value;
-}
-
-static int read_restore_packet(uint64_t data_offset, uint64_t select_offset,
-                               const char *path)
-{
-    unsigned char packet[RESTORE_PACKET_MAX_SIZE];
-    unsigned int version;
-    unsigned int online_count = 0;
-    unsigned int range_count = 0;
-    size_t packet_size = RESTORE_HEADER_SIZE;
-    size_t payload_size;
-    int port = open("/dev/port", O_RDWR | O_CLOEXEC);
-    if (port < 0) {
-        fprintf(stderr, "nvx-port-io: open /dev/port: %s\n", strerror(errno));
-        return 1;
-    }
-
-    if (write_port_byte(port, select_offset, RESTORE_PACKET_SELECT) != 0 ||
-        read_port_bytes(port, data_offset, packet, RESTORE_HEADER_SIZE) != 0) {
-        close(port);
-        return 1;
-    }
-    if (memcmp(packet, RESTORE_HEADER_V1, RESTORE_HEADER_SIZE) == 0) {
-        version = 1;
-        payload_size = RESTORE_ENTROPY_SIZE;
-    } else if (memcmp(packet, RESTORE_HEADER_V2, RESTORE_HEADER_SIZE) == 0) {
-        version = 2;
-        payload_size = 1 + RESTORE_ENTROPY_SIZE;
-    } else if (memcmp(packet, RESTORE_HEADER_V3, RESTORE_HEADER_SIZE) == 0) {
-        version = 3;
-        if (read_port_bytes(port, data_offset, packet + packet_size, 2) != 0) {
-            close(port);
-            return 1;
-        }
-        online_count = packet[packet_size];
-        range_count = packet[packet_size + 1];
-        packet_size += 2;
-        payload_size =
-            (size_t)range_count * RESTORE_RANGE_SIZE + RESTORE_ENTROPY_SIZE;
-    } else {
-        fprintf(stderr, "nvx-port-io: restore packet has an invalid header\n");
-        close(port);
-        return 1;
-    }
-
-    if (read_port_bytes(port, data_offset, packet + packet_size, payload_size) !=
-        0) {
-        close(port);
-        return 1;
-    }
-    packet_size += payload_size;
-    if (version == 2) {
-        online_count = packet[RESTORE_HEADER_SIZE];
-    }
-    if (close_port(port) != 0) {
-        return 1;
-    }
-
-    int output =
-        open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, S_IRUSR | S_IWUSR);
-    if (output < 0) {
-        fprintf(stderr, "nvx-port-io: open %s: %s\n", path, strerror(errno));
-        return 1;
-    }
-    if (write_all(output, packet, packet_size) != 0) {
-        close(output);
-        return 1;
-    }
-    if (close(output) != 0) {
-        fprintf(stderr, "nvx-port-io: close %s: %s\n", path, strerror(errno));
-        return 1;
-    }
-    printf("%u %u %u", version, online_count, range_count);
-    if (version == 3) {
-        size_t range_offset = RESTORE_HEADER_SIZE + 2;
-        for (unsigned int index = 0; index < range_count; ++index) {
-            uint64_t start = read_le_u64(packet + range_offset);
-            uint64_t length =
-                read_le_u64(packet + range_offset + sizeof(uint64_t));
-            printf(" %" PRIu64 " %" PRIu64, start, length);
-            range_offset += RESTORE_RANGE_SIZE;
-        }
-    }
-    putchar('\n');
-    return 0;
-}
-
 static int read_generation_id(uint64_t data_offset, uint64_t select_offset,
                               const char *path)
 {
     unsigned char generation_id[GENERATION_ID_SIZE];
     unsigned char status;
-    int port = open("/dev/port", O_RDWR | O_CLOEXEC);
+    int lock = lock_portb();
+    int port;
+    if (lock < 0) {
+        return 1;
+    }
+    port = open("/dev/port", O_RDWR | O_CLOEXEC);
     if (port < 0) {
         fprintf(stderr, "nvx-port-io: open /dev/port: %s\n", strerror(errno));
+        close(lock);
         return 1;
     }
 
     if (read_port_byte(port, select_offset, &status) != 0) {
         close(port);
+        close(lock);
         return 1;
     }
     if ((status & STATUS_GENERATION_ID_AVAILABLE) == 0) {
@@ -240,14 +169,17 @@ static int read_generation_id(uint64_t data_offset, uint64_t select_offset,
                 "nvx-port-io: VM generation ID is unavailable on port 0x%llx\n",
                 (unsigned long long)select_offset);
         close(port);
+        close(lock);
         return 1;
     }
     if (write_port_byte(port, select_offset, GENERATION_ID_SELECT) != 0 ||
         read_port_bytes(port, data_offset, generation_id,
                         sizeof(generation_id)) != 0) {
         close(port);
+        close(lock);
         return 1;
     }
+    close(lock);
     if (close_port(port) != 0) {
         return 1;
     }
@@ -312,9 +244,8 @@ static int write_u8(uint64_t offset, uint64_t value)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: nvx-port-io read-restore-packet DATA_PORT SELECT_PORT "
-            "OUTPUT | read-generation-id DATA_PORT SELECT_PORT [OUTPUT] | "
-            "read-u8 PORT | write-u8 PORT VALUE\n");
+            "usage: nvx-port-io read-generation-id DATA_PORT SELECT_PORT "
+            "[OUTPUT] | read-u8 PORT | write-u8 PORT VALUE\n");
 }
 
 int main(int argc, char **argv)
@@ -330,11 +261,6 @@ int main(int argc, char **argv)
         if (argc == 4 && strcmp(argv[1], "write-u8") == 0 &&
             parse_u64(argv[3], &value) && value <= UINT8_MAX) {
             return write_u8(offset, value);
-        }
-        if (argc == 5 && strcmp(argv[1], "read-restore-packet") == 0 &&
-            parse_u64(argv[3], &select_offset) &&
-            select_offset <= PORT_MAX) {
-            return read_restore_packet(offset, select_offset, argv[4]);
         }
         if ((argc == 4 || argc == 5) &&
             strcmp(argv[1], "read-generation-id") == 0 &&

@@ -6,10 +6,7 @@ fail() {
     exit "$code"
 }
 
-@SELECT_CLOCKSOURCE@
-@VALIDATE_CLOCKSOURCE@
-generation_id_before="$(/sbin/nvx-port-io read-generation-id 233 234)" ||
-    fail 48
+generation_id_before="$(/sbin/nvx-time generation-id)" || fail 48
 [ "${#generation_id_before}" -eq 32 ] || fail 49
 sleep 3600 & sleeping_pid=$!
 sleep 5 & timer_pid=$!
@@ -37,23 +34,18 @@ echo "NVX-SNAPSHOT-DOWNTIME-$((wall_restored - wall_before))-$((uptime_restored 
 echo "NVX-SNAPSHOT-UPTIME-CS-$((uptime_restored_cs - uptime_before_cs))"
 echo "NVX-SNAPSHOT-CPU-$((process_cpu_restored - process_cpu_before))-$((thread_cpu_restored - thread_cpu_before))"
 echo "NVX-SNAPSHOT-TIMER-WAIT-$((timer_wait_after - timer_wait_before))"
-generation_id_after="$(/sbin/nvx-port-io read-generation-id 233 234)" ||
-    fail 50
+generation_id_after="$(/sbin/nvx-time generation-id)" || fail 50
 [ "$generation_id_before" != "$generation_id_after" ] || fail 51
-printf '\245' | dd of=/dev/port bs=1 seek=234 count=1 conv=notrunc 2>/dev/null
-rm -f /tmp/nvx-snapshot-packet /tmp/nvx-snapshot-entropy
-index=0
-while [ "$index" -lt 83 ]; do
-    dd if=/dev/port bs=1 skip=233 count=1 2>/dev/null >>/tmp/nvx-snapshot-packet
-    index=$((index + 1))
-done
-head -c 18 /tmp/nvx-snapshot-packet | grep -q OPENVMM_ENTROPY_V1 || fail 44
-tail -c 64 /tmp/nvx-snapshot-packet >/tmp/nvx-snapshot-entropy
+# nvx-time capture consumed restore packet v4 and, for an untiered restore
+# without targets, left its 64 entropy bytes to the caller. The generation ID
+# is their first 16 bytes.
+entropy=/run/nvx/restore-entropy
+[ "$(wc -c <"$entropy")" -eq 64 ] || fail 44
 generation_id_packet="$(
-    head -c 16 /tmp/nvx-snapshot-entropy | od -An -tx1 -v | tr -d '[:space:]'
+    head -c 16 "$entropy" | od -An -tx1 -v | tr -d '[:space:]'
 )"
 [ "$generation_id_after" = "$generation_id_packet" ] || fail 52
-/sbin/nvx-reseed /tmp/nvx-snapshot-entropy || fail 45
+/sbin/nvx-reseed "$entropy" || fail 45
 rng="$(/sbin/nvx-reseed --sample)" || fail 53
 uuid="$(cat /proc/sys/kernel/random/uuid)"
 temp_path="$(mktemp /tmp/nvx-clone.XXXXXX)" || fail 54

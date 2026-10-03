@@ -4,6 +4,29 @@
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
+# The kernel supports modules only so that STRICT_MODULE_RWX keeps runtime
+# code, such as the ITS mitigation thunks, read-only. No module is shipped, so
+# loading is switched off for good before any other process runs.
+if [ -e /proc/sys/kernel/modules_disabled ] &&
+    ! echo 1 >/proc/sys/kernel/modules_disabled; then
+    echo "NVX-INIT-ERROR: cannot disable kernel module loading" >&2
+    /sbin/nvx-exit 1
+    while :; do
+        sleep 3600
+    done
+fi
+# The time ABI boot step runs next, before any other guest work, in every
+# guest mode: the initial clock step only. The other boot checks then run in
+# the background and start the time daemon; a failure powers the VM off, and
+# the state and daemon live under /run/nvx/time, so /run is mounted first and
+# kept.
+mount -t tmpfs -o mode=755,nosuid,nodev tmpfs /run
+if ! /sbin/nvx-time boot; then
+    /sbin/nvx-exit 193
+    while :; do
+        sleep 3600
+    done
+fi
 mount -t tmpfs none /tmp
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux
 ifconfig lo 127.0.0.1 up

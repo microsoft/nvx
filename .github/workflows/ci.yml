@@ -187,6 +187,49 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Beside the shared artifacts, so that a kernel rebuild doesn't delay the
+  # jobs that don't use the debug kernel.
+  debug-kernel:
+    name: Build CI debug kernel
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-workloads == 'true'
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Build the CI debug kernel
+        uses: ./.github/actions/build-guest-artifacts
+        with:
+          debug-kernel: "true"
+          guest-images: "false"
+
+      - name: Upload guest debug kernel
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-debug-kernel
+          path: |
+            build/vmlinux-debug
+            build/vmlinux-debug.config
+            build/vmlinux-debug.provenance.json
+          if-no-files-found: error
+          retention-days: 1
+
   build-openvmm-linux-gnu:
     name: OpenVMM binary / Linux GNU
     needs: [openvmm-changes]
@@ -816,6 +859,93 @@ jobs:
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
+  # Pull requests run the debug kernel on KVM only; dev pushes run every
+  # backend.
+  nvx-microvm-debug-kvm:
+    name: NVX microVM tests / Linux / KVM / Debug kernel
+    needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.debug-kernel.result == 'success' &&
+        needs.build-openvmm-linux-gnu.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: Linux / KVM / Debug kernel
+      runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
+      backend: kvm
+      openvmm-artifact: openvmm-linux-gnu
+      debug-kernel: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-debug-mshv:
+    name: NVX microVM tests / Linux / MSHV / Debug kernel
+    needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        github.event_name == 'push' &&
+        needs.artifacts.result == 'success' &&
+        needs.debug-kernel.result == 'success' &&
+        needs.build-openvmm-linux-gnu.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: Linux / MSHV / Debug kernel
+      runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
+      backend: mshv
+      openvmm-artifact: openvmm-linux-gnu
+      debug-kernel: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-debug-whp:
+    name: NVX microVM tests / Windows / WHP / Debug kernel
+    needs: [artifacts, debug-kernel, build-openvmm-windows-msvc, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        github.event_name == 'push' &&
+        needs.artifacts.result == 'success' &&
+        needs.debug-kernel.result == 'success' &&
+        needs.build-openvmm-windows-msvc.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: Windows / WHP / Debug kernel
+      runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
+      backend: whp
+      openvmm-artifact: openvmm-windows-msvc
+      debug-kernel: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
   platform-kvm:
     name: Platform / Linux / KVM / Virtual machine
     needs: [artifacts, build-openvmm-linux-gnu, openvmm-changes]
@@ -933,6 +1063,7 @@ jobs:
   release:
     name: Publish development release
     needs:
+      - debug-kernel
       - quality
       - aci-edge-sandboxes
       - openvmm-vmm-tests
@@ -940,6 +1071,9 @@ jobs:
       - nvx-microvm-tests-kvm
       - nvx-microvm-tests-mshv
       - nvx-microvm-tests-whp
+      - nvx-microvm-debug-kvm
+      - nvx-microvm-debug-mshv
+      - nvx-microvm-debug-whp
       - platform-kvm
       - platform-mshv
       - platform-whp
@@ -949,6 +1083,7 @@ jobs:
         github.event_name == 'push' &&
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
+        needs.debug-kernel.result == 'success' &&
         needs.quality.result == 'success' &&
         needs.aci-edge-sandboxes.result == 'success' &&
         (
@@ -970,6 +1105,18 @@ jobs:
         (
           needs.nvx-microvm-tests-whp.result == 'success' ||
           needs.nvx-microvm-tests-whp.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-debug-kvm.result == 'success' ||
+          needs.nvx-microvm-debug-kvm.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-debug-mshv.result == 'success' ||
+          needs.nvx-microvm-debug-mshv.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-debug-whp.result == 'success' ||
+          needs.nvx-microvm-debug-whp.result == 'skipped'
         ) &&
         needs.platform-kvm.result == 'success' &&
         needs.platform-mshv.result == 'success' &&
@@ -1025,6 +1172,7 @@ jobs:
       - aci-edge-sandboxes
       - openvmm-changes
       - artifacts
+      - debug-kernel
       - build-openvmm-linux-gnu
       - build-openvmm-linux-musl
       - build-openvmm-windows-msvc
@@ -1033,6 +1181,9 @@ jobs:
       - nvx-microvm-tests-kvm
       - nvx-microvm-tests-mshv
       - nvx-microvm-tests-whp
+      - nvx-microvm-debug-kvm
+      - nvx-microvm-debug-mshv
+      - nvx-microvm-debug-whp
       - platform-kvm
       - platform-mshv
       - platform-whp
@@ -1061,6 +1212,7 @@ jobs:
           ACI_EDGE_SANDBOXES_RESULT: ${{ needs.aci-edge-sandboxes.result }}
           CHANGES_RESULT: ${{ needs.openvmm-changes.result }}
           ARTIFACTS_RESULT: ${{ needs.artifacts.result }}
+          DEBUG_KERNEL_RESULT: ${{ needs.debug-kernel.result }}
           BUILD_LINUX_GNU_RESULT: ${{ needs.build-openvmm-linux-gnu.result }}
           BUILD_LINUX_MUSL_RESULT: ${{ needs.build-openvmm-linux-musl.result }}
           BUILD_WINDOWS_MSVC_RESULT: ${{ needs.build-openvmm-windows-msvc.result }}
@@ -1069,6 +1221,9 @@ jobs:
           MICROVM_KVM_RESULT: ${{ needs.nvx-microvm-tests-kvm.result }}
           MICROVM_MSHV_RESULT: ${{ needs.nvx-microvm-tests-mshv.result }}
           MICROVM_WHP_RESULT: ${{ needs.nvx-microvm-tests-whp.result }}
+          MICROVM_DEBUG_KVM_RESULT: ${{ needs.nvx-microvm-debug-kvm.result }}
+          MICROVM_DEBUG_MSHV_RESULT: ${{ needs.nvx-microvm-debug-mshv.result }}
+          MICROVM_DEBUG_WHP_RESULT: ${{ needs.nvx-microvm-debug-whp.result }}
           PLATFORM_KVM_RESULT: ${{ needs.platform-kvm.result }}
           PLATFORM_MSHV_RESULT: ${{ needs.platform-mshv.result }}
           PLATFORM_WHP_RESULT: ${{ needs.platform-whp.result }}
@@ -1083,11 +1238,15 @@ jobs:
   performance-persist:
     name: Persist performance baseline
     needs:
+      - debug-kernel
       - openvmm-vmm-tests
       - openvmm-unit-tests
       - nvx-microvm-tests-kvm
       - nvx-microvm-tests-mshv
       - nvx-microvm-tests-whp
+      - nvx-microvm-debug-kvm
+      - nvx-microvm-debug-mshv
+      - nvx-microvm-debug-whp
       - platform-kvm
       - platform-mshv
       - platform-whp
@@ -1097,6 +1256,7 @@ jobs:
         github.event_name == 'push' &&
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
+        needs.debug-kernel.result == 'success' &&
         (
           needs.openvmm-vmm-tests.result == 'success' ||
           needs.openvmm-vmm-tests.result == 'skipped'
@@ -1116,6 +1276,18 @@ jobs:
         (
           needs.nvx-microvm-tests-whp.result == 'success' ||
           needs.nvx-microvm-tests-whp.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-debug-kvm.result == 'success' ||
+          needs.nvx-microvm-debug-kvm.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-debug-mshv.result == 'success' ||
+          needs.nvx-microvm-debug-mshv.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-debug-whp.result == 'success' ||
+          needs.nvx-microvm-debug-whp.result == 'skipped'
         ) &&
         needs.platform-kvm.result == 'success' &&
         needs.platform-mshv.result == 'success' &&
