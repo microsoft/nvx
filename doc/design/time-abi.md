@@ -1779,26 +1779,27 @@ Expected effects:
 | v1 profiles without `ITS_NO` | Linux's ITS mitigation at boot, about 6 ms of a one-vCPU cold boot where the host's KVM advertises `ITS_NO` (the bare-metal KVM host: +6.3 [5.5, 7.3] ms against the same build booted with `indirect_target_selection=off`). The gated Azure KVM, MSHV, and WHP guests were already mitigated and are unchanged; restore is unaffected |
 | The profile's CPU view at 2 or more vCPUs on KVM | None at the integration head. Before the L3 fix, multi-vCPU cold boots were slower: +9.2 [5.0, 13.7] ms at 2 vCPUs on the bare-metal KVM host against the pre-profile head, and about +25 ms on nested Azure KVM. OpenVMM's `CPUID.4` reported a private L3 cache per vCPU, which made Linux's cache-info initialization wait a 10 ms tick for CPU 1 on many boots. With the L3 shared by the socket, the bare-metal host's cold boots match the pre-profile head: −0.3 [−3.2, +2.7], −0.0 [−2.1, +2.0], and −1.0 [−3.6, +1.7] ms at 2, 4, and 8 vCPUs. The gate's cold boots are one-vCPU; a boot-only comparison against the `dev` base on nested Azure KVM found no significant difference: +1.7 [−2.5, +6.9] ms at 2 vCPUs, +3.7 [−5.4, +13.6] at 4, and +3.3 [−7.0, +11.5] at 8, which excludes the earlier +25 ms. At 8 vCPUs, the time ABI's VMM boots 9.5 [4.6, 16.4] ms faster and its guest 8.2 [0.4, 15.9] ms slower, which cancel; the guest's part may be the KVM paravirtual features that the identity forgoes (see [Hypervisor identity](#hypervisor-identity)). The msr driver's per-CPU hotplug callback (`msr_init`) waits one or two ticks on multi-vCPU boots, as it did before the profiles; it competes for CPU with the asynchronous initramfs unpack and is off the critical path |
 | Restore work before the acknowledgement | Only the packet read, the clock set, CPU and memory activation, and entropy and identity repair, in one helper process. The restore checks, the RCU release, and the deferred `C7` start at `SCHED_IDLE` 150 ms after the acknowledgement, after the readiness path |
-| Monotonic time that includes the downtime | Right after resume, the guest kernel runs the timer work that came due during the downtime (kworkers, softirqs, and RCU) and first-touches cold pages doing so: at one vCPU about 1.4 ms on MSHV, 2.2 ms on KVM, and 17 ms on WHP (26 ms at two vCPUs). On WHP each restored 4 KiB page that the guest first touches costs about 50 µs of wall time on bare metal: a nested page fault, about 11 µs of it in the hypervisor and the rest resolved by the root, which the VMM never sees. WHP's lazily registered 2 MiB chunks add about 90 µs each, all before readiness, and a WHP restore's latency after the VPs are released is roughly the pages it touches times 53 µs. It falls inside the gated restore metric whatever the helper's priority. On MSHV the cost is per 2 MiB chunk: the root driver resolves the first touch of each chunk with 512 copy-on-write copies of the private snapshot mapping, about 1.1 ms. A one-vCPU restore touches about 24 chunks, 25 ms of its restore on both the time ABI and the legacy path, and the time ABI's catch-up adds about one chunk |
+| Monotonic time that includes the downtime | Right after resume, the guest kernel runs the timer work that came due during the downtime (kworkers, softirqs, and RCU) and first-touches cold pages doing so: at one vCPU about 1.4 ms on MSHV, 2.2 ms on KVM, and 17 ms on WHP (26 ms at two vCPUs). On WHP each restored 4 KiB page that the guest first touches costs about 50 µs of wall time on bare metal and about 70 to 95 µs on the Azure runners: a nested page fault, about 11 µs of it in the hypervisor on bare metal and the rest resolved by the root, which the VMM never sees. WHP's lazily registered 2 MiB chunks add about 90 µs each, all before readiness, and on bare metal a WHP restore's latency after the VPs are released is roughly the pages it touches times 53 µs. It falls inside the gated restore metric whatever the helper's priority. On MSHV the cost is per 2 MiB chunk: the root driver resolves the first touch of each chunk with 512 copy-on-write copies of the private snapshot mapping, about 1.1 ms. A one-vCPU restore touches about 24 chunks, 25 ms of its restore on both the time ABI and the legacy path, and the time ABI's catch-up adds about one chunk |
 | No time ABI console lines in production | Each console byte costs one or two port exits, about 10 to 12 µs on bare-metal KVM and an estimated 20 to 45 µs nested on Azure. Without the boot marker (about 110 bytes) and the restore marker (about 117 bytes), boots and restores save 1 to 5 ms, enough to fail the gate on nested Azure KVM; violation events still print |
 
-**The first second after a restore.** Not all post-resume work finishes
-before readiness. At resume the guest runs every timer that came
-due during the downtime: the kernel's, those that came due during the VMM's
-restore setup (the legacy path stopped guest time during that setup, so its
-guest ran them later), and the discipline's poll when the downtime outlasts
-the poll period. Restore repair also steps the clock, which the kernel
-follows with its RTC write, and the restore checks start 150 ms after the
-acknowledgement. Readiness doesn't wait for this work, but a request made
-during it does, most where first touches of restored RAM are expensive. On
-the Azure WHP runners, an exit requested right at readiness takes 7 to 9 ms
-longer than on the legacy path
-(`openvmm_snapshot_restore_guest_exit_teardown`: +31% and +37%, and +24% on
-bare metal). Requested 0.3 s after readiness it takes 3.5 ms longer, and
-from 1 s on the difference is within noise. On nested Azure KVM, a network
-restore that follows the shell-snapshot benchmarks' captures and restores
-is about 12 ms (8.5%) slower and is no slower on its own, which fits the
-same work faulting in restored RAM from a colder host page cache.
+**The first second after a restore.** Not all post-resume work finishes before
+readiness. At resume the guest runs every timer that came due during the
+downtime: the kernel's, those that came due during the VMM's restore setup
+(the legacy path stopped guest time during that setup, so its guest ran them
+later), and the discipline's poll when the downtime outlasts the poll period.
+Restore repair also steps the clock, which the kernel follows with its RTC
+write, and the restore checks start 150 ms after the acknowledgement.
+Readiness doesn't wait for this work, but a request made during it does, most
+where first touches of restored RAM are expensive. On the Azure WHP runners,
+an exit requested right at readiness takes 7 to 9 ms longer than on the legacy
+path (`openvmm_snapshot_restore_guest_exit_teardown`: +31% and +37%, and +24%
+on bare metal). Requested 0.3 s after readiness it takes 3.5 ms longer, and
+from 1 s on the difference is within noise. End to end, from process launch to
+exit, a WHP restore under the time ABI is at most about 2 ms slower than on
+the legacy path, and up to 6 ms faster on bare metal. On nested Azure KVM, a
+network restore that follows the shell-snapshot benchmarks' captures and
+restores is about 12 ms (8.5%) slower and is no slower on its own, which fits
+the same work faulting in restored RAM from a colder host page cache.
 
 Expected wins are tracked separately and do not relax the gate.
 
@@ -1821,11 +1822,11 @@ above covers latency. The checks' CPU time also counts the host stalls of
 their first touches of restored RAM:
 
 - WHP's restore checks first-touch restored copy-on-write RAM page by page,
-  about 50 µs each on bare metal, which the workload would otherwise do. Their
-  cost grows with guest memory: medians are 1.3 to 2.4 times higher at 512 MiB
-  than at 128 MiB at 4 and 8 vCPUs on Azure. So WHP's budgets come from 512
-  MiB guests, which bound smaller ones. Its Azure maxima are 17.03 ms at boot
-  with 2 vCPUs and 42.20 ms at restore with 4.
+  about 50 µs each on bare metal and 70 to 95 µs on Azure, which the workload
+  would otherwise do. Their cost grows with guest memory: medians are 1.3 to
+  2.4 times higher at 512 MiB than at 128 MiB at 4 and 8 vCPUs on Azure. So
+  WHP's budgets come from 512 MiB guests, which bound smaller ones. Its Azure
+  maxima are 17.03 ms at boot with 2 vCPUs and 42.20 ms at restore with 4.
 - On MSHV, each first touch of a 2 MiB chunk of restored RAM stalls the
   toucher about 1.1 ms on bare metal (see MSHV root-driver costs). The
   restore budget leaves room for one more stall above every maximum.
