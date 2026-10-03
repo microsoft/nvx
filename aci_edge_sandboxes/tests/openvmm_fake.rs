@@ -337,6 +337,87 @@ fn workload_outcomes_are_distinguished() {
 }
 
 #[test]
+fn working_directories_apply_to_each_execution() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let sandbox_id = nvx.provision(&ProvisionRequest::new()).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let pwd = |cwd: Option<&str>| {
+        let request = ExecRequest::argv(["/bin/pwd"]);
+        let request = match cwd {
+            Some(cwd) => request.with_cwd(cwd),
+            None => request,
+        };
+        nvx.exec(&sandbox_id, &request)
+            .unwrap()
+            .wait_with_output()
+            .unwrap()
+    };
+
+    // Without a working directory, a workload starts in the guest's root directory.
+    assert_eq!(pwd(None).stdout, b"/\n");
+    assert!(
+        run(&nvx, &sandbox_id, "mkdir /work/a; mkdir /work/b")
+            .outcome
+            .success()
+    );
+    // Each execution starts in its own directory, and none carries over to the next.
+    for (cwd, expected) in [
+        (Some("/work/a"), "/work/a\n"),
+        (Some("/work/b"), "/work/b\n"),
+        (None, "/\n"),
+        (Some("/work/a"), "/work/a\n"),
+    ] {
+        let output = pwd(cwd);
+        assert_eq!(
+            output.outcome,
+            ExecOutcome::Exited(0),
+            "{cwd:?}: {output:?}"
+        );
+        assert_eq!(output.stdout, expected.as_bytes(), "{cwd:?}");
+    }
+    let shell = nvx
+        .exec(
+            &sandbox_id,
+            &ExecRequest::command_line("pwd").with_cwd("/work/b"),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(shell.stdout, b"/work/b\n");
+
+    // A missing directory fails the launch with a diagnostic instead of running elsewhere.
+    let missing = nvx
+        .exec(
+            &sandbox_id,
+            &ExecRequest::command_line("write ran yes").with_cwd("/work/missing"),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(
+        missing.outcome,
+        ExecOutcome::Failed(ExecFailure::WorkingDirectory)
+    );
+    assert!(
+        missing.outcome.to_string().contains("working directory"),
+        "{}",
+        missing.outcome
+    );
+    assert!(missing.stdout.is_empty());
+    let diagnostic = String::from_utf8(missing.stderr).unwrap();
+    assert!(
+        diagnostic.contains("/work/missing") && diagnostic.contains("No such file or directory"),
+        "{diagnostic}"
+    );
+    assert!(run(&nvx, &sandbox_id, "read ran").stdout.is_empty());
+    assert_eq!(pwd(Some("/work/b")).stdout, b"/work/b\n");
+
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
 fn unsupported_requests_are_rejected_before_anything_runs() {
     let fixture = Fixture::new();
     let nvx = fixture.nvx();
@@ -390,6 +471,7 @@ fn unsupported_requests_are_rejected_before_anything_runs() {
     let write = || ExecRequest::command_line("write rejected ran");
     for request in [
         write().with_cwd("relative"),
+        write().with_cwd(format!("/{}", "d".repeat(4095))),
         write().with_env("MODE=test"),
         write().with_inherit_default_env(false),
         write().with_stdin(StdinMode::Piped),
@@ -520,6 +602,7 @@ fn guests_without_the_required_features_are_refused() {
         "host path mappings",
         "workload accounts",
         "workload containment",
+        "working directories",
     ] {
         assert!(error.message().contains(feature), "{error}");
     }
@@ -538,6 +621,19 @@ fn guests_without_the_required_features_are_refused() {
             .unwrap_err()
             .code(),
         ErrorCode::NotStarted
+    );
+
+    // This guest agent predates working directories, so it would start workloads elsewhere.
+    let without_cwd = fixture.nvx_with(|config| {
+        config.kernel_command_line = "fake_guest_features=15".to_owned();
+    });
+    let error = without_cwd.start(&sandbox_id).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::BackendUnavailable, "{error}");
+    assert!(
+        error
+            .message()
+            .contains("the openvmm backend needs (working directories)"),
+        "{error}"
     );
 
     let current = fixture.nvx();

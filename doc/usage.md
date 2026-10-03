@@ -268,8 +268,11 @@ against a real hypervisor. The tests start sandboxes with `build/vmlinux` and
 the Alpine initramfs, whose userland the workloads use directly, and run
 workloads. They check the workload identity, timeouts, and cancellation, that
 guest state lasts until a stop, and that a start terminates the VM of an
-interrupted earlier start before deprovisioning. They also map temporary host
-directories read-only, read-write, and denied, and check egress defaults and
+interrupted earlier start before deprovisioning. They check that each workload
+starts in its requested working directory, or `/` without one, and that a
+missing, non-directory, or inaccessible working directory fails the launch.
+They also map temporary host directories read-only, read-write, and denied,
+and check egress defaults and
 rules against the network gateway, which needs no Internet access. The command requires
 Cargo and `openvmm/target/release/openvmm[.exe]`, and writes the OpenVMM log to
 `--output-dir` (default `build/test-results/aci_edge_sandboxes`) when the test fails.

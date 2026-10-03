@@ -5,18 +5,22 @@
 //! input, serves the authenticated control console on the requested Unix socket or named pipe,
 //! and runs scripted workloads. Integration tests point `OpenVmmConfig::openvmm` at it.
 //!
-//! Workloads are `/bin/sh -c SCRIPT` or `/bin/echo ARGS...`. A script is a `;`-separated list
-//! of commands: `echo TEXT`, `echoerr TEXT`, `sleep MS`, `exit CODE`, `signal NUMBER`,
-//! `flood BYTES`, `write KEY VALUE`, `read KEY`, `fail`, and `launchfail`. Values written with
-//! `write` live in memory until the VM stops, like files in the guest's RAM root file system.
+//! Workloads are `/bin/sh -c SCRIPT`, `/bin/echo ARGS...`, or `/bin/pwd`. A script is a
+//! `;`-separated list of commands: `echo TEXT`, `echoerr TEXT`, `sleep MS`, `exit CODE`,
+//! `signal NUMBER`, `flood BYTES`, `write KEY VALUE`, `read KEY`, `mkdir DIRECTORY`, `pwd`, `fail`,
+//! and `launchfail`. Values written with `write` and directories made with `mkdir` live in memory
+//! until the VM stops, like files in the guest's RAM root file system.
 //! A `CANCEL` request ends a sleeping workload with the cancelled outcome, and a client that
-//! disconnects during an exec abandons it, as the real guest agent does. `pwd` prints the
-//! working directory that the backend's `cd` prelude selects.
+//! disconnects during an exec abandons it, as the real guest agent does. A workload runs in the
+//! working directory that its request names, or in `/`, and `pwd` prints it. Like the guest agent,
+//! the fake refuses a working directory that does not exist (any but `/`, `/tmp`, a mapped guest
+//! path, or a directory made with `mkdir`) with a diagnostic and the `cwd-failed` category.
 //!
 //! Kernel command-line tokens adjust the emulation: `fake_exit_on_start=CODE` fails the launch,
 //! `fake_boot_delay_ms=MS` delays the control endpoint, `fake_crash_after_ms=MS` makes the VM
 //! die, `fake_ignore_stop=1` ignores stop requests, `fake_ignore_cancel=1` ignores cancellation,
-//! and `fake_legacy_guest=1` refuses the
+//! `fake_guest_features=MASK` advertises the decimal feature mask `MASK` instead of the current
+//! guest's, and `fake_legacy_guest=1` refuses the
 //! features request like a guest agent that predates it. The command line is recorded in
 //! `fake-openvmm-<token>.json` next to the kernel.
 
@@ -52,8 +56,12 @@ const APP_STOPPED: u8 = 0x85;
 const APP_ERROR: u8 = 0xff;
 
 /// Control features of the current guest: cancellation, host path mappings, workload accounts,
-/// and workload containment.
-const GUEST_FEATURES: u32 = 0b1111;
+/// workload containment, and working directories.
+const GUEST_FEATURES: u32 = 0b10_1111;
+
+/// `EXEC` payload revision whose extended header carries a working directory.
+const EXEC_EXTENDED: u16 = 1;
+const EXEC_CWD_PRESENT: u16 = 1 << 0;
 
 struct Options {
     endpoint: String,
@@ -66,6 +74,9 @@ struct Options {
     ignore_stop: bool,
     ignore_cancel: bool,
     legacy_guest: bool,
+    guest_features: u32,
+    /// Guest paths of the mapped host paths.
+    mapped: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -263,6 +274,17 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let mapped = tokens
+        .iter()
+        .filter_map(|token| token.strip_prefix("nvx_map="))
+        .map(|fields| {
+            fields
+                .split(',')
+                .nth(1)
+                .and_then(percent_decode)
+                .ok_or_else(|| format!("invalid nvx_map={fields}"))
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Options {
         endpoint,
         args_dump: kernel.with_file_name(format!("fake-openvmm-{token}.json")),
@@ -274,7 +296,28 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         ignore_stop: knob("fake_ignore_stop") == Some("1"),
         ignore_cancel: knob("fake_ignore_cancel") == Some("1"),
         legacy_guest: knob("fake_legacy_guest") == Some("1"),
+        guest_features: knob("fake_guest_features")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(GUEST_FEATURES),
+        mapped,
     })
+}
+
+/// Decodes a percent-encoded `nvx_map=` field.
+fn percent_decode(field: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(field.len());
+    let mut rest = field.as_bytes();
+    while let [first, tail @ ..] = rest {
+        if *first == b'%' {
+            let digits = std::str::from_utf8(tail.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(digits, 16).ok()?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(*first);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).ok()
 }
 
 fn read_capability() -> Result<[u8; CAPABILITY_LEN], String> {
@@ -294,9 +337,21 @@ fn read_capability() -> Result<[u8; CAPABILITY_LEN], String> {
 }
 
 /// Guest state that lives in memory until the VM stops.
-#[derive(Default)]
 struct Guest {
     values: BTreeMap<String, String>,
+    /// Directories a workload can enter.
+    directories: BTreeSet<String>,
+}
+
+impl Guest {
+    fn new(options: &Options) -> Self {
+        let mut directories: BTreeSet<String> = ["/", "/tmp"].map(str::to_owned).into();
+        directories.extend(options.mapped.iter().cloned());
+        Self {
+            values: BTreeMap::new(),
+            directories,
+        }
+    }
 }
 
 enum Flow {
@@ -472,7 +527,12 @@ impl<S: Read + Write + Pending> Session<'_, S> {
             match kind {
                 APP_PING => self.send(APP_READY, request_id, 0, &[])?,
                 APP_FEATURES if !options.legacy_guest => {
-                    self.send(APP_READY, request_id, 0, &GUEST_FEATURES.to_le_bytes())?;
+                    self.send(
+                        APP_READY,
+                        request_id,
+                        0,
+                        &options.guest_features.to_le_bytes(),
+                    )?;
                 }
                 APP_EXEC => {
                     if !self.exec(request_id, &payload, guest)? {
@@ -518,30 +578,25 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         payload: &[u8],
         guest: &mut Guest,
     ) -> io::Result<Option<()>> {
-        let Some(argv) = decode_exec(payload) else {
+        let Some((argv, cwd)) = decode_exec(payload) else {
             return self.send_some(APP_ERROR, request_id, 22, b"invalid-request");
         };
         let timeout_ms = u32_at(payload, 0);
-        const PRELUDE: &str = "cd -- \"$1\" || exit 125\nshift\n";
+        let cwd = cwd.unwrap_or_else(|| "/".to_owned());
+        if !guest.directories.contains(&cwd) {
+            // The guest agent's refusal: a diagnostic, then ENOENT before anything runs.
+            let message = format!(
+                "nvx-managed-agent: cannot enter working directory {cwd}: No such file or \
+                 directory\n"
+            );
+            self.send(APP_STDERR, request_id, 0, message.as_bytes())?;
+            return self.send_some(APP_ERROR, request_id, 2, b"cwd-failed");
+        }
         let words: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let (words, cwd) = match words.as_slice() {
-            ["/bin/sh", "-c", script, "/bin/sh", cwd, rest @ ..] if script.starts_with(PRELUDE) => {
-                let script = &script[PRELUDE.len()..];
-                let mut words = if script == "exec \"$@\"" {
-                    rest.to_vec()
-                } else {
-                    vec!["/bin/sh", "-c", script]
-                };
-                if words.is_empty() {
-                    words.push("/bin/true");
-                }
-                (words, (*cwd).to_owned())
-            }
-            _ => (words, "/".to_owned()),
-        };
         let script = match words.as_slice() {
             ["/bin/sh", "-c", script] => (*script).to_owned(),
             ["/bin/echo", words @ ..] => format!("echo {}", words.join(" ")),
+            ["/bin/pwd"] => "pwd".to_owned(),
             [program, ..] => {
                 let message = format!("aci-edge-sandboxes-fake-openvmm: {program}: not found\n");
                 self.send(APP_STDERR, request_id, 0, message.as_bytes())?;
@@ -623,6 +678,9 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                         self.send(APP_STDOUT, request_id, 0, value.as_bytes())?;
                     }
                 }
+                "mkdir" => {
+                    guest.directories.insert(argument.to_owned());
+                }
                 "pwd" => {
                     let line = format!("{cwd}\n");
                     self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
@@ -653,12 +711,29 @@ impl<S: Read + Write + Pending> Session<'_, S> {
     }
 }
 
-fn decode_exec(payload: &[u8]) -> Option<Vec<String>> {
-    if payload.len() < 8 || payload[6..8] != [0, 0] {
+/// Decodes an `EXEC` payload into its arguments and working directory.
+fn decode_exec(payload: &[u8]) -> Option<(Vec<String>, Option<String>)> {
+    if payload.len() < 8 {
         return None;
     }
     let count = usize::from(u16::from_le_bytes([payload[4], payload[5]]));
-    let mut offset = 8;
+    let (mut offset, cwd_len) = match u16::from_le_bytes([payload[6], payload[7]]) {
+        0 => (8, 0),
+        EXEC_EXTENDED => {
+            let header = payload.get(..16)?;
+            let flags = u16::from_le_bytes([header[8], header[9]]);
+            let entries = u16::from_le_bytes([header[10], header[11]]);
+            let cwd_len = u32_at(header, 12) as usize;
+            if flags & !EXEC_CWD_PRESENT != 0
+                || entries != 0
+                || (flags & EXEC_CWD_PRESENT != 0) != (cwd_len != 0)
+            {
+                return None;
+            }
+            (16, cwd_len)
+        }
+        _ => return None,
+    };
     let mut argv = Vec::with_capacity(count);
     for _ in 0..count {
         let length = u32_at(payload.get(offset..offset + 4)?, 0) as usize;
@@ -666,7 +741,14 @@ fn decode_exec(payload: &[u8]) -> Option<Vec<String>> {
         argv.push(String::from_utf8(payload.get(offset..offset + length)?.to_vec()).ok()?);
         offset += length;
     }
-    (offset == payload.len() && !argv.is_empty()).then_some(argv)
+    let cwd = if cwd_len == 0 {
+        None
+    } else {
+        let cwd = String::from_utf8(payload.get(offset..offset + cwd_len)?.to_vec()).ok()?;
+        offset += cwd_len;
+        Some(cwd)
+    };
+    (offset == payload.len() && !argv.is_empty()).then_some((argv, cwd))
 }
 
 /// Authenticates one client and serves it until it disconnects or stops the VM.
@@ -737,7 +819,7 @@ fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()>
 
     let listener = UnixListener::bind(&options.endpoint)?;
     fs::set_permissions(&options.endpoint, fs::Permissions::from_mode(0o600))?;
-    let mut guest = Guest::default();
+    let mut guest = Guest::new(options);
     let mut epoch = 0;
     for stream in listener.incoming() {
         let mut stream = stream?;
@@ -792,7 +874,7 @@ fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()>
     // SAFETY: CreateNamedPipeW returned a fresh handle that nothing else owns.
     let mut file = File::from(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
     let pipe = file.as_raw_handle() as HANDLE;
-    let mut guest = Guest::default();
+    let mut guest = Guest::new(options);
     let mut epoch = 0;
     loop {
         // SAFETY: the handle is a pipe server instance; a null OVERLAPPED waits synchronously.

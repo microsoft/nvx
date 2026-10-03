@@ -79,16 +79,22 @@ fn assert_exec_rejected(client: &AciEdgeSandbox, request: &ExecRequest) {
 fn exec_validation_and_execution_share_guest_policy_checks() {
     let (directory, client) = client();
     let before = state_entries(&directory);
+    let full_argument = format!("/{}", "x".repeat(4095));
     for request in [
         ExecRequest::argv(["relative-program"]),
         ExecRequest::argv(["relative-program"]).with_cwd("/tmp"),
         ExecRequest::command_line("pwd").with_cwd("relative"),
         ExecRequest::command_line("x".repeat(4097)),
+        ExecRequest::command_line("x".repeat(4097)).with_cwd("/tmp"),
         ExecRequest::argv(["/bin/echo".to_owned(), "x".repeat(4097)]),
         ExecRequest::argv(vec!["/bin/true"; 65]),
-        ExecRequest::argv(vec!["/bin/true"; 60]).with_cwd("/tmp"),
+        ExecRequest::argv(vec!["/bin/true"; 65]).with_cwd("/tmp"),
         ExecRequest::argv(["/bin/echo".to_owned(), "x".repeat(4097)]).with_cwd("/tmp"),
-        ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4096))),
+        // Linux paths, including their terminating NUL, fit in 4096 bytes.
+        ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4095))),
+        // The working directory shares the control protocol's 64 KiB request bound.
+        ExecRequest::argv(vec![full_argument.as_str(); 15])
+            .with_cwd(format!("/{}", "x".repeat(4094))),
         ExecRequest::command_line("true").with_timeout(Duration::from_millis(3_600_001)),
     ] {
         assert_exec_rejected(&client, &request);
@@ -100,23 +106,21 @@ fn exec_validation_and_execution_share_guest_policy_checks() {
 fn exec_validation_accepts_the_exact_guest_limits() {
     let (directory, client) = client();
     let before = state_entries(&directory);
-    let cwd_prelude = "cd -- \"$1\" || exit 125\nshift\n";
+    let full_argument = format!("/{}", "x".repeat(4095));
     for request in [
         ExecRequest::command_line("x".repeat(4096)),
         ExecRequest::argv(["/bin/echo".to_owned(), "x".repeat(4096)]),
         ExecRequest::argv(vec!["/bin/true"; 64]),
-        ExecRequest::argv(vec!["/bin/true"; 59]).with_cwd("/tmp"),
-        ExecRequest::command_line("x".repeat(4096 - cwd_prelude.len())).with_cwd("/tmp"),
-        ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4095))),
+        // A working directory leaves the command and its arguments untouched.
+        ExecRequest::argv(vec!["/bin/true"; 64]).with_cwd("/tmp"),
+        ExecRequest::command_line("x".repeat(4096)).with_cwd("/tmp"),
+        ExecRequest::command_line("true").with_cwd(format!("/{}", "x".repeat(4094))),
+        ExecRequest::argv(vec![full_argument.as_str(); 15]),
         ExecRequest::command_line("true").with_timeout(Duration::from_millis(3_600_000)),
     ] {
         client.validate_exec(&request).unwrap();
         client.backend().validate_exec(&request).unwrap();
     }
-    assert_exec_rejected(
-        &client,
-        &ExecRequest::command_line("x".repeat(4097 - cwd_prelude.len())).with_cwd("/tmp"),
-    );
     assert_eq!(state_entries(&directory), before);
 }
 

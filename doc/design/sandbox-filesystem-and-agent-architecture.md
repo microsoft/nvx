@@ -281,6 +281,20 @@ reports `containment-failed` instead. Every subsequent direct execution also
 requires verified emptiness, so a control-session reset cannot bypass a failed
 containment check.
 
+An `EXEC` payload holds a 32-bit timeout, a 16-bit argument count, a reserved
+16-bit field, and the length-prefixed arguments. A reserved field of 1
+announces an extended header: a 16-bit flag field, a 16-bit environment entry
+count, which must be zero, and a 32-bit working-directory length. With flag
+bit 0, an absolute working directory of at most 4095 bytes follows the
+arguments. Without sandbox layers, the workload's child process enters that
+directory, or `/` without one, under the workload's user and group IDs with no
+supplementary groups or effective capabilities, before `setpriv` makes that
+identity permanent, and sets `PWD` to it. If the workload cannot enter the
+directory, the agent writes a diagnostic to the workload's standard error and
+refuses the request with the `cwd-failed` category and the error number as
+status, so nothing runs in another directory. With sandbox layers, a working
+directory is refused as `unsupported-operation`.
+
 Without sandbox layers, host directories reach workloads through OpenVMM's
 single virtio-fs export. The host exports the deepest directory that contains
 every mapped path to `/run/nvx/hostfs/root`; before it accepts control traffic,
@@ -304,14 +318,15 @@ the behaviors it depends on: an older guest boots and answers, but ignores
 payload, therefore asks which control behaviors the image provides. The agent
 answers `READY` with a four-byte little-endian bit mask: `CANCEL` (bit 0),
 `HOST_MAPPINGS` (bit 1), `WORKLOAD_ACCOUNT` (bit 2, provided by the managed
-init and reported by the agent, because both ship in one initramfs), and
-`EXEC_CGROUP` (bit 3). Without sandbox layers all four are provided; with them,
-only `CANCEL` and `WORKLOAD_ACCOUNT`. An agent that predates the request
-refuses it as `unsupported-operation`, which a host reads as no features, so a
-host terminates a guest that lacks a feature it needs instead of running
-workloads without the policy it asked for. During an execution the request is
-refused as `busy`. A feature bit is added together with the behavior it names;
-hosts ignore bits they do not know and trailing bytes of the answer.
+init and reported by the agent, because both ship in one initramfs),
+`EXEC_CGROUP` (bit 3), and `EXEC_CWD` (bit 5). Without sandbox layers all five
+are provided; with them, only `CANCEL` and `WORKLOAD_ACCOUNT`. An agent that
+predates the request refuses it as `unsupported-operation`, which a host reads
+as no features, so a host terminates a guest that lacks a feature it needs
+instead of running workloads without the policy it asked for. During an
+execution the request is refused as `busy`. A feature bit is added together
+with the behavior it names; hosts ignore bits they do not know and trailing
+bytes of the answer.
 
 The remaining production operation families are:
 

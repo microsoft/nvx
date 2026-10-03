@@ -36,6 +36,11 @@ pub(crate) const APP_ERROR: u8 = 0xff;
 
 /// Error category with which a guest agent refuses a request kind that it does not know.
 pub(crate) const UNSUPPORTED_OPERATION: &[u8] = b"unsupported-operation";
+/// Error category with which a guest agent reports a workload that it could not launch.
+pub(crate) const LAUNCH_FAILED: &str = "launch-failed";
+/// Error category with which a guest agent reports a working directory that the workload cannot
+/// enter. The status is the guest's error number, and nothing of the workload ran.
+pub(crate) const CWD_FAILED: &str = "cwd-failed";
 
 /// Length of the launch capability that authenticates the host client.
 pub(crate) const CAPABILITY_LEN: usize = 32;
@@ -43,10 +48,20 @@ pub(crate) const CAPABILITY_LEN: usize = 32;
 pub(crate) const MAX_ARGUMENTS: usize = 64;
 /// Largest encoded size of one workload argument.
 pub(crate) const MAX_ARGUMENT_BYTES: usize = 4096;
+/// Largest encoded size of a workload's working directory: Linux's `PATH_MAX` without the
+/// terminating NUL.
+pub(crate) const MAX_CWD_BYTES: usize = 4095;
 /// Largest workload timeout the guest agent accepts.
 pub(crate) const MAX_TIMEOUT_MS: u32 = 60 * 60 * 1000;
 /// Largest combined stdout and stderr volume the guest agent forwards for one execution.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Value of an `EXEC` payload's reserved field that announces the extended header: flags, an
+/// environment entry count, and a working-directory length precede the arguments, and the working
+/// directory follows them.
+const EXEC_EXTENDED: u16 = 1;
+/// Extended `EXEC` flag: the payload carries a working directory.
+const EXEC_CWD_PRESENT: u16 = 1 << 0;
 
 /// Protocol violation detected while encoding or decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,10 +189,13 @@ pub(crate) fn decode_app(frame: &[u8]) -> Result<AppFrame<'_>, ProtocolError> {
 ///
 /// The guest agent requires 1 to [`MAX_ARGUMENTS`] non-empty arguments without NUL bytes, each
 /// at most [`MAX_ARGUMENT_BYTES`] long, an absolute program path, and a timeout of at most
-/// [`MAX_TIMEOUT_MS`] (zero disables it).
+/// [`MAX_TIMEOUT_MS`] (zero disables it). A working directory must be an absolute path of at
+/// most [`MAX_CWD_BYTES`] without NUL bytes; without one, the payload keeps the original layout
+/// that every guest agent accepts.
 pub(crate) fn encode_exec_payload(
     argv: &[String],
     timeout_ms: u32,
+    cwd: Option<&str>,
 ) -> Result<Vec<u8>, ProtocolError> {
     if argv.is_empty() || argv.len() > MAX_ARGUMENTS {
         return Err(violation(format!(
@@ -192,11 +210,29 @@ pub(crate) fn encode_exec_payload(
             "exec timeout must not exceed {MAX_TIMEOUT_MS} ms"
         )));
     }
+    if let Some(cwd) = cwd
+        && (!cwd.starts_with('/') || cwd.len() > MAX_CWD_BYTES || cwd.contains('\0'))
+    {
+        return Err(violation(format!(
+            "exec working directory must be an absolute guest path of at most {MAX_CWD_BYTES} \
+             bytes without NUL characters"
+        )));
+    }
     let count = u16::try_from(argv.len()).unwrap_or(u16::MAX);
     let mut payload = Vec::new();
     payload.extend_from_slice(&timeout_ms.to_le_bytes());
     payload.extend_from_slice(&count.to_le_bytes());
-    payload.extend_from_slice(&0u16.to_le_bytes());
+    match cwd {
+        None => payload.extend_from_slice(&0u16.to_le_bytes()),
+        Some(cwd) => {
+            let length = u32::try_from(cwd.len()).unwrap_or(u32::MAX);
+            payload.extend_from_slice(&EXEC_EXTENDED.to_le_bytes());
+            payload.extend_from_slice(&EXEC_CWD_PRESENT.to_le_bytes());
+            // No environment entries.
+            payload.extend_from_slice(&0u16.to_le_bytes());
+            payload.extend_from_slice(&length.to_le_bytes());
+        }
+    }
     for argument in argv {
         let bytes = argument.as_bytes();
         if bytes.is_empty() || bytes.len() > MAX_ARGUMENT_BYTES || bytes.contains(&0) {
@@ -207,6 +243,9 @@ pub(crate) fn encode_exec_payload(
         let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
         payload.extend_from_slice(&length.to_le_bytes());
         payload.extend_from_slice(bytes);
+    }
+    if let Some(cwd) = cwd {
+        payload.extend_from_slice(cwd.as_bytes());
     }
     if APP_HEADER_LEN + payload.len() > OUTER_MAX_PAYLOAD {
         return Err(violation("exec request exceeds the control protocol limit"));
@@ -234,16 +273,25 @@ impl GuestFeatures {
     pub(crate) const WORKLOAD_ACCOUNT: Self = Self(1 << 2);
     /// Runs each workload in a cgroup of its own and kills whatever it leaves behind.
     pub(crate) const EXEC_CGROUP: Self = Self(1 << 3);
+    /// Starts each workload in the working directory that its `EXEC` request names, or in `/`,
+    /// entered with the workload's identity, and refuses the launch with the `cwd-failed`
+    /// category when the workload cannot enter it.
+    pub(crate) const EXEC_CWD: Self = Self(1 << 5);
     /// The features that the openvmm backend depends on.
     pub(crate) const REQUIRED: Self = Self(
-        Self::CANCEL.0 | Self::HOST_MAPPINGS.0 | Self::WORKLOAD_ACCOUNT.0 | Self::EXEC_CGROUP.0,
+        Self::CANCEL.0
+            | Self::HOST_MAPPINGS.0
+            | Self::WORKLOAD_ACCOUNT.0
+            | Self::EXEC_CGROUP.0
+            | Self::EXEC_CWD.0,
     );
 
-    const NAMES: [(Self, &'static str); 4] = [
+    const NAMES: [(Self, &'static str); 5] = [
         (Self::CANCEL, "cancellation"),
         (Self::HOST_MAPPINGS, "host path mappings"),
         (Self::WORKLOAD_ACCOUNT, "workload accounts"),
         (Self::EXEC_CGROUP, "workload containment"),
+        (Self::EXEC_CWD, "working directories"),
     ];
 
     /// Decodes the payload of a features response.
@@ -366,7 +414,7 @@ mod tests {
     #[test]
     fn exec_payload_matches_the_python_client() {
         let argv = ["/bin/sh", "-c", "echo hi"].map(String::from);
-        let payload = encode_exec_payload(&argv, 5000).unwrap();
+        let payload = encode_exec_payload(&argv, 5000, None).unwrap();
         assert_eq!(
             hex(&payload),
             concat!(
@@ -379,15 +427,59 @@ mod tests {
     }
 
     #[test]
+    fn exec_payload_carries_a_working_directory_after_the_arguments() {
+        let argv = ["/bin/pwd".to_owned()];
+        let payload = encode_exec_payload(&argv, 0, Some("/work")).unwrap();
+        assert_eq!(
+            hex(&payload),
+            concat!(
+                // Timeout, one argument, and the extended header: the working-directory flag, no
+                // environment entries, and the directory's length.
+                "00000000",
+                "0100",
+                "0100",
+                "0100",
+                "0000",
+                "05000000",
+                "080000002f62696e2f707764",
+                "2f776f726b",
+            )
+        );
+        let longest = format!("/{}", "d".repeat(MAX_CWD_BYTES - 1));
+        assert!(encode_exec_payload(&argv, 0, Some(&longest)).is_ok());
+        for invalid in [
+            "",
+            "work",
+            "relative/work",
+            "/work\0",
+            &format!("{longest}d"),
+        ] {
+            assert!(
+                encode_exec_payload(&argv, 0, Some(invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
     fn exec_payload_enforces_agent_limits() {
         let argument = |value: &str| vec![value.to_owned()];
-        assert!(encode_exec_payload(&argument("bin/sh"), 0).is_err());
-        assert!(encode_exec_payload(&[], 0).is_err());
-        assert!(encode_exec_payload(&argument("/bin/sh"), MAX_TIMEOUT_MS + 1).is_err());
-        assert!(encode_exec_payload(&argument(&format!("/{}", "a".repeat(4096))), 0).is_err());
-        assert!(encode_exec_payload(&vec!["/bin/true".to_owned(); 65], 0).is_err());
-        assert!(encode_exec_payload(&["/bin/echo".to_owned(), String::new()], 0).is_err());
-        assert!(encode_exec_payload(&vec!["/bin/true".to_owned(); 64], MAX_TIMEOUT_MS).is_ok());
+        assert!(encode_exec_payload(&argument("bin/sh"), 0, None).is_err());
+        assert!(encode_exec_payload(&[], 0, None).is_err());
+        assert!(encode_exec_payload(&argument("/bin/sh"), MAX_TIMEOUT_MS + 1, None).is_err());
+        assert!(
+            encode_exec_payload(&argument(&format!("/{}", "a".repeat(4096))), 0, None).is_err()
+        );
+        assert!(encode_exec_payload(&vec!["/bin/true".to_owned(); 65], 0, None).is_err());
+        assert!(encode_exec_payload(&["/bin/echo".to_owned(), String::new()], 0, None).is_err());
+        assert!(
+            encode_exec_payload(&vec!["/bin/true".to_owned(); 64], MAX_TIMEOUT_MS, None).is_ok()
+        );
+        // The working directory counts toward the control protocol's payload limit.
+        let full = vec![format!("/{}", "a".repeat(MAX_ARGUMENT_BYTES - 1)); 15];
+        assert!(encode_exec_payload(&full, 0, None).is_ok());
+        let cwd = format!("/{}", "d".repeat(MAX_CWD_BYTES - 1));
+        assert!(encode_exec_payload(&full, 0, Some(&cwd)).is_err());
     }
 
     #[test]
@@ -446,7 +538,8 @@ mod tests {
             [
                 "host path mappings",
                 "workload accounts",
-                "workload containment"
+                "workload containment",
+                "working directories"
             ]
         );
         assert!(GuestFeatures::decode(&[1, 0, 0]).is_err());
@@ -459,14 +552,27 @@ mod tests {
     }
 
     #[test]
-    fn feature_definitions_match_the_guest_agent_source() {
+    fn guest_features_use_distinct_bits() {
+        let mut seen = 0u32;
+        for (feature, name) in GuestFeatures::NAMES {
+            assert_eq!(feature.0.count_ones(), 1, "{name}");
+            assert_eq!(seen & feature.0, 0, "{name} reuses a feature bit");
+            seen |= feature.0;
+        }
+    }
+
+    fn guest_agent_source() -> Option<String> {
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
+            .parent()?
             .join("guest")
             .join("common")
             .join("nvx-managed-agent.c");
-        let Ok(source) = std::fs::read_to_string(source) else {
+        std::fs::read_to_string(source).ok()
+    }
+
+    #[test]
+    fn feature_definitions_match_the_guest_agent_source() {
+        let Some(source) = guest_agent_source() else {
             return;
         };
         let mut definitions = vec![format!("#define APP_FEATURES {APP_FEATURES}U")];
@@ -475,6 +581,7 @@ mod tests {
             ("HOST_MAPPINGS", GuestFeatures::HOST_MAPPINGS),
             ("WORKLOAD_ACCOUNT", GuestFeatures::WORKLOAD_ACCOUNT),
             ("EXEC_CGROUP", GuestFeatures::EXEC_CGROUP),
+            ("EXEC_CWD", GuestFeatures::EXEC_CWD),
         ] {
             let bit = feature.0.trailing_zeros();
             definitions.push(format!("#define FEATURE_{name} (1U << {bit})"));
@@ -483,6 +590,29 @@ mod tests {
             assert!(
                 source.contains(&definition),
                 "the guest agent does not define `{definition}`"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_extension_matches_the_guest_agent_source() {
+        let Some(source) = guest_agent_source() else {
+            return;
+        };
+        for expected in [
+            format!("#define EXEC_EXTENDED {EXEC_EXTENDED}U"),
+            "#define EXEC_EXTENDED_HEADER_LEN 16U".to_owned(),
+            format!(
+                "#define EXEC_CWD_PRESENT (1U << {})",
+                EXEC_CWD_PRESENT.trailing_zeros()
+            ),
+            format!("#define MAX_GUEST_PATH {}U", MAX_CWD_BYTES + 1),
+            format!("\"{CWD_FAILED}\""),
+            format!("\"{LAUNCH_FAILED}\""),
+        ] {
+            assert!(
+                source.contains(&expected),
+                "the guest agent does not contain `{expected}`"
             );
         }
     }

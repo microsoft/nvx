@@ -11,10 +11,10 @@
 //! - **start** launches a detached OpenVMM process with the managed lifecycle, passes it a fresh
 //!   32-byte capability through standard input, and waits until the guest agent answers on the
 //!   authenticated control console. The agent must also advertise the control features this
-//!   backend depends on (cancellation, host path mappings, workload accounts, and workload
-//!   containment). A guest image that lacks one is terminated and start fails with
-//!   [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable), because such an
-//!   image would silently ignore the policy or request that needs the feature.
+//!   backend depends on (cancellation, host path mappings, workload accounts, workload
+//!   containment, and working directories). A guest image that lacks one is terminated and start
+//!   fails with [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable), because
+//!   such an image would silently ignore the policy or request that needs the feature.
 //! - **exec** runs the workload through the control console and streams its output live.
 //! - **stop** asks the guest to shut down and falls back to terminating OpenVMM after
 //!   [`OpenVmmConfig::stop_timeout`].
@@ -33,9 +33,17 @@
 //! | `network.ingress`, `hostLoopback` | `deny` only | n/a |
 //! | `microvm.provision.memoryMib` | applied | n/a |
 //! | `process.commandLine` | n/a | run as `/bin/sh -c <commandLine>`, at most 4096 bytes |
-//! | `process.cwd` | n/a | an absolute guest path, entered before the workload runs |
+//! | `process.cwd` | n/a | an absolute guest path of at most 4095 bytes; `/` when omitted |
 //! | `process.timeout` | n/a | up to one hour |
 //! | `process.env`, `inheritDefaultEnv: false`, piped stdin | n/a | rejected |
+//!
+//! The guest agent enters the working directory with the workload's identity before it starts
+//! the workload, and points `PWD` at it. A directory that does not exist, is not a directory, or
+//! that the workload cannot search fails the launch instead: the execution ends with
+//! [`ExecFailure::WorkingDirectory`] after a diagnostic on standard error, and nothing runs.
+//! Relative paths are rejected with
+//! [`ErrorCode::PolicyValidation`](crate::ErrorCode::PolicyValidation); [`guest_path`]
+//! translates host paths.
 //!
 //! Host paths share OpenVMM's single virtio-fs export: the backend exports the deepest directory
 //! that contains every mapped path to a guest directory that only the guest's root can enter, and
@@ -85,8 +93,8 @@ pub use self::artifacts::Artifacts;
 pub use self::config::{Hypervisor, OpenVmmConfig};
 pub use self::filesystem::{guest_path, resolve_guest_path};
 use self::protocol::{
-    CAPABILITY_LEN, ExitCategory, GuestFeatures, MAX_ARGUMENT_BYTES, MAX_OUTPUT_BYTES,
-    MAX_TIMEOUT_MS,
+    CAPABILITY_LEN, ExitCategory, GuestFeatures, MAX_ARGUMENT_BYTES, MAX_CWD_BYTES,
+    MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS,
 };
 use self::session::{ControlSession, ExecEvent, SessionError};
 use self::state::{
@@ -291,54 +299,38 @@ impl OpenVmmBackend {
     }
 }
 
-/// Shell prelude that enters the working directory passed as `$1`. A missing directory ends the
-/// workload with status 125 before it runs.
-const CWD_PRELUDE: &str = "cd -- \"$1\" || exit 125\nshift\n";
-
 fn workload_argv(process: &ProcessSpec) -> Result<Vec<String>> {
-    let too_long = || {
-        Error::policy_validation(format!(
-            "process.commandLine exceeds the {MAX_ARGUMENT_BYTES}-byte limit of the openvmm \
-             backend"
-        ))
-    };
-    let Some(cwd) = &process.cwd else {
-        return Ok(match &process.command {
-            Command::CommandLine(command_line) => {
-                if command_line.len() > MAX_ARGUMENT_BYTES {
-                    return Err(too_long());
-                }
-                vec![SHELL.to_owned(), "-c".to_owned(), command_line.clone()]
+    Ok(match &process.command {
+        Command::CommandLine(command_line) => {
+            if command_line.len() > MAX_ARGUMENT_BYTES {
+                return Err(Error::policy_validation(format!(
+                    "process.commandLine exceeds the {MAX_ARGUMENT_BYTES}-byte limit of the \
+                     openvmm backend"
+                )));
             }
-            Command::Argv(argv) => argv.clone(),
-        });
+            vec![SHELL.to_owned(), "-c".to_owned(), command_line.clone()]
+        }
+        Command::Argv(argv) => argv.clone(),
+    })
+}
+
+/// Returns the guest directory the workload starts in; `None` lets the guest agent use `/`.
+fn workload_cwd(process: &ProcessSpec) -> Result<Option<&str>> {
+    let Some(cwd) = process.cwd.as_deref() else {
+        return Ok(None);
     };
     if !cwd.starts_with('/') {
         return Err(Error::policy_validation(format!(
-            "process.cwd {cwd:?} must be an absolute guest path; map host paths with \
-             openvmm::guest_path"
+            "process.cwd {cwd:?} is not an absolute guest path; the openvmm backend does not \
+             resolve relative working directories (openvmm::guest_path translates host paths)"
         )));
     }
-    // The guest agent has no working-directory field, so a shell enters the directory first.
-    let mut argv = vec![SHELL.to_owned(), "-c".to_owned()];
-    match &process.command {
-        Command::CommandLine(command_line) => {
-            let script = format!("{CWD_PRELUDE}{command_line}");
-            if script.len() > MAX_ARGUMENT_BYTES {
-                return Err(too_long());
-            }
-            argv.extend([script, SHELL.to_owned(), cwd.clone()]);
-        }
-        Command::Argv(command) => {
-            argv.extend([
-                format!("{CWD_PRELUDE}exec \"$@\""),
-                SHELL.to_owned(),
-                cwd.clone(),
-            ]);
-            argv.extend(command.iter().cloned());
-        }
+    if cwd.len() > MAX_CWD_BYTES {
+        return Err(Error::policy_validation(format!(
+            "process.cwd exceeds the {MAX_CWD_BYTES}-byte limit of the openvmm backend"
+        )));
     }
-    Ok(argv)
+    Ok(Some(cwd))
 }
 
 fn exec_timeout_ms(process: &ProcessSpec) -> Result<u32> {
@@ -353,20 +345,23 @@ fn exec_timeout_ms(process: &ProcessSpec) -> Result<u32> {
         })
 }
 
-fn prepare_exec(process: &ProcessSpec) -> Result<(Vec<String>, u32)> {
-    let argv = workload_argv(process)?;
-    let timeout_ms = exec_timeout_ms(process)?;
-    let validate = |arguments: &[String]| {
-        protocol::encode_exec_payload(arguments, timeout_ms)
-            .map(|_| ())
-            .map_err(|error| Error::policy_validation(error.0))
+/// An execution request in the form the guest agent runs it.
+#[derive(Debug)]
+struct PreparedExec<'a> {
+    argv: Vec<String>,
+    timeout_ms: u32,
+    cwd: Option<&'a str>,
+}
+
+fn prepare_exec(process: &ProcessSpec) -> Result<PreparedExec<'_>> {
+    let prepared = PreparedExec {
+        argv: workload_argv(process)?,
+        timeout_ms: exec_timeout_ms(process)?,
+        cwd: workload_cwd(process)?,
     };
-    // The cwd wrapper's /bin/sh must not hide an invalid program in the original argv.
-    if let Command::Argv(arguments) = &process.command {
-        validate(arguments)?;
-    }
-    validate(&argv)?;
-    Ok((argv, timeout_ms))
+    protocol::encode_exec_payload(&prepared.argv, prepared.timeout_ms, prepared.cwd)
+        .map_err(|error| Error::policy_validation(error.0))?;
+    Ok(prepared)
 }
 
 /// Returns the calling user's IDs when workloads that map host paths should use them; see
@@ -485,7 +480,7 @@ impl Backend for OpenVmmBackend {
     }
 
     fn validate_exec(&self, request: &ExecRequest) -> Result<()> {
-        prepare_exec(&request.process).map(|_| ())
+        prepare_exec(&request.process).map(drop)
     }
 
     fn provision(&self, request: &ProvisionRequest) -> Result<ProvisionResult> {
@@ -653,7 +648,7 @@ impl Backend for OpenVmmBackend {
         request: &ExecRequest,
         io: ExecIo,
     ) -> Result<Box<dyn ExecControl>> {
-        let (argv, timeout_ms) = prepare_exec(&request.process)?;
+        let prepared = prepare_exec(&request.process)?;
         let (runtime, capability) = {
             let _guard = self.store.lock(sandbox_id)?;
             self.store.load(sandbox_id)?;
@@ -675,11 +670,11 @@ impl Backend for OpenVmmBackend {
                 .and_then(|transport| ControlSession::attach(transport, &capability, deadline))
                 .map_err(|error| self.session_error(sandbox_id, error))?;
         let request_id = session
-            .start_exec(&argv, timeout_ms, deadline)
+            .start_exec(&prepared.argv, prepared.timeout_ms, prepared.cwd, deadline)
             .map_err(|error| self.session_error(sandbox_id, error))?;
-        let response_deadline = (timeout_ms > 0).then(|| {
+        let response_deadline = (prepared.timeout_ms > 0).then(|| {
             Instant::now()
-                + Duration::from_millis(timeout_ms.into())
+                + Duration::from_millis(prepared.timeout_ms.into())
                 + self.config.exec_response_grace
         });
         let shared = Arc::new(ExecShared::default());
@@ -844,12 +839,13 @@ fn pump(
                 });
             }
             ExecEvent::Rejected { status, category } => {
-                return if category == "launch-failed" {
-                    Ok(ExecOutcome::Failed(ExecFailure::LaunchFailed))
-                } else {
-                    Err(Error::backend_error(format!(
+                return match category.as_str() {
+                    protocol::LAUNCH_FAILED => Ok(ExecOutcome::Failed(ExecFailure::LaunchFailed)),
+                    // The guest already wrote a diagnostic that names the directory to stderr.
+                    protocol::CWD_FAILED => Ok(ExecOutcome::Failed(ExecFailure::WorkingDirectory)),
+                    _ => Err(Error::backend_error(format!(
                         "the guest agent rejected the workload: {category} (status {status})"
-                    )))
+                    ))),
                 };
             }
         };
@@ -913,35 +909,49 @@ mod tests {
     }
 
     #[test]
-    fn working_directories_are_entered_by_a_shell() {
+    fn working_directories_travel_beside_an_unchanged_command() {
         let request = ExecRequest::command_line("pwd").with_cwd("/mnt/c/work");
-        assert_eq!(
-            workload_argv(&request.process).unwrap(),
-            [
-                "/bin/sh",
-                "-c",
-                "cd -- \"$1\" || exit 125\nshift\npwd",
-                "/bin/sh",
-                "/mnt/c/work",
-            ]
-        );
+        let prepared = prepare_exec(&request.process).unwrap();
+        assert_eq!(prepared.argv, ["/bin/sh", "-c", "pwd"]);
+        assert_eq!(prepared.cwd, Some("/mnt/c/work"));
+
         let request = ExecRequest::argv(["/bin/ls", "-l"]).with_cwd("/tmp");
-        assert_eq!(
-            workload_argv(&request.process).unwrap(),
-            [
-                "/bin/sh",
-                "-c",
-                "cd -- \"$1\" || exit 125\nshift\nexec \"$@\"",
-                "/bin/sh",
-                "/tmp",
-                "/bin/ls",
-                "-l",
-            ]
-        );
-        let relative = ExecRequest::command_line("pwd").with_cwd(r"C:\work");
-        assert_eq!(
-            workload_argv(&relative.process).unwrap_err().code(),
-            ErrorCode::PolicyValidation
+        let prepared = prepare_exec(&request.process).unwrap();
+        assert_eq!(prepared.argv, ["/bin/ls", "-l"]);
+        assert_eq!(prepared.cwd, Some("/tmp"));
+
+        // The whole 4096-byte command line remains available with a working directory.
+        let longest = "x".repeat(MAX_ARGUMENT_BYTES);
+        let request = ExecRequest::command_line(longest.as_str()).with_cwd("/tmp");
+        assert_eq!(prepare_exec(&request.process).unwrap().argv[2], longest);
+
+        // Omitting the working directory leaves the guest's default, `/`.
+        let request = ExecRequest::command_line("pwd");
+        assert_eq!(prepare_exec(&request.process).unwrap().cwd, None);
+    }
+
+    #[test]
+    fn working_directories_must_be_bounded_absolute_guest_paths() {
+        let longest = format!("/{}", "d".repeat(MAX_CWD_BYTES - 1));
+        let request = ExecRequest::command_line("pwd").with_cwd(longest.as_str());
+        assert_eq!(prepare_exec(&request.process).unwrap().cwd, Some(&*longest));
+        for cwd in [
+            "work".to_owned(),
+            "./work".to_owned(),
+            "../work".to_owned(),
+            r"C:\work".to_owned(),
+            format!("{longest}d"),
+        ] {
+            let request = ExecRequest::command_line("pwd").with_cwd(cwd.as_str());
+            let error = prepare_exec(&request.process).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::PolicyValidation, "{cwd:?}");
+            assert!(error.message().contains("process.cwd"), "{error}");
+        }
+        let relative = ExecRequest::command_line("pwd").with_cwd("work");
+        let error = prepare_exec(&relative.process).unwrap_err();
+        assert!(
+            error.message().contains("not an absolute guest path"),
+            "{error}"
         );
     }
 
