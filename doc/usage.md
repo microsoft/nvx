@@ -164,9 +164,9 @@ python3 scripts/nvx.py verify-guest-determinism
     [--work-dir PATH]
 ```
 
-Builds the Ubuntu initramfs and EROFS layer twice from separate roots and
-compares every artifact SHA-256. A mismatch reports the first differing
-normalized rootfs entry when one exists.
+Currently supports only `--guest ubuntu`. It builds the Ubuntu initramfs and
+EROFS layer twice from separate roots and compares every artifact SHA-256. A
+mismatch reports the first differing normalized rootfs entry when one exists.
 
 ### `build-openvmm`
 

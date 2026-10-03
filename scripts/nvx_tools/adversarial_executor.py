@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import platform
 import re
 import subprocess
 import sys
@@ -40,9 +39,11 @@ from nvx_tools.build_constants import (
 from nvx_tools.common import (
     ScriptError,
     artifact_path,
-    git_output,
     openvmm_binary_path,
     require_file,
+)
+from nvx_tools.common import (
+    repository_metadata as _target_metadata,
 )
 from nvx_tools.release import validate_runtime_artifact_provenance
 
@@ -137,38 +138,6 @@ def _string(
             f"{description} must be a nonempty string up to {maximum} characters"
         )
     return value
-
-
-def _target_metadata() -> dict[str, object]:
-    nvx_status = git_output(
-        "status",
-        "--porcelain",
-        "--untracked-files=normal",
-    ).splitlines()
-    openvmm_status = git_output(
-        "-C",
-        str(OpenVMMBuildConstants.DIRECTORY),
-        "status",
-        "--porcelain",
-        "--untracked-files=normal",
-    ).splitlines()
-    return {
-        "nvx_commit": git_output("rev-parse", "HEAD"),
-        "nvx_dirty": bool(nvx_status),
-        "nvx_status": nvx_status,
-        "openvmm_commit": git_output(
-            "-C",
-            str(OpenVMMBuildConstants.DIRECTORY),
-            "rev-parse",
-            "HEAD",
-        ),
-        "openvmm_dirty": bool(openvmm_status),
-        "openvmm_status": openvmm_status,
-        "os": platform.system(),
-        "os_release": platform.release(),
-        "machine": platform.machine(),
-        "python": platform.python_version(),
-    }
 
 
 def _artifact_metadata() -> dict[str, object]:

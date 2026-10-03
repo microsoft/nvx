@@ -6,7 +6,6 @@ import argparse
 import json
 import math
 import os
-import platform
 import queue
 import random
 import shutil
@@ -49,14 +48,15 @@ from nvx_tools.adversarial_oracles import (
 )
 from nvx_tools.build_constants import (
     BuildConstants,
-    OpenVMMBuildConstants,
 )
 from nvx_tools.common import (
     ScriptError,
-    git_output,
     positive_int,
     remaining_timeout,
     require_tool,
+)
+from nvx_tools.common import (
+    repository_metadata as _controller_metadata,
 )
 from nvx_tools.release import verify_source_tree
 
@@ -75,38 +75,6 @@ _HOST_TYPES = ("baremetal", "virtual-machine", "unspecified")
 
 class ExecutorUnavailableError(ScriptError):
     """The executor transport disappeared or stopped responding."""
-
-
-def _controller_metadata() -> dict[str, object]:
-    nvx_status = git_output(
-        "status",
-        "--porcelain",
-        "--untracked-files=normal",
-    ).splitlines()
-    openvmm_status = git_output(
-        "-C",
-        str(OpenVMMBuildConstants.DIRECTORY),
-        "status",
-        "--porcelain",
-        "--untracked-files=normal",
-    ).splitlines()
-    return {
-        "nvx_commit": git_output("rev-parse", "HEAD"),
-        "nvx_dirty": bool(nvx_status),
-        "nvx_status": nvx_status,
-        "openvmm_commit": git_output(
-            "-C",
-            str(OpenVMMBuildConstants.DIRECTORY),
-            "rev-parse",
-            "HEAD",
-        ),
-        "openvmm_dirty": bool(openvmm_status),
-        "openvmm_status": openvmm_status,
-        "os": platform.system(),
-        "os_release": platform.release(),
-        "machine": platform.machine(),
-        "python": platform.python_version(),
-    }
 
 
 def local_executor_environment() -> dict[str, str]:

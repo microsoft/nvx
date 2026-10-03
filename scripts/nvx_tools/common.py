@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import platform
 import re
 import shutil
 import stat
@@ -139,6 +140,29 @@ def git_output(*arguments: str) -> str:
         timeout=30.0,
     )
     return completed.stdout.strip()
+
+
+def repository_metadata() -> dict[str, object]:
+    def status(*prefix: str) -> list[str]:
+        return git_output(
+            *prefix, "status", "--porcelain", "--untracked-files=normal"
+        ).splitlines()
+
+    directory = str(OpenVMMBuildConstants.DIRECTORY)
+    nvx_status = status()
+    openvmm_status = status("-C", directory)
+    return {
+        "nvx_commit": git_output("rev-parse", "HEAD"),
+        "nvx_dirty": bool(nvx_status),
+        "nvx_status": nvx_status,
+        "openvmm_commit": git_output("-C", directory, "rev-parse", "HEAD"),
+        "openvmm_dirty": bool(openvmm_status),
+        "openvmm_status": openvmm_status,
+        "os": platform.system(),
+        "os_release": platform.release(),
+        "machine": platform.machine(),
+        "python": platform.python_version(),
+    }
 
 
 def openvmm_git_state(directory: Path) -> tuple[str, bool]:
