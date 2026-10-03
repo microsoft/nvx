@@ -54,8 +54,10 @@ command-line arguments.
 | `AciEdgeSandbox::deprovision` | provisioned → (none) | optional metadata; the ID becomes stale |
 
 `ExecOutcome` distinguishes `Exited(code)`, `Signaled(signal)`, `TimedOut`,
-`Cancelled`, and `Failed(reason)`. An `Err` from `Execution::wait` means the
-outcome could not be determined, for example because the VM stopped.
+`Cancelled`, and `Failed(reason)`. `Failed(WorkingDirectory)` means that the
+workload never ran because it could not enter its working directory. An `Err`
+from `Execution::wait` means the outcome could not be determined, for example
+because the VM stopped.
 
 Request types serialize with the contract's JSON field names (`readonlyPaths`,
 `memoryMib`, `commandLine`, and so on) and reject unknown fields. Every
@@ -208,9 +210,10 @@ Windows and `$XDG_STATE_HOME/nvx/sandboxes` (default
 - **Exec** connects to the control console, authenticates, and streams the
   workload's output live. The agent runs the workload through `setpriv` as the
   workload identity, with no capabilities and `no_new_privs`, in a cgroup of
-  its own. When the workload's first process exits, the agent kills whatever
-  it left behind, including processes in other sessions, so no workload
-  process outlives its exec.
+  its own, starting it in its [working directory](#working-directories). When
+  the workload's first process exits, the agent kills whatever it left behind,
+  including processes in other sessions, so no workload process outlives its
+  exec.
 - **Stop** asks the guest to shut down. If the guest does not finish within
   `stop_timeout`, OpenVMM is terminated. Everything the workloads wrote is
   discarded, because the root file system lives in guest memory.
@@ -236,13 +239,34 @@ terminate the VM when the caller exits.
 | `microvm.provision.memoryMib` | applied | n/a |
 | `process.commandLine` | n/a | run as `/bin/sh -c <commandLine>`; at most 4096 bytes |
 | `process.argv` (ACI Edge Sandboxes extension) | n/a | applied; absolute program, up to 64 arguments of 4096 bytes |
-| `process.cwd` | n/a | an absolute guest path; a missing directory ends the workload with status 125 |
+| `process.cwd` | n/a | applied; an absolute guest path of at most 4095 bytes, `/` when omitted; see [Working directories](#working-directories) |
 | `process.timeout` | n/a | applied, up to 3,600,000 ms |
 | `process.env`, `inheritDefaultEnv: false` | n/a | rejected |
 | Piped standard input | n/a | rejected; the workload reads end-of-file |
 
 Workloads run as the configured non-root identity and may write at most 1 MiB
 of combined output. Larger output ends with `Failed(OutputLimitExceeded)`.
+
+### Working directories
+
+Each execution starts in the working directory that it requests, and nothing
+carries over from an earlier execution.
+
+- Without `process.cwd`, the workload starts in the guest's root directory,
+  `/`.
+- `process.cwd` must be an absolute guest path of at most 4095 bytes. A
+  relative path is rejected with `policy_validation` before anything runs;
+  `openvmm::resolve_guest_path` turns a mapped host path into a guest path.
+- The guest agent enters the directory with the workload's own identity,
+  before the workload starts, and points `PWD` at it. For a path with empty,
+  `.`, or `..` components, `PWD` names the directory's physical path instead.
+- A directory that does not exist, is not a directory, or that the workload
+  cannot search fails the launch, and the backend never falls back to another
+  directory. Nothing runs, the workload's standard error receives a diagnostic
+  such as `nvx-managed-agent: cannot enter working directory /work: No such
+  file or directory`, and the execution ends with `Failed(WorkingDirectory)`.
+- Start refuses a guest image that cannot enter working directories with
+  `backend_unavailable`.
 
 ### Host paths
 
@@ -335,7 +359,7 @@ behind the profile's NAT gateway `10.0.0.1`, which also serves DNS.
 | `exec` on a stopped sandbox, or a VM that died | `NotStarted` | `not_started` |
 | `start` or `deprovision` on a running sandbox | `AlreadyStarted` | `already_started` |
 | `stop` on a stopped sandbox | `AlreadyStopped` | `already_stopped` |
-| Unsupported policy or exec feature, oversized command | `PolicyValidation` | `policy_validation` |
+| Unsupported policy or exec feature, oversized command, relative or oversized `process.cwd` | `PolicyValidation` | `policy_validation` |
 | Missing OpenVMM artifacts, inaccessible hypervisor, incompatible release or guest image, unsupported host | `BackendUnavailable` | `backend_unavailable` |
 | OpenVMM launch failure, boot timeout, control-session failure, I/O errors | `BackendError` | `backend_error` |
 
@@ -380,13 +404,14 @@ python3 scripts/nvx.py test-aci-edge-sandboxes --backend kvm   # real VM (reposi
   control console. It lets the real OpenVMM backend run end to end on hosts
   without a hypervisor: detached launch, reconnection from a new process,
   crash recovery, interrupted-start recovery, forced stop, cancellation,
-  refusal of guest images that lack required features, and failure injection.
+  working directories, refusal of guest images that lack required features,
+  and failure injection.
 - `cargo run --example lifecycle -- <command>` runs one command with
   discovered artifacts.
 - `nvx.py test-aci-edge-sandboxes` runs the ignored `openvmm_e2e` tests against a real
   hypervisor with the repository's kernel and Alpine initramfs: the lifecycle,
-  host path mapping, and network rules. CI runs them on Linux/KVM, Linux/MSHV,
-  and Windows/WHP.
+  working directories, host path mapping, and network rules. CI runs them on
+  Linux/KVM, Linux/MSHV, and Windows/WHP.
 
 ## MXC integration
 
@@ -404,7 +429,7 @@ An MXC `StatefulSandboxBackend` adapter maps onto this crate as follows:
 | Backend construction | `Artifacts::discover` and `OpenVmmConfig::from_artifacts` |
 | `policy.readonly_paths`, `readwrite_paths`, `denied_paths` | `FilesystemPolicy` with the same host paths |
 | `policy.network_egress` rules | `EgressPolicy` rules, field for field |
-| `working_directory` | `ExecRequest::with_cwd(guest_path(...))` |
+| `working_directory` | `ExecRequest::with_cwd(guest_path(...))`; a directory that the workload cannot enter ends with `Failed(WorkingDirectory)` |
 
 A proof-of-concept MXC adapter, `nvx_backend`, implements this mapping. It
 runs each phase in its own process against a real VM and consumes exec pipes

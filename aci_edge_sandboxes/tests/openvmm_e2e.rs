@@ -21,8 +21,9 @@ use aci_edge_sandboxes::openvmm::{
     OpenVmmBackend, OpenVmmConfig, resolve_guest_path as guest_path,
 };
 use aci_edge_sandboxes::{
-    Access, AciEdgeSandbox, EgressPolicy, ErrorCode, ExecOutcome, ExecOutput, ExecRequest,
-    FilesystemPolicy, NetworkPolicy, NetworkRule, Protocol, ProvisionRequest, SandboxId,
+    Access, AciEdgeSandbox, EgressPolicy, ErrorCode, ExecFailure, ExecOutcome, ExecOutput,
+    ExecRequest, FilesystemPolicy, NetworkPolicy, NetworkRule, Protocol, ProvisionRequest,
+    SandboxId,
 };
 
 mod support;
@@ -206,7 +207,115 @@ fn host_paths_are_mapped_into_the_guest() {
         sandbox_id,
         ExecRequest::argv(["/bin/true"]).with_cwd(format!("{out}/missing")),
     );
-    assert_eq!(missing.outcome, ExecOutcome::Exited(125));
+    assert_eq!(
+        missing.outcome,
+        ExecOutcome::Failed(ExecFailure::WorkingDirectory),
+        "{missing:?}"
+    );
+}
+
+/// Runs the shell's `pwd`, which reports `PWD`, then `/bin/pwd`, which resolves the directory.
+fn pwd(nvx: &AciEdgeSandbox, sandbox_id: &SandboxId, cwd: Option<&str>) -> ExecOutput {
+    let request = ExecRequest::command_line("pwd; /bin/pwd");
+    let request = match cwd {
+        Some(cwd) => request.with_cwd(cwd),
+        None => request,
+    };
+    run(nvx, sandbox_id, request)
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn working_directories_apply_to_each_execution() {
+    let (nvx, backend) = client("cwd");
+    let sandbox = started(&nvx, &backend, &ProvisionRequest::new());
+    let sandbox_id = id(&sandbox);
+
+    // Without a working directory, a workload starts in the guest's root directory.
+    let default = pwd(&nvx, sandbox_id, None);
+    assert_eq!(default.stdout, b"/\n/\n", "{default:?}");
+    let setup = shell(
+        &nvx,
+        sandbox_id,
+        "mkdir -p /tmp/work/a /tmp/work/b /tmp/work/locked && touch /tmp/work/file && \
+         chmod 000 /tmp/work/locked && ln -s /tmp/work/a /tmp/work/link",
+    );
+    assert!(setup.outcome.success(), "{setup:?}");
+
+    // Each execution starts in the directory it names, and none carries over to the next.
+    for (cwd, expected) in [
+        (Some("/tmp/work/a"), "/tmp/work/a\n/tmp/work/a\n"),
+        (Some("/tmp/work/b"), "/tmp/work/b\n/tmp/work/b\n"),
+        (None, "/\n/\n"),
+        (Some("/tmp/work/a"), "/tmp/work/a\n/tmp/work/a\n"),
+        // PWD keeps the name the caller gave, while /bin/pwd resolves the link.
+        (Some("/tmp/work/link"), "/tmp/work/link\n/tmp/work/a\n"),
+        // A name with empty or "." components reports the directory it resolves to.
+        (Some("/tmp//work/./b/"), "/tmp/work/b\n/tmp/work/b\n"),
+    ] {
+        let output = pwd(&nvx, sandbox_id, cwd);
+        assert_eq!(
+            output.outcome,
+            ExecOutcome::Exited(0),
+            "{cwd:?}: {output:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            expected,
+            "{cwd:?}: {output:?}"
+        );
+    }
+    // An argument vector starts in the working directory as well.
+    let listing = run(
+        &nvx,
+        sandbox_id,
+        ExecRequest::argv(["/bin/ls"]).with_cwd("/tmp/work"),
+    );
+    assert_eq!(listing.stdout, b"a\nb\nfile\nlink\nlocked\n", "{listing:?}");
+
+    // A directory that the workload cannot enter fails the launch, and nothing runs elsewhere.
+    for (cwd, reason) in [
+        ("/tmp/work/missing", "No such file or directory"),
+        ("/tmp/work/file", "Not a directory"),
+        ("/tmp/work/locked", "Permission denied"),
+        // Root could enter /root, but the workload's identity cannot.
+        ("/root", "Permission denied"),
+    ] {
+        let output = run(
+            &nvx,
+            sandbox_id,
+            ExecRequest::command_line("touch /tmp/work/ran").with_cwd(cwd),
+        );
+        assert_eq!(
+            output.outcome,
+            ExecOutcome::Failed(ExecFailure::WorkingDirectory),
+            "{cwd}: {output:?}"
+        );
+        assert!(output.stdout.is_empty(), "{cwd}: {output:?}");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains(&format!("working directory {cwd}: {reason}")),
+            "{cwd}: {diagnostic}"
+        );
+    }
+    let relative = nvx
+        .exec(
+            sandbox_id,
+            &ExecRequest::command_line("touch /tmp/work/ran").with_cwd("tmp/work"),
+        )
+        .unwrap_err();
+    assert_eq!(relative.code(), ErrorCode::PolicyValidation, "{relative}");
+    assert!(
+        shell(&nvx, sandbox_id, "test ! -e /tmp/work/ran")
+            .outcome
+            .success()
+    );
+
+    // Refused launches leave the sandbox usable.
+    assert_eq!(
+        pwd(&nvx, sandbox_id, Some("/tmp/work/b")).stdout,
+        b"/tmp/work/b\n/tmp/work/b\n"
+    );
 }
 
 #[test]

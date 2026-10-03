@@ -370,6 +370,9 @@ impl ExecRequest {
     }
 
     /// Sets the working directory inside the sandbox.
+    ///
+    /// Without one, the workload starts in the backend's default directory; the openvmm backend
+    /// uses `/` and accepts only absolute guest paths.
     #[must_use]
     pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
         self.process.cwd = Some(cwd.into());
@@ -415,7 +418,7 @@ pub enum StdinMode {
 pub struct ProcessSpec {
     /// What to run.
     pub command: Command,
-    /// Working directory inside the sandbox.
+    /// Working directory inside the sandbox. `None` selects the backend's default directory.
     pub cwd: Option<String>,
     /// Additional `KEY=VALUE` environment entries.
     pub env: Vec<String>,

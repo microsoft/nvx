@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -53,6 +54,17 @@
 #define FEATURE_HOST_MAPPINGS (1U << 1)
 #define FEATURE_WORKLOAD_ACCOUNT (1U << 2)
 #define FEATURE_EXEC_CGROUP (1U << 3)
+#define FEATURE_EXEC_CWD (1U << 5)
+
+/*
+ * An EXEC payload whose reserved field holds EXEC_EXTENDED carries a flags
+ * field, an environment entry count, and a working-directory length before
+ * the arguments, and the working directory after them. Only the working
+ * directory is implemented, so the entry count must be zero.
+ */
+#define EXEC_EXTENDED 1U
+#define EXEC_EXTENDED_HEADER_LEN 16U
+#define EXEC_CWD_PRESENT (1U << 0)
 
 #define MAX_ARGUMENTS 64U
 #define MAX_ARGUMENT_LEN 4096U
@@ -104,6 +116,20 @@ struct agent_config {
     const char *user;
     const char *home;
     int direct;
+};
+
+/* Optional fields of one EXEC request. */
+struct exec_config {
+    char *cwd;
+};
+
+#define LAUNCH_STAGE_CWD 1
+#define LAUNCH_STAGE_SETUP 2
+
+/* What a direct-mode child reports when it fails before it executes setpriv. */
+struct launch_failure {
+    int32_t stage;
+    int32_t error;
 };
 
 static uint16_t read_u16(const uint8_t *bytes)
@@ -924,20 +950,103 @@ static void terminate_workload(const struct agent_config *config, pid_t child)
     }
 }
 
+/* Parses a workload user or group ID: decimal, neither root nor the "unchanged" value -1. */
+static int parse_workload_id(const char *text, uint32_t *id)
+{
+    char *end = NULL;
+    unsigned long value;
+
+    if (text[0] < '0' || text[0] > '9') {
+        errno = EINVAL;
+        return -1;
+    }
+    errno = 0;
+    value = strtoul(text, &end, 10);
+    if (errno != 0 || *end != '\0' || value == 0 || value >= UINT32_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    *id = (uint32_t)value;
+    return 0;
+}
+
+/* Tells the agent why a direct-mode child cannot launch its workload, then exits. */
+static void report_launch_failure(int launch_fd, int32_t stage, int error)
+{
+    struct launch_failure failure = {.stage = stage, .error = error};
+
+    (void)write_all(launch_fd, &failure, sizeof(failure));
+    _exit(125);
+}
+
+/*
+ * Enters the working directory with the workload's IDs, no supplementary
+ * groups, and no effective capabilities, as setpriv will run the workload, so
+ * a directory that the workload cannot search fails the launch instead of
+ * becoming a working directory that the workload cannot use. The real and
+ * saved IDs stay root, so the child regains root for setpriv afterwards.
+ */
+static void enter_workload_directory(
+    const struct agent_config *config,
+    const char *directory,
+    int launch_fd)
+{
+    uint32_t uid;
+    uint32_t gid;
+
+    if (parse_workload_id(config->uid, &uid) != 0 ||
+        parse_workload_id(config->gid, &gid) != 0 || setgroups(0, NULL) != 0 ||
+        setegid((gid_t)gid) != 0 || seteuid((uid_t)uid) != 0) {
+        report_launch_failure(launch_fd, LAUNCH_STAGE_SETUP, errno);
+    }
+    if (chdir(directory) != 0) {
+        report_launch_failure(launch_fd, LAUNCH_STAGE_CWD, errno);
+    }
+    if (seteuid(0) != 0 || setegid(0) != 0) {
+        report_launch_failure(launch_fd, LAUNCH_STAGE_SETUP, errno);
+    }
+}
+
+/*
+ * Points PWD at the working directory, so a shell reports it as the caller
+ * named it, symbolic links included. A path with empty, ".", or ".."
+ * components is replaced by the directory's physical path.
+ */
+static int export_working_directory(const char *directory)
+{
+    char physical[MAX_GUEST_PATH];
+
+    if (strcmp(directory, "/") == 0 || safe_path(directory, 1)) {
+        return setenv("PWD", directory, 1);
+    }
+    if (getcwd(physical, sizeof(physical)) == NULL) {
+        return -1;
+    }
+    return setenv("PWD", physical, 1);
+}
+
+/* Runs a workload in the guest's own root file system, from `cwd` or the root directory. */
 static void exec_direct(
     const struct agent_config *config,
+    const char *cwd,
+    int launch_fd,
     char *const workload_argv[])
 {
+    const char *directory = cwd == NULL ? "/" : cwd;
     char *arguments[MAX_ARGUMENTS + 16];
     size_t index = 0;
     size_t workload_index = 0;
 
+    enter_workload_directory(config, directory, launch_fd);
     if (join_exec_cgroup() != 0) {
         _exit(125);
     }
     setenv("HOME", config->home, 1);
     setenv("USER", config->user, 1);
     setenv("LOGNAME", config->user, 1);
+    if (export_working_directory(directory) != 0) {
+        unsetenv("PWD");
+    }
     arguments[index++] = "setpriv";
     arguments[index++] = "--reuid";
     arguments[index++] = (char *)config->uid;
@@ -985,9 +1094,13 @@ static int decode_exec_payload(
     const uint8_t *payload,
     uint32_t payload_len,
     uint32_t *timeout_ms,
-    char ***workload_argv)
+    char ***workload_argv,
+    struct exec_config *exec_config)
 {
     uint16_t argc;
+    uint16_t extension;
+    uint16_t flags = 0;
+    uint32_t cwd_len = 0;
     uint32_t offset = 8;
     char **arguments;
     uint16_t index;
@@ -997,8 +1110,24 @@ static int decode_exec_payload(
     }
     *timeout_ms = read_u32(payload);
     argc = read_u16(payload + 4);
-    if (read_u16(payload + 6) != 0 || argc == 0 || argc > MAX_ARGUMENTS ||
-        *timeout_ms > MAX_TIMEOUT_MS) {
+    extension = read_u16(payload + 6);
+    if (argc == 0 || argc > MAX_ARGUMENTS || *timeout_ms > MAX_TIMEOUT_MS) {
+        return -1;
+    }
+    if (extension == EXEC_EXTENDED) {
+        if (payload_len < EXEC_EXTENDED_HEADER_LEN) {
+            return -1;
+        }
+        flags = read_u16(payload + 8);
+        cwd_len = read_u32(payload + 12);
+        offset = EXEC_EXTENDED_HEADER_LEN;
+        /* The working directory must fit PATH_MAX with its terminating NUL. */
+        if ((flags & ~EXEC_CWD_PRESENT) != 0 || read_u16(payload + 10) != 0 ||
+            ((flags & EXEC_CWD_PRESENT) != 0) != (cwd_len != 0) ||
+            cwd_len >= MAX_GUEST_PATH) {
+            return -1;
+        }
+    } else if (extension != 0) {
         return -1;
     }
     arguments = calloc((size_t)argc + 1, sizeof(*arguments));
@@ -1025,7 +1154,23 @@ static int decode_exec_payload(
         arguments[index][length] = '\0';
         offset += length;
     }
-    if (offset != payload_len || arguments[0][0] != '/') {
+    if (arguments[0][0] != '/') {
+        goto fail;
+    }
+    if (cwd_len != 0) {
+        if (payload_len - offset < cwd_len || payload[offset] != '/' ||
+            memchr(payload + offset, '\0', cwd_len) != NULL) {
+            goto fail;
+        }
+        exec_config->cwd = malloc((size_t)cwd_len + 1);
+        if (exec_config->cwd == NULL) {
+            goto fail;
+        }
+        memcpy(exec_config->cwd, payload + offset, cwd_len);
+        exec_config->cwd[cwd_len] = '\0';
+        offset += cwd_len;
+    }
+    if (offset != payload_len) {
         goto fail;
     }
     *workload_argv = arguments;
@@ -1036,6 +1181,8 @@ fail:
         free(arguments[index]);
     }
     free(arguments);
+    free(exec_config->cwd);
+    exec_config->cwd = NULL;
     return -1;
 }
 
@@ -1169,16 +1316,91 @@ static int drain_output(int fd)
     }
 }
 
+/*
+ * Waits until a direct-mode child either executes setpriv, which closes the
+ * close-on-exec launch pipe, or reports why it cannot launch the workload.
+ * Returns 0 once setpriv runs, 1 with `failure` filled in, or -1 on error.
+ */
+static int read_launch_failure(int fd, struct launch_failure *failure)
+{
+    uint8_t buffer[sizeof(*failure)];
+    size_t length = 0;
+
+    while (length < sizeof(buffer)) {
+        ssize_t count = read(fd, buffer + length, sizeof(buffer) - length);
+
+        if (count > 0) {
+            length += (size_t)count;
+        } else if (count == 0) {
+            break;
+        } else if (errno != EINTR) {
+            return -1;
+        }
+    }
+    if (length == 0) {
+        return 0;
+    }
+    if (length != sizeof(buffer)) {
+        errno = EPROTO;
+        return -1;
+    }
+    memcpy(failure, buffer, sizeof(*failure));
+    return 1;
+}
+
+/*
+ * Refuses a workload whose working directory it cannot enter. Nothing of the
+ * workload ran; a diagnostic on its standard error names the directory, and
+ * the refusal carries the error number.
+ */
+static int refuse_working_directory(
+    struct control_session *session,
+    uint64_t request_id,
+    const char *directory,
+    int error)
+{
+    char message[MAX_GUEST_PATH + 128];
+    int length = snprintf(
+        message,
+        sizeof(message),
+        "nvx-managed-agent: cannot enter working directory %s: %s\n",
+        directory,
+        strerror(error));
+
+    if (length > 0 && (size_t)length < sizeof(message) &&
+        send_app_frame(
+            session, APP_STDERR, request_id, 0, message, (uint32_t)length) != 0) {
+        return -1;
+    }
+    return send_app_error(session, request_id, error, "cwd-failed");
+}
+
+static void close_pipe(int pipe_fds[2])
+{
+    unsigned int index;
+
+    for (index = 0; index < 2; ++index) {
+        if (pipe_fds[index] >= 0) {
+            close(pipe_fds[index]);
+            pipe_fds[index] = -1;
+        }
+    }
+}
+
 static int run_exec(
     struct control_session *session,
     const struct agent_config *config,
     uint64_t request_id,
     uint32_t timeout_ms,
-    char **workload_argv)
+    char **workload_argv,
+    const struct exec_config *exec_config)
 {
     const char *barrier = "/run/nvx/managed-container-start";
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
+    int launch_pipe[2] = {-1, -1};
+    struct launch_failure launch_failure = {0};
+    int launch_failed = 0;
     pid_t child;
     uint64_t started;
     size_t output_bytes = 0;
@@ -1192,6 +1414,10 @@ static int run_exec(
     int wait_status = 0;
     int child_exited = 0;
 
+    /* A sandbox workload runs in a container root that this agent does not enter. */
+    if (!config->direct && exec_config->cwd != NULL) {
+        return send_app_error(session, request_id, 95, "unsupported-operation");
+    }
     if (config->direct && prepare_exec_cgroup() != 0) {
         portb_error("exec-cgroup", errno);
         return send_app_error(session, request_id, 125, "launch-failed");
@@ -1210,21 +1436,19 @@ static int run_exec(
             return send_app_error(session, request_id, 125, "launch-failed");
         }
     }
-    if (pipe2(stdout_pipe, O_CLOEXEC) != 0 || pipe2(stderr_pipe, O_CLOEXEC) != 0) {
+    if (pipe2(stdout_pipe, O_CLOEXEC) != 0 || pipe2(stderr_pipe, O_CLOEXEC) != 0 ||
+        (config->direct && pipe2(launch_pipe, O_CLOEXEC) != 0)) {
         unlink(barrier);
-        if (stdout_pipe[0] >= 0) {
-            close(stdout_pipe[0]);
-            close(stdout_pipe[1]);
-        }
+        close_pipe(stdout_pipe);
+        close_pipe(stderr_pipe);
         return send_app_error(session, request_id, 125, "launch-failed");
     }
 
     child = fork();
     if (child < 0) {
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[0]);
-        close(stderr_pipe[1]);
+        close_pipe(stdout_pipe);
+        close_pipe(stderr_pipe);
+        close_pipe(launch_pipe);
         unlink(barrier);
         return send_app_error(session, request_id, 125, "launch-failed");
     }
@@ -1244,7 +1468,8 @@ static int run_exec(
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
         if (config->direct) {
-            exec_direct(config, workload_argv);
+            close(launch_pipe[0]);
+            exec_direct(config, exec_config->cwd, launch_pipe[1], workload_argv);
         }
         exec_sandbox(config, barrier, workload_argv);
     }
@@ -1252,6 +1477,15 @@ static int run_exec(
     setpgid(child, child);
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
+    /*
+     * Only the child writes to the launch pipe, and it closes its end when it
+     * executes setpriv. Its report is read once it has exited, so the agent
+     * keeps serving control traffic while the child enters the directory.
+     */
+    if (config->direct) {
+        close(launch_pipe[1]);
+        launch_pipe[1] = -1;
+    }
     if (make_nonblocking(stdout_pipe[0]) != 0 ||
         make_nonblocking(stderr_pipe[0]) != 0 ||
         (!config->direct &&
@@ -1261,6 +1495,7 @@ static int run_exec(
         waitpid(child, NULL, 0);
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
+        close_pipe(launch_pipe);
         unlink(barrier);
         return send_app_error(session, request_id, 125, "launch-failed");
     }
@@ -1310,6 +1545,7 @@ static int run_exec(
                 if (stderr_open) {
                     close(stderr_pipe[0]);
                 }
+                close_pipe(launch_pipe);
                 return -1;
             }
         }
@@ -1364,6 +1600,14 @@ static int run_exec(
         }
     }
 
+    /* The child has exited, so its launch report, if any, is complete. */
+    if (config->direct) {
+        launch_failed = read_launch_failure(launch_pipe[0], &launch_failure);
+        if (launch_failed < 0) {
+            portb_error("exec-launch-report", errno);
+        }
+        close_pipe(launch_pipe);
+    }
     if (config->direct && settle_exec_cgroup() != 0) {
         portb_error("exec-cgroup-settle", errno);
         return session_lost
@@ -1373,6 +1617,18 @@ static int run_exec(
     if (session_lost) {
         /* Nothing may be sent for the abandoned exec once the new epoch is acknowledged. */
         return 0;
+    }
+    /* A child that reported a launch failure exited without running anything. */
+    if (launch_failed > 0 && launch_failure.stage == LAUNCH_STAGE_CWD) {
+        return refuse_working_directory(
+            session,
+            request_id,
+            exec_config->cwd == NULL ? "/" : exec_config->cwd,
+            launch_failure.error);
+    }
+    if (launch_failed > 0) {
+        portb_error("exec-launch", launch_failure.error);
+        return send_app_error(session, request_id, 125, "launch-failed");
     }
     if (cancelled) {
         return send_app_frame(
@@ -1404,13 +1660,16 @@ static int run_exec(
         session, APP_EXIT, request_id, 125, "failed", 6);
 }
 
-/* Direct mode alone sets up host mappings and a cgroup for each workload. */
+/*
+ * Direct mode alone sets up host mappings, gives each workload a cgroup, and
+ * enters a working directory for it.
+ */
 static uint32_t agent_features(const struct agent_config *config)
 {
     uint32_t features = FEATURE_CANCEL | FEATURE_WORKLOAD_ACCOUNT;
 
     if (config->direct) {
-        features |= FEATURE_HOST_MAPPINGS | FEATURE_EXEC_CGROUP;
+        features |= FEATURE_HOST_MAPPINGS | FEATURE_EXEC_CGROUP | FEATURE_EXEC_CWD;
     }
     return features;
 }
@@ -1422,6 +1681,7 @@ static int handle_data_record(
 {
     struct app_request request;
     char **workload_argv = NULL;
+    struct exec_config exec_config = {0};
     uint8_t features[4];
     uint32_t timeout_ms = 0;
     int result;
@@ -1463,13 +1723,20 @@ static int handle_data_record(
                 request.payload,
                 request.payload_len,
                 &timeout_ms,
-                &workload_argv) != 0) {
+                &workload_argv,
+                &exec_config) != 0) {
             return send_app_error(
                 session, request.request_id, 22, "invalid-request");
         }
         result = run_exec(
-            session, config, request.request_id, timeout_ms, workload_argv);
+            session,
+            config,
+            request.request_id,
+            timeout_ms,
+            workload_argv,
+            &exec_config);
         free_arguments(workload_argv);
+        free(exec_config.cwd);
         return result;
     case APP_CANCEL:
         /* The targeted workload already finished and reported its outcome. */

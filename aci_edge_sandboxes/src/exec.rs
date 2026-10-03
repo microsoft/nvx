@@ -103,6 +103,9 @@ impl fmt::Display for ExecOutcome {
 pub enum ExecFailure {
     /// The sandbox could not launch the workload.
     LaunchFailed,
+    /// The workload's working directory (`process.cwd`, or the backend's default) does not exist,
+    /// is not a directory, or is not accessible to the workload, so the workload did not run.
+    WorkingDirectory,
     /// The workload exceeded the backend's output limit and was terminated.
     OutputLimitExceeded,
     /// The sandbox lost track of the workload's exit status.
@@ -113,6 +116,10 @@ impl fmt::Display for ExecFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::LaunchFailed => "the workload could not be launched",
+            Self::WorkingDirectory => {
+                "the workload's working directory does not exist, is not a directory, or is not \
+                 accessible to the workload"
+            }
             Self::OutputLimitExceeded => "the workload exceeded the output limit",
             Self::Workload => "the workload's exit status could not be determined",
         })
