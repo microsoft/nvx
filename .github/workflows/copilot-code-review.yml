@@ -1,0 +1,36 @@
+name: "Copilot Code Review Setup Steps"
+
+# Copilot code review uses this file instead of copilot-setup-steps.yml.
+# Reviews read code without building it, so this environment only checks out
+# the repository and installs the gh-aw MCP server used by .github/mcp.json.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-code-review.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Copilot only recognizes a job with this exact name, even in this file.
+  copilot-setup-steps:
+    name: Copilot Code Review Setup Steps
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install gh-aw extension
+        uses: github/gh-aw-actions/setup-cli@5e508589e03a7757a7e05b26e834292f5445bfb6 # v0.88.7
+        with:
+          version: v0.88.7
