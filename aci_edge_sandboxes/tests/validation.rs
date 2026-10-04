@@ -104,6 +104,18 @@ fn exec_validation_and_execution_share_guest_policy_checks() {
             .with_cwd("/tmp")
             .with_environment(entries(57)),
         ExecRequest::argv(vec!["/bin/true"; 61]).with_env("A=b"),
+        // A program starts behind a shell that takes five arguments, in front of `env`.
+        ExecRequest::argv(["/bin/true"])
+            .with_cwd("/tmp")
+            .with_environment(entries(56)),
+        ExecRequest::argv(vec!["/bin/true"; 2])
+            .with_cwd("/tmp")
+            .with_environment(entries(55)),
+        // `setpriv` starts a program whose name contains `=`, which takes one more argument.
+        ExecRequest::argv(["/opt/a=b"]).with_environment(entries(60)),
+        ExecRequest::argv(["/opt/a=b"])
+            .with_cwd("/tmp")
+            .with_environment(entries(55)),
         ExecRequest::command_line("true").with_env(format!("A={}", "x".repeat(4095))),
         ExecRequest::command_line("true")
             .with_environment(vec![format!("A={}", "x".repeat(4094)); 20]),
@@ -134,7 +146,18 @@ fn exec_validation_accepts_the_exact_guest_limits() {
             .with_cwd("/tmp")
             .with_environment(entries(56)),
         ExecRequest::argv(vec!["/bin/true"; 60]).with_env("A=b"),
+        ExecRequest::argv(["/bin/true"])
+            .with_cwd("/tmp")
+            .with_environment(entries(55)),
+        ExecRequest::argv(vec!["/bin/true"; 2])
+            .with_cwd("/tmp")
+            .with_environment(entries(54)),
         ExecRequest::argv(["/opt/a=b/run"]).with_env("A=b"),
+        ExecRequest::argv(["/opt/a=b"]).with_environment(entries(59)),
+        ExecRequest::argv(["/opt/a=b"])
+            .with_cwd("/tmp")
+            .with_environment(entries(54)),
+        ExecRequest::argv(["/opt/a=b"]).with_cwd("/tmp"),
         ExecRequest::command_line("x".repeat(4096)).with_env("A=b"),
         ExecRequest::command_line("true").with_env(format!("A={}", "x".repeat(4094))),
         ExecRequest::command_line("true").with_environment(Vec::<String>::new()),

@@ -321,6 +321,47 @@ fn exec_environments_follow_the_mxc_schema() {
         expected
     );
 
+    // The shell that enters a working directory runs before `env`, so it cannot add `PWD`,
+    // `OLDPWD`, or `SHLVL` to the environment of a program, and it cannot rewrite entries with
+    // these names either.
+    let in_tmp = || env().with_cwd("/tmp");
+    assert_eq!(listing(in_tmp().with_env("FOO=bar")), ["FOO=bar"]);
+    assert_eq!(
+        listing(in_tmp().with_environment(Vec::<String>::new())),
+        Vec::<String>::new()
+    );
+    let shell_names = [
+        "PWD=/custom",
+        "SHLVL=7",
+        "OLDPWD=/keep",
+        "-DASHED=1",
+        "A.B=2",
+        "FOO=bar",
+    ];
+    let given = |entries: &[&str]| -> Vec<String> {
+        let mut entries: Vec<String> = entries.iter().map(|entry| (*entry).to_owned()).collect();
+        entries.sort();
+        entries
+    };
+    assert_eq!(
+        listing(in_tmp().with_environment(shell_names)),
+        given(&shell_names)
+    );
+    // Layered entries come on top of what that shell exported, so they win.
+    let layered = listing(
+        in_tmp()
+            .with_environment(["PWD=/custom", "SHLVL=7", "FOO=bar"])
+            .with_inherit_default_env(true),
+    );
+    for expected in [
+        "PWD=/custom",
+        "SHLVL=7",
+        "FOO=bar",
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+    ] {
+        assert!(layered.iter().any(|line| line == expected), "{layered:?}");
+    }
+
     // Each execution has its own environment: nothing carries over to the next one.
     let foo = |entry: Option<&str>| {
         let request = ExecRequest::argv(["/bin/printenv", "FOO"]);
@@ -400,26 +441,47 @@ fn environment_values_reach_the_workload_exactly() {
         .collect();
     assert_eq!(all.stdout, listing.as_bytes(), "{all:?}");
 
-    // The program is read as a program even when its name contains `=`.
+    // `env` would read a program name that contains `=` as one more entry, and a shell between
+    // `env` and the program would export `PWD` and `SHLVL`. BusyBox's `env`, linked into a
+    // directory whose name contains `=`, is a program that prints exactly the environment that it
+    // received, so it shows that neither happens.
     assert!(
         shell(
             &nvx,
             sandbox_id,
-            "printf '#!/bin/sh\\necho ran \"$FOO\"\\n' > '/tmp/a=b' && chmod +x '/tmp/a=b'",
+            "mkdir '/tmp/a=b' && ln -s /bin/busybox '/tmp/a=b/env'",
         )
         .outcome
         .success()
     );
-    for request in [
-        ExecRequest::argv(["/tmp/a=b"]).with_env("FOO=bar baz"),
-        ExecRequest::argv(["/tmp/a=b"])
-            .with_env("FOO=bar baz")
-            .with_inherit_default_env(true),
-    ] {
-        let output = run(&nvx, sandbox_id, request);
-        assert_eq!(output.stdout, b"ran bar baz\n", "{output:?}");
-        assert!(output.outcome.success(), "{output:?}");
-    }
+    let named = || ExecRequest::argv(["/tmp/a=b/env"]);
+    let printed = |request| environment(&nvx, sandbox_id, request);
+    assert_eq!(printed(named().with_env("FOO=bar baz")), ["FOO=bar baz"]);
+    assert_eq!(
+        printed(
+            named()
+                .with_cwd("/tmp")
+                .with_environment(["PWD=/custom", "SHLVL=7", "FOO=bar"])
+        ),
+        ["FOO=bar", "PWD=/custom", "SHLVL=7"]
+    );
+    assert_eq!(
+        printed(named().with_environment(Vec::<String>::new())),
+        Vec::<String>::new()
+    );
+    // The program's arguments reach it: `env -i BAR=1` prints only that entry.
+    assert_eq!(
+        printed(ExecRequest::argv(["/tmp/a=b/env", "-i", "BAR=1"]).with_env("FOO=bar")),
+        ["BAR=1"]
+    );
+    // Layering puts the entries on top of the default environment, with nothing else added.
+    let mut expected = printed(ExecRequest::argv(["/usr/bin/env"]));
+    expected.push("FOO=bar".to_owned());
+    expected.sort();
+    assert_eq!(
+        printed(named().with_env("FOO=bar").with_inherit_default_env(true)),
+        expected
+    );
 
     // The guest agent takes 64 arguments of 4096 bytes: `env`, `-i`, and `--` use three of them.
     let entries: Vec<String> = (0..60).map(|index| format!("V{index}=x")).collect();
@@ -488,6 +550,41 @@ fn environments_leave_the_workload_contained() {
             .with_env("FOO=bar"),
     );
     assert_eq!(missing.outcome, ExecOutcome::Exited(125));
+
+    // A program whose name contains `=` starts through `setpriv`, which must not give back what
+    // the guest agent took away, and a missing one fails with that launcher's error.
+    assert!(
+        shell(
+            &nvx,
+            sandbox_id,
+            "printf '#!/bin/sh\\nid -u; grep -E \"^(CapEff|NoNewPrivs):\" /proc/self/status\\n' \
+             > '/tmp/c=d' && chmod +x '/tmp/c=d'",
+        )
+        .outcome
+        .success()
+    );
+    for request in [
+        ExecRequest::argv(["/tmp/c=d"]).with_env("FOO=bar"),
+        ExecRequest::argv(["/tmp/c=d"])
+            .with_cwd("/tmp")
+            .with_environment(Vec::<String>::new()),
+    ] {
+        let output = run(&nvx, sandbox_id, request.clone());
+        assert_eq!(
+            output.stdout, b"65534\nCapEff:\t0000000000000000\nNoNewPrivs:\t1\n",
+            "{request:?}: {output:?}"
+        );
+    }
+    let absent = run(
+        &nvx,
+        sandbox_id,
+        ExecRequest::argv(["/tmp/absent=program"]).with_env("FOO=bar"),
+    );
+    assert_eq!(absent.outcome, ExecOutcome::Exited(127), "{absent:?}");
+    assert!(
+        String::from_utf8_lossy(&absent.stderr).contains("failed to execute /tmp/absent=program"),
+        "{absent:?}"
+    );
 
     // Timeouts and cancellation still reach the workload that the entries were applied to.
     let timed_out = run(

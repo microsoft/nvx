@@ -58,6 +58,12 @@
 //! default one. The guest agent has no environment field, so the backend starts the workload
 //! through `env`, and the entries count toward the 64 arguments that the agent accepts.
 //!
+//! A `process.argv` program receives exactly the requested environment. The shell that enters its
+//! working directory runs before `env`, and a program whose name contains `=`, which `env` would
+//! read as one more entry, starts through `setpriv`. A shell after `env` would export `PWD`,
+//! `OLDPWD`, and `SHLVL` of its own and rewrite entries with those names. That is what a
+//! `process.commandLine` workload gets, because its shell is the workload.
+//!
 //! # Concurrency and cancellation
 //!
 //! Lifecycle transitions of one sandbox are serialized by a lock file. Executions are serialized
@@ -307,6 +313,14 @@ impl OpenVmmBackend {
 /// workload with status 125 before it runs.
 const CWD_PRELUDE: &str = "cd -- \"$1\" || exit 125\nshift\n";
 
+/// Returns the arguments that start the workload of `process` in its working directory and
+/// environment.
+///
+/// The guest agent has neither a working-directory nor an environment field, so a shell enters
+/// the directory and `env` applies the entries. A command line runs in a shell anyway, which
+/// therefore does both, with `env` starting it. For a program, a shell that ran after `env` would
+/// export `PWD`, `OLDPWD`, and `SHLVL` of its own and rewrite entries with those names, so the
+/// shell goes first and `env` replaces it with the program.
 fn workload_argv(process: &ProcessSpec) -> Result<Vec<String>> {
     let too_long = || {
         Error::policy_validation(format!(
@@ -314,43 +328,50 @@ fn workload_argv(process: &ProcessSpec) -> Result<Vec<String>> {
              backend"
         ))
     };
-    let Some(cwd) = &process.cwd else {
-        return Ok(match &process.command {
-            Command::CommandLine(command_line) => {
-                if command_line.len() > MAX_ARGUMENT_BYTES {
-                    return Err(too_long());
-                }
-                vec![SHELL.to_owned(), "-c".to_owned(), command_line.clone()]
-            }
-            Command::Argv(argv) => argv.clone(),
-        });
-    };
-    if !cwd.starts_with('/') {
+    if let Some(cwd) = &process.cwd
+        && !cwd.starts_with('/')
+    {
         return Err(Error::policy_validation(format!(
             "process.cwd {cwd:?} must be an absolute guest path; map host paths with \
              openvmm::guest_path"
         )));
     }
-    // The guest agent has no working-directory field, so a shell enters the directory first.
-    let mut argv = vec![SHELL.to_owned(), "-c".to_owned()];
-    match &process.command {
-        Command::CommandLine(command_line) => {
+    match (&process.command, &process.cwd) {
+        (Command::CommandLine(command_line), None) => {
+            if command_line.len() > MAX_ARGUMENT_BYTES {
+                return Err(too_long());
+            }
+            let shell = vec![SHELL.to_owned(), "-c".to_owned(), command_line.clone()];
+            environment::apply(process, shell, 0)
+        }
+        (Command::CommandLine(command_line), Some(cwd)) => {
             let script = format!("{CWD_PRELUDE}{command_line}");
             if script.len() > MAX_ARGUMENT_BYTES {
                 return Err(too_long());
             }
-            argv.extend([script, SHELL.to_owned(), cwd.clone()]);
+            let shell = vec![
+                SHELL.to_owned(),
+                "-c".to_owned(),
+                script,
+                SHELL.to_owned(),
+                cwd.clone(),
+            ];
+            environment::apply(process, shell, 0)
         }
-        Command::Argv(command) => {
-            argv.extend([
+        (Command::Argv(argv), None) => environment::apply(process, argv.clone(), 0),
+        (Command::Argv(argv), Some(cwd)) => {
+            let mut shell = vec![
+                SHELL.to_owned(),
+                "-c".to_owned(),
                 format!("{CWD_PRELUDE}exec \"$@\""),
                 SHELL.to_owned(),
                 cwd.clone(),
-            ]);
-            argv.extend(command.iter().cloned());
+            ];
+            let program = environment::apply(process, argv.clone(), shell.len())?;
+            shell.extend(program);
+            Ok(shell)
         }
     }
-    Ok(argv)
 }
 
 fn exec_timeout_ms(process: &ProcessSpec) -> Result<u32> {
@@ -377,7 +398,6 @@ fn prepare_exec(process: &ProcessSpec) -> Result<(Vec<String>, u32)> {
     if let Command::Argv(arguments) = &process.command {
         validate(arguments)?;
     }
-    let argv = environment::apply(process, argv)?;
     validate(&argv)?;
     Ok((argv, timeout_ms))
 }
@@ -961,7 +981,8 @@ mod tests {
     }
 
     #[test]
-    fn environments_wrap_the_working_directory_prelude() {
+    fn command_lines_start_in_a_shell_that_receives_the_environment() {
+        // The shell is the workload and enters the directory itself, so `env` starts it.
         let request = ExecRequest::command_line("pwd")
             .with_cwd("/tmp")
             .with_env("FOO=bar baz");
@@ -984,10 +1005,74 @@ mod tests {
     }
 
     #[test]
+    fn programs_enter_their_directory_before_env_runs() {
+        // A shell after `env` would add `PWD`, `OLDPWD`, and `SHLVL` to the environment of the
+        // program and rewrite entries with those names, so the shell comes first.
+        let request = ExecRequest::argv(["/bin/ls", "-l"])
+            .with_cwd("/tmp")
+            .with_env("FOO=bar");
+        assert_eq!(
+            workload_argv(&request.process).unwrap(),
+            [
+                "/bin/sh",
+                "-c",
+                "cd -- \"$1\" || exit 125\nshift\nexec \"$@\"",
+                "/bin/sh",
+                "/tmp",
+                "/usr/bin/env",
+                "-i",
+                "--",
+                "FOO=bar",
+                "/bin/ls",
+                "-l",
+            ]
+        );
+        let layered = request.with_inherit_default_env(true);
+        assert_eq!(
+            workload_argv(&layered.process).unwrap()[5..],
+            ["/usr/bin/env", "--", "FOO=bar", "/bin/ls", "-l"]
+        );
+        let empty = ExecRequest::argv(["/bin/ls"])
+            .with_cwd("/tmp")
+            .with_environment(Vec::<String>::new());
+        assert_eq!(
+            workload_argv(&empty.process).unwrap()[5..],
+            ["/usr/bin/env", "-i", "--", "/bin/ls"]
+        );
+    }
+
+    #[test]
+    fn programs_with_an_equals_sign_never_run_after_a_shell_that_follows_env() {
+        let request = ExecRequest::argv(["/opt/a=b/run", "arg"])
+            .with_cwd("/tmp")
+            .with_env("FOO=bar");
+        assert_eq!(
+            workload_argv(&request.process).unwrap()[5..],
+            [
+                "/usr/bin/env",
+                "-i",
+                "--",
+                "FOO=bar",
+                "/bin/setpriv",
+                "/opt/a=b/run",
+                "arg",
+            ]
+        );
+        let without_environment = ExecRequest::argv(["/opt/a=b/run"]).with_cwd("/tmp");
+        assert_eq!(
+            workload_argv(&without_environment.process).unwrap()[5..],
+            ["/opt/a=b/run"]
+        );
+    }
+
+    #[test]
     fn the_environment_wrapper_does_not_hide_invalid_programs() {
         for request in [
             ExecRequest::argv(["relative-program"]).with_env("FOO=bar"),
             ExecRequest::argv(["relative-program"]).with_environment(Vec::<String>::new()),
+            ExecRequest::argv(["relative-program"])
+                .with_cwd("/tmp")
+                .with_env("FOO=bar"),
         ] {
             assert_eq!(
                 prepare_exec(&request.process).unwrap_err().code(),

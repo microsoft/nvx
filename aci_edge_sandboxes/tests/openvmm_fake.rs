@@ -882,6 +882,16 @@ const DEFAULT_ENVIRONMENT: [&str; 5] = [
     "LOGNAME=nobody",
 ];
 
+fn sorted<I, S>(lines: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut lines: Vec<String> = lines.into_iter().map(Into::into).collect();
+    lines.sort();
+    lines
+}
+
 fn output_of(nvx: &AciEdgeSandbox, sandbox_id: &SandboxId, request: ExecRequest) -> ExecOutput {
     let output = nvx
         .exec(sandbox_id, &request)
@@ -893,17 +903,14 @@ fn output_of(nvx: &AciEdgeSandbox, sandbox_id: &SandboxId, request: ExecRequest)
     output
 }
 
+/// Returns the sorted `NAME=VALUE` lines that the workload of `request` prints.
 fn environment_of(
     nvx: &AciEdgeSandbox,
     sandbox_id: &SandboxId,
     request: ExecRequest,
 ) -> Vec<String> {
     let output = output_of(nvx, sandbox_id, request);
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect()
+    sorted(String::from_utf8(output.stdout).unwrap().lines())
 }
 
 #[test]
@@ -914,18 +921,19 @@ fn environments_follow_the_mxc_schema() {
     assert!(capabilities.env && capabilities.clear_default_env);
     let sandbox_id = nvx.provision(&ProvisionRequest::new()).unwrap().sandbox_id;
     nvx.start(&sandbox_id).unwrap();
-    let print = || ExecRequest::command_line("env");
+    // Programs run directly, because a shell exports variables of its own.
+    let print = || ExecRequest::argv(["/usr/bin/env"]);
     let environment = |request| environment_of(&nvx, &sandbox_id, request);
 
     // No environment supplied: the default environment, whatever `inheritDefaultEnv` says.
-    assert_eq!(environment(print()), DEFAULT_ENVIRONMENT);
+    assert_eq!(environment(print()), sorted(DEFAULT_ENVIRONMENT));
     assert_eq!(
         environment(print().with_inherit_default_env(false)),
-        DEFAULT_ENVIRONMENT
+        sorted(DEFAULT_ENVIRONMENT)
     );
     assert_eq!(
         environment(print().with_inherit_default_env(true)),
-        DEFAULT_ENVIRONMENT
+        sorted(DEFAULT_ENVIRONMENT)
     );
 
     // An explicitly empty environment is empty, not the default one.
@@ -945,20 +953,20 @@ fn environments_follow_the_mxc_schema() {
     // Supplied entries are the whole environment, empty values included.
     assert_eq!(
         environment(print().with_environment(["FOO=bar", "EMPTY="])),
-        ["FOO=bar", "EMPTY="]
+        sorted(["FOO=bar", "EMPTY="])
     );
     assert_eq!(
         environment(print().with_env("FOO=bar").with_env("EMPTY=")),
-        ["FOO=bar", "EMPTY="]
+        sorted(["FOO=bar", "EMPTY="])
     );
     assert_eq!(
         environment(print().with_env("FOO=bar").with_inherit_default_env(false)),
-        ["FOO=bar"]
+        sorted(["FOO=bar"])
     );
     // The last of repeated names wins.
     assert_eq!(
         environment(print().with_environment(["A=1", "B=2", "A=3"])),
-        ["A=3", "B=2"]
+        sorted(["A=3", "B=2"])
     );
 
     // Layering keeps the default environment, and a supplied entry wins over a default.
@@ -968,14 +976,14 @@ fn environments_follow_the_mxc_schema() {
                 .with_environment(["FOO=bar", "PATH=/custom"])
                 .with_inherit_default_env(true)
         ),
-        [
+        sorted([
             "PATH=/custom",
             "TERM=linux",
             "HOME=/",
             "USER=nobody",
             "LOGNAME=nobody",
             "FOO=bar",
-        ]
+        ])
     );
     assert_eq!(
         environment(
@@ -983,21 +991,7 @@ fn environments_follow_the_mxc_schema() {
                 .with_environment(Vec::<String>::new())
                 .with_inherit_default_env(true)
         ),
-        DEFAULT_ENVIRONMENT
-    );
-
-    // The form of the command does not matter: argv programs see the same environment.
-    assert_eq!(
-        environment(ExecRequest::argv(["/usr/bin/env"]).with_environment(["FOO=bar"])),
-        ["FOO=bar"]
-    );
-    assert_eq!(
-        environment(ExecRequest::argv(["/usr/bin/env"]).with_environment(Vec::<String>::new())),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        environment(ExecRequest::argv(["/usr/bin/env"])),
-        DEFAULT_ENVIRONMENT
+        sorted(DEFAULT_ENVIRONMENT)
     );
     nvx.stop(&sandbox_id).unwrap();
     nvx.deprovision(&sandbox_id).unwrap();
@@ -1026,13 +1020,15 @@ fn environment_values_reach_the_workload_exactly() {
         .collect();
 
     for request in [
-        ExecRequest::command_line("env"),
         ExecRequest::argv(["/usr/bin/env"]),
-        ExecRequest::command_line("env").with_cwd("/tmp"),
+        ExecRequest::argv(["/usr/bin/env"]).with_cwd("/tmp"),
+        ExecRequest::argv(["/opt/a=b/printenv"]),
+        ExecRequest::argv(["/opt/a=b/printenv"]).with_cwd("/tmp"),
     ] {
         let output = output_of(&nvx, &sandbox_id, request.with_environment(environment()));
         assert_eq!(output.stdout, listing.as_bytes());
     }
+    // A shell reads the same values.
     for (name, value) in entries {
         let output = output_of(
             &nvx,
@@ -1063,8 +1059,8 @@ fn each_execution_has_its_own_environment() {
     assert_eq!(foo(print().with_env("FOO=one")), b"one\n");
     assert_eq!(foo(print()), b"");
     assert_eq!(
-        environment_of(&nvx, &sandbox_id, ExecRequest::command_line("env")),
-        DEFAULT_ENVIRONMENT
+        environment_of(&nvx, &sandbox_id, ExecRequest::argv(["/usr/bin/env"])),
+        sorted(DEFAULT_ENVIRONMENT)
     );
 
     // Overlapping executions are serialized and keep their own values.
@@ -1079,6 +1075,110 @@ fn each_execution_has_its_own_environment() {
         .unwrap();
     assert_eq!(slow.wait_with_output().unwrap().stdout, b"slow\n");
     assert_eq!(fast.wait_with_output().unwrap().stdout, b"fast\n");
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
+fn programs_get_exactly_the_requested_environment_whatever_starts_them() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let sandbox_id = nvx.provision(&ProvisionRequest::new()).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let environment = |request| environment_of(&nvx, &sandbox_id, request);
+    let print = || ExecRequest::argv(["/usr/bin/env"]);
+    // A shell exports `PWD`, `OLDPWD`, and `SHLVL`, and it rewrites entries with these names.
+    let shell_names = [
+        "PWD=/custom",
+        "SHLVL=7",
+        "OLDPWD=/keep",
+        "-DASHED=1",
+        "FOO=bar",
+    ];
+
+    // The shell that enters the working directory runs before `env`, so it leaves no trace.
+    assert_eq!(
+        environment(print().with_cwd("/work").with_env("FOO=bar")),
+        sorted(["FOO=bar"])
+    );
+    assert_eq!(
+        environment(
+            print()
+                .with_cwd("/work")
+                .with_environment(Vec::<String>::new())
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        environment(print().with_cwd("/work").with_environment(shell_names)),
+        sorted(shell_names)
+    );
+    // Layering puts the entries on top of whatever that shell exported, so the entries win.
+    let layered = environment(
+        print()
+            .with_cwd("/work")
+            .with_environment(["PWD=/custom", "SHLVL=7", "FOO=bar"])
+            .with_inherit_default_env(true),
+    );
+    for expected in [
+        "PWD=/custom",
+        "SHLVL=7",
+        "FOO=bar",
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+    ] {
+        assert!(layered.iter().any(|line| line == expected), "{layered:?}");
+    }
+
+    // A program whose name contains `=` cannot start behind `env`, but no shell may replace it.
+    let named = || ExecRequest::argv(["/opt/a=b/printenv"]);
+    assert_eq!(
+        environment(named().with_env("FOO=bar")),
+        sorted(["FOO=bar"])
+    );
+    assert_eq!(
+        environment(named().with_cwd("/work").with_env("FOO=bar")),
+        sorted(["FOO=bar"])
+    );
+    assert_eq!(
+        environment(named().with_environment(Vec::<String>::new())),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        environment(named().with_cwd("/work").with_environment(shell_names)),
+        sorted(shell_names)
+    );
+    assert_eq!(
+        environment(named().with_env("FOO=bar").with_inherit_default_env(true)),
+        sorted(DEFAULT_ENVIRONMENT.into_iter().chain(["FOO=bar"]))
+    );
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
+fn a_command_line_runs_in_a_shell_that_exports_variables_of_its_own() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let sandbox_id = nvx.provision(&ProvisionRequest::new()).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let environment = |request| environment_of(&nvx, &sandbox_id, request);
+    let print = || ExecRequest::command_line("env");
+
+    // The shell is the workload, so it keeps the entries and adds `SHLVL` and `PWD`...
+    assert_eq!(
+        environment(print().with_env("FOO=bar")),
+        sorted(["FOO=bar", "SHLVL=1", "PWD=/"])
+    );
+    // ...and `OLDPWD` once it has entered a working directory...
+    assert_eq!(
+        environment(print().with_cwd("/work").with_env("FOO=bar")),
+        sorted(["FOO=bar", "SHLVL=1", "PWD=/work", "OLDPWD=/"])
+    );
+    // ...and it rewrites entries with those names, as every shell does.
+    assert_eq!(
+        environment(print().with_env("SHLVL=7")),
+        sorted(["SHLVL=8", "PWD=/"])
+    );
     nvx.stop(&sandbox_id).unwrap();
     nvx.deprovision(&sandbox_id).unwrap();
 }
@@ -1113,6 +1213,9 @@ fn environments_combine_with_working_directories_and_programs_with_equals_signs(
         ExecRequest::argv(["/opt/a=b/run", "arg"])
             .with_env("FOO=bar")
             .with_inherit_default_env(true),
+        ExecRequest::argv(["/opt/a=b/run", "arg"])
+            .with_cwd("/work")
+            .with_env("FOO=bar"),
     ] {
         let output = nvx
             .exec(&sandbox_id, &request)

@@ -277,12 +277,24 @@ of an empty list for `[]`. `ExecRequest::with_env` adds an entry,
   entries reach only the workload, which keeps its identity, no capabilities,
   and `no_new_privs`.
 - Entries travel as arguments of `env`, so they share the guest agent's limit of
-  64 arguments of 4096 bytes with the workload's own arguments. A `commandLine`
-  leaves room for 58 entries (59 when layered, 56 with a working directory), and
-  a longer list or entry is `policy_validation`, before anything runs.
-- A shell can add variables to an empty environment: BusyBox's `sh` sets `PWD`
-  and `SHLVL`. Run `/usr/bin/env` through `process.argv` to see exactly the
+  64 arguments of 4096 bytes with the workload's own arguments. `env`, `-i`, and
+  `--` take three of the 64 (two when layered); a working directory takes five
+  more for a program, which a shell enters first, and a program whose name
+  contains `=` takes one for its launcher. A `commandLine` therefore leaves room
+  for 58 entries (59 when layered, 56 with a working directory), and a longer
+  list or entry is `policy_validation`, before anything runs.
+- A `process.argv` program receives exactly the requested environment, also with
+  a working directory. The shell that enters the directory runs before `env`,
+  because a shell after it would add `PWD`, `OLDPWD`, and `SHLVL` to the
+  environment and rewrite entries with those names. For the same reason, a
+  program whose name contains `=`, which `env` would read as one more entry,
+  starts through `/bin/setpriv`, the launcher that the guest agent uses for every
+  workload. Run `/usr/bin/env` through `process.argv` to see exactly the
   environment that was requested.
+- A `process.commandLine` runs in a shell, and the shell is the workload, so it
+  exports variables of its own: BusyBox's `sh` adds `SHLVL` and `PWD` (and
+  `OLDPWD` after entering a working directory), and rewrites entries with those
+  names, as it does for any script.
 
 ### Host paths
 

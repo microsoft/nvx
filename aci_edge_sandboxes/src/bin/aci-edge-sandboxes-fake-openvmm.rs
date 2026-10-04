@@ -6,17 +6,22 @@
 //! and runs scripted workloads. Integration tests point `OpenVmmConfig::openvmm` at it.
 //!
 //! Workloads are `/bin/sh -c SCRIPT` or `/bin/echo ARGS...`, optionally behind the backend's
-//! `cd` prelude or its `/usr/bin/env [-i] [--] [NAME=VALUE]... COMMAND...` wrapper. A script is a
-//! `;`-separated list of commands: `echo TEXT`, `echoerr TEXT`, `sleep MS`, `exit CODE`,
-//! `signal NUMBER`, `flood BYTES`, `write KEY VALUE`, `read KEY`, `env`, `printenv NAME`, `fail`,
-//! and `launchfail`. Values written with `write` live in memory until the VM stops, like files in
-//! the guest's RAM root file system. A `CANCEL` request ends a sleeping workload with the
-//! cancelled outcome, and a client that disconnects during an exec abandons it, as the real guest
-//! agent does. `pwd` prints the working directory that the backend's `cd` prelude selects. `env`
-//! and `printenv` print the workload's environment: the guest's default one (`PATH`, `TERM`,
-//! `HOME`, `USER`, and `LOGNAME`), as the `env` wrapper changes it. Like BusyBox's `env`, the
+//! `cd` prelude, its `/usr/bin/env [-i] [--] [NAME=VALUE]... COMMAND...` wrapper, or the guest
+//! agent's `/bin/setpriv COMMAND...` launcher. A script is a `;`-separated list of commands:
+//! `echo TEXT`, `echoerr TEXT`, `sleep MS`, `exit CODE`, `signal NUMBER`, `flood BYTES`,
+//! `write KEY VALUE`, `read KEY`, `env`, `printenv NAME`, `fail`, and `launchfail`. Values written
+//! with `write` live in memory until the VM stops, like files in the guest's RAM root file system.
+//! A `CANCEL` request ends a sleeping workload with the cancelled outcome, and a client that
+//! disconnects during an exec abandons it, as the real guest agent does. `pwd` prints the
+//! working directory that the backend's `cd` prelude selects.
+//!
+//! The double tracks the environment that each stage hands to the next. It starts as a subset of
+//! the guest's default one (`PATH`, `TERM`, `HOME`, `USER`, and `LOGNAME`), `env` changes it, and
+//! `env` and `printenv` print it, as does a program named `printenv`. Like BusyBox's `env`, the
 //! wrapper without a command prints the environment, and it reads a program name that contains
-//! `=` as one more entry.
+//! `=` as one more entry. Like BusyBox's `sh`, a shell raises `SHLVL` and exports its working
+//! directory as `PWD`, and `cd` exports the directory that it leaves as `OLDPWD`. `setpriv` runs
+//! its command unchanged.
 //!
 //! Kernel command-line tokens adjust the emulation: `fake_exit_on_start=CODE` fails the launch,
 //! `fake_boot_delay_ms=MS` delays the control endpoint, `fake_crash_after_ms=MS` makes the VM
@@ -87,6 +92,26 @@ fn set_variable(environment: &mut Environment, name: &str, value: &str) {
         Some(entry) => value.clone_into(&mut entry.1),
         None => environment.push((name.to_owned(), value.to_owned())),
     }
+}
+
+/// What BusyBox's `sh` does to the environment of everything that it starts: it raises `SHLVL` and
+/// exports its working directory as `PWD`, replacing the values of the same names that it got. It
+/// keeps every other variable, including those whose names are not valid shell identifiers.
+fn start_shell(environment: &mut Environment, cwd: &str) {
+    let level = environment
+        .iter()
+        .find(|(name, _)| name == "SHLVL")
+        .and_then(|(_, value)| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    set_variable(environment, "SHLVL", &(level + 1).to_string());
+    set_variable(environment, "PWD", cwd);
+}
+
+/// `cd` exports the directory that it leaves as `OLDPWD` and the one that it enters as `PWD`.
+fn change_directory(environment: &mut Environment, cwd: &mut String, directory: &str) {
+    set_variable(environment, "OLDPWD", cwd);
+    set_variable(environment, "PWD", directory);
+    directory.clone_into(cwd);
 }
 
 /// Applies the arguments of `/usr/bin/env` to `environment` and returns its command, which is
@@ -591,6 +616,8 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         let mut environment = default_environment();
         let mut cwd = "/".to_owned();
         let mut words: Vec<&str> = argv.iter().map(String::as_str).collect();
+        // The command line that a shell runs, once the wrappers around it are resolved.
+        let mut shell_script = None;
         // Runs the wrappers that the backend puts around a workload, in whatever order they nest.
         loop {
             match words.as_slice() {
@@ -609,39 +636,44 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                         return self.send_some(APP_EXIT, request_id, 1, b"exit");
                     }
                 },
+                ["/bin/setpriv", command @ ..] if !command.is_empty() => {
+                    words = command.to_vec();
+                }
                 ["/bin/sh", "-c", script, "/bin/sh", directory, rest @ ..]
                     if script.starts_with(PRELUDE) =>
                 {
+                    start_shell(&mut environment, &cwd);
+                    change_directory(&mut environment, &mut cwd, directory);
                     let script = &script[PRELUDE.len()..];
-                    let mut command = if script == "exec \"$@\"" {
-                        rest.to_vec()
+                    if script == "exec \"$@\"" {
+                        words = if rest.is_empty() {
+                            vec!["/bin/true"]
+                        } else {
+                            rest.to_vec()
+                        };
                     } else {
-                        vec!["/bin/sh", "-c", script]
-                    };
-                    if command.is_empty() {
-                        command.push("/bin/true");
+                        shell_script = Some(script);
+                        break;
                     }
-                    cwd = (*directory).to_owned();
-                    words = command;
                 }
-                // The environment wrapper runs a program whose name contains `=` this way.
-                ["/bin/sh", "-c", "exec \"$@\"", "/bin/sh", command @ ..]
-                    if !command.is_empty() =>
-                {
-                    words = command.to_vec();
+                ["/bin/sh", "-c", script] => {
+                    start_shell(&mut environment, &cwd);
+                    shell_script = Some(*script);
+                    break;
                 }
                 _ => break,
             }
         }
-        let script = match words.as_slice() {
-            ["/bin/sh", "-c", script] => (*script).to_owned(),
-            ["/bin/echo", words @ ..] => format!("echo {}", words.join(" ")),
-            [program, ..] => {
+        let script = match (shell_script, words.as_slice()) {
+            (Some(script), _) => script.to_owned(),
+            (None, ["/bin/echo", words @ ..]) => format!("echo {}", words.join(" ")),
+            (None, [program]) if program.rsplit('/').next() == Some("printenv") => "env".to_owned(),
+            (None, [program, ..]) => {
                 let message = format!("aci-edge-sandboxes-fake-openvmm: {program}: not found\n");
                 self.send(APP_STDERR, request_id, 0, message.as_bytes())?;
                 return self.send_some(APP_EXIT, request_id, 127, b"exit");
             }
-            [] => return self.send_some(APP_ERROR, request_id, 22, b"invalid-request"),
+            (None, []) => return self.send_some(APP_ERROR, request_id, 22, b"invalid-request"),
         };
         let started = Instant::now();
         let limit = (timeout_ms > 0).then(|| started + Duration::from_millis(timeout_ms.into()));

@@ -4,8 +4,11 @@
 //! for another one, so the backend starts the workload through `env`. The agent runs `env` after
 //! it has dropped its privileges and `env` replaces itself with the workload, so the entries reach
 //! only the workload, which keeps its identity, its cgroup, and its exit status.
+//!
+//! Nothing may run between `env` and the workload. A shell there would export `PWD`, `OLDPWD`, and
+//! `SHLVL` of its own and rewrite entries with those names, so a program that needs a shell, such
+//! as one that must enter a working directory first, is started by a shell *in front of* `env`.
 
-use super::SHELL;
 use super::protocol::{MAX_ARGUMENT_BYTES, MAX_ARGUMENTS};
 use crate::error::{Error, Result};
 use crate::model::ProcessSpec;
@@ -13,15 +16,23 @@ use crate::model::ProcessSpec;
 /// Alpine links this path to BusyBox's `env`.
 const ENV: &str = "/usr/bin/env";
 
-/// Shell script that runs its arguments as a command.
-const EXEC_SCRIPT: &str = "exec \"$@\"";
+/// The launcher that the guest agent starts every workload with. Given a program and no options,
+/// it executes the program and leaves the environment alone.
+const SETPRIV: &str = "/bin/setpriv";
 
 /// Returns the arguments that start `argv` in the environment that `process` requests.
 ///
 /// Omitting `env` selects the default environment, as does layering an empty list over it, and
 /// neither needs `env`. Entries replace the default environment, unless `inheritDefaultEnv` layers
 /// them over it, and an empty list therefore starts the workload with no variables at all.
-pub(super) fn apply(process: &ProcessSpec, mut argv: Vec<String>) -> Result<Vec<String>> {
+///
+/// `reserved` is the number of arguments that the caller puts in front of the result. They count
+/// toward the guest agent's limit with it.
+pub(super) fn apply(
+    process: &ProcessSpec,
+    mut argv: Vec<String>,
+    reserved: usize,
+) -> Result<Vec<String>> {
     let Some(entries) = &process.env else {
         return Ok(argv);
     };
@@ -46,23 +57,19 @@ pub(super) fn apply(process: &ProcessSpec, mut argv: Vec<String>) -> Result<Vec<
     // `--` keeps an entry whose name starts with `-` from being read as an option.
     wrapped.push("--".to_owned());
     wrapped.extend(entries.iter().cloned());
-    // `env` reads a program name that contains `=` as one more entry.
+    // `env` reads a program name that contains `=` as one more entry, so another launcher has to
+    // start such a program. A shell would change the environment, but `setpriv` does not.
     if argv.first().is_some_and(|program| program.contains('=')) {
-        wrapped.extend([
-            SHELL.to_owned(),
-            "-c".to_owned(),
-            EXEC_SCRIPT.to_owned(),
-            SHELL.to_owned(),
-        ]);
+        wrapped.push(SETPRIV.to_owned());
     }
     wrapped.append(&mut argv);
-    if wrapped.len() > MAX_ARGUMENTS {
+    let total = reserved + wrapped.len();
+    if total > MAX_ARGUMENTS {
         return Err(Error::policy_validation(format!(
             "process.env has {} entries, but the openvmm backend passes them as arguments of \
-             {ENV}: it, the entries, and the workload's own arguments need {} of the \
-             {MAX_ARGUMENTS} arguments that the guest agent accepts",
+             {ENV}, so the request needs {total} of the {MAX_ARGUMENTS} arguments that the guest \
+             agent accepts",
             entries.len(),
-            wrapped.len()
         )));
     }
     Ok(wrapped)
@@ -79,7 +86,7 @@ mod tests {
     }
 
     fn wrap(request: &ExecRequest) -> Result<Vec<String>> {
-        apply(&request.process, strings(["/bin/sh", "-c", "env"]))
+        apply(&request.process, strings(["/bin/sh", "-c", "env"]), 0)
     }
 
     #[test]
@@ -123,7 +130,7 @@ mod tests {
     fn an_explicitly_empty_environment_clears_the_default_one() {
         let request = ExecRequest::argv(["/usr/bin/env"]).with_environment(Vec::<String>::new());
         assert_eq!(
-            apply(&request.process, strings(["/usr/bin/env"])).unwrap(),
+            apply(&request.process, strings(["/usr/bin/env"]), 0).unwrap(),
             ["/usr/bin/env", "-i", "--", "/usr/bin/env"]
         );
     }
@@ -159,27 +166,42 @@ mod tests {
     }
 
     #[test]
-    fn programs_with_an_equals_sign_run_through_the_shell() {
+    fn programs_with_an_equals_sign_start_through_setpriv_not_a_shell() {
         let request = ExecRequest::argv(["/opt/a=b/run", "arg"]).with_env("FOO=bar");
         assert_eq!(
-            apply(&request.process, strings(["/opt/a=b/run", "arg"])).unwrap(),
+            apply(&request.process, strings(["/opt/a=b/run", "arg"]), 0).unwrap(),
             [
                 "/usr/bin/env",
                 "-i",
                 "--",
                 "FOO=bar",
-                "/bin/sh",
-                "-c",
-                "exec \"$@\"",
-                "/bin/sh",
+                "/bin/setpriv",
                 "/opt/a=b/run",
                 "arg",
             ]
         );
-        // A program without one is started directly.
+        let layered = request.with_inherit_default_env(true);
         assert_eq!(
-            apply(&request.process, strings(["/opt/run", "a=b"])).unwrap(),
+            apply(&layered.process, strings(["/opt/a=b/run"]), 0).unwrap(),
+            [
+                "/usr/bin/env",
+                "--",
+                "FOO=bar",
+                "/bin/setpriv",
+                "/opt/a=b/run"
+            ]
+        );
+        // A program without one is started directly, whatever its arguments contain.
+        let direct = ExecRequest::argv(["/opt/run"]).with_env("FOO=bar");
+        assert_eq!(
+            apply(&direct.process, strings(["/opt/run", "a=b"]), 0).unwrap(),
             ["/usr/bin/env", "-i", "--", "FOO=bar", "/opt/run", "a=b"]
+        );
+        // Without entries, nothing needs the launcher.
+        let plain = ExecRequest::argv(["/opt/a=b/run"]);
+        assert_eq!(
+            apply(&plain.process, strings(["/opt/a=b/run"]), 0).unwrap(),
+            ["/opt/a=b/run"]
         );
     }
 
@@ -196,11 +218,37 @@ mod tests {
             error.message().contains("process.env has 59 entries"),
             "{error}"
         );
+        assert!(error.message().contains("needs 65 of the 64"), "{error}");
         // Layering needs no `-i`.
         let layered = ExecRequest::command_line("env")
             .with_environment(entries(MAX_ARGUMENTS - 5))
             .with_inherit_default_env(true);
         assert_eq!(wrap(&layered).unwrap().len(), MAX_ARGUMENTS);
+    }
+
+    #[test]
+    fn arguments_in_front_of_the_wrapper_count_toward_the_limit() {
+        let entries = |count: usize| (0..count).map(|index| format!("V{index}=x"));
+        let program = || strings(["/bin/true"]);
+        // Five arguments in front, then the wrapper's three, the entries, and the program's one.
+        let fits = ExecRequest::argv(["/bin/true"]).with_environment(entries(MAX_ARGUMENTS - 9));
+        let wrapped = apply(&fits.process, program(), 5).unwrap();
+        assert_eq!(5 + wrapped.len(), MAX_ARGUMENTS);
+        let beyond = ExecRequest::argv(["/bin/true"]).with_environment(entries(MAX_ARGUMENTS - 8));
+        let error = apply(&beyond.process, program(), 5).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::PolicyValidation);
+        assert!(error.message().contains("needs 65 of the 64"), "{error}");
+        // So does the launcher of a program whose name contains `=`.
+        let launched = ExecRequest::argv(["/opt/a=b"]).with_environment(entries(MAX_ARGUMENTS - 5));
+        assert_eq!(
+            apply(&launched.process, strings(["/opt/a=b"]), 0)
+                .unwrap()
+                .len(),
+            MAX_ARGUMENTS
+        );
+        let launched = ExecRequest::argv(["/opt/a=b"]).with_environment(entries(MAX_ARGUMENTS - 4));
+        let error = apply(&launched.process, strings(["/opt/a=b"]), 0).unwrap_err();
+        assert!(error.message().contains("needs 65 of the 64"), "{error}");
     }
 
     #[test]
