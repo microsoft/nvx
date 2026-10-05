@@ -161,8 +161,8 @@ a kernel whose `vmlinux-debug.config` lacks the detectors, because the guest's
 run the debug kernel on KVM only and `dev` pushes run it on every backend;
 each job takes about five minutes on its own runner, in parallel with the
 other microVM jobs. The jobs gate the required status check, the development
-release, and performance persistence. The GitHub-hosted `debug-kernel` job
-builds the debug kernel beside the shared `artifacts` job
+release, and performance persistence. The `debug-kernel` job builds on the
+Linux PR utility runner with rootless Docker beside the shared `artifacts` job
 (`build-guest-artifacts` with `guest-images: "false"`) and caches it under its
 own key, so a kernel rebuild delays only the debug jobs, and a failed debug
 kernel build fails the required status check and blocks the release.
@@ -207,7 +207,8 @@ draining without adding sleeps to the measured benchmark workloads.
 The harness waits for the output reader's EOF notification even after the
 process exits, so delayed final output chunks cannot create a false failure.
 
-Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
+Shared guest artifacts are built with rootless Docker on the Linux PR utility
+runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
 separate cache keys. Ubuntu keys include the Canonical archive pin,
 supplemental package lock, common guest sources, shared download and guest
@@ -300,14 +301,20 @@ short-lived workflow artifacts alongside the OpenVMM handoff and benchmark
 results. Caches only accelerate reproducible build inputs and outputs; consumers
 do not depend on them as a handoff.
 Pull requests gate regressions against recent matching-platform history, and
-successful pushes to `dev` append their p50 values under `data/`. Metadata-only
-performance jobs use GitHub-hosted Ubuntu runners. Provisioning instructions
-are in the [runner bootstrap guide](../scripts/setup/README.md).
+successful pushes to `dev` append their p50 values under `data/`. Quality,
+change detection, artifact builds, the performance gate, and the required
+status check use the Linux PR utility runner; release publication and
+performance persistence use a separate trusted push-only utility runner.
+Provisioning instructions are in the
+[runner bootstrap guide](../scripts/setup/README.md).
 
-Persistent runners accept pushes and same-repository pull requests only. Fork
-pull requests run the GitHub-hosted validation jobs but do not execute code on
-the Azure runner fleet. A maintainer must stage an external contribution on a
-trusted repository branch before running the backend matrices.
+Backend test and performance runners accept pushes and same-repository pull
+requests only. During the hosted-runner outage, fork pull requests run only
+the utility validation jobs on dedicated PR runners, not the backend
+matrices or push-only utility runners. A maintainer must stage an external
+contribution on a trusted repository branch to run the backend matrices.
+The persistent Linux PR runner also builds artifacts used after pushes; the
+unreviewed fork-to-push artifact-isolation question remains open.
 
 ## Host qualification
 
@@ -362,7 +369,7 @@ available for interactive qualification.
 ## Rust crate
 
 The required `aci-edge-sandboxes` job checks the [`aci_edge_sandboxes` crate](../aci_edge_sandboxes/README.md) on
-GitHub-hosted Ubuntu and Windows runners through the
+dedicated Linux and Windows utility runners through the
 [`check-aci-edge-sandboxes`](../.github/actions/check-aci-edge-sandboxes/action.yml) action. The action
 runs rustfmt, Clippy with warnings denied, and rustdoc, all on the Rust
 toolchain that MXC pins. It also runs the unit, mock, and fake-OpenVMM
@@ -370,6 +377,10 @@ integration tests, checks the declared minimum Rust version, and cross-checks
 the macOS build that MXC compiles. The fake-OpenVMM tests drive the real
 OpenVMM backend through its control protocol without a hypervisor.
 The action also validates bundled artifact staging with a fixture package.
+PRs use the PR-only runners; `dev` pushes use the trusted runners. Additional
+Rust toolchains are installed in a job-private directory rather than the
+protected runner toolchain. Before running a Windows PR job, CI verifies that
+the runner account cannot reach Azure instance metadata.
 The development release job depends on `aci-edge-sandboxes` and requires its combined
 Linux/Windows result to be successful; failed, cancelled, or skipped crate
 checks cannot publish a release.
