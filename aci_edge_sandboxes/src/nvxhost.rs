@@ -456,6 +456,11 @@ pub(crate) struct Session {
     next_token: u64,
 }
 
+fn disposal_deadline(operation: Option<Instant>, now: Instant) -> Instant {
+    let maximum = now + Duration::from_secs(5);
+    operation.map_or(maximum, |deadline| deadline.min(maximum))
+}
+
 impl Session {
     pub(crate) fn connect_verified(
         host: Arc<HostLibrary>,
@@ -773,16 +778,19 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) fn close(mut self) -> Result<()> {
+    pub(crate) fn close(mut self, deadline: Option<Instant>) -> Result<()> {
+        let now = Instant::now();
+        let deadline = disposal_deadline(deadline, now);
+        if now >= deadline {
+            return Err(Error::backend_error(
+                "guest session disposal exceeded the operation deadline",
+            ));
+        }
         let token = self.token()?;
         let status = unsafe { (self.host.exports.session_dispose)(self.session, token) };
         self.host
             .check_status("closing a guest session", status, ptr::null_mut())?;
-        let disposed = self.next(
-            COMPLETION_DISPOSE,
-            token,
-            Some(Instant::now() + Duration::from_secs(5)),
-        )?;
+        let disposed = self.next(COMPLETION_DISPOSE, token, Some(deadline))?;
         self.completed_ok("closing a guest session", &disposed)?;
         let status = unsafe { (self.host.exports.session_release)(self.session) };
         self.host
@@ -826,6 +834,21 @@ impl Drop for Call {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disposal_never_extends_a_short_operation_deadline() {
+        let now = Instant::now();
+        let short = now + Duration::from_millis(100);
+        assert_eq!(disposal_deadline(Some(short), now), short);
+        let maximum = now + Duration::from_secs(5);
+        assert_eq!(
+            disposal_deadline(Some(now + Duration::from_secs(60)), now),
+            maximum
+        );
+        assert_eq!(disposal_deadline(None, now), maximum);
+        let expired = now - Duration::from_millis(1);
+        assert_eq!(disposal_deadline(Some(expired), now), expired);
+    }
 
     #[test]
     fn ttrpc_response_decodes_the_existing_wire_vector() {

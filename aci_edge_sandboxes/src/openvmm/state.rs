@@ -35,6 +35,8 @@ use crate::model::NetworkPolicy;
 pub(crate) const STATE_FORMAT: u32 = 2;
 /// Backend key recorded in every sandbox.
 pub(crate) const BACKEND_KEY: &str = "openvmm";
+/// Backend key for the separately supplied native host library.
+pub(crate) const NATIVE_BACKEND_KEY: &str = "nvxhost";
 /// Linux control socket name.
 pub(crate) const SOCKET_NAME: &str = "control.sock";
 /// Linux boot-console socket name.
@@ -329,14 +331,11 @@ impl StateStore {
     /// Removes the files that exist only while the sandbox starts or runs.
     pub(crate) fn clear_runtime(&self, sandbox_id: &SandboxId) -> Result<()> {
         let dir = self.dir(sandbox_id);
-        for name in [
-            RUNTIME_NAME,
-            LAUNCH_NAME,
-            CAPABILITY_NAME,
-            SOCKET_NAME,
-            BOOT_SOCKET_NAME,
-        ] {
+        for name in [RUNTIME_NAME, LAUNCH_NAME, CAPABILITY_NAME, SOCKET_NAME] {
             remove_if_present(&dir.join(name))?;
+        }
+        if self.backend == NATIVE_BACKEND_KEY {
+            remove_if_present(&dir.join(BOOT_SOCKET_NAME))?;
         }
         Ok(())
     }
@@ -374,11 +373,10 @@ impl StateStore {
             LAUNCH_NAME,
             CAPABILITY_NAME,
             SOCKET_NAME,
-            BOOT_SOCKET_NAME,
             OUTCOME_NAME,
             LOG_NAME,
-            CONSOLE_LOG_NAME,
         ];
+        let native_only = [BOOT_SOCKET_NAME, CONSOLE_LOG_NAME];
         let mut owned = Vec::new();
         for entry in entries {
             let entry = entry.map_err(io_error(format!(
@@ -388,7 +386,10 @@ impl StateStore {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let temporary = name.starts_with('.') && name.ends_with(".tmp");
-            if known.contains(&name.as_ref()) || temporary {
+            if known.contains(&name.as_ref())
+                || (self.backend == NATIVE_BACKEND_KEY && native_only.contains(&name.as_ref()))
+                || temporary
+            {
                 owned.push(entry.path());
             } else if name != RECORD_NAME {
                 return Err(Error::backend_error(format!(
@@ -520,7 +521,7 @@ mod tests {
     #[test]
     fn native_records_round_trip_only_through_their_backend() {
         let root = tempfile::tempdir().unwrap();
-        let store = StateStore::open_for(root.path(), "nvxhost").unwrap();
+        let store = StateStore::open_for(root.path(), NATIVE_BACKEND_KEY).unwrap();
         let id = SandboxId::generate().unwrap();
         assert_eq!(
             store.create(&id, &record()).unwrap_err().code(),
@@ -529,7 +530,7 @@ mod tests {
         assert!(!store.dir(&id).exists());
 
         let mut native = record();
-        native.backend = "nvxhost".to_owned();
+        native.backend = NATIVE_BACKEND_KEY.to_owned();
         native.native = Some(NativeArtifactRecord {
             image: PathBuf::from("image.vhd"),
             image_sha256: "1".repeat(64),
@@ -548,6 +549,29 @@ mod tests {
                 .code(),
             ErrorCode::BackendError
         );
+        drop(_guard);
+        fs::write(store.dir(&id).join(BOOT_SOCKET_NAME), b"socket").unwrap();
+        fs::write(store.dir(&id).join(CONSOLE_LOG_NAME), b"console").unwrap();
+        store.clear_runtime(&id).unwrap();
+        assert!(!store.dir(&id).join(BOOT_SOCKET_NAME).exists());
+        store.remove(&id).unwrap();
+        assert!(!store.dir(&id).exists());
+    }
+
+    #[test]
+    fn direct_records_preserve_native_only_filenames() {
+        let root = tempfile::tempdir().unwrap();
+        let store = StateStore::open(root.path()).unwrap();
+        let id = SandboxId::generate().unwrap();
+        store.create(&id, &record()).unwrap();
+        for name in [BOOT_SOCKET_NAME, CONSOLE_LOG_NAME] {
+            fs::write(store.dir(&id).join(name), b"not owned").unwrap();
+        }
+        store.clear_runtime(&id).unwrap();
+        assert!(store.dir(&id).join(BOOT_SOCKET_NAME).exists());
+        assert!(store.remove(&id).is_err());
+        assert!(store.dir(&id).join(CONSOLE_LOG_NAME).exists());
+        assert_eq!(store.load(&id).unwrap(), record());
     }
 
     #[test]

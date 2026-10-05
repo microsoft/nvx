@@ -12,12 +12,12 @@ use prost::Message;
 use sha2_runtime::{Digest, Sha256};
 
 use super::artifacts::absolute;
-use super::config::OpenVmmConfig;
+use super::config::{OpenVmmConfig, validate_unix_socket_path};
 use super::platform;
 use super::process;
 use super::state::{
-    LaunchRecord, NativeArtifactRecord, ProcessIdentity, RuntimeRecord, STATE_FORMAT,
-    SandboxRecord, StateStore, remove_if_present,
+    BOOT_SOCKET_NAME, LaunchRecord, NATIVE_BACKEND_KEY, NativeArtifactRecord, ProcessIdentity,
+    RuntimeRecord, SOCKET_NAME, STATE_FORMAT, SandboxRecord, StateStore, remove_if_present,
 };
 use super::{OpenVmmBackend, RunState};
 use crate::backend::{Backend, ExecControl, ExecIo};
@@ -27,11 +27,11 @@ use crate::exec::{Completion, ExecOutcome};
 use crate::id::SandboxId;
 use crate::model::{
     Access, Command, DeprovisionResult, ExecRequest, Metadata, ProvisionRequest, ProvisionResult,
-    StartResult, StdinMode, StopResult, duration_millis,
+    StartResult, StdinMode, StopResult,
 };
 use crate::nvxhost::{HostLibrary, LaunchInputs, Session};
 
-const BACKEND_KEY: &str = "nvxhost";
+const BACKEND_KEY: &str = NATIVE_BACKEND_KEY;
 const RUNTIME_ABI: &str = "microvm-abi-v2-edge-ramfs-v1";
 const MAX_EXEC_SECONDS: u64 = 3600;
 const MAX_OUTPUT_BYTES: usize = 1 << 20;
@@ -195,8 +195,10 @@ impl NvxHostBackend {
         config.openvmm = config.openvmm.normalized()?;
         config.image = absolute(&config.image)?;
         config.library = absolute(&config.library)?;
-        let host = HostLibrary::load(&config.library, &config.library_sha256)?;
         let store_root = config.openvmm.state_root.join(BACKEND_KEY);
+        validate_unix_socket_path(&store_root, SOCKET_NAME, "control")?;
+        validate_unix_socket_path(&store_root, BOOT_SOCKET_NAME, "boot-console")?;
+        let host = HostLibrary::load(&config.library, &config.library_sha256)?;
         let store = StateStore::open_for(&store_root, BACKEND_KEY).map_err(|error| {
             Error::backend_unavailable(format!(
                 "cannot open native sandbox state root {}",
@@ -239,8 +241,12 @@ impl NvxHostBackend {
     /// Collects the guest's bounded, non-follow log snapshot through ttrpc.
     pub fn guest_logs(&self, sandbox_id: &SandboxId) -> Result<Vec<u8>> {
         let (runtime, capability) = self.running(sandbox_id)?;
-        let mut session =
-            self.connect(&runtime, &capability, self.config.openvmm.control_timeout)?;
+        let deadline = Instant::now() + self.config.openvmm.control_timeout;
+        let mut session = self.connect(
+            &runtime,
+            &capability,
+            deadline.saturating_duration_since(Instant::now()),
+        )?;
         let mut output = Vec::new();
         let mut offset = 0u64;
         let request = StreamLogsRequest {
@@ -252,7 +258,7 @@ impl NvxHostBackend {
         let streamed = session.server_stream(
             "StreamLogs",
             &request.encode_to_vec(),
-            self.config.openvmm.control_timeout,
+            deadline.saturating_duration_since(Instant::now()),
             |bytes| {
                 let chunk = LogChunk::decode(bytes).map_err(|error| {
                     Error::backend_error("the guest returned an invalid log chunk")
@@ -285,7 +291,7 @@ impl NvxHostBackend {
                 Ok(())
             },
         );
-        finish_session(session, streamed)?;
+        finish_session(session, streamed, Some(deadline))?;
         Ok(output)
     }
 
@@ -675,7 +681,7 @@ impl Backend for NvxHostBackend {
                 deadline.saturating_duration_since(Instant::now()),
             )?;
             let result = self.wait_ready(&mut session, deadline);
-            finish_session(session, result)
+            finish_session(session, result, Some(deadline))
         })();
         let agent = match ready {
             Ok(agent) => agent,
@@ -768,7 +774,7 @@ impl Backend for NvxHostBackend {
                 .encode_to_vec(),
                 Some(remaining),
             );
-            let response = finish_session(session, response)?;
+            let response = finish_session(session, response, Some(deadline))?;
             ShutdownResponse::decode(response.as_slice()).map_err(|error| {
                 Error::backend_error("the guest returned an invalid shutdown response")
                     .with_source(error)
@@ -851,13 +857,14 @@ fn file_digest(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn finish_session<T>(session: Session, result: Result<T>) -> Result<T> {
-    match (result, session.close()) {
+fn finish_session<T>(session: Session, result: Result<T>, deadline: Option<Instant>) -> Result<T> {
+    match (result, session.close(deadline)) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(close)) => Err(Error::backend_error(format!(
-            "{error}; closing the guest session also failed: {close}"
-        ))),
+        (Err(error), Err(close)) => {
+            eprintln!("nvxhost could not close a failed guest session: {close}");
+            Err(error)
+        }
     }
 }
 
@@ -955,23 +962,25 @@ fn prepare_exec(request: &ExecRequest) -> Result<(ExecuteCommandRequest, Option<
             "the guest command must contain non-NUL arguments totaling at most 4096 bytes",
         ));
     }
-    let requested_ms = request.process.timeout.map(duration_millis).unwrap_or(0);
-    if requested_ms > MAX_EXEC_SECONDS * 1_000 {
-        return Err(Error::policy_validation(
-            "the guest command timeout exceeds one hour",
-        ));
+    let timeout = request.process.timeout.filter(|timeout| !timeout.is_zero());
+    if let Some(timeout) = timeout {
+        if timeout > Duration::from_secs(MAX_EXEC_SECONDS) {
+            return Err(Error::policy_validation(
+                "the guest command timeout exceeds one hour",
+            ));
+        }
+        if timeout.subsec_nanos() != 0 {
+            return Err(Error::policy_validation(
+                "the nvxhost backend requires whole-second precision for positive command timeouts",
+            ));
+        }
     }
-    let seconds = if requested_ms == 0 {
-        0
-    } else {
-        requested_ms.div_ceil(1_000)
-    };
-    let timeout = (seconds != 0).then(|| Duration::from_secs(seconds));
+    let seconds = timeout.map_or(0, |duration| duration.as_secs() as i32);
     Ok((
         ExecuteCommandRequest {
             command: argv[0].clone(),
             args: argv[1..].to_vec(),
-            timeout_seconds: seconds as i32,
+            timeout_seconds: seconds,
         },
         timeout,
     ))
@@ -1002,12 +1011,13 @@ fn execute(job: ExecJob) -> Result<ExecOutcome> {
                 })
         },
     )?;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout + config.exec_response_grace);
     let response = session.unary(
         "ExecuteCommand",
         &command.encode_to_vec(),
-        timeout.map(|timeout| timeout + config.exec_response_grace),
+        deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
     );
-    let response = finish_session(session, response)?;
+    let response = finish_session(session, response, deadline)?;
     let reply = ExecuteCommandResponse::decode(response.as_slice()).map_err(|error| {
         Error::backend_error("the guest returned an invalid execution result").with_source(error)
     })?;
@@ -1045,7 +1055,7 @@ mod tests {
     #[test]
     fn simple_exec_has_no_container_metadata_and_respects_timeout() {
         let (request, timeout) = prepare_exec(
-            &ExecRequest::command_line("printf READY").with_timeout(Duration::from_millis(1500)),
+            &ExecRequest::command_line("printf READY").with_timeout(Duration::from_secs(2)),
         )
         .unwrap();
         assert_eq!(request.command, SHELL);
@@ -1056,6 +1066,62 @@ mod tests {
         assert!(capabilities().exec.command_line);
         assert!(!capabilities().exec.cancel);
         assert!(!capabilities().filesystem.readonly_paths);
+    }
+
+    #[test]
+    fn fractional_second_exec_timeouts_are_rejected_but_zero_is_unbounded() {
+        let (unbounded, timeout) =
+            prepare_exec(&ExecRequest::command_line("true").with_timeout(Duration::ZERO)).unwrap();
+        assert_eq!(unbounded.timeout_seconds, 0);
+        assert_eq!(timeout, None);
+        for timeout in [
+            Duration::from_nanos(1),
+            Duration::from_millis(1),
+            Duration::from_millis(999),
+            Duration::from_millis(1001),
+        ] {
+            let error =
+                prepare_exec(&ExecRequest::command_line("true").with_timeout(timeout)).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::PolicyValidation);
+            assert!(error.message().contains("whole-second precision"));
+        }
+        assert_eq!(
+            prepare_exec(
+                &ExecRequest::command_line("true")
+                    .with_timeout(Duration::from_secs(MAX_EXEC_SECONDS + 1)),
+            )
+            .unwrap_err()
+            .code(),
+            ErrorCode::PolicyValidation,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_socket_paths_are_checked_before_loading_the_library() {
+        let suffix = PathBuf::from("0".repeat(32)).join(SOCKET_NAME);
+        let target_root_len = 107 - 1 - suffix.as_os_str().len();
+        let state_root = PathBuf::from("/").join("x".repeat(target_root_len - 1));
+        validate_unix_socket_path(&state_root, SOCKET_NAME, "control").unwrap();
+        let native_root = state_root.join(BACKEND_KEY);
+        assert!(validate_unix_socket_path(&native_root, BOOT_SOCKET_NAME, "boot-console").is_err());
+        let config = OpenVmmConfig::new(
+            "/tmp/openvmm",
+            "/tmp/vmlinux",
+            "/tmp/initramfs",
+            super::super::Hypervisor::Kvm,
+            &state_root,
+        );
+        let error = NvxHostBackend::new(NvxHostConfig::new(
+            config,
+            "/tmp/image.vhd",
+            "/tmp/libnvxhost.so",
+            [0; 32],
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BackendUnavailable);
+        assert!(error.message().contains("Unix control socket path"));
+        assert!(!native_root.exists());
     }
 
     #[test]
