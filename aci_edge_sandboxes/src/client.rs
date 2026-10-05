@@ -43,6 +43,12 @@ impl AciEdgeSandbox {
         Ok(Self::new(crate::openvmm::OpenVmmBackend::new(config)?))
     }
 
+    /// Creates an image-backed sandbox through an explicitly supplied nvxhost library.
+    #[cfg(feature = "nvxhost")]
+    pub fn nvxhost(config: crate::openvmm::NvxHostConfig) -> Result<Self> {
+        Ok(Self::new(crate::openvmm::NvxHostBackend::new(config)?))
+    }
+
     /// Returns the backend.
     pub fn backend(&self) -> &dyn Backend {
         self.backend.as_ref()

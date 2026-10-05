@@ -3,12 +3,15 @@
 `aci_edge_sandboxes` is the Rust interface to the ACI Edge Sandboxes lifecycle.
 It exposes provision, start, exec, stop, and deprovision through a pluggable
 backend. The default backend drives the `openvmm` binary directly; no daemon or
-Python tooling is involved at runtime.
+Python tooling is involved at runtime. The optional `nvxhost` backend uses a
+separately supplied native host library and a different, image-backed guest.
 
-Each sandbox is a microVM that runs the NVX guest's Alpine Linux userland
-directly from its initramfs. There are no image layers, scratch disks, or
-container namespaces; workloads run as a non-root user in the guest itself, and
-guest state lives in memory until the sandbox stops.
+By default, each sandbox is a microVM that runs the NVX guest's Alpine Linux
+userland directly from its initramfs. That backend has no image layers, scratch
+disks, or container namespaces; workloads run as a non-root user in the guest
+itself, and guest state lives in memory until the sandbox stops. The opt-in
+native backend instead runs commands against a caller-supplied, read-only GPT
+image with a RAM overlay.
 
 The Cargo package, library, and directory are named `aci_edge_sandboxes`.
 
@@ -95,6 +98,8 @@ envelope (`version`, `phase`, and `containment`) belongs to the caller.
 - Backends in this crate:
   - `openvmm::OpenVmmBackend` (feature `openvmm`, default) drives the `openvmm`
     executable.
+  - `openvmm::NvxHostBackend` (feature `nvxhost`) drives OpenVMM using a
+    separately supplied native host library and image-backed guest.
   - `testing::MockBackend` (feature `testing`) implements the state machine in
     memory for consumers' unit tests.
 - `AsyncAciEdgeSandbox` (feature `async`) wraps `AciEdgeSandbox` for Tokio. Lifecycle calls run on
@@ -103,6 +108,43 @@ envelope (`version`, `phase`, and `containment`) belongs to the caller.
 To add a backend, implement `Backend`. Declare only the capabilities it can
 enforce, and report state-machine violations with the codes listed in the
 [error mapping](#error-mapping).
+
+## Image-backed native host backend (opt-in)
+
+Enable `nvxhost` to use `AciEdgeSandbox::nvxhost(NvxHostConfig)`. This leaves the default
+direct-OpenVMM backend and its Alpine guest unchanged. The caller supplies OpenVMM, a
+compatible kernel and static edge-agent initramfs, a prepared GPT image, the absolute path
+to `nvxhost.dll` (`libnvxhost.so` on Linux), and the independently approved SHA-256 of that
+library. The Rust crate does **not** build, download, or publish the private library.
+`NvxHostBackend::new` verifies the file digest and ABI version and requires the additive
+`nvx_build_ramfs_launch_arguments` and `nvx_session_connect_verified` exports. A missing,
+wrong-version, or wrong-digest library fails rather than falling back.
+
+The image is attached read-only in OpenVMM's distro block slot. The edge guest validates
+its GPT and p2+ ext4 layers and uses a RAM-backed tmpfs upper/work for its overlay; it
+does not interpret p1 OCI configuration or require a scratch disk. OpenVMM must support
+the explicit `nvx_overlay_upper=ramfs` scratchless topology. On Windows, the backend
+assigns `//./pipe/openvmm-microvm-<NAME>` control and boot endpoints. It retains the
+OpenVMM process/state, sends the 32-byte capability through stdin, checks the serving
+process on the connected pipe/socket, and owns graceful-or-forced stop and deprovision.
+State is kept separately under `<state_root>/nvxhost/`; a running VM is never silently
+converted to the direct backend. `NvxHostBackend::guest_logs` reads a bounded non-follow
+guest-log snapshot before stop.
+
+This first backend supports provision/start/exec/stop/deprovision with shell commands or
+argv and a fixed caller-provided image. It explicitly rejects host file mappings, network
+configuration beyond deny-all, piped stdin, execution cancellation, custom working
+directories and environments. Snapshot/restore, image selection, and richer guest
+operations are not part of this profile. See
+[`examples/nvxhost_lifecycle.rs`](examples/nvxhost_lifecycle.rs) for a run requiring
+`--openvmm`, `--kernel`, `--initrd`, `--image`, `--host-library`, `--host-sha256`,
+`--state-root`, `--hypervisor`, and a command after `--`. The ignored
+`tests/nvxhost_guest.rs` exercises an actual WHP guest when the corresponding
+`NVXHOST_TEST_*` paths and approved DLL digest are set.
+
+The caller must independently approve and protect the native asset. Checking a caller-supplied
+digest does not make a writable path or a self-declared digest trustworthy; use this profile
+only with an immutable, externally authorized library installation.
 
 ## OpenVMM backend
 

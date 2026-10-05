@@ -23,11 +23,16 @@ openvmm = []
 bundled = ["openvmm", "dep:sha2"]
 # Tokio-based asynchronous wrappers around the synchronous core.
 async = ["dep:tokio"]
+# Loads an explicitly supplied native host library and boots an image-backed ttrpc guest.
+nvxhost = ["openvmm", "dep:libloading", "dep:prost", "dep:sha2-runtime"]
 # Test doubles: an in-memory `MockBackend` and the `aci-edge-sandboxes-fake-openvmm` binary.
 testing = []
 
 [dependencies]
 getrandom = "0.4"
+libloading = { version = "0.8", optional = true }
+prost = { version = "0.13", optional = true }
+sha2-runtime = { package = "sha2", version = "0.10", optional = true }
 serde = { version = "1.0.200", features = ["derive"] }
 serde_json = "1.0.120"
 thiserror = "2"
@@ -64,6 +69,10 @@ doc = false
 [[example]]
 name = "lifecycle"
 required-features = ["openvmm"]
+
+[[example]]
+name = "nvxhost_lifecycle"
+required-features = ["nvxhost"]
 
 [lints.rust]
 missing_docs = "warn"

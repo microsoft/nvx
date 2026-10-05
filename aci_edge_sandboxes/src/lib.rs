@@ -58,6 +58,8 @@ mod exec;
 mod id;
 mod input;
 mod model;
+#[cfg(feature = "nvxhost")]
+mod nvxhost;
 mod stream;
 mod validate;
 

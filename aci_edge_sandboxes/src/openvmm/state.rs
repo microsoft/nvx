@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use super::filesystem::HostMapping;
 use super::platform;
 use super::protocol::CAPABILITY_LEN;
+#[cfg(any(test, feature = "nvxhost"))]
+use crate::error::ErrorCode;
 use crate::error::{Error, Result};
 use crate::id::SandboxId;
 use crate::model::NetworkPolicy;
@@ -35,12 +37,15 @@ pub(crate) const STATE_FORMAT: u32 = 2;
 pub(crate) const BACKEND_KEY: &str = "openvmm";
 /// Linux control socket name.
 pub(crate) const SOCKET_NAME: &str = "control.sock";
+/// Linux boot-console socket name.
+pub(crate) const BOOT_SOCKET_NAME: &str = "boot.sock";
 
 const RECORD_NAME: &str = "sandbox.json";
 const LAUNCH_NAME: &str = "launch.json";
 const RUNTIME_NAME: &str = "runtime.json";
 const CAPABILITY_NAME: &str = "control.capability";
 const LOG_NAME: &str = "openvmm.log";
+const CONSOLE_LOG_NAME: &str = "console.log";
 const OUTCOME_NAME: &str = "outcome.json";
 const LOCKS_NAME: &str = ".locks";
 
@@ -54,6 +59,8 @@ pub(crate) struct SandboxRecord {
     pub(crate) network: Option<NetworkPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) filesystem: Option<HostMapping>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native: Option<NativeArtifactRecord>,
     pub(crate) memory_mib: u32,
     pub(crate) workload_uid: u32,
     pub(crate) workload_gid: u32,
@@ -62,6 +69,16 @@ pub(crate) struct SandboxRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) create_workload_account: bool,
     pub(crate) hostname: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeArtifactRecord {
+    pub(crate) image: PathBuf,
+    pub(crate) image_sha256: String,
+    pub(crate) kernel_sha256: String,
+    pub(crate) initrd_sha256: String,
+    pub(crate) library_sha256: String,
 }
 
 /// Identity of the OpenVMM process of a running sandbox.
@@ -104,6 +121,7 @@ pub(crate) struct LockGuard {
 #[derive(Debug)]
 pub(crate) struct StateStore {
     root: PathBuf,
+    backend: &'static str,
 }
 
 fn io_error(context: String) -> impl FnOnce(io::Error) -> Error {
@@ -113,6 +131,10 @@ fn io_error(context: String) -> impl FnOnce(io::Error) -> Error {
 impl StateStore {
     /// Opens `root`, creating it and restricting it to the current user if needed.
     pub(crate) fn open(root: &Path) -> io::Result<Self> {
+        Self::open_for(root, BACKEND_KEY)
+    }
+
+    pub(crate) fn open_for(root: &Path, backend: &'static str) -> io::Result<Self> {
         if let Some(parent) = root.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -120,6 +142,7 @@ impl StateStore {
         platform::create_private_dir(&root.join(LOCKS_NAME))?;
         Ok(Self {
             root: root.to_path_buf(),
+            backend,
         })
     }
 
@@ -131,12 +154,22 @@ impl StateStore {
         self.dir(sandbox_id).join(LOG_NAME)
     }
 
+    #[cfg(feature = "nvxhost")]
+    pub(crate) fn console_path(&self, sandbox_id: &SandboxId) -> PathBuf {
+        self.dir(sandbox_id).join(CONSOLE_LOG_NAME)
+    }
+
     pub(crate) fn outcome_path(&self, sandbox_id: &SandboxId) -> PathBuf {
         self.dir(sandbox_id).join(OUTCOME_NAME)
     }
 
     pub(crate) fn socket_path(&self, sandbox_id: &SandboxId) -> PathBuf {
         self.dir(sandbox_id).join(SOCKET_NAME)
+    }
+
+    #[cfg(feature = "nvxhost")]
+    pub(crate) fn boot_socket_path(&self, sandbox_id: &SandboxId) -> PathBuf {
+        self.dir(sandbox_id).join(BOOT_SOCKET_NAME)
     }
 
     fn lock_path(&self, sandbox_id: &SandboxId) -> PathBuf {
@@ -150,6 +183,34 @@ impl StateStore {
         lock(&self.lock_path(sandbox_id))
     }
 
+    #[cfg(any(test, feature = "nvxhost"))]
+    pub(crate) fn lock_and_load(
+        &self,
+        sandbox_id: &SandboxId,
+    ) -> Result<(LockGuard, SandboxRecord)> {
+        match self.dir(sandbox_id).try_exists() {
+            Ok(false) => {
+                return Err(Error::stale_id(format!(
+                    "sandbox {sandbox_id} is not provisioned"
+                )));
+            }
+            Err(error) => {
+                return Err(Error::backend_error("cannot inspect sandbox state").with_source(error));
+            }
+            Ok(true) => {}
+        }
+        let guard = self.lock(sandbox_id)?;
+        match self.load(sandbox_id) {
+            Ok(record) => Ok((guard, record)),
+            Err(error) if error.code() == ErrorCode::StaleId => {
+                drop(guard);
+                self.remove_lock(sandbox_id);
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Removes the lock file of a deprovisioned sandbox.
     pub(crate) fn remove_lock(&self, sandbox_id: &SandboxId) {
         let _ = fs::remove_file(self.lock_path(sandbox_id));
@@ -157,6 +218,11 @@ impl StateStore {
 
     /// Creates the state directory of a new sandbox.
     pub(crate) fn create(&self, sandbox_id: &SandboxId, record: &SandboxRecord) -> Result<()> {
+        if record.backend != self.backend {
+            return Err(Error::backend_error(
+                "the sandbox record does not belong to this backend",
+            ));
+        }
         let dir = self.dir(sandbox_id);
         fs::create_dir(&dir).map_err(io_error(format!(
             "cannot create sandbox state {}",
@@ -185,7 +251,7 @@ impl StateStore {
                 )));
             }
         };
-        if record.format != STATE_FORMAT || record.backend != BACKEND_KEY {
+        if record.format != STATE_FORMAT || record.backend != self.backend {
             return Err(Error::backend_error(format!(
                 "sandbox state {} has an unsupported format",
                 path.display()
@@ -263,7 +329,13 @@ impl StateStore {
     /// Removes the files that exist only while the sandbox starts or runs.
     pub(crate) fn clear_runtime(&self, sandbox_id: &SandboxId) -> Result<()> {
         let dir = self.dir(sandbox_id);
-        for name in [RUNTIME_NAME, LAUNCH_NAME, CAPABILITY_NAME, SOCKET_NAME] {
+        for name in [
+            RUNTIME_NAME,
+            LAUNCH_NAME,
+            CAPABILITY_NAME,
+            SOCKET_NAME,
+            BOOT_SOCKET_NAME,
+        ] {
             remove_if_present(&dir.join(name))?;
         }
         Ok(())
@@ -276,6 +348,15 @@ impl StateStore {
             .truncate(true)
             .open(&path)
             .map_err(io_error(format!("cannot create {}", path.display())))
+    }
+
+    #[cfg(feature = "nvxhost")]
+    pub(crate) fn open_console_log(&self, sandbox_id: &SandboxId) -> Result<File> {
+        let path = self.console_path(sandbox_id);
+        private_options()
+            .append(true)
+            .open(&path)
+            .map_err(io_error(format!("cannot open {}", path.display())))
     }
 
     /// Deletes the state of a stopped sandbox.
@@ -293,8 +374,10 @@ impl StateStore {
             LAUNCH_NAME,
             CAPABILITY_NAME,
             SOCKET_NAME,
+            BOOT_SOCKET_NAME,
             OUTCOME_NAME,
             LOG_NAME,
+            CONSOLE_LOG_NAME,
         ];
         let mut owned = Vec::new();
         for entry in entries {
@@ -408,6 +491,7 @@ mod tests {
             backend: BACKEND_KEY.to_owned(),
             network: None,
             filesystem: None,
+            native: None,
             memory_mib: 256,
             workload_uid: 65534,
             workload_gid: 65534,
@@ -422,9 +506,48 @@ mod tests {
         let store = StateStore::open(&root.path().join("sandboxes")).unwrap();
         let id = SandboxId::generate().unwrap();
         assert_eq!(store.load(&id).unwrap_err().code(), ErrorCode::StaleId);
+        assert_eq!(
+            store.lock_and_load(&id).unwrap_err().code(),
+            ErrorCode::StaleId
+        );
+        assert!(!store.dir(&id).exists());
+        assert!(!store.lock_path(&id).exists());
         store.create(&id, &record()).unwrap();
         assert_eq!(store.load(&id).unwrap(), record());
         assert!(store.runtime(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn native_records_round_trip_only_through_their_backend() {
+        let root = tempfile::tempdir().unwrap();
+        let store = StateStore::open_for(root.path(), "nvxhost").unwrap();
+        let id = SandboxId::generate().unwrap();
+        assert_eq!(
+            store.create(&id, &record()).unwrap_err().code(),
+            ErrorCode::BackendError
+        );
+        assert!(!store.dir(&id).exists());
+
+        let mut native = record();
+        native.backend = "nvxhost".to_owned();
+        native.native = Some(NativeArtifactRecord {
+            image: PathBuf::from("image.vhd"),
+            image_sha256: "1".repeat(64),
+            kernel_sha256: "2".repeat(64),
+            initrd_sha256: "3".repeat(64),
+            library_sha256: "4".repeat(64),
+        });
+        store.create(&id, &native).unwrap();
+        let (_guard, loaded) = store.lock_and_load(&id).unwrap();
+        assert_eq!(loaded, native);
+        assert_eq!(
+            StateStore::open(root.path())
+                .unwrap()
+                .load(&id)
+                .unwrap_err()
+                .code(),
+            ErrorCode::BackendError
+        );
     }
 
     #[test]
