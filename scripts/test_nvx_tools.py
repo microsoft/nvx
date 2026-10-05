@@ -3688,7 +3688,7 @@ class CiConfigurationTests(unittest.TestCase):
                 artifact = name.replace("${{ inputs.platform }}", platform)
                 self.assertIn(f"        name: {artifact}", prepare)
 
-    def test_windows_ci_remeasures_only_unstable_lifecycle_results(self):
+    def test_ci_remeasures_only_unstable_lifecycle_results(self):
         action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -3697,14 +3697,28 @@ class CiConfigurationTests(unittest.TestCase):
             / "action.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(action.count("performance validate-openvmm"), 1)
-        self.assertNotIn("for attempt in 1 2", action)
-        self.assertEqual(action.count("foreach ($Attempt in 1, 2)"), 1)
-        self.assertEqual(action.count("$ValidationStatus -ne 75"), 1)
-        self.assertEqual(
-            action.count("Lifecycle snapshot generation was unstable"),
-            1,
-        )
+        self.assertEqual(action.count("performance validate-openvmm"), 2)
+        for step, loop, unstable in (
+            (
+                "Run Linux acceptance test",
+                "for attempt in 1 2; do",
+                '"${validation_status}" -ne 75',
+            ),
+            (
+                "Run Windows acceptance test",
+                "foreach ($Attempt in 1, 2)",
+                "$ValidationStatus -ne 75",
+            ),
+        ):
+            with self.subTest(step=step):
+                script = _composite_action_script(action, step)
+                self.assertEqual(script.count("performance validate-openvmm"), 1)
+                self.assertEqual(script.count(loop), 1)
+                self.assertEqual(script.count(unstable), 1)
+                self.assertEqual(
+                    script.count("Lifecycle snapshot generation was unstable"),
+                    1,
+                )
 
     def test_windows_benchmarks_use_provisioned_data_volume_scratch(self):
         action = (
@@ -4137,6 +4151,133 @@ function python {
                 if expected_status == 0:
                     self.assertEqual(
                         json.loads(accepted.read_text(encoding="utf-8-sig")),
+                        {"attempt": len(statuses)},
+                    )
+
+    @unittest.skipUnless(os.name == "posix", "requires bash")
+    def test_linux_acceptance_preserves_attempts_and_publishes_only_valid_data(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(action, "Run Linux acceptance test")
+        platform = "linux-kvm-virtual-machine"
+        for name, value in (
+            ("backend", "kvm"),
+            ("platform", platform),
+            ("warmups", "1"),
+            ("runs", "10"),
+            ("teardown-mode", "guest-exit"),
+        ):
+            script = script.replace("${{ inputs." + name + " }}", value)
+        stub = """
+benchmark_count=0
+validation_count=0
+python3() {
+    local argument output="" input="" platform="" previous=""
+    for argument in "$@"; do
+        case "${previous}" in
+        --output) output="${argument}" ;;
+        --input) input="${argument}" ;;
+        --platform) platform="${argument}" ;;
+        esac
+        previous="${argument}"
+    done
+    if [[ "${2-}" == benchmark ]]; then
+        benchmark_count=$((benchmark_count + 1))
+        echo "benchmark ${platform} ${output}"
+        mkdir -p "$(dirname "${output}")"
+        printf '{"attempt":%d}' "${benchmark_count}" >"${output}"
+        return "${BENCHMARK_STATUS}"
+    fi
+    if [[ "${2-} ${3-}" == "performance validate-openvmm" ]]; then
+        validation_count=$((validation_count + 1))
+        echo "validate ${platform} ${input}"
+        return "${VALIDATION_STATUSES[validation_count - 1]}"
+    fi
+    echo "unexpected command: $*" >&2
+    return 1
+}
+"""
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "NVX_BENCHMARK_CPUS": "0-7",
+                "NVX_BENCHMARK_HOST_CPU_RESERVE": "0",
+                "NVX_BENCHMARK_MARKER_TIMEOUT": "40",
+            }
+        )
+        run_dir = f"data/runs/{platform}/microvm-v2/1vcpu"
+        for name, statuses, benchmark_status in (
+            ("first-success", (0,), 0),
+            ("remeasured-success", (75, 0), 0),
+            ("both-unstable", (75, 75), 0),
+            ("invalid-data", (2,), 0),
+            ("unstable-then-invalid", (75, 2), 0),
+            ("benchmark-failure", (0,), 42),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                output = root / run_dir
+                output.mkdir(parents=True)
+                accepted = output / "acceptance.json"
+                accepted.write_text('{"attempt":"stale"}', encoding="utf-8")
+                setup = (
+                    "VALIDATION_STATUSES=("
+                    + " ".join(str(status) for status in statuses)
+                    + f")\nBENCHMARK_STATUS={benchmark_status}\n"
+                )
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "--noprofile",
+                        "--norc",
+                        "-eo",
+                        "pipefail",
+                        "-c",
+                        setup + stub + script,
+                    ],
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                expected_status = benchmark_status or statuses[-1]
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                expected_stdout: list[str] = []
+                for index in range(1, len(statuses) + 1):
+                    attempt = f"{run_dir}/acceptance-attempt-{index}.json"
+                    if index > 1:
+                        expected_stdout.append(
+                            "::warning::Lifecycle snapshot generation was unstable "
+                            f"on attempt {index - 1}; remeasuring once"
+                        )
+                    expected_stdout.append(f"benchmark {platform} {attempt}")
+                    if not benchmark_status:
+                        expected_stdout.append(f"validate {platform} {attempt}")
+                self.assertEqual(result.stdout.splitlines(), expected_stdout)
+                self.assertEqual(
+                    sorted(path.name for path in output.glob("acceptance-attempt-*")),
+                    [
+                        f"acceptance-attempt-{index}.json"
+                        for index in range(1, len(statuses) + 1)
+                    ],
+                )
+                for index in range(1, len(statuses) + 1):
+                    attempt = output / f"acceptance-attempt-{index}.json"
+                    self.assertEqual(
+                        json.loads(attempt.read_text(encoding="utf-8")),
+                        {"attempt": index},
+                    )
+                self.assertEqual(accepted.exists(), expected_status == 0)
+                if expected_status == 0:
+                    self.assertEqual(
+                        json.loads(accepted.read_text(encoding="utf-8")),
                         {"attempt": len(statuses)},
                     )
 

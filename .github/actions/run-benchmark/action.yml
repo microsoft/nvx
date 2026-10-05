@@ -51,19 +51,36 @@ runs:
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
         run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
-        python3 scripts/nvx.py benchmark \
-          --suite e2e \
-          --backend "${{ inputs.backend }}" \
-          --platform "${{ inputs.platform }}" \
-          --processors 1 \
-          "${cpu_args[@]}" \
-          --warmups "${{ inputs.warmups }}" \
-          --runs "${{ inputs.runs }}" \
-          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
-          --skip-build \
-          --teardown-mode "${{ inputs.teardown-mode }}" \
-          --snapshot-profile \
-          --output "${run_dir}/acceptance.json"
+        acceptance_output="${run_dir}/acceptance.json"
+        rm -f "${acceptance_output}"
+        for attempt in 1 2; do
+          attempt_output="${run_dir}/acceptance-attempt-${attempt}.json"
+          python3 scripts/nvx.py benchmark \
+            --suite e2e \
+            --backend "${{ inputs.backend }}" \
+            --platform "${{ inputs.platform }}" \
+            --processors 1 \
+            "${cpu_args[@]}" \
+            --warmups "${{ inputs.warmups }}" \
+            --runs "${{ inputs.runs }}" \
+            --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+            --skip-build \
+            --teardown-mode "${{ inputs.teardown-mode }}" \
+            --snapshot-profile \
+            --output "${attempt_output}"
+          validation_status=0
+          python3 scripts/nvx.py performance validate-openvmm \
+            --platform "${{ inputs.platform }}" \
+            --input "${attempt_output}" || validation_status=$?
+          if [[ "${validation_status}" -eq 0 ]]; then
+            cp "${attempt_output}" "${acceptance_output}"
+            break
+          fi
+          if [[ "${validation_status}" -ne 75 || "${attempt}" -eq 2 ]]; then
+            exit "${validation_status}"
+          fi
+          echo "::warning::Lifecycle snapshot generation was unstable on attempt ${attempt}; remeasuring once"
+        done
 
     - name: Run Linux performance suite
       if: runner.os != 'Windows'

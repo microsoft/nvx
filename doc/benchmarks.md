@@ -547,9 +547,9 @@ Both CI contracts use one-second operation windows. Canonical baseline collectio
 full `5 + 30` contract.
 
 The current workflow collects 10 measured lifecycle samples after one warmup.
-Windows CI validates the lifecycle result before starting the remaining benchmark
-suites. Snapshot-generation instability is reported with temporary-failure exit
-status 75; CI remeasures it once on the same runner. Each attempt is preserved in
+Linux and Windows CI validate the lifecycle result before starting the remaining
+benchmark suites. Snapshot-generation instability is reported with temporary-failure
+exit status 75; CI remeasures it once on the same runner. Each attempt is preserved in
 the benchmark artifact as `acceptance-attempt-1.json` or
 `acceptance-attempt-2.json`, including its lifecycle profiles. Only a validated
 attempt is copied to `acceptance.json` for collection; a stale accepted result is
@@ -557,8 +557,10 @@ removed before measuring. Other validation failures stop immediately, and a seco
 unstable result still fails the job. The stability guard rejects a p50 more than
 25% above p25 and also rejects an adjacent gap above 25% when at least two samples
 lie on each side.
-Singleton outliers remain tolerated, while pooled Windows runners cannot publish a
-bimodal host-stall series into topology-wide history.
+Singleton outliers remain tolerated, while pooled runners cannot publish a
+bimodal host-stall series into topology-wide history. On the Linux CI runners,
+snapshot generation takes about 1 ms on KVM and about 4 ms on MSHV, so a
+sub-millisecond CPU stall in two samples is enough to cross the gap limit.
 
 Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
 uploads its raw results and lifecycle profiles to the immutable
@@ -571,9 +573,11 @@ files identify the bounded lifecycle remeasurements within one workflow attempt,
 not the workflow's `github.run_attempt`.
 
 When investigating instability, compare each attempt's
-`snapshot_capture.whp.profile.raw_samples` with its `samples_ms`. For example, a
+`snapshot_capture.<backend>.profile.raw_samples` with its `samples_ms`. For example, a
 slow `capture.mapped_memory_flush` with otherwise stable capture phases localizes
 the delay to host-side mapped RAM flushing, not guest boot or snapshot restore.
+Extra time in `capture.quiesce`, `capture.save_state`, or between profiled phases
+while the flush and publication phases stay flat instead points to a host CPU stall.
 Reproduce with the exact executable and guest artifact hashes on the same host
 before attributing the delay to a source change. Keep the stability thresholds and
 bounded remeasurement unchanged when collecting diagnostic evidence.
