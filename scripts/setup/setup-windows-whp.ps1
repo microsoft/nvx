@@ -19,6 +19,10 @@ param(
     [string]$RunnerName,
 
     [Parameter()]
+    [ValidatePattern('^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$')]
+    [string]$RunnerLabels = "windows,whp,virtual-machine",
+
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$RepositoryUrl = "https://github.com/microsoft/nvx",
 
@@ -1045,7 +1049,6 @@ function Install-ActionsRunner {
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     $serviceFile = Join-Path $RunnerDirectory ".service"
     $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-    $labels = "windows,whp,virtual-machine"
     $runnerNameValidated = $false
     if (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) {
         $configuration = Get-Content -LiteralPath $runnerConfiguration -Raw |
@@ -1062,7 +1065,7 @@ function Install-ActionsRunner {
         }
     }
     $labelsValidated = (Test-Path -LiteralPath $labelsFile -PathType Leaf) -and
-    (Get-Content -LiteralPath $labelsFile -Raw).Trim() -eq $labels
+    (Get-Content -LiteralPath $labelsFile -Raw).Trim() -eq $RunnerLabels
     $registrationRequired = `
         -not (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) -or
     -not $runnerNameValidated -or
@@ -1096,7 +1099,7 @@ function Install-ActionsRunner {
                 "--url", $RepositoryUrl,
                 "--token", $Token,
                 "--name", $RunnerName,
-                "--labels", $labels,
+                "--labels", $RunnerLabels,
                 "--work", "_work",
                 "--disableupdate",
                 "--runasservice",
@@ -1108,7 +1111,7 @@ function Install-ActionsRunner {
         }
         [IO.File]::WriteAllText(
             $labelsFile,
-            $labels,
+            $RunnerLabels,
             [Text.UTF8Encoding]::new($false)
         )
     }
@@ -1230,10 +1233,9 @@ function Assert-ActionsRunner {
     }
     if (-not [string]::IsNullOrWhiteSpace($RunnerName)) {
         $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-        $expectedLabels = "windows,whp,virtual-machine"
         if (-not (Test-Path -LiteralPath $labelsFile -PathType Leaf) -or
             (Get-Content -LiteralPath $labelsFile -Raw).Trim() -ne
-            $expectedLabels) {
+            $RunnerLabels) {
             throw "Actions runner labels are not validated"
         }
     }

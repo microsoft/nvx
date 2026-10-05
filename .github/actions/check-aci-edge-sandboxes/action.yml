@@ -12,6 +12,21 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Use a per-job Rust toolchain directory
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${RUNNER_OS}" == Windows ]]; then
+          temp_root=$(cygpath -u "${RUNNER_TEMP}")
+        else
+          temp_root="${RUNNER_TEMP}"
+        fi
+        rustup_home=$(mktemp -d "${temp_root}/aci-edge-rustup.XXXXXX")
+        if [[ "${RUNNER_OS}" == Windows ]]; then
+          rustup_home=$(cygpath -w "${rustup_home}")
+        fi
+        echo "RUSTUP_HOME=${rustup_home}" >> "${GITHUB_ENV}"
+
     - name: Install Rust toolchains
       id: toolchains
       shell: bash

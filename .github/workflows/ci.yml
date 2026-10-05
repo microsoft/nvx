@@ -56,17 +56,45 @@ jobs:
   aci-edge-sandboxes:
     name: aci-edge-sandboxes / ${{ matrix.os }}
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && matrix.pr_runner || matrix.push_runner) }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            pr_runner: '["self-hosted", "linux", "x64", "nvx-utility-pr"]'
+            push_runner: '["self-hosted", "linux", "x64", "nvx-utility-trusted"]'
+          - os: windows-latest
+            pr_runner: '["self-hosted", "windows", "x64", "nvx-utility-windows-pr"]'
+            push_runner: '["self-hosted", "windows", "x64", "nvx-utility-windows-trusted"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      - name: Require metadata isolation on Windows pull requests
+        if: matrix.os == 'windows-latest' && github.event_name == 'pull_request'
+        shell: powershell
+        run: |
+          $request = [Net.WebRequest]::Create(
+            'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01'
+          )
+          $request.Proxy = $null
+          $request.Timeout = 3000
+          $request.Headers.Add('Metadata', 'true')
+          try {
+            $response = $request.GetResponse()
+            $response.Close()
+            throw 'Azure instance metadata is reachable from the PR runner.'
+          }
+          catch [Net.WebException] {
+            if ($_.Exception.Response -or
+                $_.Exception.Status -notin @('ConnectFailure', 'Timeout', 'SendFailure')) {
+              throw 'Azure instance metadata responded to the PR runner.'
+            }
+          }
 
       - name: Check aci_edge_sandboxes
         uses: ./.github/actions/check-aci-edge-sandboxes
@@ -227,13 +255,17 @@ jobs:
           needs.openvmm-changes.outputs.run-workloads == 'true'
         )
       }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, nvx-utility-pr]
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      - name: Require rootless Docker
+        id: rootless
+        uses: ./.github/actions/require-rootless-docker
 
       - name: Build the CI debug kernel
         uses: ./.github/actions/build-guest-artifacts
@@ -251,6 +283,12 @@ jobs:
             build/vmlinux-debug.provenance.json
           if-no-files-found: error
           retention-days: 1
+
+      - name: Remove Docker client configuration
+        if: always() && steps.rootless.outputs.config_dir != ''
+        env:
+          NVX_DOCKER_CONFIG_TO_CLEAN: ${{ steps.rootless.outputs.config_dir }}
+        run: python3 scripts/setup/cleanup_rootless_docker.py
 
   build-openvmm-linux-gnu:
     name: OpenVMM binary / Linux GNU

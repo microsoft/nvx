@@ -3151,10 +3151,10 @@ class CiConfigurationTests(unittest.TestCase):
         artifacts = _workflow_job(workflow, "artifacts")
         self.assertNotIn("debug-kernel", artifacts)
         self.assertNotIn("vmlinux-debug", artifacts)
-        # The debug kernel builds on GitHub-hosted capacity beside the shared
-        # artifacts, under the same condition, and only the debug jobs wait.
+        # The debug kernel builds beside the shared artifacts on the utility
+        # runner, under the same condition, and only the debug jobs wait.
         debug_build = _workflow_job(workflow, "debug-kernel")
-        self.assertIn("runs-on: ubuntu-latest", debug_build)
+        self.assertIn("runs-on: [self-hosted, linux, x64, nvx-utility-pr]", debug_build)
         self.assertIn('debug-kernel: "true"', debug_build)
         self.assertIn('guest-images: "false"', debug_build)
         self.assertIn("name: guest-debug-kernel", debug_build)
@@ -3497,6 +3497,10 @@ class CiConfigurationTests(unittest.TestCase):
             )
             self.assertIn("python3 scripts/setup/cleanup_rootless_docker.py", job)
             self.assertIn("steps.rootless.outputs.config_dir", job)
+        debug_job = _workflow_job(workflow, "debug-kernel")
+        self.assertIn("runs-on: [self-hosted, linux, x64, nvx-utility-pr]", debug_job)
+        self.assertIn("uses: ./.github/actions/require-rootless-docker", debug_job)
+        self.assertIn("python3 scripts/setup/cleanup_rootless_docker.py", debug_job)
         docker_action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -3655,6 +3659,64 @@ class CiConfigurationTests(unittest.TestCase):
                 "VmEmulatedDevices.dll",
             ):
                 self.assertIn(firmware, configuration)
+
+    def test_windows_utility_runner_labels_and_ci_routing(self):
+        setup = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        ).read_text(encoding="utf-8")
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('[string]$RunnerLabels = "windows,whp,virtual-machine"', setup)
+        self.assertIn(
+            "[ValidatePattern('^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$')]", setup
+        )
+        self.assertIn('"--labels", $RunnerLabels', setup)
+        self.assertIn(
+            "(Get-Content -LiteralPath $labelsFile -Raw).Trim() -eq $RunnerLabels",
+            setup,
+        )
+        self.assertIn(
+            "(Get-Content -LiteralPath $labelsFile -Raw).Trim() -ne\n            $RunnerLabels",
+            setup,
+        )
+        job = _workflow_job(workflow, "aci-edge-sandboxes")
+        self.assertIn("fromJSON(github.event_name == 'pull_request'", job)
+        self.assertIn(
+            'pr_runner: \'["self-hosted", "windows", "x64", "nvx-utility-windows-pr"]\'',
+            job,
+        )
+        self.assertIn(
+            'push_runner: \'["self-hosted", "windows", "x64", "nvx-utility-windows-trusted"]\'',
+            job,
+        )
+        self.assertIn(
+            'pr_runner: \'["self-hosted", "linux", "x64", "nvx-utility-pr"]\'', job
+        )
+        self.assertIn(
+            'push_runner: \'["self-hosted", "linux", "x64", "nvx-utility-trusted"]\'',
+            job,
+        )
+        self.assertIn(
+            "if: matrix.os == 'windows-latest' && github.event_name == 'pull_request'",
+            job,
+        )
+        self.assertIn("Azure instance metadata is reachable from the PR runner.", job)
+        crate_action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "check-aci-edge-sandboxes"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('mktemp -d "${temp_root}/aci-edge-rustup.XXXXXX"', crate_action)
+        self.assertIn(
+            'echo "RUSTUP_HOME=${rustup_home}" >> "${GITHUB_ENV}"', crate_action
+        )
+        self.assertLess(
+            crate_action.index("Use a per-job Rust toolchain directory"),
+            crate_action.index("Install Rust toolchains"),
+        )
 
     def test_linux_runners_require_an_invariant_tsc(self):
         validate_runner = (

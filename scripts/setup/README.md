@@ -57,9 +57,19 @@ cache statistics instead of restoring compiled `target/` trees.
 Supply a fresh registration token again when migrating an existing runner or
 changing its name, backend, or labels; provisioning replaces the registration
 and records the expected label set in a protected local marker.
+For a dedicated Windows utility runner, pass
+`-RunnerLabels windows,virtual-machine,nvx-utility-windows-pr` (or the
+corresponding `nvx-utility-windows-trusted` label for push-only jobs) with
+`-RunnerOnly -RunnerName`. This replaces the default `whp` label so utility
+jobs cannot consume a backend test runner. The label argument accepts only
+comma-separated letters, digits, underscores, hyphens and periods. The
+default Windows labels and existing WHP runners are unchanged.
 Runner services receive an explicit tool PATH. On Windows, the Rust toolchain
 is read-only to the service account while Cargo registry and Git caches use the
 runner's per-job temporary directory.
+Jobs that install additional Rust toolchains use their own writable
+`RUSTUP_HOME` under `RUNNER_TEMP`; they do not modify the protected machine
+toolchain.
 Windows runner provisioning also enables the full Hyper-V feature so the
 licensed in-box PCAT and SVGA firmware required by OpenVMM VMM tests is
 available under `System32`.
