@@ -92,6 +92,8 @@ mod config;
 mod contract;
 mod filesystem;
 mod launch;
+#[cfg(feature = "nvxhost")]
+mod native;
 mod network;
 mod platform;
 mod process;
@@ -111,6 +113,8 @@ use serde_json::Value;
 pub use self::artifacts::Artifacts;
 pub use self::config::{Hypervisor, OpenVmmConfig};
 pub use self::filesystem::{guest_path, resolve_guest_path};
+#[cfg(feature = "nvxhost")]
+pub use self::native::{NvxHostBackend, NvxHostConfig};
 use self::protocol::{
     CAPABILITY_LEN, ExitCategory, GuestFeatures, MAX_ARGUMENT_BYTES, MAX_CWD_BYTES,
     MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS, Workload, WorkloadEnvironment,
@@ -529,6 +533,7 @@ impl Backend for OpenVmmBackend {
             backend: BACKEND_KEY.to_owned(),
             network: request.network.clone(),
             filesystem,
+            native: None,
             memory_mib,
             workload_uid,
             workload_gid,

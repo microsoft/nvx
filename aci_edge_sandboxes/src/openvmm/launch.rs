@@ -107,6 +107,7 @@ mod tests {
             backend: BACKEND_KEY.to_owned(),
             network: None,
             filesystem: None,
+            native: None,
             memory_mib: 256,
             workload_uid: 65534,
             workload_gid: 65534,
