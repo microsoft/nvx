@@ -149,6 +149,36 @@ operations are not part of this profile. See
 `tests/nvxhost_guest.rs` exercises an actual WHP guest when the corresponding
 `NVXHOST_TEST_*` paths and approved DLL digest are set.
 
+For example, from `aci_edge_sandboxes` on a Windows WHP host, set the following
+paths to compatible, separately built artifacts and a caller-prepared GPT disk
+with p2+ ext4 layers (not a container image reference). Use the **edge** guest
+initramfs, not the default Alpine or standard container guest initramfs:
+
+```powershell
+$openvmm = 'C:\path\to\openvmm.exe'
+$kernel = 'C:\path\to\vmlinux'
+$initrd = 'C:\path\to\nvx-edge-initramfs.cpio.gz'
+$image = 'C:\path\to\layers.gpt'
+$hostLibrary = 'C:\path\to\nvxhost.dll'
+$approvedHostSha256 = '<64 hexadecimal digits from an independent trust policy>'
+$stateRoot = 'C:\nvx-edge-state'
+
+cargo run --release --locked --features nvxhost --example nvxhost_lifecycle -- `
+    --openvmm $openvmm --kernel $kernel --initrd $initrd --image $image `
+    --host-library $hostLibrary --host-sha256 $approvedHostSha256 `
+    --state-root $stateRoot --hypervisor whp -- 'printf READY'
+```
+
+Build the native library and the static edge initramfs separately from their
+matching private sources; this example neither fetches nor builds them. Use the
+pinned OpenVMM, which includes the scratchless RAM-overlay topology, and the NVX
+kernel that its time ABI requires, such as a release's `guest/vmlinux`. OpenVMM
+selects a [CPU profile](../doc/usage.md#cpu-profiles) at every cold boot, so start
+fails with `backend_error` on a host whose CPU none of its built-in profiles serves;
+the OpenVMM log that the error names gives the reason. On Linux, supply a matching
+`libnvxhost.so` and OpenVMM build and select `--hypervisor mshv`; the Linux edge
+lifecycle has not yet been verified end to end.
+
 The caller must independently approve and protect the native asset. Checking a caller-supplied
 digest does not make a writable path or a self-declared digest trustworthy; use this profile
 only with an immutable, externally authorized library installation.
