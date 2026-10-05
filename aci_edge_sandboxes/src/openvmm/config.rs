@@ -349,21 +349,27 @@ impl OpenVmmConfig {
                 ));
             }
         }
-        if cfg!(unix) {
-            // sockaddr_un holds 108 bytes including the terminating NUL.
-            let socket = self
-                .state_root
-                .join("0".repeat(32))
-                .join(super::state::SOCKET_NAME);
-            if socket.as_os_str().len() >= 108 {
-                return invalid(format!(
-                    "state_root {} is too long for a Unix control socket path",
-                    self.state_root.display()
-                ));
-            }
-        }
+        validate_unix_socket_path(&self.state_root, super::state::SOCKET_NAME, "control")?;
         Ok(())
     }
+}
+
+pub(crate) fn validate_unix_socket_path(
+    state_root: &Path,
+    socket_name: &str,
+    purpose: &str,
+) -> Result<()> {
+    if cfg!(unix) {
+        // sockaddr_un holds 108 bytes including the terminating NUL.
+        let socket = state_root.join("0".repeat(32)).join(socket_name);
+        if socket.as_os_str().len() >= 108 {
+            return Err(Error::backend_unavailable(format!(
+                "state_root {} is too long for a Unix {purpose} socket path",
+                state_root.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn valid_hostname(hostname: &str) -> bool {

@@ -137,7 +137,9 @@ converted to the direct backend. `NvxHostBackend::guest_logs` reads a bounded no
 guest-log snapshot before stop.
 
 This first backend supports provision/start/exec/stop/deprovision with shell commands or
-argv and a fixed caller-provided image. It explicitly rejects host file mappings, network
+argv and a fixed caller-provided image. Positive execution timeouts must be whole seconds,
+matching the guest RPC's precision; finer-grained timeouts fail validation rather than
+silently extending execution. It explicitly rejects host file mappings, network
 configuration beyond deny-all, piped stdin, execution cancellation, custom working
 directories and environments. Snapshot/restore, image selection, and richer guest
 operations are not part of this profile. See
