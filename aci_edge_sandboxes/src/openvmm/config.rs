@@ -316,7 +316,8 @@ impl OpenVmmConfig {
         }
         if !valid_guest_network(&self.guest_network) {
             return invalid(format!(
-                "guest_network {:?} must be an IPv4 address with a /1 to /30 prefix",
+                "guest_network {:?} must be an IPv4 address with a /1 to /30 prefix that is not \
+                 its network's network, broadcast, or gateway (first) address",
                 self.guest_network
             ));
         }
@@ -383,15 +384,25 @@ fn valid_hostname(hostname: &str) -> bool {
         && bytes.last() != Some(&b'-')
 }
 
+/// Applies OpenVMM's rules for a static guest address: a /1 to /30 prefix, and an address other
+/// than the network's own, its broadcast address, and the gateway, which is its first address.
 fn valid_guest_network(value: &str) -> bool {
-    let Some((address, prefix)) = value.split_once('/') else {
+    let Some((address, prefix_text)) = value.split_once('/') else {
         return false;
     };
-    address.parse::<std::net::Ipv4Addr>().is_ok()
-        && prefix
-            .parse::<u8>()
-            .is_ok_and(|prefix| (1..=30).contains(&prefix))
-        && !prefix.starts_with('0')
+    let (Ok(address), Ok(prefix)) = (
+        address.parse::<std::net::Ipv4Addr>(),
+        prefix_text.parse::<u8>(),
+    ) else {
+        return false;
+    };
+    if prefix_text.starts_with('0') || !(1..=30).contains(&prefix) {
+        return false;
+    }
+    let mask = u32::MAX << (32 - u32::from(prefix));
+    let host = u32::from(address);
+    let network = host & mask;
+    ![network, network | !mask, network + 1].contains(&host)
 }
 
 /// Describes why extra kernel parameters are unacceptable, if they are.
@@ -495,8 +506,15 @@ mod tests {
         assert!(!valid_hostname("-nvx"));
         assert!(!valid_hostname(&"a".repeat(64)));
         assert!(valid_guest_network("10.0.0.2/24"));
+        assert!(valid_guest_network("10.0.0.254/24"));
         assert!(!valid_guest_network("10.0.0.2"));
         assert!(!valid_guest_network("10.0.0.256/24"));
+        assert!(!valid_guest_network("10.0.0.2/024"));
+        // OpenVMM rejects the network, broadcast, and gateway addresses as guest addresses.
+        for reserved in ["10.0.0.0/24", "10.0.0.255/24", "10.0.0.1/24", "10.0.0.5/30"] {
+            assert!(!valid_guest_network(reserved), "{reserved}");
+        }
+        assert!(valid_guest_network("10.0.0.6/30"));
         assert!(kernel_command_line_problem("quiet loglevel=0").is_none());
         assert!(kernel_command_line_problem("tsc=reliable").is_some());
         assert!(kernel_command_line_problem("hostname=other").is_some());
