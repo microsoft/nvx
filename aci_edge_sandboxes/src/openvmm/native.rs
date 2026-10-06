@@ -13,7 +13,7 @@ use sha2_runtime::{Digest, Sha256};
 
 use super::artifacts::absolute;
 use super::config::{OpenVmmConfig, validate_unix_socket_path};
-use super::platform;
+use super::platform::{self, Transport};
 use super::process;
 use super::state::{
     BOOT_SOCKET_NAME, LaunchRecord, NATIVE_BACKEND_KEY, NativeArtifactRecord, ProcessIdentity,
@@ -36,6 +36,7 @@ const RUNTIME_ABI: &str = "microvm-abi-v2-edge-ramfs-v1";
 const MAX_EXEC_SECONDS: u64 = 3600;
 const MAX_OUTPUT_BYTES: usize = 1 << 20;
 const SHELL: &str = "/bin/sh";
+const CONSOLE_POLL: Duration = Duration::from_millis(250);
 
 /// Artifact paths and approved native-library digest for an image-backed guest.
 ///
@@ -87,7 +88,15 @@ pub struct NvxHostBackend {
     config: NvxHostConfig,
     base: OpenVmmBackend,
     host: Arc<HostLibrary>,
-    console_pumps: Mutex<HashMap<SandboxId, thread::JoinHandle<Result<()>>>>,
+    console_pumps: Mutex<HashMap<SandboxId, ConsolePump>>,
+}
+
+/// Copies the boot console of one OpenVMM launch into the sandbox's console log.
+#[derive(Debug)]
+struct ConsolePump {
+    pid: u32,
+    start_time: u64,
+    thread: thread::JoinHandle<Result<()>>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -326,21 +335,37 @@ impl NvxHostBackend {
             .console_pumps
             .lock()
             .map_err(|_| Error::backend_error("the boot-console pump table is unavailable"))?;
-        if pumps.contains_key(sandbox_id) {
+        if let Some(pump) = pumps.get(sandbox_id)
+            && pump.pid == runtime.pid
+            && pump.start_time == runtime.start_time
+        {
             return Ok(());
+        }
+        // A listener of an earlier launch ends promptly because its OpenVMM has exited; its
+        // result only describes that launch.
+        if let Some(stale) = pumps.remove(sandbox_id) {
+            let _ = stale.thread.join();
         }
         let endpoint = self.boot_endpoint(sandbox_id, &runtime.endpoint)?;
         let file = self.base.store.open_console_log(sandbox_id)?;
         let runtime = runtime.clone();
+        let (pid, start_time) = (runtime.pid, runtime.start_time);
         let timeout = self.config.openvmm.start_timeout;
-        let pump = thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("nvxhost-boot-console".to_owned())
             .spawn(move || pump_console(runtime, endpoint, file, timeout))
             .map_err(|error| {
                 Error::backend_error("cannot start the guest boot-console listener")
                     .with_source(error)
             })?;
-        pumps.insert(sandbox_id.clone(), pump);
+        pumps.insert(
+            sandbox_id.clone(),
+            ConsolePump {
+                pid,
+                start_time,
+                thread,
+            },
+        );
         Ok(())
     }
 
@@ -351,7 +376,8 @@ impl NvxHostBackend {
             .map_err(|_| Error::backend_error("the boot-console pump table is unavailable"))?
             .remove(sandbox_id);
         if let Some(pump) = pump {
-            pump.join()
+            pump.thread
+                .join()
                 .map_err(|_| Error::backend_error("the boot-console listener panicked"))??;
         }
         Ok(())
@@ -571,6 +597,9 @@ impl Backend for NvxHostBackend {
                 "sandbox {sandbox_id} is already running"
             )));
         }
+        // A listener of a launch that exited on its own ends promptly. Retire it now so that the
+        // new launch's listener connects before the guest writes its first boot output.
+        let _ = self.finish_console_pump(sandbox_id);
         self.verify_record(&record, true)?;
         self.probe()?;
 
@@ -806,9 +835,11 @@ impl Backend for NvxHostBackend {
         if let Err(error) = graceful {
             metadata.insert("gracefulError".to_owned(), error.to_string().into());
         }
-        let console = self.finish_console_pump(sandbox_id);
+        // The guest has stopped; a boot-console capture failure is only a diagnostic.
+        if let Err(error) = self.finish_console_pump(sandbox_id) {
+            metadata.insert("consoleError".to_owned(), error.to_string().into());
+        }
         self.base.store.clear_runtime(sandbox_id)?;
-        console?;
         Ok(StopResult {
             metadata: Some(metadata),
         })
@@ -822,11 +853,16 @@ impl Backend for NvxHostBackend {
                 "sandbox {sandbox_id} is running; stop it before deprovisioning"
             )));
         }
-        self.finish_console_pump(sandbox_id)?;
+        // A listener remains only if the guest exited without a stop through this backend.
+        let console = self.finish_console_pump(sandbox_id);
         self.base.store.remove(sandbox_id)?;
         drop(guard);
         self.base.store.remove_lock(sandbox_id);
-        Ok(DeprovisionResult::default())
+        Ok(DeprovisionResult {
+            metadata: console.err().map(|error| {
+                Metadata::from_iter([("consoleError".to_owned(), error.to_string().into())])
+            }),
+        })
     }
 }
 
@@ -871,19 +907,42 @@ fn finish_session<T>(session: Session, result: Result<T>, deadline: Option<Insta
 fn pump_console(
     runtime: RuntimeRecord,
     endpoint: String,
+    output: File,
+    timeout: Duration,
+) -> Result<()> {
+    copy_console(
+        || platform::connect_endpoint(&endpoint, runtime.pid, CONSOLE_POLL),
+        |activity| {
+            let current = platform::process_start_time(runtime.pid).map_err(|error| {
+                Error::backend_error(format!(
+                    "cannot verify OpenVMM while {activity} the console"
+                ))
+                .with_source(error)
+            })?;
+            Ok(current != Some(runtime.start_time))
+        },
+        output,
+        timeout,
+    )
+}
+
+/// Copies the guest boot console into `output` until OpenVMM exits.
+///
+/// OpenVMM serves one console client at a time, so the listener of another backend instance or
+/// process may hold the console. This listener then waits, past `timeout`, to take over, and
+/// ends without error if OpenVMM exits first.
+fn copy_console(
+    mut connect: impl FnMut() -> io::Result<Box<dyn Transport>>,
+    exited: impl Fn(&str) -> Result<bool>,
     mut output: File,
     timeout: Duration,
 ) -> Result<()> {
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| Error::backend_error("boot-console timeout is too long"))?;
+    let mut held_elsewhere = false;
     let mut console = loop {
-        if Instant::now() >= deadline {
-            return Err(Error::backend_error(
-                "OpenVMM did not open its guest boot-console endpoint",
-            ));
-        }
-        match platform::connect_endpoint(&endpoint, runtime.pid, Duration::from_millis(250)) {
+        match connect() {
             Ok(console) => break console,
             Err(error)
                 if matches!(
@@ -894,13 +953,18 @@ fn pump_console(
                         | io::ErrorKind::TimedOut
                 ) =>
             {
-                if platform::process_start_time(runtime.pid).map_err(|error| {
-                    Error::backend_error("cannot verify OpenVMM while connecting the console")
-                        .with_source(error)
-                })? != Some(runtime.start_time)
-                {
+                held_elsewhere |= error.kind() == io::ErrorKind::WouldBlock;
+                if exited("connecting")? {
+                    if held_elsewhere {
+                        return Ok(());
+                    }
                     return Err(Error::backend_error(
                         "OpenVMM exited before the guest boot console could connect",
+                    ));
+                }
+                if !held_elsewhere && Instant::now() >= deadline {
+                    return Err(Error::backend_error(
+                        "OpenVMM did not open its guest boot-console endpoint",
                     ));
                 }
                 thread::sleep(Duration::from_millis(25));
@@ -915,24 +979,21 @@ fn pump_console(
     };
     let mut buffer = [0u8; 4096];
     loop {
-        match console.read(&mut buffer, Some(Duration::from_millis(250))) {
+        match console.read(&mut buffer, Some(CONSOLE_POLL)) {
             Ok(0) => break,
             Ok(size) => output.write_all(&buffer[..size]).map_err(|error| {
                 Error::backend_error("cannot write the guest boot-console log").with_source(error)
             })?,
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                if platform::process_start_time(runtime.pid).map_err(|error| {
-                    Error::backend_error("cannot verify OpenVMM while reading the console")
-                        .with_source(error)
-                })? != Some(runtime.start_time)
-                {
+            // A client still queued in a socket's listen backlog is reset, rather than reaching
+            // end of stream, when OpenVMM exits.
+            Err(error) => {
+                if exited("reading")? {
                     break;
                 }
-            }
-            Err(error) => {
-                return Err(
-                    Error::backend_error("cannot read the guest boot console").with_source(error)
-                );
+                if error.kind() != io::ErrorKind::TimedOut {
+                    return Err(Error::backend_error("cannot read the guest boot console")
+                        .with_source(error));
+                }
             }
         }
     }
@@ -1049,8 +1110,140 @@ impl ExecControl for NvxHostExecution {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::collections::VecDeque;
+    use std::io::{Read, Seek, SeekFrom};
+
     use super::*;
     use crate::ErrorCode;
+
+    /// Replays scripted boot-console reads.
+    struct Replay(VecDeque<io::Result<&'static [u8]>>);
+
+    impl Transport for Replay {
+        fn read(&mut self, buffer: &mut [u8], _timeout: Option<Duration>) -> io::Result<usize> {
+            let chunk = self
+                .0
+                .pop_front()
+                .expect("the console read past its script")?;
+            buffer[..chunk.len()].copy_from_slice(chunk);
+            Ok(chunk.len())
+        }
+
+        fn write_all(&mut self, _data: &[u8], _timeout: Option<Duration>) -> io::Result<()> {
+            unreachable!("the console listener never writes")
+        }
+    }
+
+    fn replay<const N: usize>(
+        reads: [io::Result<&'static [u8]>; N],
+    ) -> io::Result<Box<dyn Transport>> {
+        Ok(Box::new(Replay(reads.into())))
+    }
+
+    fn busy() -> io::Result<Box<dyn Transport>> {
+        Err(io::ErrorKind::WouldBlock.into())
+    }
+
+    fn read_log(mut log: File) -> String {
+        let mut text = String::new();
+        log.seek(SeekFrom::Start(0)).unwrap();
+        log.read_to_string(&mut text).unwrap();
+        text
+    }
+
+    #[test]
+    fn a_console_held_elsewhere_is_awaited_past_the_deadline_until_openvmm_exits() {
+        let log = tempfile::tempfile().unwrap();
+        let (attempts, checks) = (Cell::new(0), Cell::new(0));
+        copy_console(
+            || {
+                attempts.set(attempts.get() + 1);
+                busy()
+            },
+            |_| {
+                checks.set(checks.get() + 1);
+                Ok(checks.get() > 4)
+            },
+            log.try_clone().unwrap(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(attempts.get(), 5);
+        assert_eq!(read_log(log), "");
+    }
+
+    #[test]
+    fn a_released_console_is_taken_over_and_copied_to_its_end() {
+        let log = tempfile::tempfile().unwrap();
+        let mut attempts = VecDeque::from([
+            busy(),
+            replay([
+                Ok(b"late ".as_slice()),
+                Err(io::ErrorKind::TimedOut.into()),
+                Ok(b"output".as_slice()),
+                Ok(b"".as_slice()),
+            ]),
+        ]);
+        copy_console(
+            || attempts.pop_front().unwrap(),
+            |_| Ok(false),
+            log.try_clone().unwrap(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(read_log(log), "late output");
+    }
+
+    #[test]
+    fn a_console_that_never_opens_fails_at_its_deadline_or_when_openvmm_exits() {
+        for (exited, expected) in [
+            (false, "did not open its guest boot-console endpoint"),
+            (true, "exited before the guest boot console could connect"),
+        ] {
+            let error = copy_console(
+                || Err(io::ErrorKind::NotFound.into()),
+                |_| Ok(exited),
+                tempfile::tempfile().unwrap(),
+                Duration::ZERO,
+            )
+            .unwrap_err();
+            assert!(error.message().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_console_reset_ends_the_log_only_after_openvmm_exits() {
+        let log = tempfile::tempfile().unwrap();
+        let reset = || {
+            replay([
+                Ok(b"boot".as_slice()),
+                Err(io::ErrorKind::ConnectionReset.into()),
+            ])
+        };
+        copy_console(
+            reset,
+            |_| Ok(true),
+            log.try_clone().unwrap(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(read_log(log), "boot");
+
+        let error = copy_console(
+            reset,
+            |_| Ok(false),
+            tempfile::tempfile().unwrap(),
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("cannot read the guest boot console"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn simple_exec_has_no_container_metadata_and_respects_timeout() {

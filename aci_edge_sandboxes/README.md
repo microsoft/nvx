@@ -136,6 +136,19 @@ State is kept separately under `<state_root>/nvxhost/`; a running VM is never si
 converted to the direct backend. `NvxHostBackend::guest_logs` reads a bounded non-follow
 guest-log snapshot before stop.
 
+Provision records the SHA-256 of the image, kernel, and initramfs, and every start hashes
+them again and refuses changed artifacts, so start latency grows with the image size. As
+with the direct backend, executions on one sandbox share its single control connection: a
+concurrent exec waits up to `control_timeout` for the running one to finish. The backend
+copies the guest boot console to `NvxHostBackend::console_log_path` from the process that
+started or last used the sandbox. OpenVMM serves one console client at a time and holds
+guest output while none is connected, so a guest that writes enough console output stalls
+until a listener reconnects: keep that process running, or use the sandbox from its
+successor, whose listener waits to take the capture over. Start reports `bootMilliseconds`
+and `guestBuildId`; stop reports `forced` and, after a failed graceful shutdown,
+`gracefulError`. A capture failure never fails stop or deprovision: both report it as
+`consoleError`.
+
 This first backend supports provision/start/exec/stop/deprovision with shell commands or
 argv and a fixed caller-provided image. Positive execution timeouts must be whole seconds,
 matching the guest RPC's precision; finer-grained timeouts fail validation rather than
