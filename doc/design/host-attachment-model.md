@@ -14,6 +14,7 @@ Each external resource has a stable ID and a declarative reconstruction policy.
 | filesystem | FUSE namespace, handles, cookies, root/object identity, access mode, and denied paths, or explicit dormant state | Fresh host-directory attachment with the same canonical path, target, mode, and denied paths; a dormant slot may stay unattached or bind a new attachment |
 | sandbox block | Queue/device state, fixed roles, access, geometry, read-only layer identities, and scratch policy | Matching read-only layers plus a verified private paired scratch copy, or a new same-geometry scratch file |
 | Readiness endpoint | Nothing | Optional single-use Unix socket or named pipe supplied for one restore |
+| State-control endpoint | Nothing | Optional same-user Unix socket or Windows named pipe, supplied with a live control console and authenticated with its fresh capability |
 
 Attachment resolution happens before vCPU start. A supplied attachment must
 reproduce the saved identity except that an eligible listener may replace only

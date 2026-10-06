@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from collections.abc import Callable
 from contextlib import ExitStack, redirect_stdout
@@ -30,6 +31,7 @@ from nvx_tools import (  # noqa: E402
     managed_exec_tests,
     microvm_tests,
     openvmm_process,
+    state_control,
     time_abi,
 )
 from nvx_tools.build_constants import (  # noqa: E402
@@ -2499,16 +2501,17 @@ class MicrovmTests(unittest.TestCase):
             if isinstance(node, ast.Call)
             and ast.unparse(node.func) == "TcpConsole.connect"
         ]
-        # The managed lifecycle, the console-snapshot capture and restore, and
-        # the snapshot-tier capture, restore, and gate-timeout restore.
-        self.assertEqual(len(connects), 6)
+        # The managed lifecycle, the host pause, the console-snapshot capture and
+        # restore, and the snapshot-tier capture, restore, and gate-timeout
+        # restore.
+        self.assertEqual(len(connects), 7)
         for keywords in connects:
             self.assertRegex(
                 keywords.get("monitor", ""), r"^TimeAbiMonitor\(\w*command\)$"
             )
         # Only the cold boots whose shell is on the virtio console ask for
-        # nvx-time status. Restores never ask, and in the managed lifecycle
-        # init starts the managed agent instead of a shell.
+        # nvx-time status. Restores never ask, and in the managed lifecycle and
+        # the host pause init starts the managed agent instead of a shell.
         self.assertEqual(
             [k["monitor"] for k in connects if k.get("time_abi_status") == "True"],
             ["TimeAbiMonitor(capture_command)"] * 2,
@@ -5008,6 +5011,7 @@ class MicrovmTests(unittest.TestCase):
             "restore-processors": "run_restore_processors",
             "restore-downtime": "run_restore_downtime",
             "snapshot-tiers": "run_snapshot_tiers",
+            "pause-resume": "run_pause_resume",
         }
         self.assertEqual(tuple(dispatch), microvm_tests.DEBUG_KERNEL_SCENARIOS)
         with tempfile.TemporaryDirectory() as temporary:
@@ -5102,6 +5106,37 @@ class MicrovmTests(unittest.TestCase):
                 ["test-microvm", "--backend", "kvm", "--scenario", "restore-tsc-sync"]
             )
 
+    def test_runner_runs_pause_resume_once_on_the_most_processors(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "mshv",
+                    "--scenario",
+                    "pause-resume",
+                    "--processors",
+                    "2",
+                    "4",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_pause_resume") as run,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[3:], ("mshv", 4))
+        self.assertEqual(run.call_args.kwargs["output_dir"], output_dir)
+
     def test_runner_dispatches_console_exit_for_each_requested_cpu_count(self):
         def require(path: Path, _description: str) -> Path:
             return path
@@ -5168,6 +5203,333 @@ class MicrovmTests(unittest.TestCase):
                     )
 
             self.assertEqual(log_path.read_bytes(), b"complete raw output\n")
+
+
+class _PauseClock:
+    """A host clock that sleeping advances at once. A set ``gate`` holds every
+    sleep until it opens, so that another thread's guest command is ordered
+    before the clock advances."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.gate: threading.Event | None = None
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def time(self) -> float:
+        return 1_800_000_000.0 + self.now
+
+    def sleep(self, seconds: float) -> None:
+        if self.gate is not None and not self.gate.wait(5):
+            raise AssertionError("the guest command the clock waits for never ran")
+        self.now += seconds
+
+
+_STATE_OPERATIONS = {
+    state_control.AUTHENTICATE: "authenticate",
+    state_control.QUERY: "query",
+    state_control.PAUSE: "pause",
+    state_control.RESUME: "resume",
+}
+
+
+class _PausableVm:
+    """A managed VM behind OpenVMM's state control, as the scenario sees it.
+
+    One vCPU spins whenever the VM runs; the busy loop starts ``spin_delay``
+    seconds after it is requested. ``wall_clock`` is ``step`` when the guest
+    steps its lagging wall clock at its second read after a pause, ``never``
+    when it never does, and ``follows-host`` when it never lags.
+    """
+
+    def __init__(
+        self,
+        clock: _PauseClock,
+        *,
+        holds_time: bool = True,
+        paused_cpu: float = 0.0,
+        wall_clock: str = "step",
+        answers_anonymous: bool = False,
+        spin_delay: float = 0.0,
+    ) -> None:
+        self.clock = clock
+        self.spin_delay = spin_delay
+        # The harness starts the busy loop and then sleeps.
+        self.spin_requested = threading.Event()
+        clock.gate = self.spin_requested
+        self.holds_time = holds_time
+        self.paused_cpu = paused_cpu
+        self.wall_clock = wall_clock
+        self.answers_anonymous = answers_anonymous
+        self.instance_id = bytes(range(1, 17))
+        self.paused_since: float | None = None
+        self.paused_total = 0.0
+        self.stepped = 0.0
+        self.transitions = 0
+        self.discontinuities = 0
+        self.date_reads = 0
+        self.requests: list[str] = []
+        self.unauthenticated_payloads: list[bytes] = []
+
+    def response(self) -> state_control.StateResponse:
+        state = "running" if self.paused_since is None else "paused"
+        return state_control.StateResponse(
+            "ok", state, self.transitions, self.instance_id, ""
+        )
+
+    def request(self, operation: int) -> state_control.StateResponse:
+        self.requests.append(_STATE_OPERATIONS[operation])
+        if operation == state_control.PAUSE and self.paused_since is None:
+            self.paused_since = self.clock.now
+            self.transitions += 1
+        elif operation == state_control.RESUME and self.paused_since is not None:
+            self.paused_total += self.clock.now - self.paused_since
+            self.paused_since = None
+            self.transitions += 1
+        return self.response()
+
+    def _paused(self) -> float:
+        if self.paused_since is None:
+            return self.paused_total
+        return self.paused_total + self.clock.now - self.paused_since
+
+    def cpu_seconds(self, _pid: int) -> float:
+        paused = self._paused()
+        return self.clock.now - paused + self.paused_cpu * paused
+
+    def _held(self) -> float:
+        return self.paused_total if self.holds_time else 0.0
+
+    def output(self, arguments: tuple[str, ...]) -> str:
+        if arguments == ("/bin/cat", "/proc/uptime"):
+            return f"{self.clock.now - 900.0 - self._held():.2f} 0.00\n"
+        if arguments == ("/bin/date", "-u", "+%s"):
+            self.date_reads += 1
+            lag = 0.0 if self.wall_clock == "follows-host" else self._held()
+            if (
+                self.wall_clock == "step"
+                and self.date_reads > 1
+                and self.stepped != lag
+            ):
+                self.stepped = lag
+                self.discontinuities += 1
+            return f"{int(self.clock.time() - lag + self.stepped)}\n"
+        if arguments == ("/bin/cat", "/run/nvx/time/state"):
+            last = "step" if self.discontinuities else "none"
+            return (
+                "version=1\n"
+                f"discontinuities={self.discontinuities}\n"
+                f"last_discontinuity={last}\n"
+                f"last_step_ns={int(self.stepped * 1e9)}\n"
+                "violations=0\n"
+            )
+        if arguments == ("/bin/cat", "/sys/kernel/rcu_stall_count"):
+            return "0\n"
+        if arguments == ("/bin/sh", "-c", microvm_tests.PAUSE_RESUME_SPIN_SCRIPT):
+            start = self.clock.now - 900.0 - self._held() + self.spin_delay
+            self.spin_requested.set()
+            end = start + microvm_tests.PAUSE_RESUME_SPIN_SECONDS
+            return f"{start:.2f}\n{end:.2f}\n"
+        if arguments == ("/bin/true",):
+            return ""
+        raise AssertionError(f"unexpected guest command {arguments}")
+
+
+class _PausableGuest:
+    def __init__(self, vm: _PausableVm) -> None:
+        self._vm = vm
+        self.commands: list[tuple[str, ...]] = []
+
+    def exec(
+        self, arguments: tuple[str, ...], *, timeout_ms: int, response_timeout: float
+    ) -> control_session.ManagedExecResult:
+        self.commands.append(arguments)
+        output = self._vm.output(arguments).encode()
+        return control_session.ManagedExecResult(0, "exit", output, b"")
+
+
+def _fake_state_control(vm: _PausableVm):
+    class FakeStateControl:
+        def __init__(self, authenticated: bool) -> None:
+            self._authenticated = authenticated
+            self._closed = False
+
+        @classmethod
+        def connect(cls, _endpoint: Path, _timeout: float):
+            vm.requests.append("connect")
+            return cls(False)
+
+        @classmethod
+        def authenticate(cls, _endpoint: Path, _capability: bytes, _timeout: float):
+            vm.requests.append("authenticate")
+            return cls(True), vm.response()
+
+        def send(self, operation: int, payload: bytes = b"") -> None:
+            vm.requests.append(f"unauthenticated {_STATE_OPERATIONS[operation]}")
+            vm.unauthenticated_payloads.append(payload)
+
+        def closed_without_response(self, _timeout: float) -> bool:
+            return not vm.answers_anonymous
+
+        def request(
+            self, operation: int, _timeout: float, _payload: bytes = b""
+        ) -> state_control.StateResponse:
+            if not self._authenticated or self._closed:
+                raise AssertionError("request on an unauthenticated or closed host")
+            return vm.request(operation)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            self._closed = True
+
+    return FakeStateControl
+
+
+class PauseResumeTests(unittest.TestCase):
+    CAPABILITY = bytes([0x5A]) * 32
+
+    def _check(self, vm: _PausableVm) -> tuple[dict[str, str], _PausableGuest]:
+        guest = _PausableGuest(vm)
+        with (
+            patch.object(microvm_tests, "time", vm.clock),
+            patch.object(microvm_tests, "StateControlSession", _fake_state_control(vm)),
+            patch.object(microvm_tests, "_process_cpu_seconds", new=vm.cpu_seconds),
+        ):
+            evidence = microvm_tests._check_host_pause(
+                cast(control_session.ControlSession, guest),
+                123,
+                Path("state-control"),
+                self.CAPABILITY,
+                5.0,
+            )
+        return evidence, guest
+
+    def test_pause_holds_guest_time_and_leaves_the_vm_paused(self):
+        vm = _PausableVm(_PauseClock())
+        evidence, guest = self._check(vm)
+        cycle = ["pause", "pause", "query", "resume", "resume"]
+        self.assertEqual(
+            vm.requests,
+            [
+                "connect",
+                "unauthenticated query",
+                "connect",
+                "unauthenticated authenticate",
+                "authenticate",
+                "query",
+                "resume",
+                *cycle * microvm_tests.PAUSE_RESUME_CYCLES,
+                "authenticate",
+                "pause",
+                "authenticate",
+            ],
+        )
+        self.assertEqual(vm.unauthenticated_payloads[0], b"")
+        forged = vm.unauthenticated_payloads[1]
+        self.assertEqual(len(forged), 32)
+        self.assertNotEqual(forged, self.CAPABILITY)
+        self.assertEqual(vm.transitions, 2 * microvm_tests.PAUSE_RESUME_CYCLES + 1)
+        self.assertIsNotNone(vm.paused_since)
+        self.assertIn(
+            ("/bin/sh", "-c", microvm_tests.PAUSE_RESUME_SPIN_SCRIPT), guest.commands
+        )
+        self.assertEqual(
+            evidence,
+            {
+                "busy_loop_lead_s": "3.0",
+                "paused_s": "34.0",
+                "guest_minus_host_running_s": "0.000",
+                "rcu_stalls": "0",
+                "wall_clock_lag_after_resume_s": "34.0",
+                "wall_clock_repair_s": "2.0",
+                "discipline_steps": "1",
+                "last_step_ns": "34000000000",
+                "busy_cpu_s_per_s": "1.00",
+                "paused_cpu_s": "0.00",
+            },
+        )
+
+    def test_failures_name_the_broken_property(self):
+        cases: tuple[tuple[Callable[[_PauseClock], _PausableVm], str], ...] = (
+            (
+                lambda clock: _PausableVm(clock, holds_time=False),
+                "guest uptime advanced",
+            ),
+            (
+                lambda clock: _PausableVm(clock, paused_cpu=0.5),
+                "CPU time while paused",
+            ),
+            (
+                lambda clock: _PausableVm(clock, answers_anonymous=True),
+                "did not authenticate",
+            ),
+            (
+                lambda clock: _PausableVm(clock, spin_delay=2.6),
+                "not across the pause",
+            ),
+            (
+                lambda clock: _PausableVm(clock, wall_clock="never"),
+                "still differs from host UTC",
+            ),
+            (
+                lambda clock: _PausableVm(clock, wall_clock="follows-host"),
+                "not repaired by a discipline step",
+            ),
+        )
+        for make_vm, message in cases:
+            with (
+                self.subTest(message),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                self._check(make_vm(_PauseClock()))
+
+    def test_unexpected_state_control_responses_are_reported(self):
+        response = state_control.StateResponse(
+            "busy", "running", 0, bytes(16), "restore gate"
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "state control pause returned status=busy state=running transitions=0 "
+            "detail='restore gate'; expected status=ok state=paused transitions=1",
+        ):
+            microvm_tests._expect_state(response, "pause", "ok", "paused", 1)
+
+    def test_process_cpu_time_is_read_on_linux_only(self):
+        seconds = microvm_tests._process_cpu_seconds(os.getpid())
+        if sys.platform == "linux":
+            self.assertIsNotNone(seconds)
+            self.assertGreaterEqual(cast(float, seconds), 0.0)
+        else:
+            self.assertIsNone(seconds)
+
+    def test_spin_script_reports_the_uptimes_it_spun_between(self):
+        if sys.platform != "linux":
+            self.skipTest("the script uses Linux semantics")
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        seconds = f"+ {microvm_tests.PAUSE_RESUME_SPIN_SECONDS} "
+        self.assertIn(seconds, microvm_tests.PAUSE_RESUME_SPIN_SCRIPT)
+        result = subprocess.run(
+            [
+                shell,
+                "-c",
+                microvm_tests.PAUSE_RESUME_SPIN_SCRIPT.replace(seconds, "+ 1 "),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        start, end = microvm_tests._spin_uptimes(
+            control_session.ManagedExecResult(
+                result.returncode, "exit", result.stdout, result.stderr
+            )
+        )
+        self.assertGreaterEqual(int(end), int(start) + 1)
+        self.assertLess(end - start, 2)
 
 
 if __name__ == "__main__":

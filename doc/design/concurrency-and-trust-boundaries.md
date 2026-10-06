@@ -23,7 +23,11 @@ the OpenVMM user, requires a launcher-provided capability before any host data
 reaches the guest, and bounds every record, queue, and credit window in both
 directions; malformed, stale, or out-of-order records fail closed. The
 capability never appears in arguments, environment variables, logs, snapshots,
-or attachment identities.
+or attachment identities. The state-control endpoint, which pauses and resumes
+the VM without reaching the guest, admits the same local peer and requires the
+same capability before it answers. It serves one host and one request at a
+time; a failed or stalled authentication, a malformed request, or 60 s without
+a request closes the connection without a response.
 
 Host-facing outputs are bounded as well. The optional outcome report is written
 after teardown to a previously absent local path and records only a schema
