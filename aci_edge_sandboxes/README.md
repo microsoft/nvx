@@ -341,7 +341,9 @@ Defaults:
 | `stop_timeout`, `exec_response_grace` | 30 s |
 
 Each timeout must be at most 30 days (`OpenVmmConfig::MAX_TIMEOUT`), and all
-but `exec_response_grace` must be positive.
+but `exec_response_grace` must be positive. `guest_network` must be an address
+that OpenVMM accepts: a /1 to /30 prefix, and neither the network's own address,
+its broadcast address, nor its first address, which is the gateway.
 
 Choose a `state_root` that only the current user can access.
 `OpenVmmConfig::default_state_root` returns `%LOCALAPPDATA%\nvx\sandboxes` on
