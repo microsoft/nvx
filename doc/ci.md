@@ -161,11 +161,13 @@ a kernel whose `vmlinux-debug.config` lacks the detectors, because the guest's
 run the debug kernel on KVM only and `dev` pushes run it on every backend;
 each job takes about five minutes on its own runner, in parallel with the
 other microVM jobs. The jobs gate the required status check, the development
-release, and performance persistence. The `debug-kernel` job builds on the
-Linux PR utility runner with rootless Docker beside the shared `artifacts` job
-(`build-guest-artifacts` with `guest-images: "false"`) and caches it under its
-own key, so a kernel rebuild delays only the debug jobs, and a failed debug
-kernel build fails the required status check and blocks the release.
+release, and performance persistence. The single Linux PR utility runner
+builds shared `artifacts` first. The `debug-kernel` job then uses rootless
+Docker on that runner (`build-guest-artifacts` with `guest-images: "false"`)
+and caches its output under a separate key. Normal workloads can start once
+shared artifacts are uploaded; only debug jobs wait for the debug build. A
+failed debug kernel build still fails the required status check and blocks
+the release.
 
 Every job that uses the `validate-runner` action first requires an invariant
 TSC on a Linux runner (`nonstop_tsc` in `/proc/cpuinfo`) and fails without

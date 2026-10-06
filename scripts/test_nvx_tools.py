@@ -3151,9 +3151,10 @@ class CiConfigurationTests(unittest.TestCase):
         artifacts = _workflow_job(workflow, "artifacts")
         self.assertNotIn("debug-kernel", artifacts)
         self.assertNotIn("vmlinux-debug", artifacts)
-        # The debug kernel builds beside the shared artifacts on the utility
-        # runner, under the same condition, and only the debug jobs wait.
+        # Shared artifacts must finish before the single utility runner builds
+        # the debug kernel; only debug jobs wait for that second build.
         debug_build = _workflow_job(workflow, "debug-kernel")
+        self.assertIn("needs: [openvmm-changes, artifacts]", debug_build)
         self.assertIn("runs-on: [self-hosted, linux, x64, nvx-utility-pr]", debug_build)
         self.assertIn('debug-kernel: "true"', debug_build)
         self.assertIn('guest-images: "false"', debug_build)
@@ -3167,7 +3168,13 @@ class CiConfigurationTests(unittest.TestCase):
         def condition(job: str) -> str:
             return job[job.index("    if: >-\n") : job.index("    runs-on:")]
 
-        self.assertEqual(condition(debug_build), condition(artifacts))
+        self.assertIn("needs.artifacts.result == 'success' &&", condition(debug_build))
+        self.assertEqual(
+            condition(debug_build).replace(
+                "        needs.artifacts.result == 'success' &&\n", ""
+            ),
+            condition(artifacts),
+        )
         for consumer in ("release", "performance-persist"):
             with self.subTest(consumer=consumer):
                 job = _workflow_job(workflow, consumer)

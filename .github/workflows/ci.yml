@@ -237,15 +237,16 @@ jobs:
           NVX_DOCKER_CONFIG_TO_CLEAN: ${{ steps.rootless.outputs.config_dir }}
         run: python3 scripts/setup/cleanup_rootless_docker.py
 
-  # Beside the shared artifacts, so that a kernel rebuild doesn't delay the
-  # jobs that don't use the debug kernel.
+  # The PR utility runner has one instance. Build shared artifacts first so
+  # a debug kernel rebuild cannot delay jobs that don't use it.
   debug-kernel:
     name: Build CI debug kernel
-    needs: [openvmm-changes]
+    needs: [openvmm-changes, artifacts]
     if: >-
       ${{
         always() &&
         !cancelled() &&
+        needs.artifacts.result == 'success' &&
         (
           github.event_name != 'pull_request' ||
           github.event.pull_request.draft == false
