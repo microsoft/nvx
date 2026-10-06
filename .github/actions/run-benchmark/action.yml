@@ -152,6 +152,31 @@ runs:
             --output-dir "${run_dir}"
         done
 
+    - name: Run Linux image-slot boot cost
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        set -euo pipefail
+        cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
+        if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
+          cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
+        fi
+        python3 scripts/nvx.py benchmark \
+          --suite image-slot-boot \
+          --backend "${{ inputs.backend }}" \
+          --platform "${{ inputs.platform }}" \
+          --processors 1 \
+          "${cpu_args[@]}" \
+          --warmups "${{ inputs.warmups }}" \
+          --runs "${{ inputs.runs }}" \
+          --timeout "${NVX_BENCHMARK_MARKER_TIMEOUT}" \
+          --skip-build \
+          --output-dir "data/runs/${{ inputs.platform }}/image-slot-boot"
+
     - name: Run Linux device operation rates
       if: runner.os != 'Windows'
       shell: bash
@@ -335,6 +360,32 @@ runs:
             @ScratchArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
+
+    - name: Run Windows image-slot boot cost
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        NVX_BENCHMARK_CPUS: ${{ inputs.cpus }}
+        NVX_BENCHMARK_HOST_CPU_RESERVE: ${{ inputs.host-cpu-reserve }}
+        NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $CpuArgs = @("--host-cpu-reserve", $env:NVX_BENCHMARK_HOST_CPU_RESERVE)
+        if ($env:NVX_BENCHMARK_CPUS) {
+          $CpuArgs += @("--cpus", $env:NVX_BENCHMARK_CPUS)
+        }
+        python scripts\nvx.py benchmark `
+          --suite image-slot-boot `
+          --backend "${{ inputs.backend }}" `
+          --platform "${{ inputs.platform }}" `
+          --processors 1 `
+          --warmups "${{ inputs.warmups }}" `
+          --runs "${{ inputs.runs }}" `
+          --timeout $env:NVX_BENCHMARK_MARKER_TIMEOUT `
+          --skip-build `
+          --output-dir "data/runs/${{ inputs.platform }}/image-slot-boot" `
+          @CpuArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Run Windows device operation rates
       if: runner.os == 'Windows'

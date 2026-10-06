@@ -279,7 +279,10 @@ for token in $cmdline; do
     esac
 done
 set +f
-[ "$layer_count" -gt 0 ] || fatal "at least one EROFS layer is required"
+[ "$layer_count" -gt 0 ] || case " $cmdline " in
+    *" microvm_image_slots=4 "*) ;;
+    *) fatal "at least one EROFS layer is required" ;;
+esac
 
 lowerdirs=
 if [ "$distro" = true ]; then
@@ -308,9 +311,14 @@ mount -t ext4 -o rw,nosuid,nodev "$scratch_device" "$scratch" ||
     fatal "failed to mount scratch from $scratch_device"
 mkdir -p "$scratch/upper" "$scratch/work"
 
-mount -t overlay overlay \
-    -o "lowerdir=$lowerdirs,upperdir=$scratch/upper,workdir=$scratch/work,metacopy=on,xino=on" \
-    "$rootfs" || fatal "failed to assemble the container overlay"
+if [ -n "$lowerdirs" ]; then
+    mount -t overlay overlay \
+        -o "lowerdir=$lowerdirs,upperdir=$scratch/upper,workdir=$scratch/work,metacopy=on,xino=on" \
+        "$rootfs" || fatal "failed to assemble the container overlay"
+else
+    mount --bind "$scratch/upper" "$rootfs" ||
+        fatal "failed to expose scratch-only workload root"
+fi
 
 entrypoint=$(cmdline_value nvx_entrypoint || true)
 [ -n "$entrypoint" ] || entrypoint=/bin/sh
@@ -321,31 +329,36 @@ workload_uid=$(cmdline_value nvx_workload_uid || true)
 workload_gid=$(cmdline_value nvx_workload_gid || true)
 case "$workload_uid" in '' | 0 | *[!0-9]*) fatal "workload UID is unavailable" ;; esac
 case "$workload_gid" in '' | 0 | *[!0-9]*) fatal "workload GID is unavailable" ;; esac
-[ -f "$rootfs/etc/passwd" ] && [ ! -L "$rootfs/etc/passwd" ] ||
-    fatal "workload user database is unavailable"
-[ -f "$rootfs/etc/group" ] && [ ! -L "$rootfs/etc/group" ] ||
-    fatal "workload group database is unavailable"
-workload_record=$(
-    awk -F: -v uid="$workload_uid" '
-        $3 == uid { count++; record = $1 ":" $3 ":" $4 ":" $6 }
-        END { if (count == 1) print record; else exit 1 }
-    ' "$rootfs/etc/passwd"
-) || fatal "configured workload UID is unavailable"
-workload_name=${workload_record%%:*}
-workload_remainder=${workload_record#*:}
-resolved_uid=${workload_remainder%%:*}
-workload_remainder=${workload_remainder#*:}
-resolved_gid=${workload_remainder%%:*}
-workload_home=${workload_remainder#*:}
-[ -n "$workload_name" ] && [ "$workload_home" != "$workload_remainder" ] ||
-    fatal "configured workload user record is invalid"
-[ "$resolved_uid" = "$workload_uid" ] && [ "$resolved_gid" = "$workload_gid" ] ||
-    fatal "configured workload identity does not match the user database"
-awk -F: -v gid="$workload_gid" '$3 == gid { found = 1 } END { exit !found }' \
-    "$rootfs/etc/group" || fatal "configured workload GID is unavailable"
-case "$workload_home" in /*) ;; *) fatal "configured workload home is invalid" ;; esac
-[ -d "$rootfs$workload_home" ] && [ ! -L "$rootfs$workload_home" ] ||
-    fatal "configured workload home is unavailable"
+if [ "$layer_count" -gt 0 ]; then
+    [ -f "$rootfs/etc/passwd" ] && [ ! -L "$rootfs/etc/passwd" ] ||
+        fatal "workload user database is unavailable"
+    [ -f "$rootfs/etc/group" ] && [ ! -L "$rootfs/etc/group" ] ||
+        fatal "workload group database is unavailable"
+    workload_record=$(
+        awk -F: -v uid="$workload_uid" '
+            $3 == uid { count++; record = $1 ":" $3 ":" $4 ":" $6 }
+            END { if (count == 1) print record; else exit 1 }
+        ' "$rootfs/etc/passwd"
+    ) || fatal "configured workload UID is unavailable"
+    workload_name=${workload_record%%:*}
+    workload_remainder=${workload_record#*:}
+    resolved_uid=${workload_remainder%%:*}
+    workload_remainder=${workload_remainder#*:}
+    resolved_gid=${workload_remainder%%:*}
+    workload_home=${workload_remainder#*:}
+    [ -n "$workload_name" ] && [ "$workload_home" != "$workload_remainder" ] ||
+        fatal "configured workload user record is invalid"
+    [ "$resolved_uid" = "$workload_uid" ] && [ "$resolved_gid" = "$workload_gid" ] ||
+        fatal "configured workload identity does not match the user database"
+    awk -F: -v gid="$workload_gid" '$3 == gid { found = 1 } END { exit !found }' \
+        "$rootfs/etc/group" || fatal "configured workload GID is unavailable"
+    case "$workload_home" in /*) ;; *) fatal "configured workload home is invalid" ;; esac
+    [ -d "$rootfs$workload_home" ] && [ ! -L "$rootfs$workload_home" ] ||
+        fatal "configured workload home is unavailable"
+else
+    workload_name=nvx
+    workload_home=/
+fi
 
 workload_lifecycle=$(cmdline_value nvx_lifecycle || true)
 [ -n "$workload_lifecycle" ] || workload_lifecycle=one-shot
@@ -360,6 +373,14 @@ case "$workload_lifecycle" in
 esac
 
 mount_live_share
+if [ -x /sbin/nvx-image-slot ]; then
+    slot=0
+    while [ "$slot" -lt 4 ]; do
+        /sbin/nvx-image-slot --slot "$slot" --timeout 1 --allow-empty \
+            >/dev/null 2>&1 || true
+        slot=$((slot + 1))
+    done
+fi
 workload_machine_id=$(tr -d - </proc/sys/kernel/random/uuid)
 printf '%s\n' "$workload_machine_id" >"$runtime/workload-machine-id"
 

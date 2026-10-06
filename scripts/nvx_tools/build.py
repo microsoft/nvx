@@ -717,6 +717,11 @@ def _install_guest_files(
             common / "nvx-virtio-restore-probe",
             root / "sbin" / "nvx-virtio-restore-probe",
         ),
+        (
+            "nvx-image-slot",
+            common / "nvx-image-slot",
+            root / "sbin" / "nvx-image-slot",
+        ),
     ]
     if descriptor.sandbox_control:
         alpine = BuildConstants.REPO_ROOT / AlpineBuildConstants.GUEST_DIRECTORY

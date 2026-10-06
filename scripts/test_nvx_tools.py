@@ -29,6 +29,7 @@ import urllib.error
 import urllib.request
 import uuid
 import zipfile
+from contextlib import redirect_stdout
 from pathlib import Path, PurePosixPath
 from typing import cast
 from unittest.mock import MagicMock, call, patch
@@ -287,7 +288,7 @@ def _write_release_fixture(
         "format": 1,
         "distribution": {"name": "nvx", "version": "0.1.0"},
         "openvmm": {
-            "microvm_abi_version": 2,
+            "microvm_abi_version": 3,
             "control_session_protocol_version": 1,
             "control_contract_revision": "nvx-microvm-v2-control-v2",
         },
@@ -477,6 +478,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.payload_mib, 64)
         self.assertEqual(args.network_memory_mib, 256)
         self.assertEqual(args.host_cpu_reserve, 2)
+        self.assertEqual(args.output_dir, Path("results"))
+        self.assertIs(args.handler, benchmark.run)
+
+    def test_benchmark_exposes_image_slot_boot_suite(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "image-slot-boot",
+                "--output-dir",
+                "results",
+            ]
+        )
+
+        self.assertEqual(args.suite, "image-slot-boot")
         self.assertEqual(args.output_dir, Path("results"))
         self.assertIs(args.handler, benchmark.run)
 
@@ -4811,7 +4827,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(
             manifest["openvmm"],
             {
-                "microvm_abi_version": 2,
+                "microvm_abi_version": 3,
                 "control_session_protocol_version": 1,
                 "control_contract_revision": "nvx-microvm-v2-control-v2",
             },
@@ -7317,6 +7333,52 @@ class AciSandboxRunnerTests(unittest.TestCase):
 
 
 class SandboxTests(unittest.TestCase):
+    def test_image_slots_allow_scratch_only_managed_launch(self):
+        launch = sandbox.SandboxLaunch(
+            layers=(),
+            scratch=Path("scratch.ext4"),
+            image_slot_boot_count=4,
+        )
+
+        self.assertEqual(
+            launch.openvmm_arguments(),
+            [
+                "--machine",
+                "microvm",
+                "--microvm-sandbox-block",
+                "scratch:file:scratch.ext4",
+                "--microvm-workload-identity",
+                "65534:65534",
+                "--microvm-image-slots",
+                "--microvm-image-slot-boot-count",
+                "4",
+            ],
+        )
+        self.assertNotIn("nvx_layer=", launch.kernel_command_line())
+
+    def test_scratch_only_launch_requires_image_slots(self):
+        with self.assertRaisesRegex(common.ScriptError, "unless it declares"):
+            sandbox.SandboxLaunch(layers=(), scratch=Path("scratch.ext4"))
+        with self.assertRaisesRegex(common.ScriptError, "between 1 and 4"):
+            sandbox.SandboxLaunch(
+                layers=(),
+                scratch=Path("scratch.ext4"),
+                image_slot_boot_count=5,
+            )
+
+    def test_run_parser_accepts_restore_image_slot_target(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--restore-snapshot",
+                "snapshot",
+                "--restore-image-slots",
+                "4",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(args.restore_image_slots, 4)
+
     def test_launch_contract_orders_roles_and_builds_agent_command_line(self):
         custom = sandbox.SandboxLayer.parse(
             "custom,custom.erofs,22222222-2222-2222-2222-222222222222"
@@ -8069,6 +8131,38 @@ class SandboxTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_image_slot_boot_benchmark_compares_both_prefixes_to_abi2(self):
+        args = argparse.Namespace(
+            warmups=0,
+            runs=1,
+            memory_mib=128,
+            processors=1,
+            timeout=60.0,
+        )
+        output = io.StringIO()
+        with (
+            patch.object(
+                benchmark,
+                "_image_slot_boot_sample",
+                side_effect=(10.0, 11.0, 12.0),
+            ) as sample,
+            redirect_stdout(output),
+        ):
+            benchmark.benchmark_image_slot_boot_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+            )
+
+        self.assertEqual(
+            [call.args[6] for call in sample.call_args_list],
+            [None, 1, 4],
+        )
+        self.assertIn("delta-vs-abi2=+1.000 ms", output.getvalue())
+        self.assertIn("delta-vs-abi2=+2.000 ms", output.getvalue())
+
     def test_kvm_worker_result_decoding(self):
         completed = subprocess.CompletedProcess(
             ["worker"],
@@ -11669,7 +11763,7 @@ class ReleaseTests(unittest.TestCase):
             )
             self.assertEqual(
                 manifest["openvmm"]["microvm_abi_version"],
-                2,
+                3,
             )
             self.assertEqual(
                 manifest["openvmm"]["control_session_protocol_version"],

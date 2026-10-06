@@ -15,8 +15,8 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Sequence
-from contextlib import ExitStack
+from collections.abc import Generator, Sequence
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -57,6 +57,7 @@ from .common import (
 from .control_session import ControlSession, ManagedExecRefused
 from .egress_policy import CompiledEgressPolicy, compile_policy_file
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
+from .host_control import HostControl
 from .managed_exec_tests import run_managed_exec_configuration
 from .openvmm_process import OpenvmmProcess, TcpConsole
 
@@ -70,6 +71,7 @@ MICROVM_TEST_SCENARIOS = (
     "guest-boot",
     "guest-identity",
     "host-loopback-policy",
+    "image-slots",
     "lifecycle",
     "l3-l4-egress-policy",
     "managed-lifecycle",
@@ -156,6 +158,8 @@ MANAGED_REFUSED_CWDS = (
 )
 MANAGED_REFUSED_CWD_MARKER = "/tmp/nvx-refused-cwd-ran"
 BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
+IMAGE_SLOT_READ_MARKER = b"NVX-IMAGE-SLOT-READ-OK"
+IMAGE_SLOT_RESTORE_MARKER = b"NVX-IMAGE-SLOT-RESTORE-OK"
 GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
 GUEST_IDENTITY_COMPLETION_MARKER = b"NVX-GUEST-IDENTITY-OK"
 RESTORE_PROCESSORS_FAILURE_MARKER = b"NVX-RESTORE-PROCESSORS-FAIL"
@@ -1020,6 +1024,228 @@ def run_managed_lifecycle(
             raise RuntimeError(
                 "managed lifecycle without a control endpoint was not rejected before boot"
             )
+
+
+def _host_control_endpoint(root: Path, name: str) -> Path:
+    return Path(
+        f"//./pipe/openvmm-{name}-{uuid.uuid4().hex}"
+        if os.name == "nt"
+        else root / f"{name}.sock"
+    )
+
+
+def _image_slot_command(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    memory_mib: int,
+    endpoint: Path,
+    console_address: tuple[str, int],
+    *,
+    snapshot_path: Path | None = None,
+    restore_image_slots: int | None = None,
+) -> list[str]:
+    if snapshot_path is None:
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+        )
+        command.extend(
+            (
+                "--microvm-image-slots",
+                "--microvm-image-slot-boot-count",
+                "1",
+            )
+        )
+    else:
+        command = snapshot_restore_command(
+            executable,
+            backend,
+            snapshot_path,
+            restore_image_slots=restore_image_slots,
+        )
+    command.extend(
+        (
+            "--virtio-console",
+            f"listen=tcp:{console_address[0]}:{console_address[1]}",
+            "--microvm-host-control",
+            f"listen={endpoint}",
+            "--microvm-control-auth-stdin",
+        )
+    )
+    return command
+
+
+def _write_image_slot_media(path: Path, label: str) -> None:
+    payload = f"NVX-IMAGE-SLOT-TEST {label}\n".encode()
+    path.write_bytes(payload + bytes(4096 - len(payload)))
+
+
+@contextmanager
+def _image_slot_process(
+    command: Sequence[str],
+    capability: bytes,
+    log_path: Path,
+) -> Generator[subprocess.Popen[bytes]]:
+    environment = os.environ.copy()
+    environment["OPENVMM_LOG"] = "off"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=environment,
+        )
+        record_adversarial_openvmm_pid(process.pid, environment)
+        try:
+            if process.stdin is None:
+                raise RuntimeError("failed to create control capability pipe")
+            process.stdin.write(capability)
+            process.stdin.close()
+            yield process
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def run_image_slots(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="nvx-image-slots-") as temporary:
+        root = Path(temporary)
+        image_a = root / "image-a.raw"
+        image_b = root / "image-b.raw"
+        _write_image_slot_media(image_a, "A")
+        _write_image_slot_media(image_b, "B")
+
+        endpoint = _host_control_endpoint(root, "image-slots")
+        console_address = _available_tcp_address()
+        capability = secrets.token_bytes(32)
+        command = _image_slot_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            endpoint,
+            console_address,
+        )
+        with _image_slot_process(
+            command, capability, output_dir / "image-slots-bind.log"
+        ) as process:
+            console = TcpConsole.connect(console_address, timeout)
+            console.wait_for(BOOT_MARKER, timeout)
+            with HostControl.connect(endpoint, capability, timeout) as control:
+                slots = control.query_image_slots()
+                if [slot["state"] for slot in slots] != [
+                    "empty",
+                    "inactive",
+                    "inactive",
+                    "inactive",
+                ]:
+                    raise RuntimeError(f"unexpected cold-boot image slots: {slots!r}")
+                control.bind_image_slot(0, image_a, "image-a")
+                control.bind_image_slot(0, image_a, "image-a")
+                try:
+                    control.bind_image_slot(0, image_b, "image-b")
+                except ScriptError:
+                    pass
+                else:
+                    raise RuntimeError("a second different image-slot bind succeeded")
+            console.send_line(
+                "d=$(/sbin/nvx-image-slot --slot 0 --timeout 10); "
+                "head -c 22 \"$d\" | grep -q '^NVX-IMAGE-SLOT-TEST A' && "
+                "echo NVX-IMAGE-SLOT-READ-OK; /sbin/nvx-exit 0"
+            )
+            console.wait_for_line(IMAGE_SLOT_READ_MARKER, timeout)
+            result = process.wait(timeout=timeout)
+            (output_dir / "image-slots-bind-guest.log").write_bytes(console.finish())
+            if result != 0:
+                raise RuntimeError("image-slot read VM exited unsuccessfully")
+
+        snapshot = root / "snapshot"
+        capture_endpoint = _host_control_endpoint(root, "image-slots-capture")
+        capture_console_address = _available_tcp_address()
+        capture_capability = secrets.token_bytes(32)
+        capture_command = _image_slot_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            capture_endpoint,
+            capture_console_address,
+        )
+        capture_command.extend(("--snapshot-destination", str(snapshot)))
+        with _image_slot_process(
+            capture_command,
+            capture_capability,
+            output_dir / "image-slots-capture.log",
+        ) as process:
+            console = TcpConsole.connect(capture_console_address, timeout)
+            console.wait_for(BOOT_MARKER, timeout)
+            console.send_line("/sbin/nvx-snapshot")
+            result = process.wait(timeout=timeout)
+            (output_dir / "image-slots-capture-guest.log").write_bytes(console.finish())
+            if result != 0:
+                raise RuntimeError("empty image-slot snapshot capture failed")
+
+        restore_endpoint = _host_control_endpoint(root, "image-slots-restore")
+        restore_console_address = _available_tcp_address()
+        restore_capability = secrets.token_bytes(32)
+        restore_command = _image_slot_command(
+            executable,
+            kernel,
+            initrd,
+            backend,
+            memory_mib,
+            restore_endpoint,
+            restore_console_address,
+            snapshot_path=snapshot,
+            restore_image_slots=4,
+        )
+        with _image_slot_process(
+            restore_command,
+            restore_capability,
+            output_dir / "image-slots-restore.log",
+        ) as process:
+            console = TcpConsole.connect(restore_console_address, timeout)
+            console.wait_for(b"NVX-POST-RESTORE-OK:", timeout)
+            with HostControl.connect(
+                restore_endpoint, restore_capability, timeout
+            ) as control:
+                slots = control.query_image_slots()
+                if [slot["state"] for slot in slots] != ["empty"] * 4:
+                    raise RuntimeError(f"unexpected restored image slots: {slots!r}")
+                control.bind_image_slot(3, image_b, "image-b")
+            console.send_line(
+                "d=$(/sbin/nvx-image-slot --slot 3 --timeout 10); "
+                "head -c 22 \"$d\" | grep -q '^NVX-IMAGE-SLOT-TEST B' && "
+                "echo NVX-IMAGE-SLOT-RESTORE-OK; /sbin/nvx-exit 0"
+            )
+            console.wait_for_line(IMAGE_SLOT_RESTORE_MARKER, timeout)
+            result = process.wait(timeout=timeout)
+            (output_dir / "image-slots-restore-guest.log").write_bytes(console.finish())
+            if result != 0:
+                raise RuntimeError("restored image-slot VM exited unsuccessfully")
 
 
 def run_structured_outcome(
@@ -4336,6 +4562,17 @@ def run(args: argparse.Namespace) -> int:
     if "managed-lifecycle" in scenarios:
         print(f"Running managed microVM lifecycle on OpenVMM/{args.backend}")
         run_managed_lifecycle(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "image-slots" in scenarios:
+        print(f"Running microVM image-slot correctness on OpenVMM/{args.backend}")
+        run_image_slots(
             executable,
             kernel,
             initrd,

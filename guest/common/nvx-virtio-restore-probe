@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-    echo "usage: nvx-virtio-restore-probe --device console|net|virtiofs --mode active|deferred" >&2
+    echo "usage: nvx-virtio-restore-probe --device console|net|virtiofs|image0|image1|image2|image3 --mode active|deferred" >&2
     exit 2
 }
 
@@ -146,6 +146,14 @@ perform_io() {
         console) perform_console_io ;;
         net) configure_network ;;
         virtiofs) perform_virtiofs_io ;;
+        image*)
+            slot=${device#image}
+            image_device=$(/sbin/nvx-image-slot --slot "$slot" --timeout 30) ||
+                fatal image-capacity-timeout
+            dd if="$image_device" bs=512 count=1 2>/dev/null |
+                grep -q '^NVX-IMAGE-SLOT-TEST$' ||
+                fatal image-content-invalid
+            ;;
     esac
 }
 
@@ -180,21 +188,32 @@ case "$device" in
         mmio_address=0xd0001000
         expected_device_id=26
         ;;
+    image0 | image1 | image2 | image3)
+        slot=${device#image}
+        mmio_address=$((0xd0008000 + slot * 0x1000))
+        expected_device_id=2
+        ;;
     *) usage ;;
 esac
 case "$mode" in active | deferred) ;; *) usage ;; esac
 
 device_path=
 device_name=
-resolve_virtio_device || fatal device-not-found
-driver_path=$(readlink -f "$device_path/driver") || fatal driver-not-bound
-[ -d "$driver_path" ] || fatal driver-not-found
+if ! resolve_virtio_device; then
+    case "$device:$mode" in image*:deferred) ;; *) fatal device-not-found ;; esac
+fi
+if [ -n "$device_path" ]; then
+    driver_path=$(readlink -f "$device_path/driver") || fatal driver-not-bound
+    [ -d "$driver_path" ] || fatal driver-not-found
+else
+    driver_path=
+fi
 
 emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=located device=$device mode=$mode mmio=$mmio_address id=$expected_device_id name=$device_name"
-perform_io
+case "$device" in image*) ;; *) perform_io ;; esac
 emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=pre-io-success device=$device mode=$mode"
 
-if [ "$mode" = deferred ]; then
+if [ "$mode" = deferred ] && [ -n "$device_path" ]; then
     if [ "$device" = virtiofs ]; then
         mount_dir=$(cmdline_value virtfs_dir || true)
         [ -n "$mount_dir" ] || mount_dir=/mnt/host
@@ -208,7 +227,7 @@ emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=capture-ready device=$device mode=$m
 
 emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=restore-ready device=$device mode=$mode"
 emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=trigger device=$device mode=$mode"
-if [ "$mode" = deferred ]; then
+if [ "$mode" = deferred ] && [ -n "$device_path" ]; then
     [ -c /dev/mem ] || fatal devmem-missing
     [ -w /dev/mem ] || fatal devmem-not-writable
     notify_address=$((mmio_address + 0x50))
@@ -220,6 +239,13 @@ if [ "$mode" = deferred ]; then
     emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=kick-staged device=$device mode=$mode"
     bind_device
 fi
+case "$device" in
+    image*)
+        slot=${device#image}
+        /sbin/nvx-image-slot --slot "$slot" --timeout 5 --allow-empty >/dev/null ||
+            fatal image-restore-activation-failed
+        ;;
+esac
 perform_io
 emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=io-success device=$device mode=$mode"
 /sbin/nvx-exit 0

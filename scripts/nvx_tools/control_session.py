@@ -10,7 +10,7 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from .common import ScriptError, remaining_timeout
 
@@ -242,8 +242,24 @@ class _NamedPipeStream:
         os.close(self._fd)
 
 
+class LocalStream(Protocol):
+    def read_exact(self, length: int, deadline: float) -> bytes: ...
+
+    def write_all(self, data: bytes) -> None: ...
+
+    def close(self) -> None: ...
+
+
+def connect_local_stream(endpoint: Path, timeout: float) -> LocalStream:
+    return (
+        _NamedPipeStream.connect(endpoint, timeout)
+        if os.name == "nt"
+        else _SocketStream.connect(endpoint, timeout)
+    )
+
+
 class ControlSession:
-    def __init__(self, stream: _SocketStream | _NamedPipeStream) -> None:
+    def __init__(self, stream: LocalStream) -> None:
         self._stream = stream
         self._instance_id = bytes(16)
         self._epoch = 0
@@ -259,11 +275,7 @@ class ControlSession:
     ) -> ControlSession:
         if len(capability) != 32 or capability == bytes(32):
             raise ValueError("control capability must be 32 nonzero bytes")
-        stream = (
-            _NamedPipeStream.connect(endpoint, timeout)
-            if os.name == "nt"
-            else _SocketStream.connect(endpoint, timeout)
-        )
+        stream = connect_local_stream(endpoint, timeout)
         session = cls(stream)
         try:
             session._write_outer(

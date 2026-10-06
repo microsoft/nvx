@@ -330,6 +330,8 @@ def command_run(args: argparse.Namespace) -> None:
         raise ScriptError("--restore-ready-path requires --restore-snapshot")
     if args.restore_processors is not None and args.restore_snapshot is None:
         raise ScriptError("--restore-processors requires --restore-snapshot")
+    if args.restore_image_slots is not None and args.restore_snapshot is None:
+        raise ScriptError("--restore-image-slots requires --restore-snapshot")
     if args.restore_memory_mib is not None and args.restore_snapshot is None:
         raise ScriptError("--restore-memory-mib requires --restore-snapshot")
     if args.memory_capacity_mib is not None and args.restore_snapshot is not None:
@@ -367,6 +369,8 @@ def command_run(args: argparse.Namespace) -> None:
         )
         if args.restore_processors is not None:
             command.extend(["--restore-processors", str(args.restore_processors)])
+        if args.restore_image_slots is not None:
+            command.extend(["--restore-image-slots", str(args.restore_image_slots)])
         if args.restore_memory_mib is not None:
             command.extend(["--restore-memory", f"{args.restore_memory_mib}M"])
         if args.restore_ready_path is not None:
@@ -488,11 +492,29 @@ def command_sandbox(args: argparse.Namespace) -> None:
         raise ScriptError("--mount-deny requires --mount")
     if args.mount is not None and operation not in ("run", "provision"):
         raise ScriptError("--mount is only valid for sandbox run or provision")
+    image_operation_options = (
+        args.image_slot,
+        args.image_path,
+        args.image_identity,
+    )
+    if operation != "bind-image-slot" and any(
+        value is not None for value in image_operation_options
+    ):
+        raise ScriptError(
+            "--image-slot, --image-path, and --image-identity require "
+            "sandbox bind-image-slot"
+        )
+    if args.image_slot_boot_count is not None and operation != "provision":
+        raise ScriptError("--image-slot-boot-count is only valid for sandbox provision")
     if operation in ("run", "provision"):
         if (args.net is None) != (args.network_profile is None):
             raise ScriptError("--net and --network-profile must be specified together")
-        if not args.layer or args.scratch is None:
-            raise ScriptError(f"sandbox {operation} requires --layer and --scratch")
+        if args.scratch is None:
+            raise ScriptError(f"sandbox {operation} requires --scratch")
+        if not args.layer and args.image_slot_boot_count is None:
+            raise ScriptError(
+                f"sandbox {operation} requires --layer unless image slots are declared"
+            )
         network_egress_allow, network_egress_deny = _resolve_network_egress_rules(args)
         launch = SandboxLaunch(
             layers=tuple(args.layer),
@@ -508,6 +530,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
                 if args.mount is None
                 else SandboxMount.parse(args.mount, tuple(args.mount_deny))
             ),
+            image_slot_boot_count=args.image_slot_boot_count,
         ).validated()
         _validate_sandbox_systemd_policy(launch)
     else:
@@ -562,6 +585,32 @@ def command_sandbox(args: argparse.Namespace) -> None:
         if args.outcome_report is not None:
             sandbox_lifecycle.write_exec_outcome(args.outcome_report, result)
         raise SystemExit(result.returncode)
+    if operation == "query-image-slots":
+        if args.state_dir is None:
+            raise ScriptError("sandbox query-image-slots requires --state-dir")
+        slots = sandbox_lifecycle.query_image_slots(args.state_dir, args.timeout)
+        print(json.dumps(slots, indent=2, sort_keys=True))
+        return
+    if operation == "bind-image-slot":
+        if args.state_dir is None:
+            raise ScriptError("sandbox bind-image-slot requires --state-dir")
+        if (
+            args.image_slot is None
+            or args.image_path is None
+            or args.image_identity is None
+        ):
+            raise ScriptError(
+                "sandbox bind-image-slot requires --image-slot, --image-path, "
+                "and --image-identity"
+            )
+        sandbox_lifecycle.bind_image_slot(
+            args.state_dir,
+            args.image_slot,
+            args.image_path,
+            args.image_identity,
+            args.timeout,
+        )
+        return
     if operation == "stop":
         if args.state_dir is None:
             raise ScriptError("sandbox stop requires --state-dir")
@@ -866,6 +915,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--cmdline", default="")
     run.add_argument("--restore-snapshot", type=Path)
     run.add_argument("--restore-processors", type=int, choices=(1, 2, 4, 8))
+    run.add_argument("--restore-image-slots", type=int, choices=(1, 2, 3, 4))
     run.add_argument("--restore-memory-mib", type=int)
     run.add_argument("--restore-ready-path", type=Path)
     run.add_argument("--dry-run", action="store_true")
@@ -891,7 +941,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sandbox.add_argument(
         "sandbox_operation",
         nargs="?",
-        choices=("run", "provision", "start", "exec", "stop", "deprovision"),
+        choices=(
+            "run",
+            "provision",
+            "start",
+            "exec",
+            "query-image-slots",
+            "bind-image-slot",
+            "stop",
+            "deprovision",
+        ),
         default="run",
     )
     sandbox.add_argument(
@@ -902,6 +961,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="ROLE,PATH,EROFS_UUID",
     )
     sandbox.add_argument("--scratch", type=Path)
+    sandbox.add_argument(
+        "--image-slot-boot-count",
+        type=int,
+        choices=(1, 2, 3, 4),
+        help="declare four image slots and activate this prefix at cold boot",
+    )
+    sandbox.add_argument("--image-slot", type=int, choices=(0, 1, 2, 3))
+    sandbox.add_argument("--image-path", type=Path)
+    sandbox.add_argument("--image-identity")
     sandbox.add_argument("--state-dir", type=Path)
     sandbox.add_argument("--entrypoint", default="/bin/sh")
     sandbox.add_argument("--arg", action="append", default=[], dest="sandbox_arg")

@@ -19,7 +19,7 @@
 #define GENERATION_ID_SIZE 16
 #define STATUS_GENERATION_ID_AVAILABLE 32
 #define RESTORE_PACKET_MAX_SIZE                                             \
-    (RESTORE_HEADER_SIZE + 2 + UINT8_MAX * RESTORE_RANGE_SIZE +            \
+    (RESTORE_HEADER_SIZE + 3 + UINT8_MAX * RESTORE_RANGE_SIZE +            \
      RESTORE_ENTROPY_SIZE)
 
 static const unsigned char RESTORE_HEADER_V1[RESTORE_HEADER_SIZE] =
@@ -28,6 +28,8 @@ static const unsigned char RESTORE_HEADER_V2[RESTORE_HEADER_SIZE] =
     "OPENVMM_ENTROPY_V2";
 static const unsigned char RESTORE_HEADER_V3[RESTORE_HEADER_SIZE] =
     "OPENVMM_ENTROPY_V3";
+static const unsigned char RESTORE_HEADER_V4[RESTORE_HEADER_SIZE] =
+    "OPENVMM_ENTROPY_V4";
 
 static int parse_u64(const char *text, uint64_t *value)
 {
@@ -141,6 +143,7 @@ static int read_restore_packet(uint64_t data_offset, uint64_t select_offset,
     unsigned char packet[RESTORE_PACKET_MAX_SIZE];
     unsigned int version;
     unsigned int online_count = 0;
+    unsigned int image_slot_count = 0;
     unsigned int range_count = 0;
     size_t packet_size = RESTORE_HEADER_SIZE;
     size_t payload_size;
@@ -170,6 +173,18 @@ static int read_restore_packet(uint64_t data_offset, uint64_t select_offset,
         online_count = packet[packet_size];
         range_count = packet[packet_size + 1];
         packet_size += 2;
+        payload_size =
+            (size_t)range_count * RESTORE_RANGE_SIZE + RESTORE_ENTROPY_SIZE;
+    } else if (memcmp(packet, RESTORE_HEADER_V4, RESTORE_HEADER_SIZE) == 0) {
+        version = 4;
+        if (read_port_bytes(port, data_offset, packet + packet_size, 3) != 0) {
+            close(port);
+            return 1;
+        }
+        online_count = packet[packet_size];
+        image_slot_count = packet[packet_size + 1];
+        range_count = packet[packet_size + 2];
+        packet_size += 3;
         payload_size =
             (size_t)range_count * RESTORE_RANGE_SIZE + RESTORE_ENTROPY_SIZE;
     } else {
@@ -205,9 +220,10 @@ static int read_restore_packet(uint64_t data_offset, uint64_t select_offset,
         fprintf(stderr, "nvx-port-io: close %s: %s\n", path, strerror(errno));
         return 1;
     }
-    printf("%u %u %u", version, online_count, range_count);
-    if (version == 3) {
-        size_t range_offset = RESTORE_HEADER_SIZE + 2;
+    printf("%u %u %u %u", version, online_count, image_slot_count, range_count);
+    if (version == 3 || version == 4) {
+        size_t range_offset =
+            RESTORE_HEADER_SIZE + (version == 4 ? 3 : 2);
         for (unsigned int index = 0; index < range_count; ++index) {
             uint64_t start = read_le_u64(packet + range_offset);
             uint64_t length =
