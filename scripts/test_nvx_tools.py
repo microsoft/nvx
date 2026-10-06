@@ -3660,6 +3660,78 @@ class CiConfigurationTests(unittest.TestCase):
             ):
                 self.assertIn(firmware, configuration)
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_fresh_runner_accepts_precreated_work_directory(self):
+        setup = BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            escaped_setup = str(setup).replace("'", "''")
+            escaped_temporary = temporary.replace("'", "''")
+            harness = f"""
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{escaped_setup}', [ref]$tokens, [ref]$errors
+)
+if ($errors.Count -ne 0) {{ throw "setup script has parse errors" }}
+$definition = $ast.Find({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq "Assert-FreshRunnerDirectory"
+}}, $true)
+if (-not $definition) {{ throw "fresh-install guard is missing" }}
+. ([scriptblock]::Create($definition.Extent.Text))
+$root = Join-Path '{escaped_temporary}' "actions-runner"
+New-Item -ItemType Directory -Path $root | Out-Null
+Assert-FreshRunnerDirectory -Path $root
+$work = Join-Path $root "_work"
+New-Item -ItemType Directory -Path (Join-Path $work "_sccache") -Force | Out-Null
+Assert-FreshRunnerDirectory -Path $root
+$partial = Join-Path $root "config.cmd"
+Set-Content -LiteralPath $partial -Value "partial"
+try {{
+    Assert-FreshRunnerDirectory -Path $root
+    throw "accepted partial runner package"
+}} catch {{
+    if ($_.Exception.Message -notlike "refusing to install into partial runner directory*") {{ throw }}
+}}
+Remove-Item -LiteralPath $partial
+Remove-Item -LiteralPath $work -Recurse
+Set-Content -LiteralPath $work -Value "not a directory"
+try {{
+    Assert-FreshRunnerDirectory -Path $root
+    throw "accepted non-directory work path"
+}} catch {{
+    if ($_.Exception.Message -notlike "refusing to install into partial runner directory*") {{ throw }}
+}}
+Remove-Item -LiteralPath $work
+$outside = Join-Path '{escaped_temporary}' "outside"
+New-Item -ItemType Directory -Path $outside | Out-Null
+New-Item -ItemType Junction -Path $work -Target $outside | Out-Null
+try {{
+    Assert-FreshRunnerDirectory -Path $root
+    throw "accepted linked work directory"
+}} catch {{
+    if ($_.Exception.Message -notlike "refusing to install into partial runner directory*") {{ throw }}
+}}
+Write-Output "fresh runner directory validated"
+"""
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    harness,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("fresh runner directory validated", result.stdout)
+
     def test_windows_utility_runner_labels_and_ci_routing(self):
         setup = (
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"

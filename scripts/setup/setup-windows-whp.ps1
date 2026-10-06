@@ -324,6 +324,23 @@ function Assert-ActionsRunnerWritablePaths {
     }
 }
 
+function Assert-FreshRunnerDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = Get-Item -LiteralPath $Path -Force
+    $unexpected = @(Get-ChildItem -LiteralPath $Path -Force |
+        Where-Object {
+            $_.Name -ne "_work" -or
+            -not $_.PSIsContainer -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        })
+    if (-not $root.PSIsContainer -or
+        $root.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+        $unexpected.Count -ne 0) {
+        throw "refusing to install into partial runner directory: $Path"
+    }
+}
+
 function Assert-ActionsRunnerStatePaths {
     Assert-ActionsRunnerWritablePaths
     foreach ($name in @(
@@ -1023,9 +1040,7 @@ function Install-ActionsRunner {
 
         $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
         if (-not (Test-Path -LiteralPath $listener -PathType Leaf)) {
-            if (@(Get-ChildItem -LiteralPath $RunnerDirectory -Force).Count -ne 0) {
-                throw "refusing to install into partial runner directory: $RunnerDirectory"
-            }
+            Assert-FreshRunnerDirectory -Path $RunnerDirectory
             Copy-Item `
                 -Path (Join-Path $packageRoot "*") `
                 -Destination $RunnerDirectory `

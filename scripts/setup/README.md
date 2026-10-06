@@ -64,6 +64,10 @@ corresponding `nvx-utility-windows-trusted` label for push-only jobs) with
 jobs cannot consume a backend test runner. The label argument accepts only
 comma-separated letters, digits, underscores, hyphens and periods. The
 default Windows labels and existing WHP runners are unchanged.
+On a fresh Windows runner, prerequisite setup creates `_work` before the
+Actions runner archive is installed. The installer accepts that directory
+but still refuses other partial package entries or a linked/non-directory
+`_work`; it does not silently overwrite an incomplete installation.
 Runner services receive an explicit tool PATH. On Windows, the Rust toolchain
 is read-only to the service account while Cargo registry and Git caches use the
 runner's per-job temporary directory.
