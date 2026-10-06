@@ -3,6 +3,7 @@
 //! ```text
 //! <state_root>/
 //!   .locks/<token>.lock       serializes lifecycle transitions of one sandbox
+//!   images/                   registered guest images (nvxhost backend only)
 //!   <token>/
 //!     sandbox.json            provisioned configuration
 //!     launch.json             endpoint and available process identity of a start in progress
@@ -41,6 +42,9 @@ pub(crate) const NATIVE_BACKEND_KEY: &str = "nvxhost";
 pub(crate) const SOCKET_NAME: &str = "control.sock";
 /// Linux boot-console socket name.
 pub(crate) const BOOT_SOCKET_NAME: &str = "boot.sock";
+/// Directory of the nvxhost backend's image registry.
+#[cfg(feature = "nvxhost")]
+pub(crate) const IMAGES_NAME: &str = "images";
 
 const RECORD_NAME: &str = "sandbox.json";
 const LAUNCH_NAME: &str = "launch.json";
@@ -73,11 +77,15 @@ pub(crate) struct SandboxRecord {
     pub(crate) hostname: String,
 }
 
+/// Artifacts that a native sandbox was provisioned with.
+///
+/// The image is referenced by its registered content ID (`sha256:<hex>`), whose registration
+/// supplies the path; the digests of the runtime files and host library are lowercase hexadecimal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct NativeArtifactRecord {
-    pub(crate) image: PathBuf,
-    pub(crate) image_sha256: String,
+    pub(crate) image: String,
+    pub(crate) openvmm_sha256: String,
     pub(crate) kernel_sha256: String,
     pub(crate) initrd_sha256: String,
     pub(crate) library_sha256: String,
@@ -96,7 +104,9 @@ pub(crate) struct RuntimeRecord {
 /// Marker written before OpenVMM is launched and replaced by the runtime record afterwards.
 ///
 /// Process identity is added as soon as the child is identified, before writing runtime state.
-/// A marker without identity is never expired: its child may be alive without an endpoint.
+/// A marker without identity is never expired: its child may be alive without an endpoint. A
+/// marker that records a claim on the OpenVMM log is the exception, because OpenVMM inherits the
+/// claim, so a released claim proves that nothing of the launch still runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct LaunchRecord {
@@ -104,6 +114,9 @@ pub(crate) struct LaunchRecord {
     pub(crate) endpoint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) process: Option<ProcessIdentity>,
+    /// Whether the launching process claimed the OpenVMM log before writing this marker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) log_claimed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +229,23 @@ impl StateStore {
     /// Removes the lock file of a deprovisioned sandbox.
     pub(crate) fn remove_lock(&self, sandbox_id: &SandboxId) {
         let _ = fs::remove_file(self.lock_path(sandbox_id));
+    }
+
+    /// Lists the IDs of the sandboxes that have state directories.
+    #[cfg(feature = "nvxhost")]
+    pub(crate) fn sandbox_ids(&self) -> Result<Vec<SandboxId>> {
+        let list_error = || format!("cannot list sandbox state {}", self.root.display());
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(io_error(list_error()))? {
+            let name = entry.map_err(io_error(list_error()))?.file_name();
+            if let Some(id) = name
+                .to_str()
+                .and_then(|token| SandboxId::parse(&format!("{}:{token}", SandboxId::PREFIX)).ok())
+            {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
     }
 
     /// Creates the state directory of a new sandbox.
@@ -418,7 +448,8 @@ pub(crate) fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-fn lock(path: &Path) -> Result<LockGuard> {
+/// Takes an exclusive advisory lock on `path`, creating the lock file if needed.
+pub(crate) fn lock(path: &Path) -> Result<LockGuard> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -462,21 +493,24 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     written.map_err(io_error(format!("cannot write {}", path.display())))
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let mut text = serde_json::to_vec_pretty(value)
-        .map_err(|error| Error::backend_error("cannot encode sandbox state").with_source(error))?;
+/// Atomically replaces `path` with `value` as JSON, readable only by the current user.
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut text = serde_json::to_vec_pretty(value).map_err(|error| {
+        Error::backend_error(format!("cannot encode {}", path.display())).with_source(error)
+    })?;
     text.push(b'\n');
     write_private(path, &text)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+/// Reads a JSON state file, returning `None` if it does not exist.
+pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let text = match fs::read(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error(format!("cannot read {}", path.display()))(error)),
     };
     serde_json::from_slice(&text).map(Some).map_err(|error| {
-        Error::backend_error(format!("sandbox state {} is malformed", path.display()))
+        Error::backend_error(format!("state file {} is malformed", path.display()))
             .with_source(error)
     })
 }
@@ -532,8 +566,8 @@ mod tests {
         let mut native = record();
         native.backend = NATIVE_BACKEND_KEY.to_owned();
         native.native = Some(NativeArtifactRecord {
-            image: PathBuf::from("image.vhd"),
-            image_sha256: "1".repeat(64),
+            image: format!("sha256:{}", "1".repeat(64)),
+            openvmm_sha256: "5".repeat(64),
             kernel_sha256: "2".repeat(64),
             initrd_sha256: "3".repeat(64),
             library_sha256: "4".repeat(64),
@@ -585,9 +619,19 @@ mod tests {
             format: STATE_FORMAT,
             endpoint: "endpoint".to_owned(),
             process: None,
+            log_claimed: false,
         };
         store.write_launch(&id, &launch).unwrap();
         assert_eq!(store.launch(&id).unwrap(), Some(launch.clone()));
+        // Markers without a claim keep their earlier encoding.
+        let text = fs::read_to_string(store.dir(&id).join(LAUNCH_NAME)).unwrap();
+        assert!(!text.contains("logClaimed"), "{text}");
+        let claimed = LaunchRecord {
+            log_claimed: true,
+            ..launch.clone()
+        };
+        store.write_launch(&id, &claimed).unwrap();
+        assert_eq!(store.launch(&id).unwrap(), Some(claimed));
         let identified = LaunchRecord {
             process: Some(ProcessIdentity {
                 pid: 1,

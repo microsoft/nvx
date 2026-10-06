@@ -91,6 +91,8 @@ mod artifacts;
 mod config;
 mod contract;
 mod filesystem;
+#[cfg(feature = "nvxhost")]
+mod images;
 mod launch;
 #[cfg(feature = "nvxhost")]
 mod native;
@@ -114,7 +116,9 @@ pub use self::artifacts::Artifacts;
 pub use self::config::{Hypervisor, OpenVmmConfig};
 pub use self::filesystem::{guest_path, resolve_guest_path};
 #[cfg(feature = "nvxhost")]
-pub use self::native::{NvxHostBackend, NvxHostConfig};
+pub use self::images::{ImageDigest, ImageId, RegisteredImage};
+#[cfg(feature = "nvxhost")]
+pub use self::native::{NvxHostBackend, NvxHostConfig, RuntimeDigests};
 use self::protocol::{
     CAPABILITY_LEN, ExitCategory, GuestFeatures, MAX_ARGUMENT_BYTES, MAX_CWD_BYTES,
     MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS, Workload, WorkloadEnvironment,
@@ -215,7 +219,8 @@ impl OpenVmmBackend {
     ///
     /// Lifecycle locks serialize starts, so a launch marker seen under the lock always belongs
     /// to an interrupted start. Recorded identity is authoritative even before an endpoint
-    /// exists; legacy markers can be recovered only when their endpoint identifies the child.
+    /// exists; other markers can be recovered only when their endpoint identifies the child, or
+    /// when a released claim on the OpenVMM log proves that nothing of the launch still runs.
     fn recover_launch(&self, sandbox_id: &SandboxId, launch: &LaunchRecord) -> Result<()> {
         let interrupted = |detail: &str| {
             Error::backend_error(format!(
@@ -225,13 +230,8 @@ impl OpenVmmBackend {
         let identity = match &launch.process {
             Some(identity) => identity.clone(),
             None => {
-                let pid = platform::endpoint_server_pid(&launch.endpoint)
-                    .map_err(|error| interrupted("cannot be recovered yet").with_source(error))?;
-                let Some(pid) = pid else {
-                    return Err(interrupted(
-                        "has no recorded process identity or observable endpoint; cannot verify \
-                         that OpenVMM exited, so the launch marker is retained",
-                    ));
+                let Some(pid) = self.launched_server(sandbox_id, launch)? else {
+                    return Ok(());
                 };
                 let Some(start_time) = platform::process_start_time(pid)
                     .map_err(|error| interrupted("cannot be recovered yet").with_source(error))?
@@ -252,6 +252,52 @@ impl OpenVmmBackend {
                 identity.pid
             ))
             .with_source(error)),
+        }
+    }
+
+    /// Finds the process that serves the endpoint of an interrupted start that recorded no
+    /// process identity, returning `None` once the launch provably has no running process.
+    ///
+    /// Without a claim on the OpenVMM log, an absent endpoint proves nothing. With one, OpenVMM
+    /// shares the claim, so a held claim means that OpenVMM has yet to open its endpoint or to
+    /// exit; either is awaited for up to the start timeout.
+    fn launched_server(
+        &self,
+        sandbox_id: &SandboxId,
+        launch: &LaunchRecord,
+    ) -> Result<Option<u32>> {
+        let interrupted = |detail: &str| {
+            Error::backend_error(format!(
+                "an interrupted start of sandbox {sandbox_id} {detail}"
+            ))
+        };
+        let deadline = Instant::now() + self.config.start_timeout;
+        loop {
+            let pid = platform::endpoint_server_pid(&launch.endpoint)
+                .map_err(|error| interrupted("cannot be recovered yet").with_source(error))?;
+            if pid.is_some() {
+                return Ok(pid);
+            }
+            if !launch.log_claimed {
+                return Err(interrupted(
+                    "has no recorded process identity or observable endpoint; cannot verify that \
+                     OpenVMM exited, so the launch marker is retained",
+                ));
+            }
+            let log = self.store.log_path(sandbox_id);
+            if platform::launch_log_released(&log)
+                .map_err(|error| interrupted("cannot be recovered yet").with_source(error))?
+            {
+                return Ok(None);
+            }
+            if Instant::now() >= deadline {
+                return Err(interrupted(&format!(
+                    "has no recorded process identity or observable endpoint, and its OpenVMM log \
+                     {} is missing or still held; the launch marker is retained",
+                    log.display()
+                )));
+            }
+            thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -587,6 +633,7 @@ impl Backend for OpenVmmBackend {
                 format: STATE_FORMAT,
                 endpoint: endpoint.clone(),
                 process: None,
+                log_claimed: false,
             },
         )?;
         let started = Instant::now();
@@ -632,6 +679,7 @@ impl Backend for OpenVmmBackend {
             format: STATE_FORMAT,
             endpoint: endpoint.clone(),
             process: Some(ProcessIdentity { pid, start_time }),
+            log_claimed: false,
         };
         if let Err(error) = self
             .store

@@ -3,7 +3,7 @@
 //! The tests need `NVXHOST_TEST_OPENVMM`, `NVXHOST_TEST_KERNEL`, `NVXHOST_TEST_INITRD`,
 //! `NVXHOST_TEST_IMAGE`, `NVXHOST_TEST_LIBRARY`, and the approved `NVXHOST_TEST_SHA256`. Run them
 //! one at a time so that the check for leftover OpenVMM processes is exact, and optimized, since
-//! every provision and start hashes the image:
+//! creating a backend hashes the runtime files and registering an image hashes the image:
 //! `cargo test --release --features nvxhost --test nvxhost_guest -- --ignored --test-threads=1`.
 #![cfg(feature = "nvxhost")]
 
@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aci_edge_sandboxes::openvmm::{Hypervisor, NvxHostBackend, NvxHostConfig, OpenVmmConfig};
+use aci_edge_sandboxes::openvmm::{
+    Hypervisor, ImageDigest, ImageId, NvxHostBackend, NvxHostConfig, OpenVmmConfig,
+};
 use aci_edge_sandboxes::{
     AciEdgeSandbox, Error, ErrorCode, ExecOutcome, ExecOutput, ExecRequest, ProvisionRequest,
     Result, SandboxId, StdinMode, StopResult,
@@ -22,6 +24,8 @@ use aci_edge_sandboxes::{
 
 const HELPER_STATE: &str = "NVXHOST_TEST_HELPER_STATE";
 const HELPER_SANDBOX: &str = "NVXHOST_TEST_HELPER_SANDBOX";
+/// Hashing the test image took most of a second of every start before images were registered.
+const MAX_START_OVERHEAD: Duration = Duration::from_millis(500);
 
 fn required(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} must be set")))
@@ -38,35 +42,50 @@ fn approved_digest() -> [u8; 32] {
     digest
 }
 
+/// Returns the test configuration for `image`, with sandbox state under `state`.
+fn native_config(state: &Path, image: &Path) -> NvxHostConfig {
+    NvxHostConfig::new(
+        OpenVmmConfig::new(
+            required("NVXHOST_TEST_OPENVMM"),
+            required("NVXHOST_TEST_KERNEL"),
+            required("NVXHOST_TEST_INITRD"),
+            Hypervisor::Whp,
+            state,
+        ),
+        image,
+        required("NVXHOST_TEST_LIBRARY"),
+        approved_digest(),
+    )
+}
+
 fn backend_with(
     state: &Path,
     guest_debug: bool,
     adjust: impl FnOnce(&mut OpenVmmConfig),
 ) -> Arc<NvxHostBackend> {
-    let mut config = OpenVmmConfig::new(
-        required("NVXHOST_TEST_OPENVMM"),
-        required("NVXHOST_TEST_KERNEL"),
-        required("NVXHOST_TEST_INITRD"),
-        Hypervisor::Whp,
-        state,
-    );
-    adjust(&mut config);
-    Arc::new(
-        NvxHostBackend::new(
-            NvxHostConfig::new(
-                config,
-                required("NVXHOST_TEST_IMAGE"),
-                required("NVXHOST_TEST_LIBRARY"),
-                approved_digest(),
-            )
-            .with_guest_debug(guest_debug),
-        )
-        .unwrap(),
-    )
+    let mut config =
+        native_config(state, &required("NVXHOST_TEST_IMAGE")).with_guest_debug(guest_debug);
+    adjust(&mut config.openvmm);
+    Arc::new(NvxHostBackend::new(config).unwrap())
 }
 
 fn backend(state: &Path) -> Arc<NvxHostBackend> {
     backend_with(state, false, |_| {})
+}
+
+/// Copies the test image into `state`, so that a test can change the copy.
+fn copied_image(state: &Path) -> PathBuf {
+    let image = state.join("image.vhd");
+    std::fs::copy(required("NVXHOST_TEST_IMAGE"), &image).unwrap();
+    image
+}
+
+/// Moves a file's modification time without changing its content.
+fn touch(path: &Path) {
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    let modified = file.metadata().unwrap().modified().unwrap();
+    file.set_modified(modified + Duration::from_secs(2))
+        .unwrap();
 }
 
 /// Lists the OpenVMM processes running on this host, failing if they cannot be listed.
@@ -240,6 +259,33 @@ fn failure<T>(result: Result<T>) -> ErrorCode {
         Ok(_) => panic!("the operation unexpectedly succeeded"),
         Err(error) => error.code(),
     }
+}
+
+/// Fails unless `result` is a `BackendUnavailable` error whose message contains `expected`.
+fn assert_unavailable<T>(result: Result<T>, expected: &str) {
+    match result {
+        Ok(_) => {
+            panic!("the operation unexpectedly succeeded instead of failing with {expected:?}")
+        }
+        Err(error) => {
+            assert_eq!(error.code(), ErrorCode::BackendUnavailable, "{error}");
+            assert!(error.message().contains(expected), "{error}");
+        }
+    }
+}
+
+/// Starts a sandbox and returns the time that the call spent outside the guest boot.
+fn start_overhead(client: &AciEdgeSandbox, id: &SandboxId) -> Duration {
+    let called = Instant::now();
+    let started = client.start(id).unwrap();
+    let total = called.elapsed();
+    let boot = started
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("bootMilliseconds"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap();
+    total.saturating_sub(Duration::from_millis(boot))
 }
 
 fn start_in_helper(state: &Path, id: &SandboxId) -> Child {
@@ -665,6 +711,13 @@ fn whp_parallel_sandboxes_and_repeated_restarts_stay_isolated() {
     }
     client.deprovision(&sandbox.id).unwrap();
     eprintln!("(start call, boot) milliseconds across restarts: {starts:?}");
+    assert!(
+        starts
+            .iter()
+            .all(|&(total, boot)| total.saturating_sub(u128::from(boot))
+                < MAX_START_OVERHEAD.as_millis()),
+        "starts spent more than {MAX_START_OVERHEAD:?} outside the guest boot: {starts:?}"
+    );
     assert_no_new_openvmm(&before);
 }
 
@@ -707,5 +760,148 @@ fn whp_concurrent_commands_share_one_guest() {
     );
     assert_graceful(client.stop(&sandbox.id));
     client.deprovision(&sandbox.id).unwrap();
+    assert_no_new_openvmm(&before);
+}
+
+#[test]
+#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
+fn whp_registered_images_start_without_hashing_and_fail_closed_after_a_change() {
+    let state = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let image = copied_image(state.path());
+    let created = Instant::now();
+    let first = NvxHostBackend::new(native_config(state.path(), &image)).unwrap();
+    let hashed = created.elapsed();
+    let id = first.image_id();
+    let created = Instant::now();
+    let backend = Arc::new(NvxHostBackend::new(native_config(state.path(), &image)).unwrap());
+    let reused = created.elapsed();
+    eprintln!("backend creation: {hashed:?} registering the image, {reused:?} reusing it");
+    assert_eq!(backend.image_id(), id);
+    assert_eq!(backend.runtime_digests(), first.runtime_digests());
+    let images = backend.images().unwrap();
+    assert_eq!(images.len(), 1, "{images:?}");
+    assert_eq!(
+        (
+            images[0].id,
+            &images[0].path,
+            images[0].intact,
+            images[0].trusted
+        ),
+        (id, &image, true, false)
+    );
+
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    let sandbox = provision(&client, &backend);
+    let overhead = start_overhead(&client, &sandbox.id);
+    eprintln!("the first start spent {overhead:?} outside the guest boot");
+    assert_prints(&client, &sandbox.id, "registered");
+    assert_graceful(client.stop(&sandbox.id));
+
+    // A changed seal fails closed, without hashing, until the image is registered again.
+    touch(&image);
+    assert_unavailable(
+        client.start(&sandbox.id),
+        "changed since it was registered; register it again",
+    );
+    assert_unavailable(client.provision(&ProvisionRequest::new()), "changed since");
+    assert!(!backend.images().unwrap()[0].intact);
+    assert_eq!(
+        failure(backend.unregister_image(&id)),
+        ErrorCode::PolicyValidation
+    );
+    let registered = backend
+        .register_image(&image, ImageDigest::Compute)
+        .unwrap();
+    assert_eq!((registered.id, registered.intact), (id, true));
+    client.start(&sandbox.id).unwrap();
+    assert_prints(&client, &sandbox.id, "reregistered");
+    assert_graceful(client.stop(&sandbox.id));
+    backend.verify_image(&id).unwrap();
+
+    client.deprovision(&sandbox.release()).unwrap();
+    assert!(backend.unregister_image(&id).unwrap());
+    assert!(!backend.unregister_image(&id).unwrap());
+    assert!(backend.images().unwrap().is_empty());
+    assert_unavailable(
+        client.provision(&ProvisionRequest::new()),
+        "no longer registered",
+    );
+    assert!(image.is_file());
+    assert_no_new_openvmm(&before);
+}
+
+#[test]
+#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
+fn whp_trusted_digests_and_content_verification_follow_their_contracts() {
+    let state = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let image = copied_image(state.path());
+
+    // A trusted digest is recorded without hashing, even one that the content does not have.
+    let claimed = ImageId::from_sha256([7; 32]);
+    let trusting = NvxHostBackend::new(
+        native_config(state.path(), &image)
+            .with_image_digest(ImageDigest::Trusted(*claimed.sha256())),
+    )
+    .unwrap();
+    assert_eq!(trusting.image_id(), claimed);
+    assert!(trusting.images().unwrap()[0].trusted);
+    assert_unavailable(
+        trusting.verify_image(&claimed),
+        "no longer matches its SHA-256",
+    );
+
+    // Content verification hashes before every start, so it refuses the misattributed image.
+    let verifying = Arc::new(
+        NvxHostBackend::new(native_config(state.path(), &image).with_content_verification(true))
+            .unwrap(),
+    );
+    assert_eq!(verifying.image_id(), claimed);
+    let client = AciEdgeSandbox::from_shared(verifying.clone());
+    let sandbox = provision(&client, &verifying);
+    assert_unavailable(client.start(&sandbox.id), "no longer matches its SHA-256");
+
+    // Runtime files are checked against approved digests and pinned per sandbox.
+    let digests = verifying.runtime_digests();
+    NvxHostBackend::new(native_config(state.path(), &image).with_runtime_digests(digests)).unwrap();
+    let mut unapproved = digests;
+    unapproved.initrd = [0; 32];
+    assert_unavailable(
+        NvxHostBackend::new(native_config(state.path(), &image).with_runtime_digests(unapproved)),
+        "does not match the approved SHA-256",
+    );
+    let initrd = state.path().join("initramfs.cpio.gz");
+    let mut changed = std::fs::read(required("NVXHOST_TEST_INITRD")).unwrap();
+    changed.push(0);
+    std::fs::write(&initrd, changed).unwrap();
+    let mut config = native_config(state.path(), &image);
+    config.openvmm.initrd = initrd;
+    let other = AciEdgeSandbox::from_shared(Arc::new(NvxHostBackend::new(config).unwrap()));
+    assert_unavailable(
+        other.start(&sandbox.id),
+        "provisioned with different OpenVMM runtime files",
+    );
+    client.deprovision(&sandbox.release()).unwrap();
+
+    // Once the image is registered by its actual digest, a verified start succeeds.
+    assert!(verifying.unregister_image(&claimed).unwrap());
+    let actual = verifying
+        .register_image(&image, ImageDigest::Compute)
+        .unwrap()
+        .id;
+    assert_ne!(actual, claimed);
+    let verifying = Arc::new(
+        NvxHostBackend::new(native_config(state.path(), &image).with_content_verification(true))
+            .unwrap(),
+    );
+    assert_eq!(verifying.image_id(), actual);
+    let client = AciEdgeSandbox::from_shared(verifying.clone());
+    let sandbox = provision(&client, &verifying);
+    let overhead = start_overhead(&client, &sandbox.id);
+    eprintln!("a start with content verification spent {overhead:?} outside the guest boot");
+    assert_prints(&client, &sandbox.id, "verified");
+    assert_graceful(client.stop(&sandbox.id));
+    client.deprovision(&sandbox.release()).unwrap();
     assert_no_new_openvmm(&before);
 }

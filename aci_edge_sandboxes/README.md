@@ -131,9 +131,30 @@ State is kept separately under `<state_root>/nvxhost/`; a running VM is never si
 converted to the direct backend. `NvxHostBackend::guest_logs` reads a bounded non-follow
 guest-log snapshot before stop.
 
-Provision records the SHA-256 of the image, kernel, and initramfs, and every start hashes
-them again and refuses changed artifacts, so start latency grows with the image size. As
-with the direct backend, executions on one sandbox share its single control connection: a
+The backend hashes OpenVMM, the kernel, and the initramfs once, when it is created
+(`NvxHostBackend::runtime_digests`); `NvxHostConfig::with_runtime_digests` requires approved
+digests. It also registers the configured image under `<state_root>/nvxhost/images/` by its
+content ID, `sha256:<hex>` (`ImageId`). Registration hashes the image once;
+`ImageDigest::Expect` additionally requires a digest, and `ImageDigest::Trusted` records a digest
+that the caller's own policy verified without reading the file. Later backends and processes
+reuse a registration that the file still matches without reading it. Provision records the image
+ID and the runtime digests. Start compares each file's seal (volume, file ID, length, and
+last-write time, plus the change time on Linux) with the one taken when the file was hashed,
+instead of hashing again, and fails with `backend_unavailable` if anything changed, so a start
+costs about the guest's boot time. A seal detects replacement or modification, not a writer that
+deliberately restores timestamps. On Windows, start also keeps writers out of the files until
+OpenVMM has opened them. Register a changed image again with `register_image`: unchanged content
+keeps its ID, so sandboxes that use it start again. `images` lists the registrations and whether
+each file still matches, `verify_image` hashes one again as a diagnostic, and `unregister_image`
+refuses while a provisioned sandbox uses the image. `with_content_verification(true)` hashes the
+image and runtime files again before every start, also as a diagnostic.
+
+Start claims the sandbox's OpenVMM log before launching, and OpenVMM inherits the claim. If the
+caller dies before it records OpenVMM's identity, the next operation waits up to
+`start_timeout` for that OpenVMM to open its endpoint and then terminates it; once no process
+holds the log, nothing of the interrupted launch runs, so the sandbox is usable again.
+
+As with the direct backend, executions on one sandbox share its single control connection: a
 concurrent exec waits up to `control_timeout` for the running one to finish. The backend
 copies the guest boot console to `NvxHostBackend::console_log_path` from the process that
 started or last used the sandbox. OpenVMM serves one console client at a time and holds
@@ -153,7 +174,8 @@ directories and environments. Snapshot/restore, image selection, and richer gues
 operations are not part of this profile. See
 [`examples/nvxhost_lifecycle.rs`](examples/nvxhost_lifecycle.rs) for a run requiring
 `--openvmm`, `--kernel`, `--initrd`, `--image`, `--host-library`, `--host-sha256`,
-`--state-root`, `--hypervisor`, and a command after `--`. The ignored
+`--state-root`, `--hypervisor`, and a command after `--`; an optional `--image-sha256`
+requires the image's digest when it is registered. The ignored
 `tests/nvxhost_guest.rs` exercises an actual WHP guest when the corresponding
 `NVXHOST_TEST_*` paths and approved DLL digest are set.
 

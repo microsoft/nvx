@@ -9,20 +9,23 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use prost::Message;
-use sha2_runtime::{Digest, Sha256};
 
 use super::artifacts::absolute;
 use super::config::{OpenVmmConfig, validate_unix_socket_path};
+use super::images::{
+    ImageDigest, ImageId, ImageRecord, ImageStore, RegisteredImage, VerifiedFile, encode_hex,
+};
 use super::platform::{self, Transport};
 use super::process;
 use super::state::{
-    BOOT_SOCKET_NAME, LaunchRecord, NATIVE_BACKEND_KEY, NativeArtifactRecord, ProcessIdentity,
-    RuntimeRecord, SOCKET_NAME, STATE_FORMAT, SandboxRecord, StateStore, remove_if_present,
+    BOOT_SOCKET_NAME, IMAGES_NAME, LaunchRecord, NATIVE_BACKEND_KEY, NativeArtifactRecord,
+    ProcessIdentity, RuntimeRecord, SOCKET_NAME, STATE_FORMAT, SandboxRecord, StateStore,
+    remove_if_present,
 };
 use super::{OpenVmmBackend, RunState};
 use crate::backend::{Backend, ExecControl, ExecIo};
 use crate::capabilities::Capabilities;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::exec::{Completion, ExecOutcome};
 use crate::id::SandboxId;
 use crate::model::{
@@ -41,17 +44,35 @@ const CONSOLE_POLL: Duration = Duration::from_millis(250);
 /// Artifact paths and approved native-library digest for an image-backed guest.
 ///
 /// The image is a caller-prepared GPT disk, not a container image reference. This backend
-/// creates no disks, filesystem mappings, or network devices.
+/// creates no disks, filesystem mappings, or network devices. Construct it with
+/// [`NvxHostConfig::new`] and its builder methods, which keep callers compatible as options
+/// are added.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NvxHostConfig {
     /// OpenVMM and guest boot artifacts, hypervisor, state root, and deadlines.
     pub openvmm: OpenVmmConfig,
     /// GPT image attached read-only as the distro block device.
+    ///
+    /// The backend registers the image when it is created, and the sandboxes that it provisions
+    /// refer to the image by its [`ImageId`].
     pub image: PathBuf,
+    /// How the backend establishes the content digest of `image` when it registers it.
+    pub image_digest: ImageDigest,
     /// Absolute path to a separately installed nvxhost DLL or shared library.
     pub library: PathBuf,
     /// SHA-256 approved by the caller's independent artifact policy.
     pub library_sha256: [u8; 32],
+    /// SHA-256 digests of the OpenVMM runtime files approved by the caller's policy, if any.
+    ///
+    /// The backend hashes the runtime files once, when it is created, and requires these digests
+    /// when they are set.
+    pub runtime_sha256: Option<RuntimeDigests>,
+    /// Hashes the image and the runtime files again before every start.
+    ///
+    /// Otherwise a start compares only the files' seals with those taken when they were hashed.
+    /// This diagnostic reads every file in full, which adds the hashing time to each start.
+    pub content_verification: bool,
     /// Requests verbose guest kernel diagnostics on the boot console.
     pub guest_debug: bool,
 }
@@ -67,10 +88,34 @@ impl NvxHostConfig {
         Self {
             openvmm,
             image: image.into(),
+            image_digest: ImageDigest::Compute,
             library: library.into(),
             library_sha256,
+            runtime_sha256: None,
+            content_verification: false,
             guest_debug: false,
         }
+    }
+
+    /// Sets how the backend establishes the digest of the image that it registers.
+    #[must_use]
+    pub fn with_image_digest(mut self, digest: ImageDigest) -> Self {
+        self.image_digest = digest;
+        self
+    }
+
+    /// Requires the OpenVMM runtime files to have these approved digests.
+    #[must_use]
+    pub fn with_runtime_digests(mut self, digests: RuntimeDigests) -> Self {
+        self.runtime_sha256 = Some(digests);
+        self
+    }
+
+    /// Hashes the image and the runtime files again before every start, as a diagnostic.
+    #[must_use]
+    pub fn with_content_verification(mut self, enabled: bool) -> Self {
+        self.content_verification = enabled;
+        self
     }
 
     /// Enables verbose guest boot diagnostics without changing the guest lifecycle.
@@ -81,6 +126,17 @@ impl NvxHostConfig {
     }
 }
 
+/// SHA-256 digests of the OpenVMM executable, guest kernel, and guest initramfs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeDigests {
+    /// Digest of the OpenVMM executable.
+    pub openvmm: [u8; 32],
+    /// Digest of the guest kernel.
+    pub kernel: [u8; 32],
+    /// Digest of the guest initramfs.
+    pub initrd: [u8; 32],
+}
+
 /// Owns sandbox state and OpenVMM processes; the private native library owns only
 /// the launch arguments and authenticated guest channel.
 #[derive(Debug)]
@@ -88,7 +144,63 @@ pub struct NvxHostBackend {
     config: NvxHostConfig,
     base: OpenVmmBackend,
     host: Arc<HostLibrary>,
+    images: ImageStore,
+    image: ImageId,
+    runtime: RuntimeFiles,
     console_pumps: Mutex<HashMap<SandboxId, ConsolePump>>,
+}
+
+/// The OpenVMM runtime files, hashed once, when the backend is created.
+#[derive(Debug)]
+struct RuntimeFiles {
+    openvmm: VerifiedFile,
+    kernel: VerifiedFile,
+    initrd: VerifiedFile,
+}
+
+impl RuntimeFiles {
+    fn verify(config: &OpenVmmConfig, approved: Option<RuntimeDigests>) -> Result<Self> {
+        Ok(Self {
+            openvmm: VerifiedFile::verify(
+                &config.openvmm,
+                "OpenVMM executable",
+                approved.map(|digests| digests.openvmm),
+            )?,
+            kernel: VerifiedFile::verify(
+                &config.kernel,
+                "guest kernel",
+                approved.map(|digests| digests.kernel),
+            )?,
+            initrd: VerifiedFile::verify(
+                &config.initrd,
+                "guest initramfs",
+                approved.map(|digests| digests.initrd),
+            )?,
+        })
+    }
+
+    fn digests(&self) -> RuntimeDigests {
+        RuntimeDigests {
+            openvmm: *self.openvmm.sha256(),
+            kernel: *self.kernel.sha256(),
+            initrd: *self.initrd.sha256(),
+        }
+    }
+
+    /// Opens every file, keeping writers out on Windows while the handles live, and checks that
+    /// none changed since it was hashed. With `rehash`, it also hashes every file again.
+    fn open_checked(&self, rehash: bool) -> Result<Vec<File>> {
+        [&self.openvmm, &self.kernel, &self.initrd]
+            .into_iter()
+            .map(|verified| {
+                let mut file = verified.open_checked()?;
+                if rehash {
+                    verified.verify_content(&mut file)?;
+                }
+                Ok(file)
+            })
+            .collect()
+    }
 }
 
 /// Copies the boot console of one OpenVMM launch into the sandbox's console log.
@@ -199,7 +311,12 @@ struct ExecJob {
 }
 
 impl NvxHostBackend {
-    /// Opens the state root and verifies the explicitly supplied native asset.
+    /// Opens the state root, verifies the explicitly supplied native asset, hashes the OpenVMM
+    /// runtime files, and registers the configured image.
+    ///
+    /// Creating a backend reads every runtime file in full. It reads the image only if no
+    /// registration that the file still matches exists and `image_digest` is not
+    /// [`ImageDigest::Trusted`].
     pub fn new(mut config: NvxHostConfig) -> Result<Self> {
         config.openvmm = config.openvmm.normalized()?;
         config.image = absolute(&config.image)?;
@@ -215,6 +332,16 @@ impl NvxHostBackend {
             ))
             .with_source(error)
         })?;
+        let images_dir = store_root.join(IMAGES_NAME);
+        let images = ImageStore::open(&images_dir).map_err(|error| {
+            Error::backend_unavailable(format!(
+                "cannot open the image registry {}",
+                images_dir.display()
+            ))
+            .with_source(error)
+        })?;
+        let runtime = RuntimeFiles::verify(&config.openvmm, config.runtime_sha256)?;
+        let image = images.register(&config.image, config.image_digest)?.id;
         let base = OpenVmmBackend {
             config: config.openvmm.clone(),
             store,
@@ -223,6 +350,9 @@ impl NvxHostBackend {
             config,
             base,
             host,
+            images,
+            image,
+            runtime,
             console_pumps: Mutex::new(HashMap::new()),
         })
     }
@@ -245,6 +375,81 @@ impl NvxHostBackend {
     /// Returns OpenVMM's bounded outcome report path for the latest launch.
     pub fn outcome_report_path(&self, sandbox_id: &SandboxId) -> PathBuf {
         self.base.store.outcome_path(sandbox_id)
+    }
+
+    /// Returns the ID of the configured image, which the sandboxes that this backend provisions
+    /// boot.
+    pub fn image_id(&self) -> ImageId {
+        self.image
+    }
+
+    /// Returns the digests of the OpenVMM runtime files, computed when the backend was created.
+    pub fn runtime_digests(&self) -> RuntimeDigests {
+        self.runtime.digests()
+    }
+
+    /// Registers the image at `path` in the state root's image registry.
+    ///
+    /// A registration that the file still matches is reused without reading the file. Otherwise
+    /// the image is hashed, or recorded with an [`ImageDigest::Trusted`] digest, and its
+    /// registration replaces any earlier one of the same content. Registering a changed image
+    /// again lets the sandboxes that boot it start again if its content is unchanged.
+    pub fn register_image(
+        &self,
+        path: impl AsRef<Path>,
+        digest: ImageDigest,
+    ) -> Result<RegisteredImage> {
+        let path = absolute(path.as_ref())?;
+        Ok(self.images.register(&path, digest)?.describe(true))
+    }
+
+    /// Lists the registered images and whether each file still matches its registration.
+    pub fn images(&self) -> Result<Vec<RegisteredImage>> {
+        Ok(self
+            .images
+            .list()?
+            .into_iter()
+            .map(|record| {
+                let intact = self.images.open_checked(&record, false).is_ok();
+                record.describe(intact)
+            })
+            .collect())
+    }
+
+    /// Hashes a registered image and checks that it still has the content that its ID names.
+    ///
+    /// This diagnostic reads the whole image, whereas provisioning and starting compare only the
+    /// image's seal with its registration.
+    pub fn verify_image(&self, id: &ImageId) -> Result<()> {
+        let record = self
+            .images
+            .get(id)?
+            .ok_or_else(|| Error::backend_unavailable(format!("image {id} is not registered")))?;
+        self.images.verify(&record)
+    }
+
+    /// Removes the registration of an image, returning whether it existed. The file stays.
+    ///
+    /// Fails with [`ErrorCode::PolicyValidation`] while a provisioned sandbox refers to the image.
+    /// Removing the registration of the configured image makes provisioning fail until the image
+    /// is registered again.
+    pub fn unregister_image(&self, id: &ImageId) -> Result<bool> {
+        let _registry = self.images.lock()?;
+        let image = id.to_string();
+        for sandbox_id in self.base.store.sandbox_ids()? {
+            let record = match self.base.store.load(&sandbox_id) {
+                Ok(record) => record,
+                // The sandbox was deprovisioned after the listing.
+                Err(error) if error.code() == ErrorCode::StaleId => continue,
+                Err(error) => return Err(error),
+            };
+            if record.native.is_some_and(|native| native.image == image) {
+                return Err(Error::policy_validation(format!(
+                    "image {id} is used by sandbox {sandbox_id}; deprovision the sandbox first"
+                )));
+            }
+        }
+        self.images.remove(id)
     }
 
     /// Collects the guest's bounded, non-follow log snapshot through ttrpc.
@@ -383,38 +588,84 @@ impl NvxHostBackend {
         Ok(())
     }
 
-    fn artifact_record(&self) -> Result<NativeArtifactRecord> {
-        Ok(NativeArtifactRecord {
-            image: self.config.image.clone(),
-            image_sha256: file_digest(&self.config.image)?,
-            kernel_sha256: file_digest(&self.config.openvmm.kernel)?,
-            initrd_sha256: file_digest(&self.config.openvmm.initrd)?,
-            library_sha256: encode_digest(&self.config.library_sha256),
-        })
+    fn artifact_record(&self) -> NativeArtifactRecord {
+        let digests = self.runtime.digests();
+        NativeArtifactRecord {
+            image: self.image.to_string(),
+            openvmm_sha256: encode_hex(&digests.openvmm),
+            kernel_sha256: encode_hex(&digests.kernel),
+            initrd_sha256: encode_hex(&digests.initrd),
+            library_sha256: encode_hex(&self.config.library_sha256),
+        }
     }
 
-    fn verify_record(&self, record: &SandboxRecord, for_launch: bool) -> Result<()> {
+    /// Returns a sandbox's artifact identity after checking that it uses this backend's host
+    /// library.
+    fn native_record<'a>(&self, record: &'a SandboxRecord) -> Result<&'a NativeArtifactRecord> {
         let recorded = record.native.as_ref().ok_or_else(|| {
             Error::backend_error("the native sandbox has no pinned artifact identity")
         })?;
-        if recorded.image != self.config.image
-            || recorded.library_sha256 != encode_digest(&self.config.library_sha256)
+        if recorded.library_sha256 != encode_hex(&self.config.library_sha256) {
+            return Err(Error::backend_unavailable(
+                "the native sandbox was provisioned with a different host library",
+            ));
+        }
+        Ok(recorded)
+    }
+
+    /// Checks the configured image and the runtime files against their seals.
+    fn check_configured_artifacts(&self) -> Result<()> {
+        let image = self.images.get(&self.image)?.ok_or_else(|| {
+            Error::backend_unavailable(format!(
+                "image {} is no longer registered; register it again",
+                self.image
+            ))
+        })?;
+        self.images.open_checked(&image, false)?;
+        self.runtime.open_checked(false)?;
+        Ok(())
+    }
+
+    /// Checks a sandbox's artifacts before it launches, without hashing them unless content
+    /// verification is enabled, and returns its image registration.
+    ///
+    /// The returned handles keep writers out of the files on Windows until they are dropped, after
+    /// OpenVMM has opened the files.
+    fn launch_artifacts(&self, record: &SandboxRecord) -> Result<(ImageRecord, Vec<File>)> {
+        let recorded = self.native_record(record)?;
+        let digests = self.runtime.digests();
+        if recorded.openvmm_sha256 != encode_hex(&digests.openvmm)
+            || recorded.kernel_sha256 != encode_hex(&digests.kernel)
+            || recorded.initrd_sha256 != encode_hex(&digests.initrd)
         {
             return Err(Error::backend_unavailable(
-                "the native sandbox's image or host library differs from its provisioned identity",
+                "the native sandbox was provisioned with different OpenVMM runtime files",
             ));
         }
-        if for_launch && *recorded != self.artifact_record()? {
-            return Err(Error::backend_unavailable(
-                "the native sandbox's boot artifacts changed since provision",
-            ));
+        let id = ImageId::parse(&recorded.image).map_err(|_| {
+            Error::backend_error(format!(
+                "the native sandbox records a malformed image ID {:?}",
+                recorded.image
+            ))
+        })?;
+        let image = self.images.get(&id)?.ok_or_else(|| {
+            Error::backend_unavailable(format!(
+                "image {id} of the native sandbox is not registered; register it again"
+            ))
+        })?;
+        let rehash = self.config.content_verification;
+        let mut held = self.runtime.open_checked(rehash)?;
+        let mut file = self.images.open_checked(&image, true)?;
+        if rehash {
+            image.verify_content(&mut file)?;
         }
-        Ok(())
+        held.push(file);
+        Ok((image, held))
     }
 
     fn running(&self, sandbox_id: &SandboxId) -> Result<(RuntimeRecord, [u8; 32])> {
         let (_guard, record) = self.base.store.lock_and_load(sandbox_id)?;
-        self.verify_record(&record, false)?;
+        self.native_record(&record)?;
         match self.base.reconcile(sandbox_id)? {
             RunState::Provisioned => Err(Error::not_started(format!(
                 "sandbox {sandbox_id} is not running"
@@ -520,13 +771,7 @@ impl Backend for NvxHostBackend {
 
     fn probe(&self) -> Result<()> {
         self.base.probe()?;
-        if !self.config.image.is_file() {
-            return Err(Error::backend_unavailable(format!(
-                "NVX image not found: {}",
-                self.config.image.display()
-            )));
-        }
-        Ok(())
+        self.check_configured_artifacts()
     }
 
     fn validate_provision(&self, request: &ProvisionRequest) -> Result<()> {
@@ -565,13 +810,17 @@ impl Backend for NvxHostBackend {
 
     fn provision(&self, request: &ProvisionRequest) -> Result<ProvisionResult> {
         self.validate_provision(request)?;
-        self.probe()?;
+        self.base.probe()?;
+        // Unregistering an image waits for this lock, so the image stays registered until the
+        // sandbox that refers to it is recorded.
+        let _registry = self.images.lock()?;
+        self.check_configured_artifacts()?;
         let record = SandboxRecord {
             format: STATE_FORMAT,
             backend: BACKEND_KEY.to_owned(),
             network: None,
             filesystem: None,
-            native: Some(self.artifact_record()?),
+            native: Some(self.artifact_record()),
             memory_mib: request
                 .microvm
                 .provision
@@ -600,8 +849,9 @@ impl Backend for NvxHostBackend {
         // A listener of a launch that exited on its own ends promptly. Retire it now so that the
         // new launch's listener connects before the guest writes its first boot output.
         let _ = self.finish_console_pump(sandbox_id);
-        self.verify_record(&record, true)?;
-        self.probe()?;
+        // `_held` keeps writers out of the checked files on Windows until OpenVMM has opened them.
+        let (image, _held) = self.launch_artifacts(&record)?;
+        self.base.probe()?;
 
         let mut capability = [0u8; 32];
         while capability == [0; 32] {
@@ -620,7 +870,7 @@ impl Backend for NvxHostBackend {
         let mut arguments = self.host.launch_arguments(&LaunchInputs {
             kernel: &self.config.openvmm.kernel,
             initrd: &self.config.openvmm.initrd,
-            image: &self.config.image,
+            image: &image.path,
             control: &endpoint,
             boot: &boot,
             hypervisor: self.config.openvmm.hypervisor.as_str(),
@@ -634,12 +884,18 @@ impl Backend for NvxHostBackend {
 
         self.base.store.write_capability(sandbox_id, &capability)?;
         let log = self.base.store.create_log(sandbox_id)?;
+        // OpenVMM inherits the log and this claim, so if this process dies before it records
+        // OpenVMM's identity, recovery can still tell whether anything of the launch runs.
+        platform::claim_launch_log(&log).map_err(|error| {
+            Error::backend_error("cannot claim the OpenVMM log").with_source(error)
+        })?;
         self.base.store.write_launch(
             sandbox_id,
             &LaunchRecord {
                 format: STATE_FORMAT,
                 endpoint: endpoint.clone(),
                 process: None,
+                log_claimed: true,
             },
         )?;
         let started = Instant::now();
@@ -684,6 +940,7 @@ impl Backend for NvxHostBackend {
                     format: STATE_FORMAT,
                     endpoint,
                     process: Some(ProcessIdentity { pid, start_time }),
+                    log_claimed: true,
                 },
             )
             .and_then(|()| self.base.store.write_runtime(sandbox_id, &runtime))
@@ -782,7 +1039,7 @@ impl Backend for NvxHostBackend {
 
     fn stop(&self, sandbox_id: &SandboxId) -> Result<StopResult> {
         let (_guard, record) = self.base.store.lock_and_load(sandbox_id)?;
-        self.verify_record(&record, false)?;
+        self.native_record(&record)?;
         let RunState::Running(runtime) = self.base.reconcile(sandbox_id)? else {
             return Err(Error::already_stopped(format!(
                 "sandbox {sandbox_id} is not running"
@@ -847,7 +1104,7 @@ impl Backend for NvxHostBackend {
 
     fn deprovision(&self, sandbox_id: &SandboxId) -> Result<DeprovisionResult> {
         let (guard, record) = self.base.store.lock_and_load(sandbox_id)?;
-        self.verify_record(&record, false)?;
+        self.native_record(&record)?;
         if let RunState::Running(_) = self.base.reconcile(sandbox_id)? {
             return Err(Error::already_started(format!(
                 "sandbox {sandbox_id} is running; stop it before deprovisioning"
@@ -876,21 +1133,6 @@ fn capabilities() -> Capabilities {
     capabilities.network.ingress_deny = true;
     capabilities.network.host_loopback_deny = true;
     capabilities
-}
-
-fn encode_digest(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn file_digest(path: &Path) -> Result<String> {
-    let mut file = File::open(path).map_err(|error| {
-        Error::backend_unavailable(format!("cannot open {}", path.display())).with_source(error)
-    })?;
-    let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher).map_err(|error| {
-        Error::backend_unavailable(format!("cannot hash {}", path.display())).with_source(error)
-    })?;
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn finish_session<T>(session: Session, result: Result<T>, deadline: Option<Instant>) -> Result<T> {
@@ -1329,5 +1571,125 @@ mod tests {
             prepare_exec(&request).unwrap_err().code(),
             ErrorCode::PolicyValidation
         );
+    }
+
+    fn host_hypervisor() -> super::super::Hypervisor {
+        if cfg!(windows) {
+            super::super::Hypervisor::Whp
+        } else {
+            super::super::Hypervisor::Kvm
+        }
+    }
+
+    #[test]
+    fn a_launch_log_claim_lasts_until_the_launcher_and_openvmm_have_exited() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("openvmm.log");
+        assert!(
+            !platform::launch_log_released(&path).unwrap(),
+            "a missing log proves nothing"
+        );
+        let log = File::create(&path).unwrap();
+        platform::claim_launch_log(&log).unwrap();
+        assert!(!platform::launch_log_released(&path).unwrap());
+
+        // A long-running child stands in for OpenVMM, which inherits the log as its output.
+        #[cfg(windows)]
+        let (program, arguments) = (
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\PING.EXE"),
+            ["-n", "60", "127.0.0.1"].map(std::ffi::OsString::from),
+        );
+        #[cfg(not(windows))]
+        let (program, arguments) = (PathBuf::from("sleep"), [std::ffi::OsString::from("60")]);
+        let config = OpenVmmConfig::new(
+            program,
+            "vmlinux",
+            "initramfs.cpio.gz",
+            host_hypervisor(),
+            directory.path(),
+        );
+        let launched =
+            process::spawn(&config, &arguments, &[1; 32], log, directory.path()).unwrap();
+        assert!(
+            !platform::launch_log_released(&path).unwrap(),
+            "the child's inherited copy no longer holds the claim"
+        );
+        assert!(process::kill_child(launched));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !platform::launch_log_released(&path).unwrap() {
+            assert!(Instant::now() < deadline, "the claim outlived its holders");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn claimed_launch_markers_are_cleared_only_once_nothing_holds_the_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = OpenVmmConfig::new(
+            "openvmm",
+            "vmlinux",
+            "initramfs.cpio.gz",
+            host_hypervisor(),
+            directory.path(),
+        );
+        config.start_timeout = Duration::from_millis(200);
+        let store = StateStore::open_for(&directory.path().join(BACKEND_KEY), BACKEND_KEY).unwrap();
+        let base = OpenVmmBackend { config, store };
+        let sandbox_id = SandboxId::generate().unwrap();
+        let record = SandboxRecord {
+            format: STATE_FORMAT,
+            backend: BACKEND_KEY.to_owned(),
+            network: None,
+            filesystem: None,
+            native: None,
+            memory_mib: 256,
+            workload_uid: 65534,
+            workload_gid: 65534,
+            create_workload_account: false,
+            hostname: "nvx-sandbox".to_owned(),
+        };
+        base.store.create(&sandbox_id, &record).unwrap();
+        let endpoint = platform::control_endpoint(&base.store.socket_path(&sandbox_id)).unwrap();
+        let marker = |log_claimed| LaunchRecord {
+            format: STATE_FORMAT,
+            endpoint: endpoint.clone(),
+            process: None,
+            log_claimed,
+        };
+        let retained = |expected: &str| {
+            let Err(error) = base.reconcile(&sandbox_id) else {
+                panic!("an unproven launch marker was cleared");
+            };
+            assert_eq!(error.code(), ErrorCode::BackendError, "{error}");
+            assert!(error.message().contains(expected), "{error}");
+            assert!(base.store.launch(&sandbox_id).unwrap().is_some());
+        };
+
+        // A claim whose log is missing proves nothing.
+        base.store.write_launch(&sandbox_id, &marker(true)).unwrap();
+        retained("is missing or still held");
+
+        // Without a claim, an absent endpoint never proves that the launch exited.
+        drop(base.store.create_log(&sandbox_id).unwrap());
+        base.store
+            .write_launch(&sandbox_id, &marker(false))
+            .unwrap();
+        retained("cannot verify that OpenVMM exited");
+
+        // A held claim is awaited for the start timeout, and the marker then retained.
+        let log = base.store.create_log(&sandbox_id).unwrap();
+        platform::claim_launch_log(&log).unwrap();
+        base.store.write_launch(&sandbox_id, &marker(true)).unwrap();
+        let waited = Instant::now();
+        retained("is missing or still held");
+        assert!(waited.elapsed() >= Duration::from_millis(200));
+
+        // A released claim proves that nothing of the launch runs.
+        drop(log);
+        assert!(matches!(
+            base.reconcile(&sandbox_id).unwrap(),
+            RunState::Provisioned
+        ));
+        assert!(base.store.launch(&sandbox_id).unwrap().is_none());
     }
 }

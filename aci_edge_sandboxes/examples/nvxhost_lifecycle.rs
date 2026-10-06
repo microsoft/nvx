@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use aci_edge_sandboxes::openvmm::{Hypervisor, NvxHostBackend, NvxHostConfig, OpenVmmConfig};
+use aci_edge_sandboxes::openvmm::{
+    Hypervisor, ImageDigest, NvxHostBackend, NvxHostConfig, OpenVmmConfig,
+};
 use aci_edge_sandboxes::{AciEdgeSandbox, ExecOutcome, ExecRequest, ProvisionRequest};
 
 fn main() -> ExitCode {
@@ -25,6 +27,7 @@ fn run() -> Result<(), String> {
     let mut image = None;
     let mut library = None;
     let mut digest = None;
+    let mut image_digest = ImageDigest::Compute;
     let mut root = None;
     let mut hypervisor = None;
     let mut command = None;
@@ -40,7 +43,10 @@ fn run() -> Result<(), String> {
             "--initrd" => initrd = Some(value()?),
             "--image" => image = Some(value()?),
             "--host-library" => library = Some(value()?),
-            "--host-sha256" => digest = Some(parse_digest(&value()?)?),
+            "--host-sha256" => digest = Some(parse_digest(&option, &value()?)?),
+            "--image-sha256" => {
+                image_digest = ImageDigest::Expect(parse_digest(&option, &value()?)?);
+            }
             "--state-root" => root = Some(value()?),
             "--hypervisor" => hypervisor = Some(value()?.parse::<Hypervisor>().map_err(describe)?),
             "--" => {
@@ -66,8 +72,10 @@ fn run() -> Result<(), String> {
 
     let config = OpenVmmConfig::new(openvmm, kernel, initrd, hypervisor, PathBuf::from(root));
     let backend = Arc::new(
-        NvxHostBackend::new(NvxHostConfig::new(config, image, library, digest))
-            .map_err(describe)?,
+        NvxHostBackend::new(
+            NvxHostConfig::new(config, image, library, digest).with_image_digest(image_digest),
+        )
+        .map_err(describe)?,
     );
     let client = AciEdgeSandbox::from_shared(backend.clone());
     let id = client
@@ -133,14 +141,16 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn parse_digest(hex: &str) -> Result<[u8; 32], String> {
+fn parse_digest(option: &str, hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 || !hex.is_ascii() {
-        return Err("--host-sha256 must contain exactly 64 hexadecimal digits".to_owned());
+        return Err(format!(
+            "{option} must contain exactly 64 hexadecimal digits"
+        ));
     }
     let mut digest = [0u8; 32];
     for (index, byte) in digest.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "--host-sha256 must be hexadecimal")?;
+            .map_err(|_| format!("{option} must be hexadecimal"))?;
     }
     Ok(digest)
 }
@@ -155,9 +165,10 @@ mod tests {
 
     #[test]
     fn digest_requires_exact_hex_bytes() {
-        assert_eq!(parse_digest(&"ab".repeat(32)).unwrap(), [0xab; 32]);
-        assert!(parse_digest("ab").is_err());
-        assert!(parse_digest(&"é".repeat(32)).is_err());
-        assert!(parse_digest(&"gg".repeat(32)).is_err());
+        let parse = |hex: &str| parse_digest("--image-sha256", hex);
+        assert_eq!(parse(&"ab".repeat(32)).unwrap(), [0xab; 32]);
+        assert!(parse("ab").unwrap_err().starts_with("--image-sha256 "));
+        assert!(parse(&"é".repeat(32)).is_err());
+        assert!(parse(&"gg".repeat(32)).is_err());
     }
 }
