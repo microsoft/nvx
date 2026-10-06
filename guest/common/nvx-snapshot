@@ -30,6 +30,7 @@ RESTORE_PACKET_AVAILABLE=2
 RESTORE_PROCESSOR_TARGET_AVAILABLE=4
 RESTORE_MEMORY_TARGET_AVAILABLE=8
 RESTORE_MEMORY_EXPANSION_AVAILABLE=16
+RESTORE_IMAGE_SLOT_TARGET_AVAILABLE=64
 container_frozen=false
 scratch_frozen=false
 post_restore_pending=false
@@ -553,7 +554,8 @@ if [ $((restore_status & RESTORE_PACKET_AVAILABLE)) -ne 0 ] &&
     [ "$snapshot_tier" = legacy ] &&
     [ $((restore_status & RESTORE_MEMORY_TARGET_AVAILABLE)) -ne 0 ] &&
     [ $((restore_status & RESTORE_PROCESSOR_TARGET_AVAILABLE)) -eq 0 ] &&
-    [ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -eq 0 ]; then
+    [ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -eq 0 ] &&
+    [ $((restore_status & RESTORE_IMAGE_SLOT_TARGET_AVAILABLE)) -eq 0 ]; then
     memtotal_kib=$(read_memtotal_kib) ||
         fail_closed "failed to read MemTotal after memory activation"
     echo "NVX-MEMORY-ONLINE-OK: added_bytes=0 memtotal_kib=$memtotal_kib elapsed_us=0"
@@ -562,7 +564,8 @@ if [ $((restore_status & RESTORE_PACKET_AVAILABLE)) -ne 0 ] &&
 elif [ $((restore_status & RESTORE_PACKET_AVAILABLE)) -ne 0 ] &&
     { [ "$snapshot_tier" != legacy ] ||
         [ $((restore_status & RESTORE_PROCESSOR_TARGET_AVAILABLE)) -ne 0 ] ||
-        [ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -ne 0 ]; }; then
+        [ $((restore_status & RESTORE_MEMORY_EXPANSION_AVAILABLE)) -ne 0 ] ||
+        [ $((restore_status & RESTORE_IMAGE_SLOT_TARGET_AVAILABLE)) -ne 0 ]; }; then
     post_restore
 else
     post_restore_pending=false

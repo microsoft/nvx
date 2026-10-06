@@ -140,10 +140,11 @@ a different second bind fails, and there is no unbind, eject, rebind, device
 addition, or activation after readiness.
 
 The OpenVMM promotion from `4355c010e726128c751138e7f74ad969e76a4c19` to
-`10106b13207bf64314581df9b72a5bf975953125` contains exactly
+`bf98f65ff514c3bdf4bf011b2470750fe273d500` contains exactly
 `368b9d2a` (bind-once virtio-blk image slots), `6c12f620` (microVM image
-slots and host control), and `10106b13` (machine validation admits the
-declared image-slot transports). It contains no unrelated fork changes.
+slots and host control), `10106b13` (machine validation admits the declared
+image-slot transports), and `bf98f65f` (restore advertises and gates
+image-slot targets). It contains no unrelated fork changes.
 
 Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and

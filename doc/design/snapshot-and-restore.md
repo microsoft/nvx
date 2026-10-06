@@ -490,7 +490,11 @@ repeated { little-endian u64 gpa_start, little-endian u64 length }
 
 Version 4 carries the image-slot target beside the online-VP target and retains
 the version-3 memory-range encoding. A zero online-VP count means no processor
-target. The active image-slot count is always in `1..4`.
+target. The active image-slot count is always in `1..4`. Portb status bit 6
+identifies a version-4 image-slot target; bits 2, 3, and 4 keep their meanings
+for the processor target and any expansion ranges. Every explicit target holds
+the restore gate, so the guest always verifies the active prefix and
+acknowledges before readiness, even when no new slot becomes active.
 
 ## Restore-time memory activation
 
