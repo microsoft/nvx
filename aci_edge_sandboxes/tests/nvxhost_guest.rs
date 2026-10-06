@@ -1087,6 +1087,207 @@ fn host_paths_follow_the_filesystem_policy() {
     assert_no_new_openvmm(&before);
 }
 
+/// Reports what the guest reaches through aliases of the denied paths `secret` and `secret.txt`
+/// in the read-write mapping `root`: each entry is `ok`, `ok:` and what was read or listed, or
+/// the name of the error.
+const ALIAS_PROBE: &str = r#"
+import errno, json, os, sys
+root = sys.argv[1]
+def attempt(action):
+    try:
+        result = action()
+    except OSError as error:
+        return errno.errorcode.get(error.errno, str(error.errno))
+    return "ok" if result is None else "ok:" + result
+def read(path):
+    with open(path) as file:
+        return file.read()
+def listing(path):
+    return ",".join(sorted(os.listdir(path)))
+def at(*parts):
+    return os.path.join(root, *parts)
+report = {
+    "listing": attempt(lambda: listing(root)),
+    "dot-dot": attempt(lambda: read(at("sub", "..", "secret", "token"))),
+    "dot-dot listing": attempt(lambda: listing(at("sub", ".."))),
+    "above the mapping": attempt(
+        lambda: read(os.path.join(root, "..", os.path.basename(root), "secret.txt"))),
+    "host link": attempt(lambda: read(at("links", "allowed"))),
+    "host link into denied directory": attempt(lambda: read(at("links", "token"))),
+    "host link to denied file": attempt(lambda: read(at("links", "file"))),
+    "host link to denied directory": attempt(lambda: listing(at("links", "secret"))),
+    "host absolute link": attempt(lambda: read(at("links", "absolute"))),
+    "host hard link": attempt(lambda: read(at("hard", "secret.txt"))),
+    "host hard link listing": attempt(lambda: listing(at("hard"))),
+    "host hard link into denied directory": attempt(lambda: read(at("links", "hard-token"))),
+}
+if os.path.lexists(at("links", "junction")):
+    report["host junction"] = attempt(lambda: listing(at("links", "junction")))
+# Links that the guest creates are stored as links, which the host never follows.
+os.symlink("secret/token", at("guest-link"))
+os.symlink(at("secret"), at("guest-directory-link"))
+report["guest link"] = attempt(lambda: read(at("guest-link")))
+report["guest directory link"] = attempt(lambda: listing(at("guest-directory-link")))
+report["guest hard link"] = attempt(lambda: os.link(at("secret.txt"), at("guest-hard-link")))
+with open(at("decoy"), "w") as file:
+    file.write("decoy")
+report["rename over"] = attempt(lambda: os.rename(at("decoy"), at("secret.txt")))
+report["rename away"] = attempt(lambda: os.rename(at("secret.txt"), at("moved")))
+report["unlink"] = attempt(lambda: os.unlink(at("secret.txt")))
+report["create inside"] = attempt(lambda: os.mkdir(at("secret", "new")))
+report["link at the name"] = attempt(lambda: os.symlink("allowed.txt", at("secret.txt")))
+print(json.dumps(report))
+"#;
+
+/// Creates the host symbolic link `link` to `target`, which needs Developer Mode or the
+/// symbolic-link privilege on Windows.
+fn host_link(target: &Path, link: &Path, directory: bool) {
+    #[cfg(unix)]
+    let created = {
+        let _ = directory;
+        std::os::unix::fs::symlink(target, link)
+    };
+    #[cfg(windows)]
+    let created = if directory {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+    created.unwrap_or_else(|error| {
+        panic!(
+            "cannot link {} to {}; Windows needs Developer Mode or the symbolic-link privilege: \
+             {error}",
+            link.display(),
+            target.display()
+        )
+    });
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn denied_paths_stay_hidden_through_aliases() {
+    let state = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let root = host.path().join("shared");
+    for directory in ["secret", "sub", "links", "hard"] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    for (file, content) in [
+        ("allowed.txt", "allowed"),
+        ("secret/token", "token"),
+        ("secret.txt", "secret"),
+    ] {
+        std::fs::write(root.join(file), content).unwrap();
+    }
+    std::fs::hard_link(
+        root.join("secret.txt"),
+        root.join("hard").join("secret.txt"),
+    )
+    .unwrap();
+    let (links, up) = (root.join("links"), Path::new(".."));
+    std::fs::hard_link(root.join("secret").join("token"), links.join("hard-token")).unwrap();
+    host_link(&up.join("allowed.txt"), &links.join("allowed"), false);
+    host_link(
+        &up.join("secret").join("token"),
+        &links.join("token"),
+        false,
+    );
+    host_link(&up.join("secret.txt"), &links.join("file"), false);
+    host_link(&up.join("secret"), &links.join("secret"), true);
+    // Linux maps a path unchanged, so this link names the denied file's guest path too, once
+    // the link targets the canonical path that the mapping uses.
+    let absolute = root.join("secret").join("token");
+    let absolute = if cfg!(unix) {
+        std::fs::canonicalize(&absolute).unwrap()
+    } else {
+        absolute
+    };
+    host_link(&absolute, &links.join("absolute"), false);
+    #[cfg(windows)]
+    {
+        let created = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(links.join("junction"))
+            .arg(root.join("secret"))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(created.success(), "mklink /J failed: {created}");
+    }
+    let backend = backend(state.path());
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    let sandbox = started(
+        &client,
+        &backend,
+        &ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+            readwrite_paths: vec![root.clone()],
+            denied_paths: vec![root.join("secret"), root.join("secret.txt")],
+            ..FilesystemPolicy::default()
+        }),
+    );
+    let printed = python(&client, &sandbox.id, ALIAS_PROBE, &[&guest(&root)]);
+    // The guest resolves every link itself, and OpenVMM refuses each lookup of a denied path,
+    // and of another name for a denied object. OpenVMM never reads the target of an absolute
+    // Windows link or junction for the guest. It knows only the denied objects themselves, so a
+    // host hard link to a file inside a denied directory stays readable.
+    let absolute = if cfg!(windows) { "EPERM" } else { "EACCES" };
+    let mut expected = serde_json::json!({
+        "listing": "ok:allowed.txt,hard,links,sub",
+        "dot-dot": "EACCES",
+        "dot-dot listing": "ok:allowed.txt,hard,links,sub",
+        "above the mapping": "EACCES",
+        "host link": "ok:allowed",
+        "host link into denied directory": "EACCES",
+        "host link to denied file": "EACCES",
+        "host link to denied directory": "EACCES",
+        "host absolute link": absolute,
+        "host hard link": "EACCES",
+        "host hard link into denied directory": "ok:token",
+        "guest link": "EACCES",
+        "guest directory link": "EACCES",
+        "guest hard link": "EACCES",
+        "rename over": "EACCES",
+        "rename away": "EACCES",
+        "unlink": "EACCES",
+        "create inside": "EACCES",
+        "link at the name": "EACCES",
+    });
+    if cfg!(windows) {
+        expected["host junction"] = serde_json::json!("EPERM");
+    }
+    let mut report = serde_json::from_str::<serde_json::Value>(&printed).unwrap();
+    // A directory that holds a host hard link to a denied file lists the link's name when the
+    // guest reads only names, and fails when it also looks the entries up, as its first read of
+    // a directory does.
+    let listing = report
+        .as_object_mut()
+        .unwrap()
+        .remove("host hard link listing");
+    assert!(
+        matches!(
+            listing.as_ref().and_then(serde_json::Value::as_str),
+            Some("EACCES" | "ok:secret.txt")
+        ),
+        "host hard link listing: {listing:?}"
+    );
+    assert_eq!(report, expected);
+    assert_graceful(client.stop(&sandbox.id));
+    client.deprovision(&sandbox.release()).unwrap();
+    for (file, content) in [
+        ("secret/token", "token"),
+        ("secret.txt", "secret"),
+        ("hard/secret.txt", "secret"),
+        ("decoy", "decoy"),
+    ] {
+        assert_eq!(std::fs::read_to_string(root.join(file)).unwrap(), content);
+    }
+    for absent in ["moved", "guest-hard-link", "secret/new"] {
+        assert!(!root.join(absent).exists(), "{absent}");
+    }
+    assert_no_new_openvmm(&before);
+}
+
 /// Reports the workload's capabilities and the outcome of operations that would lift its mount
 /// restrictions, given a read-only mapping inside a read-write one and a file path in the latter.
 const CONTAINMENT_PROBE: &str = r#"

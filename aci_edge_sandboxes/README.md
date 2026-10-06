@@ -255,6 +255,15 @@ must be deprovisioned and provisioned again to accept the change.
   into the RAM overlay at its guest path, read-only where requested. The bind mounts travel on
   the guest's 1024-byte kernel command line, which leaves room for roughly a dozen typical
   paths; provision rejects a policy whose mounts do not fit with `policy_validation`.
+- Denied paths stay hidden through their aliases: `..`, host symbolic links and junctions,
+  links that workloads create, and other names of a denied object, such as a host hard link to
+  a denied file. OpenVMM never follows a link on the host, so the guest resolves every link
+  itself, and each lookup of a denied path fails with `EACCES`; an absolute Windows symbolic
+  link or a junction cannot be followed at all (`EPERM`). OpenVMM recognizes only the denied
+  objects themselves: a host hard link that already joins a file inside a denied directory to a
+  name outside it stays readable through that name. A directory that holds a host hard link to
+  a denied file may list the link's name, and a listing that also looks its entries up, as the
+  guest's first read of a directory does, fails with `EACCES`.
 - Workloads run as the guest's root with only the default container capabilities (`CHOWN`,
   `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `SETGID`, `SETUID`, `NET_BIND_SERVICE`, and
   `AUDIT_WRITE`), with `no_new_privs`, and without user namespaces, so they cannot remount or
@@ -548,9 +557,10 @@ translation, for example to turn a host working directory into a
   Exporting a whole volume (`/` or `C:\`) is refused, so mapped paths must
   share a directory below it.
 - Denied paths inside the export are hidden by OpenVMM itself: they are absent
-  from listings and inaccessible through any name. OpenVMM requires hidden
-  paths below the export to contain no whitespace, colons, or backslashes and
-  no links, and accepts at most 128 of them.
+  from listings and inaccessible through any name, except a host hard link to a
+  file inside a denied directory, which OpenVMM cannot tell from any other file.
+  OpenVMM requires hidden paths below the export to contain no whitespace,
+  colons, or backslashes and no links, and accepts at most 128 of them.
 - Mapped paths must exist, be directories or regular files, and share one
   volume. A path listed both read-only and read-write is mapped read-only. A
   denied path must not contain a mapped path, and a denied path that does not
