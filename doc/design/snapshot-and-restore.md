@@ -55,6 +55,15 @@ with a bounded wait, calls `sync`, and freezes the mounted filesystem. Its
 fresh-scratch mode instead requires scratch to be unmounted. A rejected capture
 thaws every guest-owned barrier; failure to thaw terminates the VM.
 
+A filesystem-only guest selected by `nvx_image_format=flat-ext4` has no
+persistent workload process or per-workload machine ID. Its trusted guest
+controller must reject in-flight commands, quiesce the filesystem execution
+cgroup and paired scratch, and provide the post-restore hook. On a
+`workload-start` restore, the native helper permits those two process-specific
+identities to be absent only for this explicit image format; the runtime hook
+remains mandatory. This does not make workload snapshots safe to share outside
+their trust domain.
+
 1. gate host input and defer completion of the snapshot-port write;
 2. stop the vCPU at the I/O boundary while completing the write, so saved state
    starts at the instruction immediately after `out`;
