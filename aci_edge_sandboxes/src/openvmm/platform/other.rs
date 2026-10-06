@@ -29,6 +29,16 @@ pub(crate) fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
+#[cfg(feature = "nvxhost")]
+pub(crate) fn open_sealable(_path: &Path, _deny_writers: bool) -> io::Result<fs::File> {
+    Err(unsupported())
+}
+
+#[cfg(feature = "nvxhost")]
+pub(crate) fn file_seal(_file: &fs::File) -> io::Result<super::FileSeal> {
+    Err(unsupported())
+}
+
 pub(crate) fn detach(_command: &mut Command, _breakaway_from_job: bool) {}
 
 pub(crate) fn probe_hypervisor(_hypervisor: Hypervisor) -> Result<(), String> {
@@ -56,4 +66,13 @@ pub(crate) fn connect_endpoint(
 
 pub(crate) fn endpoint_server_pid(_endpoint: &str) -> io::Result<Option<u32>> {
     Ok(None)
+}
+
+#[cfg(feature = "nvxhost")]
+pub(crate) fn claim_launch_log(_log: &fs::File) -> io::Result<()> {
+    Err(unsupported())
+}
+
+pub(crate) fn launch_log_released(_path: &Path) -> io::Result<bool> {
+    Err(unsupported())
 }

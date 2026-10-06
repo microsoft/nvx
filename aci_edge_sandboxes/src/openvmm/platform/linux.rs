@@ -245,6 +245,59 @@ pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+#[cfg(feature = "nvxhost")]
+pub(crate) use seal::{file_seal, open_sealable};
+
+#[cfg(feature = "nvxhost")]
+mod seal {
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::path::Path;
+
+    use crate::openvmm::platform::FileSeal;
+
+    /// Device and inode numbers, size, and modification and change times in nanoseconds.
+    const SCHEME: &str = "unix-file-v1";
+
+    /// Opens a file to seal it.
+    ///
+    /// Linux has no mandatory share modes, so `deny_writers` has no effect: comparing seals
+    /// taken from the handle detects a writer instead.
+    pub(crate) fn open_sealable(path: &Path, _deny_writers: bool) -> io::Result<File> {
+        // A FIFO would otherwise block the open until a writer appears.
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    }
+
+    /// Returns the seal of an open regular file.
+    pub(crate) fn file_seal(file: &File) -> io::Result<FileSeal> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path does not name a regular file",
+            ));
+        }
+        Ok(FileSeal {
+            scheme: SCHEME.to_owned(),
+            volume: metadata.dev(),
+            file: format!("{:x}", metadata.ino()),
+            length: metadata.size(),
+            modified: nanoseconds(metadata.mtime(), metadata.mtime_nsec()),
+            changed: Some(nanoseconds(metadata.ctime(), metadata.ctime_nsec())),
+        })
+    }
+
+    fn nanoseconds(seconds: i64, nanoseconds: i64) -> i64 {
+        seconds
+            .saturating_mul(1_000_000_000)
+            .saturating_add(nanoseconds)
+    }
+}
+
 /// Returns the control endpoint OpenVMM should listen on for a sandbox.
 pub(crate) fn control_endpoint(socket_path: &Path) -> io::Result<String> {
     socket_path
@@ -297,6 +350,37 @@ pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// Claims a fresh OpenVMM log for one launch.
+///
+/// The claim is an exclusive lock of the log's open file description, which OpenVMM shares
+/// through its inherited standard output and error, so the claim lasts until both the launching
+/// process and OpenVMM have exited.
+#[cfg(feature = "nvxhost")]
+pub(crate) fn claim_launch_log(log: &fs::File) -> io::Result<()> {
+    log.try_lock().map_err(|error| match error {
+        fs::TryLockError::WouldBlock => io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "another process holds the OpenVMM log",
+        ),
+        fs::TryLockError::Error(error) => error,
+    })
+}
+
+/// Returns whether no process holds the claim on an OpenVMM log, which proves that the launch
+/// that claimed it has no running process. A missing log proves nothing.
+pub(crate) fn launch_log_released(path: &Path) -> io::Result<bool> {
+    let log = match fs::File::open(path) {
+        Ok(log) => log,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    match log.try_lock() {
+        Ok(()) => Ok(true),
+        Err(fs::TryLockError::WouldBlock) => Ok(false),
+        Err(fs::TryLockError::Error(error)) => Err(error),
     }
 }
 

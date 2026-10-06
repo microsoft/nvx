@@ -11,13 +11,13 @@ use std::{mem, ptr};
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
     ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY,
-    ERROR_PIPE_NOT_CONNECTED, FILETIME, FreeLibrary, GENERIC_READ, GENERIC_WRITE, GetLastError,
-    HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    ERROR_PIPE_NOT_CONNECTED, ERROR_SHARING_VIOLATION, FILETIME, FreeLibrary, GENERIC_READ,
+    GENERIC_WRITE, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
-    GetFileInformationByHandle, OPEN_EXISTING, ReadFile, SECURITY_IDENTIFICATION,
+    FILE_SHARE_READ, GetFileInformationByHandle, OPEN_EXISTING, ReadFile, SECURITY_IDENTIFICATION,
     SECURITY_SQOS_PRESENT, WriteFile,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -448,6 +448,97 @@ pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     ))
 }
 
+#[cfg(feature = "nvxhost")]
+pub(crate) use seal::{file_seal, open_sealable};
+
+#[cfg(feature = "nvxhost")]
+mod seal {
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::mem;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileBasicInfo,
+        FileIdInfo, FileStandardInfo, GetFileInformationByHandleEx,
+    };
+
+    use crate::openvmm::platform::FileSeal;
+
+    /// Volume serial number, 128-bit file ID, end of file, and last-write time in 100-nanosecond
+    /// units.
+    const SCHEME: &str = "windows-file-v1";
+
+    /// Opens a file to seal it.
+    ///
+    /// With `deny_writers`, the handle reads the file and keeps writers, deletion, and renaming
+    /// out until it is closed, and opening fails while another handle can write the file.
+    /// Otherwise the handle reads only attributes and shares everything.
+    pub(crate) fn open_sealable(path: &Path, deny_writers: bool) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        if deny_writers {
+            options.read(true).share_mode(FILE_SHARE_READ);
+        } else {
+            options
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        options.open(path)
+    }
+
+    /// Returns the seal of an open regular file.
+    pub(crate) fn file_seal(file: &File) -> io::Result<FileSeal> {
+        let handle = file.as_raw_handle() as HANDLE;
+        let standard: FILE_STANDARD_INFO = information(handle, FileStandardInfo)?;
+        if standard.Directory || standard.DeletePending {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path does not name a regular file",
+            ));
+        }
+        let basic: FILE_BASIC_INFO = information(handle, FileBasicInfo)?;
+        let identity: FILE_ID_INFO = information(handle, FileIdInfo)?;
+        Ok(FileSeal {
+            scheme: SCHEME.to_owned(),
+            volume: identity.VolumeSerialNumber,
+            file: identity
+                .FileId
+                .Identifier
+                .iter()
+                .rev()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            length: u64::try_from(standard.EndOfFile)
+                .map_err(|_| io::Error::other("the file reports a negative length"))?,
+            modified: basic.LastWriteTime,
+            changed: None,
+        })
+    }
+
+    fn information<T: Default>(handle: HANDLE, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T> {
+        let mut value = T::default();
+        // SAFETY: the handle is open, and the buffer is a writable `T` of the size passed, which
+        // each caller pairs with the structure that `class` returns.
+        let succeeded = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                class,
+                (&raw mut value).cast(),
+                mem::size_of::<T>() as u32,
+            )
+        } != 0;
+        if succeeded {
+            Ok(value)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
 /// Returns a fresh named-pipe endpoint for OpenVMM to listen on.
 pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
     let mut bytes = [0u8; 16];
@@ -547,6 +638,31 @@ pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
             }
             error => return Err(io::Error::from_raw_os_error(error as i32)),
         }
+    }
+}
+
+/// Claims a fresh OpenVMM log for one launch.
+///
+/// The log's writable handles are the claim: OpenVMM inherits them as its standard output and
+/// error, so the claim lasts until both the launching process and OpenVMM have exited.
+#[cfg(feature = "nvxhost")]
+pub(crate) fn claim_launch_log(_log: &fs::File) -> io::Result<()> {
+    Ok(())
+}
+
+/// Returns whether no process holds the claim on an OpenVMM log, which proves that the launch
+/// that claimed it has no running process. A missing log proves nothing.
+pub(crate) fn launch_log_released(path: &Path) -> io::Result<bool> {
+    // Opening without write sharing fails while any handle can write the log.
+    match OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
