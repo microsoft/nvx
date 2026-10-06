@@ -29,6 +29,10 @@ const COMPLETION_SEND: u32 = 2;
 const COMPLETION_RECV: u32 = 3;
 const COMPLETION_DISPOSE: u32 = 6;
 const ERROR_CONNECT: u32 = 12;
+const ERROR_ARGUMENT: u32 = 10;
+const ERROR_ARGUMENT_NULL: u32 = 14;
+const ERROR_NOT_SUPPORTED: u32 = 15;
+const ERROR_HOST_CHANGED: u32 = 18;
 const CALL_UNARY: u32 = 0;
 const CALL_SERVER_STREAM: u32 = 1;
 const FRAME_RESPONSE: u8 = 2;
@@ -37,6 +41,7 @@ const FLAG_REMOTE_CLOSED: u8 = 1;
 const FLAG_NO_DATA: u8 = 4;
 const LAUNCH_GUEST_DEBUG: u32 = 1;
 const LAUNCH_HAS_MEMORY: u32 = 4;
+const PLAN_VALIDATE_ONLY: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -139,8 +144,20 @@ type CallSendRequest = unsafe extern "C" fn(u64, *const u8, usize, u8, i64, u32,
 type CallRecv = unsafe extern "C" fn(u64, u64) -> i32;
 type CallTryComplete = unsafe extern "C" fn(u64) -> i32;
 type CallRelease = unsafe extern "C" fn(u64) -> i32;
-type BuildRamfsArguments = unsafe extern "C" fn(
+type BuildRamfsArgumentsWithPlan = unsafe extern "C" fn(
     *const NvxLaunchRequest,
+    *const u8,
+    usize,
+    *mut *mut u8,
+    *mut usize,
+    *mut *mut c_void,
+) -> i32;
+type PlanSandbox = unsafe extern "C" fn(
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    u32,
     *mut *mut u8,
     *mut usize,
     *mut *mut c_void,
@@ -164,7 +181,8 @@ struct Exports {
     call_recv: CallRecv,
     call_try_complete: CallTryComplete,
     call_release: CallRelease,
-    build_ramfs_arguments: BuildRamfsArguments,
+    build_ramfs_arguments_with_plan: BuildRamfsArgumentsWithPlan,
+    plan_sandbox: PlanSandbox,
     buffer_free: BufferFree,
 }
 
@@ -244,13 +262,73 @@ impl HostLibrary {
             call_recv: resolve(&library, b"nvx_call_recv\0")?,
             call_try_complete: resolve(&library, b"nvx_call_try_complete\0")?,
             call_release: resolve(&library, b"nvx_call_release\0")?,
-            build_ramfs_arguments: resolve(&library, b"nvx_build_ramfs_launch_arguments\0")?,
+            build_ramfs_arguments_with_plan: resolve(
+                &library,
+                b"nvx_build_ramfs_launch_arguments_with_plan\0",
+            )?,
+            plan_sandbox: resolve(&library, b"nvx_plan_sandbox\0")?,
             buffer_free: resolve(&library, b"nvx_buffer_free\0")?,
         };
         Ok(Arc::new(Self {
             _library: library,
             exports,
         }))
+    }
+
+    /// Plans the host paths and network of `policy`, the JSON of a request's `filesystem` and
+    /// `network` sections, for a guest at `guest_network`.
+    ///
+    /// Returns the plan's JSON, which the caller stores and passes back at launch, or `None`
+    /// when `validate_only`, which checks the policy without touching the host. Policies that
+    /// the library cannot enforce fail with `policy_validation`.
+    pub(crate) fn plan_sandbox(
+        &self,
+        policy: &str,
+        guest_network: &str,
+        validate_only: bool,
+    ) -> Result<Option<String>> {
+        let mut buffer = ptr::null_mut();
+        let mut length = 0;
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            (self.exports.plan_sandbox)(
+                policy.as_ptr(),
+                policy.len(),
+                guest_network.as_ptr(),
+                guest_network.len(),
+                if validate_only { PLAN_VALIDATE_ONLY } else { 0 },
+                &mut buffer,
+                &mut length,
+                &mut error,
+            )
+        };
+        if status != STATUS_OK || !error.is_null() {
+            let failure = self.failure(error);
+            if !error.is_null() {
+                unsafe { (self.exports.error_free)(error) };
+            }
+            return Err(
+                if matches!(
+                    failure.kind,
+                    ERROR_ARGUMENT | ERROR_ARGUMENT_NULL | ERROR_NOT_SUPPORTED
+                ) {
+                    Error::policy_validation(failure.message)
+                } else {
+                    failure.as_error("planning host paths and network", status)
+                },
+            );
+        }
+        if validate_only {
+            return Ok(None);
+        }
+        if buffer.is_null() || length == 0 {
+            return Err(Error::backend_error("nvxhost returned no sandbox plan"));
+        }
+        let plan = unsafe { slice::from_raw_parts(buffer, length).to_vec() };
+        unsafe { (self.exports.buffer_free)(buffer, length) };
+        String::from_utf8(plan).map(Some).map_err(|error| {
+            Error::backend_error("nvxhost returned a non-UTF-8 sandbox plan").with_source(error)
+        })
     }
 
     pub(crate) fn launch_arguments(&self, inputs: &LaunchInputs<'_>) -> Result<Vec<OsString>> {
@@ -287,10 +365,31 @@ impl HostLibrary {
         let mut buffer = ptr::null_mut();
         let mut length = 0;
         let mut error = ptr::null_mut();
+        let plan = inputs.plan.unwrap_or_default();
         let status = unsafe {
-            (self.exports.build_ramfs_arguments)(&request, &mut buffer, &mut length, &mut error)
+            (self.exports.build_ramfs_arguments_with_plan)(
+                &request,
+                plan.as_ptr(),
+                plan.len(),
+                &mut buffer,
+                &mut length,
+                &mut error,
+            )
         };
-        self.check_status("building OpenVMM arguments", status, error)?;
+        if status != STATUS_OK || !error.is_null() {
+            let failure = self.failure(error);
+            if !error.is_null() {
+                unsafe { (self.exports.error_free)(error) };
+            }
+            return Err(if failure.kind == ERROR_HOST_CHANGED {
+                Error::backend_error(format!(
+                    "{}; deprovision the sandbox and provision it again",
+                    failure.message
+                ))
+            } else {
+                failure.as_error("building OpenVMM arguments", status)
+            });
+        }
         if buffer.is_null() || length == 0 {
             return Err(Error::backend_error(
                 "nvxhost returned no OpenVMM launch arguments",
@@ -377,6 +476,8 @@ pub(crate) struct LaunchInputs<'a> {
     pub(crate) hypervisor: &'a str,
     pub(crate) memory_mb: u32,
     pub(crate) guest_debug: bool,
+    /// JSON of the sandbox plan from [`HostLibrary::plan_sandbox`], if the sandbox has one.
+    pub(crate) plan: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -881,18 +982,18 @@ mod tests {
                 .message()
                 .contains("does not match the approved SHA-256")
         );
-        let args = host
-            .launch_arguments(&LaunchInputs {
-                kernel: Path::new(r"C:\test\vmlinux"),
-                initrd: Path::new(r"C:\test\edge-initramfs.cpio.gz"),
-                image: Path::new(r"C:\test\image.gpt"),
-                control: "//./pipe/openvmm-microvm-edge-control",
-                boot: "//./pipe/openvmm-microvm-edge-boot",
-                hypervisor: "whp",
-                memory_mb: 256,
-                guest_debug: false,
-            })
-            .unwrap();
+        let inputs = |plan| LaunchInputs {
+            kernel: Path::new(r"C:\test\vmlinux"),
+            initrd: Path::new(r"C:\test\edge-initramfs.cpio.gz"),
+            image: Path::new(r"C:\test\image.gpt"),
+            control: "//./pipe/openvmm-microvm-edge-control",
+            boot: "//./pipe/openvmm-microvm-edge-boot",
+            hypervisor: "whp",
+            memory_mb: 256,
+            guest_debug: false,
+            plan,
+        };
+        let args = host.launch_arguments(&inputs(None)).unwrap();
         let args: Vec<_> = args
             .iter()
             .map(|argument| argument.to_str().unwrap())
@@ -904,6 +1005,38 @@ mod tests {
                 .filter(|&&argument| argument == "--microvm-sandbox-block")
                 .count(),
             1
+        );
+        assert!(!args.contains(&"--mount") && !args.contains(&"--net"));
+
+        // Validation consults nothing on the host; unenforceable policies are policy errors.
+        assert_eq!(host.plan_sandbox("{}", "10.0.0.2/24", true).unwrap(), None);
+        let ipv6 = r#"{"network":{"egress":{"default":"allow","deny":[{"to":[{"cidr":"::/0"}]}]},"ingress":{"default":"deny"}}}"#;
+        assert_eq!(
+            host.plan_sandbox(ipv6, "10.0.0.2/24", true)
+                .unwrap_err()
+                .code(),
+            crate::ErrorCode::PolicyValidation
+        );
+        // A plan maps a host directory and attaches a network device at launch.
+        let directory = tempfile::tempdir().unwrap();
+        let policy = serde_json::json!({
+            "filesystem": { "readonlyPaths": [directory.path()] },
+            "network": { "egress": { "default": "allow" }, "ingress": { "default": "deny" } },
+        })
+        .to_string();
+        let plan = host
+            .plan_sandbox(&policy, "10.0.0.2/24", false)
+            .unwrap()
+            .unwrap();
+        let args = host.launch_arguments(&inputs(Some(&plan))).unwrap();
+        let args: Vec<_> = args
+            .iter()
+            .map(|argument| argument.to_str().unwrap())
+            .collect();
+        assert!(args.contains(&"--mount") && args.contains(&"--net"));
+        assert!(
+            args.iter()
+                .any(|argument| argument.contains("nvx_overlay_upper=ramfs nvx_map=.,"))
         );
     }
 }

@@ -1,25 +1,33 @@
-//! Opt-in WHP lifecycle and robustness proofs with a separately supplied native library and guest.
+//! Opt-in lifecycle, robustness, host-path, and network proofs with a separately supplied native
+//! library and guest.
 //!
 //! The tests need `NVXHOST_TEST_OPENVMM`, `NVXHOST_TEST_KERNEL`, `NVXHOST_TEST_INITRD`,
-//! `NVXHOST_TEST_IMAGE`, `NVXHOST_TEST_LIBRARY`, and the approved `NVXHOST_TEST_SHA256`. Run them
-//! one at a time so that the check for leftover OpenVMM processes is exact, and optimized, since
-//! creating a backend hashes the runtime files and registering an image hashes the image:
+//! `NVXHOST_TEST_IMAGE`, `NVXHOST_TEST_LIBRARY`, and the approved `NVXHOST_TEST_SHA256`.
+//! `NVXHOST_TEST_HYPERVISOR` selects `whp`, `mshv`, or `kvm`, and defaults to `whp` on Windows.
+//! The host-path and network tests also need `python3` in the image. Run the tests one at a time
+//! so that the check for leftover OpenVMM processes is exact, and optimized, since creating a
+//! backend hashes the runtime files and registering an image hashes the image:
 //! `cargo test --release --features nvxhost --test nvxhost_guest -- --ignored --test-threads=1`.
 #![cfg(feature = "nvxhost")]
 
 use std::collections::BTreeSet;
+use std::io::{ErrorKind, Write};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aci_edge_sandboxes::openvmm::{
     Hypervisor, ImageDigest, ImageId, NvxHostBackend, NvxHostConfig, OpenVmmConfig,
+    resolve_guest_path,
 };
 use aci_edge_sandboxes::{
-    AciEdgeSandbox, Error, ErrorCode, ExecOutcome, ExecOutput, ExecRequest, ProvisionRequest,
-    Result, SandboxId, StdinMode, StopResult,
+    Access, AciEdgeSandbox, EgressPolicy, Error, ErrorCode, ExecOutcome, ExecOutput, ExecRequest,
+    FilesystemPolicy, NetworkPolicy, NetworkRule, Protocol, ProvisionRequest, Result, SandboxId,
+    StdinMode, StopResult,
 };
 
 const HELPER_STATE: &str = "NVXHOST_TEST_HELPER_STATE";
@@ -42,6 +50,17 @@ fn approved_digest() -> [u8; 32] {
     digest
 }
 
+/// Returns the hypervisor that `NVXHOST_TEST_HYPERVISOR` names, which defaults to WHP on Windows.
+fn hypervisor() -> Hypervisor {
+    match std::env::var("NVXHOST_TEST_HYPERVISOR") {
+        Ok(name) => name
+            .parse()
+            .unwrap_or_else(|error| panic!("NVXHOST_TEST_HYPERVISOR: {error}")),
+        Err(_) if cfg!(windows) => Hypervisor::Whp,
+        Err(_) => panic!("NVXHOST_TEST_HYPERVISOR must name the hypervisor, such as mshv"),
+    }
+}
+
 /// Returns the test configuration for `image`, with sandbox state under `state`.
 fn native_config(state: &Path, image: &Path) -> NvxHostConfig {
     NvxHostConfig::new(
@@ -49,7 +68,7 @@ fn native_config(state: &Path, image: &Path) -> NvxHostConfig {
             required("NVXHOST_TEST_OPENVMM"),
             required("NVXHOST_TEST_KERNEL"),
             required("NVXHOST_TEST_INITRD"),
-            Hypervisor::Whp,
+            hypervisor(),
             state,
         ),
         image,
@@ -199,16 +218,32 @@ impl Drop for Cleanup<'_> {
 }
 
 fn provision<'a>(client: &'a AciEdgeSandbox, backend: &'a NvxHostBackend) -> Cleanup<'a> {
-    let id = client
-        .provision(&ProvisionRequest::new())
-        .unwrap()
-        .sandbox_id;
+    provision_with(client, backend, &ProvisionRequest::new())
+}
+
+fn provision_with<'a>(
+    client: &'a AciEdgeSandbox,
+    backend: &'a NvxHostBackend,
+    request: &ProvisionRequest,
+) -> Cleanup<'a> {
+    let id = client.provision(request).unwrap().sandbox_id;
     Cleanup {
         client,
         backend,
         id,
         armed: true,
     }
+}
+
+/// Provisions a sandbox for `request` and starts it.
+fn started<'a>(
+    client: &'a AciEdgeSandbox,
+    backend: &'a NvxHostBackend,
+    request: &ProvisionRequest,
+) -> Cleanup<'a> {
+    let sandbox = provision_with(client, backend, request);
+    client.start(&sandbox.id).unwrap();
+    sandbox
 }
 
 fn exec(client: &AciEdgeSandbox, id: &SandboxId, request: &ExecRequest) -> ExecOutput {
@@ -226,6 +261,29 @@ fn assert_prints(client: &AciEdgeSandbox, id: &SandboxId, text: &str) {
     );
     assert_eq!(output.outcome, ExecOutcome::Exited(0), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), text);
+}
+
+/// Runs `argv` in the guest without a shell, so that paths need no quoting.
+fn run(client: &AciEdgeSandbox, id: &SandboxId, argv: &[&str]) -> ExecOutput {
+    exec(client, id, &ExecRequest::argv(argv.iter().copied()))
+}
+
+/// Runs a Python program with `args` in the guest and returns what it printed.
+fn python(client: &AciEdgeSandbox, id: &SandboxId, program: &str, args: &[&str]) -> String {
+    let mut argv = vec!["/bin/sh", "-c", "exec python3 -c \"$@\"", "sh", program];
+    argv.extend_from_slice(args);
+    let output = exec(
+        client,
+        id,
+        &ExecRequest::argv(argv).with_timeout(Duration::from_secs(120)),
+    );
+    assert_eq!(output.outcome, ExecOutcome::Exited(0), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// The guest path of an existing host path, which mappings derive from the resolved path.
+fn guest(path: &Path) -> String {
+    resolve_guest_path(path).unwrap()
 }
 
 fn forced(stopped: &StopResult) -> Option<bool> {
@@ -305,14 +363,14 @@ fn start_in_helper(state: &Path, id: &SandboxId) -> Child {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_guest_lifecycle_stops_gracefully_and_cleans_up() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn guest_lifecycle_stops_gracefully_and_cleans_up() {
     let state = tempfile::tempdir().unwrap();
     let config = OpenVmmConfig::new(
         required("NVXHOST_TEST_OPENVMM"),
         required("NVXHOST_TEST_KERNEL"),
         required("NVXHOST_TEST_INITRD"),
-        Hypervisor::Whp,
+        hypervisor(),
         state.path(),
     );
     let backend = Arc::new(
@@ -422,7 +480,7 @@ fn whp_guest_lifecycle_stops_gracefully_and_cleans_up() {
         let stop = client.stop(&sandbox_id);
         let deprovision = client.deprovision(&sandbox_id);
         panic!(
-            "WHP lifecycle failed: {error}; recovery stop: {stop:?}; \
+            "guest lifecycle failed: {error}; recovery stop: {stop:?}; \
              recovery deprovision: {deprovision:?}; OpenVMM log: {log}; \
              guest console: {console}; OpenVMM outcome: {outcome}"
         );
@@ -430,8 +488,8 @@ fn whp_guest_lifecycle_stops_gracefully_and_cleans_up() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_exec_reports_exit_codes_streams_timeouts_and_output_limits() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn exec_reports_exit_codes_streams_timeouts_and_output_limits() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let backend = backend(state.path());
@@ -508,8 +566,8 @@ fn whp_exec_reports_exit_codes_streams_timeouts_and_output_limits() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_lifecycle_errors_follow_state_and_a_stopped_sandbox_restarts() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn lifecycle_errors_follow_state_and_a_stopped_sandbox_restarts() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let backend = backend(state.path());
@@ -541,8 +599,8 @@ fn whp_lifecycle_errors_follow_state_and_a_stopped_sandbox_restarts() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_new_backend_reattaches_to_a_running_guest_and_forces_a_stop() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn new_backend_reattaches_to_a_running_guest_and_forces_a_stop() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let id = {
@@ -579,8 +637,8 @@ fn whp_new_backend_reattaches_to_a_running_guest_and_forces_a_stop() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_a_crashed_guest_is_not_running_and_restarts_with_its_console_captured() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn a_crashed_guest_is_not_running_and_restarts_with_its_console_captured() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let backend = backend_with(state.path(), true, |_| {});
@@ -615,7 +673,7 @@ fn whp_a_crashed_guest_is_not_running_and_restarts_with_its_console_captured() {
 }
 
 #[test]
-#[ignore = "helper process for whp_guest_survives_its_caller_and_a_killed_start_leaves_no_vm"]
+#[ignore = "helper process for guest_survives_its_caller_and_a_killed_start_leaves_no_vm"]
 fn helper_starts_a_sandbox_in_another_process() {
     let Some(sandbox) = std::env::var_os(HELPER_SANDBOX) else {
         return;
@@ -626,8 +684,8 @@ fn helper_starts_a_sandbox_in_another_process() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_guest_survives_its_caller_and_a_killed_start_leaves_no_vm() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn guest_survives_its_caller_and_a_killed_start_leaves_no_vm() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let backend = backend_with(state.path(), false, |config| {
@@ -667,8 +725,8 @@ fn whp_guest_survives_its_caller_and_a_killed_start_leaves_no_vm() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_parallel_sandboxes_and_repeated_restarts_stay_isolated() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn parallel_sandboxes_and_repeated_restarts_stay_isolated() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let backend = backend(state.path());
@@ -722,8 +780,8 @@ fn whp_parallel_sandboxes_and_repeated_restarts_stay_isolated() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_concurrent_commands_share_one_guest() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn concurrent_commands_share_one_guest() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let backend = backend(state.path());
@@ -764,8 +822,8 @@ fn whp_concurrent_commands_share_one_guest() {
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_registered_images_start_without_hashing_and_fail_closed_after_a_change() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn registered_images_start_without_hashing_and_fail_closed_after_a_change() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let image = copied_image(state.path());
@@ -832,8 +890,8 @@ fn whp_registered_images_start_without_hashing_and_fail_closed_after_a_change() 
 }
 
 #[test]
-#[ignore = "requires an approved private DLL, edge initramfs, GPT image, and a WHP host"]
-fn whp_trusted_digests_and_content_verification_follow_their_contracts() {
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn trusted_digests_and_content_verification_follow_their_contracts() {
     let state = tempfile::tempdir().unwrap();
     let before = openvmm_processes();
     let image = copied_image(state.path());
@@ -903,5 +961,537 @@ fn whp_trusted_digests_and_content_verification_follow_their_contracts() {
     assert_prints(&client, &sandbox.id, "verified");
     assert_graceful(client.stop(&sandbox.id));
     client.deprovision(&sandbox.release()).unwrap();
+    assert_no_new_openvmm(&before);
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn host_paths_follow_the_filesystem_policy() {
+    let state = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let work = host.path().join("work");
+    for directory in ["src/secret", "out/frozen", "other"] {
+        std::fs::create_dir_all(work.join(directory)).unwrap();
+    }
+    for (file, content) in [
+        ("src/a.txt", "source"),
+        ("src/secret/key", "hidden"),
+        ("out/frozen/b.txt", "frozen"),
+        ("config.json", "{}"),
+        ("other/c.txt", "other"),
+    ] {
+        std::fs::write(work.join(file), content).unwrap();
+    }
+    let (src, out, frozen, config) = (
+        work.join("src"),
+        work.join("out"),
+        work.join("out").join("frozen"),
+        work.join("config.json"),
+    );
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        // A read-only file inside the read-only src, which OpenVMM exports read-write for out,
+        // and a read-only directory inside the read-write out, which only the guest protects.
+        readonly_paths: vec![
+            src.clone(),
+            config.clone(),
+            src.join("a.txt"),
+            frozen.clone(),
+        ],
+        readwrite_paths: vec![out.clone()],
+        denied_paths: vec![src.join("secret")],
+    });
+    let backend = backend(state.path());
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    // Workloads never see the sandbox state, which holds the plan of every sandbox: a mapping
+    // inside the state root fails, and one that contains it needs a denied path that hides it.
+    let exposing = |path: &Path, denied: Vec<PathBuf>| {
+        ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+            readonly_paths: vec![path.to_path_buf()],
+            denied_paths: denied,
+            ..FilesystemPolicy::default()
+        })
+    };
+    let parent = state.path().parent().unwrap();
+    for request in [
+        exposing(state.path(), Vec::new()),
+        exposing(parent, Vec::new()),
+    ] {
+        assert_eq!(
+            failure(client.provision(&request)),
+            ErrorCode::PolicyValidation
+        );
+    }
+    let hidden = client
+        .provision(&exposing(parent, vec![state.path().to_path_buf()]))
+        .unwrap();
+    client.deprovision(&hidden.sandbox_id).unwrap();
+
+    let sandbox = started(&client, &backend, &request);
+    let id = &sandbox.id;
+    let (guest_src, guest_out, guest_frozen, guest_config) =
+        (guest(&src), guest(&out), guest(&frozen), guest(&config));
+
+    let read = run(
+        &client,
+        id,
+        &[
+            "/bin/cat",
+            &format!("{guest_src}/a.txt"),
+            &guest_config,
+            &format!("{guest_frozen}/b.txt"),
+        ],
+    );
+    assert_eq!(read.stdout, b"source{}frozen", "{read:?}");
+    let listing = run(&client, id, &["/bin/ls", "-a", &guest_src]);
+    assert_eq!(listing.stdout, b".\n..\na.txt\n", "{listing:?}");
+    let attempts: [[&str; 2]; 7] = [
+        ["/bin/cat", &format!("{guest_src}/secret/key")],
+        ["/bin/touch", &format!("{guest_src}/new")],
+        ["/bin/touch", &guest_config],
+        ["/bin/touch", &format!("{guest_frozen}/new")],
+        ["/bin/rm", &format!("{guest_frozen}/b.txt")],
+        ["/bin/ls", "/run/nvx/hostfs"],
+        ["/bin/ls", &guest(&work.join("other"))],
+    ];
+    for denied in attempts {
+        let output = run(&client, id, &denied);
+        assert_ne!(
+            output.outcome,
+            ExecOutcome::Exited(0),
+            "{denied:?}: {output:?}"
+        );
+    }
+    let written = run(
+        &client,
+        id,
+        &[
+            "/bin/sh",
+            "-c",
+            "echo written > \"$1\"",
+            "sh",
+            &format!("{guest_out}/result"),
+        ],
+    );
+    assert_eq!(written.outcome, ExecOutcome::Exited(0), "{written:?}");
+    assert_eq!(
+        std::fs::read_to_string(out.join("result")).unwrap(),
+        "written\n"
+    );
+    assert_graceful(client.stop(id));
+    client.deprovision(&sandbox.release()).unwrap();
+    assert!(!src.join("new").exists() && !frozen.join("new").exists());
+    assert_eq!(
+        std::fs::read_to_string(frozen.join("b.txt")).unwrap(),
+        "frozen"
+    );
+    assert_no_new_openvmm(&before);
+}
+
+/// Reports the workload's capabilities and the outcome of operations that would lift its mount
+/// restrictions, given a read-only mapping inside a read-write one and a file path in the latter.
+const CONTAINMENT_PROBE: &str = r#"
+import ctypes, errno, json, sys
+libc = ctypes.CDLL(None, use_errno=True)
+frozen, writable = sys.argv[1], sys.argv[2]
+def call(name, *args):
+    ctypes.set_errno(0)
+    if getattr(libc, name)(*args) == 0:
+        return "ok"
+    return errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+def write(path):
+    try:
+        with open(path, "w") as file:
+            file.write("x")
+        return "ok"
+    except OSError as error:
+        return errno.errorcode.get(error.errno, str(error.errno))
+with open("/proc/self/status") as file:
+    status = dict(line.split(":", 1) for line in file.read().splitlines() if ":" in line)
+with open("/proc/sys/user/max_user_namespaces") as file:
+    user_namespaces = file.read().strip()
+names = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs")
+print(json.dumps({
+    "capabilities": [status[name].strip() for name in names],
+    "userNamespaces": user_namespaces,
+    "write": write(writable),
+    "writeFrozen": write(frozen + "/new"),
+    "remount": call("mount", None, frozen.encode(), None, ctypes.c_ulong(32 | 4096), None),
+    "tmpfs": call("mount", b"tmpfs", b"/tmp", b"tmpfs", ctypes.c_ulong(0), None),
+    "export": call("mount", b"microvm", b"/mnt", b"virtiofs", ctypes.c_ulong(0), None),
+    "unmount": call("umount2", frozen.encode(), 2),
+    "unshareMount": call("unshare", 0x20000),
+    "unshareUser": call("unshare", 0x10000000),
+    "chroot": call("chroot", b"/tmp"),
+}))
+"#;
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn workloads_cannot_lift_their_mount_restrictions() {
+    let state = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let out = host.path().join("out");
+    let frozen = out.join("frozen");
+    std::fs::create_dir_all(&frozen).unwrap();
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![frozen.clone()],
+        readwrite_paths: vec![out.clone()],
+        ..FilesystemPolicy::default()
+    });
+    let backend = backend(state.path());
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    let sandbox = started(&client, &backend, &request);
+    let printed = python(
+        &client,
+        &sandbox.id,
+        CONTAINMENT_PROBE,
+        &[&guest(&frozen), &format!("{}/written", guest(&out))],
+    );
+    let report: serde_json::Value = serde_json::from_str(&printed).unwrap();
+
+    // The workload stays root, with only the default container capabilities: CHOWN,
+    // DAC_OVERRIDE, FOWNER, FSETID, KILL, SETGID, SETUID, NET_BIND_SERVICE, and AUDIT_WRITE.
+    let (none, default) = ("0000000000000000", "00000000200004fb");
+    assert_eq!(
+        report["capabilities"],
+        serde_json::json!([none, default, default, default, none, "1"]),
+        "{report}"
+    );
+    assert_eq!(report["userNamespaces"], "0", "{report}");
+    assert_eq!(report["write"], "ok", "{report}");
+    assert_eq!(report["writeFrozen"], "EROFS", "{report}");
+    for operation in [
+        "remount",
+        "tmpfs",
+        "export",
+        "unmount",
+        "unshareMount",
+        "chroot",
+    ] {
+        assert_eq!(report[operation], "EPERM", "{operation}: {report}");
+    }
+    assert_ne!(report["unshareUser"], "ok", "{report}");
+    assert_graceful(client.stop(&sandbox.id));
+    client.deprovision(&sandbox.release()).unwrap();
+    assert!(out.join("written").is_file() && !frozen.join("new").exists());
+    assert_no_new_openvmm(&before);
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn replaced_host_objects_inside_a_writable_mapping_fail_the_next_start() {
+    let state = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let out = host.path().join("out");
+    let (frozen, secret, moved) = (out.join("frozen"), out.join("secret"), out.join("moved"));
+    for directory in [&frozen, &secret] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![frozen.clone()],
+        readwrite_paths: vec![out.clone()],
+        denied_paths: vec![secret.clone()],
+    });
+    let backend = backend(state.path());
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    let sandbox = started(&client, &backend, &request);
+    let id = &sandbox.id;
+    assert_prints(&client, id, "planned");
+    assert_graceful(client.stop(id));
+
+    // A decoy at a protected path fails the start until the planned object is back.
+    for pinned in [&secret, &frozen] {
+        std::fs::rename(pinned, &moved).unwrap();
+        std::fs::create_dir(pinned).unwrap();
+        let error = client
+            .start(id)
+            .expect_err("a start must fail when a protected object was replaced");
+        assert_eq!(error.code(), ErrorCode::BackendError, "{error}");
+        assert!(error.message().contains("provision it again"), "{error}");
+        std::fs::remove_dir(pinned).unwrap();
+        std::fs::rename(&moved, pinned).unwrap();
+        client.start(id).unwrap();
+        assert_prints(&client, id, "restored");
+        assert_graceful(client.stop(id));
+    }
+    client.deprovision(&sandbox.release()).unwrap();
+    assert_no_new_openvmm(&before);
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn every_mapping_that_fits_the_kernel_command_line_reaches_the_guest() {
+    let state = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let directories: Vec<PathBuf> = (0..64)
+        .map(|index| {
+            let directory = host.path().join(format!("m{index:02}"));
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("index"), format!("{index} ")).unwrap();
+            directory
+        })
+        .collect();
+    let request = |count: usize| {
+        ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+            readonly_paths: directories[..count].to_vec(),
+            ..FilesystemPolicy::default()
+        })
+    };
+    let backend = backend(state.path());
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+
+    // Provisioning plans the mappings without a guest, so it finds the largest set that fits.
+    let mut fitting = 0;
+    for count in 1..=directories.len() {
+        match client.provision(&request(count)) {
+            Ok(provisioned) => {
+                client.deprovision(&provisioned.sandbox_id).unwrap();
+                fitting = count;
+            }
+            Err(error) => {
+                assert_eq!(error.code(), ErrorCode::PolicyValidation, "{error}");
+                assert!(error.message().contains("kernel command line"), "{error}");
+                break;
+            }
+        }
+    }
+    assert!(
+        (2..directories.len()).contains(&fitting),
+        "{fitting} mappings fit the kernel command line"
+    );
+    let sandbox = started(&client, &backend, &request(fitting));
+    let files: Vec<String> = directories[..fitting]
+        .iter()
+        .map(|directory| format!("{}/index", guest(directory)))
+        .collect();
+    let mut argv = vec!["/bin/cat"];
+    argv.extend(files.iter().map(String::as_str));
+    let output = run(&client, &sandbox.id, &argv);
+    let expected: String = (0..fitting).map(|index| format!("{index} ")).collect();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        expected,
+        "{output:?}"
+    );
+    eprintln!("{fitting} mappings fit the kernel command line");
+    assert_graceful(client.stop(&sandbox.id));
+    client.deprovision(&sandbox.release()).unwrap();
+    assert_no_new_openvmm(&before);
+}
+
+/// Reports the guest's interfaces, source address, and resolver, and whether it reaches the
+/// gateway's DNS service, two host services that greet it, and a host-loopback service through
+/// the gateway.
+const NETWORK_PROBE: &str = r#"
+import json, socket, sys
+gateway, host, allowed, other, loopback = sys.argv[1:6]
+def connect(address, port, greeted=True):
+    try:
+        with socket.create_connection((address, int(port)), timeout=3) as connection:
+            return "reached:" + connection.recv(16).decode() if greeted else "reached"
+    except OSError:
+        return "blocked"
+def source():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect((gateway, 53))
+            return probe.getsockname()[0]
+    except OSError:
+        return "none"
+def resolver():
+    try:
+        with open("/etc/resolv.conf") as file:
+            return file.read()
+    except OSError:
+        return None
+print(json.dumps({
+    "interfaces": sorted(name for _, name in socket.if_nameindex()),
+    "source": source(),
+    "dns": connect(gateway, 53, greeted=False),
+    "allowed": connect(host, allowed),
+    "other": connect(host, other),
+    "loopback": connect(gateway, loopback),
+    "resolver": resolver(),
+}))
+"#;
+
+/// Returns the host's IPv4 address on its default route.
+fn host_address() -> Ipv4Addr {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    // Connecting a UDP socket selects a route and a source address without sending anything.
+    socket
+        .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
+        .expect("the host needs a default IPv4 route");
+    match socket.local_addr().unwrap().ip() {
+        IpAddr::V4(address) if !address.is_loopback() && !address.is_unspecified() => address,
+        address => panic!("the host's default route uses {address}"),
+    }
+}
+
+/// Host TCP services that greet every connection with their name until they are dropped.
+struct Services {
+    done: Arc<AtomicBool>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+impl Services {
+    fn serve(listeners: Vec<(TcpListener, &'static str)>) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let threads = listeners
+            .into_iter()
+            .map(|(listener, greeting)| {
+                listener.set_nonblocking(true).unwrap();
+                let done = done.clone();
+                thread::spawn(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let _ = stream.set_nonblocking(false);
+                                let _ = stream.write_all(greeting.as_bytes());
+                            }
+                            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(20));
+                            }
+                            Err(error) => panic!("the {greeting} service failed: {error}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        Self { done, threads }
+    }
+}
+
+impl Drop for Services {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn network_policies_are_enforced() {
+    let state = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let host = host_address();
+    // The guest must reach the host through its gateway rather than consider it on-link.
+    let (guest_network, guest_address, gateway) = if host.octets()[..3] == [10, 0, 0] {
+        ("10.0.1.2/24", "10.0.1.2", "10.0.1.1")
+    } else {
+        ("10.0.0.2/24", "10.0.0.2", "10.0.0.1")
+    };
+    let listen = |address: Ipv4Addr| TcpListener::bind((address, 0)).unwrap();
+    let (allowed, other, loopback) = (listen(host), listen(host), listen(Ipv4Addr::LOCALHOST));
+    let ports = [&allowed, &other, &loopback]
+        .map(|listener| listener.local_addr().unwrap().port().to_string());
+    let _services = Services::serve(vec![
+        (allowed, "allowed"),
+        (other, "other"),
+        (loopback, "loopback"),
+    ]);
+    let backend = backend_with(state.path(), false, |config| {
+        config.guest_network = guest_network.to_owned();
+    });
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    let host_rule = || NetworkRule::to(format!("{host}/32"));
+    let contained = |egress: EgressPolicy| NetworkPolicy {
+        egress,
+        ..NetworkPolicy::deny_all()
+    };
+    // Each case lists whether the guest reaches the gateway's DNS service, the allowed host
+    // service, and the other host service. No case reaches the host's loopback.
+    let cases = [
+        (
+            "no device",
+            NetworkPolicy::deny_all(),
+            [false, false, false],
+        ),
+        (
+            "allow",
+            NetworkPolicy::egress(Access::Allow),
+            [true, true, true],
+        ),
+        (
+            "host allow rule",
+            contained(
+                EgressPolicy::new(Access::Deny)
+                    .with_allow(host_rule().on_port(Protocol::Tcp, ports[0].parse().unwrap())),
+            ),
+            [false, true, false],
+        ),
+        (
+            "host deny rule",
+            contained(EgressPolicy::new(Access::Allow).with_deny(host_rule())),
+            [true, false, false],
+        ),
+        (
+            "gateway DNS rule",
+            contained(
+                EgressPolicy::new(Access::Deny)
+                    .with_allow(NetworkRule::to(gateway).on_port(Protocol::Tcp, 53)),
+            ),
+            [true, false, false],
+        ),
+    ];
+    let host_text = host.to_string();
+    let reached = |yes: bool, greeting: &str| match (yes, greeting) {
+        (false, _) => "blocked".to_owned(),
+        (true, "") => "reached".to_owned(),
+        (true, greeting) => format!("reached:{greeting}"),
+    };
+    let gateway_resolver = serde_json::json!(format!("nameserver {gateway}\n"));
+    for (name, policy, [dns, allowed, other]) in cases {
+        let nic = name != "no device";
+        let sandbox = started(
+            &client,
+            &backend,
+            &ProvisionRequest::new().with_network(policy),
+        );
+        let printed = python(
+            &client,
+            &sandbox.id,
+            NETWORK_PROBE,
+            &[gateway, &host_text, &ports[0], &ports[1], &ports[2]],
+        );
+        let mut report: serde_json::Value = serde_json::from_str(&printed).unwrap();
+        let fields = report.as_object_mut().unwrap();
+        let resolver = fields.remove("resolver");
+        let interfaces = fields.remove("interfaces").unwrap();
+        let (interface_count, source) = if nic { (2, guest_address) } else { (1, "none") };
+        assert!(
+            interfaces.as_array().unwrap().len() == interface_count
+                && interfaces
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("lo")),
+            "{name}: interfaces {interfaces}"
+        );
+        assert_eq!(
+            report,
+            serde_json::json!({
+                "source": source,
+                "dns": reached(dns, ""),
+                "allowed": reached(allowed, "allowed"),
+                "other": reached(other, "other"),
+                "loopback": "blocked",
+            }),
+            "{name}"
+        );
+        // The guest names its gateway as resolver only when it may reach its DNS service.
+        assert_eq!(
+            resolver.as_ref() == Some(&gateway_resolver),
+            dns,
+            "{name}: resolver {resolver:?}"
+        );
+        assert_graceful(client.stop(&sandbox.id));
+        client.deprovision(&sandbox.release()).unwrap();
+    }
     assert_no_new_openvmm(&before);
 }

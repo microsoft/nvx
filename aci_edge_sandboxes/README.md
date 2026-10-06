@@ -117,8 +117,9 @@ compatible kernel and static edge-agent initramfs, a prepared GPT image, the abs
 to `nvxhost.dll` (`libnvxhost.so` on Linux), and the independently approved SHA-256 of that
 library. The Rust crate does **not** build, download, or publish the private library.
 `NvxHostBackend::new` verifies the file digest and ABI version and requires the additive
-`nvx_build_ramfs_launch_arguments` and `nvx_session_connect_verified` exports. A missing,
-wrong-version, or wrong-digest library fails rather than falling back.
+`nvx_plan_sandbox`, `nvx_build_ramfs_launch_arguments_with_plan`, and
+`nvx_session_connect_verified` exports. A missing, wrong-version, or wrong-digest library fails
+rather than falling back.
 
 The image is attached read-only in OpenVMM's distro block slot. The edge guest validates
 its GPT and p2+ ext4 layers and uses a RAM-backed tmpfs upper/work for its overlay; it
@@ -165,19 +166,21 @@ and `guestBuildId`; stop reports `forced` and, after a failed graceful shutdown,
 `gracefulError`. A capture failure never fails stop or deprovision: both report it as
 `consoleError`.
 
-This first backend supports provision/start/exec/stop/deprovision with shell commands or
-argv and a fixed caller-provided image. Positive execution timeouts must be whole seconds,
-matching the guest RPC's precision; finer-grained timeouts fail validation rather than
-silently extending execution. It explicitly rejects host file mappings, network
-configuration beyond deny-all, piped stdin, execution cancellation, custom working
-directories and environments. Snapshot/restore, image selection, and richer guest
-operations are not part of this profile. See
+This backend supports provision/start/exec/stop/deprovision with shell commands or argv, a
+fixed caller-provided image, and the host paths and network rules described below. Positive
+execution timeouts must be whole seconds, matching the guest RPC's precision; finer-grained
+timeouts fail validation rather than silently extending execution. It explicitly rejects piped
+stdin, execution cancellation, custom working directories and environments. Snapshot/restore,
+image selection, and richer guest operations are not part of this profile. See
 [`examples/nvxhost_lifecycle.rs`](examples/nvxhost_lifecycle.rs) for a run requiring
 `--openvmm`, `--kernel`, `--initrd`, `--image`, `--host-library`, `--host-sha256`,
 `--state-root`, `--hypervisor`, and a command after `--`; an optional `--image-sha256`
-requires the image's digest when it is registered. The ignored
-`tests/nvxhost_guest.rs` exercises an actual WHP guest when the corresponding
-`NVXHOST_TEST_*` paths and approved DLL digest are set.
+requires the image's digest when it is registered. The repeatable `--readonly`, `--readwrite`,
+and `--denied` options map host paths, and `--egress allow|deny` with the repeatable
+`--egress-allow` and `--egress-deny` options, each taking `CIDR` or `CIDR:tcp|udp:PORT`, attach a
+network. The ignored `tests/nvxhost_guest.rs` exercises an actual guest when the corresponding
+`NVXHOST_TEST_*` paths and approved library digest are set: under WHP on Windows, or under the
+hypervisor that `NVXHOST_TEST_HYPERVISOR` names, such as `mshv` on Linux.
 
 For example, from `aci_edge_sandboxes` on a Windows WHP host, set the following
 paths to compatible, separately built artifacts and a caller-prepared GPT disk
@@ -199,12 +202,56 @@ cargo run --release --locked --features nvxhost --example nvxhost_lifecycle -- `
     --state-root $stateRoot --hypervisor whp -- 'printf READY'
 ```
 
+To map `C:\work\src` read-only and `C:\work\out` read-write, and let the guest reach only
+`192.0.2.10` on TCP port 443, add
+`--readonly C:\work\src --readwrite C:\work\out --egress deny --egress-allow 192.0.2.10:tcp:443`
+before `--`. The example prints where each mapped path appears in the guest, here
+`/mnt/c/work/src` and `/mnt/c/work/out`.
+
 Build the native library and the static edge initramfs separately from their
 matching private sources; this example neither fetches nor builds them. Use the
 pinned OpenVMM, which includes the scratchless RAM-overlay topology, and a kernel
 compatible with that OpenVMM and guest revision. On Linux, supply a matching
-`libnvxhost.so` and OpenVMM build and select `--hypervisor mshv`; the Linux edge
-lifecycle has not yet been verified end to end.
+`libnvxhost.so` and OpenVMM build and select `--hypervisor mshv`.
+
+### Native host paths and network
+
+The native backend accepts the same `filesystem` and `network` policies as the direct
+backend: it maps host paths to the same guest paths under the same rules and expands network
+rules the same way; see [Host paths](#host-paths) and [Network rules](#network-rules). It also
+refuses mappings that would show workloads its state root, described below. Its workloads run
+as the guest's root, so it ignores `map_host_identity`. The private library plans the
+policies. Provision passes them to `nvx_plan_sandbox`, which resolves the mapped and denied
+paths, chooses the export, pins the objects inside read-write mappings, and expands the
+network rules; the sandbox record keeps the resulting plan. Start passes the plan back, and
+the library checks it again against every planning rule that needs no host access, and checks
+the pinned objects: if one was replaced, start fails with `backend_error`, and the sandbox
+must be deprovisioned and provisioned again to accept the change.
+
+- The state root holds the record, and so the plan, of every sandbox, which decides what the
+  next start exports and which egress it allows. Provision therefore refuses, with
+  `policy_validation`, a mapped path inside the state root, and one that contains it unless a
+  denied path inside the mapping hides it.
+- OpenVMM exports the deepest directory that contains every mapped path through one
+  virtio-fs device, read-only unless a path is read-write, and hides the denied paths. The
+  guest mounts the export where workloads cannot reach it and bind-mounts each mapped path
+  into the RAM overlay at its guest path, read-only where requested. The bind mounts travel on
+  the guest's 1024-byte kernel command line, which leaves room for roughly a dozen typical
+  paths; provision rejects a policy whose mounts do not fit with `policy_validation`.
+- Workloads run as the guest's root with only the default container capabilities (`CHOWN`,
+  `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `SETGID`, `SETUID`, `NET_BIND_SERVICE`, and
+  `AUDIT_WRITE`), with `no_new_privs`, and without user namespaces, so they cannot remount or
+  unmount the mapped paths or mount the export again. Host-side changes through read-write
+  mappings, including modes and ownership, happen with the credentials of the account that
+  runs OpenVMM, so run OpenVMM unprivileged. A host hard link that already joins a file in a
+  read-write mapping to one in a read-only mapping stays writable through the read-write
+  path.
+- A policy that denies egress without allow rules attaches no network device. Otherwise the
+  guest gets `OpenVmmConfig::guest_network` (`10.0.0.2/24` by default) behind OpenVMM's NAT
+  gateway, the network's first address, and names that gateway as its DNS server in
+  `/etc/resolv.conf` when the policy allows TCP or UDP port 53 to it. Choose a guest network
+  that contains no address the guest must reach. Ingress and host-loopback access must be
+  `deny`.
 
 The caller must independently approve and protect the native asset. Checking a caller-supplied
 digest does not make a writable path or a self-declared digest trustworthy; use this profile
