@@ -6,9 +6,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use aci_edge_sandboxes::openvmm::{
-    Hypervisor, ImageDigest, NvxHostBackend, NvxHostConfig, OpenVmmConfig,
+    Hypervisor, ImageDigest, NvxHostBackend, NvxHostConfig, OpenVmmConfig, resolve_guest_path,
 };
-use aci_edge_sandboxes::{AciEdgeSandbox, ExecOutcome, ExecRequest, ProvisionRequest};
+use aci_edge_sandboxes::{
+    Access, AciEdgeSandbox, EgressPolicy, ExecOutcome, ExecRequest, FilesystemPolicy,
+    NetworkPolicy, NetworkRule, Protocol, ProvisionRequest,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -30,6 +33,10 @@ fn run() -> Result<(), String> {
     let mut image_digest = ImageDigest::Compute;
     let mut root = None;
     let mut hypervisor = None;
+    let mut filesystem = FilesystemPolicy::default();
+    let mut egress = None;
+    let mut allow = Vec::new();
+    let mut deny = Vec::new();
     let mut command = None;
     let mut args = std::env::args().skip(1);
     while let Some(option) = args.next() {
@@ -49,6 +56,12 @@ fn run() -> Result<(), String> {
             }
             "--state-root" => root = Some(value()?),
             "--hypervisor" => hypervisor = Some(value()?.parse::<Hypervisor>().map_err(describe)?),
+            "--readonly" => filesystem.readonly_paths.push(value()?.into()),
+            "--readwrite" => filesystem.readwrite_paths.push(value()?.into()),
+            "--denied" => filesystem.denied_paths.push(value()?.into()),
+            "--egress" => egress = Some(parse_access(&option, &value()?)?),
+            "--egress-allow" => allow.push(parse_rule(&option, &value()?)?),
+            "--egress-deny" => deny.push(parse_rule(&option, &value()?)?),
             "--" => {
                 command = Some(args.by_ref().collect::<Vec<_>>().join(" "));
                 break;
@@ -69,6 +82,33 @@ fn run() -> Result<(), String> {
     let command = command
         .filter(|command| !command.is_empty())
         .ok_or("pass the guest command after --")?;
+    let mut request = ProvisionRequest::new();
+    if !filesystem.is_empty() {
+        for path in filesystem
+            .readonly_paths
+            .iter()
+            .chain(&filesystem.readwrite_paths)
+        {
+            if let Some(guest) = resolve_guest_path(path) {
+                eprintln!("{} is {guest} in the guest", path.display());
+            }
+        }
+        request = request.with_filesystem(filesystem);
+    }
+    match egress {
+        Some(default) => {
+            request = request.with_network(NetworkPolicy {
+                egress: EgressPolicy {
+                    default,
+                    allow,
+                    deny,
+                },
+                ..NetworkPolicy::deny_all()
+            });
+        }
+        None if allow.is_empty() && deny.is_empty() => {}
+        None => return Err("--egress-allow and --egress-deny require --egress".to_owned()),
+    }
 
     let config = OpenVmmConfig::new(openvmm, kernel, initrd, hypervisor, PathBuf::from(root));
     let backend = Arc::new(
@@ -78,10 +118,7 @@ fn run() -> Result<(), String> {
         .map_err(describe)?,
     );
     let client = AciEdgeSandbox::from_shared(backend.clone());
-    let id = client
-        .provision(&ProvisionRequest::new())
-        .map_err(describe)?
-        .sandbox_id;
+    let id = client.provision(&request).map_err(describe)?.sandbox_id;
     let started = client.start(&id);
     let succeeded = started.is_ok();
     let executed = started.and_then(|_| {
@@ -155,6 +192,38 @@ fn parse_digest(option: &str, hex: &str) -> Result<[u8; 32], String> {
     Ok(digest)
 }
 
+fn parse_access(option: &str, text: &str) -> Result<Access, String> {
+    match text {
+        "allow" => Ok(Access::Allow),
+        "deny" => Ok(Access::Deny),
+        _ => Err(format!("{option} must be allow or deny")),
+    }
+}
+
+/// Parses `CIDR` or `CIDR:tcp|udp:PORT`, such as `192.0.2.0/24` or `192.0.2.1:tcp:443`.
+fn parse_rule(option: &str, text: &str) -> Result<NetworkRule, String> {
+    let malformed = || format!("{option} must be CIDR or CIDR:tcp|udp:PORT");
+    let mut parts = text.split(':');
+    let rule = NetworkRule::to(
+        parts
+            .next()
+            .filter(|cidr| !cidr.is_empty())
+            .ok_or_else(malformed)?,
+    );
+    match (parts.next(), parts.next(), parts.next()) {
+        (None, ..) => Ok(rule),
+        (Some(protocol), Some(port), None) => {
+            let protocol = match protocol {
+                "tcp" => Protocol::Tcp,
+                "udp" => Protocol::Udp,
+                _ => return Err(malformed()),
+            };
+            Ok(rule.on_port(protocol, port.parse().map_err(|_| malformed())?))
+        }
+        _ => Err(malformed()),
+    }
+}
+
 fn describe(error: aci_edge_sandboxes::Error) -> String {
     error.to_string()
 }
@@ -170,5 +239,29 @@ mod tests {
         assert!(parse("ab").unwrap_err().starts_with("--image-sha256 "));
         assert!(parse(&"é".repeat(32)).is_err());
         assert!(parse(&"gg".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn egress_rules_name_a_network_and_optionally_one_port() {
+        let parse = |text: &str| parse_rule("--egress-allow", text);
+        assert_eq!(
+            parse("192.0.2.0/24").unwrap(),
+            NetworkRule::to("192.0.2.0/24")
+        );
+        assert_eq!(
+            parse("192.0.2.1:udp:53").unwrap(),
+            NetworkRule::to("192.0.2.1").on_port(Protocol::Udp, 53)
+        );
+        for malformed in [
+            "",
+            ":tcp:1",
+            "192.0.2.1:tcp",
+            "192.0.2.1:icmp:1",
+            "192.0.2.1:tcp:x",
+        ] {
+            assert!(parse(malformed).is_err(), "{malformed}");
+        }
+        assert_eq!(parse_access("--egress", "deny").unwrap(), Access::Deny);
+        assert!(parse_access("--egress", "Deny").is_err());
     }
 }

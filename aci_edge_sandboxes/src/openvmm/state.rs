@@ -79,6 +79,8 @@ pub(crate) struct SandboxRecord {
 ///
 /// The image is referenced by its registered content ID (`sha256:<hex>`), whose registration
 /// supplies the path; the digests of the runtime files and host library are lowercase hexadecimal.
+/// The host library's plan of the sandbox's host paths and network, if the request had any, is
+/// kept as the library wrote it and handed back to the library at every start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct NativeArtifactRecord {
@@ -87,6 +89,8 @@ pub(crate) struct NativeArtifactRecord {
     pub(crate) kernel_sha256: String,
     pub(crate) initrd_sha256: String,
     pub(crate) library_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) devices: Option<serde_json::Value>,
 }
 
 /// Identity of the OpenVMM process of a running sandbox.
@@ -565,6 +569,7 @@ mod tests {
             kernel_sha256: "2".repeat(64),
             initrd_sha256: "3".repeat(64),
             library_sha256: "4".repeat(64),
+            devices: Some(serde_json::json!({ "format": 1, "network": { "egress": "deny" } })),
         });
         store.create(&id, &native).unwrap();
         let (_guard, loaded) = store.lock_and_load(&id).unwrap();

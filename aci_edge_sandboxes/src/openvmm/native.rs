@@ -12,6 +12,7 @@ use prost::Message;
 
 use super::artifacts::absolute;
 use super::config::{OpenVmmConfig, validate_unix_socket_path};
+use super::filesystem;
 use super::images::{
     ImageDigest, ImageId, ImageRecord, ImageStore, RegisteredImage, VerifiedFile, encode_hex,
 };
@@ -29,13 +30,13 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::exec::{Completion, ExecOutcome};
 use crate::id::SandboxId;
 use crate::model::{
-    Access, Command, DeprovisionResult, ExecRequest, Metadata, ProvisionRequest, ProvisionResult,
-    StartResult, StdinMode, StopResult,
+    Command, DeprovisionResult, ExecRequest, FilesystemPolicy, Metadata, NetworkPolicy,
+    ProvisionRequest, ProvisionResult, StartResult, StdinMode, StopResult,
 };
 use crate::nvxhost::{HostLibrary, LaunchInputs, Session};
 
 const BACKEND_KEY: &str = NATIVE_BACKEND_KEY;
-const RUNTIME_ABI: &str = "microvm-abi-v2-edge-ramfs-v1";
+const RUNTIME_ABI: &str = "microvm-abi-v2-edge-ramfs-v2";
 const MAX_EXEC_SECONDS: u64 = 3600;
 const MAX_OUTPUT_BYTES: usize = 1 << 20;
 const SHELL: &str = "/bin/sh";
@@ -44,9 +45,9 @@ const CONSOLE_POLL: Duration = Duration::from_millis(250);
 /// Artifact paths and approved native-library digest for an image-backed guest.
 ///
 /// The image is a caller-prepared GPT disk, not a container image reference. This backend
-/// creates no disks, filesystem mappings, or network devices. Construct it with
-/// [`NvxHostConfig::new`] and its builder methods, which keep callers compatible as options
-/// are added.
+/// creates no disks; it maps host paths and attaches a network device as each sandbox's policy
+/// requests. Construct it with [`NvxHostConfig::new`] and its builder methods, which keep
+/// callers compatible as options are added.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct NvxHostConfig {
@@ -588,7 +589,7 @@ impl NvxHostBackend {
         Ok(())
     }
 
-    fn artifact_record(&self) -> NativeArtifactRecord {
+    fn artifact_record(&self, devices: Option<serde_json::Value>) -> NativeArtifactRecord {
         let digests = self.runtime.digests();
         NativeArtifactRecord {
             image: self.image.to_string(),
@@ -596,6 +597,7 @@ impl NvxHostBackend {
             kernel_sha256: encode_hex(&digests.kernel),
             initrd_sha256: encode_hex(&digests.initrd),
             library_sha256: encode_hex(&self.config.library_sha256),
+            devices,
         }
     }
 
@@ -785,21 +787,24 @@ impl Backend for NvxHostBackend {
                 "microvm.provision.memoryMib must fit a positive signed 32-bit integer",
             ));
         }
-        if request
+        if let Some(policy) = device_policy(request)? {
+            self.host
+                .plan_sandbox(&policy, &self.config.openvmm.guest_network, true)?;
+        }
+        // The state root holds every sandbox's record, including the plan that decides what the
+        // next start exports, so no workload may see it.
+        let state_root = &self.config.openvmm.state_root;
+        if let Some(path) = request
             .filesystem
             .as_ref()
-            .is_some_and(|policy| !policy.is_empty())
-            || request.network.as_ref().is_some_and(|policy| {
-                policy.egress.default != Access::Deny
-                    || policy.ingress.default != Access::Deny
-                    || policy.ingress.host_loopback == Some(Access::Allow)
-                    || !policy.egress.allow.is_empty()
-                    || !policy.egress.deny.is_empty()
-            })
+            .and_then(|policy| filesystem::exposes(state_root, policy))
         {
-            return Err(Error::policy_validation(
-                "the nvxhost backend currently supports no host filesystem or guest network",
-            ));
+            return Err(Error::policy_validation(format!(
+                "the mapped path {} would show workloads the sandbox state in {}; map paths \
+                 outside the state root, or deny the state root inside the mapped path",
+                path.display(),
+                state_root.display()
+            )));
         }
         Ok(())
     }
@@ -811,6 +816,19 @@ impl Backend for NvxHostBackend {
     fn provision(&self, request: &ProvisionRequest) -> Result<ProvisionResult> {
         self.validate_provision(request)?;
         self.base.probe()?;
+        let devices = match device_policy(request)? {
+            Some(policy) => {
+                let plan = self
+                    .host
+                    .plan_sandbox(&policy, &self.config.openvmm.guest_network, false)?
+                    .ok_or_else(|| Error::backend_error("nvxhost returned no sandbox plan"))?;
+                Some(serde_json::from_str(&plan).map_err(|error| {
+                    Error::backend_error("nvxhost returned a malformed sandbox plan")
+                        .with_source(error)
+                })?)
+            }
+            None => None,
+        };
         // Unregistering an image waits for this lock, so the image stays registered until the
         // sandbox that refers to it is recorded.
         let _registry = self.images.lock()?;
@@ -820,7 +838,7 @@ impl Backend for NvxHostBackend {
             backend: BACKEND_KEY.to_owned(),
             network: None,
             filesystem: None,
-            native: Some(self.artifact_record()),
+            native: Some(self.artifact_record(devices)),
             memory_mib: request
                 .microvm
                 .provision
@@ -867,6 +885,15 @@ impl Backend for NvxHostBackend {
             Error::backend_error("cannot choose a control endpoint").with_source(error)
         })?;
         let boot = self.boot_endpoint(sandbox_id, &endpoint)?;
+        let plan = record
+            .native
+            .as_ref()
+            .and_then(|native| native.devices.as_ref())
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                Error::backend_error("cannot encode the sandbox plan").with_source(error)
+            })?;
         let mut arguments = self.host.launch_arguments(&LaunchInputs {
             kernel: &self.config.openvmm.kernel,
             initrd: &self.config.openvmm.initrd,
@@ -876,6 +903,7 @@ impl Backend for NvxHostBackend {
             hypervisor: self.config.openvmm.hypervisor.as_str(),
             memory_mb: record.memory_mib,
             guest_debug: self.config.guest_debug,
+            plan: plan.as_deref(),
         })?;
         let report = self.base.store.outcome_path(sandbox_id);
         remove_if_present(&report)?;
@@ -1129,10 +1157,38 @@ fn capabilities() -> Capabilities {
     capabilities.exec.argv = true;
     capabilities.exec.max_timeout_ms = Some(MAX_EXEC_SECONDS * 1_000);
     capabilities.exec.max_output_bytes = Some(MAX_OUTPUT_BYTES as u64);
+    capabilities.network.egress_allow = true;
     capabilities.network.egress_deny = true;
     capabilities.network.ingress_deny = true;
     capabilities.network.host_loopback_deny = true;
+    capabilities.network.egress_rules = true;
+    capabilities.filesystem.readonly_paths = true;
+    capabilities.filesystem.readwrite_paths = true;
+    capabilities.filesystem.denied_paths = true;
     capabilities
+}
+
+/// The JSON of `request`'s `filesystem` and `network` sections, which nvxhost plans, or `None`
+/// when the request has neither.
+fn device_policy(request: &ProvisionRequest) -> Result<Option<String>> {
+    #[derive(serde::Serialize)]
+    struct Policy<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filesystem: Option<&'a FilesystemPolicy>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        network: Option<&'a NetworkPolicy>,
+    }
+    if request.filesystem.is_none() && request.network.is_none() {
+        return Ok(None);
+    }
+    serde_json::to_string(&Policy {
+        filesystem: request.filesystem.as_ref(),
+        network: request.network.as_ref(),
+    })
+    .map(Some)
+    .map_err(|error| {
+        Error::policy_validation("filesystem paths must be valid UTF-8").with_source(error)
+    })
 }
 
 fn finish_session<T>(session: Session, result: Result<T>, deadline: Option<Instant>) -> Result<T> {
@@ -1500,7 +1556,51 @@ mod tests {
         assert!(request.encode_to_vec().len() < 100);
         assert!(capabilities().exec.command_line);
         assert!(!capabilities().exec.cancel);
-        assert!(!capabilities().filesystem.readonly_paths);
+        assert!(!capabilities().exec.cwd);
+    }
+
+    #[test]
+    fn host_paths_and_network_follow_the_policy_the_library_plans() {
+        let capabilities = capabilities();
+        assert!(capabilities.filesystem.readonly_paths);
+        assert!(capabilities.filesystem.readwrite_paths);
+        assert!(capabilities.filesystem.denied_paths);
+        assert!(capabilities.network.egress_allow && capabilities.network.egress_rules);
+        assert!(!capabilities.network.ingress_allow && !capabilities.network.host_loopback_allow);
+
+        assert_eq!(device_policy(&ProvisionRequest::default()).unwrap(), None);
+        // The JSON is nvxhost's planning input; its own tests parse this exact text.
+        let request = ProvisionRequest {
+            filesystem: Some(FilesystemPolicy {
+                readonly_paths: vec!["/work/src".into()],
+                readwrite_paths: vec!["/work/out".into()],
+                denied_paths: vec!["/work/src/secret".into()],
+            }),
+            network: Some(NetworkPolicy {
+                egress: crate::model::EgressPolicy::new(crate::model::Access::Deny)
+                    .with_allow(crate::model::NetworkRule {
+                        to: vec![crate::model::NetworkPeer {
+                            cidr: "192.0.2.0/24".into(),
+                            except: vec!["192.0.2.128/25".into()],
+                        }],
+                        ports: vec![crate::model::NetworkPort {
+                            protocol: crate::model::Protocol::Tcp,
+                            port: Some(443),
+                            end_port: Some(444),
+                        }],
+                    })
+                    .with_deny(crate::model::NetworkRule::to("192.0.2.7")),
+                ingress: crate::model::IngressPolicy {
+                    default: crate::model::Access::Deny,
+                    host_loopback: Some(crate::model::Access::Deny),
+                },
+            }),
+            ..ProvisionRequest::default()
+        };
+        assert_eq!(
+            device_policy(&request).unwrap().unwrap(),
+            r#"{"filesystem":{"readonlyPaths":["/work/src"],"readwritePaths":["/work/out"],"deniedPaths":["/work/src/secret"]},"network":{"egress":{"default":"deny","allow":[{"to":[{"cidr":"192.0.2.0/24","except":["192.0.2.128/25"]}],"ports":[{"protocol":"tcp","port":443,"endPort":444}]}],"deny":[{"to":[{"cidr":"192.0.2.7"}]}]},"ingress":{"default":"deny","hostLoopback":"deny"}}}"#
+        );
     }
 
     #[test]

@@ -331,6 +331,37 @@ pub(crate) fn plan(policy: &FilesystemPolicy) -> Result<Option<HostMapping>> {
     }))
 }
 
+/// Returns the first mapped path of `policy` that would show workloads the host directory
+/// `private`, such as the sandbox state root: a mapped path inside it, or one that contains it
+/// without a denied path inside the mapping that hides it. Planning rejects paths that cannot be
+/// resolved, so they are skipped here.
+#[cfg(feature = "nvxhost")]
+pub(crate) fn exposes(private: &Path, policy: &FilesystemPolicy) -> Option<PathBuf> {
+    let private = canonicalize(private).unwrap_or_else(|_| private.to_path_buf());
+    let hidden: Vec<PathBuf> = policy
+        .denied_paths
+        .iter()
+        .filter_map(|path| canonicalize_lenient(path).ok().map(|(path, _)| path))
+        .collect();
+    policy
+        .readonly_paths
+        .iter()
+        .chain(&policy.readwrite_paths)
+        .find(|path| {
+            let Ok(mapped) = canonicalize(path) else {
+                return false;
+            };
+            mapped.starts_with(&private)
+                || private.starts_with(&mapped)
+                    && !hidden.iter().any(|denied| {
+                        private.starts_with(denied)
+                            && denied.starts_with(&mapped)
+                            && *denied != mapped
+                    })
+        })
+        .cloned()
+}
+
 /// Checks that every mapped and denied path inside a read-write mapping still names the object
 /// it named at provision.
 ///
@@ -873,6 +904,54 @@ mod tests {
         fs::remove_dir(base.join("tools")).unwrap();
         fs::create_dir(base.join("tools")).unwrap();
         verify(&mapping).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "nvxhost")]
+    fn mappings_must_not_expose_a_private_directory() {
+        let directory = root();
+        let base = directory.path();
+        // Pretend that work/out holds the sandbox state.
+        let private = base.join("work/out");
+        let policy = |readonly: &[&str], denied: &[&str]| FilesystemPolicy {
+            readonly_paths: readonly.iter().map(|path| base.join(path)).collect(),
+            readwrite_paths: Vec::new(),
+            denied_paths: denied.iter().map(|path| base.join(path)).collect(),
+        };
+        assert_eq!(
+            exposes(&private, &policy(&["tools", "work/src"], &[])),
+            None
+        );
+        assert_eq!(
+            exposes(&private, &policy(&["tools", "work"], &[])),
+            Some(base.join("work"))
+        );
+        // A denied path inside the mapping hides it; one outside the mapping does not.
+        assert_eq!(exposes(&private, &policy(&["work"], &["work/out"])), None);
+        assert_eq!(
+            exposes(&private, &policy(&["work"], &["."])),
+            Some(base.join("work"))
+        );
+        assert_eq!(
+            exposes(&private, &policy(&["work/out"], &["work/out"])),
+            Some(base.join("work/out"))
+        );
+        fs::create_dir_all(base.join("work/out/data")).unwrap();
+        let inside = FilesystemPolicy {
+            readwrite_paths: vec![base.join("work/out/data")],
+            ..FilesystemPolicy::default()
+        };
+        assert_eq!(exposes(&private, &inside), Some(base.join("work/out/data")));
+        // Another spelling of the private directory is recognized.
+        let spelled = if cfg!(windows) {
+            base.join("WORK").join("OUT")
+        } else {
+            base.join("work").join(".").join("out")
+        };
+        assert_eq!(
+            exposes(&spelled, &policy(&["work"], &[])),
+            Some(base.join("work"))
+        );
     }
 
     #[test]
