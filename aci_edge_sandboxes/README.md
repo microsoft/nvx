@@ -172,20 +172,24 @@ and `guestBuildId`; stop reports `forced` and, after a failed graceful shutdown,
 `consoleError`.
 
 This backend supports provision/start/exec/stop/deprovision with shell commands or argv, a
-fixed caller-provided image, and the host paths and network rules described below. Positive
-execution timeouts must be whole seconds, matching the guest RPC's precision; finer-grained
-timeouts fail validation rather than silently extending execution. It explicitly rejects piped
-stdin, execution cancellation, custom working directories and environments. Snapshot/restore,
-image selection, and richer guest operations are not part of this profile. See
+fixed caller-provided image, and the host paths, network rules, proxy, forwarded ports, working
+directories, and environments described below. Positive execution timeouts must be whole
+seconds, matching the guest RPC's precision; finer-grained timeouts fail validation rather than
+silently extending execution. It explicitly rejects piped stdin and execution cancellation.
+Snapshot/restore, image selection, and richer guest operations are not part of this profile. See
 [`examples/nvxhost_lifecycle.rs`](examples/nvxhost_lifecycle.rs) for a run requiring
 `--openvmm`, `--kernel`, `--initrd`, `--image`, `--host-library`, `--host-sha256`,
 `--state-root`, `--hypervisor`, and a command after `--`; an optional `--image-sha256`
 requires the image's digest when it is registered. The repeatable `--readonly`, `--readwrite`,
 and `--denied` options map host paths, and `--egress allow|deny` with the repeatable
 `--egress-allow` and `--egress-deny` options, each taking `CIDR` or `CIDR:tcp|udp:PORT`, attach a
-network. The ignored `tests/nvxhost_guest.rs` exercises an actual guest when the corresponding
-`NVXHOST_TEST_*` paths and approved library digest are set: under WHP on Windows, or under the
-hypervisor that `NVXHOST_TEST_HYPERVISOR` names, such as `mshv` on Linux.
+network. `--network-proxy URL` routes the guest's traffic through a host proxy, and
+`--host-loopback allow|deny` with the repeatable `--host-loopback-forward tcp|udp:HOST:GUEST`
+publishes guest ports on host loopback. The repeatable `--env KEY=VALUE`, layered over the
+guest's environment, and `--cwd PATH` apply to the command. The ignored
+`tests/nvxhost_guest.rs` exercises an actual guest when the corresponding `NVXHOST_TEST_*` paths
+and approved library digest are set: under WHP on Windows, or under the hypervisor that
+`NVXHOST_TEST_HYPERVISOR` names, such as `mshv` on Linux.
 
 For example, from `aci_edge_sandboxes` on a Windows WHP host, set the following
 paths to compatible, separately built artifacts and a caller-prepared GPT disk
@@ -211,7 +215,10 @@ To map `C:\work\src` read-only and `C:\work\out` read-write, and let the guest r
 `192.0.2.10` on TCP port 443, add
 `--readonly C:\work\src --readwrite C:\work\out --egress deny --egress-allow 192.0.2.10:tcp:443`
 before `--`. The example prints where each mapped path appears in the guest, here
-`/mnt/c/work/src` and `/mnt/c/work/out`.
+`/mnt/c/work/src` and `/mnt/c/work/out`. To let the guest out only through a proxy that listens
+on host port 3128, add `--egress deny --network-proxy http://127.0.0.1:3128` instead; to reach
+a guest service on port 8080 at host `127.0.0.1:18080`, add
+`--egress allow --host-loopback allow --host-loopback-forward tcp:18080:8080`.
 
 Build the native library and the static edge initramfs separately from their
 matching private sources; this example neither fetches nor builds them. Use the
@@ -237,9 +244,11 @@ the pinned objects: if one was replaced, start fails with `backend_error`, and t
 must be deprovisioned and provisioned again to accept the change.
 
 - The state root holds the record, and so the plan, of every sandbox, which decides what the
-  next start exports and which egress it allows. Provision therefore refuses, with
-  `policy_validation`, a mapped path inside the state root, and one that contains it unless a
-  denied path inside the mapping hides it.
+  next start exports, which egress it allows, and which host loopback ports the guest reaches
+  or publishes. Start's checks catch a damaged plan, but not one changed into another plan that
+  planning could have produced, so only the caller may write the state root. Provision
+  therefore refuses, with `policy_validation`, a mapped path inside the state root, and one that
+  contains it unless a denied path inside the mapping hides it.
 - OpenVMM exports the deepest directory that contains every mapped path through one
   virtio-fs device, read-only unless a path is read-write, and hides the denied paths. The
   guest mounts the export where workloads cannot reach it and bind-mounts each mapped path
@@ -254,12 +263,53 @@ must be deprovisioned and provisioned again to accept the change.
   runs OpenVMM, so run OpenVMM unprivileged. A host hard link that already joins a file in a
   read-write mapping to one in a read-only mapping stays writable through the read-write
   path.
-- A policy that denies egress without allow rules attaches no network device. Otherwise the
-  guest gets `OpenVmmConfig::guest_network` (`10.0.0.2/24` by default) behind OpenVMM's NAT
-  gateway, the network's first address, and names that gateway as its DNS server in
-  `/etc/resolv.conf` when the policy allows TCP or UDP port 53 to it. Choose a guest network
-  that contains no address the guest must reach. Ingress and host-loopback access must be
-  `deny`.
+- A policy that denies egress without allow rules or a proxy attaches no network device.
+  Otherwise the guest gets `OpenVmmConfig::guest_network` (`10.0.0.2/24` by default) behind
+  OpenVMM's NAT gateway, the network's first address, and names that gateway as its DNS server
+  in `/etc/resolv.conf` when the policy allows TCP or UDP port 53 to it. Choose a guest network
+  that contains no address the guest must reach. Ingress must be `deny`, and host-loopback
+  access must be `deny` unless ports are forwarded, as described next.
+
+### Native proxy and forwarded ports
+
+Two provision options connect the guest to host loopback without opening it in general. They
+are exclusive: a proxy needs host-loopback access denied, and forwarded ports need it allowed.
+
+- `runtimeConfig.networkProxy` (`ProvisionRequest::with_network_proxy`) names an HTTP or HTTPS
+  proxy that listens on host IPv4 loopback, such as `http://127.0.0.1:3128` or
+  `http://localhost:3128`: an explicit port, and at most a trailing `/` after it. As in MXC's
+  schema, the proxy is the guest's only way out, so the network policy must deny egress without
+  allow or deny rules; provision rejects other policies, and IPv6 or remote proxies, with
+  `policy_validation`. The guest's only reachable destination is TCP to its gateway at the
+  proxy's port, which OpenVMM connects to the proxy; it cannot reach a DNS server, so the proxy
+  resolves names. Every workload gets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and
+  `https_proxy` naming the proxy at the gateway, such as `http://10.0.0.1:3128`, and `NO_PROXY`
+  and `no_proxy` set to `localhost,127.0.0.1`; an HTTPS proxy's certificate must therefore be
+  valid for the gateway's address.
+- `microvm.provision.hostLoopbackForwards` (`ProvisionRequest::with_host_loopback_forward`),
+  an extension, publishes up to 64 guest ports on host loopback: OpenVMM listens on
+  `127.0.0.1:hostPort` and relays each TCP connection or UDP datagram to the guest's
+  `guestPort`. Ports are nonzero, and a host port appears at most once per protocol. Forwarded
+  ports need `network.ingress.hostLoopback: allow`, which also lets the guest reach every host
+  loopback service through its gateway; `allow` without forwarded ports is rejected. The guest
+  answers forwarded traffic at addresses that OpenVMM assigns inside the guest network, so the
+  egress default must be `allow`, which leaves the guest's other egress open, and no deny rule
+  may cover the guest network.
+
+Only the guest sets the proxy variables: an exec whose `process.env` names one of them, in any
+case, fails with `policy_validation`, with or without a proxy.
+
+### Native working directories and environments
+
+`process.cwd` must be an absolute guest path without `..` of at most 4095 bytes, as with the
+direct backend; `openvmm::resolve_guest_path` gives the guest path of a mapped host path. A
+directory that the workload cannot enter ends the command with exit code 126 and an
+`NVX-EDGE-STAGE-ERROR` line on standard error. The guest's default environment holds only
+`PATH` (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`) and the proxy
+variables. `process.env` can only be layered over it, with `inheritDefaultEnv: true`, as at
+most 256 entries of at most 32 KiB in total; replacing it fails with `policy_validation`. A
+later entry for a name replaces an earlier one, and an entry replaces the default of the same
+name.
 
 The caller must independently approve and protect the native asset. Checking a caller-supplied
 digest does not make a writable path or a self-declared digest trustworthy; use this profile
@@ -644,6 +694,7 @@ An MXC `StatefulSandboxBackend` adapter maps onto this crate as follows:
 | `policy.network_egress` rules | `EgressPolicy` rules, field for field |
 | `working_directory` | `ExecRequest::with_cwd(guest_path(...))`; a directory that the workload cannot enter ends with `Failed(WorkingDirectory)` |
 | `process.env`, `process.inheritDefaultEnv` | `ProcessSpec::env`, `None` when omitted, and `inherit_default_env`, or `ExecRequest::with_envs` and `with_inherit_default_env`; see [Environment](#environment) |
+| `runtimeConfig.networkProxy` | `ProvisionRequest::with_network_proxy` with the `nvxhost` backend; see [Native proxy and forwarded ports](#native-proxy-and-forwarded-ports) |
 
 A proof-of-concept MXC adapter, `nvx_backend`, implements this mapping. It
 runs each phase in its own process against a real VM and consumes exec pipes

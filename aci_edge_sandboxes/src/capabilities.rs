@@ -73,12 +73,17 @@ pub struct NetworkCapabilities {
     pub ingress_allow: bool,
     /// Honors `network.ingress.default: deny`.
     pub ingress_deny: bool,
-    /// Honors `network.ingress.hostLoopback: allow`.
+    /// Honors `network.ingress.hostLoopback: allow` without forwarded ports.
     pub host_loopback_allow: bool,
     /// Honors `network.ingress.hostLoopback: deny`.
     pub host_loopback_deny: bool,
     /// Honors `network.egress.allow` and `network.egress.deny` rules.
     pub egress_rules: bool,
+    /// Honors `runtimeConfig.networkProxy`.
+    pub network_proxy: bool,
+    /// Honors `microvm.provision.hostLoopbackForwards`, with
+    /// `network.ingress.hostLoopback: allow`.
+    pub host_loopback_forwards: bool,
 }
 
 /// Host filesystem mappings a backend can honor.

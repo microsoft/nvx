@@ -10,7 +10,7 @@ use aci_edge_sandboxes::openvmm::{
 };
 use aci_edge_sandboxes::{
     Access, AciEdgeSandbox, EgressPolicy, ExecOutcome, ExecRequest, FilesystemPolicy,
-    NetworkPolicy, NetworkRule, Protocol, ProvisionRequest,
+    ForwardProtocol, HostLoopbackForward, NetworkPolicy, NetworkRule, Protocol, ProvisionRequest,
 };
 
 fn main() -> ExitCode {
@@ -37,6 +37,11 @@ fn run() -> Result<(), String> {
     let mut egress = None;
     let mut allow = Vec::new();
     let mut deny = Vec::new();
+    let mut host_loopback = None;
+    let mut proxy = None;
+    let mut forwards = Vec::new();
+    let mut environment = Vec::new();
+    let mut cwd = None;
     let mut command = None;
     let mut args = std::env::args().skip(1);
     while let Some(option) = args.next() {
@@ -62,6 +67,11 @@ fn run() -> Result<(), String> {
             "--egress" => egress = Some(parse_access(&option, &value()?)?),
             "--egress-allow" => allow.push(parse_rule(&option, &value()?)?),
             "--egress-deny" => deny.push(parse_rule(&option, &value()?)?),
+            "--host-loopback" => host_loopback = Some(parse_access(&option, &value()?)?),
+            "--network-proxy" => proxy = Some(value()?),
+            "--host-loopback-forward" => forwards.push(parse_forward(&option, &value()?)?),
+            "--env" => environment.push(value()?),
+            "--cwd" => cwd = Some(value()?),
             "--" => {
                 command = Some(args.by_ref().collect::<Vec<_>>().join(" "));
                 break;
@@ -97,17 +107,38 @@ fn run() -> Result<(), String> {
     }
     match egress {
         Some(default) => {
-            request = request.with_network(NetworkPolicy {
+            let mut network = NetworkPolicy {
                 egress: EgressPolicy {
                     default,
                     allow,
                     deny,
                 },
                 ..NetworkPolicy::deny_all()
-            });
+            };
+            if let Some(access) = host_loopback {
+                network.ingress.host_loopback = Some(access);
+            }
+            request = request.with_network(network);
         }
-        None if allow.is_empty() && deny.is_empty() => {}
-        None => return Err("--egress-allow and --egress-deny require --egress".to_owned()),
+        None if allow.is_empty() && deny.is_empty() && host_loopback.is_none() => {}
+        None => {
+            return Err(
+                "--egress-allow, --egress-deny, and --host-loopback require --egress".to_owned(),
+            );
+        }
+    }
+    if let Some(proxy) = proxy {
+        request = request.with_network_proxy(proxy);
+    }
+    for forward in forwards {
+        request = request.with_host_loopback_forward(forward);
+    }
+    let mut exec = ExecRequest::command_line(command);
+    if let Some(cwd) = cwd {
+        exec = exec.with_cwd(cwd);
+    }
+    if !environment.is_empty() {
+        exec = exec.with_envs(environment).with_inherit_default_env(true);
     }
 
     let config = OpenVmmConfig::new(openvmm, kernel, initrd, hypervisor, PathBuf::from(root));
@@ -122,9 +153,7 @@ fn run() -> Result<(), String> {
     let started = client.start(&id);
     let succeeded = started.is_ok();
     let executed = started.and_then(|_| {
-        let output = client
-            .exec(&id, &ExecRequest::command_line(command))?
-            .wait_with_output()?;
+        let output = client.exec(&id, &exec)?.wait_with_output()?;
         let logs = backend.guest_logs(&id)?;
         if logs.is_empty() || !logs.windows(8).any(|window| window == b"execute:") {
             return Err(aci_edge_sandboxes::Error::new(
@@ -224,6 +253,25 @@ fn parse_rule(option: &str, text: &str) -> Result<NetworkRule, String> {
     }
 }
 
+/// Parses `tcp|udp:HOST-PORT:GUEST-PORT`, such as `tcp:3000:8080`.
+fn parse_forward(option: &str, text: &str) -> Result<HostLoopbackForward, String> {
+    let malformed = || format!("{option} must be tcp|udp:HOST-PORT:GUEST-PORT");
+    let parts: Vec<&str> = text.split(':').collect();
+    let [protocol, host, guest] = parts.as_slice() else {
+        return Err(malformed());
+    };
+    let protocol = match *protocol {
+        "tcp" => ForwardProtocol::Tcp,
+        "udp" => ForwardProtocol::Udp,
+        _ => return Err(malformed()),
+    };
+    let port = |text: &str| text.parse::<u16>().ok().filter(|port| *port != 0);
+    match (port(host), port(guest)) {
+        (Some(host), Some(guest)) => Ok(HostLoopbackForward::new(protocol, host, guest)),
+        _ => Err(malformed()),
+    }
+}
+
 fn describe(error: aci_edge_sandboxes::Error) -> String {
     error.to_string()
 }
@@ -263,5 +311,28 @@ mod tests {
         }
         assert_eq!(parse_access("--egress", "deny").unwrap(), Access::Deny);
         assert!(parse_access("--egress", "Deny").is_err());
+    }
+
+    #[test]
+    fn forwards_name_a_protocol_and_two_ports() {
+        let parse = |text: &str| parse_forward("--host-loopback-forward", text);
+        assert_eq!(
+            parse("tcp:3000:8080").unwrap(),
+            HostLoopbackForward::new(ForwardProtocol::Tcp, 3000, 8080)
+        );
+        assert_eq!(
+            parse("udp:5353:53").unwrap(),
+            HostLoopbackForward::new(ForwardProtocol::Udp, 5353, 53)
+        );
+        for malformed in [
+            "",
+            "tcp:3000",
+            "tcp:0:80",
+            "tcp:80:0",
+            "icmp:1:1",
+            "tcp:1:2:3",
+        ] {
+            assert!(parse(malformed).is_err(), "{malformed}");
+        }
     }
 }
