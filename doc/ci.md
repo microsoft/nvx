@@ -40,8 +40,8 @@ pending checks. The test runners ask after every cold boot whose shell is on
 a console the harness reads, the OpenVMM console or a virtio console over
 TCP, before any other input, and wait for the query to exit, so the console's
 echo of later input cannot split its lines. Cold boots with no shell there are
-only scanned: one-shot workloads, and the managed lifecycle, where init starts
-the managed agent instead of a shell. A failing boot check still powers them
+only scanned: one-shot workloads, and the managed lifecycle and `pause-resume`
+scenarios, where init starts the managed agent instead of a shell. A failing boot check still powers them
 off with status 193, which fails the run. The query must
 exit 0 with a passing `NVX-TIME-ABI` boot line, which reports ABI version 1,
 generation 0, a plausible TSC rate, and the backend's LAPIC rate; a missing
@@ -99,6 +99,30 @@ harness stages its check, report `/sys/kernel/rcu_stall_count` as 0 two
 seconds later, and show an uptime of at least 30 s, which proves that
 monotonic time advanced by the downtime. The captures share one downtime
 window, so the scenario adds about a minute per backend.
+The `pause-resume` scenario covers [host pause](design/time-abi.md#host-pause).
+It boots the largest requested vCPU count with the managed lifecycle and
+OpenVMM's state-control endpoint (`--microvm-state-control`), which
+authenticates hosts with the control console's capability. A host that does
+not authenticate, or presents the wrong capability, must get no response.
+While a managed workload spins on one vCPU, the harness pauses the VM for
+30 s, longer than the guest's 21 s RCU stall timeout and the debug kernel's
+20 s soft-lockup threshold, and then twice for 2 s. It repeats every pause and
+resume request, which must change nothing the second time, queries the run
+state while paused, and requires the transition count to rise by one on every
+change. On Linux hosts, the OpenVMM process may use at most a tenth of a
+pause, plus 0.2 s, in CPU time while paused. Afterwards the workload must
+finish, having started at least 0.5 s of guest uptime before the long pause
+and stopped after it, guest uptime must have advanced by the time the VM ran to
+within 1 s, and `/sys/kernel/rcu_stall_count` must read 0. Host UTC kept
+running, so the guest's wall clock must return to within 1.5 s of host UTC
+within 150 s, through at least one wall-clock discipline step that
+`/run/nvx/time/state` records, with no new violation there. A second host,
+connected after the first one disconnects, must see the same broker instance
+and transition count, and pauses the VM again; a third host must then find it
+still paused. Finally the harness terminates OpenVMM, which must still be
+running and must exit with the termination status. The scenario prints one
+`NVX-PAUSE-RESUME:` line with its measurements and adds about a minute per
+backend.
 The `time-abi-conformance` scenario boots the largest requested vCPU count and
 runs the guest's exhaustive CI check, `/sbin/nvx-time exhaustive`, which the
 boot check leaves to CI. On every online CPU it checks every leaf
@@ -144,7 +168,8 @@ on the CI debug kernel (`build/vmlinux-debug`, built from
 `kernel/config-microvm-debug`), whose soft-lockup and hung-task detectors
 production kernels leave out. It selects the same-host restore scenarios
 `smp`, `smp-snapshot`, `restore-processors`, `restore-downtime`, and
-`snapshot-tiers`. The jobs skip every other test step, because those boot the
+`snapshot-tiers`, and the host pause scenario `pause-resume`. The jobs skip
+every other test step, because those boot the
 production kernel, which the `nvx-microvm-tests-{kvm,mshv,whp}` jobs already
 cover: the public managed execution configuration, the Ubuntu and Azure Linux
 guest tests, the Ubuntu sandbox layer and live-share smoke tests, the
@@ -159,7 +184,7 @@ whose guest OpenVMM stops at the restore gate on purpose. The harness refuses
 a kernel whose `vmlinux-debug.config` lacks the detectors, because the guest's
 `C11` check passes vacuously without them. To bound the cost, pull requests
 run the debug kernel on KVM only and `dev` pushes run it on every backend;
-each job takes about five minutes on its own runner, in parallel with the
+each job takes about six minutes on its own runner, in parallel with the
 other microVM jobs. The jobs gate the required status check, the development
 release, and performance persistence. The GitHub-hosted `debug-kernel` job
 builds the debug kernel beside the shared `artifacts` job

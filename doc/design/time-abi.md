@@ -37,10 +37,12 @@ Goals:
   rejected with a stable error code.
 - Restore within one backend across hosts of the same CPU generation and CPU
   profile, including restores after a host reboot.
-- Guest monotonic time advances by the snapshot downtime. Wall clock is set
+- Guest monotonic time advances by the snapshot downtime and stands still
+  while the host pauses the VM ([Host pause](#host-pause)). Wall clock is set
   on every restore and disciplined afterwards.
 - RCU-stall, soft-lockup, hung-task, clocksource, and TSC-warp detectors never
-  trip across capture and restore. A detected violation fails fast.
+  trip across capture, restore, and host pause. A detected violation fails
+  fast.
 - No performance regression beyond the gate in
   [Performance expectations and acceptance gate](#performance-expectations-and-acceptance-gate).
 
@@ -877,6 +879,40 @@ round trip on Azure takes about 12 µs, so nested MSHV pairs at a median of
 6.2 µs and WHP on 8573C runners at up to 11 µs; a 10 µs bound would leave
 about 1.5× margin over the median and fail restores at random. Downtime needs
 only millisecond accuracy, so a 100 µs pairing error is negligible.
+
+## Host pause
+
+The host can pause a running microVM and later resume it in the same VM
+process, without a snapshot, through OpenVMM's state-control endpoint
+(`--microvm-state-control`; see the [appendix](#appendix-openvmm-guide)).
+Where a restore advances guest time by the downtime, a host pause holds it:
+
+- **Monotonic time.** Once the vCPUs stop, OpenVMM takes VP 0's guest TSC and
+  every vCPU's LAPIC state. Resume writes that TSC to every vCPU with the
+  [synchronized TSC set](#backend-obligations), writes the LAPIC states back
+  before any vCPU runs, and then starts the VM. The TSC, the LAPIC timers, and
+  the VM time behind the emulated timers continue from where they stopped, so
+  guest `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`, and jiffies count only the time
+  the VM ran, and no RCU-stall, soft-lockup, or hung-task detector sees a
+  pause of any length. The generation counter does not change, and no restore
+  repair runs.
+- **Rejection.** As at capture, a pause is rejected when a vCPU has an armed
+  periodic LAPIC timer, which a guest under this ABI arms at most before its
+  first tick, or a TSC-deadline timer, which it never arms (see
+  [Clocksource, tick, and PIT](#clocksource-tick-and-pit)). The vCPUs then
+  start again, and the guest sees only a brief stall.
+- **Wall clock.** Host UTC keeps running, and so do the CMOS RTC's date and
+  time and the [time sample](#time-sample). After a resume, guest
+  `CLOCK_REALTIME` is behind host UTC by the paused time until the
+  [wall-clock discipline](#wall-clock-discipline)'s next poll, at most 64 s
+  of guest time later, steps it and counts a discontinuity
+  (`last_discontinuity=step`); a lag under 128 ms is slewed instead. The
+  discipline follows it as it follows any host wall-clock step, without a
+  violation.
+- **Snapshots.** A guest snapshot request still pending when a pause stops
+  the vCPUs is cancelled, as when the VM stops for any other reason. A pause
+  at a snapshot boundary or during the post-restore gate is refused as busy
+  and changes nothing.
 
 ## Restore algorithm
 
@@ -2180,8 +2216,8 @@ harness reads, and after every restore in the `smp-snapshot`,
 `restore-processors`, `restore-downtime`, and `snapshot-tiers` scenarios,
 except `snapshot-tiers`' gate-timeout check, whose guest OpenVMM stops at the
 restore gate on purpose. CI's other restores and its guests without a shell,
-the managed lifecycle and one-shot workloads, are only scanned for violation
-events; a failed check still powers the guest off with status 193. Each query
+the managed lifecycle, host pause, and one-shot workloads, are only scanned
+for violation events; a failed check still powers the guest off with status 193. Each query
 requires exit status 0 and, after a restore,
 a `phase=restore` line with `status=ok`, the restored `generation`, and
 `cpus` equal to the online CPUs; after a cold boot, a `phase=boot` line with
@@ -2233,6 +2269,13 @@ hosts the fleet can use (see Conformance), with the warp probe and the
 watcher active, report no RCU, soft-lockup, hung-task, clocksource, or warp
 message. The CI debug-kernel variant runs the same-host cases with the
 soft-lockup and hung-task detectors enabled.
+
+**Host pause.** CI's [`pause-resume`](../ci.md) scenario pauses a managed VM
+for 30 s, longer than the 21 s RCU stall timeout, while a workload spins on
+one vCPU, and then twice for 2 s, on every backend and on the debug kernel.
+It checks the rules of [Host pause](#host-pause): guest uptime counts only the
+time the VM ran, to within 1 s; `rcu_stall_count` stays 0, with no violation;
+and the guest's wall clock returns to host UTC through a discipline step.
 
 **Performance.** The gate above, computed by the performance agent from the
 CI benchmark matrix.
@@ -2356,3 +2399,8 @@ The OpenVMM Guide documents the user-facing contract in
 
 The CLI reference documents `--cpu-profile` and `--x-time-abi-verify`. The
 test hooks stay undocumented in the Guide; this document describes them.
+
+`Guide/src/reference/openvmm/management/state_control_protocol.md` documents
+[host pause](#host-pause): the state-control endpoint and its authentication,
+the protocol, and guest time across a pause. The CLI reference documents
+`--microvm-state-control`.

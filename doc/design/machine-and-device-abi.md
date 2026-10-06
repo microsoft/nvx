@@ -299,6 +299,16 @@ The workload protocol carried inside the brokered data stream belongs to the
 guest agent; see
 [Control protocol and checkpoint handoff](sandbox-filesystem-and-agent-architecture.md#control-protocol-and-checkpoint-handoff).
 
+A machine with a live, authenticated control console may also bind a
+state-control endpoint (`--microvm-state-control listen=<endpoint>`), through
+which the host pauses, resumes, and queries the VM without a snapshot;
+[Host pause](time-abi.md#host-pause) defines guest time across a pause. The
+endpoint follows the private-endpoint and peer-identity rules above, must
+differ from both console endpoints, and answers a host only after it presents
+the control console's capability. OpenVMM serves it outside the VM's devices,
+so it keeps answering while the VM is paused. Snapshots never record it; a
+restore may supply a fresh one.
+
 ### Network
 
 The optional NIC has one RX/TX queue pair and an exact feature mask:

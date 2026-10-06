@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import secrets
+import signal
 import socket
 import struct
 import subprocess
@@ -55,11 +56,19 @@ from .common import (
     require_file,
     sha256_file,
 )
-from .control_session import ControlSession, ManagedExecRefused
+from .control_session import ControlSession, ManagedExecRefused, ManagedExecResult
 from .egress_policy import CompiledEgressPolicy, compile_policy_file
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .managed_exec_tests import run_managed_exec_configuration
 from .openvmm_process import OpenvmmProcess, TcpConsole
+from .state_control import (
+    AUTHENTICATE,
+    PAUSE,
+    QUERY,
+    RESUME,
+    StateControlSession,
+    StateResponse,
+)
 from .time_abi import (
     ABI_VERSION,
     CHECK_CPU_BUDGET_US,
@@ -96,6 +105,7 @@ MICROVM_TEST_SCENARIOS = (
     "managed-lifecycle",
     "managed-exec-config",
     "network-snapshot",
+    "pause-resume",
     "restore-downtime",
     "restore-memory",
     "restore-processors",
@@ -121,12 +131,14 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
 )
 # The spec runs the same-host restore cases on the CI debug kernel, whose
 # soft-lockup and hung-task detectors the guest's time ABI watcher reports.
+# Host pause holds guest time for longer than the soft-lockup threshold too.
 DEBUG_KERNEL_SCENARIOS = (
     "smp",
     "smp-snapshot",
     "restore-processors",
     "restore-downtime",
     "snapshot-tiers",
+    "pause-resume",
 )
 # Scenarios that run only when named, never in a default suite. The time ABI
 # hides TSC-deadline on every backend, so `smp` already runs on the one-shot
@@ -226,6 +238,33 @@ RESTORE_DOWNTIME_PATH = "/tmp/nvx-restore-downtime"
 # Gives the RCU stall detector time to report a stall that the release of
 # the stall suppression exposed.
 RESTORE_DOWNTIME_SETTLE_SECONDS = 2
+# Host pause holds guest time: the first pause outlasts the 21 s RCU stall
+# timeout, as the long-downtime restore does, while a guest busy loop spans it.
+PAUSE_RESUME_LONG_SECONDS = 30.0
+PAUSE_RESUME_SHORT_SECONDS = 2.0
+PAUSE_RESUME_CYCLES = 3
+PAUSE_RESUME_SPIN_SECONDS = 10
+# Spins one vCPU, without forking, for PAUSE_RESUME_SPIN_SECONDS of guest
+# uptime, and prints the uptimes at which it started and stopped.
+PAUSE_RESUME_SPIN_SCRIPT = (
+    'read -r now _ </proc/uptime; echo "$now"; '
+    f"end=$(( ${{now%.*}} + {PAUSE_RESUME_SPIN_SECONDS} )); "
+    'while read -r now _ </proc/uptime; [ "${now%.*}" -lt "$end" ]; do :; done; '
+    'echo "$now"'
+)
+# The busy loop must have run this long before the long pause starts.
+PAUSE_RESUME_SPIN_LEAD_SECONDS = 0.5
+PAUSE_RESUME_UPTIME_TOLERANCE_SECONDS = 1.0
+# No vCPU of a paused VM runs, so its OpenVMM process may use at most this
+# share of the pause, plus a fixed allowance, in CPU time.
+PAUSE_RESUME_PAUSED_CPU_SHARE = 0.1
+PAUSE_RESUME_PAUSED_CPU_ALLOWANCE_SECONDS = 0.2
+# The wall-clock discipline polls at most 64 s apart and steps an offset of
+# 128 ms or more; the bound leaves room for a skipped poll.
+PAUSE_RESUME_WALL_CLOCK_REPAIR_SECONDS = 150.0
+# The guest reports whole seconds.
+PAUSE_RESUME_WALL_CLOCK_TOLERANCE_SECONDS = 1.5
+PAUSE_RESUME_EVIDENCE_PREFIX = "NVX-PAUSE-RESUME: "
 # The guest's exhaustive CI check reports each check on each online CPU.
 TIME_ABI_EXHAUSTIVE_COMMAND = "/sbin/nvx-time exhaustive"
 TIME_ABI_EXHAUSTIVE_PREFIX = "NVX-TIME-ABI-EXHAUSTIVE: "
@@ -286,7 +325,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         help=(
             "boot the CI debug kernel (build/vmlinux-debug), which enables the "
             "soft-lockup and hung-task detectors; selects the same-host restore "
-            "scenarios unless --scenario is given"
+            "and host pause scenarios unless --scenario is given"
         ),
     )
     parser.add_argument(
@@ -1076,6 +1115,443 @@ def run_managed_lifecycle(
             raise RuntimeError(
                 "managed lifecycle without a control endpoint was not rejected before boot"
             )
+
+
+def _expect_state(
+    response: StateResponse, step: str, status: str, state: str, transitions: int
+) -> None:
+    if (response.status, response.state, response.transitions) != (
+        status,
+        state,
+        transitions,
+    ):
+        raise RuntimeError(
+            f"state control {step} returned status={response.status} "
+            f"state={response.state} transitions={response.transitions} "
+            f"detail={response.detail!r}; expected status={status} "
+            f"state={state} transitions={transitions}"
+        )
+
+
+def _process_cpu_seconds(pid: int) -> float | None:
+    """Returns a Linux process's user plus system CPU time, or None elsewhere."""
+    if sys.platform != "linux":
+        return None
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    fields = stat.rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def _managed_output(
+    session: ControlSession, arguments: tuple[str, ...], timeout: float
+) -> str:
+    result = session.exec(arguments, timeout_ms=10_000, response_timeout=timeout)
+    if result.returncode != 0 or result.category != "exit" or result.stderr:
+        raise RuntimeError(
+            f"managed guest command {' '.join(arguments)} failed: "
+            f"returncode={result.returncode} category={result.category} "
+            f"stderr={result.stderr!r}"
+        )
+    return result.stdout.decode("utf-8")
+
+
+def _guest_uptime(session: ControlSession, timeout: float) -> tuple[float, float]:
+    """Returns the guest's uptime and the host's monotonic time of the read."""
+    before = time.monotonic()
+    output = _managed_output(session, ("/bin/cat", "/proc/uptime"), timeout)
+    return float(output.split()[0]), (before + time.monotonic()) / 2
+
+
+def _guest_wall_clock_lag(session: ControlSession, timeout: float) -> float:
+    """Returns host UTC minus the guest's wall clock, in seconds."""
+    before = time.time()
+    guest = int(_managed_output(session, ("/bin/date", "-u", "+%s"), timeout))
+    return (before + time.time()) / 2 - guest
+
+
+def _guest_time_state(session: ControlSession, timeout: float) -> dict[str, str]:
+    """Returns the guest time component's published state."""
+    output = _managed_output(session, ("/bin/cat", "/run/nvx/time/state"), timeout)
+    return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+
+
+def _spin_uptimes(result: ManagedExecResult) -> tuple[float, float]:
+    """Returns the guest uptimes at which the busy loop started and stopped."""
+    if result.returncode != 0 or result.category != "exit" or result.stderr:
+        raise RuntimeError(f"guest busy loop failed: {result}")
+    try:
+        start, end = (float(line) for line in result.stdout.decode().split())
+    except ValueError as error:
+        raise RuntimeError(f"guest busy loop printed {result.stdout!r}") from error
+    return start, end
+
+
+def _time_state_counter(state: dict[str, str], key: str) -> int:
+    try:
+        return int(state[key])
+    except (KeyError, ValueError) as error:
+        raise RuntimeError(f"guest time state has no valid {key}: {state}") from error
+
+
+def _hold_host_pause(
+    host: StateControlSession,
+    pid: int,
+    transitions: int,
+    seconds: float,
+    timeout: float,
+) -> tuple[float, float | None]:
+    """Pauses the VM, holds it for ``seconds``, and resumes it, repeating each
+    request to check that it is idempotent. Returns how long the VM was paused
+    and, where the host reports it, OpenVMM's CPU time meanwhile."""
+    requested = time.monotonic()
+    _expect_state(
+        host.request(PAUSE, timeout), "pause", "ok", "paused", transitions + 1
+    )
+    # The guest stopped while the request was outstanding.
+    paused_at = (requested + time.monotonic()) / 2
+    _expect_state(
+        host.request(PAUSE, timeout), "repeated pause", "ok", "paused", transitions + 1
+    )
+    cpu_before = _process_cpu_seconds(pid)
+    time.sleep(seconds)
+    cpu_after = _process_cpu_seconds(pid)
+    _expect_state(
+        host.request(QUERY, timeout),
+        "query while paused",
+        "ok",
+        "paused",
+        transitions + 1,
+    )
+    requested = time.monotonic()
+    _expect_state(
+        host.request(RESUME, timeout), "resume", "ok", "running", transitions + 2
+    )
+    resumed_at = (requested + time.monotonic()) / 2
+    _expect_state(
+        host.request(RESUME, timeout),
+        "repeated resume",
+        "ok",
+        "running",
+        transitions + 2,
+    )
+    if cpu_before is None or cpu_after is None:
+        return resumed_at - paused_at, None
+    used = cpu_after - cpu_before
+    if (
+        used
+        > PAUSE_RESUME_PAUSED_CPU_SHARE * seconds
+        + PAUSE_RESUME_PAUSED_CPU_ALLOWANCE_SECONDS
+    ):
+        raise RuntimeError(
+            f"OpenVMM used {used:.2f} s of CPU time while paused for {seconds:.0f} s"
+        )
+    return resumed_at - paused_at, used
+
+
+def _check_host_pause(
+    session: ControlSession,
+    pid: int,
+    endpoint: Path,
+    capability: bytes,
+    timeout: float,
+) -> dict[str, str]:
+    """Drives the state-control endpoint and checks the guest across pauses.
+    Leaves the VM paused and returns the evidence fields."""
+    # Only a host that presents the control capability gets a response.
+    with StateControlSession.connect(endpoint, timeout) as anonymous:
+        anonymous.send(QUERY)
+        if not anonymous.closed_without_response(timeout):
+            raise RuntimeError(
+                "state control answered a host that did not authenticate"
+            )
+    with StateControlSession.connect(endpoint, timeout) as forged:
+        forged.send(AUTHENTICATE, bytes(byte ^ 1 for byte in capability))
+        if not forged.closed_without_response(timeout):
+            raise RuntimeError(
+                "state control answered a host with the wrong capability"
+            )
+
+    host, first = StateControlSession.authenticate(endpoint, capability, timeout)
+    with host:
+        _expect_state(first, "authentication", "ok", "running", 0)
+        if first.instance_id == bytes(16):
+            raise RuntimeError("state control reported no broker instance ID")
+        _expect_state(host.request(QUERY, timeout), "query", "ok", "running", 0)
+        _expect_state(
+            host.request(RESUME, timeout), "resume while running", "ok", "running", 0
+        )
+
+        time_before = _guest_time_state(session, timeout)
+        uptime_start, host_start = _guest_uptime(session, timeout)
+
+        # One vCPU spins across the long pause, so the pause stops a busy guest.
+        spin_results: list[ManagedExecResult] = []
+        spin_errors: list[Exception] = []
+
+        def spin() -> None:
+            try:
+                spin_results.append(
+                    session.exec(
+                        ("/bin/sh", "-c", PAUSE_RESUME_SPIN_SCRIPT),
+                        timeout_ms=600_000,
+                        response_timeout=timeout
+                        + PAUSE_RESUME_LONG_SECONDS
+                        + PAUSE_RESUME_SPIN_SECONDS,
+                    )
+                )
+            except Exception as error:
+                spin_errors.append(error)
+
+        spinner = threading.Thread(target=spin, daemon=True)
+        spinner.start()
+        time.sleep(2)
+        busy_before = _process_cpu_seconds(pid)
+        time.sleep(1)
+        busy_after = _process_cpu_seconds(pid)
+        # The VM has run without a pause so far, so its uptime follows the host.
+        pause_uptime = uptime_start + time.monotonic() - host_start
+        paused, paused_cpu = _hold_host_pause(
+            host, pid, 0, PAUSE_RESUME_LONG_SECONDS, timeout
+        )
+        spinner.join(timeout + PAUSE_RESUME_SPIN_SECONDS)
+        if spinner.is_alive() or spin_errors or len(spin_results) != 1:
+            raise RuntimeError(f"guest busy loop did not finish: {spin_errors}")
+        spin_start, spin_end = _spin_uptimes(spin_results[0])
+        if not spin_start + PAUSE_RESUME_SPIN_LEAD_SECONDS <= pause_uptime < spin_end:
+            raise RuntimeError(
+                f"the guest busy loop ran from uptime {spin_start:.2f} s to "
+                f"{spin_end:.2f} s, not across the pause at {pause_uptime:.2f} s"
+            )
+        for cycle in range(1, PAUSE_RESUME_CYCLES):
+            held, _ = _hold_host_pause(
+                host, pid, 2 * cycle, PAUSE_RESUME_SHORT_SECONDS, timeout
+            )
+            paused += held
+            _managed_output(session, ("/bin/true",), timeout)
+
+        uptime_end, host_end = _guest_uptime(session, timeout)
+        guest_elapsed = uptime_end - uptime_start
+        host_running = host_end - host_start - paused
+        if abs(guest_elapsed - host_running) > PAUSE_RESUME_UPTIME_TOLERANCE_SECONDS:
+            raise RuntimeError(
+                f"guest uptime advanced {guest_elapsed:.3f} s while the host ran "
+                f"the VM for {host_running:.3f} s and paused it for {paused:.3f} s"
+            )
+        stalls = _managed_output(
+            session, ("/bin/cat", "/sys/kernel/rcu_stall_count"), timeout
+        ).strip()
+        if stalls != "0":
+            raise RuntimeError(f"guest reported {stalls} RCU stalls across host pauses")
+
+        # Host UTC kept running, so the guest steps its wall clock at its next
+        # discipline poll.
+        repair_started = time.monotonic()
+        first_lag = lag = _guest_wall_clock_lag(session, timeout)
+        while abs(lag) > PAUSE_RESUME_WALL_CLOCK_TOLERANCE_SECONDS:
+            if (
+                time.monotonic() - repair_started
+                > PAUSE_RESUME_WALL_CLOCK_REPAIR_SECONDS
+            ):
+                raise RuntimeError(
+                    f"guest wall clock still differs from host UTC by {lag:.1f} s"
+                )
+            time.sleep(2)
+            lag = _guest_wall_clock_lag(session, timeout)
+        repair = time.monotonic() - repair_started
+        time_after = _guest_time_state(session, timeout)
+        steps = _time_state_counter(time_after, "discontinuities") - (
+            _time_state_counter(time_before, "discontinuities")
+        )
+        if steps < 1 or time_after.get("last_discontinuity") != "step":
+            raise RuntimeError(
+                "guest wall clock was not repaired by a discipline step: "
+                f"discontinuities rose by {steps}, last_discontinuity="
+                f"{time_after.get('last_discontinuity')}"
+            )
+        violations = _time_state_counter(time_after, "violations")
+        if violations != _time_state_counter(time_before, "violations"):
+            raise RuntimeError(
+                f"guest time state reports {violations} violations after host pauses"
+            )
+
+    # A later host is served once the first disconnects.
+    second, response = StateControlSession.authenticate(endpoint, capability, timeout)
+    with second:
+        _expect_state(
+            response, "second authentication", "ok", "running", 2 * PAUSE_RESUME_CYCLES
+        )
+        if response.instance_id != first.instance_id:
+            raise RuntimeError("state control reported a different broker instance")
+        _expect_state(
+            second.request(PAUSE, timeout),
+            "final pause",
+            "ok",
+            "paused",
+            2 * PAUSE_RESUME_CYCLES + 1,
+        )
+    # The pause outlives the host that made it.
+    third, response = StateControlSession.authenticate(endpoint, capability, timeout)
+    with third:
+        _expect_state(
+            response,
+            "authentication after the final pause",
+            "ok",
+            "paused",
+            2 * PAUSE_RESUME_CYCLES + 1,
+        )
+        if response.instance_id != first.instance_id:
+            raise RuntimeError("state control reported a different broker instance")
+    evidence = {
+        "busy_loop_lead_s": f"{pause_uptime - spin_start:.1f}",
+        "paused_s": f"{paused:.1f}",
+        "guest_minus_host_running_s": f"{guest_elapsed - host_running:.3f}",
+        "rcu_stalls": stalls,
+        "wall_clock_lag_after_resume_s": f"{first_lag:.1f}",
+        "wall_clock_repair_s": f"{repair:.1f}",
+        "discipline_steps": str(steps),
+        "last_step_ns": time_after.get("last_step_ns", "unknown"),
+    }
+    # OpenVMM's CPU time includes guest execution only where the backend
+    # accounts it to the vCPU threads, so the busy figure is evidence only.
+    if busy_before is not None and busy_after is not None:
+        evidence["busy_cpu_s_per_s"] = f"{busy_after - busy_before:.2f}"
+    if paused_cpu is not None:
+        evidence["paused_cpu_s"] = f"{paused_cpu:.2f}"
+    return evidence
+
+
+def run_pause_resume(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    processors: int,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Pauses and resumes a managed microVM through OpenVMM's state control.
+
+    The guest must observe no elapsed monotonic time across the pauses, report
+    no RCU stall or time ABI violation, step its wall clock back to host UTC,
+    and run workloads after each resume. Hosts that do not present the control
+    capability get no response. The scenario ends by terminating OpenVMM while
+    the VM is paused.
+    """
+    with tempfile.TemporaryDirectory(prefix="nvx-pause-resume-") as temporary:
+        root = Path(temporary)
+        control_endpoint, state_endpoint = (
+            (str(root / "control.sock"), str(root / "state.sock")),
+            (
+                f"//./pipe/openvmm-microvm-{uuid.uuid4().hex}",
+                f"//./pipe/openvmm-microvm-{uuid.uuid4().hex}",
+            ),
+        )[os.name == "nt"]
+        boot_console_address = _available_tcp_address()
+        capability = secrets.token_bytes(32)
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            processors=processors,
+        )
+        command.extend(
+            (
+                "--microvm-workload-identity",
+                "65534:65534",
+                "--microvm-lifecycle",
+                "managed",
+                "--virtio-console",
+                f"listen=tcp:{boot_console_address[0]}:{boot_console_address[1]}",
+                "--microvm-control-console",
+                f"listen={control_endpoint}",
+                "--microvm-control-auth-stdin",
+                "--microvm-state-control",
+                f"listen={state_endpoint}",
+            )
+        )
+        log_path = output_dir / "pause-resume.log"
+        guest_log_path = output_dir / "pause-resume-guest.log"
+        process: subprocess.Popen[bytes] | None = None
+        boot_console: TcpConsole | None = None
+        with log_path.open("wb") as log:
+            try:
+                environment = os.environ.copy()
+                environment["OPENVMM_LOG"] = "info"
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=environment,
+                )
+                record_adversarial_openvmm_pid(process.pid, environment)
+                if process.stdin is None:
+                    raise RuntimeError("failed to create control capability pipe")
+                process.stdin.write(capability)
+                process.stdin.close()
+                # As in the managed lifecycle, init hands the boot to the
+                # managed agent, so the monitor only scans the guest console.
+                boot_console = TcpConsole.connect(
+                    boot_console_address, timeout, monitor=TimeAbiMonitor(command)
+                )
+                with ControlSession.connect(
+                    Path(control_endpoint), capability, timeout
+                ) as session:
+                    session.ping(timeout)
+                    evidence = _check_host_pause(
+                        session, process.pid, Path(state_endpoint), capability, timeout
+                    )
+                # The VM is still paused; the host stops it without the guest.
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        f"OpenVMM exited with status {process.returncode} while "
+                        f"paused; see {log_path}"
+                    )
+                process.terminate()
+                try:
+                    result = process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError(
+                        f"OpenVMM did not exit within {timeout:g} s of being "
+                        f"terminated while paused; see {log_path}"
+                    ) from error
+                # Popen.terminate() uses TerminateProcess with exit code 1 on
+                # Windows, and SIGTERM, which OpenVMM does not handle, elsewhere.
+                terminated = 1 if os.name == "nt" else -signal.SIGTERM
+                if result != terminated:
+                    raise RuntimeError(
+                        f"OpenVMM exited with status {result} instead of being "
+                        f"terminated while paused; see {log_path}"
+                    )
+                guest_log_path.write_bytes(boot_console.finish(check=False))
+                boot_console.finish()
+                boot_console = None
+            finally:
+                if boot_console is not None:
+                    guest_log_path.write_bytes(boot_console.finish(check=False))
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+    print(
+        PAUSE_RESUME_EVIDENCE_PREFIX
+        + " ".join(
+            f"{name}={value}"
+            for name, value in {
+                "backend": backend,
+                "processors": str(processors),
+                **evidence,
+            }.items()
+        )
+    )
 
 
 def run_structured_outcome(
@@ -5287,6 +5763,22 @@ def run(args: argparse.Namespace) -> int:
             kernel,
             initrd,
             args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "pause-resume" in scenarios:
+        processors = max(args.processors)
+        print(
+            f"Running microVM host pause and resume ({processors} vCPU) "
+            f"on OpenVMM/{args.backend}"
+        )
+        run_pause_resume(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            processors,
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
