@@ -3099,8 +3099,10 @@ def _image_slot_boot_sample(
                     output.extend(chunk)
                 elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
                 console.sendall(b"/sbin/nvx-exit 0\n")
-            if process.wait(timeout=timeout) != 0:
-                raise RuntimeError("image-slot benchmark VM exited unsuccessfully")
+                # Closing the console before the guest consumes the exit
+                # command discards it, so keep it open until OpenVMM exits.
+                if process.wait(timeout=timeout) != 0:
+                    raise RuntimeError("image-slot benchmark VM exited unsuccessfully")
             return elapsed_ms
         finally:
             if process.poll() is None:

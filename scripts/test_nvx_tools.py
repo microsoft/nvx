@@ -8163,6 +8163,58 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("delta-vs-abi2=+1.000 ms", output.getvalue())
         self.assertIn("delta-vs-abi2=+2.000 ms", output.getvalue())
 
+    def test_image_slot_boot_sample_keeps_console_open_until_exit(self):
+        events: list[str] = []
+
+        class FakeConsole:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                events.append("close")
+
+            def settimeout(self, _):
+                pass
+
+            def recv(self, _):
+                return benchmark.BOOT_MARKER
+
+            def sendall(self, data):
+                events.append(f"send:{data.decode()}")
+
+        class FakeProcess:
+            stdin = None
+
+            def wait(self, timeout):
+                events.append("wait")
+                return 0
+
+            def poll(self):
+                return 0
+
+        with (
+            patch.object(benchmark.subprocess, "Popen", return_value=FakeProcess()),
+            patch.object(
+                benchmark.socket,
+                "create_connection",
+                return_value=FakeConsole(),
+            ),
+        ):
+            benchmark._image_slot_boot_sample(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                128,
+                1,
+                None,
+                5.0,
+                command_prefix=(),
+                windows_cpus=None,
+            )
+
+        self.assertEqual(events, ["send:/sbin/nvx-exit 0\n", "wait", "close"])
+
     def test_kvm_worker_result_decoding(self):
         completed = subprocess.CompletedProcess(
             ["worker"],
