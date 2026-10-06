@@ -19,7 +19,10 @@ pub(crate) const SUPPORTED: bool = true;
 /// Returns the start time of a live process, `None` if the process no longer exists, or an error
 /// if its state cannot be determined.
 ///
-/// The value is the `starttime` field of `/proc/<pid>/stat`. Zombie processes count as exited.
+/// The value is the `starttime` field of `/proc/<pid>/stat`. A process runs until its last thread
+/// exits, as on Windows: a zombie whose main thread exited first still runs while its other threads
+/// exit, and they keep the process's descriptors, such as an inherited log and its lock, open.
+/// Zombies without other threads count as exited.
 pub(crate) fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
     let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
@@ -31,19 +34,45 @@ pub(crate) fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
         }
         Err(error) => return Err(error),
     };
+    start_time_from_stat(pid, &stat, || other_threads_remain(pid))
+}
+
+/// Interprets the `/proc/<pid>/stat` line of `pid` as [`process_start_time`] does, asking
+/// `other_threads_remain` only about a zombie.
+pub(crate) fn start_time_from_stat(
+    pid: u32,
+    stat: &str,
+    other_threads_remain: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<Option<u64>> {
     let malformed = || io::Error::other(format!("/proc/{pid}/stat has an unexpected format"));
+    // The command name may contain spaces and parentheses, so the fields start after the last
+    // closing parenthesis.
     let fields: Vec<&str> = stat[stat.rfind(')').ok_or_else(malformed)? + 1..]
         .split_whitespace()
         .collect();
-    match fields.first() {
-        Some(&"Z" | &"X") => Ok(None),
-        // Field 22 of the stat line; the fields after the command name start at field 3.
-        Some(_) => fields
-            .get(19)
-            .and_then(|value| value.parse().ok())
-            .map(Some)
-            .ok_or_else(malformed),
-        None => Err(malformed()),
+    // Field 22 of the stat line; the fields after the command name start at field 3.
+    let start_time = fields
+        .get(19)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(malformed)?;
+    match fields[0] {
+        "X" => Ok(None),
+        "Z" => Ok(other_threads_remain()?.then_some(start_time)),
+        _ => Ok(Some(start_time)),
+    }
+}
+
+/// Returns whether a process has threads besides its main thread.
+fn other_threads_remain(pid: u32) -> io::Result<bool> {
+    match fs::read_dir(format!("/proc/{pid}/task")) {
+        Ok(threads) => Ok(threads.count() > 1),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
 }
 

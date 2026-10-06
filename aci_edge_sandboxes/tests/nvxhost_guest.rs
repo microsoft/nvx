@@ -611,8 +611,9 @@ fn new_backend_reattaches_to_a_running_guest_and_forces_a_stop() {
         sandbox.release()
     };
 
+    // No graceful shutdown fits in a nanosecond, so the stop has to terminate OpenVMM.
     let second = backend_with(state.path(), false, |config| {
-        config.stop_timeout = Duration::from_millis(1);
+        config.stop_timeout = Duration::from_nanos(1);
     });
     let client = AciEdgeSandbox::from_shared(second.clone());
     let sandbox = Cleanup {

@@ -82,8 +82,8 @@ pub(crate) fn spawn(
 ///
 /// On Unix a background thread reaps the child once it exits so it does not linger as a zombie
 /// while this process lives. If that thread cannot start, the child becomes a zombie after it
-/// exits; liveness checks treat zombies as exited, so only the process table entry leaks. The
-/// OpenVMM process keeps running either way.
+/// exits; liveness checks treat zombies without threads as exited, so only the process table
+/// entry leaks. The OpenVMM process keeps running either way.
 pub(crate) fn detach_child(launched: Launched) {
     #[cfg(not(windows))]
     {
@@ -219,5 +219,90 @@ mod tests {
             command.spawn().unwrap()
         };
         assert!(!child_keeps_inherited_writer(fallback));
+    }
+
+    #[test]
+    fn zombies_run_while_other_threads_remain() {
+        // Field 22 of a stat line, the start time, is 22 here; the command name holds a space
+        // and a parenthesis.
+        let stat = |state: &str| {
+            let fields: Vec<String> = (4..=22).map(|field| field.to_string()).collect();
+            format!("7 (open vmm)) {state} {}\n", fields.join(" "))
+        };
+        let unasked = || -> io::Result<bool> { panic!("only zombies count their threads") };
+        let start_time = |state: &str, remain: io::Result<bool>| {
+            platform::start_time_from_stat(7, &stat(state), || remain)
+        };
+        for state in ["R", "S", "D", "T"] {
+            assert_eq!(
+                platform::start_time_from_stat(7, &stat(state), unasked).unwrap(),
+                Some(22)
+            );
+        }
+        assert_eq!(
+            platform::start_time_from_stat(7, &stat("X"), unasked).unwrap(),
+            None
+        );
+        assert_eq!(start_time("Z", Ok(true)).unwrap(), Some(22));
+        assert_eq!(start_time("Z", Ok(false)).unwrap(), None);
+        assert!(start_time("Z", Err(io::Error::other("unreadable"))).is_err());
+        assert!(platform::start_time_from_stat(7, "7 (vmm) S 1 2", unasked).is_err());
+        assert!(platform::start_time_from_stat(7, "garbage", unasked).is_err());
+    }
+
+    /// Kills and reaps a child process when dropped, even when a test fails.
+    struct Reaped(Child);
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn a_process_runs_until_its_last_thread_exits() {
+        // The main thread leaves through pthread_exit, which turns it into a zombie, while
+        // another thread sleeps. Python is the only portable way to arrange that here.
+        let spawned = Command::new("python3")
+            .args([
+                "-c",
+                "import ctypes, threading, time\n\
+                 threading.Thread(target=time.sleep, args=(60,)).start()\n\
+                 ctypes.CDLL(None).pthread_exit(None)\n",
+            ])
+            .stdin(Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => Reaped(child),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!("skipping: python3 is not installed");
+                return;
+            }
+            Err(error) => panic!("cannot start python3: {error}"),
+        };
+        let pid = child.0.id();
+        let start_time = platform::process_start_time(pid).unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            if stat[stat.rfind(')').unwrap() + 1..]
+                .trim_start()
+                .starts_with('Z')
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the main thread did not exit");
+            thread::sleep(POLL_INTERVAL);
+        }
+        assert_eq!(platform::process_start_time(pid).unwrap(), Some(start_time));
+        assert!(!wait_for_exit(
+            pid,
+            start_time,
+            Instant::now() + Duration::from_millis(100)
+        ));
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(wait_for_exit(pid, start_time, Instant::now()));
     }
 }
