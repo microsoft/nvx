@@ -272,6 +272,14 @@ The manifest is authoritative for:
 - the exact length and either SHA-256 or storage-generation identity of paired
   `scratch.img`.
 
+On Linux, the read-only distro role can use an externally supplied block
+device. OpenVMM opens its direct node without following links, reads its exact
+capacity from the device, and records its geometry and requested identity
+without copying it into the snapshot. The caller must authenticate and lease
+that immutable source, re-resolve its current device node on every attach,
+and reject a recycled pathname. Other roles, including paired writable
+scratch, remain regular files.
+
 Snapshot paths and repeated fields are bounded. Restore rejects truncated,
 oversized, malformed, wrong-type, path-escaping, symlinked, incompatible,
 missing, extra, or reordered state before guest execution. New snapshots use
