@@ -30,15 +30,20 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::exec::{Completion, ExecOutcome};
 use crate::id::SandboxId;
 use crate::model::{
-    Command, DeprovisionResult, ExecRequest, FilesystemPolicy, Metadata, NetworkPolicy,
-    ProvisionRequest, ProvisionResult, StartResult, StdinMode, StopResult,
+    Command, DeprovisionResult, ExecRequest, FilesystemPolicy, HostLoopbackForward, Metadata,
+    NetworkPolicy, ProvisionRequest, ProvisionResult, RuntimeConfig, StartResult, StdinMode,
+    StopResult,
 };
 use crate::nvxhost::{HostLibrary, LaunchInputs, Session};
 
 const BACKEND_KEY: &str = NATIVE_BACKEND_KEY;
-const RUNTIME_ABI: &str = "microvm-abi-v2-edge-ramfs-v2";
+const RUNTIME_ABI: &str = "microvm-abi-v2-edge-ramfs-v3";
 const MAX_EXEC_SECONDS: u64 = 3600;
 const MAX_OUTPUT_BYTES: usize = 1 << 20;
+/// Largest number of `process.env` entries, as for the direct backend.
+const MAX_ENVIRONMENT: usize = super::protocol::MAX_ENVIRONMENT;
+/// Largest combined size of the `process.env` entries, which keeps exec requests small.
+const MAX_ENVIRONMENT_BYTES: usize = 32 * 1024;
 const SHELL: &str = "/bin/sh";
 const CONSOLE_POLL: Duration = Duration::from_millis(250);
 
@@ -248,6 +253,10 @@ struct ExecuteCommandRequest {
     command: String,
     #[prost(string, repeated, tag = "2")]
     args: Vec<String>,
+    #[prost(string, tag = "3")]
+    working_directory: String,
+    #[prost(btree_map = "string, string", tag = "4")]
+    environment: std::collections::BTreeMap<String, String>,
     #[prost(int32, tag = "5")]
     timeout_seconds: i32,
 }
@@ -1155,6 +1164,8 @@ fn capabilities() -> Capabilities {
     let mut capabilities = Capabilities::new(BACKEND_KEY);
     capabilities.exec.command_line = true;
     capabilities.exec.argv = true;
+    capabilities.exec.cwd = true;
+    capabilities.exec.env = true;
     capabilities.exec.max_timeout_ms = Some(MAX_EXEC_SECONDS * 1_000);
     capabilities.exec.max_output_bytes = Some(MAX_OUTPUT_BYTES as u64);
     capabilities.network.egress_allow = true;
@@ -1162,28 +1173,56 @@ fn capabilities() -> Capabilities {
     capabilities.network.ingress_deny = true;
     capabilities.network.host_loopback_deny = true;
     capabilities.network.egress_rules = true;
+    capabilities.network.network_proxy = true;
+    capabilities.network.host_loopback_forwards = true;
     capabilities.filesystem.readonly_paths = true;
     capabilities.filesystem.readwrite_paths = true;
     capabilities.filesystem.denied_paths = true;
     capabilities
 }
 
-/// The JSON of `request`'s `filesystem` and `network` sections, which nvxhost plans, or `None`
-/// when the request has neither.
+/// The JSON of the sections of `request` that nvxhost plans: `filesystem`, `network`,
+/// `runtimeConfig`, and the forwarded ports of `microvm.provision`. `None` when the request has
+/// none of them.
 fn device_policy(request: &ProvisionRequest) -> Result<Option<String>> {
     #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct Policy<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         filesystem: Option<&'a FilesystemPolicy>,
         #[serde(skip_serializing_if = "Option::is_none")]
         network: Option<&'a NetworkPolicy>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        runtime_config: Option<&'a RuntimeConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        microvm: Option<Microvm<'a>>,
     }
-    if request.filesystem.is_none() && request.network.is_none() {
+    #[derive(serde::Serialize)]
+    struct Microvm<'a> {
+        provision: Provision<'a>,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Provision<'a> {
+        host_loopback_forwards: &'a [HostLoopbackForward],
+    }
+    let forwards = &request.microvm.provision.host_loopback_forwards;
+    if request.filesystem.is_none()
+        && request.network.is_none()
+        && request.runtime_config.is_none()
+        && forwards.is_empty()
+    {
         return Ok(None);
     }
     serde_json::to_string(&Policy {
         filesystem: request.filesystem.as_ref(),
         network: request.network.as_ref(),
+        runtime_config: request.runtime_config.as_ref(),
+        microvm: (!forwards.is_empty()).then_some(Microvm {
+            provision: Provision {
+                host_loopback_forwards: forwards,
+            },
+        }),
     })
     .map(Some)
     .map_err(|error| {
@@ -1301,15 +1340,13 @@ fn copy_console(
 }
 
 fn prepare_exec(request: &ExecRequest) -> Result<(ExecuteCommandRequest, Option<Duration>)> {
-    if request.stdin == StdinMode::Piped
-        || request.process.cwd.is_some()
-        || request.process.env.is_some()
-    {
+    if request.stdin == StdinMode::Piped {
         return Err(Error::policy_validation(
-            "the nvxhost backend supports no piped stdin, custom working directory, or environment",
+            "the nvxhost backend supports no piped stdin",
         ));
     }
-    let argv = match &request.process.command {
+    let process = &request.process;
+    let argv = match &process.command {
         Command::CommandLine(line) => vec![SHELL.to_owned(), "-c".to_owned(), line.clone()],
         Command::Argv(argv) => argv.clone(),
     };
@@ -1321,7 +1358,7 @@ fn prepare_exec(request: &ExecRequest) -> Result<(ExecuteCommandRequest, Option<
             "the guest command must contain non-NUL arguments totaling at most 4096 bytes",
         ));
     }
-    let timeout = request.process.timeout.filter(|timeout| !timeout.is_zero());
+    let timeout = process.timeout.filter(|timeout| !timeout.is_zero());
     if let Some(timeout) = timeout {
         if timeout > Duration::from_secs(MAX_EXEC_SECONDS) {
             return Err(Error::policy_validation(
@@ -1339,10 +1376,75 @@ fn prepare_exec(request: &ExecRequest) -> Result<(ExecuteCommandRequest, Option<
         ExecuteCommandRequest {
             command: argv[0].clone(),
             args: argv[1..].to_vec(),
+            working_directory: working_directory(process.cwd.as_deref())?,
+            environment: environment(process.env.as_deref(), process.inherit_default_env)?,
             timeout_seconds: seconds,
         },
         timeout,
     ))
+}
+
+/// The guest working directory of `cwd`: absolute, without `..`, and bounded like the direct
+/// backend's. Empty selects the guest default, `/`.
+fn working_directory(cwd: Option<&str>) -> Result<String> {
+    let Some(cwd) = cwd else {
+        return Ok(String::new());
+    };
+    if !cwd.starts_with('/')
+        || cwd.len() > super::protocol::MAX_CWD_BYTES
+        || cwd.split('/').any(|part| part == "..")
+    {
+        return Err(Error::policy_validation(format!(
+            "process.cwd {cwd:?} must be an absolute guest path without '..' of at most {} bytes; \
+             map host paths with openvmm::guest_path",
+            super::protocol::MAX_CWD_BYTES
+        )));
+    }
+    Ok(cwd.to_owned())
+}
+
+/// The variables that `process.env` layers over the guest's default environment, `PATH`; a
+/// later entry for a name replaces an earlier one.
+///
+/// The guest sets the proxy variables itself, so `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`, in
+/// any case, are refused.
+fn environment(
+    entries: Option<&[String]>,
+    inherit_default_env: Option<bool>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let Some(entries) = entries else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    if inherit_default_env != Some(true) {
+        return Err(Error::policy_validation(
+            "the nvxhost backend layers process.env over the guest's default environment; set \
+             inheritDefaultEnv",
+        ));
+    }
+    if entries.len() > MAX_ENVIRONMENT
+        || entries.iter().map(String::len).sum::<usize>() > MAX_ENVIRONMENT_BYTES
+    {
+        return Err(Error::policy_validation(format!(
+            "process.env holds at most {MAX_ENVIRONMENT} entries of at most \
+             {MAX_ENVIRONMENT_BYTES} bytes in total"
+        )));
+    }
+    let mut environment = std::collections::BTreeMap::new();
+    for entry in entries {
+        let (name, value) = entry.split_once('=').ok_or_else(|| {
+            Error::policy_validation("process.env entries must have the form KEY=VALUE")
+        })?;
+        if ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        {
+            return Err(Error::policy_validation(format!(
+                "process.env may not set {name}; the guest sets the proxy variables"
+            )));
+        }
+        environment.insert(name.to_owned(), value.to_owned());
+    }
+    Ok(environment)
 }
 
 fn execute(job: ExecJob) -> Result<ExecOutcome> {
@@ -1554,9 +1656,46 @@ mod tests {
         assert_eq!(request.timeout_seconds, 2);
         assert_eq!(timeout, Some(Duration::from_secs(2)));
         assert!(request.encode_to_vec().len() < 100);
+        assert!(request.working_directory.is_empty() && request.environment.is_empty());
         assert!(capabilities().exec.command_line);
         assert!(!capabilities().exec.cancel);
-        assert!(!capabilities().exec.cwd);
+        assert!(capabilities().exec.cwd && capabilities().exec.env);
+        assert!(!capabilities().exec.clear_default_env);
+    }
+
+    #[test]
+    fn working_directories_and_layered_environments_reach_the_guest() {
+        let (request, _) = prepare_exec(
+            &ExecRequest::argv(["/usr/bin/env"])
+                .with_cwd("/mnt/c/work")
+                .with_envs(["A=1", "B=x=y", "A=2", "EMPTY="])
+                .with_inherit_default_env(true),
+        )
+        .unwrap();
+        assert_eq!(request.working_directory, "/mnt/c/work");
+        assert_eq!(
+            request.environment.into_iter().collect::<Vec<_>>(),
+            [
+                ("A".to_owned(), "2".to_owned()),
+                ("B".to_owned(), "x=y".to_owned()),
+                ("EMPTY".to_owned(), String::new()),
+            ]
+        );
+        let decoded = ExecuteCommandRequest::decode(
+            prepare_exec(
+                &ExecRequest::command_line("pwd")
+                    .with_cwd("/tmp")
+                    .with_env("K=V")
+                    .with_inherit_default_env(true),
+            )
+            .unwrap()
+            .0
+            .encode_to_vec()
+            .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(decoded.working_directory, "/tmp");
+        assert_eq!(decoded.environment["K"], "V");
     }
 
     #[test]
@@ -1567,6 +1706,7 @@ mod tests {
         assert!(capabilities.filesystem.denied_paths);
         assert!(capabilities.network.egress_allow && capabilities.network.egress_rules);
         assert!(!capabilities.network.ingress_allow && !capabilities.network.host_loopback_allow);
+        assert!(capabilities.network.network_proxy && capabilities.network.host_loopback_forwards);
 
         assert_eq!(device_policy(&ProvisionRequest::default()).unwrap(), None);
         // The JSON is nvxhost's planning input; its own tests parse this exact text.
@@ -1600,6 +1740,33 @@ mod tests {
         assert_eq!(
             device_policy(&request).unwrap().unwrap(),
             r#"{"filesystem":{"readonlyPaths":["/work/src"],"readwritePaths":["/work/out"],"deniedPaths":["/work/src/secret"]},"network":{"egress":{"default":"deny","allow":[{"to":[{"cidr":"192.0.2.0/24","except":["192.0.2.128/25"]}],"ports":[{"protocol":"tcp","port":443,"endPort":444}]}],"deny":[{"to":[{"cidr":"192.0.2.7"}]}]},"ingress":{"default":"deny","hostLoopback":"deny"}}}"#
+        );
+
+        // The proxy and the forwarded ports, also in nvxhost's tests; memory stays out.
+        let proxied = ProvisionRequest::new()
+            .with_network(NetworkPolicy::deny_all())
+            .with_network_proxy("http://127.0.0.1:8080")
+            .with_memory_mib(512);
+        assert_eq!(
+            device_policy(&proxied).unwrap().unwrap(),
+            r#"{"network":{"egress":{"default":"deny"},"ingress":{"default":"deny","hostLoopback":"deny"}},"runtimeConfig":{"networkProxy":"http://127.0.0.1:8080"}}"#
+        );
+        let mut loopback = NetworkPolicy::egress(crate::model::Access::Allow);
+        loopback.ingress.host_loopback = Some(crate::model::Access::Allow);
+        let forwarded = ProvisionRequest::new()
+            .with_network(loopback)
+            .with_host_loopback_forward(crate::model::HostLoopbackForward::new(
+                crate::model::ForwardProtocol::Tcp,
+                3000,
+                8080,
+            ));
+        assert_eq!(
+            device_policy(&forwarded).unwrap().unwrap(),
+            r#"{"network":{"egress":{"default":"allow"},"ingress":{"default":"deny","hostLoopback":"allow"}},"microvm":{"provision":{"hostLoopbackForwards":[{"protocol":"tcp","hostPort":3000,"guestPort":8080}]}}}"#
+        );
+        assert_eq!(
+            device_policy(&ProvisionRequest::new().with_memory_mib(512)).unwrap(),
+            None
         );
     }
 
@@ -1661,16 +1828,44 @@ mod tests {
 
     #[test]
     fn unsupported_exec_options_fail_before_guest_work() {
-        let request = ExecRequest::command_line("echo READY").with_cwd("/tmp");
-        assert_eq!(
-            prepare_exec(&request).unwrap_err().code(),
-            ErrorCode::PolicyValidation
-        );
-        let request = ExecRequest::command_line("echo READY").with_env("K=V");
-        assert_eq!(
-            prepare_exec(&request).unwrap_err().code(),
-            ErrorCode::PolicyValidation
-        );
+        let long = format!("/{}", "d".repeat(super::super::protocol::MAX_CWD_BYTES));
+        let many: Vec<String> = (0..=MAX_ENVIRONMENT)
+            .map(|index| format!("V{index}=1"))
+            .collect();
+        let large = vec![format!("BIG={}", "x".repeat(MAX_ENVIRONMENT_BYTES))];
+        for request in [
+            ExecRequest::command_line("cat").with_stdin(StdinMode::Piped),
+            ExecRequest::command_line("pwd").with_cwd("tmp"),
+            ExecRequest::command_line("pwd").with_cwd("/tmp/../root"),
+            ExecRequest::command_line("pwd").with_cwd(long.as_str()),
+            // The guest layers the environment over its defaults; it cannot replace them.
+            ExecRequest::command_line("env").with_env("K=V"),
+            ExecRequest::command_line("env")
+                .with_env("K=V")
+                .with_inherit_default_env(false),
+            ExecRequest::command_line("env")
+                .with_envs(many)
+                .with_inherit_default_env(true),
+            ExecRequest::command_line("env")
+                .with_envs(large)
+                .with_inherit_default_env(true),
+        ] {
+            assert_eq!(
+                prepare_exec(&request).unwrap_err().code(),
+                ErrorCode::PolicyValidation,
+                "{request:?}"
+            );
+        }
+        for name in ["HTTP_PROXY", "https_proxy", "No_Proxy"] {
+            let error = prepare_exec(
+                &ExecRequest::command_line("env")
+                    .with_env(format!("{name}=http://192.0.2.1:3128"))
+                    .with_inherit_default_env(true),
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::PolicyValidation);
+            assert!(error.message().contains(name), "{error}");
+        }
     }
 
     fn host_hypervisor() -> super::super::Hypervisor {

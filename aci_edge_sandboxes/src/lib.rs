@@ -82,8 +82,8 @@ pub use exec::{Canceller, ExecFailure, ExecOutcome, ExecOutput, Execution};
 pub use id::SandboxId;
 pub use input::{InputCloser, InputSource};
 pub use model::{
-    Access, Command, DeprovisionResult, EgressPolicy, ExecRequest, FilesystemPolicy, IngressPolicy,
-    Metadata, MicrovmConfig, MicrovmProvision, NetworkPeer, NetworkPolicy, NetworkPort,
-    NetworkRule, ProcessSpec, Protocol, ProvisionRequest, ProvisionResult, StartResult, StdinMode,
-    StopResult,
+    Access, Command, DeprovisionResult, EgressPolicy, ExecRequest, FilesystemPolicy,
+    ForwardProtocol, HostLoopbackForward, IngressPolicy, Metadata, MicrovmConfig, MicrovmProvision,
+    NetworkPeer, NetworkPolicy, NetworkPort, NetworkRule, ProcessSpec, Protocol, ProvisionRequest,
+    ProvisionResult, RuntimeConfig, StartResult, StdinMode, StopResult,
 };

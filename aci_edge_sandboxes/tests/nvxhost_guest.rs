@@ -1,12 +1,13 @@
-//! Opt-in lifecycle, robustness, host-path, and network proofs with a separately supplied native
-//! library and guest.
+//! Opt-in lifecycle, robustness, host-path, network, proxy, port-forwarding, and exec-environment
+//! proofs with a separately supplied native library and guest.
 //!
 //! The tests need `NVXHOST_TEST_OPENVMM`, `NVXHOST_TEST_KERNEL`, `NVXHOST_TEST_INITRD`,
 //! `NVXHOST_TEST_IMAGE`, `NVXHOST_TEST_LIBRARY`, and the approved `NVXHOST_TEST_SHA256`.
 //! `NVXHOST_TEST_HYPERVISOR` selects `whp`, `mshv`, or `kvm`, and defaults to `whp` on Windows.
-//! The host-path and network tests also need `python3` in the image. Run the tests one at a time
-//! so that the check for leftover OpenVMM processes is exact, and optimized, since creating a
-//! backend hashes the runtime files and registering an image hashes the image:
+//! The host-path, network, proxy, port-forwarding, and exec-environment tests also need `python3`
+//! in the image. Run the tests one at a time so that the check for leftover OpenVMM processes is
+//! exact, and optimized, since creating a backend hashes the runtime files and registering an
+//! image hashes the image:
 //! `cargo test --release --features nvxhost --test nvxhost_guest -- --ignored --test-threads=1`.
 #![cfg(feature = "nvxhost")]
 
@@ -26,8 +27,8 @@ use aci_edge_sandboxes::openvmm::{
 };
 use aci_edge_sandboxes::{
     Access, AciEdgeSandbox, EgressPolicy, Error, ErrorCode, ExecOutcome, ExecOutput, ExecRequest,
-    FilesystemPolicy, NetworkPolicy, NetworkRule, Protocol, ProvisionRequest, Result, SandboxId,
-    StdinMode, StopResult,
+    FilesystemPolicy, ForwardProtocol, HostLoopbackForward, NetworkPolicy, NetworkRule, Protocol,
+    ProvisionRequest, Result, SandboxId, StdinMode, StopResult,
 };
 
 const HELPER_STATE: &str = "NVXHOST_TEST_HELPER_STATE";
@@ -546,16 +547,13 @@ fn exec_reports_exit_codes_streams_timeouts_and_output_limits() {
     for index in 0..20 {
         assert_prints(&client, id, &format!("command{index}"));
     }
-    for request in [
-        ExecRequest::command_line("pwd").with_cwd("/tmp"),
-        ExecRequest::command_line("env").with_env("NAME=value"),
-        ExecRequest::command_line("cat").with_stdin(StdinMode::Piped),
-    ] {
-        assert_eq!(
-            failure(client.exec(id, &request)),
-            ErrorCode::PolicyValidation
-        );
-    }
+    assert_eq!(
+        failure(client.exec(
+            id,
+            &ExecRequest::command_line("cat").with_stdin(StdinMode::Piped)
+        )),
+        ErrorCode::PolicyValidation
+    );
     let logs = backend.guest_logs(id).unwrap();
     assert!(logs.windows(8).any(|window| window == b"execute:"));
     assert!(logs.windows(13).any(|window| window == b"output-limit:"));
@@ -1494,5 +1492,422 @@ fn network_policies_are_enforced() {
         assert_graceful(client.stop(&sandbox.id));
         client.deprovision(&sandbox.release()).unwrap();
     }
+    assert_no_new_openvmm(&before);
+}
+
+/// Reports the guest's proxy variables and whether it reaches the proxy, the proxy's port over
+/// UDP, another host loopback port, and a host service.
+const PROXY_PROBE: &str = r#"
+import json, os, socket, sys
+gateway, proxy, other, host, service = sys.argv[1:6]
+def connect(address, port):
+    try:
+        with socket.create_connection((address, int(port)), timeout=3) as connection:
+            return "reached:" + connection.recv(16).decode()
+    except OSError:
+        return "blocked"
+def datagram(address, port):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(3)
+            probe.sendto(b"ping", (address, int(port)))
+            return "reached:" + probe.recv(16).decode()
+    except OSError:
+        return "blocked"
+names = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"]
+print(json.dumps({
+    "variables": {name: os.environ.get(name) for name in names},
+    "proxy": connect(gateway, proxy),
+    "proxyUdp": datagram(gateway, proxy),
+    "other": connect(gateway, other),
+    "service": connect(host, service),
+}))
+"#;
+
+/// A host UDP service that answers every datagram with `reply` until it is dropped.
+struct DatagramService {
+    done: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl DatagramService {
+    fn serve(socket: UdpSocket, reply: &'static str) -> Self {
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = done.clone();
+        let thread = thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok((_, peer)) = socket.recv_from(&mut buffer) {
+                    let _ = socket.send_to(reply.as_bytes(), peer);
+                }
+            }
+        });
+        Self {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for DatagramService {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The guest network and gateway for `host`, chosen so that the guest reaches the host through
+/// its gateway rather than consider it on-link.
+fn guest_network_for(host: Ipv4Addr) -> (&'static str, &'static str) {
+    if host.octets()[..3] == [10, 0, 0] {
+        ("10.0.1.2/24", "10.0.1.1")
+    } else {
+        ("10.0.0.2/24", "10.0.0.1")
+    }
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn a_loopback_proxy_is_the_only_way_out() {
+    let state = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let host = host_address();
+    let (guest_network, gateway) = guest_network_for(host);
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = proxy.local_addr().unwrap().port();
+    let other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let service = TcpListener::bind((host, 0)).unwrap();
+    let ports =
+        [&other, &service].map(|listener| listener.local_addr().unwrap().port().to_string());
+    let _services = Services::serve(vec![
+        (proxy, "proxy"),
+        (other, "other"),
+        (service, "service"),
+    ]);
+    // A UDP service on the proxy's port proves that only TCP reaches the proxy.
+    let _datagrams =
+        DatagramService::serve(UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).unwrap(), "udp");
+    let backend = backend_with(state.path(), false, |config| {
+        config.guest_network = guest_network.to_owned();
+    });
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+
+    // A proxy is a separate connectivity model from direct egress.
+    for network in [
+        NetworkPolicy::egress(Access::Allow),
+        NetworkPolicy {
+            egress: EgressPolicy::new(Access::Deny)
+                .with_allow(NetworkRule::to(format!("{host}/32"))),
+            ..NetworkPolicy::deny_all()
+        },
+    ] {
+        let request = ProvisionRequest::new()
+            .with_network(network)
+            .with_network_proxy(format!("http://127.0.0.1:{port}"));
+        assert_eq!(
+            failure(client.provision(&request)),
+            ErrorCode::PolicyValidation
+        );
+    }
+    for url in [
+        format!("http://192.0.2.1:{port}"),
+        format!("http://[::1]:{port}"),
+        "http://127.0.0.1".to_owned(),
+    ] {
+        let request = ProvisionRequest::new()
+            .with_network(NetworkPolicy::deny_all())
+            .with_network_proxy(url);
+        assert_eq!(
+            failure(client.provision(&request)),
+            ErrorCode::PolicyValidation
+        );
+    }
+
+    let sandbox = started(
+        &client,
+        &backend,
+        &ProvisionRequest::new()
+            .with_network(NetworkPolicy::deny_all())
+            .with_network_proxy(format!("http://localhost:{port}")),
+    );
+    let host_text = host.to_string();
+    let printed = python(
+        &client,
+        &sandbox.id,
+        PROXY_PROBE,
+        &[gateway, &port.to_string(), &ports[0], &host_text, &ports[1]],
+    );
+    let url = format!("http://{gateway}:{port}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&printed).unwrap(),
+        serde_json::json!({
+            "variables": {
+                "HTTP_PROXY": url,
+                "HTTPS_PROXY": url,
+                "http_proxy": url,
+                "https_proxy": url,
+                "NO_PROXY": "localhost,127.0.0.1",
+                "no_proxy": "localhost,127.0.0.1",
+            },
+            "proxy": "reached:proxy",
+            "proxyUdp": "blocked",
+            "other": "blocked",
+            "service": "blocked",
+        })
+    );
+    // Only the guest sets the proxy variables.
+    for name in ["HTTP_PROXY", "https_proxy", "No_Proxy"] {
+        let request = ExecRequest::command_line("true")
+            .with_env(format!("{name}=http://192.0.2.1:3128"))
+            .with_inherit_default_env(true);
+        assert_eq!(
+            failure(client.exec(&sandbox.id, &request)),
+            ErrorCode::PolicyValidation
+        );
+    }
+    assert_graceful(client.stop(&sandbox.id));
+    client.deprovision(&sandbox.release()).unwrap();
+    assert_no_new_openvmm(&before);
+}
+
+/// Serves one TCP connection and one UDP datagram on the given guest ports, then exits. It gives
+/// up after 30 seconds without the host, rather than wait for the command's timeout.
+const FORWARD_LISTENER: &str = r#"
+import socket, sys
+tcp = socket.create_server(("0.0.0.0", int(sys.argv[1])))
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.bind(("0.0.0.0", int(sys.argv[2])))
+tcp.settimeout(30)
+udp.settimeout(30)
+connection, _ = tcp.accept()
+connection.sendall(b"forwarded")
+connection.close()
+data, peer = udp.recvfrom(16)
+udp.sendto(b"udp:" + data, peer)
+print("served")
+"#;
+
+/// Returns a host loopback port that is free now.
+fn free_loopback_port(udp: bool) -> u16 {
+    if udp {
+        UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    } else {
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn forwarded_ports_publish_guest_listeners_on_host_loopback() {
+    use std::io::Read;
+    use std::net::TcpStream;
+
+    let state = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let host = host_address();
+    let (guest_network, gateway) = guest_network_for(host);
+    let loopback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let loopback_port = loopback.local_addr().unwrap().port().to_string();
+    let _services = Services::serve(vec![(loopback, "loopback")]);
+    let backend = backend_with(state.path(), false, |config| {
+        config.guest_network = guest_network.to_owned();
+    });
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    let mut open = NetworkPolicy::egress(Access::Allow);
+    open.ingress.host_loopback = Some(Access::Allow);
+    let forwarded = |network: NetworkPolicy, tcp_port: u16, udp_port: u16| {
+        ProvisionRequest::new()
+            .with_network(network)
+            .with_host_loopback_forward(HostLoopbackForward::new(
+                ForwardProtocol::Tcp,
+                tcp_port,
+                8080,
+            ))
+            .with_host_loopback_forward(HostLoopbackForward::new(
+                ForwardProtocol::Udp,
+                udp_port,
+                8081,
+            ))
+    };
+
+    // Generic host-loopback access, forwards without it, and forwards whose replies egress
+    // would drop all fail before any VM exists.
+    let mut closed = open.clone();
+    closed.egress =
+        EgressPolicy::new(Access::Deny).with_allow(NetworkRule::to(format!("{host}/32")));
+    for request in [
+        ProvisionRequest::new().with_network(open.clone()),
+        forwarded(NetworkPolicy::egress(Access::Allow), 18080, 18081),
+        forwarded(closed, 18080, 18081),
+    ] {
+        assert_eq!(
+            failure(client.provision(&request)),
+            ErrorCode::PolicyValidation
+        );
+    }
+
+    // OpenVMM binds the host ports when it starts, and another process can take a port released
+    // here before then, so a failed start is retried with other ports.
+    let mut retries = 0;
+    let (sandbox, tcp_port, udp_port) = loop {
+        let (tcp_port, udp_port) = (free_loopback_port(false), free_loopback_port(true));
+        let sandbox = provision_with(
+            &client,
+            &backend,
+            &forwarded(open.clone(), tcp_port, udp_port),
+        );
+        match client.start(&sandbox.id) {
+            Ok(_) => break (sandbox, tcp_port, udp_port),
+            Err(error) if retries < 2 => {
+                retries += 1;
+                eprintln!("starting with ports {tcp_port} and {udp_port} failed: {error}");
+            }
+            Err(error) => panic!("starting with ports {tcp_port} and {udp_port} failed: {error}"),
+        }
+    };
+    let listener = thread::scope(|scope| {
+        let served =
+            scope.spawn(|| python(&client, &sandbox.id, FORWARD_LISTENER, &["8080", "8081"]));
+        // OpenVMM accepts on the host before the guest listens, so retry until the guest
+        // answers.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let greeting = loop {
+            let mut text = String::new();
+            let answered = TcpStream::connect((Ipv4Addr::LOCALHOST, tcp_port))
+                .and_then(|mut stream| {
+                    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                    stream.read_to_string(&mut text)
+                })
+                .is_ok_and(|_| !text.is_empty());
+            if answered || Instant::now() > deadline {
+                break text;
+            }
+            thread::sleep(Duration::from_millis(200));
+        };
+        assert_eq!(greeting, "forwarded");
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut reply = [0u8; 16];
+        let received = (0..30).find_map(|_| {
+            socket
+                .send_to(b"ping", (Ipv4Addr::LOCALHOST, udp_port))
+                .ok()?;
+            socket.recv(&mut reply).ok()
+        });
+        assert_eq!(
+            received.map(|length| &reply[..length]),
+            Some(&b"udp:ping"[..])
+        );
+        served.join().unwrap()
+    });
+    assert_eq!(listener, "served\n");
+    // Allowed host loopback also lets the guest reach host loopback services at its gateway.
+    let printed = python(
+        &client,
+        &sandbox.id,
+        "import socket, sys\nwith socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3) as c: print(c.recv(16).decode())",
+        &[gateway, &loopback_port],
+    );
+    assert_eq!(printed, "loopback\n");
+    assert_graceful(client.stop(&sandbox.id));
+    client.deprovision(&sandbox.release()).unwrap();
+    assert_no_new_openvmm(&before);
+}
+
+#[test]
+#[ignore = "requires an approved private library, edge initramfs, GPT image, and a hypervisor host"]
+fn exec_environments_layer_over_the_guest_defaults() {
+    let state = tempfile::tempdir().unwrap();
+    let before = openvmm_processes();
+    let backend = backend(state.path());
+    let client = AciEdgeSandbox::from_shared(backend.clone());
+    let sandbox = started(&client, &backend, &ProvisionRequest::new());
+    let report = ExecRequest::argv([
+        "/bin/sh",
+        "-c",
+        "pwd; printf '%s|%s|%s' \"$A\" \"$B\" \"$PATH\"",
+    ]);
+    let output = exec(
+        &client,
+        &sandbox.id,
+        &report
+            .clone()
+            .with_cwd("/tmp")
+            .with_envs(["A=1", "B=two words", "A=one"])
+            .with_inherit_default_env(true),
+    );
+    assert_eq!(output.outcome, ExecOutcome::Exited(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/tmp\none|two words|/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    );
+    // The request's PATH replaces the default.
+    let output = exec(
+        &client,
+        &sandbox.id,
+        &report
+            .clone()
+            .with_env("PATH=/bin")
+            .with_inherit_default_env(true),
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "/\n||/bin");
+    // The largest environment the backend accepts reaches the workload, also when its control
+    // characters take six bytes each in the guest's encoding.
+    let value = "\u{1}".repeat(131);
+    let output = exec(
+        &client,
+        &sandbox.id,
+        &ExecRequest::argv([
+            "/bin/sh",
+            "-c",
+            "exec python3 -c \"$1\"",
+            "sh",
+            "import os; print(sum(name[0] == 'V' for name in os.environ), \
+             len(os.environ['V000']), len(os.environ['V239']))",
+        ])
+        .with_envs((0..240).map(|index| format!("V{index:03}={value}")))
+        .with_inherit_default_env(true),
+    );
+    assert_eq!(output.outcome, ExecOutcome::Exited(0), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "240 131 131\n");
+    // A missing working directory fails the command, not the sandbox.
+    let output = exec(
+        &client,
+        &sandbox.id,
+        &report.clone().with_cwd("/nonexistent"),
+    );
+    assert_eq!(output.outcome, ExecOutcome::Exited(126), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("NVX-EDGE-STAGE-ERROR"),
+        "{output:?}"
+    );
+    // The guest layers the environment over its defaults; it cannot replace them.
+    for request in [
+        report.clone().with_env("A=1"),
+        report.clone().with_cwd("relative"),
+    ] {
+        assert_eq!(
+            failure(client.exec(&sandbox.id, &request)),
+            ErrorCode::PolicyValidation
+        );
+    }
+    assert_prints(&client, &sandbox.id, "still-running");
+    assert_graceful(client.stop(&sandbox.id));
+    client.deprovision(&sandbox.release()).unwrap();
     assert_no_new_openvmm(&before);
 }

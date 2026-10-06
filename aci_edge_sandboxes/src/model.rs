@@ -14,9 +14,9 @@ pub type Metadata = serde_json::Map<String, serde_json::Value>;
 /// Inputs to [`AciEdgeSandbox::provision`](crate::AciEdgeSandbox::provision).
 ///
 /// The serialized form matches the policy fields of the contract's provision request
-/// (`filesystem`, `network`, and `microvm`). Envelope fields such as `version` and `phase` belong
-/// to the caller's wire layer and are rejected here. Every field is optional, so `{}` provisions a
-/// sandbox with the backend defaults.
+/// (`filesystem`, `network`, `runtimeConfig`, and `microvm`). Envelope fields such as `version`
+/// and `phase` belong to the caller's wire layer and are rejected here. Every field is optional,
+/// so `{}` provisions a sandbox with the backend defaults.
 ///
 /// The sandbox runs the guest's own Alpine Linux userland directly; there are no image layers or
 /// scratch disks. Guest state lives in memory and lasts until the sandbox stops.
@@ -29,6 +29,10 @@ pub struct ProvisionRequest {
     /// Network posture. `None` attaches no network device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkPolicy>,
+    /// Runtime connectivity. The sandbox takes it at provision because its network is fixed
+    /// when the microVM starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<RuntimeConfig>,
     /// MicroVM configuration.
     #[serde(default, skip_serializing_if = "MicrovmConfig::is_default")]
     pub microvm: MicrovmConfig,
@@ -60,6 +64,35 @@ impl ProvisionRequest {
         self.microvm.provision.memory_mib = Some(memory_mib);
         self
     }
+
+    /// Routes the guest's traffic through a proxy on host loopback, such as
+    /// `http://127.0.0.1:8080`; see [`RuntimeConfig::network_proxy`].
+    #[must_use]
+    pub fn with_network_proxy(mut self, url: impl Into<String>) -> Self {
+        self.runtime_config
+            .get_or_insert_with(RuntimeConfig::default)
+            .network_proxy = Some(url.into());
+        self
+    }
+
+    /// Publishes a guest port on a host loopback port; see
+    /// [`MicrovmProvision::host_loopback_forwards`].
+    #[must_use]
+    pub fn with_host_loopback_forward(mut self, forward: HostLoopbackForward) -> Self {
+        self.microvm.provision.host_loopback_forwards.push(forward);
+        self
+    }
+}
+
+/// The contract's `runtimeConfig` section.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeConfig {
+    /// An HTTP or HTTPS proxy on host loopback with an explicit port, such as
+    /// `http://127.0.0.1:8080`. It must be the guest's only way out: the network's egress default
+    /// is `deny`, without allow or deny rules. Workloads receive the proxy variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_proxy: Option<String>,
 }
 
 /// The contract's `microvm` section.
@@ -85,6 +118,54 @@ pub struct MicrovmProvision {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u32>,
+    /// Host loopback ports that each reach one guest port, an extension to the contract.
+    /// Forwarded ports need `network.ingress.hostLoopback: allow`, which also lets the guest
+    /// reach host loopback services.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_loopback_forwards: Vec<HostLoopbackForward>,
+}
+
+/// A host loopback port forwarded to a guest port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostLoopbackForward {
+    /// Transport protocol.
+    pub protocol: ForwardProtocol,
+    /// Port on host loopback (`127.0.0.1`).
+    pub host_port: u16,
+    /// Port inside the guest.
+    pub guest_port: u16,
+}
+
+impl HostLoopbackForward {
+    /// Forwards `host_port` on host loopback to `guest_port` in the guest.
+    pub fn new(protocol: ForwardProtocol, host_port: u16, guest_port: u16) -> Self {
+        Self {
+            protocol,
+            host_port,
+            guest_port,
+        }
+    }
+}
+
+/// Transport protocol of a [`HostLoopbackForward`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardProtocol {
+    /// TCP.
+    Tcp,
+    /// UDP.
+    Udp,
+}
+
+impl ForwardProtocol {
+    /// Returns the contract spelling of this protocol.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
 }
 
 /// The contract's `filesystem` section.

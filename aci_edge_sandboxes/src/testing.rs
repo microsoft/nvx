@@ -91,6 +91,8 @@ impl MockBackend {
         network.host_loopback_allow = true;
         network.host_loopback_deny = true;
         network.egress_rules = true;
+        network.network_proxy = true;
+        network.host_loopback_forwards = true;
         let filesystem = &mut capabilities.filesystem;
         filesystem.readonly_paths = true;
         filesystem.readwrite_paths = true;

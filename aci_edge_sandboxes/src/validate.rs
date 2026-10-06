@@ -40,6 +40,32 @@ pub(crate) fn provision_structure(request: &ProvisionRequest) -> Result<()> {
             }
         }
     }
+    if let Some(proxy) = request
+        .runtime_config
+        .as_ref()
+        .and_then(|config| config.network_proxy.as_deref())
+    {
+        if proxy.trim().is_empty() {
+            return Err(Error::malformed_request(
+                "runtimeConfig.networkProxy is empty",
+            ));
+        }
+        no_nul(proxy, "runtimeConfig.networkProxy")?;
+    }
+    for (index, forward) in request
+        .microvm
+        .provision
+        .host_loopback_forwards
+        .iter()
+        .enumerate()
+    {
+        if forward.host_port == 0 || forward.guest_port == 0 {
+            return Err(Error::malformed_request(format!(
+                "microvm.provision.hostLoopbackForwards[{index}]: ports must be between 1 and \
+                 65535"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -123,11 +149,14 @@ pub(crate) fn provision_capabilities(
             check_access(backend, field, access, allow, deny)?;
         }
         if let Some(access) = network.ingress.host_loopback {
+            // Forwarded ports are the only host-loopback access a backend may honor.
+            let forwarded = supported.host_loopback_forwards
+                && !request.microvm.provision.host_loopback_forwards.is_empty();
             check_access(
                 backend,
                 "network.ingress.hostLoopback",
                 access,
-                supported.host_loopback_allow,
+                supported.host_loopback_allow || forwarded,
                 supported.host_loopback_deny,
             )?;
         }
@@ -137,6 +166,22 @@ pub(crate) fn provision_capabilities(
                 "the {backend} backend cannot enforce network.egress allow or deny rules"
             )));
         }
+    }
+    let proxy = request
+        .runtime_config
+        .as_ref()
+        .is_some_and(|config| config.network_proxy.is_some());
+    if proxy && !capabilities.network.network_proxy {
+        return Err(Error::policy_validation(format!(
+            "the {backend} backend cannot enforce runtimeConfig.networkProxy"
+        )));
+    }
+    if !request.microvm.provision.host_loopback_forwards.is_empty()
+        && !capabilities.network.host_loopback_forwards
+    {
+        return Err(Error::policy_validation(format!(
+            "the {backend} backend cannot enforce microvm.provision.hostLoopbackForwards"
+        )));
     }
     Ok(())
 }
@@ -410,6 +455,64 @@ mod tests {
         let mut supported = capabilities();
         supported.network.egress_rules = true;
         provision_capabilities(&valid, &supported).unwrap();
+    }
+
+    #[test]
+    fn proxies_and_forwards_need_their_capabilities() {
+        use crate::model::{ForwardProtocol, HostLoopbackForward};
+
+        let proxied = request()
+            .with_network(NetworkPolicy::deny_all())
+            .with_network_proxy("http://127.0.0.1:8080");
+        provision_structure(&proxied).unwrap();
+        assert_eq!(
+            code(provision_capabilities(&proxied, &capabilities())),
+            ErrorCode::PolicyValidation
+        );
+        let mut supported = capabilities();
+        supported.network.network_proxy = true;
+        provision_capabilities(&proxied, &supported).unwrap();
+        for proxy in ["", "  ", "http://127.0.0.1:80\0"] {
+            assert_eq!(
+                code(provision_structure(&request().with_network_proxy(proxy))),
+                ErrorCode::MalformedRequest,
+                "{proxy:?}"
+            );
+        }
+
+        let mut loopback = NetworkPolicy::egress(Access::Allow);
+        loopback.ingress.host_loopback = Some(Access::Allow);
+        let forward = HostLoopbackForward::new(ForwardProtocol::Tcp, 3000, 8080);
+        let forwarded = request()
+            .with_network(loopback.clone())
+            .with_host_loopback_forward(forward);
+        provision_structure(&forwarded).unwrap();
+        assert_eq!(
+            code(provision_capabilities(&forwarded, &capabilities())),
+            ErrorCode::PolicyValidation
+        );
+        let mut supported = capabilities();
+        supported.network.host_loopback_forwards = true;
+        provision_capabilities(&forwarded, &supported).unwrap();
+        // Without forwarded ports, host-loopback access needs the generic capability.
+        assert_eq!(
+            code(provision_capabilities(
+                &request().with_network(loopback),
+                &supported
+            )),
+            ErrorCode::PolicyValidation
+        );
+        for (host_port, guest_port) in [(0, 53), (53, 0)] {
+            let zero = request().with_host_loopback_forward(HostLoopbackForward::new(
+                ForwardProtocol::Udp,
+                host_port,
+                guest_port,
+            ));
+            assert_eq!(
+                code(provision_structure(&zero)),
+                ErrorCode::MalformedRequest
+            );
+        }
     }
 
     #[test]
