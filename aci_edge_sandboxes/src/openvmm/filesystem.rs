@@ -812,11 +812,15 @@ mod tests {
             ErrorCode::PolicyValidation
         );
         if cfg!(windows) {
-            let volume = FilesystemPolicy {
-                readonly_paths: vec![base.join("work"), PathBuf::from(r"C:\Windows")],
-                ..FilesystemPolicy::default()
-            };
             if canonical(base).starts_with(r"C:\") {
+                let windows = canonical(Path::new(r"C:\Windows"));
+                let users = canonical(Path::new(r"C:\Users"));
+                assert_eq!(windows.parent(), Some(Path::new(r"C:\")));
+                assert_eq!(users.parent(), Some(Path::new(r"C:\")));
+                let volume = FilesystemPolicy {
+                    readonly_paths: vec![windows, users],
+                    ..FilesystemPolicy::default()
+                };
                 assert_eq!(
                     plan(&volume).unwrap_err().code(),
                     ErrorCode::PolicyValidation
