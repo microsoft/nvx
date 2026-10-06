@@ -547,6 +547,17 @@ function Get-RequiredCommand {
     return $command.Source
 }
 
+function Get-GitBashDirectory {
+    param([Parameter(Mandatory = $true)][string]$GitExecutable)
+
+    $gitRoot = Split-Path -Parent (Split-Path -Parent $GitExecutable)
+    $directory = Join-Path $gitRoot "bin"
+    if (-not (Test-Path -LiteralPath (Join-Path $directory "bash.exe") -PathType Leaf)) {
+        throw "Git for Windows bash.exe was not found alongside $GitExecutable"
+    }
+    return $directory
+}
+
 function Get-WinGetCommand {
     $command = Get-Command winget.exe -ErrorAction SilentlyContinue |
     Select-Object -First 1
@@ -681,6 +692,12 @@ function Install-Toolchain {
     if ($null -eq (Get-Command git.exe -ErrorAction SilentlyContinue |
             Select-Object -First 1)) {
         Install-WinGetPackage "Git.Git" @("--scope", "machine")
+        Update-ProcessPath
+    }
+    if ($RunnerOnly) {
+        $gitBashDirectory = Get-GitBashDirectory `
+            -GitExecutable (Get-RequiredCommand "git.exe")
+        Add-MachinePathEntry $gitBashDirectory
         Update-ProcessPath
     }
     if ($null -eq (Get-PythonCommand -AllowMissing)) {
@@ -1440,6 +1457,17 @@ function Assert-Environment {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     if ($TrustedCargoHome + "\bin" -notin @($machinePath -split ";")) {
         throw "trusted Cargo bin directory is missing from the machine PATH"
+    }
+    if ($RunnerOnly) {
+        $gitBashDirectory = Get-GitBashDirectory `
+            -GitExecutable (Get-RequiredCommand "git.exe")
+        if ($gitBashDirectory -notin @($machinePath -split ";") -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                (Get-RequiredCommand "bash.exe"),
+                (Join-Path $gitBashDirectory "bash.exe")
+            )) {
+            throw "Git Bash does not resolve from the Windows runner machine PATH"
+        }
     }
     Assert-TrustedToolchainAcl
     $python = Get-PythonCommand

@@ -3732,6 +3732,70 @@ Write-Output "fresh runner directory validated"
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("fresh runner directory validated", result.stdout)
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_runner_exposes_git_bash_from_machine_path(self):
+        setup = BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
+        configuration = setup.read_text(encoding="utf-8")
+        self.assertIn("Add-MachinePathEntry $gitBashDirectory", configuration)
+        self.assertIn(
+            '$gitBashDirectory -notin @($machinePath -split ";")', configuration
+        )
+        self.assertIn('Get-RequiredCommand "bash.exe"', configuration)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            escaped_setup = str(setup).replace("'", "''")
+            escaped_temporary = temporary.replace("'", "''")
+            harness = f"""
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{escaped_setup}', [ref]$tokens, [ref]$errors
+)
+if ($errors.Count -ne 0) {{ throw "setup script has parse errors" }}
+$definition = $ast.Find({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq "Get-GitBashDirectory"
+}}, $true)
+if (-not $definition) {{ throw "Git Bash directory lookup is missing" }}
+. ([scriptblock]::Create($definition.Extent.Text))
+$root = Join-Path '{escaped_temporary}' "Git"
+$cmd = Join-Path $root "cmd"
+$bin = Join-Path $root "bin"
+New-Item -ItemType Directory -Path $cmd, $bin -Force | Out-Null
+$git = Join-Path $cmd "git.exe"
+$bash = Join-Path $bin "bash.exe"
+Set-Content -LiteralPath $git -Value "git"
+Set-Content -LiteralPath $bash -Value "bash"
+if ((Get-GitBashDirectory -GitExecutable $git) -ne $bin) {{
+    throw "Git for Windows bin directory was not selected"
+}}
+Remove-Item -LiteralPath $bash
+try {{
+    Get-GitBashDirectory -GitExecutable $git
+    throw "accepted missing Git Bash"
+}} catch {{
+    if ($_.Exception.Message -notlike "Git for Windows bash.exe was not found*") {{ throw }}
+}}
+Write-Output "Git Bash directory validated"
+"""
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    harness,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Git Bash directory validated", result.stdout)
+
     def test_windows_utility_runner_labels_and_ci_routing(self):
         setup = (
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
