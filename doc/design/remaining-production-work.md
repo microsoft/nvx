@@ -28,10 +28,11 @@ the required stop signal. Such images may need `CAP_MKNOD` together with a
 cgroup device filter. They are not covered by the current drop-all-capabilities
 bootstrap, and its private mount policy must not be described as that profile.
 
-Azure Files, secret/content volumes, and other optional mounts remain undesigned.
-Guest-side CIFS, a scratch-backed temporary directory, or an explicit small
-content attachment are possible directions, not supported extra device slots
-in the fixed ABI. Managed executions deliver bounded environments through a
+Secret/content volumes and other optional mounts remain undesigned.
+Guest-side network filesystems, a scratch-backed temporary directory, or an
+explicit small content attachment are separate directions. ABI 3 does provide
+four fixed read-only image slots, but they are bind-once block media rather
+than general volume or device hotplug. Managed executions deliver bounded environments through a
 sealed anonymous file inside the guest; snapshot-time launch configuration and
 secret-volume delivery remain distinct proposed features. Scratch cannot
 currently grow online; capacity exhaustion and whole-file copy-up remain

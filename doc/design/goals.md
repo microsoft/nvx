@@ -17,8 +17,9 @@ explicitly, by `--machine microvm` on the OpenVMM command line or by the
 microVM machine profile of the management RPC, and is never inferred from a
 kernel, device, or hypervisor choice. It uses fixed sandbox layer and scratch
 roles, deterministic SMP topology, and shared virtio-mmio interrupt status with
-edge-triggered delivery. Snapshot manifests retain microVM ABI value 2 and
-boot-layout value 2, optional restore-time RAM expansion uses machine-contract
+edge-triggered delivery. Snapshot manifests retain microVM ABI value 2 for
+machines without image slots and use value 3 for slot-declaring machines;
+they retain boot-layout value 2. Optional restore-time RAM expansion uses machine-contract
 capability version 1, and the management RPC uses numeric machine-profile
 value 2. KVM and MSHV are supported on Linux and WHP is supported on Windows.
 Hypervisor-specific code provides partition creation, vCPU execution,

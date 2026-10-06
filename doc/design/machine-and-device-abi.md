@@ -95,7 +95,7 @@ restore, the same write acknowledges completion of guest repair.
 
 ## Fixed virtio-mmio transport
 
-All eight fixed address slots are reserved, including the dedicated control
+ABI 2 reserves eight fixed address slots, including the dedicated control
 console at `0xd0007000..0xd0007fff` on IRQ 3 (shared status at `0x3001c`).
 Every microVM cold-booted from the command line or the management RPC
 instantiates the virtio-fs slot, so it is discoverable before capture even
@@ -116,6 +116,33 @@ profile-owned command-line tokens, and has packed-ring support masked.
 | `custom` virtio-blk | `blk:sandbox:custom` | `0xd0005000..0xd0005fff` | 9 | Optional read-only role |
 | `scratch` virtio-blk | `blk:sandbox:scratch` | `0xd0006000..0xd0006fff` | 11 | Required writable final role when blocks are present |
 | Control virtio-console | `console:microvm-control0` | `0xd0007000..0xd0007fff` | 3 | Optional authenticated local endpoint |
+
+An ABI-3 machine declares four additional, permanent image-slot transports.
+Omitting image slots keeps the exact ABI-2 topology. A slot-declaring launch
+always has capacity `S = 4`; `B` is the active cold-boot prefix, and a restore
+may activate a larger prefix `N` only while restore input remains gated.
+Inactive slots are virtio-mmio placeholders with device ID 0. Active slots are
+empty read-only virtio-blk devices with 512-byte logical and 4096-byte physical
+blocks until the host binds media once.
+
+| Device | Stable identity | MMIO range | IRQ | Shared status |
+| --- | --- | ---: | ---: | ---: |
+| Image slot 0 | `blk:image0` | `0xd0008000..0xd0008fff` | 1 | `0x30020` |
+| Image slot 1 | `blk:image1` | `0xd0009000..0xd0009fff` | 13 | `0x30024` |
+| Image slot 2 | `blk:image2` | `0xd000a000..0xd000afff` | 14 | `0x30028` |
+| Image slot 3 | `blk:image3` | `0xd000b000..0xd000bfff` | 15 | `0x3002c` |
+
+The discovery token is `microvm_image_slots=4`. Binding sets capacity and
+raises a virtio configuration-change interrupt; the guest block driver updates
+capacity through its normal config-change path. The host-control protocol
+permits query and bind-once operations only. The same identity is idempotent,
+a different second bind fails, and there is no unbind, eject, rebind, device
+addition, or activation after readiness.
+
+The OpenVMM promotion from `4355c010e726128c751138e7f74ad969e76a4c19` to
+`6c12f620d2e793a7e077aaf3e211caa673b4dc24` contains exactly
+`368b9d2a` (bind-once virtio-blk image slots) and `6c12f620` (microVM image
+slots and host control). It contains no unrelated fork changes.
 
 Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and
@@ -150,6 +177,10 @@ per fixed slot resides in the reserved shared-status page:
 | `custom` block | `0x30014` |
 | `scratch` block | `0x30018` |
 | Control virtio-console | `0x3001c` |
+| Image slot 0 | `0x30020` |
+| Image slot 1 | `0x30024` |
+| Image slot 2 | `0x30028` |
+| Image slot 3 | `0x3002c` |
 
 OpenVMM publishes config-change and used-buffer bits with a sequentially
 consistent compare-exchange loop. It pulses the device IRQ only when the old

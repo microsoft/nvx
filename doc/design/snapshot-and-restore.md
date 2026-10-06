@@ -463,6 +463,35 @@ Performance comparisons should separate VP binding and worker construction
 from guest resume-to-readiness. Matching host-side phase costs do not require
 the total restore latencies or tail behavior to match.
 
+## Restore-time image-slot activation
+
+ABI-3 snapshots record image-slot capacity `S = 4`, the cold-boot active prefix
+`B`, and the empty state of every active slot. Capture is rejected before the
+guest is quiesced if any slot is bound. ABI-2 snapshots contain no image-slot
+state.
+
+An explicit `--restore-image-slots N` target is process-local and must satisfy
+`B <= N <= 4`. During gated repair the guest binds the virtio-mmio driver to
+newly active placeholders `B..N-1`, verifies that all slots in `0..N-1` are
+empty read-only block devices, and only then acknowledges the restore gate.
+The target does not modify the snapshot, and no operation activates a slot
+after readiness.
+
+Image-slot activation selects restore packet version 4:
+
+```text
+OPENVMM_ENTROPY_V4\0
+u8 optional_online_vp_count
+u8 active_image_slot_count
+u8 expansion_range_count
+repeated { little-endian u64 gpa_start, little-endian u64 length }
+64 bytes fresh entropy
+```
+
+Version 4 carries the image-slot target beside the online-VP target and retains
+the version-3 memory-range encoding. A zero online-VP count means no processor
+target. The active image-slot count is always in `1..4`.
+
 ## Restore-time memory activation
 
 Restore-time memory activation separates the immutable RAM geometry recorded

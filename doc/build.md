@@ -168,7 +168,7 @@ invalidates the object cache.
 Release packaging stages and verifies a complete output before replacing an
 existing `dist/` version. Its `SOURCE-MANIFEST.json` records the package
 version and exact hashes for OpenVMM, Linux, the generated kernel config, and
-the unchanged Alpine initramfs. The OpenVMM section advertises microVM ABI 2,
+the unchanged Alpine initramfs. The OpenVMM section advertises microVM ABI 3,
 control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
 part of this platform manifest.

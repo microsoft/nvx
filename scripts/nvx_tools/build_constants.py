@@ -104,7 +104,7 @@ class OpenVMMBuildConstants:
     CACHE_DIRECTORY_NAME: Final = "openvmm-cache"
     PROVENANCE_NAME: Final = "openvmm.provenance.json"
     PROVENANCE_FORMAT: Final = 1
-    MICROVM_ABI_VERSION: Final = 2
+    MICROVM_ABI_VERSION: Final = 3
     CONTROL_SESSION_PROTOCOL_VERSION: Final = 1
     CONTROL_CONTRACT_REVISION: Final = "nvx-microvm-v2-control-v2"
 
