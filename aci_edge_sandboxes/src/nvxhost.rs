@@ -41,6 +41,7 @@ const FLAG_REMOTE_CLOSED: u8 = 1;
 const FLAG_NO_DATA: u8 = 4;
 const LAUNCH_GUEST_DEBUG: u32 = 1;
 const LAUNCH_HAS_MEMORY: u32 = 4;
+const LAUNCH_HOST_CPU_PROFILE: u32 = 16;
 const PLAN_VALIDATE_ONLY: u32 = 1;
 
 #[repr(C)]
@@ -347,12 +348,7 @@ impl HostLibrary {
             .map_err(|_| Error::policy_validation("guest memory exceeds the nvxhost ABI range"))?;
         let request = NvxLaunchRequest {
             struct_size: size_of::<NvxLaunchRequest>() as u32,
-            flags: LAUNCH_HAS_MEMORY
-                | if inputs.guest_debug {
-                    LAUNCH_GUEST_DEBUG
-                } else {
-                    0
-                },
+            flags: inputs.flags(),
             memory_mb,
             kernel_path: NvxStr::present(kernel),
             initrd_path: NvxStr::present(initrd),
@@ -476,8 +472,24 @@ pub(crate) struct LaunchInputs<'a> {
     pub(crate) hypervisor: &'a str,
     pub(crate) memory_mb: u32,
     pub(crate) guest_debug: bool,
+    /// Boots on the CPU profile that OpenVMM derives from this host.
+    pub(crate) host_cpu_profile: bool,
     /// JSON of the sandbox plan from [`HostLibrary::plan_sandbox`], if the sandbox has one.
     pub(crate) plan: Option<&'a str>,
+}
+
+impl LaunchInputs<'_> {
+    /// Launch flags of the nvxhost ABI for these inputs.
+    fn flags(&self) -> u32 {
+        let mut flags = LAUNCH_HAS_MEMORY;
+        if self.guest_debug {
+            flags |= LAUNCH_GUEST_DEBUG;
+        }
+        if self.host_cpu_profile {
+            flags |= LAUNCH_HOST_CPU_PROFILE;
+        }
+        flags
+    }
 }
 
 #[derive(Debug)]
@@ -968,6 +980,28 @@ mod tests {
     }
 
     #[test]
+    fn launch_flags_follow_the_inputs() {
+        let mut inputs = LaunchInputs {
+            kernel: Path::new("vmlinux"),
+            initrd: Path::new("initramfs"),
+            image: Path::new("image.gpt"),
+            control: "control",
+            boot: "boot",
+            hypervisor: "whp",
+            memory_mb: 256,
+            guest_debug: false,
+            host_cpu_profile: false,
+            plan: None,
+        };
+        assert_eq!(inputs.flags(), LAUNCH_HAS_MEMORY);
+        inputs.guest_debug = true;
+        assert_eq!(inputs.flags(), LAUNCH_HAS_MEMORY | LAUNCH_GUEST_DEBUG);
+        inputs.guest_debug = false;
+        inputs.host_cpu_profile = true;
+        assert_eq!(inputs.flags(), LAUNCH_HAS_MEMORY | LAUNCH_HOST_CPU_PROFILE);
+    }
+
+    #[test]
     #[ignore = "set NVXHOST_TEST_LIBRARY to a separately built nvxhost DLL or shared library"]
     fn privately_built_library_exposes_the_ramfs_launch_abi() {
         let path = std::env::var_os("NVXHOST_TEST_LIBRARY")
@@ -991,6 +1025,7 @@ mod tests {
             hypervisor: "whp",
             memory_mb: 256,
             guest_debug: false,
+            host_cpu_profile: false,
             plan,
         };
         let args = host.launch_arguments(&inputs(None)).unwrap();
@@ -1007,6 +1042,18 @@ mod tests {
             1
         );
         assert!(!args.contains(&"--mount") && !args.contains(&"--net"));
+        assert!(!args.contains(&"--cpu-profile"));
+        let hosted = host
+            .launch_arguments(&LaunchInputs {
+                host_cpu_profile: true,
+                ..inputs(None)
+            })
+            .unwrap();
+        assert!(
+            hosted
+                .windows(2)
+                .any(|pair| pair[0] == "--cpu-profile" && pair[1] == "host")
+        );
 
         // Validation consults nothing on the host; unenforceable policies are policy errors.
         assert_eq!(host.plan_sandbox("{}", "10.0.0.2/24", true).unwrap(), None);

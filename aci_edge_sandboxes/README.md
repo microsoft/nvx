@@ -189,7 +189,8 @@ publishes guest ports on host loopback. The repeatable `--env KEY=VALUE`, layere
 guest's environment, and `--cwd PATH` apply to the command. The ignored
 `tests/nvxhost_guest.rs` exercises an actual guest when the corresponding `NVXHOST_TEST_*` paths
 and approved library digest are set: under WHP on Windows, or under the hypervisor that
-`NVXHOST_TEST_HYPERVISOR` names, such as `mshv` on Linux.
+`NVXHOST_TEST_HYPERVISOR` names, such as `mshv` on Linux. `NVXHOST_TEST_CPU_PROFILE=host` boots
+its guests on a host CPU profile.
 
 For example, from `aci_edge_sandboxes` on a Windows WHP host, set the following
 paths to compatible, separately built artifacts and a caller-prepared GPT disk
@@ -225,8 +226,12 @@ matching private sources; this example neither fetches nor builds them. Use the
 pinned OpenVMM, which includes the scratchless RAM-overlay topology, and the NVX
 kernel that its time ABI requires, such as a release's `guest/vmlinux`. OpenVMM
 selects a [CPU profile](../doc/usage.md#cpu-profiles) at every cold boot, so start
-fails with `backend_error` on a host whose CPU none of its built-in profiles serves;
-the OpenVMM log that the error names gives the reason. On Linux, supply a matching
+fails with `backend_error` on a host that none of its built-in profiles serves, or
+whose hypervisor does not support its profile; the OpenVMM log that the error names
+gives the reason. On such a development host,
+`NvxHostConfig::with_host_cpu_profile(true)` (the example's `--cpu-profile host`)
+boots the guests on a host profile, which OpenVMM derives from the host's
+hypervisor at every cold boot and does not pin. On Linux, supply a matching
 `libnvxhost.so` and OpenVMM build and select `--hypervisor mshv`.
 
 ### Native host paths and network

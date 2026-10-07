@@ -4,6 +4,8 @@
 //! The tests need `NVXHOST_TEST_OPENVMM`, `NVXHOST_TEST_KERNEL`, `NVXHOST_TEST_INITRD`,
 //! `NVXHOST_TEST_IMAGE`, `NVXHOST_TEST_LIBRARY`, and the approved `NVXHOST_TEST_SHA256`.
 //! `NVXHOST_TEST_HYPERVISOR` selects `whp`, `mshv`, or `kvm`, and defaults to `whp` on Windows.
+//! `NVXHOST_TEST_CPU_PROFILE=host` boots the guests on a host CPU profile, for hosts that no
+//! built-in profile serves; the default, `auto`, uses the built-in profile.
 //! The host-path, network, proxy, port-forwarding, and exec-environment tests also need `python3`
 //! in the image. Run the tests one at a time so that the check for leftover OpenVMM processes is
 //! exact, and optimized, since creating a backend hashes the runtime files and registering an
@@ -62,6 +64,17 @@ fn hypervisor() -> Hypervisor {
     }
 }
 
+/// Returns whether `NVXHOST_TEST_CPU_PROFILE` selects a host CPU profile (`host`) rather than the
+/// built-in profile of the host's CPU (`auto`, the default).
+fn host_cpu_profile() -> bool {
+    match std::env::var("NVXHOST_TEST_CPU_PROFILE") {
+        Ok(name) if name == "host" => true,
+        Ok(name) if name == "auto" => false,
+        Ok(name) => panic!("NVXHOST_TEST_CPU_PROFILE must be auto or host, not {name:?}"),
+        Err(_) => false,
+    }
+}
+
 /// Returns the test configuration for `image`, with sandbox state under `state`.
 fn native_config(state: &Path, image: &Path) -> NvxHostConfig {
     NvxHostConfig::new(
@@ -76,6 +89,7 @@ fn native_config(state: &Path, image: &Path) -> NvxHostConfig {
         required("NVXHOST_TEST_LIBRARY"),
         approved_digest(),
     )
+    .with_host_cpu_profile(host_cpu_profile())
 }
 
 fn backend_with(
@@ -382,7 +396,8 @@ fn guest_lifecycle_stops_gracefully_and_cleans_up() {
                 required("NVXHOST_TEST_LIBRARY"),
                 approved_digest(),
             )
-            .with_guest_debug(true),
+            .with_guest_debug(true)
+            .with_host_cpu_profile(host_cpu_profile()),
         )
         .unwrap(),
     );

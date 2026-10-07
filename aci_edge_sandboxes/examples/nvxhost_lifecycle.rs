@@ -42,6 +42,7 @@ fn run() -> Result<(), String> {
     let mut forwards = Vec::new();
     let mut environment = Vec::new();
     let mut cwd = None;
+    let mut host_cpu_profile = false;
     let mut command = None;
     let mut args = std::env::args().skip(1);
     while let Some(option) = args.next() {
@@ -72,6 +73,7 @@ fn run() -> Result<(), String> {
             "--host-loopback-forward" => forwards.push(parse_forward(&option, &value()?)?),
             "--env" => environment.push(value()?),
             "--cwd" => cwd = Some(value()?),
+            "--cpu-profile" => host_cpu_profile = parse_cpu_profile(&option, &value()?)?,
             "--" => {
                 command = Some(args.by_ref().collect::<Vec<_>>().join(" "));
                 break;
@@ -144,7 +146,9 @@ fn run() -> Result<(), String> {
     let config = OpenVmmConfig::new(openvmm, kernel, initrd, hypervisor, PathBuf::from(root));
     let backend = Arc::new(
         NvxHostBackend::new(
-            NvxHostConfig::new(config, image, library, digest).with_image_digest(image_digest),
+            NvxHostConfig::new(config, image, library, digest)
+                .with_image_digest(image_digest)
+                .with_host_cpu_profile(host_cpu_profile),
         )
         .map_err(describe)?,
     );
@@ -226,6 +230,15 @@ fn parse_access(option: &str, text: &str) -> Result<Access, String> {
         "allow" => Ok(Access::Allow),
         "deny" => Ok(Access::Deny),
         _ => Err(format!("{option} must be allow or deny")),
+    }
+}
+
+/// Parses `auto`, OpenVMM's built-in profile of the host's CPU, or `host`, a host profile.
+fn parse_cpu_profile(option: &str, text: &str) -> Result<bool, String> {
+    match text {
+        "auto" => Ok(false),
+        "host" => Ok(true),
+        _ => Err(format!("{option} must be auto or host")),
     }
 }
 
@@ -311,6 +324,18 @@ mod tests {
         }
         assert_eq!(parse_access("--egress", "deny").unwrap(), Access::Deny);
         assert!(parse_access("--egress", "Deny").is_err());
+    }
+
+    #[test]
+    fn cpu_profiles_are_auto_or_host() {
+        assert!(!parse_cpu_profile("--cpu-profile", "auto").unwrap());
+        assert!(parse_cpu_profile("--cpu-profile", "host").unwrap());
+        for other in ["", "Host", "amd.milan.v1"] {
+            assert!(
+                parse_cpu_profile("--cpu-profile", other).is_err(),
+                "{other}"
+            );
+        }
     }
 
     #[test]

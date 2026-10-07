@@ -81,6 +81,9 @@ pub struct NvxHostConfig {
     pub content_verification: bool,
     /// Requests verbose guest kernel diagnostics on the boot console.
     pub guest_debug: bool,
+    /// Boots guests on the CPU profile that OpenVMM derives from this host instead of the
+    /// built-in profile of the host's CPU generation.
+    pub host_cpu_profile: bool,
 }
 
 impl NvxHostConfig {
@@ -100,6 +103,7 @@ impl NvxHostConfig {
             runtime_sha256: None,
             content_verification: false,
             guest_debug: false,
+            host_cpu_profile: false,
         }
     }
 
@@ -128,6 +132,18 @@ impl NvxHostConfig {
     #[must_use]
     pub fn with_guest_debug(mut self, enabled: bool) -> Self {
         self.guest_debug = enabled;
+        self
+    }
+
+    /// Boots guests on a host CPU profile (OpenVMM's `--cpu-profile host`), for development
+    /// hosts that no built-in CPU profile serves or whose hypervisor does not support it.
+    ///
+    /// OpenVMM derives the profile from the hypervisor on this host at every cold boot, under
+    /// the built-in profiles' policy, and still fails a host that lacks a feature that the time
+    /// ABI requires. Unlike a built-in profile, a host profile is not pinned.
+    #[must_use]
+    pub fn with_host_cpu_profile(mut self, enabled: bool) -> Self {
+        self.host_cpu_profile = enabled;
         self
     }
 }
@@ -912,6 +928,7 @@ impl Backend for NvxHostBackend {
             hypervisor: self.config.openvmm.hypervisor.as_str(),
             memory_mb: record.memory_mib,
             guest_debug: self.config.guest_debug,
+            host_cpu_profile: self.config.host_cpu_profile,
             plan: plan.as_deref(),
         })?;
         let report = self.base.store.outcome_path(sandbox_id);
