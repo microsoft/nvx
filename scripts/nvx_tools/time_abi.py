@@ -100,11 +100,22 @@ class CpuGeneration:
     name: str
     vendor: str
     cpus: tuple[CpuModel, ...]
+    # The revisions of the generation's profile that OpenVMM pins, oldest
+    # first. Its auto selects the latest; earlier revisions stay pinned so
+    # that their snapshots still restore.
+    revisions: tuple[int, ...] = (1,)
 
     @property
     def profile_id(self) -> str:
-        """The catalog's v1 profile, which every backend shares."""
-        return f"{PROFILE_VENDORS[self.vendor]}.{self.name}.v1"
+        """The catalog profile that auto selects, the latest revision, which
+        every backend shares."""
+        return self.profile_ids[-1]
+
+    @property
+    def profile_ids(self) -> tuple[str, ...]:
+        """Every pinned revision of the generation's profile, oldest first."""
+        vendor = PROFILE_VENDORS[self.vendor]
+        return tuple(f"{vendor}.{self.name}.v{revision}" for revision in self.revisions)
 
     def contains(self, vendor: str, family: int, model: int, stepping: int) -> bool:
         """Whether a CPU belongs to the generation."""
@@ -126,13 +137,15 @@ class CpuGeneration:
 # Lake (steppings 5-7) and Cooper Lake (10-11), which have no profile. AMD's
 # family 25 model 1 is Milan's in every stepping, Milan-X's 2 included, family
 # 25 model 17 Genoa's, Genoa-X's included, and family 26 model 2 Turin's.
+# Genoa's second revision drops CPUID 0x80000021, which not every Genoa
+# host's hypervisor presents.
 CPU_GENERATIONS: tuple[CpuGeneration, ...] = (
     CpuGeneration("skylake-sp", "GenuineIntel", (CpuModel(6, 85, range(5)),)),
     CpuGeneration("icelake-sp", "GenuineIntel", (CpuModel(6, 106),)),
     CpuGeneration("emeraldrapids", "GenuineIntel", (CpuModel(6, 207),)),
     CpuGeneration("alderlake", "GenuineIntel", (CpuModel(6, 151), CpuModel(6, 154))),
     CpuGeneration("milan", "AuthenticAMD", (CpuModel(25, 1),)),
-    CpuGeneration("genoa", "AuthenticAMD", (CpuModel(25, 17),)),
+    CpuGeneration("genoa", "AuthenticAMD", (CpuModel(25, 17),), revisions=(1, 2)),
     CpuGeneration("turin", "AuthenticAMD", (CpuModel(26, 2),)),
 )
 

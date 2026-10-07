@@ -166,7 +166,8 @@ class FieldParsingTests(unittest.TestCase):
                 self.assertIsNone(time_abi.cpu_generation(vendor, family, model, 1))
 
     def test_names_the_catalog_profiles(self):
-        # One profile per generation serves every backend.
+        # One profile per generation serves every backend; auto selects its
+        # latest revision.
         self.assertEqual(
             [generation.profile_id for generation in time_abi.CPU_GENERATIONS],
             [
@@ -175,10 +176,13 @@ class FieldParsingTests(unittest.TestCase):
                 "intel.emeraldrapids.v1",
                 "intel.alderlake.v1",
                 "amd.milan.v1",
-                "amd.genoa.v1",
+                "amd.genoa.v2",
                 "amd.turin.v1",
             ],
         )
+        genoa = time_abi.cpu_generation("AuthenticAMD", 25, 17, 1)
+        assert genoa is not None
+        self.assertEqual(genoa.profile_ids, ("amd.genoa.v1", "amd.genoa.v2"))
         self.assertEqual(
             time_abi.describe_cpu_generations(),
             "skylake-sp 6/85 steppings 0-4, icelake-sp 6/106, emeraldrapids 6/207, "
@@ -243,7 +247,7 @@ class FieldParsingTests(unittest.TestCase):
             )
         self.assertTrue(pinned)
         copy = {
-            generation.profile_id: (
+            profile_id: (
                 generation.name,
                 generation.vendor,
                 tuple(
@@ -251,6 +255,7 @@ class FieldParsingTests(unittest.TestCase):
                 ),
             )
             for generation in time_abi.CPU_GENERATIONS
+            for profile_id in generation.profile_ids
         }
         self.assertEqual(copy, pinned)
 
