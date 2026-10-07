@@ -87,8 +87,23 @@ cmdline_value() {
     return 1
 }
 
+workload_identity_marker=$runtime/runtime-workload-identity
+
+# A guest runtime that runs several independent workloads creates this regular
+# file before capture. Its post-restore hook then refreshes every workload's
+# identity, so no single workload process or machine ID is published.
+workload_identity_owner() {
+    if [ ! -e "$workload_identity_marker" ] && [ ! -L "$workload_identity_marker" ]; then
+        printf 'single\n'
+    elif [ -f "$workload_identity_marker" ] && [ ! -L "$workload_identity_marker" ]; then
+        printf 'runtime\n'
+    else
+        return 1
+    fi
+}
+
 workload_identity_required() {
-    [ "$image_format" != flat-ext4 ]
+    [ "$image_format" != flat-ext4 ] && [ "$identity_owner" != runtime ]
 }
 
 read_port_byte() {
@@ -435,6 +450,8 @@ post_restore() {
 
     if [ "$snapshot_tier" != instance-checkpoint ]; then
         console_status "NVX-POST-RESTORE-STAGE: identity"
+        identity_owner=$(workload_identity_owner) ||
+            fail_closed "runtime workload identity marker is invalid"
         machine_id=$(sha256sum "$entropy" | cut -c1-32)
         printf '%s\n' "$machine_id" >/etc/machine-id ||
             fail_closed "failed to refresh machine identity"
@@ -450,7 +467,10 @@ post_restore() {
         hostname_value=$(cmdline_value nvx_hostname || true)
         [ -n "$hostname_value" ] || hostname_value=nvx-sandbox
         hostname "$hostname_value" || fail_closed "failed to refresh hostname"
-        if [ -s "$workload_pid_file" ]; then
+        if [ "$identity_owner" = runtime ]; then
+            # Each workload keeps its own hostname; the runtime hook owns refresh.
+            :
+        elif [ -s "$workload_pid_file" ]; then
             IFS= read -r workload_pid <"$workload_pid_file"
             case "$workload_pid" in
                 '' | *[!0-9]*) fail_closed "workload PID is invalid" ;;
@@ -495,6 +515,11 @@ mountpoint -q "$scratch_mount" && scratch_mounted=true
 if [ "$snapshot_tier" = workload-start ] &&
     [ ! -x "$runtime/runtime-post-restore" ]; then
     echo "nvx-snapshot: workload-start capture requires a runtime hook" >&2
+    exit 1
+fi
+
+if ! workload_identity_owner >/dev/null; then
+    echo "nvx-snapshot: runtime workload identity marker is invalid" >&2
     exit 1
 fi
 

@@ -64,6 +64,16 @@ identities to be absent only for this explicit image format; the runtime hook
 remains mandatory. This does not make workload snapshots safe to share outside
 their trust domain.
 
+A guest runtime that runs several independent workloads may instead create the
+regular file `/run/nvx/runtime-workload-identity` before capture. The marker
+declares that the runtime's post-restore hook refreshes or deliberately
+preserves each workload's identity. The native helper then requires neither a
+single workload process nor a per-workload machine ID on a `workload-start`
+restore, and it does not rewrite any workload hostname. It still refreshes the
+guest's own identity, and the runtime hook remains mandatory. Capture and
+restore reject a marker that is not a regular file. Without the marker, the
+helper's behavior is unchanged.
+
 1. gate host input and defer completion of the snapshot-port write;
 2. stop the vCPU at the I/O boundary while completing the write, so saved state
    starts at the instruction immediately after `out`;

@@ -1469,15 +1469,16 @@ class MicrovmTests(unittest.TestCase):
             snapshot.count("workload_identity_required; then"),
             2,
         )
-        for image_format, outcome in (
-            ("", "required"),
-            ("flat-ext4", "optional"),
+        for image_format, identity_owner, outcome in (
+            ("", "single", "required"),
+            ("flat-ext4", "single", "optional"),
+            ("", "runtime", "optional"),
         ):
             result = subprocess.run(
                 [shell, "-c",
-                 "set -eu\nimage_format=$1\n" + required
+                 "set -eu\nimage_format=$1\nidentity_owner=$2\n" + required
                  + "\nif workload_identity_required; then echo required; else echo optional; fi",
-                 "_", image_format],
+                 "_", image_format, identity_owner],
                 text=True,
                 capture_output=True,
                 timeout=5,
@@ -1485,6 +1486,59 @@ class MicrovmTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), outcome)
+
+    def test_runtime_owned_workload_identity_marker_is_a_regular_file(self):
+        if sys.platform == "win32":
+            self.skipTest("native POSIX guest helper test requires Linux")
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        snapshot = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
+        ).read_text(encoding="utf-8")
+        begin = snapshot.index("workload_identity_owner() {")
+        end = snapshot.index("\n}\n", begin) + 2
+        owner = snapshot[begin:end]
+        capture_check = snapshot.index("if ! workload_identity_owner >/dev/null; then")
+        freeze = snapshot.index('echo 1 >"$container_cgroup/cgroup.freeze"')
+        self.assertLess(capture_check, freeze)
+        restore_check = snapshot.index(
+            'fail_closed "runtime workload identity marker is invalid"'
+        )
+        hostname_reset = snapshot.index('nsenter -t "$workload_pid" -u hostname')
+        self.assertLess(restore_check, hostname_reset)
+        self.assertIn('if [ "$identity_owner" = runtime ]; then', snapshot)
+
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "runtime-workload-identity"
+
+            def resolve() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [shell, "-c",
+                     "set -eu\nworkload_identity_marker=$1\n" + owner
+                     + "\nworkload_identity_owner",
+                     "_", str(marker)],
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+
+            result = resolve()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "single")
+            marker.write_bytes(b"")
+            result = resolve()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "runtime")
+            marker.unlink()
+            marker.mkdir()
+            self.assertNotEqual(resolve().returncode, 0)
+            marker.rmdir()
+            target = Path(directory) / "target"
+            target.write_bytes(b"")
+            marker.symlink_to(target)
+            self.assertNotEqual(resolve().returncode, 0)
 
     def test_snapshot_console_diagnostics_are_nonfatal_and_ordered(self):
         shell = _posix_shell()
