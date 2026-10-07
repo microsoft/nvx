@@ -140,13 +140,17 @@ a different second bind fails, and there is no unbind, eject, rebind, device
 addition, or activation after readiness.
 
 The OpenVMM promotion from `4355c010e726128c751138e7f74ad969e76a4c19` to
-`6aaf6fb799f47ba83a972413c506121f69959d97` contains exactly
-`368b9d2a` (bind-once virtio-blk image slots), `6c12f620` (microVM image
-slots and host control), `10106b13` (machine validation admits the declared
-image-slot transports), `bf98f65f` (restore advertises and gates
-image-slot targets), and `6aaf6fb7` (a host-control client closing its
-connection after the last response ends the session without a warning). It
-contains no unrelated fork changes.
+`26d237d2d92b97862924e8a28a8afed2e7b92c0e` contains exactly two lines of
+change and the merge that joins them. The image-slot line is `368b9d2a`
+(bind-once virtio-blk image slots), `6c12f620` (microVM image slots and host
+control), `10106b13` (machine validation admits the declared image-slot
+transports), `bf98f65f` (restore advertises and gates image-slot targets), and
+`6aaf6fb7` (a host-control client closing its connection after the last
+response ends the session without a warning). The snapshot storage line is
+`821ddf7f` (generation-bound snapshots), `1a57cb25` (claimed scratch bound by
+file identity), and `7c7c24f4` (read-only distro block devices). The two lines
+touch disjoint parts of the machine contract, and the promotion contains no
+unrelated fork changes.
 
 Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and
@@ -203,13 +207,17 @@ Block devices are routed directly to virtio-mmio rather than VPCI. Packed rings
 are unavailable. Each block has a stable role, MMIO address, IRQ, access mode, and
 fixed feature mask. Its snapshot contract records the role, read-only flag,
 logical length, logical and physical block sizes, and identity policy. Each
-consumed external read-only layer is identified by SHA-256 and must be supplied
-again on restore. Platform-tier layers are recorded as unbound because image
-binding has not been consumed; restore may supply different same-geometry
-layers. Writable scratch uses one of two policies:
+consumed block uses either whole-file SHA-256 or the caller-authenticated
+immutable storage generation supplied at capture. Generation mode requires all
+bound roles to carry the same nonzero generation and avoids content scans; the
+storage controller remains responsible for binding that generation to the
+exact immutable files. Platform-tier layers are recorded as unbound because
+image binding has not been consumed; restore may supply different
+same-geometry layers. Writable scratch uses one of two artifact policies:
 
-- **paired**: capture publishes `scratch.img` with its exact length and SHA-256;
-   each restore verifies it and creates a process-private writable copy;
+- **paired**: capture publishes `scratch.img` with its exact length and selected
+   identity. Restore uses the recorded `private-copy`, reflink-only
+   `copy-on-write`, or single-use `direct-claimed` materialization policy;
 - **fresh**: capture occurs before scratch is mounted, publishes no scratch
    artifact, and restore requires a new writable file with matching geometry.
 

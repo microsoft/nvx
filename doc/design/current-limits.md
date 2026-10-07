@@ -16,6 +16,7 @@ The current ABI family intentionally does not provide:
 - snapshot block media other than cached regular raw files;
 - more than four image slots, writable image slots, binding an inactive slot,
    rebinding or ejecting media, or activating a slot after restore readiness;
+- copy-on-write paired-scratch restore on filesystems without reflink support;
 - sandbox-block, network, or control-console construction through the
    management RPC, or its restore of snapshots that contain them;
 - host networking other than the in-process portable endpoint, unrestricted

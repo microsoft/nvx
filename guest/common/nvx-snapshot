@@ -87,6 +87,10 @@ cmdline_value() {
     return 1
 }
 
+workload_identity_required() {
+    [ "$image_format" != flat-ext4 ]
+}
+
 read_port_byte() {
     /sbin/nvx-port-io read-u8 "$1"
 }
@@ -329,6 +333,11 @@ export NVX_VM_GENERATION_ID="$generation_id"
 
 post_restore() {
     post_restore_pending=true
+    image_format=$(cmdline_value nvx_image_format || true)
+    case "$image_format" in
+        '' | flat-ext4) ;;
+        *) fail_closed "restore image format is unsupported" ;;
+    esac
     console_status "NVX-POST-RESTORE-STAGE: packet"
     restore_packet=$runtime/restore-packet
     entropy=$runtime/restore-entropy
@@ -434,7 +443,8 @@ post_restore() {
         if [ -f "$workload_machine_id" ] && [ ! -L "$workload_machine_id" ]; then
             printf '%s\n' "$machine_id" >"$workload_machine_id" ||
                 fail_closed "failed to refresh workload machine identity"
-        elif [ "$snapshot_tier" = workload-start ]; then
+        elif [ "$snapshot_tier" = workload-start ] &&
+            workload_identity_required; then
             fail_closed "workload-start restore requires workload machine identity"
         fi
         hostname_value=$(cmdline_value nvx_hostname || true)
@@ -449,7 +459,8 @@ post_restore() {
                 fail_closed "workload process is unavailable"
             nsenter -t "$workload_pid" -u hostname "$hostname_value" ||
                 fail_closed "failed to refresh workload hostname"
-        elif [ "$snapshot_tier" = workload-start ]; then
+        elif [ "$snapshot_tier" = workload-start ] &&
+            workload_identity_required; then
             fail_closed "workload-start restore requires a workload process"
         fi
         if [ "$snapshot_tier" = workload-start ]; then

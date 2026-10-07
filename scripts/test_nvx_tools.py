@@ -5972,6 +5972,7 @@ class BuildTests(unittest.TestCase):
         for setting in (
             "CONFIG_SECCOMP_FILTER=y",
             "CONFIG_UNIX=y",
+            "CONFIG_VETH=y",
             "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
         ):
             self.assertIn(setting, configured)
