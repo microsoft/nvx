@@ -132,8 +132,17 @@ perform_virtiofs_io() {
     if ! mountpoint -q "$mount_dir"; then
         /sbin/nvx-hostmount >/dev/hvc0 2>&1 || fatal virtiofs-mount-failed
     fi
-    seed=$mount_dir/.nvx-virtio-restore-host-seed
-    result=$mount_dir/.nvx-virtio-restore-guest-result
+    # An aggregate's root lists its host directories, so the probe uses the
+    # first, at the target where nvx-hostmount binds it.
+    io_dir=$mount_dir
+    if [ "$(cmdline_value virtfs_aggregate || true)" = 1 ]; then
+        first_share=$(cmdline_value nvx_share || true)
+        first_share=${first_share#*,}
+        io_dir=${first_share%,*}
+        [ -n "$io_dir" ] || fatal virtiofs-share-missing
+    fi
+    seed=$io_dir/.nvx-virtio-restore-host-seed
+    result=$io_dir/.nvx-virtio-restore-guest-result
     [ -f "$seed" ] || fatal virtiofs-host-seed-missing
     [ "$(cat "$seed")" = host-to-guest ] || fatal virtiofs-host-seed-invalid
     printf 'guest-to-host\n' >"$result" || fatal virtiofs-write-failed
@@ -196,9 +205,9 @@ emit_marker "NVX-VIRTIO-RESTORE-PROBE phase=pre-io-success device=$device mode=$
 
 if [ "$mode" = deferred ]; then
     if [ "$device" = virtiofs ]; then
-        mount_dir=$(cmdline_value virtfs_dir || true)
-        [ -n "$mount_dir" ] || mount_dir=/mnt/host
-        umount "$mount_dir" || fatal virtiofs-unmount-failed
+        # Unmount every bind of an aggregate before the share itself, so the
+        # device has no file system left when its driver lets go of it.
+        /sbin/nvx-hostmount --unmount >/dev/hvc0 2>&1 || fatal virtiofs-unmount-failed
     fi
     unbind_device
 fi

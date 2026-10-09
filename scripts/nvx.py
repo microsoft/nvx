@@ -88,12 +88,16 @@ from nvx_tools.release import (
     verify_source_tree,
 )
 from nvx_tools.sandbox import (
-    MAX_MOUNTS,
+    AGGREGATE_MOUNT_TARGET,
     MOUNT_OWNERS,
     MOUNT_POLICY_OPTIONS,
+    SANDBOX_COMMAND_LINE_MAX_SIZE,
     SandboxLaunch,
     SandboxLayer,
     SandboxMount,
+    aggregate_child_name,
+    aggregate_command_line_fragment,
+    aggregate_share_tokens,
     parse_workload_identity,
     require_mount_owner_supported,
 )
@@ -174,6 +178,46 @@ def _sandbox_mounts(args: argparse.Namespace) -> tuple[SandboxMount, ...]:
         )
         for index, value in enumerate(mounts)
     )
+
+
+def _run_share(value: str) -> tuple[str, str, str]:
+    """Split a run --mount into its guest target, host path, and access."""
+    fields = value.split(",")
+    if len(fields) not in (2, 3):
+        raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
+    target, host_path = fields[:2]
+    access = fields[2] if len(fields) == 3 else "ro"
+    if access not in ("ro", "rw"):
+        raise ScriptError(f"unsupported --mount mode {access!r}; choose ro or rw")
+    return target, host_path, access
+
+
+def _validate_run_share_targets(targets: list[str]) -> None:
+    """Reject guest targets that the guest cannot bind from an aggregate:
+    targets that do not survive the kernel command line, or that hide each
+    other or the aggregate itself."""
+    for index, target in enumerate(targets):
+        if (
+            not target.startswith("/")
+            or target == "/"
+            or any(character.isspace() or character in "\0\\=," for character in target)
+            or any(part in ("", ".", "..") for part in target.split("/")[1:])
+        ):
+            raise ScriptError(
+                f"invalid --mount target {target!r}: with several shares, each "
+                "target must be an absolute non-root path without empty, dot, or "
+                "parent components, whitespace, '\\', '=', or ','"
+            )
+        for other in (AGGREGATE_MOUNT_TARGET, *targets[:index]):
+            if (
+                target == other
+                or target.startswith(f"{other}/")
+                or other.startswith(f"{target}/")
+            ):
+                raise ScriptError(
+                    f"--mount targets {other} and {target} overlap; a share "
+                    "cannot hide another"
+                )
 
 
 def _run(
@@ -515,16 +559,28 @@ def command_run(args: argparse.Namespace) -> None:
             command.extend(["--memory-capacity", f"{args.memory_capacity_mib}M"])
     if args.cpu_profile is not None:
         command.extend(["--cpu-profile", args.cpu_profile])
-    if len(args.mount) > MAX_MOUNTS:
-        raise ScriptError(f"--mount is accepted at most {MAX_MOUNTS} times")
-    for mount in args.mount:
-        if mount.count(",") not in (1, 2):
-            raise ScriptError("--mount must be GUEST_TARGET,HOST_PATH[,ro|rw]")
-        command.extend(["--mount", mount])
+    shares = [_run_share(value) for value in args.mount]
+    if len(shares) == 1:
+        command.extend(["--mount", args.mount[0]])
+    elif shares:
+        _validate_run_share_targets([target for target, _, _ in shares])
+        command.extend(["--mount-aggregate", AGGREGATE_MOUNT_TARGET])
+        # A restore names the children as the boot did, so OpenVMM refuses a
+        # restore whose targets differ from those that the guest bound.
+        for index, (target, host_path, access) in enumerate(shares):
+            name = aggregate_child_name(index, target)
+            command.extend(["--mount-child", f"{name},{host_path},{access}"])
     if args.mount_owner is not None and not args.mount:
         raise ScriptError("--mount-owner requires --mount")
     for option in MOUNT_POLICY_OPTIONS.values():
         for path in getattr(args, _mount_policy_destination(option)):
+            # OpenVMM attributes each path of several shares to the child whose
+            # host directory contains it.
+            if len(shares) > 1 and not Path(path).is_absolute():
+                raise ScriptError(
+                    f"with several --mount shares, {option} {path} must be an "
+                    "absolute host path"
+                )
             command.extend([option, str(path)])
     if args.mount_owner is not None:
         require_mount_owner_supported(args.mount_owner)
@@ -537,8 +593,30 @@ def command_run(args: argparse.Namespace) -> None:
     )
     if args.outcome_report is not None:
         command.extend(["--microvm-report", str(args.outcome_report)])
-    if args.cmdline:
-        command.extend(["--cmdline", args.cmdline])
+    cmdline = args.cmdline
+    # A restored guest keeps the binds that its boot made, at the targets that
+    # its children's names pin.
+    if len(shares) > 1 and args.restore_snapshot is None:
+        cmdline = " ".join(
+            token
+            for token in (
+                args.cmdline,
+                *aggregate_share_tokens(
+                    [(target, access) for target, _, access in shares]
+                ),
+            )
+            if token
+        )
+        fragment = aggregate_command_line_fragment([access for _, _, access in shares])
+        if len(cmdline.encode()) + len(fragment.encode()) + 1 > (
+            SANDBOX_COMMAND_LINE_MAX_SIZE
+        ):
+            raise ScriptError(
+                "the --mount shares and --cmdline exceed the 1024-byte budget of "
+                "the kernel command line; attach fewer shares or use shorter targets"
+            )
+    if cmdline:
+        command.extend(["--cmdline", cmdline])
     print(f">> {_format_command(command)}")
     if not args.dry_run:
         raise SystemExit(
@@ -1072,8 +1150,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="GUEST_TARGET,HOST_PATH[,ro|rw]",
         help=(
-            "live-share a host directory; repeat once for a second share with "
-            "its own guest target and mode"
+            "live-share a host directory; repeat for more shares, each with its "
+            "own guest target and mode, as children of one virtio-fs device"
         ),
     )
     run.add_argument("--mount-deny", action="append", type=Path, default=[])
@@ -1234,8 +1312,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="GUEST_TARGET,HOST_PATH[,ro|rw]",
         help=(
             "live-share a host directory inside the container rootfs; repeat "
-            f"to attach up to {MAX_MOUNTS} shares, each with its own target and "
-            "mode"
+            "to attach more shares, each with its own target and mode, as "
+            "children of one virtio-fs device"
         ),
     )
     sandbox.add_argument(

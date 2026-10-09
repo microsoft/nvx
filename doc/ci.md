@@ -267,8 +267,8 @@ the read-write check through `provision`, `start`, `exec`, and `stop`, and must
 report a successful outcome with a cleanly unmounted scratch filesystem, which
 shows that `stop` unmounted the share and overlay first. Each backend then
 attaches a read-write `/workspace` share and a read-only
-`/opt/hostedtoolcache` share to one sandbox at the same time, each with its
-own denied subdirectory. The smoke script runs the read-write and read-only
+`/opt/hostedtoolcache` share to one sandbox at the same time, as the children
+of one aggregate virtio-fs device, each with its own denied subdirectory. The smoke script runs the read-write and read-only
 checks on the two shares and verifies that a link in the read-write share
 cannot write into the read-only share; the host requires the guest's writes in
 the workspace, an unchanged tool cache, and unchanged denied files, both for a

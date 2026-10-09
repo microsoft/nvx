@@ -103,22 +103,22 @@ restore, the same write acknowledges completion of guest repair.
 
 ## Fixed virtio-mmio transport
 
-All nine fixed address slots are reserved, including the dedicated control
-console at `0xd0007000..0xd0007fff` on IRQ 3 (shared status at `0x3001c`) and
-the second virtio-fs slot at `0xd0008000..0xd0008fff` on IRQ 13 (shared status
-at `0x30020`).
+All eight fixed address slots are reserved, including the dedicated control
+console at `0xd0007000..0xd0007fff` on IRQ 3 (shared status at `0x3001c`).
+The window at `0xd0008000..0xd0008fff`, IRQ 13, and the shared-status word at
+`0x30020` held a second virtio-fs slot in earlier releases; they are unused, and
+a snapshot that recorded that slot no longer restores.
 Every microVM cold-booted from the command line or the management RPC
-instantiates the first virtio-fs slot, so it is discoverable before capture even
+instantiates the virtio-fs slot, so it is discoverable before capture even
 without a host attachment; a restore keeps the slot only when the snapshot
-recorded it. The second virtio-fs slot exists only with a second host
-attachment, so machines with one share or none keep their device inventory
-and command line. Other optional devices are instantiated only when configured.
+recorded it. Several shares are children of one aggregate attachment on that
+slot. Other optional devices are instantiated only when configured.
 The control slot is instantiated for a control console, either a live
 authenticated local endpoint on Linux or Windows or an explicitly disconnected
 console. Every device uses virtio-mmio, is discovered only through
 profile-owned command-line tokens, and has packed-ring support masked.
-The MP table routes only the 16 ISA interrupts, and no other device uses
-IRQ 13 on KVM, MSHV, or WHP.
+The MP table routes only the 16 ISA interrupts, and no device uses IRQ 13 on
+KVM, MSHV, or WHP.
 
 | Device | Stable identity | MMIO range | IRQ | Availability |
 | --- | --- | ---: | ---: | --- |
@@ -130,7 +130,6 @@ IRQ 13 on KVM, MSHV, or WHP.
 | `custom` virtio-blk | `blk:sandbox:custom` | `0xd0005000..0xd0005fff` | 9 | Optional read-only role |
 | `scratch` virtio-blk | `blk:sandbox:scratch` | `0xd0006000..0xd0006fff` | 11 | Required writable final role when blocks are present |
 | Control virtio-console | `console:microvm-control0` | `0xd0007000..0xd0007fff` | 3 | Optional authenticated local endpoint |
-| Second virtio-fs | `fs:microvm1` | `0xd0008000..0xd0008fff` | 13 | Optional; requires a HostFs attachment |
 
 Explicit placement metadata bypasses the standard sequential MMIO allocator.
 The worker validates the complete device count, kind, bus, address, IRQ, and
@@ -165,7 +164,6 @@ per fixed slot resides in the reserved shared-status page:
 | `custom` block | `0x30014` |
 | `scratch` block | `0x30018` |
 | Control virtio-console | `0x3001c` |
-| Second virtio-fs | `0x30020` |
 
 OpenVMM publishes config-change and used-buffer bits with a sequentially
 consistent compare-exchange loop. It pulses the device IRQ only when the old
@@ -373,18 +371,28 @@ traffic must establish fresh post-restore flows.
 
 ### Filesystem
 
-Each filesystem slot is a no-DAX virtio-fs device with a fixed tag, `microvm`
-for the first slot and `microvm1` for the second, one
-high-priority queue, one request queue, direct I/O, and zero guest cache
+The filesystem slot is a no-DAX virtio-fs device with the fixed tag `microvm`,
+one high-priority queue, one request queue, direct I/O, and zero guest cache
 lifetimes. It requires FUSE 7.31 or newer and caps writes at 1 MiB. Without
-`--mount`, the first slot has no HostFs backend or active filesystem policy but remains
-guest-discoverable. A second `--mount` attaches a second, independent HostFs
-server with its own access mode and denied paths to the second slot. Guest
-targets and host roots of the two attachments must not equal or contain one
-another, so neither share can hide the other or reach its files under a
-different policy. Each attachment adds one `virtfs_dir=`, `virtfs_tag=`,
-`virtfs_mode=` token triplet, in slot order. Its explicit profile rejects SectionFs, Aggregate,
-alternate tags, extra queues, shared-memory windows, and PCI transport.
+`--mount` or `--mount-aggregate`, the slot has no HostFs backend or active
+filesystem policy but remains guest-discoverable. `--mount` may appear once and
+attaches one HostFs server. `--mount-aggregate GUEST_TARGET` with a repeatable
+`--mount-child NAME,HOST_PATH[,ro|rw]` instead attaches an aggregate: a
+synthetic root, mode `0500` and owned by root, which lists one child per host
+directory under its name and refuses every change, and below each child an
+independent HostFs volume with its own access mode and denied, allowed, and
+writable paths. Policy paths of an aggregate are absolute and apply to the
+child whose root contains them. Child names are unique `[A-Za-z0-9._-]`
+names of at most 64 bytes, at most 256 children share at most 128 KiB of
+policy paths, and their host roots must not equal or contain one another, so
+no child can reach the files of another under a different policy. A rename
+between children fails with `EXDEV`. A hard link between children fails with
+`EROFS` when its destination is read-only, which Linux also reports first, and
+otherwise with `EXDEV`. The attachment adds one
+`virtfs_dir=`, `virtfs_tag=`, `virtfs_mode=` token triplet, `rw` when any child
+is read-write, and `virtfs_aggregate=1` for an aggregate. Its explicit profile
+rejects SectionFs, alternate tags, extra queues, shared-memory windows, PCI
+transport, and aggregates whose children change after boot.
 The host root is pinned by its platform object identity and revalidated when
 the export is opened, and every operation stays confined to the export: on
 Linux, each host operation opens its parent directory without following a
@@ -395,16 +403,19 @@ rejected. A read-write mapping lets the guest create symbolic links with
 exact targets, which only the guest resolves; a read-only mapping rejects
 them. Bounded inode, alias, and handle tables fail an operation rather than
 create untracked host state.
-Read-only mode rejects mutation in the host device before invoking host
-filesystem operations; read-write mode exposes only the supported common host
-contract.
+Read-only mode, of a share or of an aggregate child, rejects mutation in the
+host device before invoking host filesystem operations; read-write mode exposes
+only the supported common host contract.
 Denied host paths are canonicalized into a bounded relative set and enforced
 before HostFs operations. Prefix checks hide complete subtrees, while denied
 root device/inode identities block hard-link, junction, and bind-mount
 aliases. The policy is unchanged by a second guest mount.
 Allowed host paths expose subtrees of denied paths again; the nearest policy
 path that contains a path decides whether the guest can see it, and denied
-and allowed paths alternate, so neither kind is redundant. A hidden directory
+and allowed paths alternate, so neither kind is redundant. A denied path may
+name the root of a share or child when allowed paths inside it remain, which
+leaves the root traverse-only. Policy path names may contain spaces, but not
+begin or end with one. A hidden directory
 on the way to an allowed path is traverse-only: the guest can look it up as a
 directory and list only the entries that lead to allowed paths, and its object
 identity is accepted only at its own path. Writable host paths, when present,
@@ -432,10 +443,16 @@ and handle allocation, aliases (including those of symbolic links), lookup
 counts, directory snapshots and cookies, and the identities needed to reopen
 objects. Restore requires the same path,
 target, mode, denied, allowed, and writable paths, ownership mode, root
-identity, and reopenable objects for every captured attachment, supplied in
-slot order; the contract
-records the second attachment separately, so a restore can neither drop nor
-add it. A caller-owned
+identity, and reopenable objects for the captured attachment; for an
+aggregate, the same target and the same children, names, modes, host paths,
+root identities, and policies, in the same order, and the contract records a
+digest of the children's identities, so a restore can neither drop, add, nor
+reorder one. The guest binds each child at a target that OpenVMM does not
+record, so NVX names each child after its index and a digest of its guest
+target: the snapshot then pins each target, and a restore that requests
+another target fails before the guest runs. An aggregate's capture also saves
+each child's volume and the synthetic root's directory state in
+device-private schema version 8. A caller-owned
 capture records device-private schema version 6, which earlier releases reject
 instead of restoring the attachment as the VMM. A capture with allowed or
 writable paths records its complete access policy in device-private schema

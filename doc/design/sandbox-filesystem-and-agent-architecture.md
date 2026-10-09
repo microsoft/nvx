@@ -32,8 +32,9 @@ supplied native library and an image-backed edge guest that NVX does not build.
 ## Implemented filesystem bootstrap
 
 The public `nvx sandbox` command accepts one to three role-bearing EROFS lower
-images, a preformatted ext4 scratch image, up to two
-[live host shares](#live-host-shares), an absolute entrypoint, and
+images, a preformatted ext4 scratch image, any number of
+[live host shares](#live-host-shares) that its kernel command line holds, an
+absolute entrypoint, and
 individual argument tokens. It supplies non-secret kernel-command-line
 configuration for one-shot runs. Managed execution carries bounded arguments
 and a per-execution environment over the authenticated control channel;
@@ -81,7 +82,8 @@ The assembled view is:
 /run/nvx/scratch/work    (same ext4) ------> workdir
                                           overlay --> /run/nvx/rootfs
 virtio-fs tag microvm    (optional share) ---> /run/nvx/rootfs/TARGET
-virtio-fs tag microvm1   (optional share) ---> /run/nvx/rootfs/TARGET
+  or an aggregate        ---> /run/nvx/shares, each child bound at
+                              /run/nvx/rootfs/TARGET
 ```
 
 At least one lower role is required by the bootstrap; distro plus runtime is
@@ -114,29 +116,40 @@ A live share exposes a host directory, such as a source checkout or a tool
 cache, to the workload without copying it into an image: edits are visible in
 both directions without staging or copy-back.
 
-Each `--mount` attaches its own fixed virtio-fs slot, tag `microvm` for the
-first share and `microvm1` for the second, served by its own HostFs server, so
-the two shares keep independent `ro` or `rw` modes and access policies. On
-every request, whichever guest mount or link reaches the share, the host
-enforces the share's mode and its denied, allowed, and writable paths, and
-accesses host files as the identity that `--mount-owner` selects. Guest
-mount flags are therefore not a security boundary, and the access policy adds
-no guest configuration. Before OpenVMM starts, NVX rejects a third share and
-policy paths outside their share. It also rejects guest targets or host
+The microVM has one virtio-fs slot, tag `microvm`. One `--mount` attaches a
+HostFs server to it. Several attach an aggregate instead, whose children, named
+by their index and a digest of their guest target, are independent HostFs
+volumes, so the shares keep independent `ro` or `rw` modes and access
+policies. On every request, whichever guest
+mount or link reaches the share, the host enforces the share's mode and its
+denied, allowed, and writable paths, and accesses host files as the identity
+that `--mount-owner` selects. Guest mount flags are therefore not a security
+boundary, and the access policy adds no guest configuration. Before OpenVMM
+starts, NVX rejects policy paths outside their share and guest targets or host
 directories that equal or contain one another, because one share could
-otherwise hide the other or reach its files under a different policy.
+otherwise hide another or reach its files under a different policy, and it
+rejects shares whose kernel command-line tokens exceed the sandbox's budget.
 [Machine and device ABI](machine-and-device-abi.md#filesystem) defines the
 device contract.
 
-OpenVMM appends one `virtfs_dir=`, `virtfs_tag=`, `virtfs_mode=` triplet per
-share, in slot order. The init agent parses every triplet before it mounts
-any, so a malformed bootstrap mounts nothing. It creates each target inside
-the container root one component at a time and refuses a path that crosses a
-symbolic link, so an image layer cannot redirect a share outside that root.
-It also refuses a repeated tag, overlapping targets, and targets that the
-container entry helper later mounts or binds over, where the runtime would
-hide the share or write into it. Each share is mounted with its mode and
-`nosuid,nodev`, and the workload's private mount namespace inherits it. Any
+OpenVMM appends one `virtfs_dir=`, `virtfs_tag=`, `virtfs_mode=` triplet for
+its share, and `virtfs_aggregate=1` for an aggregate, which it mounts
+read-write when any child is. NVX then adds one `nvx_share=NAME,TARGET,MODE`
+token per child. Because a child's name holds a digest of its target, a
+snapshot pins each target, and a restore that requests another target fails
+before the guest runs. The init agent parses every token, and creates every
+target, before it mounts anything, so a malformed bootstrap mounts nothing. It
+creates each target inside the container root one component at a time and
+refuses a path that crosses a symbolic link, so an image layer cannot redirect
+a share outside that root. It also refuses a repeated child, overlapping
+targets, and targets that the container entry helper later mounts or binds
+over, where the runtime would hide the share or write into it. A single share
+is mounted at its target with its mode and `nosuid,nodev`. An aggregate is
+mounted at `/run/nvx/shares`, outside the container root, where its root lists
+the children and only root can enter, and each child is bound at its target
+with its mode and `nosuid,nodev`. The workload's private mount namespace
+inherits the mounts, and teardown unmounts the binds in reverse order before
+the aggregate. Any
 refusal or mount failure aborts the sandbox with status 125 instead of
 starting the workload without its shares. A managed sandbox records its
 shares when it is provisioned and reattaches them on every start.
