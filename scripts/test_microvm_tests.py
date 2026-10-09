@@ -3030,6 +3030,47 @@ class MicrovmTests(unittest.TestCase):
             cleanup.index("cgroup.freeze"), cleanup.index("nvx-time cancel-capture")
         )
 
+    def test_filesystem_only_clone_does_not_require_a_workload_process(self):
+        if sys.platform == "win32":
+            self.skipTest("native POSIX guest helper test requires Linux")
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        snapshot = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
+        ).read_text(encoding="utf-8")
+        begin = snapshot.index("workload_identity_required() {")
+        end = snapshot.index("\n}\n", begin) + 2
+        required = snapshot[begin:end]
+        self.assertIn(
+            "image_format=$(cmdline_value nvx_image_format || true)", snapshot
+        )
+        self.assertEqual(
+            snapshot.count("workload_identity_required; then"),
+            2,
+        )
+        for image_format, outcome in (
+            ("", "required"),
+            ("flat-ext4", "optional"),
+        ):
+            result = subprocess.run(
+                [
+                    shell,
+                    "-c",
+                    "set -eu\nimage_format=$1\n"
+                    + required
+                    + "\nif workload_identity_required; then echo required; else echo optional; fi",
+                    "_",
+                    image_format,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), outcome)
+
     def test_snapshot_console_diagnostics_are_nonfatal_and_ordered(self):
         shell = _posix_shell()
         if shell is None:

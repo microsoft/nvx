@@ -57,6 +57,15 @@ thaws every guest-owned barrier and then releases the stall-detector
 suppression ([snapshot agent](time-abi.md#snapshot-agent)); failure to thaw or
 release terminates the VM.
 
+A filesystem-only guest selected by `nvx_image_format=flat-ext4` has no
+persistent workload process or per-workload machine ID. Its trusted guest
+controller must reject in-flight commands, quiesce the filesystem execution
+cgroup and paired scratch, and provide the post-restore hook. On a
+`workload-start` restore, the native helper permits those two process-specific
+identities to be absent only for this explicit image format; the runtime hook
+remains mandatory. This does not make workload snapshots safe to share outside
+their trust domain.
+
 1. gate host input and defer completion of the snapshot-port write;
 2. stop the vCPU at the I/O boundary while completing the write, so saved state
    starts at the instruction immediately after `out`;
@@ -265,6 +274,14 @@ The manifest is authoritative for:
 - exact lengths of `state.bin` and `memory.bin`; and
 - the exact length and either SHA-256 or storage-generation identity of paired
   `scratch.img`.
+
+On Linux, the read-only distro role can use an externally supplied block
+device. OpenVMM opens its direct node without following links, reads its exact
+capacity from the device, and records its geometry and requested identity
+without copying it into the snapshot. The caller must authenticate and lease
+that immutable source, re-resolve its current device node on every attach,
+and reject a recycled pathname. Other roles, including paired writable
+scratch, remain regular files.
 
 Snapshot paths and repeated fields are bounded. Restore rejects truncated,
 oversized, malformed, wrong-type, path-escaping, symlinked, incompatible,
