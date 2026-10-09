@@ -496,6 +496,27 @@ Performance comparisons should separate VP binding and worker construction
 from guest resume-to-readiness. Matching host-side phase costs do not require
 the total restore latencies or tail behavior to match.
 
+## Restore-time image-slot activation
+
+Snapshots of slot-declaring machines record image-slot capacity `S = 4`, the
+cold-boot active prefix `B`, and the empty state of every active slot. Capture
+is rejected before the guest is quiesced if any slot is bound. Snapshots
+without image slots record zero capacity and active count, and their restore
+packet leaves header byte 7 zero.
+
+An explicit `--restore-image-slots N` target is process-local and must satisfy
+`B <= N <= 4`. During gated repair the guest binds the virtio-mmio driver to
+newly active placeholders `B..N-1`, verifies that all slots in `0..N-1` are
+empty read-only block devices, and only then acknowledges the restore gate.
+The target does not modify the snapshot, and no operation activates a slot
+after readiness.
+
+The [restore packet](time-abi.md#restore-packet) carries `N` in header byte 7
+and sets its `IMAGE_SLOT_TARGET` flag; the target is always in `1..4`, and no
+portb status bit advertises it. Every explicit target holds the restore gate,
+so the guest always verifies the active prefix and acknowledges before
+readiness, even when no new slot becomes active.
+
 ## Restore-time memory activation
 
 Restore-time memory activation separates the immutable RAM geometry recorded

@@ -33,7 +33,9 @@ ABI version and processor count are also separate history dimensions. Legacy
 CSV rows are interpreted as ABI v1 with one vCPU; they are never used as an
 ABI-v2 one-vCPU baseline.
 New runs always emit ABI value 2 and remain stored under `microvm-v2` paths so
-they cannot collide with legacy unsuffixed ABI-1 history.
+they cannot collide with legacy unsuffixed ABI-1 history. The image-slot boot
+suite records its configurations with and without image slots together under
+the dedicated `image-slot-boot` path.
 The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
 through the supported NVX CLI. Guest payloads live in `scripts/nvx_tools/benchmark_scripts`; the
 coordinator fills the `.sh.in` templates before use.
@@ -261,6 +263,15 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 | Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 128/256/512/1024 MiB warm/cold restores. |
 | Virtio device restore profile | `benchmark --suite device-restore-profile` | Verifies active and driver-unbound deferred restore for console, network, and virtio-fs; emits standalone diagnostic JSON and raw logs. |
+| Image-slot boot cost | `benchmark --suite image-slot-boot` | Measures launches without image slots and with image slots at `B = 1` and `B = 4` using matched launches, and reports both slot deltas against the launch without slots. |
+
+Image-slot boot-cost results must use the same host, backend, kernel,
+initramfs, processor count, memory size, warmups, runs, and readiness marker.
+The suite records three series: `no-slots`, `slots-b1` (`B = 1`), and
+`slots-b4` (`B = 4`). Report both slot deltas against `no-slots` rather than
+comparing only the two slot series. Run the matrix on KVM, MSHV, and WHP;
+performance runners retain the raw commands and results under their normal
+`data/runs` output directory.
 
 ## Kernel command lines
 

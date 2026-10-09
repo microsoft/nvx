@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # pyright: reportPrivateUsage=false
 
+import json
 import os
 import socket
 import struct
@@ -9,10 +10,13 @@ import threading
 import time
 import unittest
 import uuid
+from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nvx_tools import control_session  # noqa: E402
+from nvx_tools import control_session, host_control  # noqa: E402
+from nvx_tools.common import ScriptError  # noqa: E402
 
 
 def _read_like_openvmm(descriptor: int) -> bytes | None:
@@ -721,6 +725,149 @@ class NamedPipeStreamTests(unittest.TestCase):
                 stream.write_all(b"record")
         finally:
             stream.close()
+
+
+def _host_control_frame(value: object) -> bytes:
+    payload = value if isinstance(value, bytes) else json.dumps(value).encode()
+    return host_control.FRAME_HEADER.pack(len(payload)) + payload
+
+
+class HostControlTests(unittest.TestCase):
+    CAPABILITY = bytes(range(1, 33))
+
+    def _exchange(
+        self,
+        response: bytes,
+        operation: Callable[[host_control.HostControl], object],
+    ) -> tuple[object, dict[str, object]]:
+        """Runs `operation` against a peer that answers one request with
+        `response`, and returns its result and the request it received."""
+        client, server = socket.socketpair()
+        received: list[dict[str, object]] = []
+
+        def serve() -> None:
+            with server:
+                if _read_exact(server, 32) != self.CAPABILITY:
+                    raise RuntimeError("host-control client sent a wrong capability")
+                (length,) = host_control.FRAME_HEADER.unpack(_read_exact(server, 4))
+                received.append(json.loads(_read_exact(server, length)))
+                server.sendall(response)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            with (
+                patch.object(
+                    host_control,
+                    "connect_local_stream",
+                    return_value=control_session._SocketStream(client),
+                ),
+                host_control.HostControl(
+                    Path("endpoint"), self.CAPABILITY, 5
+                ) as control,
+            ):
+                result = operation(control)
+        finally:
+            thread.join(5)
+        return result, received[0]
+
+    def test_query_sends_a_versioned_request_and_returns_the_slots(self):
+        slots = [{"slot": 0, "state": "empty"}]
+        result, request = self._exchange(
+            _host_control_frame(
+                {
+                    "version": 1,
+                    "request_id": 1,
+                    "status": "ok",
+                    "result": {"slots": slots},
+                }
+            ),
+            lambda control: control.query_image_slots(),
+        )
+        self.assertEqual(result, slots)
+        self.assertEqual(
+            request, {"version": 1, "request_id": 1, "operation": "query_image_slots"}
+        )
+
+    def test_bind_sends_the_path_and_identity_and_reports_error_codes(self):
+        bound = {
+            "version": 1,
+            "request_id": 1,
+            "status": "ok",
+            "result": {"slot": 2, "capacity_sectors": 8},
+        }
+        _, request = self._exchange(
+            _host_control_frame(bound),
+            lambda control: control.bind_image_slot(2, Path("image.raw"), "id"),
+        )
+        self.assertEqual(
+            request,
+            {
+                "version": 1,
+                "request_id": 1,
+                "operation": "bind_image_slot",
+                "slot": 2,
+                "path": str(Path("image.raw")),
+                "identity": "id",
+            },
+        )
+        response = {
+            "version": 1,
+            "request_id": 1,
+            "status": "error",
+            "code": "already_bound",
+            "message": "image slot 2 is already bound to a different identity",
+        }
+        with self.assertRaisesRegex(ScriptError, r"\(already_bound\): image slot 2"):
+            self._exchange(
+                _host_control_frame(response),
+                lambda control: control.bind_image_slot(2, Path("image.raw"), "id"),
+            )
+
+    def test_invalid_responses_are_rejected(self):
+        ok = {"version": 1, "request_id": 1, "status": "ok"}
+        for response, message in (
+            (
+                host_control.FRAME_HEADER.pack(host_control.MAX_FRAME_SIZE + 1),
+                "exceeds the protocol limit",
+            ),
+            (_host_control_frame(b"{not json"), "invalid JSON"),
+            (_host_control_frame([1]), "non-object response"),
+            (_host_control_frame({**ok, "request_id": 2, "result": {}}), "mismatched"),
+            (_host_control_frame({**ok, "version": 2, "result": {}}), "mismatched"),
+            (_host_control_frame({**ok, "result": []}), "invalid success response"),
+            (_host_control_frame({**ok, "result": {"slots": {}}}), "image-slot table"),
+            (_host_control_frame({**ok, "result": {"slots": [1]}}), "image-slot table"),
+        ):
+            with self.subTest(message=message, response=response[:40]):
+                with self.assertRaisesRegex(ScriptError, message):
+                    self._exchange(
+                        response, lambda control: control.query_image_slots()
+                    )
+
+    def test_oversized_requests_and_invalid_capabilities_fail_before_sending(self):
+        with self.assertRaisesRegex(ValueError, "32 nonzero bytes"):
+            host_control.HostControl(Path("endpoint"), bytes(32), 5)
+        client, server = socket.socketpair()
+        with (
+            server,
+            patch.object(
+                host_control,
+                "connect_local_stream",
+                return_value=control_session._SocketStream(client),
+            ),
+            host_control.HostControl(Path("endpoint"), self.CAPABILITY, 5) as control,
+        ):
+            with self.assertRaisesRegex(ValueError, "exceeds the protocol limit"):
+                control.bind_image_slot(
+                    0, Path("x" * host_control.MAX_FRAME_SIZE), "identity"
+                )
+            server.settimeout(5)
+            # Only the capability reached the peer.
+            self.assertEqual(_read_exact(server, 32), self.CAPABILITY)
+            server.setblocking(False)
+            with self.assertRaises(BlockingIOError):
+                server.recv(1)
 
 
 if __name__ == "__main__":

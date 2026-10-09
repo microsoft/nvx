@@ -32,9 +32,10 @@ supplied native library and an image-backed edge guest that NVX does not build.
 ## Implemented filesystem bootstrap
 
 The public `nvx sandbox` command accepts one to three role-bearing EROFS lower
-images, a preformatted ext4 scratch image, up to two
-[live host shares](#live-host-shares), an absolute entrypoint, and
-individual argument tokens. It supplies non-secret kernel-command-line
+images (none for a managed launch that declares image slots), a preformatted
+ext4 scratch image, up to two [live host shares](#live-host-shares) (one when
+the launch declares image slots), an absolute entrypoint, and individual
+argument tokens. It supplies non-secret kernel-command-line
 configuration for one-shot runs. Managed execution carries bounded arguments
 and a per-execution environment over the authenticated control channel;
 one-shot environment variables, secrets, and sandbox snapshot orchestration
@@ -84,10 +85,14 @@ virtio-fs tag microvm    (optional share) ---> /run/nvx/rootfs/TARGET
 virtio-fs tag microvm1   (optional share) ---> /run/nvx/rootfs/TARGET
 ```
 
-At least one lower role is required by the bootstrap; distro plus runtime is
-the intended curated-image shape, not a requirement that all three lower
-slots be populated. The initramfs remains the supervisor's root and is not
-another container lower layer.
+At least one lower role is required by the bootstrap unless the launch
+declares image slots; distro plus runtime is the intended curated-image shape,
+not a requirement that all three lower slots be populated. A slot-declaring
+launch without lower roles bind-mounts `/run/nvx/scratch/upper` as
+`/run/nvx/rootfs` instead of assembling an overlay, and skips the image's
+user-database checks: the workload runs with the configured UID and GID and
+home `/`. The initramfs remains the supervisor's root and is not another
+container lower layer.
 
 The container launch helper releases the barrier into private mount, PID, and
 UTS namespaces. The container entry helper makes mounts
@@ -122,9 +127,11 @@ enforces the share's mode and its denied, allowed, and writable paths, and
 accesses host files as the identity that `--mount-owner` selects. Guest
 mount flags are therefore not a security boundary, and the access policy adds
 no guest configuration. Before OpenVMM starts, NVX rejects a third share and
-policy paths outside their share. It also rejects guest targets or host
-directories that equal or contain one another, because one share could
-otherwise hide the other or reach its files under a different policy.
+policy paths outside their share. A launch that declares image slots accepts
+only one share, because image slot 0 takes the second share's MMIO window and
+status word, and image slot 1 takes its IRQ. NVX also rejects guest targets
+or host directories that equal or contain one another, because one share
+could otherwise hide the other or reach its files under a different policy.
 [Machine and device ABI](machine-and-device-abi.md#filesystem) defines the
 device contract.
 

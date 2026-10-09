@@ -103,7 +103,9 @@
 #define PACKET_MEMORY_TARGET 0x02
 #define PACKET_ACK_REQUIRED 0x04
 #define PACKET_TEST_HOOKS 0x08
-#define PACKET_KNOWN_FLAGS 0x0f
+#define PACKET_IMAGE_SLOT_TARGET 0x10
+#define PACKET_KNOWN_FLAGS 0x1f
+#define PACKET_MAX_IMAGE_SLOT_TARGET 4
 #define SAMPLE_SIZE 16
 #define SAMPLE_TEST_HOOKS 0x08
 #define GENERATION_ID_SIZE 16
@@ -1118,6 +1120,7 @@ struct restore_packet {
     uint8_t flags;
     uint8_t online_vp_count;
     uint8_t range_count;
+    uint8_t image_slot_target;
     uint32_t generation;
     int32_t rate_deviation;
     uint64_t downtime_ns;
@@ -1146,6 +1149,7 @@ static int parse_packet_header(const uint8_t *bytes,
     online = bytes[5];
     packet->online_vp_count = online;
     packet->range_count = bytes[6];
+    packet->image_slot_target = bytes[7];
     packet->generation = read_le32(bytes + 8);
     packet->rate_deviation = (int32_t)read_le32(bytes + 12);
     packet->downtime_ns = read_le64(bytes + 16);
@@ -1166,8 +1170,26 @@ static int parse_packet_header(const uint8_t *bytes,
                  packet->range_count);
         return -1;
     }
-    if (bytes[7] != 0) {
-        snprintf(detail, size, "restore packet reserved byte is %u", bytes[7]);
+    // Header byte 7 is the image-slot target exactly when flag bit 4 is set.
+    if (((packet->flags & PACKET_IMAGE_SLOT_TARGET) != 0) !=
+        (packet->image_slot_target != 0)) {
+        snprintf(detail, size,
+                 "restore packet image-slot flag and target %u disagree",
+                 packet->image_slot_target);
+        return -1;
+    }
+    if (packet->image_slot_target > PACKET_MAX_IMAGE_SLOT_TARGET) {
+        snprintf(detail, size, "restore packet image-slot target is %u",
+                 packet->image_slot_target);
+        return -1;
+    }
+    // The guest verifies the active slots before it acknowledges, so a
+    // target always holds the restore gate.
+    if (packet->image_slot_target != 0 &&
+        (packet->flags & PACKET_ACK_REQUIRED) == 0) {
+        snprintf(detail, size,
+                 "restore packet image-slot target %u is not acknowledged",
+                 packet->image_slot_target);
         return -1;
     }
     if (packet->generation == 0) {
@@ -4078,10 +4100,10 @@ static int repair_failed(const char *code, const char *detail)
 // and set the wall clock from its bracketed UTC, then write the entropy to
 // ENTROPY_FD, the caller's file at ENTROPY_PATH. START_NS is when the capture
 // request returned. The caller holds the portb lock. With FINISH (untiered)
-// and a DAEMON, a restore with no processors or memory to activate needs no
-// shell work before the acknowledgement, so steps 12 and 13 start here too
-// and no second helper process starts; the metadata then begins with 2
-// instead of 1.
+// and a DAEMON, a restore with no processors, image slots, or memory to
+// activate needs no shell work before the acknowledgement, so steps 12 and 13
+// start here too and no second helper process starts; the metadata then
+// begins with 2 instead of 1.
 static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
                           int entropy_fd, int64_t start_ns, bool finish,
                           pid_t daemon)
@@ -4156,7 +4178,7 @@ static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
     // A plain untiered restore needs no shell work: this helper also
     // acknowledges and hands step 13 to the daemon.
     finishing = finish && daemon > 0 && packet.online_vp_count == 0 &&
-                packet.range_count == 0 &&
+                packet.range_count == 0 && packet.image_slot_target == 0 &&
                 (packet.flags & PACKET_MEMORY_TARGET) == 0;
     // The entropy goes to the caller in every case, an untiered restore's
     // too; the file already exists, empty, so only its bytes are written.
@@ -4181,8 +4203,9 @@ static int repair_restore(const uint8_t *previous_id, const char *entropy_path,
             fail_fatal(STATUS_CONFORMANCE, "G_CONFORMANCE_C10", "conformance",
                        PHASE_RESTORE, "the time daemon is not running");
     }
-    printf("%d %u %u %u %s", finished >= 0 ? 2 : 1, packet.flags,
-           packet.online_vp_count, packet.range_count, id);
+    printf("%d %u %u %u %u %s", finished >= 0 ? 2 : 1, packet.flags,
+           packet.online_vp_count, packet.range_count,
+           packet.image_slot_target, id);
     for (unsigned index = 0; index < packet.range_count; index++)
         printf(" %" PRIu64 " %" PRIu64, packet.ranges[index][0],
                packet.ranges[index][1]);
@@ -4516,11 +4539,11 @@ static int test_packet(int argc, char **argv)
         return 0;
     }
     format_hex(packet.entropy, GENERATION_ID_SIZE, id);
-    printf("ok flags=%u online=%u ranges=%u generation=%" PRIu32
+    printf("ok flags=%u online=%u ranges=%u image_slots=%u generation=%" PRIu32
            " rate_deviation=%" PRId32 " frequency=%" PRId64
            " downtime_ns=%" PRIu64 " utc_ns=%" PRIu64 " generation_id=%s",
            packet.flags, packet.online_vp_count, packet.range_count,
-           packet.generation, packet.rate_deviation,
+           packet.image_slot_target, packet.generation, packet.rate_deviation,
            restore_frequency(packet.rate_deviation), packet.downtime_ns,
            packet.utc_ns, id);
     for (unsigned index = 0; index < packet.range_count; index++)

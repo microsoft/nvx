@@ -24,6 +24,7 @@ DOWNTIME_UTC = 0x01
 MEMORY_TARGET = 0x02
 ACK_REQUIRED = 0x04
 TEST_HOOKS = 0x08
+IMAGE_SLOT_TARGET = 0x10
 UTC_NS = 1_790_841_600_123_456_789
 ENTROPY = bytes(range(64))
 PREVIOUS_ID = "ff" * 16
@@ -42,12 +43,12 @@ def encode_packet(
     utc_ns: int = UTC_NS,
     magic: bytes = b"OVR",
     version: int = 4,
-    reserved: int = 0,
+    image_slots: int = 0,
     entropy: bytes = ENTROPY,
 ) -> bytes:
     """Encode a restore packet v4 (spec: "Restore packet")."""
     count = len(ranges) if range_count is None else range_count
-    header = magic + bytes((version, flags, online, count, reserved))
+    header = magic + bytes((version, flags, online, count, image_slots))
     header += struct.pack("<IiQQ", generation, rate_deviation, downtime_ns, utc_ns)
     assert len(header) == 32
     body = b"".join(struct.pack("<QQ", start, length) for start, length in ranges)
@@ -197,7 +198,7 @@ class GuestTimeTests(unittest.TestCase):
         self.assertEqual(len(packet), 96)
         self.assertEqual(
             self.packet(packet, recorded=2),
-            "ok flags=13 online=4 ranges=0 generation=3 "
+            "ok flags=13 online=4 ranges=0 image_slots=0 generation=3 "
             "rate_deviation=-13107200 frequency=13107200 "
             "downtime_ns=30000000000 "
             f"utc_ns={UTC_NS} generation_id={ENTROPY[:16].hex()}",
@@ -247,6 +248,16 @@ class GuestTimeTests(unittest.TestCase):
             self.assertTrue(result.stdout.startswith(expected), result.stdout)
             self.assertTrue(self.run_test(name).startswith(expected))
 
+    def test_packet_image_slot_target_uses_header_byte_7(self):
+        packet = encode_packet(flags=IMAGE_SLOT_TARGET | ACK_REQUIRED, image_slots=4)
+
+        self.assertEqual(len(packet), 96)
+        self.assertTrue(
+            self.packet(packet).startswith(
+                "ok flags=20 online=0 ranges=0 image_slots=4 generation=1 "
+            )
+        )
+
     def test_packet_memory_ranges_follow_the_header(self):
         packet = encode_packet(
             flags=MEMORY_TARGET,
@@ -265,8 +276,15 @@ class GuestTimeTests(unittest.TestCase):
         cases = {
             "magic": encode_packet(magic=b"OVX"),
             "version 3": encode_packet(version=3),
-            "reserved flag": encode_packet(flags=0x10),
-            "reserved byte": encode_packet(reserved=1),
+            "reserved flag": encode_packet(flags=0x20),
+            "image-slot target without flag": encode_packet(image_slots=1),
+            "image-slot flag without target": encode_packet(flags=IMAGE_SLOT_TARGET),
+            "image-slot target above four": encode_packet(
+                flags=IMAGE_SLOT_TARGET | ACK_REQUIRED, image_slots=5
+            ),
+            "image-slot target without acknowledgement": encode_packet(
+                flags=IMAGE_SLOT_TARGET, image_slots=4
+            ),
             "online count": encode_packet(online=3),
             "ranges without target": encode_packet(range_count=1),
             "generation zero": encode_packet(generation=0),
@@ -292,6 +310,7 @@ class GuestTimeTests(unittest.TestCase):
             encode_packet(rate_deviation=-16_384_000),
             encode_packet(downtime_ns=THIRTY_DAYS_NS),
             encode_packet(online=8),
+            encode_packet(flags=IMAGE_SLOT_TARGET | ACK_REQUIRED, image_slots=4),
         ):
             with self.subTest(packet=packet[:32].hex()):
                 self.assertTrue(self.packet(packet).startswith("ok "))

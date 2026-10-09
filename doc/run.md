@@ -382,6 +382,17 @@ For restore-time memory expansion, capture a fresh snapshot with
 remains exactly 512 MiB; selected expansion ranges receive fresh per-launch
 backing and are onlined before restore readiness.
 
+For a snapshot with image slots, select the process-local active prefix with:
+
+```console
+python3 scripts/nvx.py run \
+  --restore-snapshot build/snapshot \
+  --restore-image-slots 4
+```
+
+The target must be between the snapshot's cold-boot prefix and four. Activation
+finishes before restore readiness; slots cannot be activated later.
+
 ## virtio-fs host mapping
 
 The microVM has two mapping slots with the fixed tags `microvm` and
@@ -535,6 +546,32 @@ converter verifies immutable inputs, applies the deny-by-default metadata
 policy, creates `/nonexistent` for UID/GID 65534, and invokes `mkfs.erofs`.
 Systemd entrypoints are explicitly unsupported and do not relax the non-root,
 drop-all-capabilities sandbox policy.
+
+Managed sandboxes can opt into image slots at provision time:
+
+```console
+python3 scripts/nvx.py sandbox provision \
+  --state-dir build/sandbox \
+  --layer distro,build/distro.erofs,EROFS_UUID \
+  --scratch build/scratch.ext4 \
+  --image-slot-boot-count 4
+python3 scripts/nvx.py sandbox start --state-dir build/sandbox
+python3 scripts/nvx.py sandbox bind-image-slot \
+  --state-dir build/sandbox \
+  --image-slot 0 \
+  --image-path build/image.raw \
+  --image-identity sha256:IMAGE_DIGEST
+python3 scripts/nvx.py sandbox query-image-slots --state-dir build/sandbox
+```
+
+Capacity is always four; `--image-slot-boot-count` selects `B`. Workloads that
+need every slot immediately use `B = 4`, while other slot-declaring launches
+use `B = 1`. A slot-declaring managed launch may omit a `distro` layer and boot
+with scratch plus empty image slots. Image slot 0 uses the second virtio-fs
+slot's transport, so a slot-declaring launch accepts at most one `--mount`.
+A slot-declaring configuration uses format 6, which earlier NVX releases reject
+rather than start without its image slots. Launches without image slots retain
+the existing layer requirement, behavior, and configuration formats.
 
 This is the cold-filesystem bootstrap described in
 [the sandbox design](design/sandbox-filesystem-and-agent-architecture.md#implemented-filesystem-bootstrap), not the final

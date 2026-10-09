@@ -487,6 +487,7 @@ python3 scripts/nvx.py run
     [--cmdline TEXT]
     [--restore-snapshot PATH]
     [--restore-processors {1,2,4,8}]
+    [--restore-image-slots {1,2,3,4}]
     [--restore-memory-mib MIB]
     [--restore-ready-path PATH]
     [--dry-run]
@@ -520,6 +521,7 @@ python3 scripts/nvx.py run
 | `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. |
 | `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. |
 | `--restore-processors {1,2,4,8}` | none | Bring this contiguous processor prefix online before restore readiness. Requires an opt-in microVM snapshot and cannot exceed `--processors` capacity. |
+| `--restore-image-slots {1,2,3,4}` | none | Activate this contiguous image-slot prefix during gated restore repair. |
 | `--restore-memory-mib MIB` | none | Select the 128 MiB-aligned RAM target for an expansion-capable snapshot restore. |
 | `--restore-ready-path PATH` | none | Publish one restore-readiness event to an existing Unix socket or Windows named pipe. |
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
@@ -548,9 +550,13 @@ error itself names `--cpu-profile host`.
 
 ```text
 python3 scripts/nvx.py sandbox
-    [{run,provision,start,exec,stop,deprovision}]
+    [{run,provision,start,exec,query-image-slots,bind-image-slot,stop,deprovision}]
     [--layer ROLE,PATH,EROFS_UUID]...
     [--scratch PATH]
+    [--image-slot-boot-count {1,2,3,4}]
+    [--image-slot {0,1,2,3}]
+    [--image-path PATH]
+    [--image-identity IDENTITY]
     [--state-dir PATH]
     [--entrypoint PATH]
     [--arg VALUE]...
@@ -591,9 +597,13 @@ launches.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `{run,provision,start,exec,stop,deprovision}` | `run` | Select a one-shot run or a managed lifecycle operation. |
-| `--layer ROLE,PATH,EROFS_UUID` | required for `run` and `provision` | Attach a `distro`, `runtime`, or `custom` EROFS layer. Repeat once per distinct role. |
+| `{run,provision,start,exec,query-image-slots,bind-image-slot,stop,deprovision}` | `run` | Select a one-shot run or a managed lifecycle or image-slot operation. |
+| `--layer ROLE,PATH,EROFS_UUID` | required for `run`, and for `provision` without `--image-slot-boot-count` | Attach a `distro`, `runtime`, or `custom` EROFS layer. Repeat once per distinct role. |
 | `--scratch PATH` | required for `run` and `provision` | Attach a preformatted ext4 scratch image as the writable overlay. |
+| `--image-slot-boot-count {1,2,3,4}` | none | On `provision`, declare the four image slots and activate this cold-boot prefix. A slot-declaring launch may omit `--layer` and accepts at most one `--mount`. |
+| `--image-slot {0,1,2,3}` | none | Select the slot for `bind-image-slot`. |
+| `--image-path PATH` | none | Select read-only regular-file media for `bind-image-slot`. |
+| `--image-identity IDENTITY` | none | Record the immutable media identity, 1 to 1024 UTF-8 bytes, for idempotent bind recovery. |
 | `--state-dir PATH` | required for managed operations | Select persistent sandbox state. One-shot `run` rejects this option. |
 | `--entrypoint PATH` | `/bin/sh` | Select an absolute workload entrypoint without whitespace. |
 | `--arg VALUE` | none | Append one whitespace-free entrypoint argument. Repeat to pass multiple arguments. |
