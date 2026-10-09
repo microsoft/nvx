@@ -300,8 +300,9 @@ hypervisor at every cold boot and does not pin. On Linux, supply a matching
 ### Native host paths and network
 
 The native backend accepts the same `filesystem` and `network` policies as the direct
-backend: it maps host paths to the same guest paths under the same rules and expands network
-rules the same way; see [Host paths](#host-paths) and [Network rules](#network-rules). It also
+backend: it maps host paths to the same guest paths and expands network rules the same way;
+see [Host paths](#host-paths) and [Network rules](#network-rules). Unlike the direct backend,
+it exports one directory for all mapped paths, under the rules below. It also
 refuses mappings that would show workloads its state root, described below. Its workloads run
 as the guest's root. The library plans the policies at provision: it resolves the mapped and
 denied paths, chooses the export, pins the objects inside read-write mappings, and expands the
@@ -498,9 +499,10 @@ Windows and `$XDG_STATE_HOME/nvx/sandboxes` (default
     caller except its standard input and log, so a caller whose own output is
     a pipe, such as an MXC phase process, still reaches end-of-file when it
     exits.
-  - Start returns once the guest agent answers on the control console and
-    advertises the control features this backend needs. A guest that lacks any
-    of them is terminated, and start fails with `backend_unavailable`.
+  - Start returns once the guest agent answers on the control console,
+    advertises the control features this backend needs, and has mounted every
+    mapped host path. A guest that lacks any of the features is terminated,
+    and start fails with `backend_unavailable`.
 - **Exec** connects to the control console, authenticates, and streams the
   workload's output live. The agent runs the workload through `setpriv` as the
   workload identity, with no capabilities and `no_new_privs`, in a cgroup of
@@ -618,34 +620,60 @@ paths for one object. `openvmm::resolve_guest_path` performs the same
 translation, for example to turn a host working directory into a
 `process.cwd`; `openvmm::guest_path` translates a path as written.
 
-- OpenVMM offers one virtio-fs export. The backend exports the deepest
-  directory that contains every mapped path to `/run/nvx/hostfs/root`, a guest
-  directory that only the guest's root can enter. The guest agent then
+- OpenVMM offers one virtio-fs device, which the backend attaches as an
+  aggregate: a synthetic, read-only root that lists one exported host
+  directory per child, mounted at `/run/nvx/hostfs/root`, a guest directory
+  that only the guest's root can enter. The exported directories are the
+  outermost mapped directories and the parents of the outermost mapped files,
+  so mapped paths may lie anywhere, on any volume. The guest agent then
   bind-mounts each mapped path at its guest path, read-only or read-write, so
-  workloads see only the mapped paths. The export is writable when any path is
-  read-write, and read-only mounts are then enforced by the guest kernel.
-  Exporting a whole volume (`/` or `C:\`) is refused, so mapped paths must
-  share a directory below it.
-- Denied paths inside the export are hidden by OpenVMM itself: they are absent
-  from listings and inaccessible through any name, except a host hard link to a
-  file inside a denied directory, which OpenVMM cannot tell from any other file.
-  OpenVMM requires hidden paths below the export to contain no whitespace,
-  colons, or backslashes and no links, and accepts at most 128 of them.
-- Mapped paths must exist, be directories or regular files, and share one
-  volume. A path listed both read-only and read-write is mapped read-only. A
-  denied path must not contain a mapped path, and a denied path that does not
-  exist yet must not lie inside a mapped path, because nothing could hide it
-  once a workload creates it. On Windows hosts, which open files
-  case-insensitively, a read-only file inside a read-write directory is
-  refused. Mapping over the guest's own system directories (`/usr`, `/etc`,
-  and so on) is refused. Violations are reported as `policy_validation`.
+  workloads see only the mapped paths.
+- The host enforces each mapping's access. An exported directory is
+  read-write only if it holds a read-write mapping, and OpenVMM then limits
+  writes to its read-write mappings, so only a read-only path inside a
+  read-write mapping is read-only through the guest's bind mount alone. The
+  parent of mapped files exposes only its mapped paths: OpenVMM hides
+  everything else in it, so unmapped siblings are not exported at all.
+  Mapping a whole volume (`/` or `C:\`) is refused; map directories inside it.
+  So is mapping a file directly in a volume's root, such as `C:\notes.txt` or
+  `/notes.txt`, because its parent would be the volume's root; move the file
+  into a directory, and map the file or the directory.
+- Denied paths inside an exported directory are hidden by OpenVMM itself: they
+  are absent from listings and inaccessible through any name, except a host
+  hard link to a file inside a denied directory, which OpenVMM cannot tell
+  from any other file. Below its exported directory, a path that OpenVMM hides
+  or singles out, such as a mapped file or a read-write path inside a
+  read-only one, must not contain colons, backslashes, links, or whitespace
+  other than spaces, and no name in it may begin or end with a space.
+- Mapped paths must exist and be directories or regular files. A path listed
+  both read-only and read-write is mapped read-only. A denied path must not
+  contain a mapped path, and a denied path that does not exist yet must not
+  lie inside a mapped path, because nothing could hide it once a workload
+  creates it. On Windows hosts, which open files case-insensitively, a
+  read-only file inside a read-write directory is refused. Mapping over the
+  guest's own system directories (`/usr`, `/etc`, and so on) is refused.
+  Violations are reported as `policy_validation`.
+- OpenVMM exposes at most 128 paths in each exported directory, so mapping
+  more than 128 individual files from one directory fails at provision with
+  `policy_validation`; map the directory instead. Likewise, OpenVMM hides at
+  most 128 denied paths, and singles out at most 128 read-write paths inside
+  read-only ones, in each exported directory.
+- A sandbox maps at most 4096 paths from at most 256 exported directories.
+  OpenVMM's command line must fit the 32,767 characters of a Windows process
+  command line, with 1,024 held in reserve, on every host, which typically
+  leaves room for several hundred paths. Provision rejects a policy beyond
+  these limits with `policy_validation`.
 - Provision records the identity of every mapped and denied object inside a
   read-write mapping, and start refuses to run if one changed, so a workload
   cannot rename a denied or read-only object and leave a decoy at its path for
   the next start. Objects outside read-write mappings are not pinned, so host
   edits that replace them do not block a restart.
-- The bind mounts travel on the kernel command line, which leaves room for
-  roughly a dozen typical paths.
+- Start hands the guest agent the mapping table over the control channel, in
+  requests that each fit one 64 KiB control record; the kernel command line
+  carries only the number of entries. The agent refuses workloads until it has
+  mounted every entry, and start fails if it cannot mount one. Guest images
+  that predate the mapping table do not advertise its control feature, so
+  start refuses them.
 - On Windows hosts, mapped files appear owned by root with mode `0777`, so the
   workload identity can read and, for read-write paths, write them. On Linux
   hosts virtio-fs shows host owners and modes unchanged; with
@@ -653,8 +681,8 @@ translation, for example to turn a host working directory into a
   workloads under the calling user's IDs, and the guest creates an account for
   them.
 
-The guest kernel, not only the workload, separates the mapped paths from the
-rest of the export, so place mapped paths under one directory when possible.
+Only the guest kernel keeps a read-only path inside a read-write mapping
+read-only, so prefer read-only paths that no read-write mapping contains.
 
 ### Network rules
 
@@ -754,8 +782,8 @@ python3 scripts/nvx.py test-aci-edge-sandboxes --backend kvm   # real VM (reposi
   control console. It lets the real OpenVMM backend run end to end on hosts
   without a hypervisor: detached launch, reconnection from a new process,
   crash recovery, interrupted-start recovery, forced stop, cancellation,
-  working directories, refusal of guest images that lack required features,
-  and failure injection.
+  working directories, host path mapping tables, refusal of guest images that
+  lack required features, and failure injection.
 - `cargo run --example lifecycle -- <command>` runs one command with
   discovered artifacts.
 - `nvx.py test-aci-edge-sandboxes` runs the ignored `openvmm_e2e` tests against a real

@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 
 use super::platform::{self, Transport};
 use super::protocol::{
-    self, APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_PING, APP_READY, APP_STDERR,
-    APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN, ExitCategory, GuestFeatures, OUTER_DATA,
-    OUTER_ERROR, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, OUTER_WAIT,
-    OuterHeader, ProtocolError, UNSUPPORTED_OPERATION, Workload,
+    self, APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAPS,
+    APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN,
+    ExitCategory, GuestFeatures, HostMap, OUTER_DATA, OUTER_ERROR, OUTER_HEADER_LEN,
+    OUTER_HOST_ATTACH, OUTER_MAX_PAYLOAD, OUTER_READY, OUTER_RESET, OUTER_WAIT, OuterHeader,
+    ProtocolError, UNSUPPORTED_OPERATION, Workload,
 };
 
 /// Failure of a control session.
@@ -202,6 +203,48 @@ impl ControlSession {
                 "the guest agent returned an invalid features response".to_owned(),
             )),
         }
+    }
+
+    /// Hands the guest agent the host mapping table, in as many requests as it takes, and waits
+    /// until it has mounted every entry.
+    pub(crate) fn map_host_paths(
+        &mut self,
+        maps: &[HostMap],
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        let payloads = protocol::encode_maps_payloads(maps, OUTER_MAX_PAYLOAD - APP_HEADER_LEN)?;
+        for payload in payloads {
+            let request_id = request_id()?;
+            self.send_app(APP_MAPS, request_id, &payload, Some(deadline))?;
+            let (kind, response_id, status, payload) = self.read_app(Some(deadline))?;
+            if response_id != request_id {
+                return Err(SessionError::Protocol(
+                    "the guest agent returned a mismatched request ID".to_owned(),
+                ));
+            }
+            match kind {
+                APP_READY if status == 0 && payload.is_empty() => {}
+                APP_ERROR if payload == protocol::MAPPING_FAILED.as_bytes() => {
+                    return Err(SessionError::Protocol(format!(
+                        "the guest agent could not mount a mapped host path (error {status})"
+                    )));
+                }
+                APP_ERROR => {
+                    let category: String =
+                        String::from_utf8_lossy(&payload).chars().take(64).collect();
+                    return Err(SessionError::Protocol(format!(
+                        "the guest agent did not mount the host paths: {category} (status \
+                         {status})"
+                    )));
+                }
+                _ => {
+                    return Err(SessionError::Protocol(
+                        "the guest agent returned an invalid host mapping response".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Starts a workload and returns the request ID that identifies its events.
@@ -434,11 +477,16 @@ mod tests {
         Instant::now() + Duration::from_secs(5)
     }
 
-    /// Transport of a guest that answers each application request with `answer(kind, request_id)`.
+    /// Kind and payload of each application request that a guest received.
+    type Requests = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+
+    /// Transport of a guest that answers each application request with `answer(kind, request_id)`
+    /// and records the kind and payload of each request.
     struct Responder {
         input: VecDeque<u8>,
         next_sequence: u64,
         answer: fn(u8, u64) -> Vec<u8>,
+        requests: Requests,
     }
 
     impl Transport for Responder {
@@ -457,6 +505,10 @@ mod tests {
             let header = decode_outer_header(data[..OUTER_HEADER_LEN].try_into().unwrap()).unwrap();
             if header.record_type == OUTER_DATA {
                 let request = decode_app(&data[OUTER_HEADER_LEN..]).unwrap();
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .push((request.kind, request.payload.to_vec()));
                 let reply = (self.answer)(request.kind, request.request_id);
                 self.input
                     .extend(outer(OUTER_DATA, 1, self.next_sequence, &reply));
@@ -468,12 +520,22 @@ mod tests {
 
     /// Attaches to a guest that answers each application request with `answer`.
     fn attached(answer: fn(u8, u64) -> Vec<u8>) -> ControlSession {
+        attached_recording(answer).0
+    }
+
+    /// Attaches to a guest that answers each application request with `answer`, and returns the
+    /// kind and payload of each request that the guest receives.
+    fn attached_recording(answer: fn(u8, u64) -> Vec<u8>) -> (ControlSession, Requests) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let guest = Responder {
             input: outer(OUTER_READY, 1, 0, &[]).into(),
             next_sequence: 1,
             answer,
+            requests: Arc::clone(&requests),
         };
-        ControlSession::attach(Box::new(guest), &[1; CAPABILITY_LEN], deadline()).unwrap()
+        let session =
+            ControlSession::attach(Box::new(guest), &[1; CAPABILITY_LEN], deadline()).unwrap();
+        (session, requests)
     }
 
     /// Splits the host's writes into (record type, sequence, application frame) tuples.
@@ -706,6 +768,65 @@ mod tests {
             let mut session = attached(answer);
             assert!(matches!(
                 session.features(deadline()),
+                Err(SessionError::Protocol(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn host_mappings_travel_in_records_that_the_guest_acknowledges() {
+        let (mut session, requests) = attached_recording(|kind, id| {
+            assert_eq!(kind, APP_MAPS);
+            encode_app(APP_READY, id, 0, &[])
+        });
+        let target = format!("/{}", "t".repeat(4000));
+        let maps: Vec<HostMap> = (0..40)
+            .map(|index| HostMap {
+                source: format!("0/{index}"),
+                target: target.clone(),
+                read_only: index % 2 == 0,
+            })
+            .collect();
+        session.map_host_paths(&maps, deadline()).unwrap();
+        // Entries of about 4 KiB each fill a 64 KiB record 16 at a time.
+        let requests = requests.lock().unwrap();
+        let positions: Vec<(u32, u32)> = requests
+            .iter()
+            .map(|(_, payload)| {
+                (
+                    u32::from_le_bytes(payload[..4].try_into().unwrap()),
+                    u32::from_le_bytes(payload[4..8].try_into().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(positions, [(0, 16), (16, 16), (32, 8)]);
+    }
+
+    #[test]
+    fn refused_host_mappings_fail_the_session() {
+        let maps = [HostMap {
+            source: "0".to_owned(),
+            target: "/work".to_owned(),
+            read_only: false,
+        }];
+        let mut session = attached(|_, id| encode_app(APP_ERROR, id, 2, b"mapping-failed"));
+        let error = session.map_host_paths(&maps, deadline()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not mount a mapped host path (error 2)"),
+            "{error}"
+        );
+        let answers: [fn(u8, u64) -> Vec<u8>; 4] = [
+            |_, id| encode_app(APP_ERROR, id, 22, b"invalid-request"),
+            |_, id| encode_app(APP_ERROR, id, 95, b"unsupported-operation"),
+            |_, id| encode_app(APP_READY, id, 0, b"x"),
+            |_, id| encode_app(APP_READY, id ^ 1, 0, &[]),
+        ];
+        for answer in answers {
+            let mut session = attached(answer);
+            assert!(matches!(
+                session.map_host_paths(&maps, deadline()),
                 Err(SessionError::Protocol(_))
             ));
         }

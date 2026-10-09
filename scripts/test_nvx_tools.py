@@ -10268,25 +10268,20 @@ class ManagedAgentStopTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, stderr)
 
     def test_agent_advertises_the_control_features_of_its_mode(self):
-        cancel, host_mappings, workload_account, exec_cgroup, environment = (
-            1,
-            2,
-            4,
-            8,
-            16,
-        )
-        exec_cwd = 32
+        cancel, workload_account, exec_cgroup, environment = (1, 4, 8, 16)
+        exec_cwd, host_mapping_table = (32, 64)
         for rootfs, expected in (
             # Only the direct agent maps host paths, gives each workload a cgroup, and
-            # refuses a working directory that the workload cannot enter.
+            # refuses a working directory that the workload cannot enter. Bit 1, which
+            # announced nvx_map= kernel tokens, is retired.
             (
                 "-",
                 cancel
-                | host_mappings
                 | workload_account
                 | exec_cgroup
                 | environment
-                | exec_cwd,
+                | exec_cwd
+                | host_mapping_table,
             ),
             ("/run/nvx/rootfs", cancel | workload_account | environment),
         ):
@@ -10299,6 +10294,14 @@ class ManagedAgentStopTests(unittest.TestCase):
         kind, request_id, status, body = self._request("-", 5, b"abc")
         self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
         self.assertEqual(body, b"invalid-request")
+
+    def test_agent_refuses_a_mapping_table_that_nvx_maps_did_not_announce(self):
+        table = struct.pack("<IIHHH", 0, 1, 0, 1, 2) + b"0/w"
+        for rootfs in ("-", "/run/nvx/rootfs"):
+            with self.subTest(rootfs=rootfs):
+                kind, request_id, status, body = self._request(rootfs, 6, table)
+                self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
+                self.assertEqual(body, b"invalid-request")
 
     def test_agent_refuses_malformed_working_directories(self):
         argument = struct.pack("<I", 9) + b"/bin/true"

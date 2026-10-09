@@ -19,6 +19,13 @@
 //! `/work`, a mapped directory, or a directory made with `mkdir`), or that is a mapped regular
 //! file, with a diagnostic and the `cwd-failed` category.
 //!
+//! Host paths are mapped as OpenVMM and the guest agent map them: the command line exports
+//! numbered `--mount-child` directories through `--mount-aggregate`, the kernel command line
+//! announces the number of mappings with `nvx_maps=`, and `MAPS` requests deliver the mapping
+//! table in order. The fake checks each entry against the exported directories, refuses
+//! workloads until the table is complete, and records it in `fake-openvmm-<token>-maps.json`
+//! next to the kernel.
+//!
 //! Each workload gets the environment that its exec request selects, in the order in which the
 //! guest agent builds it. The default environment is the documented guest bootstrap environment:
 //! `PATH`, `TERM`, and the `HOME`, `USER`, and `LOGNAME` of the workload account. The guest's
@@ -31,8 +38,10 @@
 //! `fake_boot_delay_ms=MS` delays the control endpoint, `fake_crash_after_ms=MS` makes the VM
 //! die, `fake_ignore_stop=1` ignores stop requests, `fake_ignore_cancel=1` ignores cancellation,
 //! `fake_guest_features=MASK` advertises the decimal feature mask `MASK` instead of the current
-//! guest's, and `fake_legacy_guest=1` refuses the features request like a guest agent that
-//! predates it. The command line is recorded in `fake-openvmm-<token>.json` next to the kernel.
+//! guest's, `fake_legacy_guest=1` refuses the features request like a guest agent that
+//! predates it, and `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot
+//! mount a mapped path. The command line is recorded in `fake-openvmm-<token>.json` next to the
+//! kernel.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -58,6 +67,7 @@ const APP_EXEC: u8 = 2;
 const APP_STOP: u8 = 3;
 const APP_CANCEL: u8 = 4;
 const APP_FEATURES: u8 = 5;
+const APP_MAPS: u8 = 6;
 const APP_READY: u8 = 0x81;
 const APP_STDOUT: u8 = 0x82;
 const APP_STDERR: u8 = 0x83;
@@ -65,9 +75,10 @@ const APP_EXIT: u8 = 0x84;
 const APP_STOPPED: u8 = 0x85;
 const APP_ERROR: u8 = 0xff;
 
-/// Control features of the current guest: cancellation, host path mappings, workload accounts,
-/// workload containment, per-execution environments, and working directories.
-const GUEST_FEATURES: u32 = 0b11_1111;
+/// Control features of the current guest: cancellation, workload accounts, workload
+/// containment, per-execution environments, working directories, and host path mapping tables.
+/// Bit 1 is retired.
+const GUEST_FEATURES: u32 = 0b111_1101;
 
 const EXEC_EXTENDED: u16 = 1;
 const EXEC_CWD_PRESENT: u16 = 1 << 0;
@@ -75,6 +86,10 @@ const EXEC_ENVIRONMENT_PRESENT: u16 = 1 << 1;
 const EXEC_INHERIT_DEFAULT_ENV: u16 = 1 << 2;
 const MAX_ARGUMENT_BYTES: usize = 4096;
 const MAX_ENVIRONMENT: usize = 256;
+const MAX_HOST_MAPPINGS: usize = 4096;
+const MAP_READ_ONLY: u16 = 1;
+/// The guest directory at which the backend mounts the aggregate export.
+const GUEST_EXPORT: &str = "/run/nvx/hostfs/root";
 
 /// `NAME=VALUE` variables in the order in which a workload's `environ` lists them.
 type Environment = Vec<(String, String)>;
@@ -136,22 +151,31 @@ struct Options {
     report: PathBuf,
     hypervisor: String,
     args_dump: PathBuf,
+    maps_dump: PathBuf,
     exit_on_start: Option<u8>,
     boot_delay: Duration,
     crash_after: Option<Duration>,
     ignore_stop: bool,
     ignore_cancel: bool,
     legacy_guest: bool,
+    refuse_maps: bool,
     workload_uid: u32,
     guest_features: u32,
-    /// Host paths mapped into the guest.
-    mapped: Vec<Mapped>,
+    /// Host directories of the aggregate export, in child order.
+    children: Vec<PathBuf>,
+    /// Number of host mappings that the kernel command line announces.
+    maps: usize,
 }
 
 /// A host path mapped into the guest.
+#[derive(serde::Serialize)]
 struct Mapped {
+    /// Path relative to the guest's mount of the export.
+    source: String,
     /// Guest path at which the host path appears.
     target: String,
+    /// Whether the guest mounts it read-only.
+    read_only: bool,
     /// Whether the host path is a directory rather than a regular file.
     directory: bool,
 }
@@ -197,9 +221,12 @@ fn main() -> ExitCode {
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
-    const VALUED: [&str; 20] = [
-        "--mount",
+    const VALUED: [&str; 23] = [
+        "--mount-aggregate",
+        "--mount-child",
         "--mount-deny",
+        "--mount-allow",
+        "--mount-write",
         "--network-egress-allow",
         "--network-egress-deny",
         "--machine",
@@ -289,40 +316,64 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let tokens: Vec<&str> = command_line.split_whitespace().collect();
     if tokens.iter().any(|token| {
         token.starts_with("nvx_")
-            && !token.starts_with("nvx_map=")
+            && !token.starts_with("nvx_maps=")
             && *token != "nvx_workload_account=create"
     }) {
         return Err("the kernel command line must not select a sandbox".to_owned());
     }
-    let maps = tokens
+    let maps = match tokens
         .iter()
-        .filter(|token| token.starts_with("nvx_map="))
-        .count();
-    let export = match values.get("--mount").map(Vec::as_slice) {
-        None if maps == 0 && !values.contains_key("--mount-deny") => None,
-        Some([mount]) if maps > 0 => {
-            let mut fields = mount.splitn(3, ',');
-            let (Some(target), Some(host), Some(mode)) =
-                (fields.next(), fields.next(), fields.next())
-            else {
-                return Err(format!("invalid --mount {mount}"));
-            };
-            if target != "/run/nvx/hostfs/root"
-                || !Path::new(host).is_dir()
-                || !["ro", "rw"].contains(&mode)
-            {
-                return Err(format!("invalid --mount {mount}"));
-            }
-            for denied in values.get("--mount-deny").into_iter().flatten() {
-                let denied = Path::new(denied);
-                if !denied.exists() || !denied.starts_with(host) {
-                    return Err(format!("invalid --mount-deny {}", denied.display()));
-                }
-            }
-            Some(PathBuf::from(host))
-        }
-        _ => return Err("--mount, --mount-deny, and nvx_map tokens must agree".to_owned()),
+        .filter_map(|token| token.strip_prefix("nvx_maps="))
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] => 0,
+        [count] => count
+            .parse::<usize>()
+            .ok()
+            .filter(|count| (1..=MAX_HOST_MAPPINGS).contains(count))
+            .ok_or_else(|| format!("invalid nvx_maps={count}"))?,
+        _ => return Err("nvx_maps= must be given at most once".to_owned()),
     };
+    let children = match values.get("--mount-aggregate").map(Vec::as_slice) {
+        None if maps == 0 => Vec::new(),
+        Some([GUEST_EXPORT]) if maps > 0 => {
+            let mut children = Vec::new();
+            for (index, child) in values
+                .get("--mount-child")
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let invalid = || format!("invalid --mount-child {child}");
+                let (name, rest) = child.split_once(',').ok_or_else(invalid)?;
+                let (host, mode) = rest.rsplit_once(',').ok_or_else(invalid)?;
+                if name != index.to_string()
+                    || !Path::new(host).is_dir()
+                    || !["ro", "rw"].contains(&mode)
+                {
+                    return Err(invalid());
+                }
+                children.push(PathBuf::from(host));
+            }
+            if children.is_empty() {
+                return Err("--mount-aggregate requires --mount-child".to_owned());
+            }
+            children
+        }
+        _ => return Err("--mount-aggregate and nvx_maps= must agree".to_owned()),
+    };
+    if children.is_empty() && values.contains_key("--mount-child") {
+        return Err("--mount-child requires --mount-aggregate".to_owned());
+    }
+    for option in ["--mount-deny", "--mount-allow", "--mount-write"] {
+        for path in values.get(option).into_iter().flatten() {
+            let path = Path::new(path);
+            if !path.exists() || !children.iter().any(|root| path.starts_with(root)) {
+                return Err(format!("invalid {option} {}", path.display()));
+            }
+        }
+    }
     if (values.contains_key("--network-egress-allow")
         || values.contains_key("--network-egress-deny"))
         && !values.contains_key("--network-egress")
@@ -350,25 +401,10 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // The guest bind-mounts each mapped host path, relative to the export, at its target, so a
-    // target is a directory exactly when its host path is one.
-    let mapped = tokens
-        .iter()
-        .filter_map(|token| token.strip_prefix("nvx_map="))
-        .map(|fields| {
-            let mut parts = fields.split(',').map(percent_decode);
-            match (parts.next().flatten(), parts.next().flatten(), &export) {
-                (Some(source), Some(target), Some(export)) => Ok(Mapped {
-                    directory: export.join(source).is_dir(),
-                    target,
-                }),
-                _ => Err(format!("invalid nvx_map={fields}")),
-            }
-        })
-        .collect::<Result<_, _>>()?;
     Ok(Options {
         endpoint,
         args_dump: kernel.with_file_name(format!("fake-openvmm-{token}.json")),
+        maps_dump: kernel.with_file_name(format!("fake-openvmm-{token}-maps.json")),
         report,
         hypervisor: hypervisor.to_owned(),
         exit_on_start: knob("fake_exit_on_start").and_then(|value| value.parse().ok()),
@@ -377,29 +413,14 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         ignore_stop: knob("fake_ignore_stop") == Some("1"),
         ignore_cancel: knob("fake_ignore_cancel") == Some("1"),
         legacy_guest: knob("fake_legacy_guest") == Some("1"),
+        refuse_maps: knob("fake_refuse_maps") == Some("1"),
         workload_uid,
         guest_features: knob("fake_guest_features")
             .and_then(|value| value.parse().ok())
             .unwrap_or(GUEST_FEATURES),
-        mapped,
+        children,
+        maps,
     })
-}
-
-/// Decodes a percent-encoded `nvx_map=` field.
-fn percent_decode(field: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(field.len());
-    let mut rest = field.as_bytes();
-    while let [first, tail @ ..] = rest {
-        if *first == b'%' {
-            let digits = std::str::from_utf8(tail.get(..2)?).ok()?;
-            bytes.push(u8::from_str_radix(digits, 16).ok()?);
-            rest = &tail[2..];
-        } else {
-            bytes.push(*first);
-            rest = tail;
-        }
-    }
-    String::from_utf8(bytes).ok()
 }
 
 fn read_capability() -> Result<[u8; CAPABILITY_LEN], String> {
@@ -427,6 +448,8 @@ struct Guest {
     directories: BTreeSet<String>,
     /// Mapped regular files, which a workload cannot enter either.
     files: BTreeSet<String>,
+    /// Entries of the host mapping table mounted so far.
+    mapped: Vec<Mapped>,
 }
 
 impl Guest {
@@ -448,22 +471,107 @@ impl Guest {
         .into_iter()
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-        let mut directories: BTreeSet<String> = ["/", "/tmp", "/work"].map(str::to_owned).into();
-        let mut files = BTreeSet::new();
-        for mapped in &options.mapped {
-            let paths = if mapped.directory {
-                &mut directories
-            } else {
-                &mut files
-            };
-            paths.insert(mapped.target.clone());
-        }
         Self {
             values: BTreeMap::new(),
             default_environment,
-            directories,
-            files,
+            directories: ["/", "/tmp", "/work"].map(str::to_owned).into(),
+            files: BTreeSet::new(),
+            mapped: Vec::new(),
         }
+    }
+
+    /// Mounts the entries of a `MAPS` request, like the guest agent: in order, and only as many
+    /// as the kernel command line announced. Returns the error number and category of a refusal.
+    fn map(&mut self, options: &Options, payload: &[u8]) -> Result<(), (i32, &'static str)> {
+        const INVALID: (i32, &str) = (22, "invalid-request");
+        let header = |offset: usize| {
+            payload
+                .get(offset..offset + 4)
+                .map(|bytes| u32_at(bytes, 0))
+        };
+        let (Some(first), Some(count)) = (header(0), header(4)) else {
+            return Err(INVALID);
+        };
+        let (first, count) = (first as usize, count as usize);
+        if options.maps == 0
+            || first != self.mapped.len()
+            || count == 0
+            || count > options.maps - first
+        {
+            return Err(INVALID);
+        }
+        let field = |offset: usize| {
+            payload
+                .get(offset..offset + 2)
+                .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        };
+        let mut entries = Vec::with_capacity(count);
+        let mut offset = 8;
+        for _ in 0..count {
+            let (Some(flags), Some(source_len), Some(target_len)) =
+                (field(offset), field(offset + 2), field(offset + 4))
+            else {
+                return Err(INVALID);
+            };
+            offset += 6;
+            let text = |offset: usize, length: u16| {
+                payload
+                    .get(offset..offset + usize::from(length))
+                    .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+            };
+            let (Some(source), Some(target)) = (
+                text(offset, source_len),
+                text(offset + usize::from(source_len), target_len),
+            ) else {
+                return Err(INVALID);
+            };
+            offset += usize::from(source_len) + usize::from(target_len);
+            if flags & !MAP_READ_ONLY != 0 || !target.starts_with('/') || target.contains('\0') {
+                return Err(INVALID);
+            }
+            entries.push((source, target, flags & MAP_READ_ONLY != 0));
+        }
+        if offset != payload.len() {
+            return Err(INVALID);
+        }
+        if options.refuse_maps {
+            return Err((13, "mapping-failed"));
+        }
+        for (source, target, read_only) in entries {
+            let (child, relative) = source.split_once('/').unwrap_or((&source, ""));
+            let Some(root) = child
+                .parse::<usize>()
+                .ok()
+                .and_then(|child| options.children.get(child))
+            else {
+                return Err(INVALID);
+            };
+            let host = if relative.is_empty() {
+                root.clone()
+            } else {
+                root.join(relative)
+            };
+            let directory = if host.is_dir() {
+                self.directories.insert(target.clone());
+                true
+            } else if host.is_file() {
+                self.files.insert(target.clone());
+                false
+            } else {
+                return Err((2, "mapping-failed"));
+            };
+            self.mapped.push(Mapped {
+                source,
+                target,
+                read_only,
+                directory,
+            });
+        }
+        let _ = fs::write(
+            &options.maps_dump,
+            serde_json::to_vec(&self.mapped).unwrap_or_default(),
+        );
+        Ok(())
     }
 }
 
@@ -654,11 +762,20 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                         &options.guest_features.to_le_bytes(),
                     )?;
                 }
+                APP_EXEC if guest.mapped.len() < options.maps => {
+                    self.send(APP_ERROR, request_id, 11, b"mappings-incomplete")?;
+                }
                 APP_EXEC => {
                     if !self.exec(request_id, &payload, guest)? {
                         return Ok(Flow::Continue);
                     }
                 }
+                APP_MAPS => match guest.map(options, &payload) {
+                    Ok(()) => self.send(APP_READY, request_id, 0, &[])?,
+                    Err((status, category)) => {
+                        self.send(APP_ERROR, request_id, status, category.as_bytes())?;
+                    }
+                },
                 // The targeted workload already finished.
                 APP_CANCEL => {}
                 APP_STOP if options.ignore_stop => {}

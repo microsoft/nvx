@@ -375,12 +375,29 @@ standard error and refuses the request with the `cwd-failed` category and the
 error number as status, so nothing runs in another directory.
 
 Without sandbox layers, the agent maps host directories for workloads from
-one virtio-fs export. The host exports the deepest directory that contains
-every mapped path to `/run/nvx/hostfs/root`; before it accepts control traffic,
-the agent makes `/run/nvx/hostfs` root-only and bind-mounts each mapped path
-named by an `nvx_map=SOURCE,TARGET,ro|rw` kernel token (percent-encoded paths,
-`SOURCE` relative to the export), remounting each bind `nosuid,nodev` and, for
-`ro`, read-only. OpenVMM's export deny list hides denied paths. A
+one aggregate virtio-fs export. The host exports the outermost mapped
+directories and the parents of the outermost mapped files as numbered children
+of the export, which the init mounts at `/run/nvx/hostfs/root`, and enforces
+each mapping's access itself: a child is read-write only if it holds a
+read-write mapping, OpenVMM limits writes to its read-write mappings, and the
+parent of mapped files hides everything else. Neither a whole volume nor a file
+directly in a volume's root, whose parent would be that root, is mapped. Before
+it accepts control
+traffic, the agent makes `/run/nvx/hostfs` root-only. The kernel command line
+announces the number of mappings with an `nvx_maps=COUNT` token, and the host
+then sends the mapping table in `MAPS` requests. Each request carries the index
+of its first entry and its number of entries, and each entry its flags (bit 0
+selects read-only), the lengths of its source and target, the source, a path
+relative to the export such as `0/src`, and the absolute target. The agent
+accepts entries only in order and only up to the announced count, checks a
+whole request before it mounts anything, bind-mounts each source at its
+target, remounting the bind `nosuid,nodev` and, for a read-only entry,
+read-only, and answers `READY`, or `ERROR` with the `mapping-failed` category
+and the error number. Until it has mounted every announced entry, it refuses
+`EXEC` with the `mappings-incomplete` category, and a failed mount keeps it
+refusing. Without an `nvx_maps=` token, it refuses `MAPS` as
+`invalid-request`, and it ignores the `nvx_map=` tokens of older hosts.
+OpenVMM's deny list hides denied paths. A
 `nvx_workload_account=create` token lets the managed init create an account for
 a host-selected non-root identity that the image lacks, which Linux hosts use
 to run workloads under the host user's IDs. An image account that already uses
@@ -392,17 +409,20 @@ more for it, and acknowledges the new epoch, so the next session does not wait
 for an abandoned workload.
 
 A host cannot tell from a successful readiness probe whether the image enforces
-the behaviors it depends on: an older guest boots and answers, but ignores
-`nvx_map=` tokens and `CANCEL` requests. A `FEATURES` request, which carries no
+the behaviors it depends on: an older guest boots and answers, but ignores the
+mapping table and `CANCEL` requests. A `FEATURES` request, which carries no
 payload, therefore asks which control behaviors the image provides. The agent
 answers `READY` with a four-byte little-endian bit mask: `CANCEL` (bit 0),
-`HOST_MAPPINGS` (bit 1), `WORKLOAD_ACCOUNT` (bit 2, provided by the managed
-init and reported by the agent, because both ship in one initramfs),
-`EXEC_CGROUP` (bit 3), `EXEC_ENVIRONMENT` (bit 4, which applies an explicit
-environment to each execution, either replacing or layering over the bootstrap
-environment), and `EXEC_CWD` (bit 5, the `cwd-failed` refusal of a working
-directory that the workload cannot enter). Without sandbox layers all six are
-provided; with them, only `CANCEL`, `WORKLOAD_ACCOUNT`, and `EXEC_ENVIRONMENT`.
+`WORKLOAD_ACCOUNT` (bit 2, provided by the managed init and reported by the
+agent, because both ship in one initramfs), `EXEC_CGROUP` (bit 3),
+`EXEC_ENVIRONMENT` (bit 4, which applies an explicit environment to each
+execution, either replacing or layering over the bootstrap environment),
+`EXEC_CWD` (bit 5, the `cwd-failed` refusal of a working directory that the
+workload cannot enter), and `HOST_MAPPING_TABLE` (bit 6, the `MAPS` requests
+above). Bit 1 announced the bind mounts that `nvx_map=` kernel tokens listed in
+earlier images; it stays unset, so hosts that still send those tokens refuse
+current images. Without sandbox layers all six features are provided; with
+them, only `CANCEL`, `WORKLOAD_ACCOUNT`, and `EXEC_ENVIRONMENT`.
 An agent that predates the request refuses it as `unsupported-operation`, which
 a host reads as no features, so a host terminates a guest that lacks a feature
 it needs instead of running workloads without the policy it asked for. During

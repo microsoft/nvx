@@ -218,6 +218,225 @@ fn host_paths_are_mapped_into_the_guest() {
     );
 }
 
+/// A directory on another volume than the temporary directory, if the host has one: the one
+/// that `ACI_EDGE_SANDBOXES_E2E_SECOND_VOLUME` names, or the runner's temporary directory, which
+/// lies on another volume on GitHub's Windows runners. Tests create their files below it.
+fn second_volume() -> Option<PathBuf> {
+    let candidate = env::var_os("ACI_EDGE_SANDBOXES_E2E_SECOND_VOLUME")
+        .or_else(|| env::var_os("RUNNER_TEMP"))
+        .map(PathBuf::from)?;
+    let candidate = fs::canonicalize(candidate).ok()?;
+    let temporary = fs::canonicalize(env::temp_dir()).ok()?;
+    #[cfg(unix)]
+    let other = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(&candidate).ok()?.dev() != fs::metadata(&temporary).ok()?.dev()
+    };
+    #[cfg(not(unix))]
+    let other = candidate.components().next() != temporary.components().next();
+    (other && candidate.is_dir()).then_some(candidate)
+}
+
+/// Runs `script` with `paths` as its positional parameters.
+fn script(script: &str, paths: &[String]) -> ExecRequest {
+    let mut argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()];
+    argv.push("sh".to_owned());
+    argv.extend(paths.iter().cloned());
+    ExecRequest::argv(argv)
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn unrelated_directories_keep_their_own_access() {
+    // The layout of microsoft/nvx#281: projects/app and build-output are read-write, tools is
+    // read-only, and nothing else of the host is exported.
+    let host = tempfile::tempdir().unwrap();
+    let base = host.path();
+    for directory in ["projects/app", "projects/private", "build-output", "tools"] {
+        fs::create_dir_all(base.join(directory)).unwrap();
+    }
+    fs::write(base.join("tools").join("lint.cfg"), "rules").unwrap();
+    fs::write(base.join("projects").join("private").join("key"), "secret").unwrap();
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![base.join("tools")],
+        readwrite_paths: vec![base.join("projects/app"), base.join("build-output")],
+        denied_paths: Vec::new(),
+    });
+    let (nvx, backend) = client("volumes");
+    let sandbox = started(&nvx, &backend, &request);
+    let sandbox_id = id(&sandbox);
+    let guest = |name: &str| guest_path(&base.join(name)).unwrap();
+    let paths = [
+        guest("projects/app"),
+        guest("build-output"),
+        guest("tools"),
+        guest("projects"),
+    ];
+    let output = run(
+        &nvx,
+        sandbox_id,
+        script(
+            "echo app > \"$1/result\" && echo build > \"$2/result\" && cat \"$3/lint.cfg\" \
+             && ! touch \"$3/new\" 2>/dev/null && ls \"$4\"",
+            &paths,
+        ),
+    );
+    assert!(output.outcome.success(), "{output:?}");
+    // The parent of projects/app holds only its mount point.
+    assert_eq!(output.stdout, b"rulesapp\n", "{output:?}");
+    assert_eq!(
+        fs::read_to_string(base.join("projects/app/result")).unwrap(),
+        "app\n"
+    );
+    assert_eq!(
+        fs::read_to_string(base.join("build-output/result")).unwrap(),
+        "build\n"
+    );
+    assert!(!base.join("tools").join("new").exists());
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn mapped_files_hide_their_siblings_and_names_may_hold_spaces() {
+    let host = tempfile::tempdir().unwrap();
+    let work = host.path().join("my work");
+    fs::create_dir_all(work.join("data").join("My Secrets")).unwrap();
+    fs::write(work.join("notes one.txt"), "notes").unwrap();
+    fs::write(work.join("log file.txt"), "").unwrap();
+    fs::write(work.join("sibling.txt"), "hidden").unwrap();
+    fs::write(work.join("data").join("My Secrets").join("key"), "hidden").unwrap();
+    fs::write(work.join("data").join("shared.txt"), "shared").unwrap();
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![work.join("notes one.txt")],
+        readwrite_paths: vec![work.join("log file.txt"), work.join("data")],
+        denied_paths: vec![work.join("data").join("My Secrets")],
+    });
+    let (nvx, backend) = client("files");
+    let sandbox = started(&nvx, &backend, &request);
+    let sandbox_id = id(&sandbox);
+    let guest = |name: &str| guest_path(&work.join(name)).unwrap();
+    let directory = guest_path(&work).unwrap();
+    let output = run(
+        &nvx,
+        sandbox_id,
+        script(
+            "cat \"$1\" && echo logged >> \"$2\" && ! echo x > \"$1\" 2>/dev/null && ls \"$3\" \
+             && ls \"$4\"",
+            &[
+                guest("notes one.txt"),
+                guest("log file.txt"),
+                directory.clone(),
+                guest("data"),
+            ],
+        ),
+    );
+    assert!(output.outcome.success(), "{output:?}");
+    // The guest's directory holds only the mapped paths, and the denied directory is hidden.
+    assert_eq!(
+        output.stdout, b"notesdata\nlog file.txt\nnotes one.txt\nshared.txt\n",
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("log file.txt")).unwrap(),
+        "logged\n"
+    );
+    for hidden in [
+        format!("{directory}/sibling.txt"),
+        format!("{directory}/data/My Secrets/key"),
+    ] {
+        let output = run(
+            &nvx,
+            sandbox_id,
+            script("cat \"$1\"", std::slice::from_ref(&hidden)),
+        );
+        assert_ne!(
+            output.outcome,
+            ExecOutcome::Exited(0),
+            "{hidden}: {output:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn many_mappings_are_mounted() {
+    let host = tempfile::tempdir().unwrap();
+    let mut readonly_paths = Vec::new();
+    let mut readwrite_paths = Vec::new();
+    for index in 0..25 {
+        let directory = host.path().join(format!("tree-{index:02}")).join("src");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("file.txt"), format!("{index}")).unwrap();
+        let file = host.path().join(format!("file-{index:02}.txt"));
+        fs::write(&file, format!("{index}")).unwrap();
+        if index % 2 == 0 {
+            readonly_paths.push(directory);
+            readwrite_paths.push(file);
+        } else {
+            readwrite_paths.push(directory);
+            readonly_paths.push(file);
+        }
+    }
+    let mapped: Vec<String> = readonly_paths
+        .iter()
+        .chain(&readwrite_paths)
+        .map(|path| guest_path(path).unwrap())
+        .collect();
+    assert_eq!(mapped.len(), 50);
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths,
+        readwrite_paths,
+        denied_paths: Vec::new(),
+    });
+    let (nvx, backend) = client("many");
+    let sandbox = started(&nvx, &backend, &request);
+    let output = run(
+        &nvx,
+        id(&sandbox),
+        script(
+            "count=0; for path in \"$@\"; do [ -e \"$path\" ] || exit 1; \
+             count=$((count + 1)); done; echo $count",
+            &mapped,
+        ),
+    );
+    assert_eq!(output.stdout, b"50\n", "{output:?}");
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn directories_on_another_volume_are_mapped() {
+    let Some(volume) = second_volume() else {
+        eprintln!("skipped: the host has no second volume");
+        return;
+    };
+    let primary = tempfile::tempdir().unwrap();
+    let secondary = tempfile::tempdir_in(volume).unwrap();
+    fs::write(primary.path().join("input.txt"), "input").unwrap();
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![primary.path().to_path_buf()],
+        readwrite_paths: vec![secondary.path().to_path_buf()],
+        denied_paths: Vec::new(),
+    });
+    let (nvx, backend) = client("volume");
+    let sandbox = started(&nvx, &backend, &request);
+    let output = run(
+        &nvx,
+        id(&sandbox),
+        script(
+            "cat \"$1/input.txt\" > \"$2/output.txt\"",
+            &[
+                guest_path(primary.path()).unwrap(),
+                guest_path(secondary.path()).unwrap(),
+            ],
+        ),
+    );
+    assert!(output.outcome.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(secondary.path().join("output.txt")).unwrap(),
+        "input"
+    );
+}
+
 /// Runs the shell's `pwd`, which reports `PWD`, then `/bin/pwd`, which resolves the directory.
 fn pwd(nvx: &AciEdgeSandbox, sandbox_id: &SandboxId, cwd: Option<&str>) -> ExecOutput {
     let request = ExecRequest::command_line("pwd; /bin/pwd");

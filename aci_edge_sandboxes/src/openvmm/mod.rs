@@ -11,11 +11,12 @@
 //! - **start** launches a detached OpenVMM process with the managed lifecycle, passes it a fresh
 //!   32-byte capability through standard input, and waits until the guest agent answers on the
 //!   authenticated control console. The agent must also advertise the control features this
-//!   backend depends on (cancellation, host path mappings, workload accounts, workload
-//!   containment, per-execution environments, and working directories). A guest image that lacks
+//!   backend depends on (cancellation, workload accounts, workload containment, per-execution
+//!   environments, working directories, and host path mapping tables). A guest image that lacks
 //!   one is terminated and start fails with
 //!   [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable), because such an
-//!   image would silently ignore the policy or request that needs the feature.
+//!   image would silently ignore the policy or request that needs the feature. Start then hands
+//!   the agent the table of mapped host paths, and fails if the agent cannot mount them all.
 //! - **exec** runs the workload through the control console and streams its output live.
 //! - **stop** asks the guest to shut down and falls back to terminating OpenVMM after
 //!   [`OpenVmmConfig::stop_timeout`].
@@ -46,9 +47,13 @@
 //! [`ErrorCode::PolicyValidation`](crate::ErrorCode::PolicyValidation); [`guest_path`]
 //! translates host paths.
 //!
-//! Host paths share OpenVMM's single virtio-fs export: the backend exports the deepest directory
-//! that contains every mapped path to a guest directory that only the guest's root can enter, and
-//! the guest agent bind-mounts each mapped path, read-only or read-write. Egress rules are expanded
+//! Host paths share OpenVMM's single virtio-fs device: the backend exports each outermost mapped
+//! directory, and the parent of each outermost mapped file, as one child of an aggregate that
+//! only the guest's root can enter, and the guest agent bind-mounts each mapped path, read-only
+//! or read-write. OpenVMM enforces each mapping's access on the host, except that of a read-only
+//! path inside a read-write mapping, and hides denied paths and everything that is not mapped
+//! beside mapped files. A whole volume, or a file directly in a volume's root, is not mapped.
+//! Egress rules are expanded
 //! into OpenVMM's IPv4 and IPv6 rules exactly; rules that would need more than 256 OpenVMM rules
 //! are rejected. Egress denied without allow rules, with ingress denied,
 //! attaches no network device. Workloads run as the fixed non-root identity of
@@ -539,6 +544,17 @@ impl Backend for OpenVmmBackend {
         };
         launch::kernel_command_line(&self.config.kernel_command_line, &record)?;
         let sandbox_id = SandboxId::generate()?;
+        // Windows names each start's control pipe afresh, but every name has the same length.
+        let endpoint =
+            platform::control_endpoint(&self.store.socket_path(&sandbox_id)).map_err(|error| {
+                Error::backend_error("cannot choose a control endpoint").with_source(error)
+            })?;
+        launch::check_process_command_line(
+            &self.config,
+            &record,
+            &endpoint,
+            &self.store.outcome_path(&sandbox_id),
+        )?;
         self.store.create(&sandbox_id, &record)?;
         Ok(ProvisionResult {
             sandbox_id,
@@ -646,10 +662,11 @@ impl Backend for OpenVmmBackend {
             .and_then(|transport| ControlSession::attach(transport, &capability, deadline))
             .and_then(|mut session| {
                 session.ping(deadline)?;
-                session.features(deadline)
+                let features = session.features(deadline)?;
+                Ok((session, features))
             });
-        let features = match ready {
-            Ok(features) => features,
+        let (mut session, features) = match ready {
+            Ok(ready) => ready,
             Err(error) => {
                 let reason = readiness_failure(&error, record.create_workload_account);
                 return Err(self.abort_start(sandbox_id, &runtime, &reason));
@@ -658,6 +675,13 @@ impl Backend for OpenVmmBackend {
         let missing = features.missing(GuestFeatures::REQUIRED);
         if !missing.is_empty() {
             return Err(self.reject_guest(sandbox_id, &runtime, &missing));
+        }
+        // Workloads run only once the guest has mounted every mapped host path.
+        if let Some(mapping) = &record.filesystem
+            && let Err(error) = session.map_host_paths(&filesystem::guest_table(mapping), deadline)
+        {
+            let reason = format!("the host paths were not mapped: {error}");
+            return Err(self.abort_start(sandbox_id, &runtime, &reason));
         }
         let mut metadata = Metadata::new();
         let boot_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -866,6 +890,11 @@ fn pump(
                     protocol::LAUNCH_FAILED => Ok(ExecOutcome::Failed(ExecFailure::LaunchFailed)),
                     // The guest already wrote a diagnostic that names the directory to stderr.
                     protocol::CWD_FAILED => Ok(ExecOutcome::Failed(ExecFailure::WorkingDirectory)),
+                    // Only a start that was interrupted leaves a guest without its mappings.
+                    protocol::MAPPINGS_INCOMPLETE => Err(Error::backend_error(
+                        "the guest has not mounted every mapped host path, because its start did \
+                         not complete; stop the sandbox and start it again",
+                    )),
                     _ => Err(Error::backend_error(format!(
                         "the guest agent rejected the workload: {category} (status {status})"
                     ))),
