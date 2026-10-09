@@ -3671,7 +3671,11 @@ def run_denied_filesystem_paths(
         for name, denied_paths, expected in (
             ("outside", (outside,), b"outside the filesystem export root"),
             ("duplicate", (secrets, secrets), b"unique and non-overlapping"),
-            ("root", (root,), b"cannot hide the complete filesystem export"),
+            (
+                "root",
+                (root,),
+                b"can hide its root only to expose allowed paths inside it",
+            ),
         ):
             invalid = workload_boot_command(
                 executable,
@@ -5418,6 +5422,44 @@ def _tree_contents(root: Path) -> dict[str, bytes | None]:
     return contents
 
 
+# The guest binds each child of the aggregate at its target with its mode.
+_SHARE_TOKENS = (
+    "nvx_share=0,/workspace,rw nvx_share=1,/opt/hostedtoolcache,ro "
+    "nvx_share=2,/srv/data,rw"
+)
+
+
+def _aggregate_arguments(
+    workspace: Path,
+    toolcache: Path,
+    data: Path,
+    names: tuple[str, str, str] = ("0", "1", "2"),
+) -> tuple[str, ...]:
+    """Return the OpenVMM options that share the read-write workspace, the
+    read-only tool cache, and the data directory as the children `names` of
+    one aggregate. The data directory's root hides everything but `public` and
+    `notes one.txt`, and only the notes are writable."""
+    workspace_name, toolcache_name, data_name = names
+    return (
+        "--mount-aggregate",
+        "/run/nvx/shares",
+        "--mount-child",
+        f"{workspace_name},{workspace},rw",
+        "--mount-child",
+        f"{toolcache_name},{toolcache},ro",
+        "--mount-child",
+        f"{data_name},{data},rw",
+        "--mount-deny",
+        str(data),
+        "--mount-allow",
+        str(data / "public"),
+        "--mount-allow",
+        str(data / "notes one.txt"),
+        "--mount-write",
+        str(data / "notes one.txt"),
+    )
+
+
 def _shares_command(
     executable: Path,
     backend: str,
@@ -5426,6 +5468,7 @@ def _shares_command(
     memory_mib: int,
     workspace: Path,
     toolcache: Path,
+    data: Path,
 ) -> list[str]:
     command = workload_boot_command(
         executable,
@@ -5433,10 +5476,9 @@ def _shares_command(
         kernel,
         initrd,
         memory_mib,
-        "quiet loglevel=0",
-        mount=f"/workspace,{workspace},rw",
+        f"quiet loglevel=0 {_SHARE_TOKENS}",
     )
-    command.extend(("--mount", f"/opt/hostedtoolcache,{toolcache},ro"))
+    command.extend(_aggregate_arguments(workspace, toolcache, data))
     return command
 
 
@@ -5450,23 +5492,29 @@ def run_filesystem_shares(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    """Attach a read-write workspace and a read-only tool cache together."""
+    """Attach a read-write workspace, a read-only tool cache, and a data
+    directory with a hidden root together, as the children of one aggregate."""
     with tempfile.TemporaryDirectory(prefix="nvx-filesystem-shares-") as temporary:
         root = Path(temporary)
         workspace = root / "workspace"
         toolcache = root / "toolcache"
+        data = root / "data"
         (workspace / "secrets").mkdir(parents=True)
         (toolcache / "tools").mkdir(parents=True)
         (toolcache / "credentials").mkdir()
+        (data / "public").mkdir(parents=True)
         (workspace / "seed").write_bytes(b"NVX-WORKSPACE")
         (workspace / "secrets" / "token").write_bytes(b"NVX-SECRET")
         (toolcache / "seed").write_bytes(b"NVX-TOOLCACHE")
         (toolcache / "tools" / "node").write_bytes(b"NVX-TOOL")
         (toolcache / "credentials" / "token").write_bytes(b"NVX-CREDENTIAL")
+        (data / "public" / "readme").write_bytes(b"NVX-PUBLIC")
+        (data / "notes one.txt").write_bytes(b"NVX-NOTES\n")
+        (data / "private.txt").write_bytes(b"NVX-PRIVATE")
         toolcache_contents = _tree_contents(toolcache)
 
         command = _shares_command(
-            executable, backend, kernel, initrd, memory_mib, workspace, toolcache
+            executable, backend, kernel, initrd, memory_mib, workspace, toolcache, data
         )
         command.extend(
             (
@@ -5476,6 +5524,7 @@ def run_filesystem_shares(
                 str(toolcache / "credentials"),
             )
         )
+        data_contents = _tree_contents(data)
         run_guest_script(
             command,
             _read_script("filesystem-shares.sh"),
@@ -5488,49 +5537,77 @@ def run_filesystem_shares(
         if not (workspace / "guest-directory").is_dir():
             raise RuntimeError("read-write share did not accept a guest directory")
         assert_guest_symlink(workspace / "toolcache-seed", "/opt/hostedtoolcache/seed")
+        if (workspace / "linked").exists():
+            raise RuntimeError("a hard link joined two children of the aggregate")
         if _tree_contents(toolcache) != toolcache_contents:
             raise RuntimeError("guest modified the read-only share")
         if (workspace / "secrets" / "token").read_bytes() != b"NVX-SECRET":
             raise RuntimeError("guest modified a denied path")
+        data_contents["notes one.txt"] = b"NVX-NOTES\nNVX-GUEST-NOTE\n"
+        if _tree_contents(data) != data_contents:
+            raise RuntimeError(
+                "guest changed the data share beyond its one writable path"
+            )
 
-        third = root / "third"
-        third.mkdir()
         nested = workspace / "nested"
         nested.mkdir()
+        third = root / "third"
+        third.mkdir()
         for name, arguments, expected in (
             (
-                "three-shares",
-                ("--mount", f"/third,{third},ro"),
-                b"at most 2 filesystems",
+                "repeated-mount",
+                (
+                    "--mount",
+                    f"/workspace,{workspace},rw",
+                    "--mount",
+                    f"/opt/hostedtoolcache,{toolcache},ro",
+                ),
+                b"cannot be used multiple times",
             ),
-            ("relative-deny", ("--mount-deny", "secrets"), b"absolute host path"),
+            (
+                "overlapping-children",
+                (
+                    "--mount-aggregate",
+                    "/run/nvx/shares",
+                    "--mount-child",
+                    f"0,{workspace},rw",
+                    "--mount-child",
+                    f"1,{nested},ro",
+                ),
+                b"must not overlap",
+            ),
         ):
-            invalid = _shares_command(
-                executable, backend, kernel, initrd, memory_mib, workspace, toolcache
+            invalid = workload_boot_command(
+                executable, backend, kernel, initrd, memory_mib, "quiet loglevel=0"
             )
             invalid.extend(arguments)
             _expect_boot_failure(
                 invalid, output_dir / f"filesystem-shares-{name}.log", timeout, expected
             )
-        for name, mount, expected in (
-            ("nested-target", f"/workspace/cache,{toolcache},ro", b"overlap"),
-            ("nested-host", f"/opt/hostedtoolcache,{nested},ro", b"must not overlap"),
+        for name, arguments, expected in (
+            (
+                "mount-and-aggregate",
+                ("--mount", f"/third,{third},ro"),
+                b"cannot be used with",
+            ),
+            ("relative-deny", ("--mount-deny", "secrets"), b"absolute host path"),
         ):
-            invalid = workload_boot_command(
+            invalid = _shares_command(
                 executable,
                 backend,
                 kernel,
                 initrd,
                 memory_mib,
-                "quiet loglevel=0",
-                mount=f"/workspace,{workspace},rw",
+                workspace,
+                toolcache,
+                data,
             )
-            invalid.extend(("--mount", mount))
+            invalid.extend(arguments)
             _expect_boot_failure(
                 invalid, output_dir / f"filesystem-shares-{name}.log", timeout, expected
             )
 
-        # Both shares belong to the snapshot contract, in slot order.
+        # Every child belongs to the snapshot contract, in order.
         snapshot = root / "snapshot"
         with OpenvmmProcess(
             [
@@ -5542,6 +5619,7 @@ def run_filesystem_shares(
                     memory_mib,
                     workspace,
                     toolcache,
+                    data,
                 ),
                 "--snapshot-destination",
                 str(snapshot),
@@ -5560,24 +5638,44 @@ def run_filesystem_shares(
         if source.returncode != 0 or (
             source_lines.count(FILESYSTEM_SHARES_BEFORE_MARKER) != 1
         ):
-            raise RuntimeError("two-share snapshot capture failed")
+            raise RuntimeError("aggregate snapshot capture failed")
         if FILESYSTEM_SHARES_AFTER_MARKER in source_lines:
-            raise RuntimeError("two-share snapshot source crossed the capture boundary")
+            raise RuntimeError("aggregate snapshot source crossed the capture boundary")
         fingerprint = _snapshot_fingerprint(snapshot)
 
-        workspace_mount = ("--mount", f"/workspace,{workspace},rw")
-        toolcache_mount = ("--mount", f"/opt/hostedtoolcache,{toolcache},ro")
-        for name, mounts, expected in (
-            ("missing-share", (workspace_mount,), b"2 --mount attachments"),
+        aggregate = _aggregate_arguments(workspace, toolcache, data)
+        for name, arguments, expected in (
+            (
+                "missing-share",
+                (
+                    "--mount-aggregate",
+                    "/run/nvx/shares",
+                    "--mount-child",
+                    f"0,{workspace},rw",
+                    "--mount-child",
+                    f"1,{toolcache},ro",
+                ),
+                b"do not match the snapshot contract",
+            ),
             (
                 "swapped-shares",
-                (toolcache_mount, workspace_mount),
-                b"does not match the snapshot contract",
+                _aggregate_arguments(toolcache, workspace, data),
+                b"do not match the snapshot contract",
+            ),
+            # The children's names pin the targets where the guest bound them.
+            (
+                "renamed-share",
+                _aggregate_arguments(workspace, toolcache, data, ("0", "1", "data")),
+                b"do not match the snapshot contract",
+            ),
+            (
+                "single-mount",
+                ("--mount", f"/workspace,{workspace},rw"),
+                b"--mount-aggregate and --mount-child options",
             ),
         ):
             invalid = snapshot_restore_command(executable, backend, snapshot)
-            for mount in mounts:
-                invalid.extend(mount)
+            invalid.extend(arguments)
             _expect_process_failure(
                 invalid,
                 output_dir / f"filesystem-shares-{name}.log",
@@ -5586,7 +5684,7 @@ def run_filesystem_shares(
                 (FILESYSTEM_SHARES_AFTER_MARKER,),
             )
         restore = snapshot_restore_command(executable, backend, snapshot)
-        restore.extend((*workspace_mount, *toolcache_mount))
+        restore.extend(aggregate)
         with OpenvmmProcess(
             restore, output_dir / "filesystem-shares-restore.log"
         ) as process:
@@ -5594,10 +5692,10 @@ def run_filesystem_shares(
             restored = process.wait(timeout)
         if restored.returncode != 0:
             raise RuntimeError(
-                f"two-share snapshot restore exited with {restored.returncode}"
+                f"aggregate snapshot restore exited with {restored.returncode}"
             )
         if _snapshot_fingerprint(snapshot) != fingerprint:
-            raise RuntimeError("two-share snapshot restore modified snapshot artifacts")
+            raise RuntimeError("aggregate snapshot restore modified snapshot artifacts")
         if (workspace / "journal").read_bytes() != b"NVX-BEFORENVX-AFTER":
             raise RuntimeError("read-write share did not resume after restore")
         if _tree_contents(toolcache) != toolcache_contents:
@@ -6674,8 +6772,8 @@ def run(args: argparse.Namespace) -> int:
         )
     if "filesystem-shares" in scenarios:
         print(
-            "Running concurrent read-write and read-only microVM shares "
-            f"on OpenVMM/{args.backend}"
+            "Running read-write, read-only, and hidden-root microVM shares "
+            f"through one aggregate on OpenVMM/{args.backend}"
         )
         run_filesystem_shares(
             executable,
