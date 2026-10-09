@@ -18,6 +18,8 @@ The current ABI family intentionally does not provide:
    without reflink support;
 - direct-claimed paired-scratch restore on filesystems without exact-file
    hard-link support;
+- more than four image slots, writable image slots, binding an inactive slot,
+   rebinding or ejecting media, or activating a slot after restore readiness;
 - sandbox-block, network, or control-console construction through the
    management RPC, or its restore of snapshots that contain them;
 - host networking other than the in-process portable endpoint, unrestricted
@@ -47,7 +49,10 @@ transport foundation for that protocol, not completion of it. The shell
 bootstrap does not implement a fleet-safe platform build point, warm-runtime
 handoff, arbitrary OCI policy, or production agent resource guarantees.
 
-Changing a guest-visible address, IRQ, command-line token, feature mask, queue
+Image slots extend ABI 2 in place: a machine that does not declare them keeps
+the original device topology, and development snapshots from before this
+extension are not guaranteed to remain compatible. Otherwise, changing a
+guest-visible address, IRQ, command-line token, feature mask, queue
 shape, time policy, or device behavior requires a new microVM ABI version. A
 backend-specific difference is valid only when it is explicitly part of that
 versioned contract, such as the virtio-net IRQ.

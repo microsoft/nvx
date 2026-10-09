@@ -1,0 +1,95 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: nvx-image-slot --slot 0|1|2|3 [--timeout SECONDS] [--allow-empty]" >&2
+    exit 2
+}
+
+slot=
+timeout=30
+allow_empty=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --slot)
+            [ "$#" -ge 2 ] || usage
+            slot=$2
+            shift 2
+            ;;
+        --timeout)
+            [ "$#" -ge 2 ] || usage
+            timeout=$2
+            shift 2
+            ;;
+        --allow-empty)
+            allow_empty=true
+            shift
+            ;;
+        *) usage ;;
+    esac
+done
+
+case "$slot" in 0 | 1 | 2 | 3) ;; *) usage ;; esac
+case "$timeout" in '' | *[!0-9]*) usage ;; esac
+[ "$timeout" -gt 0 ] || usage
+
+mmio_address=$((0xd0008000 + slot * 0x1000))
+address_decimal=$(printf '%d' "$mmio_address")
+platform=
+while IFS=' ' read -r range separator candidate _; do
+    [ "$separator" = : ] || continue
+    case "$candidate" in virtio-mmio.*) ;; *) continue ;; esac
+    start=${range%%-*}
+    start_decimal=$(printf '%d' "0x$start") || continue
+    if [ "$start_decimal" -eq "$address_decimal" ]; then
+        platform=$candidate
+        break
+    fi
+done </proc/iomem
+[ -n "$platform" ] || {
+    echo "nvx-image-slot: image$slot transport is unavailable" >&2
+    exit 1
+}
+
+# The virtio-mmio driver binds only an active slot: an inactive slot is a
+# placeholder with device ID 0. The window may instead hold the second live
+# share, which is not a block device. Neither gains a disk by waiting.
+device=/sys/devices/virtio-mmio-cmdline/$platform
+[ -e "$device/driver" ] || {
+    echo "nvx-image-slot: image$slot is inactive" >&2
+    exit 1
+}
+for virtio in "$device"/virtio*; do
+    [ -e "$virtio/device" ] || continue
+    [ "$(cat "$virtio/device")" = 0x0002 ] || {
+        echo "nvx-image-slot: image$slot transport is not a block device" >&2
+        exit 1
+    }
+done
+
+deadline=$((timeout * 20))
+attempt=0
+while [ "$attempt" -lt "$deadline" ]; do
+    for block in "$device"/virtio*/block/*; do
+        [ -e "$block" ] || continue
+        name=${block##*/}
+        [ "$(cat "/sys/class/block/$name/ro")" = 1 ] || {
+            echo "nvx-image-slot: image$slot is not read-only" >&2
+            exit 1
+        }
+        sectors=$(cat "/sys/class/block/$name/size")
+        if [ "$sectors" -gt 0 ] || [ "$allow_empty" = true ]; then
+            if [ "$sectors" -gt 0 ]; then
+                blockdev --rereadpt "/dev/$name" 2>/dev/null || true
+            fi
+            ln -sfn "$name" "/dev/nvx-image$slot"
+            printf '/dev/nvx-image%s\n' "$slot"
+            exit 0
+        fi
+    done
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+
+echo "nvx-image-slot: image$slot capacity remained zero for $timeout seconds" >&2
+exit 1

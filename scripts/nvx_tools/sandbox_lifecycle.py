@@ -29,6 +29,7 @@ from .control_session import (
     ManagedExecResult,
     capability_pipe,
 )
+from .host_control import HostControl
 from .sandbox import SandboxLaunch, SandboxLayer, SandboxMount
 
 CONFIG_NAME = "config.json"
@@ -36,6 +37,7 @@ RUNTIME_NAME = "runtime.json"
 CAPABILITY_NAME = "control.capability"
 LOG_NAME = "openvmm.log"
 CONTROL_SOCKET_NAME = "control.sock"
+HOST_CONTROL_SOCKET_NAME = "host-control.sock"
 OUTCOME_NAME = "outcome.json"
 STATE_FORMAT = 1
 CONFIG_FORMAT = 1
@@ -52,13 +54,26 @@ MULTI_MOUNT_CONFIG_FORMAT = 4
 # configuration with either lists every share under `mounts` in a format that
 # they reject.
 POLICY_CONFIG_FORMAT = 5
+# Earlier readers would start a sandbox without its image slots, so a
+# configuration that declares them lists every share under `mounts`, with its
+# policy, in a format that they reject.
+IMAGE_SLOT_CONFIG_FORMAT = 6
 CONFIG_FORMATS = (
     CONFIG_FORMAT,
     MOUNT_CONFIG_FORMAT,
     OWNER_CONFIG_FORMAT,
     MULTI_MOUNT_CONFIG_FORMAT,
     POLICY_CONFIG_FORMAT,
+    IMAGE_SLOT_CONFIG_FORMAT,
 )
+# These formats list every share under `mounts`.
+MOUNTS_CONFIG_FORMATS = (
+    MULTI_MOUNT_CONFIG_FORMAT,
+    POLICY_CONFIG_FORMAT,
+    IMAGE_SLOT_CONFIG_FORMAT,
+)
+# These formats also carry each share's allowed and writable paths.
+MOUNT_POLICY_CONFIG_FORMATS = (POLICY_CONFIG_FORMAT, IMAGE_SLOT_CONFIG_FORMAT)
 OUTCOME_SCHEMA_VERSION = 1
 
 
@@ -199,7 +214,7 @@ def _serialize_launch(
     cmdline: str,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "format": _config_format(launch.mounts),
+        "format": _config_format(launch.mounts, launch.image_slot_boot_count),
         "layers": [
             {
                 "role": layer.role,
@@ -227,18 +242,24 @@ def _serialize_launch(
         "host_loopback_forward": list(host_loopback_forward),
         "cmdline": cmdline,
     }
-    config_format = _config_format(launch.mounts)
-    if config_format in (MULTI_MOUNT_CONFIG_FORMAT, POLICY_CONFIG_FORMAT):
+    config_format = config["format"]
+    if config_format in MOUNTS_CONFIG_FORMATS:
         config["mounts"] = [
-            _serialize_mount(mount, policy=config_format == POLICY_CONFIG_FORMAT)
+            _serialize_mount(mount, policy=config_format in MOUNT_POLICY_CONFIG_FORMATS)
             for mount in launch.mounts
         ]
     else:
         config["mount"] = _serialize_mount(launch.mounts[0]) if launch.mounts else None
+    if config_format == IMAGE_SLOT_CONFIG_FORMAT:
+        config["image_slot_boot_count"] = launch.image_slot_boot_count
     return config
 
 
-def _config_format(mounts: tuple[SandboxMount, ...]) -> int:
+def _config_format(
+    mounts: tuple[SandboxMount, ...], image_slot_boot_count: int | None = None
+) -> int:
+    if image_slot_boot_count is not None:
+        return IMAGE_SLOT_CONFIG_FORMAT
     if any(mount.allowed_paths or mount.writable_paths for mount in mounts):
         return POLICY_CONFIG_FORMAT
     if len(mounts) > 1:
@@ -287,11 +308,11 @@ def _deserialize_mount(value: object, *, policy: bool = False) -> SandboxMount:
 
 
 def _deserialize_mounts(config: dict[str, Any]) -> tuple[SandboxMount, ...]:
-    if config.get("format") in (MULTI_MOUNT_CONFIG_FORMAT, POLICY_CONFIG_FORMAT):
+    if config.get("format") in MOUNTS_CONFIG_FORMATS:
         mounts = config["mounts"]
         if not isinstance(mounts, list):
             raise TypeError("sandbox mounts configuration must be a list")
-        policy = config.get("format") == POLICY_CONFIG_FORMAT
+        policy = config.get("format") in MOUNT_POLICY_CONFIG_FORMATS
         return tuple(
             _deserialize_mount(mount, policy=policy)
             for mount in cast(list[object], mounts)
@@ -321,11 +342,21 @@ def _deserialize_launch(config: dict[str, Any]) -> SandboxLaunch:
             ),
             pids_max=None if config["pids_max"] is None else int(config["pids_max"]),
             mounts=_deserialize_mounts(config),
+            # The format check below rejects a count in any other format.
+            image_slot_boot_count=(
+                None
+                if config.get("image_slot_boot_count") is None
+                else int(config["image_slot_boot_count"])
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ScriptError("sandbox configuration is malformed") from error
-    if config.get("format") != _config_format(launch.mounts):
-        raise ScriptError("sandbox configuration format does not match its mounts")
+    if config.get("format") != _config_format(
+        launch.mounts, launch.image_slot_boot_count
+    ):
+        raise ScriptError(
+            "sandbox configuration format does not match its mounts or image slots"
+        )
     return launch.validated()
 
 
@@ -516,6 +547,13 @@ def _startup_exit_message(outcome_path: Path, status: int) -> str:
     return f"OpenVMM exited during startup with status {status}"
 
 
+def _host_endpoint(runtime: dict[str, Any]) -> Path:
+    endpoint = runtime.get("host_control_endpoint")
+    if endpoint is None:
+        raise ScriptError("sandbox was not provisioned with image slots")
+    return Path(str(endpoint))
+
+
 def provision(
     state_path: Path,
     launch: SandboxLaunch,
@@ -585,6 +623,14 @@ def start(state_path: Path, timeout: float) -> None:
         if os.name == "nt"
         else os.fspath(state_dir / CONTROL_SOCKET_NAME)
     )
+    # Only a slot-declaring launch has a host-control endpoint.
+    host_endpoint_value: str | None = None
+    if launch.image_slot_boot_count is not None:
+        host_endpoint_value = (
+            f"//./pipe/openvmm-microvm-host-{uuid.uuid4().hex}"
+            if os.name == "nt"
+            else os.fspath(state_dir / HOST_CONTROL_SOCKET_NAME)
+        )
     command = [
         os.fspath(executable),
         *launch.openvmm_arguments(),
@@ -609,6 +655,8 @@ def start(state_path: Path, timeout: float) -> None:
         "--microvm-report",
         os.fspath(outcome_path),
     ]
+    if host_endpoint_value is not None:
+        command.extend(("--microvm-host-control", f"listen={host_endpoint_value}"))
     net = config.get("net")
     network_profile = config.get("network_profile")
     if net is not None:
@@ -669,15 +717,15 @@ def start(state_path: Path, timeout: float) -> None:
                 if process.poll() is not None
                 else "cannot identify the OpenVMM process"
             )
-        _write_json(
-            state_dir / RUNTIME_NAME,
-            {
-                "format": STATE_FORMAT,
-                "pid": process.pid,
-                "start_time": start_time,
-                "control_endpoint": endpoint_value,
-            },
-        )
+        runtime: dict[str, Any] = {
+            "format": STATE_FORMAT,
+            "pid": process.pid,
+            "start_time": start_time,
+            "control_endpoint": endpoint_value,
+        }
+        if host_endpoint_value is not None:
+            runtime["host_control_endpoint"] = host_endpoint_value
+        _write_json(state_dir / RUNTIME_NAME, runtime)
         with ControlSession.connect(
             Path(endpoint_value), capability, timeout
         ) as session:
@@ -696,6 +744,7 @@ def start(state_path: Path, timeout: float) -> None:
             (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
             capability_path.unlink(missing_ok=True)
             (state_dir / CONTROL_SOCKET_NAME).unlink(missing_ok=True)
+            (state_dir / HOST_CONTROL_SOCKET_NAME).unlink(missing_ok=True)
         if status is not None and isinstance(error, Exception):
             raise ScriptError(_startup_exit_message(outcome_path, status)) from error
         raise
@@ -728,6 +777,32 @@ def exec_workload(
         )
 
 
+def query_image_slots(state_path: Path, timeout: float) -> list[dict[str, Any]]:
+    state_dir = _prepare_state_directory(state_path, create=False)
+    runtime, capability = _load_running(state_dir)
+    with HostControl.connect(_host_endpoint(runtime), capability, timeout) as control:
+        return control.query_image_slots()
+
+
+def bind_image_slot(
+    state_path: Path,
+    slot: int,
+    image: Path,
+    identity: str,
+    timeout: float,
+) -> None:
+    state_dir = _prepare_state_directory(state_path, create=False)
+    runtime, capability = _load_running(state_dir)
+    # OpenVMM records at most 1024 identity bytes per slot.
+    if not identity or len(identity.encode("utf-8")) > 1024:
+        raise ScriptError("image slot identity must be 1..1024 UTF-8 bytes")
+    # OpenVMM opens the media itself, as a read-only regular file that is not a
+    # symbolic link, and only when the slot is empty. A retry with the bound
+    # identity therefore succeeds even after the media's path is gone.
+    with HostControl.connect(_host_endpoint(runtime), capability, timeout) as control:
+        control.bind_image_slot(slot, image.absolute(), identity)
+
+
 def stop(state_path: Path, timeout: float) -> dict[str, Any]:
     state_dir = _prepare_state_directory(state_path, create=False)
     runtime, capability = _load_running(state_dir)
@@ -745,6 +820,7 @@ def stop(state_path: Path, timeout: float) -> dict[str, Any]:
         (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
         (state_dir / CAPABILITY_NAME).unlink(missing_ok=True)
         (state_dir / CONTROL_SOCKET_NAME).unlink(missing_ok=True)
+        (state_dir / HOST_CONTROL_SOCKET_NAME).unlink(missing_ok=True)
     return outcome
 
 
@@ -759,6 +835,7 @@ def deprovision(state_path: Path) -> None:
         RUNTIME_NAME,
         CAPABILITY_NAME,
         CONTROL_SOCKET_NAME,
+        HOST_CONTROL_SOCKET_NAME,
         OUTCOME_NAME,
         LOG_NAME,
         CONFIG_NAME,

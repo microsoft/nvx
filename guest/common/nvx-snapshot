@@ -154,6 +154,47 @@ activate_restore_processors() {
     echo "NVX-CPU-ONLINE-OK: count=$target"
 }
 
+image_slot_platform() {
+    slot=$1
+    address=$((0xd0008000 + slot * 0x1000))
+    while IFS=' ' read -r range separator platform _; do
+        [ "$separator" = : ] || continue
+        case "$platform" in virtio-mmio.*) ;; *) continue ;; esac
+        start=${range%%-*}
+        start=$(printf '%d' "0x$start") || continue
+        if [ "$start" -eq "$address" ]; then
+            printf '%s\n' "$platform"
+            return 0
+        fi
+    done </proc/iomem
+    return 1
+}
+
+activate_restore_image_slots() {
+    target=$1
+    slot=0
+    while [ "$slot" -lt "$target" ]; do
+        platform=$(image_slot_platform "$slot") ||
+            fail_closed "image$slot transport is unavailable"
+        if ! /sbin/nvx-image-slot --slot "$slot" --timeout 1 --allow-empty \
+            >/dev/null 2>&1; then
+            bind=/sys/bus/platform/drivers/virtio-mmio/bind
+            [ -w "$bind" ] || fail_closed "image$slot transport cannot be activated"
+            printf '%s\n' "$platform" >"$bind" ||
+                fail_closed "failed to activate image$slot"
+        fi
+        device=$(
+            /sbin/nvx-image-slot --slot "$slot" --timeout 5 --allow-empty
+        ) || fail_closed "image$slot did not become active"
+        name=$(readlink "$device") ||
+            fail_closed "image$slot stable device link is invalid"
+        [ "$(cat "/sys/class/block/$name/size")" = 0 ] ||
+            fail_closed "image$slot unexpectedly has media after restore"
+        slot=$((slot + 1))
+    done
+    echo "NVX-IMAGE-SLOTS-ACTIVE-OK: count=$target"
+}
+
 uptime_microseconds() {
     IFS=' .' read -r uptime_seconds uptime_fraction _ </proc/uptime ||
         fail_closed "failed to read guest uptime"
@@ -290,16 +331,17 @@ entropy=$runtime/restore-entropy
 # Restore steps 9 to 13 of the time ABI (doc/design/time-abi.md). nvx-time
 # capture has already read restore packet v4, checked its generation, set
 # the wall clock, and written the entropy. Its metadata is FLAGS,
-# ONLINE_VP_COUNT, RANGE_COUNT, and the new generation ID, followed by START
-# and LENGTH for each memory range.
+# ONLINE_VP_COUNT, RANGE_COUNT, IMAGE_SLOT_TARGET, and the new generation ID,
+# followed by START and LENGTH for each memory range.
 post_restore() {
     post_restore_pending=true
-    [ "$#" -ge 4 ] || fail_closed "restore packet metadata is invalid"
+    [ "$#" -ge 5 ] || fail_closed "restore packet metadata is invalid"
     packet_flags=$1
     restore_online_count=$2
     restore_memory_range_count=$3
-    shift 4
-    case "$packet_flags:$restore_online_count:$restore_memory_range_count" in
+    restore_image_slot_target=$4
+    shift 5
+    case "$packet_flags:$restore_online_count:$restore_memory_range_count:$restore_image_slot_target" in
         *[!0-9:]* | :* | *::* | *:)
             fail_closed "restore packet metadata is invalid"
             ;;
@@ -308,11 +350,16 @@ post_restore() {
         0 | 1 | 2 | 4 | 8) ;;
         *) fail_closed "restore packet has an invalid online CPU count" ;;
     esac
-    # A plain untiered restore, with no processors or memory to add, prints
-    # nothing, as before: each console byte is a port exit on its latency
-    # path.
+    case "$restore_image_slot_target" in
+        0 | 1 | 2 | 3 | 4) ;;
+        *) fail_closed "restore packet has an invalid image-slot target" ;;
+    esac
+    # A plain untiered restore, with no processors, image slots, or memory to
+    # add, prints nothing, as before: each console byte is a port exit on its
+    # latency path.
     if [ "$snapshot_tier" = legacy ] &&
         [ "$restore_online_count" -eq 0 ] &&
+        [ "$restore_image_slot_target" -eq 0 ] &&
         [ "$restore_memory_range_count" -eq 0 ] &&
         [ $((packet_flags & PACKET_MEMORY_TARGET)) -eq 0 ]; then
         finish_restore "$packet_flags" quiet
@@ -321,6 +368,9 @@ post_restore() {
     console_status "NVX-POST-RESTORE-STAGE: packet"
     if [ "$restore_online_count" -ne 0 ]; then
         activate_restore_processors "$restore_online_count"
+    fi
+    if [ "$restore_image_slot_target" -ne 0 ]; then
+        activate_restore_image_slots "$restore_image_slot_target"
     fi
     if [ $((packet_flags & PACKET_MEMORY_TARGET)) -ne 0 ]; then
         activate_restore_memory "$restore_memory_range_count" "$@"

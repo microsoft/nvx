@@ -31,6 +31,7 @@ import urllib.request
 import uuid
 import zipfile
 from collections.abc import Callable
+from contextlib import redirect_stdout
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
@@ -572,6 +573,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.payload_mib, 64)
         self.assertEqual(args.network_memory_mib, 256)
         self.assertEqual(args.host_cpu_reserve, 2)
+        self.assertEqual(args.output_dir, Path("results"))
+        self.assertIs(args.handler, nvx.command_benchmark)
+
+    def test_benchmark_exposes_image_slot_boot_suite(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "image-slot-boot",
+                "--output-dir",
+                "results",
+            ]
+        )
+
+        self.assertEqual(args.suite, "image-slot-boot")
         self.assertEqual(args.output_dir, Path("results"))
         self.assertIs(args.handler, nvx.command_benchmark)
 
@@ -10838,7 +10854,9 @@ def _write_managed_runtime(state: Path, pid: int, start_time: int | None) -> Non
     (state / sandbox_lifecycle.CAPABILITY_NAME).write_bytes(b"x" * 32)
 
 
-def _provision_managed_sandbox(root: Path) -> Path:
+def _provision_managed_sandbox(
+    root: Path, image_slot_boot_count: int | None = None
+) -> Path:
     layer_path = root / "distro.erofs"
     scratch_path = root / "scratch.ext4"
     layer_path.write_bytes(b"layer")
@@ -10855,6 +10873,7 @@ def _provision_managed_sandbox(root: Path) -> Path:
                 ),
             ),
             scratch=scratch_path,
+            image_slot_boot_count=image_slot_boot_count,
         ),
         hypervisor="whp",
         memory_mib=256,
@@ -11000,6 +11019,77 @@ sys.exit(125)
 
 
 class SandboxTests(unittest.TestCase):
+    def test_image_slots_allow_scratch_only_managed_launch(self):
+        launch = sandbox.SandboxLaunch(
+            layers=(),
+            scratch=Path("scratch.ext4"),
+            image_slot_boot_count=4,
+        )
+
+        self.assertEqual(
+            launch.openvmm_arguments(),
+            [
+                "--machine",
+                "microvm",
+                "--microvm-sandbox-block",
+                "scratch:file:scratch.ext4",
+                "--microvm-workload-identity",
+                "65534:65534",
+                "--microvm-image-slots",
+                "--microvm-image-slot-boot-count",
+                "4",
+            ],
+        )
+        self.assertNotIn("nvx_layer=", launch.kernel_command_line())
+
+    def test_scratch_only_launch_requires_image_slots(self):
+        with self.assertRaisesRegex(common.ScriptError, "unless it declares"):
+            sandbox.SandboxLaunch(layers=(), scratch=Path("scratch.ext4"))
+        with self.assertRaisesRegex(common.ScriptError, "between 1 and 4"):
+            sandbox.SandboxLaunch(
+                layers=(),
+                scratch=Path("scratch.ext4"),
+                image_slot_boot_count=5,
+            )
+
+    def test_image_slots_permit_at_most_one_mount(self):
+        work = sandbox.SandboxMount.parse("/workspace,work,rw", ())
+        tools = sandbox.SandboxMount.parse("/tools,tools,ro", ())
+        launch = sandbox.SandboxLaunch(
+            layers=(),
+            scratch=Path("scratch.ext4"),
+            mounts=(work,),
+            image_slot_boot_count=1,
+        )
+
+        arguments = launch.openvmm_arguments()
+        self.assertEqual(arguments.count("--mount"), 1)
+        self.assertEqual(
+            arguments[-3:],
+            ["--microvm-image-slots", "--microvm-image-slot-boot-count", "1"],
+        )
+        # Image slot 0 uses the transport of the second live share.
+        with self.assertRaisesRegex(common.ScriptError, "at most one --mount"):
+            sandbox.SandboxLaunch(
+                layers=(),
+                scratch=Path("scratch.ext4"),
+                mounts=(work, tools),
+                image_slot_boot_count=1,
+            )
+
+    def test_run_parser_accepts_restore_image_slot_target(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--restore-snapshot",
+                "snapshot",
+                "--restore-image-slots",
+                "4",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(args.restore_image_slots, 4)
+
     def test_launch_contract_orders_roles_and_builds_agent_command_line(self):
         custom = sandbox.SandboxLayer.parse(
             "custom,custom.erofs,22222222-2222-2222-2222-222222222222"
@@ -12258,6 +12348,77 @@ class SandboxTests(unittest.TestCase):
             with self.assertRaisesRegex(common.ScriptError, "does not match"):
                 sandbox_lifecycle._deserialize_launch(config)
 
+    def test_managed_configuration_format_binds_image_slots(self):
+        def entry(target: str, path: str) -> dict[str, object]:
+            return {
+                "guest_target": target,
+                "host_path": path,
+                "access": "rw",
+                "denied_paths": [],
+                "allowed_paths": [],
+                "writable_paths": [],
+                "owner": "vmm",
+            }
+
+        config: dict[str, object] = {
+            "format": sandbox_lifecycle.IMAGE_SLOT_CONFIG_FORMAT,
+            "layers": [],
+            "scratch": "scratch.ext4",
+            "hostname": "nvx-sandbox",
+            "workload_uid": 65534,
+            "workload_gid": 65534,
+            "memory_max": None,
+            "pids_max": None,
+            "mounts": [entry("/workspace", "work")],
+            "image_slot_boot_count": 2,
+        }
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        def unchanged(mount: sandbox.SandboxMount) -> sandbox.SandboxMount:
+            return mount
+
+        with (
+            patch.object(sandbox, "require_file", side_effect=require),
+            patch.object(sandbox.SandboxMount, "validated", unchanged),
+        ):
+            launch = sandbox_lifecycle._deserialize_launch(config)
+            self.assertEqual(launch.image_slot_boot_count, 2)
+            self.assertEqual(
+                [mount.guest_target for mount in launch.mounts], ["/workspace"]
+            )
+            self.assertEqual(
+                sandbox_lifecycle._config_format(
+                    launch.mounts, launch.image_slot_boot_count
+                ),
+                sandbox_lifecycle.IMAGE_SLOT_CONFIG_FORMAT,
+            )
+            # Image slot 0 uses the transport of the second live share.
+            config["mounts"] = [entry("/workspace", "work"), entry("/tools", "tools")]
+            with self.assertRaisesRegex(common.ScriptError, "at most one --mount"):
+                sandbox_lifecycle._deserialize_launch(config)
+            config["image_slot_boot_count"] = 5
+            config["mounts"] = []
+            with self.assertRaisesRegex(common.ScriptError, "between 1 and 4"):
+                sandbox_lifecycle._deserialize_launch(config)
+            # Only format 6 holds image slots, and format 6 always does.
+            config["layers"] = [
+                {
+                    "role": "distro",
+                    "path": "distro.erofs",
+                    "uuid": "11111111-1111-1111-1111-111111111111",
+                }
+            ]
+            del config["image_slot_boot_count"]
+            with self.assertRaisesRegex(common.ScriptError, "does not match"):
+                sandbox_lifecycle._deserialize_launch(config)
+            config["image_slot_boot_count"] = 2
+            config["format"] = sandbox_lifecycle.POLICY_CONFIG_FORMAT
+            config["mounts"] = [entry("/workspace", "work")]
+            with self.assertRaisesRegex(common.ScriptError, "does not match"):
+                sandbox_lifecycle._deserialize_launch(config)
+
     def test_managed_lifecycle_persists_and_replays_mount(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -12957,6 +13118,7 @@ class SandboxTests(unittest.TestCase):
                     _exit_unreaped(child)
 
                 session.stop.side_effect = acknowledge_stop
+                (state / sandbox_lifecycle.HOST_CONTROL_SOCKET_NAME).touch()
                 with patch.object(
                     sandbox_lifecycle.ControlSession,
                     "connect",
@@ -12967,6 +13129,9 @@ class SandboxTests(unittest.TestCase):
                 session.stop.assert_called_once_with(10)
                 self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
                 self.assertFalse((state / sandbox_lifecycle.CAPABILITY_NAME).exists())
+                self.assertFalse(
+                    (state / sandbox_lifecycle.HOST_CONTROL_SOCKET_NAME).exists()
+                )
         finally:
             _finish_child(child)
 
@@ -12981,6 +13146,8 @@ class SandboxTests(unittest.TestCase):
             # OpenVMM is gone, and this test process now has its process ID.
             _write_managed_runtime(state, os.getpid(), start_time + 1)
             (state / sandbox_lifecycle.CONFIG_NAME).write_text("{}", encoding="utf-8")
+            # A killed slot-declaring OpenVMM leaves its host-control socket.
+            (state / sandbox_lifecycle.HOST_CONTROL_SOCKET_NAME).touch()
 
             with patch.object(sandbox_lifecycle.ControlSession, "connect") as connect:
                 with self.assertRaisesRegex(
@@ -13279,6 +13446,100 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(connect.call_args.args[1], capability)
         session.ping.assert_called_once_with(10)
 
+    def test_managed_start_records_host_control_only_for_image_slots(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        process = MagicMock()
+        process.pid = 123
+        session = MagicMock()
+        context = MagicMock()
+        context.__enter__.return_value = session
+        context.__exit__.return_value = False
+        for image_slot_boot_count in (None, 1):
+            with (
+                self.subTest(image_slot_boot_count=image_slot_boot_count),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                state = _provision_managed_sandbox(
+                    Path(temporary).resolve(), image_slot_boot_count
+                )
+                with (
+                    patch.object(
+                        sandbox_lifecycle, "require_file", side_effect=require
+                    ),
+                    patch.object(
+                        sandbox_lifecycle.subprocess, "Popen", return_value=process
+                    ) as popen,
+                    patch.object(
+                        sandbox_lifecycle, "_process_start_time", return_value=456
+                    ),
+                    patch.object(
+                        sandbox_lifecycle.ControlSession,
+                        "connect",
+                        return_value=context,
+                    ),
+                ):
+                    sandbox_lifecycle.start(state, 10)
+
+                command = popen.call_args.args[0]
+                runtime = json.loads(
+                    (state / sandbox_lifecycle.RUNTIME_NAME).read_text(encoding="utf-8")
+                )
+                if image_slot_boot_count is not None:
+                    self.assertEqual(
+                        command[command.index("--microvm-host-control") + 1],
+                        f"listen={runtime['host_control_endpoint']}",
+                    )
+                    continue
+                self.assertNotIn("--microvm-host-control", command)
+                self.assertNotIn("host_control_endpoint", runtime)
+                # A sandbox without image slots fails at once rather than
+                # retrying a host-control endpoint that never exists.
+                with (
+                    patch.object(
+                        sandbox_lifecycle, "_process_running", return_value=True
+                    ),
+                    patch.object(sandbox_lifecycle.HostControl, "connect") as connect,
+                    self.assertRaisesRegex(
+                        common.ScriptError, "not provisioned with image slots"
+                    ),
+                ):
+                    sandbox_lifecycle.query_image_slots(state, 10)
+                connect.assert_not_called()
+
+    def test_bind_image_slot_leaves_media_checks_to_openvmm(self):
+        # OpenVMM checks the media only when the slot is empty, so an
+        # idempotent retry succeeds even after the bound path is gone.
+        control = MagicMock()
+        context = MagicMock()
+        context.__enter__.return_value = control
+        context.__exit__.return_value = False
+        missing = Path("missing") / "image.raw"
+        runtime = {"host_control_endpoint": "host-control.sock"}
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                sandbox_lifecycle,
+                "_load_running",
+                return_value=(runtime, b"x" * 32),
+            ),
+            patch.object(
+                sandbox_lifecycle.HostControl, "connect", return_value=context
+            ),
+        ):
+            sandbox_lifecycle.bind_image_slot(
+                Path(temporary), 1, missing, "image-a", 10
+            )
+            with self.assertRaisesRegex(common.ScriptError, "1..1024 UTF-8 bytes"):
+                sandbox_lifecycle.bind_image_slot(
+                    Path(temporary), 1, missing, "x" * 1025, 10
+                )
+
+        control.bind_image_slot.assert_called_once_with(
+            1, missing.absolute(), "image-a"
+        )
+
     def test_launch_contract_rejects_disk_option_delimiters(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -13300,6 +13561,130 @@ class SandboxTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_image_slot_boot_benchmark_compares_both_prefixes_to_no_slots(self):
+        args = argparse.Namespace(
+            warmups=0,
+            runs=1,
+            memory_mib=128,
+            processors=1,
+            timeout=60.0,
+        )
+        output = io.StringIO()
+        with (
+            patch.object(
+                benchmark,
+                "_image_slot_boot_sample",
+                side_effect=(10.0, 11.0, 12.0),
+            ) as sample,
+            redirect_stdout(output),
+        ):
+            benchmark.benchmark_image_slot_boot_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+            )
+
+        self.assertEqual(
+            [call.args[6] for call in sample.call_args_list],
+            [None, 1, 4],
+        )
+        self.assertIn("delta-vs-no-slots=+1.000 ms", output.getvalue())
+        self.assertIn("delta-vs-no-slots=+2.000 ms", output.getvalue())
+
+    def test_image_slot_boot_sample_keeps_console_open_until_exit(self):
+        events: list[str] = []
+
+        class FakeConsole:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                events.append("close")
+
+            def settimeout(self, _):
+                pass
+
+            def recv(self, _):
+                return benchmark.BOOT_MARKER
+
+            def sendall(self, data: bytes) -> None:
+                events.append(f"send:{data.decode()}")
+
+        class FakeProcess:
+            stdin = None
+
+            def wait(self, timeout: float | None = None) -> int:
+                events.append("wait")
+                return 0
+
+            def poll(self):
+                return 0
+
+        with (
+            patch.object(benchmark.subprocess, "Popen", return_value=FakeProcess()),
+            patch.object(
+                benchmark.socket,
+                "create_connection",
+                return_value=FakeConsole(),
+            ),
+        ):
+            benchmark._image_slot_boot_sample(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                128,
+                1,
+                None,
+                5.0,
+                command_prefix=(),
+                windows_cpus=None,
+            )
+
+        self.assertEqual(events, ["send:/sbin/nvx-exit 0\n", "wait", "close"])
+
+    def test_image_slot_boot_sample_hands_openvmm_a_prepared_capability_pipe(self):
+        # OpenVMM reads its capability as soon as it starts (#440).
+        prepared: list[int] = []
+        spawned: list[object] = []
+
+        def prepare(value: bytes) -> int:
+            descriptor = control_session.capability_pipe(value)
+            prepared.append(descriptor)
+            return descriptor
+
+        def launch(_command: list[str], *, stdin: object, **_options: object) -> None:
+            # The pipe stays open until OpenVMM has started with it.
+            self.assertIsInstance(stdin, int)
+            os.fstat(cast(int, stdin))
+            spawned.append(stdin)
+            raise RuntimeError("stopped after the spawn")
+
+        with (
+            patch.object(benchmark, "capability_pipe", side_effect=prepare),
+            patch.object(benchmark.subprocess, "Popen", side_effect=launch),
+            self.assertRaisesRegex(RuntimeError, "^stopped after the spawn$"),
+        ):
+            benchmark._image_slot_boot_sample(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                128,
+                1,
+                1,
+                5.0,
+                command_prefix=(),
+                windows_cpus=None,
+            )
+
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual(spawned, prepared)
+        with self.assertRaises(OSError):
+            os.fstat(prepared[0])
+
     def test_kvm_worker_result_decoding(self):
         completed = subprocess.CompletedProcess(
             ["worker"],

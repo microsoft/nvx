@@ -1189,7 +1189,7 @@ offset size field
      4    1 flags
      5    1 online_vp_count      0 = no processor target, else 1, 2, 4, or 8
      6    1 memory_range_count   0 unless MEMORY_TARGET
-     7    1 reserved = 0
+     7    1 image_slot_target    0 unless IMAGE_SLOT_TARGET, else 1 to 4
      8    4 generation           u32, little-endian, g >= 1
     12    4 rate_deviation       i32, little-endian, ppm scaled by 2^16
     16    8 downtime_ns          u64, little-endian, D
@@ -1206,13 +1206,15 @@ Flags:
 | 1 | `MEMORY_TARGET` | An explicit RAM target was requested; `memory_range_count` is valid and may be 0 |
 | 2 | `ACK_REQUIRED` | Host input is gated; the guest must acknowledge through `0x605` after repair |
 | 3 | `TEST_HOOKS` | A test hook is active: it can alter the downtime source, `D`, UTC, the rate deviation, the handling of time samples, or the CPU profile |
-| 4–7 | | Zero; the guest rejects a packet with any of them set |
+| 4 | `IMAGE_SLOT_TARGET` | An explicit image-slot target was requested; `image_slot_target` is set exactly when this flag is, and `ACK_REQUIRED` is always set with it |
+| 5–7 | | Zero; the guest rejects a packet with any of them set |
 
 `utc_ns` is latched when the guest first writes selector `0xa5` after the
 restore; every other field is sealed before the first restored VP runs (step
 16 of the [restore algorithm](#restore-algorithm)). A packet without ranges is
 96 bytes, 24 four-byte reads. Status bits 2 to 4 remain and agree with the
-packet; the packet is authoritative. `ACK_REQUIRED` replaces the guest's
+packet; the packet is authoritative, and the image-slot target has no status
+bit. `ACK_REQUIRED` replaces the guest's
 inference of gating from the tier and targets, so an untiered guest never
 writes `0x605` after an ungated restore.
 
@@ -1558,7 +1560,8 @@ acknowledgement.
    discontinuity and the new `g`, with `restore_status=pending` and
    `restore_generation=g` in the same state-file update, so that
    `nvx-time status` waits for this restore.
-9. Run the existing processor and memory activation.
+9. Run the existing processor activation, the image-slot activation that
+   `IMAGE_SLOT_TARGET` requests, and the existing memory activation.
 10. Run the existing entropy and identity repair for the restore path
     ([restore entropy](#restore-entropy)). The RTC-based wall-clock refresh
     is removed; `instance-checkpoint` restores also get step 8.
@@ -1583,9 +1586,12 @@ No restore check runs before the acknowledgement. The post-acknowledgement
 checks are `C1`, `C2`, `C3`, `C5`, `C6`, `C7`, and `C10`.
 
 Steps 6, 7, and 8 run in one helper process. For an untiered restore with no
-processor or memory to activate, that helper runs every step through 12 and
-signals the daemon, so no other process starts on the readiness path. Each
-extra process costs 2 to 4 ms after a restore (fork and exec under demand
+processor, image slot, or memory to activate, that helper runs every step
+through 12 and signals the daemon, so no other process starts on the
+readiness path. Any of these targets, an image-slot target alone included,
+returns the packet metadata to `nvx-snapshot`, which finishes the restore;
+image-slot activation also starts short processes for each slot. Each extra
+process costs 2 to 4 ms after a restore (fork and exec under demand
 faulting, measured on KVM).
 
 Step 13 starts 150 ms after the acknowledgement (or after step 10, when none
@@ -1627,7 +1633,7 @@ policies of [Time and entropy](snapshot-and-restore.md#time-and-entropy):
 | `platform` or `workload-start` tier (clone policy) | Reseeded before the acknowledgement: `nvx-reseed` credits the 64 bytes to the kernel entropy pool (`RNDADDENTROPY`) and forces a CRNG reseed (`RNDRESEEDCRNG`) | Machine ID and hostname refreshed; the runtime hook runs if present, and `workload-start` requires it |
 | Untiered, with processors or memory to activate | Reseeded before the acknowledgement, as for the clone policy | Refreshed as for the clone policy |
 | `instance-checkpoint` tier (resume policy) | Not reseeded, by design: only the generation ID is refreshed | Preserved |
-| Untiered, with nothing to activate (`online_vp_count` and `memory_range_count` both 0) | Not reseeded: `nvx-time` writes the 64 bytes to `/run/nvx/restore-entropy` for the caller of `nvx-snapshot` | Preserved |
+| Untiered, with no processors or memory to activate (`online_vp_count` and `memory_range_count` both 0), including a restore that activates only image slots | Not reseeded: `nvx-time` writes the 64 bytes to `/run/nvx/restore-entropy` for the caller of `nvx-snapshot` | Preserved |
 
 Each path's handling is unchanged from before the time ABI. v1 changes only
 the delivery: the agent used to read packets v1 to v3 a byte at a time, and
@@ -2014,7 +2020,7 @@ Expected effects:
 | Counting LAPIC instead of TSC-deadline on KVM | Different timer-programming exits; covered by the gate |
 | v1 profiles without `ITS_NO` | Linux's ITS mitigation at boot, about 6 ms of a one-vCPU cold boot where the host's KVM advertises `ITS_NO` (the bare-metal KVM host: +6.3 [5.5, 7.3] ms against the same build booted with `indirect_target_selection=off`). The gated Azure KVM, MSHV, and WHP guests were already mitigated and are unchanged; restore is unaffected |
 | The profile's CPU view at 2 or more vCPUs on KVM | None at the integration head. Before the L3 fix, multi-vCPU cold boots were slower: +9.2 [5.0, 13.7] ms at 2 vCPUs on the bare-metal KVM host against the pre-profile head, and about +25 ms on nested Azure KVM. OpenVMM's `CPUID.4` reported a private L3 cache per vCPU, which made Linux's cache-info initialization wait a 10 ms tick for CPU 1 on many boots. With the L3 shared by the socket, the bare-metal host's cold boots match the pre-profile head: −0.3 [−3.2, +2.7], −0.0 [−2.1, +2.0], and −1.0 [−3.6, +1.7] ms at 2, 4, and 8 vCPUs. The gate's cold boots are one-vCPU; a boot-only comparison against the `dev` base on nested Azure KVM found no significant difference: +1.7 [−2.5, +6.9] ms at 2 vCPUs, +3.7 [−5.4, +13.6] at 4, and +3.3 [−7.0, +11.5] at 8, which excludes the earlier +25 ms. At 8 vCPUs, the time ABI's VMM boots 9.5 [4.6, 16.4] ms faster and its guest 8.2 [0.4, 15.9] ms slower, which cancel; the guest's part may be the KVM paravirtual features that the identity forgoes (see [Hypervisor identity](#hypervisor-identity)). The msr driver's per-CPU hotplug callback (`msr_init`) waits one or two ticks on multi-vCPU boots, as it did before the profiles; it competes for CPU with the asynchronous initramfs unpack and is off the critical path |
-| Restore work before the acknowledgement | Only the packet read, the clock set, CPU and memory activation, and entropy and identity repair, in one helper process. The restore checks, the RCU release, and the deferred `C7` start at `SCHED_IDLE` 150 ms after the acknowledgement, after the readiness path |
+| Restore work before the acknowledgement | Only the packet read, the clock set, CPU and memory activation, and entropy and identity repair, in one helper process, plus image-slot activation when the packet requests it. The restore checks, the RCU release, and the deferred `C7` start at `SCHED_IDLE` 150 ms after the acknowledgement, after the readiness path |
 | Monotonic time that includes the downtime | Right after resume, the guest kernel runs the timer work that came due during the downtime (kworkers, softirqs, and RCU) and first-touches cold pages doing so: at one vCPU about 1.4 ms on MSHV, 2.2 ms on KVM, and 17 ms on WHP (26 ms at two vCPUs). On WHP each restored 4 KiB page that the guest first touches costs about 50 µs of wall time on bare metal and about 70 to 95 µs on the Azure runners: a nested page fault, about 11 µs of it in the hypervisor on bare metal and the rest resolved by the root, which the VMM never sees. WHP's lazily registered 2 MiB chunks add about 90 µs each, all before readiness, and on bare metal a WHP restore's latency after the VPs are released is roughly the pages it touches times 53 µs. It falls inside the gated restore metric whatever the helper's priority. On MSHV the cost is per 2 MiB chunk: the root driver resolves the first touch of each chunk with 512 copy-on-write copies of the private snapshot mapping, about 1.1 ms. A one-vCPU restore touches about 24 chunks, 25 ms of its restore on both the time ABI and the legacy path, and the time ABI's catch-up adds about one chunk |
 | No time ABI console lines in production | Each console byte costs one or two port exits, about 10 to 12 µs on bare-metal KVM and an estimated 20 to 45 µs nested on Azure. Without the boot marker (about 110 bytes) and the restore marker (about 117 bytes), boots and restores save 1 to 5 ms, enough to fail the gate on nested Azure KVM; violation events still print |
 
@@ -2029,9 +2035,10 @@ kernel follows with its RTC write, and the restore checks start 150 ms after
 the acknowledgement. Readiness doesn't wait for this work.
 
 The first process that a restored guest starts pays a separate cost. A plain
-(untiered) restore with nothing to activate starts no process before
-readiness, while the legacy path's status read forked and executed one there,
-which first-touched the guest kernel's fork, exec, and exit paths. Under the
+(untiered) restore with no processor, image slot, or memory to activate
+starts no process before readiness, while the legacy path's status read
+forked and executed one there, which first-touched the guest kernel's fork,
+exec, and exit paths. Under the
 time ABI the first process after readiness touches them instead, about 80 to
 110 more pages than on the legacy path, which matters where first touches of
 restored RAM are expensive: on the Azure WHP runners, the first process after

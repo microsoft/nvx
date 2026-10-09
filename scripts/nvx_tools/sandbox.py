@@ -377,10 +377,15 @@ class SandboxLaunch:
     memory_max: int | None = None
     pids_max: int | None = None
     mounts: tuple[SandboxMount, ...] = ()
+    image_slot_boot_count: int | None = None
 
     def __post_init__(self) -> None:
-        if not 1 <= len(self.layers) <= len(LAYER_ROLES):
-            raise ScriptError("a sandbox requires one to three read-only layers")
+        minimum_layers = 0 if self.image_slot_boot_count is not None else 1
+        if not minimum_layers <= len(self.layers) <= len(LAYER_ROLES):
+            raise ScriptError(
+                "a sandbox requires one to three read-only layers unless it "
+                "declares image slots"
+            )
         roles = [layer.role for layer in self.layers]
         duplicates = sorted({role for role in roles if roles.count(role) > 1})
         if duplicates:
@@ -412,6 +417,14 @@ class SandboxLaunch:
             if value is not None and value <= 0:
                 raise ScriptError(f"--{name} must be positive")
         validate_mounts(self.mounts)
+        if self.image_slot_boot_count is not None:
+            if not 1 <= self.image_slot_boot_count <= 4:
+                raise ScriptError("--image-slot-boot-count must be between 1 and 4")
+            # Image slot 0 uses the transport of the second live share.
+            if len(self.mounts) > 1:
+                raise ScriptError(
+                    "a sandbox with image slots permits at most one --mount"
+                )
 
     def validated(self) -> SandboxLaunch:
         for layer in self.layers:
@@ -446,6 +459,14 @@ class SandboxLaunch:
             )
         )
         arguments.extend(mounts_openvmm_arguments(self.mounts))
+        if self.image_slot_boot_count is not None:
+            arguments.extend(
+                (
+                    "--microvm-image-slots",
+                    "--microvm-image-slot-boot-count",
+                    str(self.image_slot_boot_count),
+                )
+            )
         return arguments
 
     def kernel_command_line(self, user_command_line: str = "") -> str:

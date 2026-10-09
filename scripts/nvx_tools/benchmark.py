@@ -18,6 +18,7 @@ import math
 import os
 import queue
 import re
+import secrets
 import select
 import selectors
 import shutil
@@ -42,6 +43,7 @@ from .build_constants import (
     OpenVMMBuildConstants,
 )
 from .common import bytes_to_mib, sha256_file
+from .control_session import capability_pipe
 from .time_abi import TimeAbiFailure, TimeAbiMonitor, status_script
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
@@ -74,6 +76,7 @@ WORKLOAD_SUITES = frozenset(
     {
         "cold-start",
         "device-io",
+        "image-slot-boot",
         "virtfs",
         "shell-snapshot",
         "shell-snapshot-restore",
@@ -3098,6 +3101,170 @@ def benchmark_cold_start_workload(
         print(f"  {label:<25}: {format_sample_summary(result['samples_ms'])}")
 
 
+def _image_slot_boot_sample(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    memory_mib: int,
+    processors: int,
+    boot_count: int | None,
+    timeout: float,
+    *,
+    command_prefix: Sequence[str],
+    windows_cpus: set[int] | None,
+) -> float:
+    with tempfile.TemporaryDirectory(prefix="nvx-image-slot-boot-") as temporary:
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        console_address = cast(tuple[str, int], listener.getsockname())
+        listener.close()
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            processors=processors,
+            command_prefix=command_prefix,
+        )
+        command.extend(
+            (
+                "--virtio-console",
+                f"listen=tcp:{console_address[0]}:{console_address[1]}",
+            )
+        )
+        capability: bytes | None = None
+        if boot_count is not None:
+            endpoint = (
+                "//./pipe/openvmm-image-slot-benchmark-"
+                f"{Path(temporary).name}-{secrets.token_hex(16)}"
+                if os.name == "nt"
+                else os.fspath(Path(temporary) / "host-control.sock")
+            )
+            capability = secrets.token_bytes(32)
+            command.extend(
+                (
+                    "--microvm-image-slots",
+                    "--microvm-image-slot-boot-count",
+                    str(boot_count),
+                    "--microvm-host-control",
+                    f"listen={endpoint}",
+                    "--microvm-control-auth-stdin",
+                )
+            )
+        capability_input: int | None = None
+        if capability is not None:
+            # OpenVMM reads its capability as soon as it starts.
+            capability_input = capability_pipe(capability)
+        stdin = subprocess.DEVNULL if capability_input is None else capability_input
+        started = time.perf_counter_ns()
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=stdin,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        finally:
+            if capability_input is not None:
+                os.close(capability_input)
+        try:
+            if windows_cpus is not None:
+                set_windows_affinity(process.pid, windows_cpus)
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    console = socket.create_connection(console_address, timeout=0.25)
+                    break
+                except OSError as error:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "image-slot benchmark console did not become available"
+                        ) from error
+            with console:
+                output = bytearray()
+                while BOOT_MARKER not in output:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("image-slot benchmark boot marker timed out")
+                    console.settimeout(min(remaining, 0.25))
+                    try:
+                        chunk = console.recv(4096)
+                    except TimeoutError:
+                        continue
+                    if not chunk:
+                        raise RuntimeError(
+                            "image-slot benchmark console closed before readiness"
+                        )
+                    output.extend(chunk)
+                elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+                console.sendall(b"/sbin/nvx-exit 0\n")
+                # Closing the console before the guest consumes the exit
+                # command discards it, so keep it open until OpenVMM exits.
+                if process.wait(timeout=timeout) != 0:
+                    raise RuntimeError("image-slot benchmark VM exited unsuccessfully")
+            return elapsed_ms
+        finally:
+            if process.poll() is None:
+                terminate(process)
+
+
+def benchmark_image_slot_boot_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    results: dict[str, list[float]] = {}
+    for label, boot_count in (("no-slots", None), ("slots-b1", 1), ("slots-b4", 4)):
+        samples: list[float] = []
+        for index in range(args.warmups + args.runs):
+            elapsed = _image_slot_boot_sample(
+                executable,
+                kernel,
+                initrd,
+                backend,
+                args.memory_mib,
+                args.processors,
+                boot_count,
+                args.timeout,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            )
+            if index >= args.warmups:
+                samples.append(elapsed)
+            print(
+                "NVX_IMAGE_SLOT_BOOT_RESULT="
+                + json.dumps(
+                    {
+                        "schema_version": 1,
+                        "backend": backend,
+                        "configuration": label,
+                        "warmup": index < args.warmups,
+                        "elapsed_ms": elapsed,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        results[label] = samples
+    baseline = statistics.median(results["no-slots"])
+    print("image-slot cold boot:")
+    for label in ("no-slots", "slots-b1", "slots-b4"):
+        median = statistics.median(results[label])
+        delta = median - baseline
+        print(
+            f"  {label:<8}: {format_sample_summary(results[label])}; "
+            f"delta-vs-no-slots={delta:+.3f} ms"
+        )
+
+
 def _format_rate_summary(samples: Sequence[float]) -> str:
     if not samples:
         raise ValueError("cannot summarize an empty throughput sample set")
@@ -4614,6 +4781,18 @@ def run_workload_benchmarks(
                 windows_cpus=windows_cpus,
             ),
         ),
+        "image-slot-boot": (
+            "image-slot-boot.log",
+            lambda: benchmark_image_slot_boot_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
         "snapshot-restore-memory": (
             "snapshot-restore-memory.log",
             lambda: benchmark_snapshot_restore_memory_workload(
@@ -5047,6 +5226,7 @@ def snapshot_restore_command(
     *,
     processors: int = 1,
     restore_processors: int | None = None,
+    restore_image_slots: int | None = None,
     restore_memory_mib: int | None = None,
     network_profile: str | None = None,
 ) -> list[str]:
@@ -5064,6 +5244,8 @@ def snapshot_restore_command(
     ]
     if restore_processors is not None:
         command.extend(("--restore-processors", str(restore_processors)))
+    if restore_image_slots is not None:
+        command.extend(("--restore-image-slots", str(restore_image_slots)))
     if restore_memory_mib is not None:
         command.extend(("--restore-memory", f"{restore_memory_mib}M"))
     if network_profile is not None:

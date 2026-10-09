@@ -2339,6 +2339,46 @@ class MicrovmTests(unittest.TestCase):
         with self.assertRaises(OSError):
             os.fstat(prepared[0])
 
+    def test_image_slots_spawns_openvmm_with_a_prepared_capability_pipe(self):
+        # The image-slot scenario authenticates its host-control endpoint with
+        # the same capability, so it also hands OpenVMM a prepared pipe (#440).
+        prepared: list[int] = []
+        spawned: list[object] = []
+
+        def prepare(capability: bytes) -> int:
+            descriptor = control_session.capability_pipe(capability)
+            prepared.append(descriptor)
+            return descriptor
+
+        def launch(_command: list[str], *, stdin: object, **_options: object) -> None:
+            # The pipe stays open until OpenVMM has started with it.
+            self.assertIsInstance(stdin, int)
+            os.fstat(cast(int, stdin))
+            spawned.append(stdin)
+            raise RuntimeError("stopped after the spawn")
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(microvm_tests, "capability_pipe", side_effect=prepare),
+            patch.object(microvm_tests.subprocess, "Popen", side_effect=launch),
+            self.assertRaisesRegex(RuntimeError, "^stopped after the spawn$"),
+        ):
+            microvm_tests.run_image_slots(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                "kvm",
+                memory_mib=256,
+                timeout=5,
+                output_dir=Path(temporary),
+            )
+
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual(spawned, prepared)
+        # The scenario closes its copy of the pipe once OpenVMM has it.
+        with self.assertRaises(OSError):
+            os.fstat(prepared[0])
+
     def test_host_loopback_listener_pair_retries_protocol_port_conflict(self):
         first_udp = MagicMock()
         first_udp.getsockname.return_value = ("127.0.0.1", 50000)
@@ -3104,7 +3144,7 @@ class MicrovmTests(unittest.TestCase):
         functions = functions.replace("/sbin/nvx-time", "nvx_time")
         generation_id = "0123456789abcdef0123456789abcdef"
 
-        def restore(flags: int) -> tuple[str, str, str]:
+        def restore(flags: int, image_slots: int = 0) -> tuple[str, str, str]:
             with tempfile.TemporaryDirectory() as temporary:
                 result = subprocess.run(
                     [shell, "-s", "--", temporary],
@@ -3123,7 +3163,8 @@ class MicrovmTests(unittest.TestCase):
                         'nvx_time() { printf "%s\\n" "$*" >>"$calls"; }\n'
                         'activate_restore_memory() { echo "memory $*"; }\n'
                         f"{functions}\n"
-                        f"post_restore {flags} 0 0 {generation_id}\n"
+                        'activate_restore_image_slots() { echo "image-slots $*"; }\n'
+                        f"post_restore {flags} 0 0 {image_slots} {generation_id}\n"
                         'echo "pending=$post_restore_pending"\n'
                     ),
                     text=True,
@@ -3157,6 +3198,75 @@ class MicrovmTests(unittest.TestCase):
             stdout, "memory 0\nNVX-POST-RESTORE-OK: tier=legacy\npending=false\n"
         )
         self.assertEqual(calls, "restore-finish --new-cpus none\n")
+        # So does an image-slot target, which activates the slots first.
+        console, stdout, calls = restore(20, image_slots=4)
+        self.assertEqual(
+            console,
+            "NVX-POST-RESTORE-STAGE: packet\nNVX-POST-RESTORE-STAGE: acknowledge\n",
+        )
+        self.assertEqual(
+            stdout,
+            "image-slots 4\nNVX-POST-RESTORE-OK: tier=legacy\npending=false\n",
+        )
+        self.assertEqual(calls, "restore-finish --ack --new-cpus none\n")
+
+    def test_image_slot_helper_fails_fast_without_an_active_block_device(self):
+        if sys.platform != "linux":
+            self.skipTest("the guest helper's device links need Linux")
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        helper = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-image-slot"
+        ).read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iomem = root / "iomem"
+            iomem.write_bytes(b"d0008000-d0008fff : virtio-mmio.8\n")
+            devices = root / "devices"
+            disks = root / "block"
+            links = root / "dev"
+            links.mkdir()
+            script = (
+                helper.replace("/proc/iomem", iomem.as_posix())
+                .replace("/sys/devices/virtio-mmio-cmdline", devices.as_posix())
+                .replace("/sys/class/block", disks.as_posix())
+                .replace("/dev/nvx-image", (links / "nvx-image").as_posix())
+            )
+            platform = devices / "virtio-mmio.8"
+
+            def probe() -> tuple[int, str, str]:
+                result = subprocess.run(
+                    [shell, "-s", "--", "--slot", "0", "--timeout", "30"]
+                    + ["--allow-empty"],
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                return result.returncode, result.stdout, result.stderr
+
+            # An inactive slot is a placeholder that no driver binds.
+            platform.mkdir(parents=True)
+            self.assertEqual(probe(), (1, "", "nvx-image-slot: image0 is inactive\n"))
+            # Without image slots, the window may hold the second live share.
+            (platform / "driver").mkdir()
+            virtio = platform / "virtio8"
+            virtio.mkdir()
+            (virtio / "device").write_bytes(b"0x001a\n")
+            self.assertEqual(
+                probe(),
+                (1, "", "nvx-image-slot: image0 transport is not a block device\n"),
+            )
+            # An active slot is an empty read-only disk until the host binds it.
+            (virtio / "device").write_bytes(b"0x0002\n")
+            (virtio / "block" / "vdb").mkdir(parents=True)
+            (disks / "vdb").mkdir(parents=True)
+            (disks / "vdb" / "ro").write_bytes(b"1\n")
+            (disks / "vdb" / "size").write_bytes(b"0\n")
+            self.assertEqual(probe(), (0, f"{(links / 'nvx-image0').as_posix()}\n", ""))
+            self.assertEqual(os.readlink(links / "nvx-image0"), "vdb")
 
     def test_capture_metadata_2_leaves_no_restore_work_to_the_shell(self):
         shell = _posix_shell()
@@ -3192,12 +3302,12 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(dispatch_metadata("0"), (0, "suppressed=true\n"))
         # nvx-time finished the restore and handed it to the daemon.
         self.assertEqual(
-            dispatch_metadata(f"2 4 0 0 {generation_id}"),
+            dispatch_metadata(f"2 4 0 0 0 {generation_id}"),
             (0, "suppressed=false\n"),
         )
         self.assertEqual(
-            dispatch_metadata(f"1 4 2 0 {generation_id}"),
-            (0, f"post_restore 4 2 0 {generation_id}\nsuppressed=false\n"),
+            dispatch_metadata(f"1 20 2 0 4 {generation_id}"),
+            (0, f"post_restore 20 2 0 4 {generation_id}\nsuppressed=false\n"),
         )
         self.assertEqual(
             dispatch_metadata("3"),
@@ -3468,9 +3578,10 @@ class MicrovmTests(unittest.TestCase):
             if isinstance(node, ast.Call)
             and ast.unparse(node.func) == "TcpConsole.connect"
         ]
-        # The managed lifecycle, the console-snapshot capture and restore, and
-        # the snapshot-tier capture, restore, and gate-timeout restore.
-        self.assertEqual(len(connects), 6)
+        # The managed lifecycle, the console-snapshot capture and restore, the
+        # snapshot-tier capture, restore, and gate-timeout restore, and the
+        # image-slot bind, capture, and restore.
+        self.assertEqual(len(connects), 9)
         for keywords in connects:
             self.assertRegex(
                 keywords.get("monitor", ""), r"^TimeAbiMonitor\(\w*command\)$"
@@ -3479,8 +3590,10 @@ class MicrovmTests(unittest.TestCase):
         # nvx-time status. Restores never ask, and in the managed lifecycle
         # init starts the managed agent instead of a shell.
         self.assertEqual(
-            [k["monitor"] for k in connects if k.get("time_abi_status") == "True"],
-            ["TimeAbiMonitor(capture_command)"] * 2,
+            sorted(
+                k["monitor"] for k in connects if k.get("time_abi_status") == "True"
+            ),
+            ["TimeAbiMonitor(capture_command)"] * 3 + ["TimeAbiMonitor(command)"],
         )
 
     def test_snapshot_core_script_handles_no_clocksource(self):
