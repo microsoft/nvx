@@ -359,6 +359,92 @@ fn mapped_files_hide_their_siblings_and_names_may_hold_spaces() {
 
 #[test]
 #[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn single_files_are_granted_without_their_directories() {
+    // The layout of microsoft/nvx#282: a read-only settings file and a read-write output file,
+    // each beside a file that the policy does not grant.
+    let host = tempfile::tempdir().unwrap();
+    let base = host.path();
+    for (name, contents) in [
+        ("config/settings.json", "settings"),
+        ("config/secret.json", "secret"),
+        ("results/output.txt", "output"),
+        ("results/other.txt", "other"),
+    ] {
+        let path = base.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![base.join("config/settings.json")],
+        readwrite_paths: vec![base.join("results/output.txt")],
+        denied_paths: Vec::new(),
+    });
+    let (nvx, backend) = client("grants");
+    let sandbox = started(&nvx, &backend, &request);
+    let sandbox_id = id(&sandbox);
+    let guest = |name: &str| guest_path(&base.join(name)).unwrap();
+    let output = run(
+        &nvx,
+        sandbox_id,
+        script(
+            "cat \"$1\" && ! echo changed > \"$1\" && ! rm -f \"$1\" && echo updated > \"$2\" \
+             && cat \"$2\" && ls -a \"$3\" && ls -a \"$4\" && [ ! -e \"$5\" ] && [ ! -e \"$6\" ]",
+            &[
+                guest("config/settings.json"),
+                guest("results/output.txt"),
+                guest("config"),
+                guest("results"),
+                guest("config/secret.json"),
+                guest("results/other.txt"),
+            ],
+        ),
+    );
+    assert!(output.outcome.success(), "{output:?}");
+    // The guest's directories hold only the granted files.
+    assert_eq!(
+        output.stdout, b"settingsupdated\n.\n..\nsettings.json\n.\n..\noutput.txt\n",
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(base.join("config/settings.json")).unwrap(),
+        "settings"
+    );
+    assert_eq!(
+        fs::read_to_string(base.join("results/output.txt")).unwrap(),
+        "updated\n"
+    );
+    // Nothing beside the granted files changed, and nothing was created there.
+    for (directory, entries) in [
+        (
+            "config",
+            [("secret.json", "secret"), ("settings.json", "settings")],
+        ),
+        (
+            "results",
+            [("other.txt", "other"), ("output.txt", "updated\n")],
+        ),
+    ] {
+        let mut found: Vec<(String, String)> = fs::read_dir(base.join(directory))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().into_string().unwrap(),
+                    fs::read_to_string(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+        found.sort();
+        let expected: Vec<(String, String)> = entries
+            .iter()
+            .map(|(name, contents)| ((*name).to_owned(), (*contents).to_owned()))
+            .collect();
+        assert_eq!(found, expected, "{directory}");
+    }
+}
+
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
 fn many_mappings_are_mounted() {
     let host = tempfile::tempdir().unwrap();
     let mut readonly_paths = Vec::new();

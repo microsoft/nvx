@@ -1,19 +1,22 @@
 //! Host paths exposed to the guest through OpenVMM's aggregate virtio-fs export.
 //!
 //! OpenVMM offers one virtio-fs device. The backend attaches it as an aggregate: a synthetic,
-//! read-only root that lists one child per exported host directory, named by its index, which
-//! the guest's init mounts at a directory that only the guest's root can enter. The guest agent
-//! then bind-mounts each mapped path at its target, read-only or read-write, from the mapping
-//! table that it receives over the control channel.
+//! read-only root that lists one child per exported host directory or file, named by its index,
+//! which the guest's init mounts at a directory that only the guest's root can enter. The guest
+//! agent then bind-mounts each mapped path at its target, read-only or read-write, from the
+//! mapping table that it receives over the control channel.
 //!
-//! The children are the outermost mapped directories and the parents of the outermost mapped
-//! files, so mapped paths may lie anywhere, on any volume, except that neither a whole volume nor
-//! a file directly in a volume's root, whose parent would export that root, can be mapped. A
-//! child whose root is not mapped itself, the parent of mapped files, hides everything but its
-//! mapped paths. A child is read-write only if it holds a read-write mapping, and OpenVMM then
-//! limits writes to its read-write mappings, so the host enforces each mapping's access, except
-//! that of a read-only path inside a read-write mapping, which only the guest's bind mount keeps
-//! read-only. OpenVMM also hides the denied paths.
+//! The children are the outermost mapped directories and the mapped files outside them. OpenVMM
+//! exports each such file alone, without its directory, so mapped paths may lie anywhere, on any
+//! volume, except that a whole volume cannot be mapped. A child is read-write only if it holds a
+//! read-write mapping, and OpenVMM then limits writes to its read-write mappings, so the host
+//! enforces each mapping's access, except that of a read-only path inside a read-write mapping,
+//! which only the guest's bind mount keeps read-only. OpenVMM also hides the denied paths.
+//!
+//! A policy that would need more children than OpenVMM offers is refused rather than served
+//! through the directories of its files, which would grant more than the files. Records of
+//! earlier crates may still hold such a directory as a hidden child, whose root is no mapping
+//! itself and which exposes only its mapped paths.
 //!
 //! Guest targets follow MXC's convention for Linux guests: a Windows path `C:\work\src` appears at
 //! `/mnt/c/work/src`, and a Linux path appears at the same path.
@@ -60,15 +63,20 @@ pub(crate) struct HostMapping {
     pub(crate) binds: Vec<Bind>,
 }
 
-/// One host directory of the aggregate export.
+/// One host directory or file of the aggregate export.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Child {
-    /// Canonical host directory.
+    /// Canonical host directory, or the canonical host file that the child exposes alone.
     pub(crate) root: PathBuf,
+    /// Whether the root is a regular file, which OpenVMM exposes without its directory. Records
+    /// without file children leave it out, and earlier crates refuse records with them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) file: bool,
     /// Whether the guest may modify it, which a read-write mapping inside it requires.
     pub(crate) writable: bool,
-    /// Whether OpenVMM hides everything but the allowed paths, because the root is no mapping.
+    /// Whether OpenVMM hides everything but the allowed paths, because the root is no mapping,
+    /// which only records of earlier crates hold.
     pub(crate) hidden: bool,
     /// Canonical host paths inside the child that OpenVMM hides.
     pub(crate) denied: Vec<PathBuf>,
@@ -180,10 +188,10 @@ pub fn resolve_guest_path(path: &Path) -> Option<String> {
 ///
 /// Mapped paths must exist, and their guest paths derive from their resolved host paths, so two
 /// spellings of one object (links, letter case, or short names) map to one guest path. A path
-/// that is both read-only and read-write is mapped read-only. Neither a whole volume nor a file
-/// directly in a volume's root can be mapped. A denied path must not contain a mapped path, and
-/// a denied path that does not exist yet must not lie inside a mapped path, because nothing
-/// could hide it once a workload creates it.
+/// that is both read-only and read-write is mapped read-only. A whole volume cannot be mapped,
+/// and a policy that would need more children than OpenVMM offers is refused. A denied path must
+/// not contain a mapped path, and a denied path that does not exist yet must not lie inside a
+/// mapped path, because nothing could hide it once a workload creates it.
 pub(crate) fn plan(policy: &FilesystemPolicy) -> Result<Option<HostMapping>> {
     let unsupported = |message: String| Err(Error::policy_validation(message));
     let mut mapped: Vec<Mapped> = Vec::new();
@@ -209,7 +217,9 @@ pub(crate) fn plan(policy: &FilesystemPolicy) -> Result<Option<HostMapping>> {
                     path.display()
                 ));
             }
-            if let Some(reason) = volume_root_refusal(&canonical, metadata.is_dir()) {
+            if metadata.is_dir()
+                && let Some(reason) = volume_root_refusal(&canonical)
+            {
                 return unsupported(format!("{field} entry {} {reason}", path.display()));
             }
             let Some(target) = guest_path(&canonical) else {
@@ -275,9 +285,10 @@ pub(crate) fn plan(policy: &FilesystemPolicy) -> Result<Option<HostMapping>> {
 
     let roots = export_roots(&mapped)?;
     if roots.len() > MAX_CHILDREN {
+        // Exporting directories for some of the files would grant more than the files.
         return unsupported(format!(
-            "the mapped paths lie in {} separate host directories, but OpenVMM exports at most \
-             {MAX_CHILDREN}",
+            "the mapped paths need {} exported directories and files, but OpenVMM exports at \
+             most {MAX_CHILDREN}; map directories that contain the files instead",
             roots.len()
         ));
     }
@@ -300,17 +311,21 @@ pub(crate) fn plan(policy: &FilesystemPolicy) -> Result<Option<HostMapping>> {
             .iter()
             .filter(|entry| entry.canonical.starts_with(&root))
             .collect();
-        let hidden = !inside.iter().any(|entry| entry.canonical == root);
-        let visible = outermost(&inside);
+        // Every root is a mapping itself, so the guest reaches all of it.
+        let Some(own) = inside.iter().find(|entry| entry.canonical == root) else {
+            return Err(Error::backend_error(format!(
+                "{} is exported but not mapped",
+                root.display()
+            )));
+        };
         let read_write: Vec<&Mapped> = inside
             .iter()
             .copied()
             .filter(|entry| !entry.read_only)
             .collect();
         let writable = !read_write.is_empty();
-        // Unless the read-write mappings cover everything that the guest reaches in the child,
-        // OpenVMM limits writes to them.
-        let mut write: Vec<PathBuf> = if writable && visible.iter().any(|entry| entry.read_only) {
+        // Unless the read-write mappings cover the whole child, OpenVMM limits writes to them.
+        let mut write: Vec<PathBuf> = if writable && own.read_only {
             outermost(&read_write)
                 .iter()
                 .map(|entry| entry.canonical.clone())
@@ -319,45 +334,32 @@ pub(crate) fn plan(policy: &FilesystemPolicy) -> Result<Option<HostMapping>> {
             Vec::new()
         };
         write.sort();
-        let mut allowed: Vec<PathBuf> = if hidden {
-            visible
-                .iter()
-                .map(|entry| entry.canonical.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        allowed.sort();
-        // Below a hidden root, only paths inside an allowed path need hiding.
         let child_denied: Vec<PathBuf> = denied
             .iter()
-            .filter(|path| {
-                path.starts_with(&root)
-                    && (!hidden || allowed.iter().any(|allowed| path.starts_with(allowed)))
-            })
+            .filter(|path| path.starts_with(&root))
             .cloned()
             .collect();
         check_root(&root)?;
-        policy_bytes += check_policy_paths(&root, &child_denied, "hide", hidden)?;
-        policy_bytes += check_policy_paths(&root, &allowed, "expose", false)?;
-        policy_bytes += check_policy_paths(&root, &write, "make writable", false)?;
+        policy_bytes += check_policy_paths(&root, &child_denied, "hide")?;
+        policy_bytes += check_policy_paths(&root, &write, "make writable")?;
         let denied_identities = child_denied
             .iter()
             .map(|path| movable(path).then(|| identity(path)).transpose())
             .collect::<Result<Vec<_>>>()?;
         children.push(Child {
             root,
+            file: !own.directory,
             writable,
-            hidden,
+            hidden: false,
             denied: child_denied,
             denied_identities,
-            allowed,
+            allowed: Vec::new(),
             write,
         });
     }
     if policy_bytes > MAX_AGGREGATE_POLICY_BYTES {
         return unsupported(format!(
-            "the paths that OpenVMM is to hide, expose, or make writable exceed its \
+            "the paths that OpenVMM is to hide or make writable exceed its \
              {MAX_AGGREGATE_POLICY_BYTES}-byte limit"
         ));
     }
@@ -402,45 +404,22 @@ pub(crate) fn plan(policy: &FilesystemPolicy) -> Result<Option<HostMapping>> {
     Ok(Some(HostMapping { children, binds }))
 }
 
-/// Explains why a mapped host path, given in canonical form, cannot be exported, or returns
-/// `None` if it can: a whole volume, or a file directly in a volume's root, which would export
-/// that root as the file's parent. It inspects only the path, not the host.
-fn volume_root_refusal(canonical: &Path, directory: bool) -> Option<&'static str> {
-    let is_volume_root = |path: &Path| {
-        !path
-            .components()
-            .any(|component| matches!(component, Component::Normal(_)))
-    };
-    if directory {
-        is_volume_root(canonical).then_some(
-            "is a whole volume, which the openvmm backend does not map; map the directories \
-             inside it",
-        )
-    } else {
-        canonical.parent().is_none_or(is_volume_root).then_some(
-            "lies directly in a volume's root, which the openvmm backend does not export; move \
-             the file into a directory",
-        )
-    }
+/// Explains why a mapped host directory, given in canonical form, cannot be exported, or returns
+/// `None` if it can: a whole volume. It inspects only the path, not the host.
+fn volume_root_refusal(canonical: &Path) -> Option<&'static str> {
+    (!canonical
+        .components()
+        .any(|component| matches!(component, Component::Normal(_))))
+    .then_some(
+        "is a whole volume, which the openvmm backend does not map; map the directories inside \
+         it",
+    )
 }
 
-/// Returns the directories to export: the outermost mapped directories and the parents of the
-/// outermost mapped files, in order. Distinct paths must not name one directory.
+/// Returns the paths to export, in order: the outermost mapped directories and the mapped files
+/// outside them, each exported alone. Distinct paths must not name one directory or file.
 fn export_roots(mapped: &[Mapped]) -> Result<Vec<PathBuf>> {
-    let mut candidates = Vec::with_capacity(mapped.len());
-    for entry in mapped {
-        if entry.directory {
-            candidates.push(entry.canonical.clone());
-        } else {
-            let Some(parent) = entry.canonical.parent() else {
-                return Err(Error::policy_validation(format!(
-                    "{} has no parent directory",
-                    entry.given.display()
-                )));
-            };
-            candidates.push(parent.to_path_buf());
-        }
-    }
+    let mut candidates: Vec<PathBuf> = mapped.iter().map(|entry| entry.canonical.clone()).collect();
     candidates.sort();
     candidates.dedup();
     let roots: Vec<PathBuf> = candidates
@@ -452,13 +431,14 @@ fn export_roots(mapped: &[Mapped]) -> Result<Vec<PathBuf>> {
         })
         .cloned()
         .collect();
-    // OpenVMM refuses one directory exported twice, which bind mounts make possible.
+    // OpenVMM refuses one object exported twice, which bind mounts and hard links make
+    // possible.
     let mut identities: Vec<(FileIdentity, &Path)> = Vec::with_capacity(roots.len());
     for root in &roots {
         let current = identity(root)?;
         if let Some((_, other)) = identities.iter().find(|(other, _)| *other == current) {
             return Err(Error::policy_validation(format!(
-                "{} and {} are the same host directory; map it once",
+                "{} and {} are the same host directory or file; map it once",
                 other.display(),
                 root.display()
             )));
@@ -535,12 +515,14 @@ fn outermost<'a>(entries: &[&'a Mapped]) -> Vec<&'a Mapped> {
         .collect()
 }
 
-/// Checks that every mapped and denied path inside a read-write mapping still names the object
-/// it named at provision.
+/// Checks that every child's root is still the kind of object that provision exported, and that
+/// every mapped and denied path inside a read-write mapping still names the object it named at
+/// provision.
 ///
-/// A workload with a read-write mapping could otherwise rename a denied or read-only object and
-/// put a decoy at its path, and the next start would protect the decoy instead. The VM is
-/// stopped while this runs, so no workload can race with it.
+/// A file that a directory replaced would otherwise grant the whole directory, and a workload
+/// with a read-write mapping could rename a denied or read-only object and put a decoy at its
+/// path, so the next start would protect the decoy instead. The VM is stopped while this runs, so
+/// no workload can race with it, and OpenVMM checks each child's kind again when it opens it.
 pub(crate) fn verify(mapping: &HostMapping) -> Result<()> {
     let changed = |path: &Path| {
         Err(Error::backend_error(format!(
@@ -549,6 +531,18 @@ pub(crate) fn verify(mapping: &HostMapping) -> Result<()> {
             path.display()
         )))
     };
+    for child in &mapping.children {
+        let kind_matches = fs::symlink_metadata(&child.root).is_ok_and(|metadata| {
+            if child.file {
+                metadata.is_file()
+            } else {
+                metadata.is_dir()
+            }
+        });
+        if !kind_matches {
+            return changed(&child.root);
+        }
+    }
     for bind in &mapping.binds {
         let Some(expected) = bind.identity else {
             continue;
@@ -607,15 +601,10 @@ fn check_root(root: &Path) -> Result<()> {
 
 /// Applies OpenVMM's rules for the paths that it is to `action` in the exported directory
 /// `root`, so a policy that OpenVMM would refuse fails at provision rather than at every start.
-/// `with_root` counts the root itself among them. Returns their combined length.
-fn check_policy_paths(
-    root: &Path,
-    paths: &[PathBuf],
-    action: &str,
-    with_root: bool,
-) -> Result<usize> {
+/// Returns their combined length.
+fn check_policy_paths(root: &Path, paths: &[PathBuf], action: &str) -> Result<usize> {
     let unsupported = |message: String| Err(Error::policy_validation(message));
-    let count = paths.len() + usize::from(with_root);
+    let count = paths.len();
     if count > MAX_POLICY_PATHS {
         return unsupported(format!(
             "OpenVMM can {action} at most {MAX_POLICY_PATHS} paths in one exported directory, \
@@ -731,13 +720,18 @@ pub(crate) fn guest_table(mapping: &HostMapping) -> Vec<HostMap> {
         .collect()
 }
 
-/// OpenVMM options that export the mapping's directories with their access policies.
+/// OpenVMM options that export the mapping's directories and files with their access policies.
+/// A file child carries the `file` flag, so OpenVMM refuses a directory that replaced the file.
 pub(crate) fn openvmm_arguments(mapping: &HostMapping) -> Vec<String> {
     let mut arguments = vec!["--mount-aggregate".to_owned(), GUEST_EXPORT.to_owned()];
     for (index, child) in mapping.children.iter().enumerate() {
         let mode = if child.writable { "rw" } else { "ro" };
+        let kind = if child.file { ",file" } else { "" };
         arguments.push("--mount-child".to_owned());
-        arguments.push(format!("{index},{},{mode}", display_path(&child.root)));
+        arguments.push(format!(
+            "{index},{},{mode}{kind}",
+            display_path(&child.root)
+        ));
     }
     let mut add = |option: &str, path: &Path| {
         arguments.push(option.to_owned());
@@ -977,51 +971,161 @@ mod tests {
     }
 
     #[test]
-    fn mapped_files_are_exposed_through_their_hidden_parents() {
+    fn mapped_files_are_exported_alone() {
         let directory = root();
         let base = directory.path();
         let policy = FilesystemPolicy {
             readonly_paths: vec![base.join("work/config.json"), base.join("work/src")],
             readwrite_paths: vec![base.join("work/run.sh"), base.join("work/out")],
             denied_paths: vec![
-                // Hidden already: the parent hides everything but its mapped paths.
+                // Not exported at all: no child holds it.
                 base.join("work/private"),
                 base.join("work/src/secret"),
             ],
         };
         let mapping = plan(&policy).unwrap().unwrap();
-        assert_eq!(mapping.children.len(), 1);
-        let child = &mapping.children[0];
         let work = canonical(&base.join("work"));
-        assert_eq!(child.root, work);
-        assert!(child.hidden && child.writable);
+        // Each file is a child of its own, without its directory, beside the directories.
+        let children: Vec<(PathBuf, bool, bool, bool)> = mapping
+            .children
+            .iter()
+            .map(|child| (child.root.clone(), child.file, child.writable, child.hidden))
+            .collect();
         assert_eq!(
-            child.allowed,
-            ["config.json", "out", "run.sh", "src"].map(|name| work.join(name))
+            children,
+            [
+                (work.join("config.json"), true, false, false),
+                (work.join("out"), false, true, false),
+                (work.join("run.sh"), true, true, false),
+                (work.join("src"), false, false, false),
+            ]
         );
-        // The read-only mappings stay read-only on the host.
-        assert_eq!(child.write, ["out", "run.sh"].map(|name| work.join(name)));
-        assert_eq!(child.denied, [work.join("src").join("secret")]);
+        assert!(
+            mapping
+                .children
+                .iter()
+                .all(|child| child.allowed.is_empty() && child.write.is_empty())
+        );
+        assert_eq!(
+            mapping.children[3].denied,
+            [work.join("src").join("secret")]
+        );
         assert_eq!(
             sources(&mapping),
             [
-                ("0/config.json".to_owned(), true),
-                ("0/out".to_owned(), false),
-                ("0/run.sh".to_owned(), false),
-                ("0/src".to_owned(), true),
+                ("0".to_owned(), true),
+                ("1".to_owned(), false),
+                ("2".to_owned(), false),
+                ("3".to_owned(), true),
             ]
         );
 
+        // OpenVMM exposes each file as the child itself, so nothing hides its directory, and the
+        // `file` flag makes it refuse a directory in the file's place.
         let arguments = openvmm_arguments(&mapping);
         assert_eq!(
-            option_values(&arguments, "--mount-deny"),
-            [
-                display_path(&work),
-                display_path(&work.join("src").join("secret"))
-            ]
+            option_values(&arguments, "--mount-child")[0],
+            format!("0,{},ro,file", display_path(&work.join("config.json")))
         );
-        assert_eq!(option_values(&arguments, "--mount-allow").len(), 4);
-        assert_eq!(option_values(&arguments, "--mount-write").len(), 2);
+        assert_eq!(
+            option_values(&arguments, "--mount-deny"),
+            [display_path(&work.join("src").join("secret"))]
+        );
+        assert!(option_values(&arguments, "--mount-allow").is_empty());
+        assert!(option_values(&arguments, "--mount-write").is_empty());
+
+        // A record without file children leaves the field out, and one with them names it.
+        let record = serde_json::to_value(&mapping).unwrap();
+        assert_eq!(record["children"][0]["file"], true);
+        assert!(record["children"][1].get("file").is_none());
+        let restored: HostMapping = serde_json::from_value(record).unwrap();
+        assert_eq!(restored, mapping);
+
+        // A file inside a mapped directory belongs to that directory's child.
+        let nested = FilesystemPolicy {
+            readonly_paths: vec![base.join("work/config.json")],
+            readwrite_paths: vec![base.join("work")],
+            ..FilesystemPolicy::default()
+        };
+        if !cfg!(windows) {
+            let mapping = plan(&nested).unwrap().unwrap();
+            assert_eq!(mapping.children.len(), 1);
+            assert!(!mapping.children[0].file);
+            assert_eq!(
+                sources(&mapping),
+                [("0".to_owned(), false), ("0/config.json".to_owned(), true)]
+            );
+        }
+
+        // One file reached through two names is one object, which is mapped once.
+        let link = base.join("work/config-link.json");
+        fs::hard_link(base.join("work/config.json"), &link).unwrap();
+        let aliased = FilesystemPolicy {
+            readonly_paths: vec![base.join("work/config.json"), link],
+            ..FilesystemPolicy::default()
+        };
+        let error = plan(&aliased).unwrap_err();
+        assert!(
+            error.message().contains("same host directory or file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn policies_beyond_the_children_of_an_aggregate_are_refused() {
+        let directory = root();
+        let base = directory.path();
+        let files = |parent: &str, count: usize| -> Vec<PathBuf> {
+            (0..count)
+                .map(|index| {
+                    let path = base.join(parent).join(format!("file-{index:03}"));
+                    fs::write(&path, b"x").unwrap();
+                    path
+                })
+                .collect()
+        };
+        // Up to 256 files are children of their own, however many share a directory.
+        let policy = FilesystemPolicy {
+            readonly_paths: files("tools", 256),
+            ..FilesystemPolicy::default()
+        };
+        let mapping = plan(&policy).unwrap().unwrap();
+        assert_eq!(mapping.children.len(), 256);
+        assert!(
+            mapping
+                .children
+                .iter()
+                .all(|child| child.file && !child.hidden && child.allowed.is_empty())
+        );
+
+        // More are refused rather than exported through their directory, which would grant
+        // more than the files.
+        let mut readonly_paths = files("tools", 256);
+        readonly_paths.extend(files("build-output", 1));
+        let error = plan(&FilesystemPolicy {
+            readonly_paths,
+            ..FilesystemPolicy::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::PolicyValidation);
+        assert!(error.message().contains("at most 256"), "{error}");
+        assert!(
+            error
+                .message()
+                .contains("map directories that contain the files instead"),
+            "{error}"
+        );
+
+        // A policy that grants the directory instead needs one child.
+        let mut readonly_paths = vec![base.join("tools")];
+        readonly_paths.extend(files("build-output", 1));
+        let mapping = plan(&FilesystemPolicy {
+            readonly_paths,
+            ..FilesystemPolicy::default()
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(mapping.children.len(), 2);
     }
 
     #[test]
@@ -1168,44 +1272,20 @@ mod tests {
     }
 
     #[test]
-    fn volumes_and_files_directly_in_their_roots_are_refused() {
-        // The paths are only inspected, so nothing is created at a volume root.
-        let (volumes, directories, files_in_roots, nested_files): (
-            &[&str],
-            &[&str],
-            &[&str],
-            &[&str],
-        ) = if cfg!(windows) {
-            (
-                &[r"C:\", r"D:\"],
-                &[r"C:\work", r"D:\a\b"],
-                &[r"C:\notes.txt", r"D:\build.log"],
-                &[r"C:\work\notes.txt", r"D:\a\b\build.log"],
-            )
+    fn whole_volumes_are_refused() {
+        // The paths are only inspected, so nothing is created at a volume root. A file directly
+        // in a volume's root is exported alone, so only a whole volume is refused.
+        let (volumes, directories): (&[&str], &[&str]) = if cfg!(windows) {
+            (&[r"C:\", r"D:\"], &[r"C:\work", r"D:\a\b"])
         } else {
-            (
-                &["/"],
-                &["/work", "/srv/a/b"],
-                &["/notes.txt", "/build.log"],
-                &["/work/notes.txt", "/srv/a/b/build.log"],
-            )
+            (&["/"], &["/work", "/srv/a/b"])
         };
         for volume in volumes {
-            let reason = volume_root_refusal(Path::new(volume), true).unwrap();
+            let reason = volume_root_refusal(Path::new(volume)).unwrap();
             assert!(reason.contains("whole volume"), "{volume}: {reason}");
         }
-        for file in files_in_roots {
-            let reason = volume_root_refusal(Path::new(file), false).unwrap();
-            assert!(
-                reason.contains("move the file into a directory"),
-                "{file}: {reason}"
-            );
-        }
         for directory in directories {
-            assert_eq!(volume_root_refusal(Path::new(directory), true), None);
-        }
-        for file in nested_files {
-            assert_eq!(volume_root_refusal(Path::new(file), false), None);
+            assert_eq!(volume_root_refusal(Path::new(directory)), None);
         }
     }
 
@@ -1252,7 +1332,7 @@ mod tests {
             fs::create_dir_all(base.join(name)).unwrap();
         }
         fs::write(base.join("my files/notes one.txt"), b"notes").unwrap();
-        // Names may contain spaces.
+        // Names may contain spaces, in a file that a child exposes alone and in a policy path.
         let spaced = FilesystemPolicy {
             readonly_paths: vec![base.join("my files/notes one.txt")],
             readwrite_paths: vec![base.join("work/out")],
@@ -1261,10 +1341,10 @@ mod tests {
         let mapping = plan(&spaced).unwrap().unwrap();
         let arguments = openvmm_arguments(&mapping);
         assert!(
-            option_values(&arguments, "--mount-allow")[0].ends_with("notes one.txt"),
+            option_values(&arguments, "--mount-child")[0].ends_with("notes one.txt,ro,file"),
             "{arguments:?}"
         );
-        assert!(option_values(&arguments, "--mount-deny")[1].ends_with("My Secrets"));
+        assert!(option_values(&arguments, "--mount-deny")[0].ends_with("My Secrets"));
         // But they must not begin or end with one.
         let leading = FilesystemPolicy {
             readwrite_paths: vec![base.join("work/out")],
@@ -1317,20 +1397,24 @@ mod tests {
                 })
                 .collect()
         };
-        // A hidden root exposes at most 128 mapped paths.
-        let policy = FilesystemPolicy {
-            readonly_paths: files(128),
-            ..FilesystemPolicy::default()
-        };
-        let mapping = plan(&policy).unwrap().unwrap();
-        assert_eq!(mapping.children[0].allowed.len(), 128);
-        let policy = FilesystemPolicy {
-            readonly_paths: files(129),
-            ..FilesystemPolicy::default()
-        };
-        let error = plan(&policy).unwrap_err();
-        assert_eq!(error.code(), ErrorCode::PolicyValidation);
-        assert!(error.message().contains("at most 128"), "{error}");
+        // One exported directory hides at most 128 denied paths, and singles out at most 128
+        // read-write paths inside a read-only one.
+        for policy in [
+            FilesystemPolicy {
+                readonly_paths: vec![base.join("tools")],
+                denied_paths: files(129),
+                ..FilesystemPolicy::default()
+            },
+            FilesystemPolicy {
+                readonly_paths: vec![base.join("tools")],
+                readwrite_paths: files(129),
+                ..FilesystemPolicy::default()
+            },
+        ] {
+            let error = plan(&policy).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::PolicyValidation);
+            assert!(error.message().contains("at most 128"), "{error}");
+        }
     }
 
     #[test]
@@ -1377,6 +1461,32 @@ mod tests {
         fs::remove_dir_all(base.join("tools")).unwrap();
         fs::create_dir(base.join("tools")).unwrap();
         verify(&mapping).unwrap();
+
+        // Every child keeps its kind: a directory in place of a file child would grant all of it,
+        // and a directory child must remain a directory.
+        let settings = base.join("settings.json");
+        fs::write(&settings, b"{}").unwrap();
+        let with_file = FilesystemPolicy {
+            readonly_paths: vec![settings.clone(), base.join("tools")],
+            ..FilesystemPolicy::default()
+        };
+        let mapping = plan(&with_file).unwrap().unwrap();
+        verify(&mapping).unwrap();
+        fs::remove_file(&settings).unwrap();
+        fs::create_dir(&settings).unwrap();
+        assert_eq!(
+            verify(&mapping).unwrap_err().code(),
+            ErrorCode::BackendError
+        );
+        fs::remove_dir(&settings).unwrap();
+        fs::write(&settings, b"{}").unwrap();
+        verify(&mapping).unwrap();
+        fs::remove_dir(base.join("tools")).unwrap();
+        fs::write(base.join("tools"), b"").unwrap();
+        assert_eq!(
+            verify(&mapping).unwrap_err().code(),
+            ErrorCode::BackendError
+        );
     }
 
     /// A directory on another volume than the temporary directory, if the host has one: the one

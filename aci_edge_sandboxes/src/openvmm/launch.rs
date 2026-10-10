@@ -237,6 +237,7 @@ mod tests {
         record.filesystem = Some(filesystem::HostMapping {
             children: vec![filesystem::Child {
                 root: "/host/work".into(),
+                file: false,
                 writable: false,
                 hidden: false,
                 denied: vec!["/host/work/secret".into()],
@@ -313,6 +314,7 @@ mod tests {
         record.filesystem = Some(filesystem::HostMapping {
             children: vec![filesystem::Child {
                 root: "/host/work".into(),
+                file: false,
                 writable: false,
                 hidden: false,
                 denied_identities: vec![None; denied.len()],
