@@ -27,7 +27,7 @@ grep -q '^microvm /run/nvx/shares virtiofs rw' /proc/mounts || fail 43
 grep -q '^microvm /workspace virtiofs rw' /proc/mounts || fail 44
 grep -q '^microvm /opt/hostedtoolcache virtiofs ro' /proc/mounts || fail 45
 grep -q '^microvm /srv/data virtiofs rw' /proc/mounts || fail 46
-[ "$(ls /run/nvx/shares | tr '\n' ' ')" = "0 1 2 " ] || fail 47
+[ "$(ls /run/nvx/shares | tr '\n' ' ')" = "0 1 2 3 4 " ] || fail 47
 [ "$(stat -c %a /run/nvx/shares)" = 500 ] || fail 48
 [ "$(cat /workspace/seed)" = NVX-WORKSPACE ] || fail 49
 [ "$(cat /opt/hostedtoolcache/seed)" = NVX-TOOLCACHE ] || fail 50
@@ -118,10 +118,51 @@ case "$error" in
 esac
 [ ! -e /workspace/linked ] || fail 85
 [ ! -e /srv/data/public/linked ] || fail 86
-if mkdir /run/nvx/shares/3 2>/dev/null; then
+if mkdir /run/nvx/shares/5 2>/dev/null; then
     fail 87
 fi
 [ "$(cat /opt/hostedtoolcache/seed)" = NVX-TOOLCACHE ] || fail 88
+
+# Each file child is the file alone: the aggregate lists it as a regular
+# file, which the guest binds at a file, and nothing else of its host
+# directory reaches the guest.
+[ -f /run/nvx/shares/3 ] && [ -f /run/nvx/shares/4 ] || fail 89
+grep -q '^microvm /config/settings.json virtiofs ro' /proc/mounts || fail 90
+grep -q '^microvm /results/output.txt virtiofs rw' /proc/mounts || fail 91
+[ "$(cat /config/settings.json)" = NVX-SETTINGS ] || fail 92
+[ "$(cat /results/output.txt)" = NVX-OUTPUT ] || fail 93
+[ "$(ls /config | tr '\n' ' ')" = "settings.json " ] || fail 94
+if error=$(ls /run/nvx/shares/3/secret.json 2>&1); then
+    fail 95
+fi
+case "$error" in
+    *'Not a directory'*) ;;
+    *)
+        echo "NVX-FILESYSTEM-SHARES-ERROR $error"
+        fail 96
+        ;;
+esac
+# The read-only file rejects writes, also through the aggregate as root, and
+# the read-write file accepts them, truncation included.
+if error=$( (printf 'append\n' >>/config/settings.json) 2>&1); then
+    fail 97
+fi
+expect_read_only "$error" 98
+if error=$( (printf 'append\n' >>/run/nvx/shares/3) 2>&1); then
+    fail 99
+fi
+expect_read_only "$error" 100
+printf 'NVX-GUEST-OUTPUT\n' >/results/output.txt || fail 101
+[ "$(cat /run/nvx/shares/4)" = NVX-GUEST-OUTPUT ] || fail 102
+# The guest can neither remove nor replace a file child.
+if error=$(rm -f /run/nvx/shares/4 2>&1); then
+    fail 103
+fi
+expect_read_only "$error" 104
+if mv /results/output.txt /results/renamed 2>/dev/null; then
+    fail 105
+fi
+[ "$(cat /results/output.txt)" = NVX-GUEST-OUTPUT ] || fail 106
 
 echo NVX-FILESYSTEM-SHARES-OK
 nvx-exit 0
