@@ -256,11 +256,13 @@ live in `KernelBuildConstants` in
 | Watchdogs | Soft-lockup and hung-task detectors off, or on in the [CI debug kernel](#ci-debug-kernel) | Keep the detectors out of production kernels |
 
 `build-kernel` runs every check, and packaging runs them again on the
-packaged config. `scripts/nvx.py verify` checks the checked-in
-`kernel/config-microvm` for the direct-boot, sandbox, network, time-ABI, and
-hardening groups plus the xe9 console and virtio-fs. When
-`build/vmlinux.config` exists, it also checks that file for the direct-boot,
-sandbox, and network groups plus the xe9 console.
+packaged config. `scripts/nvx.py verify` is a lighter source check. It looks
+for the fixed settings of the direct-boot, sandbox, network, time-ABI, and
+hardening groups, plus the xe9 console and virtio-fs, in the checked-in
+`kernel/config-microvm`. It does not reject options built as modules; only the
+build and packaging checks do. When `build/vmlinux.config` exists, `verify`
+also checks that file for the direct-boot, sandbox, and network groups plus
+the xe9 console.
 
 ## CI debug kernel
 
