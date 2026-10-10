@@ -35,6 +35,7 @@
 #define APP_STOP 3U
 #define APP_CANCEL 4U
 #define APP_FEATURES 5U
+#define APP_MAPS 6U
 #define APP_READY 0x81U
 #define APP_STDOUT 0x82U
 #define APP_STDERR 0x83U
@@ -49,14 +50,16 @@
  * (aci_edge_sandboxes, src/openvmm/protocol.rs). The init script of the image provides
  * FEATURE_WORKLOAD_ACCOUNT; the agent speaks for it because both ship in one
  * initramfs. An agent that predates FEATURES refuses the request as an
- * unsupported operation, which the host reads as no features.
+ * unsupported operation, which the host reads as no features. Bit 1 announced
+ * bind mounts that nvx_map= kernel command-line tokens listed; it stays unused,
+ * so hosts that still send those tokens refuse this image.
  */
 #define FEATURE_CANCEL (1U << 0)
-#define FEATURE_HOST_MAPPINGS (1U << 1)
 #define FEATURE_WORKLOAD_ACCOUNT (1U << 2)
 #define FEATURE_EXEC_CGROUP (1U << 3)
 #define FEATURE_EXEC_ENVIRONMENT (1U << 4)
 #define FEATURE_EXEC_CWD (1U << 5)
+#define FEATURE_HOST_MAPPING_TABLE (1U << 6)
 
 #define MAX_ARGUMENTS 64U
 #define MAX_ARGUMENT_LEN 4096U
@@ -80,9 +83,15 @@
 #define CGROUP_ROOT "/sys/fs/cgroup"
 #endif
 #define EXEC_CGROUP CGROUP_ROOT "/nvx-exec"
+#ifndef HOSTFS_DIR
 #define HOSTFS_DIR "/run/nvx/hostfs"
+#endif
 #define HOSTFS_ROOT HOSTFS_DIR "/root"
-#define MAP_TOKEN "nvx_map="
+#define MAPS_TOKEN "nvx_maps="
+#define MAX_HOST_MAPPINGS 4096U
+#define MAPS_HEADER_LEN 8U
+#define MAP_ENTRY_HEADER_LEN 6U
+#define MAP_READ_ONLY 1U
 #define MAX_COMMAND_LINE 4096U
 #define MAX_GUEST_PATH 4096U
 
@@ -127,6 +136,16 @@ struct exec_config {
     uint16_t environment_count;
     int environment_present;
     int inherit_default_env;
+};
+
+/*
+ * Host mappings that nvx_maps= announces and APP_MAPS requests deliver. Until
+ * every announced mapping is mounted, workloads are refused.
+ */
+struct host_mappings {
+    uint32_t expected;
+    uint32_t applied;
+    int failed;
 };
 
 #define LAUNCH_STAGE_CWD 1
@@ -315,53 +334,6 @@ static int write_outer_record(
     return payload_len == 0 || write_all(fd, payload, payload_len) == 0 ? 0 : -1;
 }
 
-static int hex_digit(char value)
-{
-    if (value >= '0' && value <= '9') {
-        return value - '0';
-    }
-    if (value >= 'A' && value <= 'F') {
-        return value - 'A' + 10;
-    }
-    if (value >= 'a' && value <= 'f') {
-        return value - 'a' + 10;
-    }
-    return -1;
-}
-
-/* Decodes a percent-encoded field of length `length` into a NUL-terminated string. */
-static int percent_decode(const char *input, size_t length, char *output, size_t capacity)
-{
-    size_t index;
-    size_t used = 0;
-
-    for (index = 0; index < length; ++index) {
-        char value = input[index];
-
-        if (value == '%') {
-            int high;
-            int low;
-
-            if (index + 2 >= length) {
-                return -1;
-            }
-            high = hex_digit(input[index + 1]);
-            low = hex_digit(input[index + 2]);
-            if (high < 0 || low < 0) {
-                return -1;
-            }
-            value = (char)((high << 4) | low);
-            index += 2;
-        }
-        if (value == '\0' || used + 1 >= capacity) {
-            return -1;
-        }
-        output[used++] = value;
-    }
-    output[used] = '\0';
-    return 0;
-}
-
 /* Accepts a /-separated path without empty, "." (unless alone), or ".." components. */
 static int safe_path(const char *path, int absolute)
 {
@@ -423,20 +395,60 @@ static int make_directories(const char *path, int include_last)
 }
 
 /*
- * Bind-mounts each mapped host path at its guest target. The host's export is
- * mounted at HOSTFS_ROOT, whose parent only root may enter, so workloads reach
- * mapped paths only through these bind mounts. Every token has the form
- * nvx_map=SOURCE,TARGET,ro|rw with percent-encoded paths; SOURCE is relative to
- * the export, and "." is the export itself.
+ * Reads the number of host mappings that nvx_maps=COUNT announces into
+ * `count`, or 0 without the token. Tokens are split in place. Older hosts
+ * listed their mappings in nvx_map= tokens, which are ignored.
  */
-static int setup_host_mappings(void)
+static int parse_host_mapping_count(char *command_line, uint32_t *count)
 {
-    char command_line[MAX_COMMAND_LINE];
     char *token;
     char *cursor;
+    int found = 0;
+
+    *count = 0;
+    for (token = strtok_r(command_line, " \t\n", &cursor); token != NULL;
+         token = strtok_r(NULL, " \t\n", &cursor)) {
+        const char *digit = token + strlen(MAPS_TOKEN);
+        uint32_t value = 0;
+
+        if (strncmp(token, MAPS_TOKEN, strlen(MAPS_TOKEN)) != 0) {
+            continue;
+        }
+        if (found || *digit == '\0') {
+            errno = EINVAL;
+            return -1;
+        }
+        for (; *digit != '\0'; ++digit) {
+            if (*digit < '0' || *digit > '9' || value > MAX_HOST_MAPPINGS) {
+                errno = EINVAL;
+                return -1;
+            }
+            value = value * 10U + (uint32_t)(*digit - '0');
+        }
+        if (value == 0 || value > MAX_HOST_MAPPINGS) {
+            errno = EINVAL;
+            return -1;
+        }
+        *count = value;
+        found = 1;
+    }
+    return 0;
+}
+
+/*
+ * Reads the number of announced host mappings and, while the host's export is
+ * mounted at HOSTFS_ROOT, makes its parent a directory that only root may
+ * enter, so workloads reach mapped paths only through the bind mounts. The
+ * announced mappings need that export.
+ */
+static int prepare_host_mappings(struct host_mappings *mappings)
+{
+    char command_line[MAX_COMMAND_LINE];
+    struct stat parent;
+    struct stat export;
     ssize_t count;
+    int mounted;
     int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
-    int prepared = 0;
 
     if (fd < 0) {
         return -1;
@@ -447,95 +459,118 @@ static int setup_host_mappings(void)
         return -1;
     }
     command_line[count] = '\0';
-
-    for (token = strtok_r(command_line, " \n", &cursor); token != NULL;
-         token = strtok_r(NULL, " \n", &cursor)) {
-        char source[MAX_GUEST_PATH];
-        char target[MAX_GUEST_PATH];
-        char host[MAX_GUEST_PATH + sizeof(HOSTFS_ROOT) + 1];
-        const char *fields = token + strlen(MAP_TOKEN);
-        const char *first;
-        const char *second;
-        struct stat status;
-        unsigned long flags = MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV;
-
-        if (strncmp(token, MAP_TOKEN, strlen(MAP_TOKEN)) != 0) {
-            continue;
-        }
-        first = strchr(fields, ',');
-        second = first == NULL ? NULL : strchr(first + 1, ',');
-        if (second == NULL || strchr(second + 1, ',') != NULL ||
-            percent_decode(fields, (size_t)(first - fields), source, sizeof(source)) != 0 ||
-            percent_decode(first + 1, (size_t)(second - first - 1), target, sizeof(target)) !=
-                0 ||
-            !safe_path(source, 0) || !safe_path(target, 1)) {
-            errno = EINVAL;
-            return -1;
-        }
-        if (strcmp(second + 1, "ro") == 0) {
-            flags |= MS_RDONLY;
-        } else if (strcmp(second + 1, "rw") != 0) {
-            errno = EINVAL;
-            return -1;
-        }
-        if (!prepared) {
-            struct stat parent;
-            struct stat export;
-
-            /* The export must be a mount of its own, inside a root-only directory. */
-            if (stat(HOSTFS_DIR, &parent) != 0 || stat(HOSTFS_ROOT, &export) != 0 ||
-                parent.st_dev == export.st_dev || chown(HOSTFS_DIR, 0, 0) != 0 ||
-                chmod(HOSTFS_DIR, 0700) != 0) {
-                return -1;
-            }
-            prepared = 1;
-        }
-        if (strcmp(source, ".") == 0) {
-            snprintf(host, sizeof(host), "%s", HOSTFS_ROOT);
-        } else {
-            snprintf(host, sizeof(host), "%s/%s", HOSTFS_ROOT, source);
-        }
-        if (lstat(host, &status) != 0) {
-            return -1;
-        }
-        if (S_ISDIR(status.st_mode)) {
-            if (make_directories(target, 1) != 0) {
-                return -1;
-            }
-        } else if (S_ISREG(status.st_mode)) {
-            struct stat existing;
-
-            if (make_directories(target, 0) != 0) {
-                return -1;
-            }
-            /*
-             * An existing target may lie inside an earlier read-only bind, where
-             * even O_CREAT with write access fails, so only a missing one is made.
-             */
-            if (lstat(target, &existing) != 0) {
-                int file;
-
-                if (errno != ENOENT) {
-                    return -1;
-                }
-                file = open(target, O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
-                if (file < 0) {
-                    return -1;
-                }
-                close(file);
-            } else if (!S_ISREG(existing.st_mode)) {
-                errno = EINVAL;
-                return -1;
-            }
-        } else {
-            errno = EINVAL;
-            return -1;
-        }
-        if (mount(host, target, NULL, MS_BIND, NULL) != 0 ||
-            mount(NULL, target, NULL, flags, NULL) != 0) {
-            return -1;
-        }
+    if (parse_host_mapping_count(command_line, &mappings->expected) != 0) {
+        return -1;
     }
+    mounted = stat(HOSTFS_DIR, &parent) == 0 && stat(HOSTFS_ROOT, &export) == 0 &&
+              parent.st_dev != export.st_dev;
+    if (mounted && (chown(HOSTFS_DIR, 0, 0) != 0 || chmod(HOSTFS_DIR, 0700) != 0)) {
+        return -1;
+    }
+    if (mappings->expected != 0 && !mounted) {
+        errno = ENOENT;
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Bind-mounts SOURCE, a path relative to the export, at the guest path TARGET,
+ * read-only or read-write, without set-user-ID programs or device nodes.
+ */
+static int apply_host_mapping(const char *source, const char *target, int read_only)
+{
+    char host[MAX_GUEST_PATH + sizeof(HOSTFS_ROOT) + 1];
+    struct stat status;
+    unsigned long flags = MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV;
+
+    if (read_only) {
+        flags |= MS_RDONLY;
+    }
+    snprintf(host, sizeof(host), "%s/%s", HOSTFS_ROOT, source);
+    if (lstat(host, &status) != 0) {
+        return -1;
+    }
+    if (S_ISDIR(status.st_mode)) {
+        if (make_directories(target, 1) != 0) {
+            return -1;
+        }
+    } else if (S_ISREG(status.st_mode)) {
+        struct stat existing;
+
+        if (make_directories(target, 0) != 0) {
+            return -1;
+        }
+        /*
+         * An existing target may lie inside an earlier read-only bind, where
+         * even O_CREAT with write access fails, so only a missing one is made.
+         */
+        if (lstat(target, &existing) != 0) {
+            int file;
+
+            if (errno != ENOENT) {
+                return -1;
+            }
+            file = open(target, O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
+            if (file < 0) {
+                return -1;
+            }
+            close(file);
+        } else if (!S_ISREG(existing.st_mode)) {
+            errno = EINVAL;
+            return -1;
+        }
+    } else {
+        errno = EINVAL;
+        return -1;
+    }
+    if (mount(host, target, NULL, MS_BIND, NULL) != 0 ||
+        mount(NULL, target, NULL, flags, NULL) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Decodes the APP_MAPS entry at `*offset` and advances past it: 16-bit flags,
+ * source length, and target length, then the source, a relative path of the
+ * export, and the target, an absolute guest path.
+ */
+static int decode_host_mapping(
+    const uint8_t *payload,
+    uint32_t payload_len,
+    uint32_t *offset,
+    char *source,
+    char *target,
+    int *read_only)
+{
+    uint16_t flags;
+    uint16_t source_len;
+    uint16_t target_len;
+
+    if (payload_len - *offset < MAP_ENTRY_HEADER_LEN) {
+        return -1;
+    }
+    flags = read_u16(payload + *offset);
+    source_len = read_u16(payload + *offset + 2);
+    target_len = read_u16(payload + *offset + 4);
+    *offset += MAP_ENTRY_HEADER_LEN;
+    if ((flags & ~MAP_READ_ONLY) != 0 || source_len == 0 || target_len == 0 ||
+        source_len >= MAX_GUEST_PATH || target_len >= MAX_GUEST_PATH ||
+        payload_len - *offset < (uint32_t)source_len + target_len) {
+        return -1;
+    }
+    memcpy(source, payload + *offset, source_len);
+    source[source_len] = '\0';
+    *offset += source_len;
+    memcpy(target, payload + *offset, target_len);
+    target[target_len] = '\0';
+    *offset += target_len;
+    if (strlen(source) != source_len || strlen(target) != target_len ||
+        strcmp(source, ".") == 0 || !safe_path(source, 0) || !safe_path(target, 1)) {
+        return -1;
+    }
+    *read_only = (flags & MAP_READ_ONLY) != 0;
     return 0;
 }
 
@@ -2090,22 +2125,161 @@ static uint32_t agent_features(const struct agent_config *config)
         FEATURE_CANCEL | FEATURE_WORKLOAD_ACCOUNT | FEATURE_EXEC_ENVIRONMENT;
 
     if (config->direct) {
-        features |= FEATURE_HOST_MAPPINGS | FEATURE_EXEC_CGROUP | FEATURE_EXEC_CWD;
+        features |= FEATURE_HOST_MAPPING_TABLE | FEATURE_EXEC_CGROUP | FEATURE_EXEC_CWD;
     }
     return features;
 }
 
-static int handle_data_record(
+/*
+ * Mounts the entries FIRST to FIRST + COUNT - 1 of the host mapping table that
+ * an APP_MAPS request carries after its 32-bit FIRST and COUNT. Entries arrive
+ * in order and only up to the number that nvx_maps= announced, before any
+ * workload runs. The whole request is checked before anything is mounted, and
+ * a mapping that fails to mount fails every later workload.
+ */
+static int handle_host_mappings(
+    struct control_session *session,
+    struct host_mappings *mappings,
+    const struct app_request *request)
+{
+    char source[MAX_GUEST_PATH];
+    char target[MAX_GUEST_PATH];
+    uint32_t first;
+    uint32_t count;
+    uint32_t index;
+    uint32_t offset = MAPS_HEADER_LEN;
+    int read_only;
+
+    if (mappings->failed || request->payload_len < MAPS_HEADER_LEN) {
+        return send_app_error(session, request->request_id, 22, "invalid-request");
+    }
+    first = read_u32(request->payload);
+    count = read_u32(request->payload + 4);
+    if (first != mappings->applied || count == 0 ||
+        count > mappings->expected - mappings->applied) {
+        return send_app_error(session, request->request_id, 22, "invalid-request");
+    }
+    for (index = 0; index < count; ++index) {
+        if (decode_host_mapping(
+                request->payload, request->payload_len, &offset, source, target,
+                &read_only) != 0) {
+            return send_app_error(session, request->request_id, 22, "invalid-request");
+        }
+    }
+    if (offset != request->payload_len) {
+        return send_app_error(session, request->request_id, 22, "invalid-request");
+    }
+    offset = MAPS_HEADER_LEN;
+    for (index = 0; index < count; ++index) {
+        decode_host_mapping(
+            request->payload, request->payload_len, &offset, source, target, &read_only);
+        if (apply_host_mapping(source, target, read_only) != 0) {
+            int status = errno;
+
+            mappings->failed = 1;
+            portb_error("host-mapping", status);
+            dprintf(
+                STDERR_FILENO,
+                "NVX-MANAGED-ERROR: stage=host-mapping status=%d entry=%u\n",
+                status,
+                (unsigned)(first + index));
+            return send_app_error(session, request->request_id, status, "mapping-failed");
+        }
+        ++mappings->applied;
+    }
+    return send_app_frame(session, APP_READY, request->request_id, 0, NULL, 0);
+}
+
+/* Serves one application request of the authenticated host. */
+static int handle_app_request(
     struct control_session *session,
     const struct agent_config *config,
-    const struct outer_record *record)
+    struct host_mappings *mappings,
+    const struct app_request *request)
 {
-    struct app_request request;
     char **workload_argv = NULL;
     uint8_t features[4];
     struct exec_config exec_config = {0};
     uint32_t timeout_ms = 0;
     int result;
+
+    switch (request->kind) {
+    case APP_PING:
+        if (request->payload_len != 0) {
+            portb_error("ping-payload", (int)request->payload_len);
+            return send_app_error(
+                session, request->request_id, 22, "invalid-request");
+        }
+        result = send_app_frame(
+            session, APP_READY, request->request_id, 0, NULL, 0);
+        if (result != 0) {
+            portb_error("ping-ready", errno);
+        }
+        return result;
+    case APP_EXEC:
+        /* Workloads must not run without the host paths that they expect. */
+        if (mappings->applied != mappings->expected) {
+            return send_app_error(
+                session, request->request_id, EAGAIN, "mappings-incomplete");
+        }
+        if (decode_exec_payload(
+                request->payload,
+                request->payload_len,
+                &timeout_ms,
+                &workload_argv,
+                &exec_config) != 0) {
+            return send_app_error(
+                session, request->request_id, 22, "invalid-request");
+        }
+        result = run_exec(
+            session,
+            config,
+            request->request_id,
+            timeout_ms,
+            workload_argv,
+            &exec_config);
+        free_arguments(workload_argv);
+        free_exec_config(&exec_config);
+        return result;
+    case APP_CANCEL:
+        /* The targeted workload already finished and reported its outcome. */
+        return 0;
+    case APP_FEATURES:
+        if (request->payload_len != 0) {
+            return send_app_error(
+                session, request->request_id, 22, "invalid-request");
+        }
+        write_u32(features, agent_features(config));
+        return send_app_frame(
+            session,
+            APP_READY,
+            request->request_id,
+            0,
+            features,
+            sizeof(features));
+    case APP_MAPS:
+        return handle_host_mappings(session, mappings, request);
+    case APP_STOP:
+        if (request->payload_len != 0 ||
+            send_app_frame(
+                session, APP_STOPPED, request->request_id, 0, NULL, 0) != 0) {
+            return -1;
+        }
+        tcdrain(session->fd);
+        return AGENT_STOPPED;
+    default:
+        return send_app_error(
+            session, request->request_id, 95, "unsupported-operation");
+    }
+}
+
+static int handle_data_record(
+    struct control_session *session,
+    const struct agent_config *config,
+    struct host_mappings *mappings,
+    const struct outer_record *record)
+{
+    struct app_request request;
 
     if (record->sequence != session->host_sequence) {
         portb_error("data-sequence", (int)record->sequence);
@@ -2125,73 +2299,13 @@ static int handle_data_record(
         portb_error("data-credit", (int)record->payload_len);
         return -1;
     }
-
-    switch (request.kind) {
-    case APP_PING:
-        if (request.payload_len != 0) {
-            portb_error("ping-payload", (int)request.payload_len);
-            return send_app_error(
-                session, request.request_id, 22, "invalid-request");
-        }
-        result = send_app_frame(
-            session, APP_READY, request.request_id, 0, NULL, 0);
-        if (result != 0) {
-            portb_error("ping-ready", errno);
-        }
-        return result;
-    case APP_EXEC:
-        if (decode_exec_payload(
-                request.payload,
-                request.payload_len,
-                &timeout_ms,
-                &workload_argv,
-                &exec_config) != 0) {
-            return send_app_error(
-                session, request.request_id, 22, "invalid-request");
-        }
-        result = run_exec(
-            session,
-            config,
-            request.request_id,
-            timeout_ms,
-            workload_argv,
-            &exec_config);
-        free_arguments(workload_argv);
-        free_exec_config(&exec_config);
-        return result;
-    case APP_CANCEL:
-        /* The targeted workload already finished and reported its outcome. */
-        return 0;
-    case APP_FEATURES:
-        if (request.payload_len != 0) {
-            return send_app_error(
-                session, request.request_id, 22, "invalid-request");
-        }
-        write_u32(features, agent_features(config));
-        return send_app_frame(
-            session,
-            APP_READY,
-            request.request_id,
-            0,
-            features,
-            sizeof(features));
-    case APP_STOP:
-        if (request.payload_len != 0 ||
-            send_app_frame(
-                session, APP_STOPPED, request.request_id, 0, NULL, 0) != 0) {
-            return -1;
-        }
-        tcdrain(session->fd);
-        return AGENT_STOPPED;
-    default:
-        return send_app_error(
-            session, request.request_id, 95, "unsupported-operation");
-    }
+    return handle_app_request(session, config, mappings, &request);
 }
 
 static int run_agent(
     struct control_session *session,
-    const struct agent_config *config)
+    const struct agent_config *config,
+    struct host_mappings *mappings)
 {
     struct outer_record record;
 
@@ -2210,7 +2324,7 @@ static int run_agent(
                 return -1;
             }
         } else if (record.type == OUTER_DATA) {
-            int result = handle_data_record(session, config, &record);
+            int result = handle_data_record(session, config, mappings, &record);
 
             if (result == AGENT_STOPPED) {
                 free_outer_record(&record);
@@ -2249,6 +2363,7 @@ static int finish_agent(const struct agent_config *config, int status)
 int main(int argc, char **argv)
 {
     struct control_session session = {0};
+    struct host_mappings mappings = {0};
     struct agent_config config;
     int result;
 
@@ -2275,7 +2390,7 @@ int main(int argc, char **argv)
             status);
         return finish_agent(&config, 125);
     }
-    if (config.direct && setup_host_mappings() != 0) {
+    if (config.direct && prepare_host_mappings(&mappings) != 0) {
         int status = errno;
         portb_error("host-mappings", status);
         dprintf(
@@ -2295,7 +2410,7 @@ int main(int argc, char **argv)
         close(session.fd);
         return finish_agent(&config, 125);
     }
-    result = run_agent(&session, &config);
+    result = run_agent(&session, &config, &mappings);
     if (result == AGENT_STOPPED) {
         close(session.fd);
         return finish_agent(&config, 0);

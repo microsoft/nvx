@@ -28,6 +28,7 @@ pub(crate) const APP_EXEC: u8 = 2;
 pub(crate) const APP_STOP: u8 = 3;
 pub(crate) const APP_CANCEL: u8 = 4;
 pub(crate) const APP_FEATURES: u8 = 5;
+pub(crate) const APP_MAPS: u8 = 6;
 pub(crate) const APP_READY: u8 = 0x81;
 pub(crate) const APP_STDOUT: u8 = 0x82;
 pub(crate) const APP_STDERR: u8 = 0x83;
@@ -42,6 +43,12 @@ pub(crate) const LAUNCH_FAILED: &str = "launch-failed";
 /// Error category with which a guest agent reports a working directory that the workload cannot
 /// enter. The status is the guest's error number, and nothing of the workload ran.
 pub(crate) const CWD_FAILED: &str = "cwd-failed";
+/// Error category with which a guest agent refuses a workload until it has applied every host
+/// mapping that the kernel command line announced.
+pub(crate) const MAPPINGS_INCOMPLETE: &str = "mappings-incomplete";
+/// Error category with which a guest agent reports a host mapping that it could not apply. The
+/// status is the guest's error number.
+pub(crate) const MAPPING_FAILED: &str = "mapping-failed";
 
 /// Length of the launch capability that authenticates the host client.
 pub(crate) const CAPABILITY_LEN: usize = 32;
@@ -59,11 +66,18 @@ pub(crate) const MAX_ENVIRONMENT: usize = 256;
 pub(crate) const MAX_TIMEOUT_MS: u32 = u32::MAX;
 /// Largest combined stdout and stderr volume the guest agent forwards for one execution.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Largest number of host mappings that the guest agent accepts.
+pub(crate) const MAX_HOST_MAPPINGS: usize = 4096;
+/// Largest source or target of one host mapping: Linux's `PATH_MAX` without the terminating NUL.
+pub(crate) const MAX_MAP_PATH_BYTES: usize = 4095;
 
 const EXEC_EXTENDED: u16 = 1;
 const EXEC_CWD_PRESENT: u16 = 1 << 0;
 const EXEC_ENVIRONMENT_PRESENT: u16 = 1 << 1;
 const EXEC_INHERIT_DEFAULT_ENV: u16 = 1 << 2;
+const MAPS_HEADER_LEN: usize = 8;
+const MAP_ENTRY_HEADER_LEN: usize = 6;
+const MAP_READ_ONLY: u16 = 1 << 0;
 
 /// Protocol violation detected while encoding or decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +325,82 @@ pub(crate) fn encode_exec_payload(workload: &Workload<'_>) -> Result<Vec<u8>, Pr
     Ok(payload)
 }
 
+/// One bind mount of the host mapping table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostMap {
+    /// Path of the mapped object relative to the guest's mount of the export, `/`-separated.
+    pub(crate) source: String,
+    /// Absolute guest path at which the guest agent mounts it.
+    pub(crate) target: String,
+    /// Whether the guest agent mounts it read-only.
+    pub(crate) read_only: bool,
+}
+
+/// Encodes the host mapping table as the payloads of consecutive `APP_MAPS` requests, each at
+/// most `limit` bytes long.
+///
+/// A payload holds the index of its first entry and its number of entries, so the guest agent
+/// applies the entries in order and only up to the number that the kernel command line
+/// announced. Each entry holds its flags, the lengths of its source and target, and then both.
+/// The guest agent requires 1 to [`MAX_HOST_MAPPINGS`] entries, a relative source and an
+/// absolute target of at most [`MAX_MAP_PATH_BYTES`] without NUL bytes.
+pub(crate) fn encode_maps_payloads(
+    maps: &[HostMap],
+    limit: usize,
+) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    if maps.is_empty() || maps.len() > MAX_HOST_MAPPINGS {
+        return Err(violation(format!(
+            "a host mapping table holds 1 to {MAX_HOST_MAPPINGS} entries"
+        )));
+    }
+    let mut payloads = Vec::new();
+    let mut payload = Vec::new();
+    let mut count = 0u32;
+    for (index, map) in maps.iter().enumerate() {
+        let (source, target) = (map.source.as_bytes(), map.target.as_bytes());
+        if source.is_empty()
+            || source.starts_with(b"/")
+            || !target.starts_with(b"/")
+            || source.len() > MAX_MAP_PATH_BYTES
+            || target.len() > MAX_MAP_PATH_BYTES
+            || source.contains(&0)
+            || target.contains(&0)
+        {
+            return Err(violation(format!(
+                "a host mapping needs a relative source and an absolute target of at most \
+                 {MAX_MAP_PATH_BYTES} bytes without NUL characters"
+            )));
+        }
+        let entry_len = MAP_ENTRY_HEADER_LEN + source.len() + target.len();
+        if MAPS_HEADER_LEN + entry_len > limit {
+            return Err(violation(
+                "a host mapping exceeds the control protocol limit",
+            ));
+        }
+        if count > 0 && payload.len() + entry_len > limit {
+            payload[4..8].copy_from_slice(&count.to_le_bytes());
+            payloads.push(std::mem::take(&mut payload));
+            count = 0;
+        }
+        if count == 0 {
+            let first = u32::try_from(index).unwrap_or(u32::MAX);
+            payload.extend_from_slice(&first.to_le_bytes());
+            payload.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let flags = if map.read_only { MAP_READ_ONLY } else { 0 };
+        let length = |bytes: &[u8]| u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+        payload.extend_from_slice(&flags.to_le_bytes());
+        payload.extend_from_slice(&length(source).to_le_bytes());
+        payload.extend_from_slice(&length(target).to_le_bytes());
+        payload.extend_from_slice(source);
+        payload.extend_from_slice(target);
+        count += 1;
+    }
+    payload[4..8].copy_from_slice(&count.to_le_bytes());
+    payloads.push(payload);
+    Ok(payloads)
+}
+
 /// Control features of a guest image, advertised in the response to `APP_FEATURES`.
 ///
 /// The bits are defined by the guest agent in `guest/common/nvx-managed-agent.c`, which also
@@ -325,8 +415,8 @@ impl GuestFeatures {
     pub(crate) const NONE: Self = Self(0);
     /// Terminates a workload on `APP_CANCEL` and reports the `cancelled` exit category.
     pub(crate) const CANCEL: Self = Self(1 << 0);
-    /// Bind-mounts the `nvx_map=` host paths and keeps the shared export root-only.
-    pub(crate) const HOST_MAPPINGS: Self = Self(1 << 1);
+    // Bit 1 announced the bind mounts that `nvx_map=` kernel command-line tokens listed. Guests
+    // no longer set it, so a host that still sends those tokens refuses them.
     /// Creates the account that `nvx_workload_account=create` selects.
     pub(crate) const WORKLOAD_ACCOUNT: Self = Self(1 << 2);
     /// Runs each workload in a cgroup of its own and kills whatever it leaves behind.
@@ -338,23 +428,27 @@ impl GuestFeatures {
     /// entered with the workload's identity, and refuses the launch with the `cwd-failed`
     /// category when the workload cannot enter it.
     pub(crate) const EXEC_CWD: Self = Self(1 << 5);
+    /// Bind-mounts the host mapping table of `APP_MAPS` requests, as many entries as the
+    /// `nvx_maps=` kernel command-line token announces, keeps the shared export root-only, and
+    /// refuses workloads until every entry is mounted.
+    pub(crate) const HOST_MAPPING_TABLE: Self = Self(1 << 6);
     /// The features that the openvmm backend depends on.
     pub(crate) const REQUIRED: Self = Self(
         Self::CANCEL.0
-            | Self::HOST_MAPPINGS.0
             | Self::WORKLOAD_ACCOUNT.0
             | Self::EXEC_CGROUP.0
             | Self::EXEC_ENVIRONMENT.0
-            | Self::EXEC_CWD.0,
+            | Self::EXEC_CWD.0
+            | Self::HOST_MAPPING_TABLE.0,
     );
 
     const NAMES: [(Self, &'static str); 6] = [
         (Self::CANCEL, "cancellation"),
-        (Self::HOST_MAPPINGS, "host path mappings"),
         (Self::WORKLOAD_ACCOUNT, "workload accounts"),
         (Self::EXEC_CGROUP, "workload containment"),
         (Self::EXEC_ENVIRONMENT, "per-execution environments"),
         (Self::EXEC_CWD, "working directories"),
+        (Self::HOST_MAPPING_TABLE, "host path mapping tables"),
     ];
 
     /// Decodes the payload of a features response.
@@ -709,14 +803,19 @@ mod tests {
         assert_eq!(
             cancel_only.missing(required),
             [
-                "host path mappings",
                 "workload accounts",
                 "workload containment",
                 "per-execution environments",
                 "working directories",
+                "host path mapping tables",
             ]
         );
         assert!(GuestFeatures::decode(&[1, 0, 0]).is_err());
+
+        // A guest of the previous release announced its host mappings with bit 1, which no
+        // longer counts.
+        let previous = GuestFeatures::decode(&0b11_1111u32.to_le_bytes()).unwrap();
+        assert_eq!(previous.missing(required), ["host path mapping tables"]);
 
         // Every required feature has a name, so a refusal can say what is missing.
         assert_eq!(
@@ -727,12 +826,132 @@ mod tests {
 
     #[test]
     fn guest_features_use_distinct_bits() {
-        let mut seen = 0u32;
+        let mut seen = 1u32 << 1;
         for (feature, name) in GuestFeatures::NAMES {
             assert_eq!(feature.0.count_ones(), 1, "{name}");
             assert_eq!(seen & feature.0, 0, "{name} reuses a feature bit");
             seen |= feature.0;
         }
+    }
+
+    fn map(source: &str, target: &str, read_only: bool) -> HostMap {
+        HostMap {
+            source: source.to_owned(),
+            target: target.to_owned(),
+            read_only,
+        }
+    }
+
+    // Golden vector produced with Python's struct module: "<II", then "<HHH" before each entry.
+    #[test]
+    fn maps_payload_lists_each_entry_after_its_position() {
+        let payloads = encode_maps_payloads(
+            &[map("0", "/w", false), map("1/a b", "/t/x", true)],
+            OUTER_MAX_PAYLOAD - APP_HEADER_LEN,
+        )
+        .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            hex(&payloads[0]),
+            concat!(
+                "0000000002000000",
+                "000001000200",
+                "30",
+                "2f77",
+                "010005000400",
+                "312f612062",
+                "2f742f78",
+            )
+        );
+    }
+
+    #[test]
+    fn maps_payloads_are_split_to_fit_the_limit() {
+        let maps: Vec<HostMap> = (0..10)
+            .map(|index| {
+                map(
+                    &format!("0/{index:02}"),
+                    &format!("/work/{index:02}"),
+                    index % 2 == 0,
+                )
+            })
+            .collect();
+        // Each entry takes 6 + 4 + 8 bytes, so a 64-byte payload holds 3 entries.
+        let payloads = encode_maps_payloads(&maps, 64).unwrap();
+        assert_eq!(payloads.len(), 4);
+        let mut next = 0u32;
+        for payload in &payloads {
+            assert!(payload.len() <= 64);
+            assert_eq!(u32::from_le_bytes(array(&payload[..4])), next);
+            let count = u32::from_le_bytes(array(&payload[4..8]));
+            let mut offset = MAPS_HEADER_LEN;
+            for index in next..next + count {
+                let field =
+                    |at: usize| usize::from(u16::from_le_bytes(array(&payload[at..at + 2])));
+                let flags = field(offset);
+                let source_len = field(offset + 2);
+                let target_len = field(offset + 4);
+                offset += MAP_ENTRY_HEADER_LEN;
+                let expected = &maps[index as usize];
+                assert_eq!(flags == usize::from(MAP_READ_ONLY), expected.read_only);
+                assert_eq!(
+                    &payload[offset..offset + source_len],
+                    expected.source.as_bytes()
+                );
+                offset += source_len;
+                assert_eq!(
+                    &payload[offset..offset + target_len],
+                    expected.target.as_bytes()
+                );
+                offset += target_len;
+            }
+            assert_eq!(offset, payload.len());
+            next += count;
+        }
+        assert_eq!(next, 10);
+
+        // The largest table fits the control protocol in a few requests.
+        let long = format!("/{}", "t".repeat(MAX_MAP_PATH_BYTES - 1));
+        let largest: Vec<HostMap> = (0..MAX_HOST_MAPPINGS)
+            .map(|index| map(&format!("0/{index}"), &long, false))
+            .collect();
+        let payloads = encode_maps_payloads(&largest, OUTER_MAX_PAYLOAD - APP_HEADER_LEN).unwrap();
+        assert!(
+            payloads
+                .iter()
+                .all(|payload| APP_HEADER_LEN + payload.len() <= OUTER_MAX_PAYLOAD)
+        );
+        assert_eq!(
+            payloads
+                .iter()
+                .map(|payload| u32::from_le_bytes(array(&payload[4..8])))
+                .sum::<u32>() as usize,
+            MAX_HOST_MAPPINGS
+        );
+    }
+
+    #[test]
+    fn maps_payloads_enforce_agent_limits() {
+        let limit = OUTER_MAX_PAYLOAD - APP_HEADER_LEN;
+        let too_long = format!("/{}", "t".repeat(MAX_MAP_PATH_BYTES));
+        for invalid in [
+            map("", "/w", false),
+            map("/0", "/w", false),
+            map("0", "w", false),
+            map("0", &too_long, false),
+            map("0\0", "/w", false),
+            map("0", "/w\0", false),
+        ] {
+            assert!(
+                encode_maps_payloads(std::slice::from_ref(&invalid), limit).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert!(encode_maps_payloads(&[], limit).is_err());
+        let too_many = vec![map("0", "/w", true); MAX_HOST_MAPPINGS + 1];
+        assert!(encode_maps_payloads(&too_many, limit).is_err());
+        // An entry that cannot fit any request is refused rather than split.
+        assert!(encode_maps_payloads(&[map("0", "/abcdefghijklmnop", true)], 20).is_err());
     }
 
     fn guest_agent_source() -> Option<String> {
@@ -749,14 +968,17 @@ mod tests {
         let Some(source) = guest_agent_source() else {
             return;
         };
-        let mut definitions = vec![format!("#define APP_FEATURES {APP_FEATURES}U")];
+        let mut definitions = vec![
+            format!("#define APP_FEATURES {APP_FEATURES}U"),
+            format!("#define APP_MAPS {APP_MAPS}U"),
+        ];
         for (name, feature) in [
             ("CANCEL", GuestFeatures::CANCEL),
-            ("HOST_MAPPINGS", GuestFeatures::HOST_MAPPINGS),
             ("WORKLOAD_ACCOUNT", GuestFeatures::WORKLOAD_ACCOUNT),
             ("EXEC_CGROUP", GuestFeatures::EXEC_CGROUP),
             ("EXEC_ENVIRONMENT", GuestFeatures::EXEC_ENVIRONMENT),
             ("EXEC_CWD", GuestFeatures::EXEC_CWD),
+            ("HOST_MAPPING_TABLE", GuestFeatures::HOST_MAPPING_TABLE),
         ] {
             let bit = feature.0.trailing_zeros();
             definitions.push(format!("#define FEATURE_{name} (1U << {bit})"));
@@ -765,6 +987,30 @@ mod tests {
             assert!(
                 source.contains(&definition),
                 "the guest agent does not define `{definition}`"
+            );
+        }
+        // The retired bit stays unused, so hosts that need it refuse the image.
+        assert!(!source.contains("(1U << 1)"));
+    }
+
+    #[test]
+    fn host_mapping_table_matches_the_guest_agent_source() {
+        let Some(source) = guest_agent_source() else {
+            return;
+        };
+        for expected in [
+            format!("#define MAX_HOST_MAPPINGS {MAX_HOST_MAPPINGS}U"),
+            format!("#define MAX_GUEST_PATH {}U", MAX_MAP_PATH_BYTES + 1),
+            format!("#define MAPS_HEADER_LEN {MAPS_HEADER_LEN}U"),
+            format!("#define MAP_ENTRY_HEADER_LEN {MAP_ENTRY_HEADER_LEN}U"),
+            format!("#define MAP_READ_ONLY {MAP_READ_ONLY}U"),
+            "#define MAPS_TOKEN \"nvx_maps=\"".to_owned(),
+            format!("\"{MAPPINGS_INCOMPLETE}\""),
+            format!("\"{MAPPING_FAILED}\""),
+        ] {
+            assert!(
+                source.contains(&expected),
+                "the guest agent does not contain `{expected}`"
             );
         }
     }

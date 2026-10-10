@@ -6,18 +6,23 @@ fail() {
     exit "$code"
 }
 
-grep -q '^microvm /workspace virtiofs rw' /proc/mounts || fail 80
-grep -q '^microvm1 /opt/hostedtoolcache virtiofs ro' /proc/mounts || fail 81
+grep -q '^microvm /run/nvx/shares virtiofs rw' /proc/mounts || fail 80
+grep -q '^microvm /workspace virtiofs rw' /proc/mounts || fail 81
+grep -q '^microvm /opt/hostedtoolcache virtiofs ro' /proc/mounts || fail 82
 exec 3<>/workspace/journal
 printf NVX-BEFORE >&3
 echo NVX-FILESYSTEM-SHARES-BEFORE
 nvx-snapshot
 printf NVX-AFTER >&3
 exec 3>&-
-[ "$(cat /workspace/journal)" = NVX-BEFORENVX-AFTER ] || fail 82
-[ "$(cat /opt/hostedtoolcache/seed)" = NVX-TOOLCACHE ] || fail 83
+[ "$(cat /workspace/journal)" = NVX-BEFORENVX-AFTER ] || fail 83
+[ "$(cat /opt/hostedtoolcache/seed)" = NVX-TOOLCACHE ] || fail 84
 if touch /opt/hostedtoolcache/mutation 2>/dev/null; then
-    fail 84
+    fail 85
 fi
+if touch /run/nvx/shares/1/mutation 2>/dev/null; then
+    fail 86
+fi
+[ "$(ls /srv/data | tr '\n' '|')" = "notes one.txt|public|" ] || fail 87
 echo NVX-FILESYSTEM-SHARES-AFTER
 nvx-exit 0

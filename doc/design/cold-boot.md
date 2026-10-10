@@ -96,14 +96,13 @@ tokens. A fresh boot then appends host-owned tokens in this order:
    `nvx_workload_gid=`) and workload lifecycle (`nvx_lifecycle=`);
 3. `nvx_snapshot_tier=<tier>` for a capture with sandbox blocks;
 4. device-discovery tokens in fixed address order: network, the first
-   filesystem slot, boot console, sandbox blocks, the control console followed
-   by `nvx_control_tty=hvc2`, and the second filesystem slot when a second
-   HostFs export is attached; and
+   filesystem slot, boot console, sandbox blocks, and the control console
+   followed by `nvx_control_tty=hvc2`; and
 5. network bootstrap tokens, including gateway DNS only when the egress
    policy permits it, which names the IPv4 gateway or else the IPv6 one,
    followed by
    [filesystem bootstrap tokens](machine-and-device-abi.md#filesystem) for
-   each attached HostFs export, in slot order.
+   the attached HostFs export or aggregate.
 
 The command line carries no clock parameter: the guest reads its TSC and
 LAPIC rates from the [time ABI](time-abi.md#rates) MSRs, and a

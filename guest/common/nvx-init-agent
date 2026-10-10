@@ -168,6 +168,61 @@ validate_share_target() {
     esac
 }
 
+# Creates the mount point of the live share target $1 inside the container
+# rootfs one component at a time, so that a symbolic link in a container layer
+# cannot redirect the share outside that rootfs, and sets share_path to it.
+make_share_mount_point() {
+    share_path=$rootfs
+    share_remainder=${1#/}
+    while [ -n "$share_remainder" ]; do
+        share_component=${share_remainder%%/*}
+        if [ "$share_component" = "$share_remainder" ]; then
+            share_remainder=
+        else
+            share_remainder=${share_remainder#*/}
+        fi
+        share_path=$share_path/$share_component
+        if [ -L "$share_path" ]; then
+            fatal "live share target crosses a symbolic link: $1"
+        elif [ -e "$share_path" ]; then
+            [ -d "$share_path" ] ||
+                fatal "live share target is not a directory: $1"
+        else
+            mkdir -m 0755 "$share_path" ||
+                fatal "failed to create live share target $1"
+        fi
+    done
+}
+
+# Records a mounted live share for teardown, most recent first.
+record_live_share() {
+    share_mountpoints="$1${share_mountpoints:+
+$share_mountpoints}"
+}
+
+# Checks that the live share target $1 is valid and that no other share hides
+# or shadows it.
+claim_share_target() {
+    validate_share_target "$1"
+    set -f
+    for mounted_target in $share_targets; do
+        case "$1/" in
+            "$mounted_target"/*)
+                set +f
+                fatal "live share targets overlap: $mounted_target and $1"
+                ;;
+        esac
+        case "$mounted_target/" in
+            "$1"/*)
+                set +f
+                fatal "live share targets overlap: $mounted_target and $1"
+                ;;
+        esac
+    done
+    set +f
+    share_targets="$share_targets $1"
+}
+
 mount_live_share() {
     share_tag=$1
     share_target=$2
@@ -179,99 +234,136 @@ mount_live_share() {
         ro | rw) ;;
         *) fatal "live share mode is unsupported: $share_mode" ;;
     esac
-    validate_share_target "$share_target"
-    # Each share has its own tag, and no share may hide or shadow another.
-    case " $share_tags " in
-        *" $share_tag "*) fatal "live share tag is not unique: $share_tag" ;;
-    esac
-    set -f
-    for mounted_target in $share_targets; do
-        case "$share_target/" in
-            "$mounted_target"/*)
-                set +f
-                fatal "live share targets overlap: $mounted_target and $share_target"
-                ;;
-        esac
-        case "$mounted_target/" in
-            "$share_target"/*)
-                set +f
-                fatal "live share targets overlap: $mounted_target and $share_target"
-                ;;
-        esac
-    done
-    set +f
-
-    # Create the mount point one component at a time so that a symbolic link in
-    # a container layer cannot redirect the share outside the container rootfs.
-    share_path=$rootfs
-    share_remainder=${share_target#/}
-    while [ -n "$share_remainder" ]; do
-        share_component=${share_remainder%%/*}
-        if [ "$share_component" = "$share_remainder" ]; then
-            share_remainder=
-        else
-            share_remainder=${share_remainder#*/}
-        fi
-        share_path=$share_path/$share_component
-        if [ -L "$share_path" ]; then
-            fatal "live share target crosses a symbolic link: $share_target"
-        elif [ -e "$share_path" ]; then
-            [ -d "$share_path" ] ||
-                fatal "live share target is not a directory: $share_target"
-        else
-            mkdir -m 0755 "$share_path" ||
-                fatal "failed to create live share target $share_target"
-        fi
-    done
+    claim_share_target "$share_target"
+    make_share_mount_point "$share_target"
     mount -t virtiofs -o "$share_mode,nosuid,nodev" "$share_tag" "$share_path" ||
         fatal "failed to mount live share $share_tag at $share_target"
-    share_mountpoints="$share_path${share_mountpoints:+
-$share_mountpoints}"
-    share_tags="$share_tags $share_tag"
-    share_targets="$share_targets $share_target"
+    record_live_share "$share_path"
     echo "NVX-SANDBOX-SHARE: target=$share_target mode=$share_mode tag=$share_tag"
 }
 
+# Splits the aggregate child specification $1, CHILD,TARGET,MODE, into
+# child_name, child_target, and child_mode.
+parse_share_child() {
+    child_name=${1%%,*}
+    child_rest=${1#*,}
+    child_target=${child_rest%,*}
+    child_mode=${child_rest##*,}
+    if [ "$child_rest" = "$1" ] || [ "$child_target" = "$child_rest" ]; then
+        fatal "live share child is invalid: $1"
+    fi
+    case "$child_name" in
+        '' | . | .. | *[!A-Za-z0-9._-]*) fatal "live share child is invalid: $1" ;;
+    esac
+    case "$child_mode" in
+        ro | rw) ;;
+        *) fatal "live share mode is unsupported: $child_mode" ;;
+    esac
+}
+
+# Binds child $2 of the aggregate share mounted at $1 at the target $3 inside
+# the container rootfs, with mode $4 and without set-user-ID programs or
+# device nodes.
+bind_live_share() {
+    make_share_mount_point "$3"
+    mount -o bind "$1/$2" "$share_path" ||
+        fatal "failed to bind live share $2 at $3"
+    record_live_share "$share_path"
+    mount -o "remount,bind,$4,nosuid,nodev" "$share_path" ||
+        fatal "failed to restrict live share $2 at $3"
+    echo "NVX-SANDBOX-SHARE: target=$3 mode=$4 child=$2"
+}
+
 mount_live_shares() {
-    # OpenVMM appends one virtfs_dir=, virtfs_tag=, virtfs_mode= triplet per
-    # attached share, in virtio-fs slot order. Parse them all before mounting
-    # any, so that a malformed bootstrap mounts nothing.
-    share_specs=
-    share_field=dir
+    # OpenVMM appends one virtfs_dir=, virtfs_tag=, virtfs_mode= triplet for
+    # its virtio-fs share, and virtfs_aggregate=1 when that share is an
+    # aggregate of several host directories, which nvx_share=CHILD,TARGET,MODE
+    # tokens place. Parse every token before mounting anything, so that a
+    # malformed bootstrap mounts nothing.
+    share_dir=
+    share_tag=
+    share_mode=
+    share_fields=0
+    share_aggregate=false
+    share_children=
     # Kernel command-line tokens are deliberately split on spaces.
     # shellcheck disable=SC2086
     set -f
     for token in $cmdline; do
-        case "$share_field:$token" in
-            dir:virtfs_dir=?*)
-                share_target=${token#*=}
-                share_field=tag
+        case "$token" in
+            virtfs_dir=?*)
+                share_dir=${token#*=}
+                share_fields=$((share_fields + 1))
                 ;;
-            tag:virtfs_tag=?*)
+            virtfs_tag=?*)
                 share_tag=${token#*=}
-                share_field=mode
+                share_fields=$((share_fields + 1))
                 ;;
-            mode:virtfs_mode=?*)
-                share_specs="$share_specs$share_tag $share_target ${token#*=}
-"
-                share_field=dir
+            virtfs_mode=?*)
+                share_mode=${token#*=}
+                share_fields=$((share_fields + 1))
                 ;;
-            *:virtfs_dir=* | *:virtfs_tag=* | *:virtfs_mode=*)
+            virtfs_dir=* | virtfs_tag=* | virtfs_mode=*)
                 set +f
                 fatal "live share bootstrap is incomplete"
                 ;;
+            virtfs_aggregate=1) share_aggregate=true ;;
+            nvx_share=*) share_children="$share_children ${token#*=}" ;;
         esac
     done
     set +f
-    [ "$share_field" = dir ] || fatal "live share bootstrap is incomplete"
-    share_tags=
+    if [ "$share_fields" -eq 0 ] && [ "$share_aggregate" = false ] &&
+        [ -z "$share_children" ]; then
+        return 0
+    fi
+    [ "$share_fields" -eq 3 ] && [ -n "$share_dir" ] && [ -n "$share_tag" ] &&
+        [ -n "$share_mode" ] || fatal "live share bootstrap is incomplete"
     share_targets=
-    while read -r share_tag share_target share_mode; do
-        [ -n "$share_tag" ] || continue
-        mount_live_share "$share_tag" "$share_target" "$share_mode"
-    done <<EOF
-$share_specs
-EOF
+    if [ "$share_aggregate" = false ]; then
+        [ -z "$share_children" ] ||
+            fatal "live share children require an aggregate share"
+        mount_live_share "$share_tag" "$share_dir" "$share_mode"
+        return 0
+    fi
+    # The aggregate's root lists every child, so it stays outside the
+    # container rootfs, where only this agent reaches it.
+    [ "$share_dir" = "$runtime/shares" ] ||
+        fatal "the aggregate live share must be mounted at $runtime/shares"
+    case "$share_tag" in
+        '' | *[!A-Za-z0-9_-]*) fatal "live share tag is invalid" ;;
+    esac
+    case "$share_mode" in
+        ro | rw) ;;
+        *) fatal "live share mode is unsupported: $share_mode" ;;
+    esac
+    [ -n "$share_children" ] || fatal "the aggregate live share has no children"
+    share_seen=
+    set -f
+    for share_spec in $share_children; do
+        set +f
+        parse_share_child "$share_spec"
+        case " $share_seen " in
+            *" $child_name "*) fatal "live share child is not unique: $child_name" ;;
+        esac
+        share_seen="$share_seen $child_name"
+        claim_share_target "$child_target"
+        make_share_mount_point "$child_target"
+        set -f
+    done
+    set +f
+    mkdir -p "$share_dir" ||
+        fatal "failed to create the aggregate live share directory"
+    mount -t virtiofs -o "$share_mode,nosuid,nodev" "$share_tag" "$share_dir" ||
+        fatal "failed to mount the aggregate live share $share_tag"
+    record_live_share "$share_dir"
+    set -f
+    for share_spec in $share_children; do
+        set +f
+        parse_share_child "$share_spec"
+        bind_live_share "$share_dir" "$child_name" "$child_target" "$child_mode"
+        set -f
+    done
+    set +f
 }
 
 # Unmount in dependency order: the live shares are children of the overlay,

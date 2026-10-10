@@ -146,6 +146,15 @@ impl Fixture {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
+    /// The host mapping table that the guest received, in order.
+    fn mapping_table(&self, sandbox_id: &SandboxId) -> Vec<serde_json::Value> {
+        let path = self
+            .directory
+            .path()
+            .join(format!("fake-openvmm-{}-maps.json", sandbox_id.token()));
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
     fn sandbox_dirs(&self) -> usize {
         fs::read_dir(&self.state_root)
             .unwrap()
@@ -1059,11 +1068,11 @@ fn guests_without_the_required_features_are_refused() {
     assert_eq!(error.code(), ErrorCode::BackendUnavailable, "{error}");
     for feature in [
         "cancellation",
-        "host path mappings",
         "workload accounts",
         "workload containment",
         "per-execution environments",
         "working directories",
+        "host path mapping tables",
     ] {
         assert!(error.message().contains(feature), "{error}");
     }
@@ -1087,7 +1096,7 @@ fn guests_without_the_required_features_are_refused() {
     // This guest agent predates working directories, so it would start workloads elsewhere. It
     // provides every other required feature.
     let without_cwd = fixture.nvx_with(|config| {
-        config.kernel_command_line = "fake_guest_features=31".to_owned();
+        config.kernel_command_line = "fake_guest_features=95".to_owned();
     });
     let error = without_cwd.start(&sandbox_id).unwrap_err();
     assert_eq!(error.code(), ErrorCode::BackendUnavailable, "{error}");
@@ -1095,6 +1104,20 @@ fn guests_without_the_required_features_are_refused() {
         error
             .message()
             .contains("the openvmm backend needs (working directories)"),
+        "{error}"
+    );
+
+    // The previous release's guest agent read its bind mounts from the kernel command line, so
+    // it would ignore the mapping table.
+    let previous = fixture.nvx_with(|config| {
+        config.kernel_command_line = "fake_guest_features=63".to_owned();
+    });
+    let error = previous.start(&sandbox_id).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::BackendUnavailable, "{error}");
+    assert!(
+        error
+            .message()
+            .contains("the openvmm backend needs (host path mapping tables)"),
         "{error}"
     );
 
@@ -1390,10 +1413,18 @@ fn filesystem_and_network_policies_reach_openvmm() {
             .map(|pair| pair[1].clone())
             .collect::<Vec<_>>()
     };
-    let mounts = value("--mount");
-    assert_eq!(mounts.len(), 1);
-    assert!(mounts[0].starts_with("/run/nvx/hostfs/root,"), "{mounts:?}");
-    assert!(mounts[0].ends_with(",rw"), "{mounts:?}");
+    let mounts = value("--mount-child");
+    assert_eq!(mounts.len(), 2, "{mounts:?}");
+    assert!(
+        mounts[0].starts_with("0,") && mounts[0].ends_with(",rw"),
+        "{mounts:?}"
+    );
+    assert!(
+        mounts[1].starts_with("1,") && mounts[1].ends_with(",ro"),
+        "{mounts:?}"
+    );
+    assert_eq!(value("--mount-aggregate"), ["/run/nvx/hostfs/root"]);
+    assert!(value("--mount").is_empty());
     assert_eq!(value("--mount-deny").len(), 1);
     assert_eq!(value("--network-egress"), ["deny"]);
     assert_eq!(
@@ -1413,14 +1444,24 @@ fn filesystem_and_network_policies_reach_openvmm() {
             "2001:db8::1/128"
         ]
     );
+    // Only the number of mappings travels on the kernel command line.
     let command_line = &value("--cmdline")[0];
-    let maps: Vec<&str> = command_line
-        .split(' ')
-        .filter(|token| token.starts_with("nvx_map="))
+    assert!(
+        command_line.split(' ').any(|token| token == "nvx_maps=2"),
+        "{command_line}"
+    );
+    assert!(!command_line.contains("nvx_map="), "{command_line}");
+    let table = fixture.mapping_table(&sandbox_id);
+    let entries: Vec<(&str, bool)> = table
+        .iter()
+        .map(|entry| {
+            (
+                entry["source"].as_str().unwrap(),
+                entry["read_only"].as_bool().unwrap(),
+            )
+        })
         .collect();
-    assert_eq!(maps.len(), 2, "{command_line}");
-    assert!(maps.iter().any(|token| token.ends_with(",ro")));
-    assert!(maps.iter().any(|token| token.ends_with(",rw")));
+    assert_eq!(entries, [("0", false), ("1", true)]);
 
     let guest =
         aci_edge_sandboxes::openvmm::resolve_guest_path(&base.join("work").join("out")).unwrap();
@@ -1429,7 +1470,7 @@ fn filesystem_and_network_policies_reach_openvmm() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|bind| bind["source"] == "out" && bind["target"] == guest),
+            .any(|bind| bind["child"] == 0 && bind["source"] == "" && bind["target"] == guest),
         "the working directory must match the canonical mapped guest path"
     );
     let pwd = nvx
@@ -1495,6 +1536,189 @@ fn mapped_files_are_not_working_directories() {
 
     nvx.stop(&sandbox_id).unwrap();
     nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
+fn unrelated_directories_are_exported_side_by_side() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let base = fixture.directory.path();
+    for name in ["projects/app", "projects/private", "build-output", "tools"] {
+        fs::create_dir_all(base.join(name)).unwrap();
+    }
+    fs::write(base.join("tools").join("lint.cfg"), b"rules").unwrap();
+    // The layout of microsoft/nvx#281: the paths share no directory that could be exported
+    // alone without the unmapped projects/private.
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![base.join("tools")],
+        readwrite_paths: vec![base.join("projects/app"), base.join("build-output")],
+        denied_paths: Vec::new(),
+    });
+    let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let arguments = fixture.launch_arguments(&sandbox_id);
+    let children: Vec<&String> = arguments
+        .windows(2)
+        .filter(|pair| pair[0] == "--mount-child")
+        .map(|pair| &pair[1])
+        .collect();
+    assert_eq!(children.len(), 3, "{arguments:?}");
+    let modes: Vec<&str> = children
+        .iter()
+        .map(|child| child.rsplit(',').next().unwrap())
+        .collect();
+    assert_eq!(modes, ["rw", "rw", "ro"]);
+    // Each mapped directory is a child of its own; their parent stays unexported.
+    for (child, name) in children
+        .iter()
+        .zip(["build-output", "projects/app", "tools"])
+    {
+        let (_, rest) = child.split_once(',').unwrap();
+        let (host, _) = rest.rsplit_once(',').unwrap();
+        assert!(Path::new(host).ends_with(name), "{child}");
+    }
+    for name in ["projects/app", "build-output", "tools"] {
+        let guest = aci_edge_sandboxes::openvmm::resolve_guest_path(&base.join(name)).unwrap();
+        let pwd = nvx
+            .exec(
+                &sandbox_id,
+                &ExecRequest::command_line("pwd").with_cwd(guest.clone()),
+            )
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        assert_eq!(pwd.stdout, format!("{guest}\n").into_bytes(), "{name}");
+    }
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
+fn large_mapping_tables_reach_the_guest_in_several_records() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let work = fixture.directory.path().join("work");
+    // Read-only directories inside a read-write one need no OpenVMM options of their own, so
+    // the table outgrows one 64 KiB control record long before the command line fills up.
+    let names: Vec<String> = (0..800)
+        .map(|index| format!("{}-{index:04}", "directory".repeat(6)))
+        .collect();
+    for name in &names {
+        fs::create_dir_all(work.join(name)).unwrap();
+    }
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: names.iter().map(|name| work.join(name)).collect(),
+        readwrite_paths: vec![work.clone()],
+        denied_paths: Vec::new(),
+    });
+    let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let command_line = fixture
+        .launch_arguments(&sandbox_id)
+        .windows(2)
+        .find(|pair| pair[0] == "--cmdline")
+        .map(|pair| pair[1].clone())
+        .unwrap();
+    assert!(command_line.contains("nvx_maps=801"), "{command_line}");
+    let table = fixture.mapping_table(&sandbox_id);
+    assert_eq!(table.len(), 801);
+    let bytes: usize = table
+        .iter()
+        .map(|entry| {
+            6 + entry["source"].as_str().unwrap().len() + entry["target"].as_str().unwrap().len()
+        })
+        .sum();
+    assert!(bytes > 64 * 1024, "{bytes}");
+    assert_eq!(table[0]["source"], "0");
+    assert!(
+        table[1..]
+            .iter()
+            .all(|entry| entry["read_only"] == true && entry["directory"] == true)
+    );
+    let last = aci_edge_sandboxes::openvmm::resolve_guest_path(&work.join(&names[799])).unwrap();
+    let pwd = nvx
+        .exec(
+            &sandbox_id,
+            &ExecRequest::command_line("pwd").with_cwd(last.clone()),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(pwd.stdout, format!("{last}\n").into_bytes());
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
+fn starts_fail_when_the_guest_cannot_mount_the_mappings() {
+    let fixture = Fixture::new();
+    let work = fixture.directory.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let nvx = fixture.nvx_with(|config| {
+        config.kernel_command_line = "fake_refuse_maps=1".to_owned();
+    });
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readwrite_paths: vec![work],
+        ..FilesystemPolicy::default()
+    });
+    let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
+    let error = nvx.start(&sandbox_id).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::BackendError, "{error}");
+    assert!(
+        error
+            .message()
+            .contains("could not mount a mapped host path (error 13)"),
+        "{error}"
+    );
+    // The VM was terminated and forgotten, so the sandbox is merely provisioned.
+    assert!(
+        !fixture
+            .state_root
+            .join(sandbox_id.token())
+            .join("runtime.json")
+            .exists()
+    );
+    assert_eq!(
+        nvx.exec(&sandbox_id, &ExecRequest::command_line("echo"))
+            .unwrap_err()
+            .code(),
+        ErrorCode::NotStarted
+    );
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
+fn sandboxes_of_the_previous_state_format_are_refused() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let work = fixture.directory.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readwrite_paths: vec![work.clone()],
+        ..FilesystemPolicy::default()
+    });
+    let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
+    // Version 2 exported one directory and listed its bind mounts on the kernel command line.
+    let mut record = state_json(&fixture, &sandbox_id, "sandbox.json");
+    record["format"] = 2.into();
+    record["filesystem"] = serde_json::json!({
+        "root": work,
+        "writable": true,
+        "denied": [],
+        "deniedIdentities": [],
+        "binds": [{ "source": "", "target": "/work", "readOnly": false }],
+    });
+    fs::write(
+        fixture
+            .state_root
+            .join(sandbox_id.token())
+            .join("sandbox.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    let error = nvx.start(&sandbox_id).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::BackendError, "{error}");
+    assert!(error.message().contains("unsupported format"), "{error}");
 }
 
 #[test]

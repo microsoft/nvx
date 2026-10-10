@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -25,10 +27,13 @@ SANDBOX_COMMAND_LINE_MAX_SIZE = (
 _HOSTNAME = re.compile(r"(?=^.{1,63}$)(?!-)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 DEFAULT_WORKLOAD_IDENTITY = (65534, 65534)
 MOUNT_ACCESS_MODES = ("ro", "rw")
-# OpenVMM attaches each live share to the next fixed virtio-fs slot, which has
-# its own guest-visible tag.
-MOUNT_TAGS = ("microvm", "microvm1")
-MAX_MOUNTS = len(MOUNT_TAGS)
+# OpenVMM attaches one virtio-fs device, tag `microvm`. One share uses it
+# directly. Several share it as the children of an aggregate, named by
+# aggregate_child_name, which the guest mounts at AGGREGATE_MOUNT_TARGET, a
+# directory that only the guest's root can enter, before it binds each child at
+# its target.
+MOUNT_TAG = "microvm"
+AGGREGATE_MOUNT_TARGET = "/run/nvx/shares"
 # `vmm` performs every share operation as OpenVMM; `caller` performs each as the
 # guest caller's identity, with guest root squashed to the share owner.
 MOUNT_OWNERS = ("vmm", "caller")
@@ -48,8 +53,10 @@ MOUNT_POLICY_OPTIONS = {
     "allowed": "--mount-allow",
     "writable": "--mount-write",
 }
-# OpenVMM appends exactly these virtio-fs bootstrap tokens for each live share.
+# OpenVMM appends exactly these virtio-fs bootstrap tokens for its share, and
+# the suffix when the share is an aggregate.
 _MOUNT_COMMAND_LINE_FRAGMENT = " virtfs_dir={} virtfs_tag={} virtfs_mode={}"
+_AGGREGATE_COMMAND_LINE_SUFFIX = " virtfs_aggregate=1"
 
 
 def parse_workload_identity(value: str) -> tuple[int, int]:
@@ -265,8 +272,10 @@ class SandboxMount:
             (kind, self._absolute_paths(paths)) for kind, paths in self.policy_paths()
         )
 
-    def command_line_fragment(self, tag: str = MOUNT_TAGS[0]) -> str:
-        return _MOUNT_COMMAND_LINE_FRAGMENT.format(self.guest_target, tag, self.access)
+    def command_line_fragment(self) -> str:
+        return _MOUNT_COMMAND_LINE_FRAGMENT.format(
+            self.guest_target, MOUNT_TAG, self.access
+        )
 
 
 def _targets_overlap(left: str, right: str) -> bool:
@@ -274,9 +283,7 @@ def _targets_overlap(left: str, right: str) -> bool:
 
 
 def validate_mounts(mounts: tuple[SandboxMount, ...]) -> None:
-    """Validate the live shares that one sandbox attaches, in slot order."""
-    if len(mounts) > MAX_MOUNTS:
-        raise ScriptError(f"a sandbox permits at most {MAX_MOUNTS} --mount options")
+    """Validate the live shares that one sandbox attaches, in child order."""
     for index, mount in enumerate(mounts):
         for other in mounts[:index]:
             if _targets_overlap(other.guest_target, mount.guest_target):
@@ -326,27 +333,55 @@ def validate_mount_host_paths(mounts: tuple[SandboxMount, ...]) -> None:
         for kind, paths in mount.absolute_policy_paths():
             option = MOUNT_POLICY_OPTIONS[kind]
             for path in paths:
-                if root not in Path(path).resolve().parents:
-                    raise ScriptError(
-                        f"{option} {path} is not inside the host directory of "
-                        f"--mount {mount.guest_target}; with several shares, each "
-                        f"{option} follows the --mount whose directory it names"
-                    )
+                resolved = Path(path).resolve()
+                # A denied root hides the share behind its allowed paths, which
+                # OpenVMM requires; it accepts no other policy path at a root.
+                if root in resolved.parents or (kind == "denied" and resolved == root):
+                    continue
+                raise ScriptError(
+                    f"{option} {path} is not inside the host directory of "
+                    f"--mount {mount.guest_target}; with several shares, each "
+                    f"{option} follows the --mount whose directory it names"
+                )
+
+
+def aggregate_child_name(index: int, target: str) -> str:
+    """Return the name of the aggregate child at `index` that the guest binds
+    at `target`.
+
+    The name holds a digest of the target. A snapshot records every child's
+    name, so it pins each target, and OpenVMM refuses a restore that requests
+    other targets before the guest runs, rather than keep the snapshot's binds.
+    """
+    digest = hashlib.sha256(target.encode()).hexdigest()[:32]
+    return f"{index}-{digest}"
 
 
 def mounts_openvmm_arguments(mounts: tuple[SandboxMount, ...]) -> list[str]:
-    """Return the OpenVMM arguments that attach `mounts` in slot order."""
+    """Return the OpenVMM arguments that attach `mounts`: one share directly,
+    and several as the children of an aggregate, in order."""
     arguments: list[str] = []
-    for mount in mounts:
+    if len(mounts) == 1:
+        mount = mounts[0]
         arguments.extend(
             (
                 "--mount",
                 f"{mount.guest_target},{os.fspath(mount.host_path)},{mount.access}",
             )
         )
+    elif mounts:
+        arguments.extend(("--mount-aggregate", AGGREGATE_MOUNT_TARGET))
+        for index, mount in enumerate(mounts):
+            name = aggregate_child_name(index, mount.guest_target)
+            arguments.extend(
+                (
+                    "--mount-child",
+                    f"{name},{os.fspath(mount.host_path)},{mount.access}",
+                )
+            )
     for mount in mounts:
         # OpenVMM resolves a relative policy path in the only share, and
-        # attributes absolute policy paths to the share that contains them.
+        # attributes absolute policy paths to the child that contains them.
         policy_paths = (
             mount.policy_paths() if len(mounts) == 1 else mount.absolute_policy_paths()
         )
@@ -358,12 +393,35 @@ def mounts_openvmm_arguments(mounts: tuple[SandboxMount, ...]) -> list[str]:
     return arguments
 
 
+def aggregate_share_tokens(shares: Sequence[tuple[str, str]]) -> list[str]:
+    """Return the kernel command-line tokens that tell the guest where to bind
+    each child of an aggregate, given each share's guest target and access, or
+    none for a single share."""
+    if len(shares) < 2:
+        return []
+    return [
+        f"nvx_share={aggregate_child_name(index, target)},{target},{access}"
+        for index, (target, access) in enumerate(shares)
+    ]
+
+
+def aggregate_command_line_fragment(accesses: Sequence[str]) -> str:
+    """Return the bootstrap tokens that OpenVMM appends for an aggregate of
+    shares with `accesses`, which it mounts read-write if any child is."""
+    access = "rw" if "rw" in accesses else "ro"
+    return (
+        _MOUNT_COMMAND_LINE_FRAGMENT.format(AGGREGATE_MOUNT_TARGET, MOUNT_TAG, access)
+        + _AGGREGATE_COMMAND_LINE_SUFFIX
+    )
+
+
 def mounts_command_line_fragment(mounts: tuple[SandboxMount, ...]) -> str:
     """Return the bootstrap tokens that OpenVMM appends for `mounts`."""
-    return "".join(
-        mount.command_line_fragment(tag)
-        for mount, tag in zip(mounts, MOUNT_TAGS[: len(mounts)], strict=True)
-    )
+    if len(mounts) == 1:
+        return mounts[0].command_line_fragment()
+    if not mounts:
+        return ""
+    return aggregate_command_line_fragment([mount.access for mount in mounts])
 
 
 @dataclass(frozen=True)
@@ -478,6 +536,11 @@ class SandboxLaunch:
             tokens.append(f"nvx_memory_max={self.memory_max}")
         if self.pids_max is not None:
             tokens.append(f"nvx_pids_max={self.pids_max + 1}")
+        tokens.extend(
+            aggregate_share_tokens(
+                [(mount.guest_target, mount.access) for mount in self.mounts]
+            )
+        )
         command_line = " ".join(token for token in tokens if token)
         # OpenVMM appends the live-share bootstrap tokens after this command line,
         # so they consume the same x86 budget.
@@ -487,7 +550,8 @@ class SandboxLaunch:
             > SANDBOX_COMMAND_LINE_MAX_SIZE
         ):
             raise ScriptError(
-                "sandbox kernel command line exceeds its 1024-byte x86 budget"
+                "sandbox kernel command line exceeds its 1024-byte x86 budget; "
+                "attach fewer --mount shares or use shorter targets and arguments"
             )
         return command_line
 

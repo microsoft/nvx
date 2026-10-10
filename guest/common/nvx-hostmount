@@ -1,56 +1,97 @@
 #!/bin/sh
 
-mount_share() {
-    vdir=$1
-    vtag=$2
-    vmode=$3
-    [ -n "$vtag" ] || return 0
-    [ -n "$vdir" ] || vdir=/mnt/host
-    [ -n "$vmode" ] || vmode=ro
-    mkdir -p "$vdir"
-    if ! mount -t virtiofs -o "$vmode" "$vtag" "$vdir" 2>/dev/null; then
-        echo "virtfs: failed to mount tag $vtag at $vdir" >&2
-        return 1
-    fi
-    echo "virtfs: mounted live host directory at $vdir (virtiofs,$vmode)"
+# Mounts the live host share that OpenVMM's virtfs_dir=, virtfs_tag=, and
+# virtfs_mode= tokens describe. When virtfs_aggregate=1 marks it as an
+# aggregate of several host directories, its root lists one child per
+# directory, which only root can enter, and each nvx_share=CHILD,TARGET,MODE
+# token binds one child at TARGET with MODE, without set-user-ID programs or
+# device nodes. With --unmount, the binds and then the share are unmounted.
+
+fail() {
+    echo "virtfs: $*" >&2
+    exit 1
 }
 
-# OpenVMM appends one virtfs_dir=, virtfs_tag=, virtfs_mode= triplet per
-# attached share, in virtio-fs slot order; a repeated field starts the next.
 vdir=
 vtag=
 vmode=
+aggregate=false
+shares=
 cmdline=$(cat /proc/cmdline)
 # Kernel command-line tokens are deliberately split on spaces.
 # shellcheck disable=SC2086
 set -f
 for token in $cmdline; do
     case "$token" in
-        virtfs_dir=*)
-            if [ -n "$vdir" ]; then
-                mount_share "$vdir" "$vtag" "$vmode" || exit 1
-                vtag=
-                vmode=
-            fi
-            vdir=${token#*=}
-            ;;
-        virtfs_tag=*)
-            if [ -n "$vtag" ]; then
-                mount_share "$vdir" "$vtag" "$vmode" || exit 1
-                vdir=
-                vmode=
-            fi
-            vtag=${token#*=}
-            ;;
-        virtfs_mode=*)
-            if [ -n "$vmode" ]; then
-                mount_share "$vdir" "$vtag" "$vmode" || exit 1
-                vdir=
-                vtag=
-            fi
-            vmode=${token#*=}
-            ;;
+        virtfs_dir=*) vdir=${token#*=} ;;
+        virtfs_tag=*) vtag=${token#*=} ;;
+        virtfs_mode=*) vmode=${token#*=} ;;
+        virtfs_aggregate=1) aggregate=true ;;
+        nvx_share=*) shares="$shares ${token#*=}" ;;
     esac
 done
 set +f
-mount_share "$vdir" "$vtag" "$vmode"
+[ -n "$vtag" ] || exit 0
+[ -n "$vdir" ] || vdir=/mnt/host
+[ -n "$vmode" ] || vmode=ro
+[ "$aggregate" = true ] || shares=
+
+# Splits the share specification $1 into share_child, share_target, and
+# share_mode.
+parse_share() {
+    share_child=${1%%,*}
+    share_rest=${1#*,}
+    share_target=${share_rest%,*}
+    share_mode=${share_rest##*,}
+    case "$share_child" in
+        '' | . | .. | *[!A-Za-z0-9._-]*) fail "invalid live share $1" ;;
+    esac
+    case "$share_mode" in ro | rw) ;; *) fail "invalid live share mode in $1" ;; esac
+    case "$share_target" in /?*) ;; *) fail "invalid live share target in $1" ;; esac
+    [ "$share_rest" != "$1" ] && [ "$share_target" != "$share_rest" ] ||
+        fail "invalid live share $1"
+}
+
+if [ "${1:-}" = --unmount ]; then
+    status=0
+    reversed=
+    set -f
+    for share in $shares; do
+        reversed="$share $reversed"
+    done
+    for share in $reversed; do
+        set +f
+        parse_share "$share"
+        if mountpoint -q "$share_target" && ! umount "$share_target"; then
+            echo "virtfs: failed to unmount live share $share_child at $share_target" >&2
+            status=1
+        fi
+        set -f
+    done
+    set +f
+    if mountpoint -q "$vdir" && ! umount "$vdir"; then
+        echo "virtfs: failed to unmount tag $vtag at $vdir" >&2
+        status=1
+    fi
+    exit "$status"
+fi
+
+mkdir -p "$vdir"
+if ! mount -t virtiofs -o "$vmode" "$vtag" "$vdir" 2>/dev/null; then
+    fail "failed to mount tag $vtag at $vdir"
+fi
+echo "virtfs: mounted live host directory at $vdir (virtiofs,$vmode)"
+set -f
+for share in $shares; do
+    set +f
+    parse_share "$share"
+    [ -d "$vdir/$share_child" ] || fail "live share $share_child is not exported"
+    if ! mkdir -p "$share_target" ||
+        ! mount -o bind "$vdir/$share_child" "$share_target" ||
+        ! mount -o "remount,bind,$share_mode,nosuid,nodev" "$share_target"; then
+        fail "failed to bind live share $share_child at $share_target"
+    fi
+    echo "virtfs: bound live share $share_child at $share_target (virtiofs,$share_mode)"
+    set -f
+done
+set +f

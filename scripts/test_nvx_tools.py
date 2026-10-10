@@ -8832,21 +8832,40 @@ class SandboxShareAgentTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.rootfs = self.root / "rootfs"
         self.rootfs.mkdir()
+        self.runtime = (self.root / "run").as_posix()
+
+    SHARE_FUNCTIONS = (
+        "validate_share_target",
+        "make_share_mount_point",
+        "record_live_share",
+        "claim_share_target",
+        "mount_live_share",
+        "parse_share_child",
+        "bind_live_share",
+        "mount_live_shares",
+    )
+
+    def _aggregate(self, *children: str, mode: str = "rw") -> str:
+        """Returns the bootstrap of an aggregate whose children the
+        CHILD,TARGET,MODE specifications `children` place."""
+        tokens = [
+            f"virtfs_dir={self.runtime}/shares",
+            "virtfs_tag=microvm",
+            f"virtfs_mode={mode}",
+            "virtfs_aggregate=1",
+            *(f"nvx_share={child}" for child in children),
+        ]
+        return " ".join(tokens)
 
     def _run(self, cmdline: str) -> tuple[subprocess.CompletedProcess[str], str]:
         mount_log = self.root / "mount.log"
         mount_log.unlink(missing_ok=True)
         functions = "".join(
-            _shell_function(self.source, name)
-            for name in (
-                "validate_share_target",
-                "mount_live_share",
-                "mount_live_shares",
-            )
+            _shell_function(self.source, name) for name in self.SHARE_FUNCTIONS
         )
         script = (
             "set -eu\n"
-            "rootfs=$1\ncmdline=$2\nmount_log=$3\nshare_mountpoints=\n"
+            "rootfs=$1\ncmdline=$2\nmount_log=$3\nruntime=$4\nshare_mountpoints=\n"
             'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
             'mount() { printf "%s\\n" "$*" >>"$mount_log"; }\n'
             f"{functions}"
@@ -8861,6 +8880,7 @@ class SandboxShareAgentTests(unittest.TestCase):
                 self.rootfs.as_posix(),
                 cmdline,
                 mount_log.as_posix(),
+                self.runtime,
             ],
             input=script,
             text=True,
@@ -9063,77 +9083,135 @@ class SandboxShareAgentTests(unittest.TestCase):
                     result.stdout,
                 )
 
-    def test_agent_mounts_every_share_in_slot_order(self):
+    def test_agent_binds_every_child_of_an_aggregate(self):
         rootfs = self.rootfs.as_posix()
         result, log = self._run(
-            "nvx_sandbox=1 virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-            "virtfs_dir=/opt/hostedtoolcache virtfs_tag=microvm1 virtfs_mode=ro"
+            "nvx_sandbox=1 "
+            + self._aggregate("0,/workspace,rw", "1,/opt/hostedtoolcache,ro")
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The aggregate stays outside the container rootfs; each child is bound
+        # inside it with its own mode.
         self.assertEqual(
             log.splitlines(),
             [
-                f"-t virtiofs -o rw,nosuid,nodev microvm {rootfs}/workspace",
-                f"-t virtiofs -o ro,nosuid,nodev microvm1 {rootfs}/opt/hostedtoolcache",
+                f"-t virtiofs -o rw,nosuid,nodev microvm {self.runtime}/shares",
+                f"-o bind {self.runtime}/shares/0 {rootfs}/workspace",
+                f"-o remount,bind,rw,nosuid,nodev {rootfs}/workspace",
+                f"-o bind {self.runtime}/shares/1 {rootfs}/opt/hostedtoolcache",
+                f"-o remount,bind,ro,nosuid,nodev {rootfs}/opt/hostedtoolcache",
             ],
         )
         self.assertIn(
-            "NVX-SANDBOX-SHARE: target=/workspace mode=rw tag=microvm\n"
-            "NVX-SANDBOX-SHARE: target=/opt/hostedtoolcache mode=ro tag=microvm1\n",
+            "NVX-SANDBOX-SHARE: target=/workspace mode=rw child=0\n"
+            "NVX-SANDBOX-SHARE: target=/opt/hostedtoolcache mode=ro child=1\n",
             result.stdout,
         )
-        # Teardown unmounts the most recent share first.
+        # Teardown unmounts the most recent bind first, and the aggregate last.
         self.assertIn(
-            f"mountpoints={rootfs}/opt/hostedtoolcache {rootfs}/workspace\n",
+            f"mountpoints={rootfs}/opt/hostedtoolcache {rootfs}/workspace "
+            f"{self.runtime}/shares\n",
             result.stdout,
         )
 
-    def test_agent_rejects_colliding_tags_and_overlapping_targets(self):
-        for cmdline, message in (
-            (
-                "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-                "virtfs_dir=/opt/tools virtfs_tag=microvm virtfs_mode=ro",
-                "tag is not unique",
-            ),
-            (
-                "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-                "virtfs_dir=/workspace virtfs_tag=microvm1 virtfs_mode=ro",
-                "targets overlap",
-            ),
-            (
-                "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-                "virtfs_dir=/workspace/cache virtfs_tag=microvm1 virtfs_mode=ro",
-                "targets overlap",
-            ),
-            (
-                "virtfs_dir=/opt/tools/node virtfs_tag=microvm virtfs_mode=ro "
-                "virtfs_dir=/opt virtfs_tag=microvm1 virtfs_mode=rw",
-                "targets overlap",
-            ),
-        ):
-            with self.subTest(cmdline=cmdline):
-                result, log = self._run(cmdline)
-                self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertIn(message, result.stderr)
-                # Only the first, valid share was mounted.
-                self.assertEqual(len(log.splitlines()), 1)
-
-        # A shared prefix that is not a path component is not an overlap.
+    def test_agent_binds_children_by_the_names_that_nvx_gives_them(self):
+        rootfs = self.rootfs.as_posix()
+        workspace = sandbox.aggregate_child_name(0, "/workspace")
+        tools = sandbox.aggregate_child_name(1, "/opt/tools")
         result, log = self._run(
-            "virtfs_dir=/work virtfs_tag=microvm virtfs_mode=rw "
-            "virtfs_dir=/workspace virtfs_tag=microvm1 virtfs_mode=ro"
+            self._aggregate(
+                f"{workspace},/workspace,rw", f"{tools},/opt/tools,ro", "a.b_C-9,/x,ro"
+            )
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(log.splitlines()), 2)
+        self.assertIn(
+            f"-o bind {self.runtime}/shares/{workspace} {rootfs}/workspace\n", log
+        )
+        self.assertIn(
+            f"-o bind {self.runtime}/shares/{tools} {rootfs}/opt/tools\n", log
+        )
+        self.assertIn(f"-o bind {self.runtime}/shares/a.b_C-9 {rootfs}/x\n", log)
+        self.assertIn(
+            f"NVX-SANDBOX-SHARE: target=/workspace mode=rw child={workspace}\n",
+            result.stdout,
+        )
+        # A repeated name is refused, however the child is named.
+        result, log = self._run(
+            self._aggregate(f"{workspace},/workspace,rw", f"{workspace},/b,ro")
+        )
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("child is not unique", result.stderr)
+        self.assertEqual(log, "")
+
+    def test_hostmount_accepts_only_child_names_inside_the_aggregate(self):
+        hostmount = self.AGENT.with_name("nvx-hostmount").read_text(encoding="utf-8")
+        script = (
+            'fail() { echo "FAIL: $*" >&2; exit 1; }\n'
+            f"{_shell_function(hostmount, 'parse_share')}"
+            'parse_share "$1"\n'
+            'printf "%s|%s|%s\\n" "$share_child" "$share_target" "$share_mode"\n'
+        )
+
+        def parse(share: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [self.shell, "-s", "--", share],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        name = sandbox.aggregate_child_name(0, "/workspace")
+        for share, expected in (
+            (f"{name},/workspace,rw", f"{name}|/workspace|rw\n"),
+            ("0,/opt/tools,ro", "0|/opt/tools|ro\n"),
+            ("a.b_C-9,/x,ro", "a.b_C-9|/x|ro\n"),
+        ):
+            with self.subTest(share=share):
+                result = parse(share)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+        for share in (
+            ",/workspace,rw",
+            ".,/workspace,rw",
+            "..,/workspace,rw",
+            "a/b,/workspace,rw",
+            "a:b,/workspace,rw",
+            "a*,/workspace,rw",
+        ):
+            with self.subTest(share=share):
+                result = parse(share)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("invalid live share", result.stderr)
+
+    def test_agent_rejects_repeated_children_and_overlapping_targets(self):
+        for children, message in (
+            (("0,/workspace,rw", "0,/opt/tools,ro"), "child is not unique"),
+            (("0,/workspace,rw", "1,/workspace,ro"), "targets overlap"),
+            (("0,/workspace,rw", "1,/workspace/cache,ro"), "targets overlap"),
+            (("0,/opt/tools/node,ro", "1,/opt,rw"), "targets overlap"),
+        ):
+            with self.subTest(children=children):
+                result, log = self._run(self._aggregate(*children))
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertIn(message, result.stderr)
+                # Every child is checked before anything is mounted.
+                self.assertEqual(log, "")
+
+        # A shared prefix that is not a path component is not an overlap.
+        result, log = self._run(self._aggregate("0,/work,rw", "1,/workspace,ro"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(log.splitlines()), 5)
 
     def test_agent_parses_every_share_before_mounting_any(self):
         for cmdline in (
             "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-            "virtfs_dir=/opt/tools virtfs_tag=microvm1",
+            "virtfs_dir=/opt/tools",
+            "virtfs_tag=microvm virtfs_mode=ro",
             "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-            "virtfs_tag=microvm1 virtfs_dir=/opt/tools virtfs_mode=ro",
-            "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-            "virtfs_dir= virtfs_tag=microvm1 virtfs_mode=ro",
+            "virtfs_dir= virtfs_tag=microvm virtfs_mode=ro",
+            "virtfs_aggregate=1",
+            "nvx_share=0,/workspace,rw",
         ):
             with self.subTest(cmdline=cmdline):
                 result, log = self._run(cmdline)
@@ -9145,13 +9223,7 @@ class SandboxShareAgentTests(unittest.TestCase):
         mount_log = self.root / "mount.log"
         functions = "".join(
             _shell_function(self.source, name)
-            for name in (
-                "unmount_live_shares",
-                "fatal",
-                "validate_share_target",
-                "mount_live_share",
-                "mount_live_shares",
-            )
+            for name in ("unmount_live_shares", "fatal", *self.SHARE_FUNCTIONS)
         ).replace("/sbin/nvx-exit", "nvx_exit")
         result = subprocess.run(
             [
@@ -9159,14 +9231,16 @@ class SandboxShareAgentTests(unittest.TestCase):
                 "-s",
                 "--",
                 self.rootfs.as_posix(),
-                "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
-                "virtfs_dir=/workspace/nested virtfs_tag=microvm1 virtfs_mode=ro",
+                self._aggregate("0,/workspace,rw", "1,/opt/tools,ro"),
                 mount_log.as_posix(),
+                self.runtime,
             ],
             input=(
                 "set -eu\n"
-                "rootfs=$1\ncmdline=$2\nmount_log=$3\nshare_mountpoints=\n"
-                'mount() { printf "mount %s\\n" "$*" >>"$mount_log"; }\n'
+                "rootfs=$1\ncmdline=$2\nmount_log=$3\nruntime=$4\n"
+                "share_mountpoints=\n"
+                'mount() { printf "mount %s\\n" "$*" >>"$mount_log"; '
+                'case "$*" in *shares/1*) return 1 ;; esac; }\n'
                 'umount() { printf "umount %s\\n" "$1" >>"$mount_log"; }\n'
                 'nvx_exit() { printf "exit %s\\n" "$1" >>"$mount_log"; exit "$1"; }\n'
                 f"{functions}mount_live_shares\n"
@@ -9176,13 +9250,17 @@ class SandboxShareAgentTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 125, result.stdout)
-        self.assertIn("targets overlap", result.stderr)
+        self.assertIn("failed to bind live share 1", result.stderr)
         rootfs = self.rootfs.as_posix()
         self.assertEqual(
             mount_log.read_text(encoding="utf-8").splitlines(),
             [
-                f"mount -t virtiofs -o rw,nosuid,nodev microvm {rootfs}/workspace",
+                f"mount -t virtiofs -o rw,nosuid,nodev microvm {self.runtime}/shares",
+                f"mount -o bind {self.runtime}/shares/0 {rootfs}/workspace",
+                f"mount -o remount,bind,rw,nosuid,nodev {rootfs}/workspace",
+                f"mount -o bind {self.runtime}/shares/1 {rootfs}/opt/tools",
                 f"umount {rootfs}/workspace",
+                f"umount {self.runtime}/shares",
                 "exit 125",
             ],
         )
@@ -9207,11 +9285,34 @@ class SandboxShareAgentTests(unittest.TestCase):
             ("virtfs_dir=/.nvx-agent virtfs_tag=microvm virtfs_mode=ro", "reserved"),
             ("virtfs_dir=/etc virtfs_tag=microvm virtfs_mode=ro", "reserved"),
             ("virtfs_dir=/file virtfs_tag=microvm virtfs_mode=ro", "not a directory"),
+            (
+                "virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw "
+                "nvx_share=0,/workspace,rw",
+                "require an aggregate",
+            ),
+            (
+                "virtfs_dir=/shares virtfs_tag=microvm virtfs_mode=rw "
+                "virtfs_aggregate=1 nvx_share=0,/workspace,rw",
+                "must be mounted at",
+            ),
+            (self._aggregate(), "has no children"),
+            (self._aggregate(",/workspace,rw"), "child is invalid"),
+            (self._aggregate(".,/workspace,rw"), "child is invalid"),
+            (self._aggregate("..,/workspace,rw"), "child is invalid"),
+            (self._aggregate("a/b,/workspace,rw"), "child is invalid"),
+            (self._aggregate("a:b,/workspace,rw"), "child is invalid"),
+            (self._aggregate("a*,/workspace,rw"), "child is invalid"),
+            (self._aggregate("0,/workspace"), "child is invalid"),
+            (self._aggregate("0,/workspace,rx"), "mode"),
+            (self._aggregate("0,workspace,rw"), "absolute"),
+            (self._aggregate("0,/a,b,rw"), "reserved char"),
+            (self._aggregate("0,/workspace,rw", "1,/proc,ro"), "reserved"),
+            (self._aggregate("0,/file,ro"), "not a directory"),
         ):
             with self.subTest(cmdline=cmdline):
                 result, log = self._run(cmdline)
                 self.assertEqual(result.returncode, 125, result.stdout)
-                self.assertIn("FATAL: live share", result.stderr)
+                self.assertIn("live share", result.stderr)
                 self.assertIn(message, result.stderr)
                 self.assertEqual(log, "")
 
@@ -10268,25 +10369,20 @@ class ManagedAgentStopTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, stderr)
 
     def test_agent_advertises_the_control_features_of_its_mode(self):
-        cancel, host_mappings, workload_account, exec_cgroup, environment = (
-            1,
-            2,
-            4,
-            8,
-            16,
-        )
-        exec_cwd = 32
+        cancel, workload_account, exec_cgroup, environment = (1, 4, 8, 16)
+        exec_cwd, host_mapping_table = (32, 64)
         for rootfs, expected in (
             # Only the direct agent maps host paths, gives each workload a cgroup, and
-            # refuses a working directory that the workload cannot enter.
+            # refuses a working directory that the workload cannot enter. Bit 1, which
+            # announced nvx_map= kernel tokens, is retired.
             (
                 "-",
                 cancel
-                | host_mappings
                 | workload_account
                 | exec_cgroup
                 | environment
-                | exec_cwd,
+                | exec_cwd
+                | host_mapping_table,
             ),
             ("/run/nvx/rootfs", cancel | workload_account | environment),
         ):
@@ -10299,6 +10395,14 @@ class ManagedAgentStopTests(unittest.TestCase):
         kind, request_id, status, body = self._request("-", 5, b"abc")
         self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
         self.assertEqual(body, b"invalid-request")
+
+    def test_agent_refuses_a_mapping_table_that_nvx_maps_did_not_announce(self):
+        table = struct.pack("<IIHHH", 0, 1, 0, 1, 2) + b"0/w"
+        for rootfs in ("-", "/run/nvx/rootfs"):
+            with self.subTest(rootfs=rootfs):
+                kind, request_id, status, body = self._request(rootfs, 6, table)
+                self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
+                self.assertEqual(body, b"invalid-request")
 
     def test_agent_refuses_malformed_working_directories(self):
         argument = struct.pack("<I", 9) + b"/bin/true"
@@ -11403,7 +11507,7 @@ class SandboxTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
             launch.kernel_command_line(fitting + "x")
 
-    def test_launch_contract_attaches_two_shares_in_slot_order(self):
+    def test_launch_contract_attaches_several_shares_as_an_aggregate(self):
         distro = sandbox.SandboxLayer.parse(
             "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
         )
@@ -11415,19 +11519,30 @@ class SandboxTests(unittest.TestCase):
                 sandbox.SandboxMount.parse(
                     "/opt/hostedtoolcache,tools,ro", ("credentials",)
                 ),
+                sandbox.SandboxMount.parse("/srv/cache,cache,ro"),
             ),
         )
 
         arguments = launch.openvmm_arguments()
-        # With several shares, OpenVMM attributes each denied path to the share
-        # that contains it, so relative paths are joined to their share.
+        workspace, toolcache, cache = (
+            sandbox.aggregate_child_name(index, mount.guest_target)
+            for index, mount in enumerate(launch.mounts)
+        )
+        # Several shares are the children of one aggregate, and OpenVMM
+        # attributes each denied path to the child that contains it, so
+        # relative paths are joined to their share.
+        self.assertNotIn("--mount", arguments)
         self.assertEqual(
-            arguments[arguments.index("--mount") :],
+            arguments[arguments.index("--mount-aggregate") :],
             [
-                "--mount",
-                f"/workspace,{os.fspath(Path('work'))},rw",
-                "--mount",
-                f"/opt/hostedtoolcache,{os.fspath(Path('tools'))},ro",
+                "--mount-aggregate",
+                "/run/nvx/shares",
+                "--mount-child",
+                f"{workspace},{os.fspath(Path('work'))},rw",
+                "--mount-child",
+                f"{toolcache},{os.fspath(Path('tools'))},ro",
+                "--mount-child",
+                f"{cache},{os.fspath(Path('cache'))},ro",
                 "--mount-deny",
                 os.fspath(Path.cwd() / "work" / "secrets"),
                 "--mount-deny",
@@ -11437,17 +11552,39 @@ class SandboxTests(unittest.TestCase):
         fragment = sandbox.mounts_command_line_fragment(launch.mounts)
         self.assertEqual(
             fragment,
-            " virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw"
-            " virtfs_dir=/opt/hostedtoolcache virtfs_tag=microvm1 virtfs_mode=ro",
+            " virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=rw"
+            " virtfs_aggregate=1",
         )
-        self.assertNotIn("virtfs_", launch.kernel_command_line())
+        # The guest binds each child at its target, in order.
+        command_line = launch.kernel_command_line()
+        self.assertNotIn("virtfs_", command_line)
+        self.assertTrue(
+            command_line.endswith(
+                f" nvx_share={workspace},/workspace,rw"
+                f" nvx_share={toolcache},/opt/hostedtoolcache,ro"
+                f" nvx_share={cache},/srv/cache,ro"
+            ),
+            command_line,
+        )
+        self.assertEqual(
+            sandbox.mounts_command_line_fragment(launch.mounts[1:]),
+            " virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=ro"
+            " virtfs_aggregate=1",
+        )
+        with self.assertRaisesRegex(common.ScriptError, "owned by the sandbox"):
+            launch.kernel_command_line("nvx_share=0,/etc,rw")
 
-        # Every share's bootstrap tokens count toward the x86 budget.
+        # Every share's tokens count toward the x86 budget.
         base = sandbox.SandboxLaunch(
             layers=(distro,), scratch=Path("s.ext4")
         ).kernel_command_line()
+        shares = len(command_line) - len(base)
         fitting = "x" * (
-            sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE - len(base) - len(fragment) - 2
+            sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE
+            - len(base)
+            - shares
+            - len(fragment)
+            - 2
         )
         launch.kernel_command_line(fitting)
         with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
@@ -11463,6 +11600,42 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(arguments.count("--mount-owner"), 1)
         self.assertEqual(arguments[-2:], ["--mount-owner", "caller"])
 
+    def test_aggregate_child_names_pin_their_targets(self):
+        name = sandbox.aggregate_child_name(0, "/workspace")
+        self.assertEqual(name, f"0-{hashlib.sha256(b'/workspace').hexdigest()[:32]}")
+        # Equal targets give equal names, so a restore names its children as
+        # the boot did, and another target or position gives another name.
+        self.assertEqual(sandbox.aggregate_child_name(0, "/workspace"), name)
+        self.assertNotEqual(sandbox.aggregate_child_name(0, "/workspace2"), name)
+        self.assertNotEqual(sandbox.aggregate_child_name(1, "/workspace"), name)
+        # Every name follows OpenVMM's rule for the name of a child.
+        for index, target in ((0, "/w"), (999, "/" + "x" * 1000)):
+            self.assertRegex(
+                sandbox.aggregate_child_name(index, target),
+                r"\A[0-9]+-[0-9a-f]{32}\Z",
+            )
+        self.assertLessEqual(len(sandbox.aggregate_child_name(999, "/w")), 64)
+
+    def test_launch_bounds_shares_by_the_kernel_command_line(self):
+        distro = sandbox.SandboxLayer.parse(
+            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
+        )
+
+        def launch(count: int) -> sandbox.SandboxLaunch:
+            return sandbox.SandboxLaunch(
+                layers=(distro,),
+                scratch=Path("s.ext4"),
+                mounts=tuple(
+                    sandbox.SandboxMount.parse(f"/share/{index:02},host{index}")
+                    for index in range(count)
+                ),
+            )
+
+        # No fixed number of shares is the limit, only the command line.
+        launch(10).kernel_command_line()
+        with self.assertRaisesRegex(common.ScriptError, "fewer --mount shares"):
+            launch(20).kernel_command_line()
+
     def test_launch_rejects_invalid_share_sets(self):
         distro = sandbox.SandboxLayer.parse(
             "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
@@ -11472,7 +11645,6 @@ class SandboxTests(unittest.TestCase):
             return sandbox.SandboxMount.parse(value, (), owner)
 
         for mounts, message in (
-            ((mount("/a,a"), mount("/b,b"), mount("/c,c")), "at most 2"),
             ((mount("/workspace,a,rw"), mount("/workspace,b")), "overlap"),
             ((mount("/workspace,a,rw"), mount("/workspace/cache,b")), "overlap"),
             ((mount("/opt/tools/node,a"), mount("/opt,b,rw")), "overlap"),
@@ -11536,11 +11708,28 @@ class SandboxTests(unittest.TestCase):
             toolcache = sandbox.SandboxMount.parse(f"/opt/hostedtoolcache,{tools}")
             with self.assertRaisesRegex(common.ScriptError, "not inside"):
                 launch(foreign, toolcache).validated()
-            with self.assertRaisesRegex(common.ScriptError, "not inside"):
-                launch(
-                    sandbox.SandboxMount.parse(f"/workspace,{work},rw", (".",)),
-                    toolcache,
-                ).validated()
+            # A denied path may name a share's root, which OpenVMM then hides
+            # behind its allowed paths, but no allowed or writable path may.
+            launch(
+                sandbox.SandboxMount.parse(
+                    f"/workspace,{work},rw",
+                    (".",),
+                    allowed_paths=(os.fspath(work / "nested"),),
+                ),
+                toolcache,
+            ).validated()
+            for allowed_paths, writable_paths in (((".",), ()), ((), (".",))):
+                with self.subTest(allowed=allowed_paths, writable=writable_paths):
+                    with self.assertRaisesRegex(common.ScriptError, "not inside"):
+                        launch(
+                            sandbox.SandboxMount.parse(
+                                f"/workspace,{work},rw",
+                                ("nested",),
+                                allowed_paths=allowed_paths,
+                                writable_paths=writable_paths,
+                            ),
+                            toolcache,
+                        ).validated()
 
             validated = launch(
                 sandbox.SandboxMount.parse(f"/workspace,{work},rw", ("nested",)),
@@ -11859,10 +12048,95 @@ class SandboxTests(unittest.TestCase):
                     ],
                     "--mount-write .* is not inside the host directory",
                 ),
+                # Only a denied path may name a share's root.
+                (
+                    [
+                        "--mount",
+                        f"/workspace,{work},rw",
+                        "--mount-deny",
+                        "logs",
+                        "--mount-allow",
+                        os.fspath(work),
+                        "--mount",
+                        f"/opt/hostedtoolcache,{tools}",
+                    ],
+                    "--mount-allow .* is not inside the host directory",
+                ),
+                (
+                    [
+                        "--mount",
+                        f"/workspace,{work},rw",
+                        "--mount-write",
+                        os.fspath(work),
+                        "--mount",
+                        f"/opt/hostedtoolcache,{tools}",
+                    ],
+                    "--mount-write .* is not inside the host directory",
+                ),
             ):
                 with self.subTest(message=message):
                     with self.assertRaisesRegex(common.ScriptError, message):
                         nvx.command_sandbox(nvx.parse_args([*common_args, *arguments]))
+
+    def test_sandbox_command_hides_a_share_root_behind_its_allowed_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            work = root / "work"
+            tools = root / "tools"
+            layer.write_bytes(b"distro")
+            scratch.write_bytes(b"scratch")
+            (work / "src").mkdir(parents=True)
+            tools.mkdir()
+            args = nvx.parse_args(
+                [
+                    "sandbox",
+                    "--layer",
+                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
+                    "--scratch",
+                    str(scratch),
+                    "--mount",
+                    f"/workspace,{work},rw",
+                    "--mount-deny",
+                    os.fspath(work),
+                    "--mount-allow",
+                    os.fspath(work / "src"),
+                    "--mount",
+                    f"/opt/hostedtoolcache,{tools}",
+                    "--dry-run",
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(nvx, "require_file", side_effect=require),
+                patch.object(
+                    nvx, "_format_command", return_value="formatted"
+                ) as format_command,
+            ):
+                nvx.command_sandbox(args)
+
+            command = format_command.call_args.args[0]
+
+            def values(option: str) -> list[str]:
+                return [
+                    command[index + 1]
+                    for index, value in enumerate(command)
+                    if value == option
+                ]
+
+            # OpenVMM hides the workspace's root behind its one allowed path.
+            workspace = sandbox.aggregate_child_name(0, "/workspace")
+            toolcache = sandbox.aggregate_child_name(1, "/opt/hostedtoolcache")
+            self.assertEqual(
+                values("--mount-child"),
+                [f"{workspace},{work},rw", f"{toolcache},{tools},ro"],
+            )
+            self.assertEqual(values("--mount-deny"), [os.fspath(work)])
+            self.assertEqual(values("--mount-allow"), [os.fspath(work / "src")])
 
     def test_sandbox_command_attributes_mount_deny_to_the_preceding_mount(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -11919,13 +12193,20 @@ class SandboxTests(unittest.TestCase):
                 nvx.command_sandbox(args)
 
             command = format_command.call_args.args[0]
+            workspace = sandbox.aggregate_child_name(0, "/workspace")
+            toolcache = sandbox.aggregate_child_name(1, "/opt/hostedtoolcache")
+            self.assertNotIn("--mount", command)
             self.assertEqual(
                 [
                     command[index + 1]
                     for index, value in enumerate(command)
-                    if value == "--mount"
+                    if value in ("--mount-aggregate", "--mount-child")
                 ],
-                [f"/workspace,{work},rw", f"/opt/hostedtoolcache,{tools},ro"],
+                [
+                    "/run/nvx/shares",
+                    f"{workspace},{work},rw",
+                    f"{toolcache},{tools},ro",
+                ],
             )
             self.assertEqual(
                 [
@@ -11938,6 +12219,12 @@ class SandboxTests(unittest.TestCase):
                     os.fspath(tools / "credentials"),
                     os.fspath(tools / "logs"),
                 ],
+            )
+            cmdline = command[command.index("--cmdline") + 1]
+            self.assertIn(
+                f"nvx_share={workspace},/workspace,rw "
+                f"nvx_share={toolcache},/opt/hostedtoolcache,ro",
+                cmdline,
             )
 
             # With one share, a --mount-deny may come first; with several, it
@@ -11959,6 +12246,8 @@ class SandboxTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(common.ScriptError, "must follow the --mount"):
                 nvx.command_sandbox(leading)
+            # More shares are children of the same aggregate.
+            (root / "cache").mkdir()
             three = nvx.parse_args(
                 [
                     *common_args,
@@ -11967,20 +12256,32 @@ class SandboxTests(unittest.TestCase):
                     "--mount",
                     f"/b,{tools}",
                     "--mount",
-                    f"/c,{root}",
+                    f"/c,{root / 'cache'}",
+                    "--dry-run",
                 ]
             )
-            with self.assertRaisesRegex(common.ScriptError, "at most 2"):
+            with (
+                patch.object(nvx, "require_file", side_effect=require),
+                patch.object(
+                    nvx, "_format_command", return_value="formatted"
+                ) as format_command,
+            ):
                 nvx.command_sandbox(three)
+            command = format_command.call_args.args[0]
+            self.assertEqual(command.count("--mount-child"), 3)
 
-    def test_run_forwards_every_mount_in_order(self):
+    def test_run_attaches_several_mounts_as_an_aggregate(self):
         args = nvx.parse_args(
             [
                 "run",
                 "--mount",
                 "/workspace,work,rw",
                 "--mount",
-                "/opt/hostedtoolcache,tools,ro",
+                "/opt/hostedtoolcache,tools",
+                "--mount",
+                "/srv/cache,cache,ro",
+                "--cmdline",
+                "quiet",
                 "--dry-run",
             ]
         )
@@ -11992,19 +12293,126 @@ class SandboxTests(unittest.TestCase):
         ):
             nvx.command_run(args)
             command = format_command.call_args.args[0]
+            workspace, toolcache, cache = (
+                sandbox.aggregate_child_name(index, target)
+                for index, target in enumerate(
+                    ("/workspace", "/opt/hostedtoolcache", "/srv/cache")
+                )
+            )
+            booted = [
+                "/run/nvx/shares",
+                f"{workspace},work,rw",
+                f"{toolcache},tools,ro",
+                f"{cache},cache,ro",
+            ]
+            self.assertNotIn("--mount", command)
             self.assertEqual(
                 [
                     command[index + 1]
                     for index, value in enumerate(command)
-                    if value == "--mount"
+                    if value in ("--mount-aggregate", "--mount-child")
                 ],
-                ["/workspace,work,rw", "/opt/hostedtoolcache,tools,ro"],
+                booted,
             )
-            three = nvx.parse_args(
-                ["run", "--mount", "/a,a", "--mount", "/b,b", "--mount", "/c,c"]
+            self.assertEqual(
+                command[command.index("--cmdline") + 1],
+                f"quiet nvx_share={workspace},/workspace,rw "
+                f"nvx_share={toolcache},/opt/hostedtoolcache,ro "
+                f"nvx_share={cache},/srv/cache,ro",
             )
-            with self.assertRaisesRegex(common.ScriptError, "at most 2"):
-                nvx.command_run(three)
+
+            # One share stays a plain --mount without bind tokens.
+            single = nvx.parse_args(
+                ["run", "--mount", "/workspace,work,rw", "--dry-run"]
+            )
+            nvx.command_run(single)
+            command = format_command.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--mount") :], ["--mount", "/workspace,work,rw"]
+            )
+            self.assertNotIn("--cmdline", command)
+
+            # A restored guest keeps its binds, so only the devices are named,
+            # with the children's names of the boot: they pin the targets that
+            # the guest bound, and another target names another child.
+            restored = nvx.parse_args(
+                [
+                    "run",
+                    "--restore-snapshot",
+                    "snapshot",
+                    "--mount",
+                    "/workspace,work,rw",
+                    "--mount",
+                    "/opt/hostedtoolcache,tools",
+                    "--mount",
+                    "/srv/cache,cache,ro",
+                    "--dry-run",
+                ]
+            )
+            nvx.command_run(restored)
+            command = format_command.call_args.args[0]
+            self.assertEqual(
+                [
+                    command[index + 1]
+                    for index, value in enumerate(command)
+                    if value in ("--mount-aggregate", "--mount-child")
+                ],
+                booted,
+            )
+            self.assertNotIn("--cmdline", command)
+            retargeted = nvx.parse_args(
+                [
+                    "run",
+                    "--restore-snapshot",
+                    "snapshot",
+                    "--mount",
+                    "/workspace,work,rw",
+                    "--mount",
+                    "/opt/tools,tools",
+                    "--mount",
+                    "/srv/cache,cache,ro",
+                    "--dry-run",
+                ]
+            )
+            nvx.command_run(retargeted)
+            command = format_command.call_args.args[0]
+            children = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--mount-child"
+            ]
+            self.assertEqual(children[0::2], booted[1::2])
+            self.assertNotEqual(children[1], booted[2])
+            self.assertEqual(children[1].split(",", 1)[1], "tools,ro")
+
+            for mounts, message in (
+                (["/a,a,rx"], "unsupported --mount mode"),
+                (["/workspace,a", "/workspace/cache,b"], "overlap"),
+                (["/run/nvx,a", "/b,b"], "overlap"),
+                (["/a b,a", "/b,b"], "invalid --mount target"),
+                (["relative,a", "/b,b"], "invalid --mount target"),
+                ([f"/share/{index:02},host" for index in range(60)], "1024-byte"),
+            ):
+                with self.subTest(mounts=mounts[:2]):
+                    invalid = nvx.parse_args(
+                        ["run", *[f"--mount={mount}" for mount in mounts], "--dry-run"]
+                    )
+                    with self.assertRaisesRegex(common.ScriptError, message):
+                        nvx.command_run(invalid)
+            relative = nvx.parse_args(
+                [
+                    "run",
+                    "--mount",
+                    "/a,a",
+                    "--mount",
+                    "/b,b",
+                    "--mount-deny",
+                    "secrets",
+                    "--dry-run",
+                ]
+            )
+            with self.assertRaisesRegex(common.ScriptError, "absolute host path"):
+                nvx.command_run(relative)
 
     def test_managed_lifecycle_persists_and_replays_two_shares(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -12112,11 +12520,13 @@ class SandboxTests(unittest.TestCase):
                 [
                     command[index + 1]
                     for index, value in enumerate(command)
-                    if value in ("--mount", "--mount-deny")
+                    if value in ("--mount-aggregate", "--mount-child", "--mount-deny")
                 ],
                 [
-                    f"/workspace,{work},rw",
-                    f"/opt/hostedtoolcache,{tools},ro",
+                    "/run/nvx/shares",
+                    f"{sandbox.aggregate_child_name(0, '/workspace')},{work},rw",
+                    f"{sandbox.aggregate_child_name(1, '/opt/hostedtoolcache')},"
+                    f"{tools},ro",
                     os.fspath(work / "secrets"),
                 ],
             )

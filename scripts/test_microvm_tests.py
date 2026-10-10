@@ -1979,30 +1979,43 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
     """The filesystem-shares scenario with OpenVMM and the guest simulated."""
 
     @staticmethod
-    def _mounts(command: list[str]) -> list[str]:
+    def _children(command: list[str]) -> list[str]:
         return [
             command[index + 1]
             for index, value in enumerate(command)
-            if value == "--mount"
+            if value == "--mount-child"
         ]
 
-    def _run(self, *, guest_writes_toolcache: bool = False) -> list[list[str]]:
+    @staticmethod
+    def _host(child: str) -> Path:
+        return Path(child.split(",", 1)[1].rsplit(",", 1)[0])
+
+    def _run(
+        self,
+        *,
+        guest_writes_toolcache: bool = False,
+        guest_links_children: bool = False,
+    ) -> list[list[str]]:
         launched: list[list[str]] = []
-        mounts = self._mounts
+        children = self._children
+        host = self._host
 
         def guest(
             command: list[str], script: str, marker: bytes, **_kwargs: object
         ) -> None:
             launched.append(command)
             self.assertEqual(marker, microvm_tests.FILESYSTEM_SHARES_MARKER)
-            self.assertIn("mount -t virtiofs -o rw microvm1", script)
-            workspace, toolcache = (
-                Path(mount.split(",", 2)[1]) for mount in mounts(command)
-            )
+            self.assertIn("touch /run/nvx/shares/1/mutation", script)
+            self.assertIn("ln /run/nvx/shares/1/seed /run/nvx/shares/0/linked", script)
+            workspace, toolcache, data = (host(child) for child in children(command))
             (workspace / "from-guest").write_bytes(b"NVX-GUEST-WRITE\n")
             (workspace / "guest-directory").mkdir()
+            with (data / "notes one.txt").open("ab") as notes:
+                notes.write(b"NVX-GUEST-NOTE\n")
             if guest_writes_toolcache:
                 (toolcache / "mutation").write_bytes(b"")
+            if guest_links_children:
+                (workspace / "linked").write_bytes(b"NVX-TOOLCACHE")
 
         class FakeProcess:
             def __init__(self, command: list[str], _log_path: Path) -> None:
@@ -2023,8 +2036,7 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
 
             def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
                 command = self.command
-                requested = mounts(command)
-                workspace = Path(requested[0].split(",", 2)[1])
+                requested = children(command)
                 if "--snapshot-destination" in command:
                     snapshot = Path(
                         command[command.index("--snapshot-destination") + 1]
@@ -2032,28 +2044,35 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
                     snapshot.mkdir()
                     for name in ("manifest.bin", "state.bin", "memory.bin"):
                         (snapshot / name).write_bytes(name.encode())
-                    (workspace / "journal").write_bytes(b"NVX-BEFORE")
+                    (host(requested[0]) / "journal").write_bytes(b"NVX-BEFORE")
                     return openvmm_process.OpenvmmProcessResult(
                         0, b"NVX-FILESYSTEM-SHARES-BEFORE\n"
                     )
                 if "--restore-snapshot" in command:
-                    if len(requested) == 1:
-                        error = b"requires 2 --mount attachments in snapshot order"
-                    elif not requested[0].startswith("/workspace,"):
-                        error = b"target does not match the snapshot contract"
+                    names = [child.split(",", 1)[0] for child in requested]
+                    if "--mount" in command:
+                        error = (
+                            b"requires the --mount-aggregate and --mount-child options"
+                        )
+                    elif (
+                        len(requested) != 3
+                        or host(requested[0]).name != "workspace"
+                        or names != ["0", "1", "2"]
+                    ):
+                        error = b"do not match the snapshot contract"
                     else:
-                        with (workspace / "journal").open("ab") as journal:
+                        with (host(requested[0]) / "journal").open("ab") as journal:
                             journal.write(b"NVX-AFTER")
                         return openvmm_process.OpenvmmProcessResult(
                             0, b"NVX-FILESYSTEM-SHARES-AFTER\n"
                         )
                     return openvmm_process.OpenvmmProcessResult(1, error + b"\n")
-                if len(requested) == 3:
-                    error = b"microVM permits at most 2 filesystems"
-                elif "--mount-deny" in command:
+                if command.count("--mount") == 2:
+                    error = b"the argument '--mount' cannot be used multiple times"
+                elif "--mount" in command:
+                    error = b"'--mount-aggregate' cannot be used with '--mount'"
+                elif "secrets" in command:
                     error = b"--mount-deny requires an absolute host path"
-                elif requested[1].startswith("/workspace/cache,"):
-                    error = b"guest mount targets overlap"
                 else:
                     error = b"host directories must not overlap"
                 return openvmm_process.OpenvmmProcessResult(2, error + b"\n")
@@ -2079,34 +2098,66 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
         )
         return launched
 
-    def test_scenario_attaches_both_shares_and_restores_them_in_order(self):
+    def test_scenario_attaches_every_share_and_restores_them_in_order(self):
         launched = self._run()
         boot = launched[0]
-        workspace, toolcache = self._mounts(boot)
-        self.assertTrue(workspace.startswith("/workspace,"))
-        self.assertTrue(workspace.endswith(",rw"))
-        self.assertTrue(toolcache.startswith("/opt/hostedtoolcache,"))
-        self.assertTrue(toolcache.endswith(",ro"))
-        denied = [
-            Path(boot[index + 1]).name
-            for index, value in enumerate(boot)
-            if value == "--mount-deny"
-        ]
-        self.assertEqual(denied, ["secrets", "credentials"])
+        self.assertNotIn("--mount", boot)
+        self.assertEqual(boot[boot.index("--mount-aggregate") + 1], "/run/nvx/shares")
+        workspace, toolcache, data = self._children(boot)
+        self.assertTrue(workspace.startswith("0,") and workspace.endswith(",rw"))
+        self.assertTrue(toolcache.startswith("1,") and toolcache.endswith(",ro"))
+        self.assertTrue(data.startswith("2,") and data.endswith(",rw"))
+        cmdline = boot[boot.index("--cmdline") + 1]
+        self.assertIn(
+            "nvx_share=0,/workspace,rw nvx_share=1,/opt/hostedtoolcache,ro "
+            "nvx_share=2,/srv/data,rw",
+            cmdline,
+        )
 
-        # Four invalid sets fail before boot, then a capture with both shares,
-        # two invalid restores, and the restore with both shares in order.
-        self.assertEqual(len(launched), 1 + 4 + 1 + 3)
+        def policy(command: list[str], option: str) -> list[str]:
+            return [
+                Path(command[index + 1]).name
+                for index, value in enumerate(command)
+                if value == option
+            ]
+
+        # The data directory's root hides everything but two paths, one of
+        # them writable, and each other share hides its own denied path.
+        self.assertEqual(
+            policy(boot, "--mount-deny"), ["data", "secrets", "credentials"]
+        )
+        self.assertEqual(policy(boot, "--mount-allow"), ["public", "notes one.txt"])
+        self.assertEqual(policy(boot, "--mount-write"), ["notes one.txt"])
+
+        # Four invalid sets fail before boot, then a capture with every share,
+        # four invalid restores, and the restore with every share in order.
+        self.assertEqual(len(launched), 1 + 4 + 1 + 5)
+        self.assertEqual(launched[1].count("--mount"), 2)
+        self.assertEqual(len(self._children(launched[2])), 2)
         capture = launched[5]
         self.assertIn("--snapshot-destination", capture)
-        self.assertEqual(self._mounts(capture), [workspace, toolcache])
-        self.assertEqual(self._mounts(launched[6]), [workspace])
-        self.assertEqual(self._mounts(launched[7]), [toolcache, workspace])
-        self.assertEqual(self._mounts(launched[8]), [workspace, toolcache])
+        self.assertEqual(self._children(capture), [workspace, toolcache, data])
+        self.assertEqual(self._children(launched[6]), [workspace, toolcache])
+        self.assertEqual(
+            [self._host(child).name for child in self._children(launched[7])],
+            ["toolcache", "workspace", "data"],
+        )
+        # Renaming a child, with the same host directory, mode, and order, is
+        # enough to fail.
+        self.assertEqual(
+            self._children(launched[8]),
+            [workspace, toolcache, data.replace("2,", "data,", 1)],
+        )
+        self.assertIn("--mount", launched[9])
+        self.assertEqual(self._children(launched[10]), [workspace, toolcache, data])
 
     def test_scenario_rejects_a_write_to_the_read_only_share(self):
         with self.assertRaisesRegex(RuntimeError, "modified the read-only share"):
             self._run(guest_writes_toolcache=True)
+
+    def test_scenario_rejects_a_hard_link_between_children(self):
+        with self.assertRaisesRegex(RuntimeError, "hard link joined two children"):
+            self._run(guest_links_children=True)
 
     def test_scenario_is_a_default_correctness_scenario(self):
         self.assertIn("filesystem-shares", microvm_tests.MICROVM_TEST_SCENARIOS)

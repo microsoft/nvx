@@ -29,8 +29,10 @@ use crate::model::NetworkPolicy;
 
 /// Version of the state files written by this crate.
 ///
-/// Version 1 described sandboxes assembled from image layers and a scratch disk.
-pub(crate) const STATE_FORMAT: u32 = 2;
+/// Version 1 described sandboxes assembled from image layers and a scratch disk, and version 2
+/// exported the mapped host paths as one directory whose bind mounts the kernel command line
+/// listed.
+pub(crate) const STATE_FORMAT: u32 = 3;
 /// Backend key recorded in every sandbox.
 pub(crate) const BACKEND_KEY: &str = "openvmm";
 /// Linux control socket name.
@@ -201,17 +203,23 @@ impl StateStore {
     /// Loads the configuration of a provisioned sandbox.
     pub(crate) fn load(&self, sandbox_id: &SandboxId) -> Result<SandboxRecord> {
         let path = self.dir(sandbox_id).join(RECORD_NAME);
-        let record: SandboxRecord = match read_json(&path)? {
+        // Records of other formats have other fields, so their format is checked first.
+        let record: serde_json::Value = match read_json(&path)? {
             Some(record) => record,
             None => return Err(not_provisioned(sandbox_id)),
         };
-        if record.format != STATE_FORMAT || record.backend != BACKEND_KEY {
+        if record.get("format").and_then(serde_json::Value::as_u64) != Some(STATE_FORMAT.into())
+            || record.get("backend").and_then(serde_json::Value::as_str) != Some(BACKEND_KEY)
+        {
             return Err(Error::backend_error(format!(
                 "sandbox state {} has an unsupported format",
                 path.display()
             )));
         }
-        Ok(record)
+        serde_json::from_value(record).map_err(|error| {
+            Error::backend_error(format!("sandbox state {} is malformed", path.display()))
+                .with_source(error)
+        })
     }
 
     pub(crate) fn runtime(&self, sandbox_id: &SandboxId) -> Result<Option<RuntimeRecord>> {
@@ -516,14 +524,30 @@ mod tests {
         store.create(&id, &record()).unwrap();
         fs::write(store.dir(&id).join(RECORD_NAME), b"{ truncated").unwrap();
         assert_eq!(store.load(&id).unwrap_err().code(), ErrorCode::BackendError);
+        let unsupported = |record: &serde_json::Value| {
+            fs::write(
+                store.dir(&id).join(RECORD_NAME),
+                serde_json::to_vec(record).unwrap(),
+            )
+            .unwrap();
+            let error = store.load(&id).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::BackendError);
+            assert!(error.message().contains("unsupported format"), "{error}");
+        };
         let mut legacy = serde_json::to_value(record()).unwrap();
         legacy["format"] = 1.into();
-        fs::write(
-            store.dir(&id).join(RECORD_NAME),
-            serde_json::to_vec(&legacy).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(store.load(&id).unwrap_err().code(), ErrorCode::BackendError);
+        unsupported(&legacy);
+        // Version 2 exported one directory and listed its bind mounts on the kernel command
+        // line.
+        legacy["format"] = 2.into();
+        legacy["filesystem"] = serde_json::json!({
+            "root": "/host/work",
+            "writable": false,
+            "denied": [],
+            "deniedIdentities": [],
+            "binds": [{ "source": "", "target": "/host/work", "readOnly": true }],
+        });
+        unsupported(&legacy);
     }
 
     #[test]
