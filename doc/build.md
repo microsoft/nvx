@@ -189,30 +189,24 @@ boots never run it. The
 token) reports violations without powering off, for runs against VMMs that
 predate the ABI. Both time tools are linked statically against musl
 (`musl-gcc`): with static glibc each would add about 700 KB to the initramfs,
-and every unpacked kilobyte delays cold boot. The matching kernel enables
-virtio-blk, compressed EROFS, overlayfs, ext4 scratch, memory cgroups, and
-cgroup BPF. The build fails if `olddefconfig` drops any required option. The
-APK manifest records the `blkid` and `util-linux` tools used by the bootstrap
-plus the device helper's source and binary SHA-256 values.
-
-The platform configuration also enables Unix-domain sockets for local guest
-IPC and seccomp filters for workload syscall policies. Overlayfs does not
-unconditionally follow redirect metadata. These are kernel capabilities, not
-product-agent configuration; the same requirements are checked after
-`olddefconfig` and when verifying source and generated configurations.
+and every unpacked kilobyte delays cold boot. The
+[kernel configuration checks](#kernel-configuration-checks) cover the kernel
+features that the sandbox bootstrap needs. The APK manifest records the
+`blkid` and `util-linux` tools used by the bootstrap plus the device helper's
+source and binary SHA-256 values.
 
 The Ubuntu initramfs uses Ubuntu userland with the NVX kernel. It is not an
 Ubuntu-kernel or systemd VM. Its distribution-neutral package manifest records
 the Ubuntu Base and supplemental binary/source identities, license metadata,
 rootfs SHA-256, and NVX helper provenance.
 
-The native kernel build caches the verified and patched source under
-`.cache/linux`, uses `O=build/linux`, runs `olddefconfig`, exports the exact
-generated config as `build/vmlinux.config`, and fails if ACPI is enabled,
-PVH remains enabled, or the MP-table, APIC, IOAPIC, and command-line
-virtio-mmio requirements are missing. It also enforces the time-ABI settings:
-`CONFIG_HYPERVISOR_GUEST` and `CONFIG_PARAVIRT` stay on, while `CONFIG_HYPERV`,
-`CONFIG_KVM_GUEST`, and `CONFIG_CPU_FREQ` stay off. The guest identifies the
+The kernel build, `build-kernel`, which the Docker build also runs, caches the
+verified and patched source under `.cache/linux`, uses `O=build/linux`, runs
+`olddefconfig`, stops unless the generated config passes the
+[kernel configuration checks](#kernel-configuration-checks), and exports it as
+`build/vmlinux.config`. The time-ABI settings keep `CONFIG_HYPERVISOR_GUEST`
+and `CONFIG_PARAVIRT` on and `CONFIG_HYPERV`, `CONFIG_KVM_GUEST`, and
+`CONFIG_CPU_FREQ` off. The guest identifies the
 hypervisor only through the time ABI's Hyper-V identity, so the KVM guest code,
 kvmclock, and the haltpoll idle driver would be dead code. Without cpufreq,
 `intel_pstate` cannot probe MSRs the microVM does not implement, so no `#GP`
@@ -241,6 +235,32 @@ When the mitigation patches indirect branches, the read-only executable cache
 takes one 2 MiB block of guest memory. `CONFIG_DEBUG_WX` audits the kernel page
 tables at boot, and the `nvx-time` boot check fails if the audit reports a
 writable and executable mapping.
+
+## Kernel configuration checks
+
+The kernel build checks the configuration that `olddefconfig` generates
+against fixed groups of settings, so a configuration or version change cannot
+silently drop a feature that the machine profile or a guest needs. The groups
+live in `KernelBuildConstants` in
+[`build_constants.py`](../scripts/nvx_tools/build_constants.py).
+
+| Group | Required settings | Purpose |
+| --- | --- | --- |
+| Direct boot | ACPI and PVH off; MP-table parsing, local APIC, IOAPIC, and virtio-mmio devices from the command line | Boot through the [ACPI-free MP-table loader](design/cold-boot.md#linux-direct-mp-table-loader) |
+| Virtio console | Virtio console and HVC driver over virtio-mmio | Drive the [virtio consoles](design/machine-and-device-abi.md#console) |
+| Sandbox | virtio-blk; ext4; EROFS with zstd compression; overlayfs that does not always follow redirects; memory and PID cgroups; BPF and cgroup BPF; seccomp filters; Unix-domain sockets; network namespaces and veth | Layer EROFS over ext4 scratch and confine the workload in the [sandbox bootstrap](design/sandbox-filesystem-and-agent-architecture.md#implemented-filesystem-bootstrap) |
+| Network | IPv4; IPv6 without the SIT tunnel driver; virtio-net | Configure the dual-stack NIC of the [portable network profile](design/machine-and-device-abi.md#network); SIT would add an `sit0` device that decapsulates IPv6 from IPv4 packets |
+| Shared interrupt status | `CONFIG_VIRTIO_MMIO_SHARED_STATUS` from the kernel patches | Read [shared virtio interrupt status](design/machine-and-device-abi.md#fixed-virtio-mmio-transport) |
+| Time ABI | Hypervisor-guest and paravirtualization support on; Hyper-V, KVM guest, and cpufreq off | Meet the [time ABI](design/time-abi.md), as described above |
+| Hardening | Strict kernel and module RWX with read-only executable memory, the ITS mitigation, an empty modprobe path, trimmed symbol exports, the boot-time W+X audit, and no option built as a module | Keep runtime code read-only, as described above |
+| Watchdogs | Soft-lockup and hung-task detectors off, or on in the [CI debug kernel](#ci-debug-kernel) | Keep the detectors out of production kernels |
+
+`build-kernel` runs every check, and packaging runs them again on the
+packaged config. `scripts/nvx.py verify` checks the checked-in
+`kernel/config-microvm` for the direct-boot, sandbox, network, time-ABI, and
+hardening groups plus the xe9 console and virtio-fs. When
+`build/vmlinux.config` exists, it also checks that file for the direct-boot,
+sandbox, and network groups plus the xe9 console.
 
 ## CI debug kernel
 
