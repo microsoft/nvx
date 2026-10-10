@@ -4415,8 +4415,8 @@ class MicrovmTests(unittest.TestCase):
         )
         self.assertIn("192.0.2.0/24:tcp:21002", policy.deny)
         self.assertIn("192.0.2.0/24:udp:22002", policy.deny)
-        self.assertIn("192.0.2.128/25:tcp:21001", policy.deny)
-        self.assertIn("192.0.2.128/25:udp:22003", policy.deny)
+        self.assertIn("192.0.2.128/25:tcp:21001-21003", policy.deny)
+        self.assertIn("192.0.2.128/25:udp:22001-22003", policy.deny)
 
     def test_l3_l4_egress_acceptance_invokes_public_nvx_policy_file(self):
         class ImmediateThread:

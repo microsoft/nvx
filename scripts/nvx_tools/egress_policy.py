@@ -408,36 +408,57 @@ def _lower_protocol_rules(
         events.setdefault(rule.end_port + 1, []).append((-1, rule.addresses))
 
     active: Counter[_AddressIntervals] = Counter()
-    # Each network's port ranges in port order. Every network of one segment
-    # is a distinct native rule, so a segment cannot exceed the budget alone.
     port_ranges: dict[_Network, list[_PortRange]] = {}
+    # Networks whose last range ends just before the current port segment.
+    open_networks: list[_Network] = []
     rule_count = 0
     previous_port: int | None = None
     for port in sorted(events):
+        if previous_port is not None and not active:
+            open_networks = []
         if previous_port is not None and previous_port < port and active:
             addresses = _merge_intervals(
                 interval for intervals in active for interval in intervals
             )
+            available = _merge_intervals((*addresses, *covered))
+            kept: list[_Network] = []
+            for network in open_networks:
+                interval = (
+                    int(network.network_address),
+                    int(network.broadcast_address),
+                )
+                if not _subtract_intervals((interval,), available):
+                    ranges = port_ranges[network]
+                    ranges[-1] = (ranges[-1][0], port - 1)
+                    kept.append(network)
+            kept_cover = _merge_intervals(
+                (
+                    *covered,
+                    *(
+                        (
+                            int(network.network_address),
+                            int(network.broadcast_address),
+                        )
+                        for network in kept
+                    ),
+                )
+            )
             networks = _protocol_intervals_to_networks(
                 addresses,
-                covered,
+                kept_cover,
                 version,
-                remaining_budget,
+                remaining_budget - rule_count,
                 category,
             )
             for network in networks:
-                ranges = port_ranges.setdefault(network, [])
-                # A network that the previous segment also matched extends
-                # that segment's range, so equivalent policies lower alike.
-                if ranges and ranges[-1][1] == previous_port - 1:
-                    ranges[-1] = (ranges[-1][0], port - 1)
-                    continue
                 if rule_count >= remaining_budget:
                     raise ScriptError(
                         f"{category} emits at most {MAX_RULES_PER_ACTION} native rules"
                     )
-                ranges.append((previous_port, port - 1))
+                port_ranges.setdefault(network, []).append((previous_port, port - 1))
                 rule_count += 1
+                kept.append(network)
+            open_networks = kept
         for direction, addresses in events[port]:
             active[addresses] += direction
             if active[addresses] == 0:
