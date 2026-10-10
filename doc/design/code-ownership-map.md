@@ -27,6 +27,7 @@ contracts between them.
 | Backend CPU contracts and snapshot clocks | KVM, MSHV, and WHP backends |
 | Guest-visible CPU profiles: the pinned catalog, `--cpu-profile` selection, host profiles and the `auto` fallback, backend support and restore checks, and CPU fingerprints | OpenVMM CPU-profile catalog, with the shared time-ABI layer that builds each VM's effective CPUID |
 | Layered sandbox launch and kernel features | NVX sandbox launcher and microVM kernel configuration |
+| Managed `sandbox` lifecycle of the NVX CLI: per-sandbox state, fail-closed provision, start, stop, and deprovision transitions that take effect one at a time per sandbox while `exec` runs beside them, the control capability that each start generates and hands to OpenVMM, and identification of the running OpenVMM process | NVX managed sandbox lifecycle and its control-session client |
 | Host shares of `run` and `sandbox`: one share attached directly or several as aggregate children, their pre-launch checks, and the `nvx_share=` tokens that place each child in the guest | NVX launcher |
 | Structured egress-policy files and their translation to OpenVMM egress rules | NVX launcher's egress-policy compiler |
 | Edge sandbox lifecycle API, request validation, backend capabilities, and the serializable contract model | NVX `aci_edge_sandboxes` crate and its data-model crate |
