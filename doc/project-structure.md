@@ -19,7 +19,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `guest` | Common guest sources plus Alpine-control and Ubuntu shell helpers |
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
-| `aci_edge_sandboxes` | Rust crate `aci_edge_sandboxes`: state-aware sandbox API with an OpenVMM backend |
+| `aci_edge_sandboxes` | Rust crate `aci_edge_sandboxes`: state-aware sandbox API with an OpenVMM backend and an opt-in native-agent backend |
 | `openvmm` | Public OpenVMM Git submodule from `nanvix/openvmm`, tracking its `main` branch |
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Implementation of the `nvx.py` commands |
@@ -75,7 +75,7 @@ nvx/
 |   |-- design.md                Design index
 |   |-- design/                  MicroVM, sandbox, and snapshot design chapters
 |   |-- distribution.md          Packaging and source delivery
-|   |-- guests/                  Guest userland chapters (Ubuntu)
+|   |-- guests/                  Guest userland chapters (Ubuntu and Azure Linux)
 |   |-- openvmm-upstream-roadmap.md Plan for upstreaming the OpenVMM fork's microVM commits
 |   |-- project-structure.md     This guide
 |   |-- run.md                   Guest launch and host mapping
@@ -90,9 +90,10 @@ nvx/
 |   |-- model/                   Serializable contract and wire-model crate
 |   |-- src/                     Facade and backends
 |   |   |-- openvmm/             Default backend that drives the openvmm binary
+|   |   |-- agent/               Opt-in backend over a separately supplied native agent library
 |   |   `-- bin/                 aci-edge-sandboxes-fake-openvmm test double
-|   |-- examples/                Runnable lifecycle example
-|   |-- tests/                   Mock, fake-OpenVMM, and real-hypervisor tests
+|   |-- examples/                Runnable lifecycle examples for the OpenVMM and agent backends
+|   |-- tests/                   Mock, fake-OpenVMM, validation, real-hypervisor, and agent-library tests
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     OpenVMM Git submodule
@@ -237,7 +238,9 @@ The Rust crate `aci_edge_sandboxes`, which exposes the five-phase state-aware sa
 (provision, start, exec, stop, and deprovision) to consumers such as MXC. It
 defines the contract types, a pluggable backend trait, and the default backend,
 which launches the `openvmm` binary and speaks the guest agent's control
-protocol. The crate builds independently of the OpenVMM submodule. See its
+protocol. The opt-in `agent` feature adds a second backend, a thin client of a
+separately supplied native agent library that owns the whole sandbox lifecycle.
+The crate builds independently of the OpenVMM submodule. See its
 [README](../aci_edge_sandboxes/README.md) for the API, the policy honor matrix, and tests.
 
 ### `openvmm/`
