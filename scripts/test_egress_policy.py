@@ -170,6 +170,31 @@ class EgressPolicyTests(unittest.TestCase):
             ("192.0.2.7/32:udp:1-10", "198.51.100.9/32:udp:5-20"),
         )
 
+    def test_keeps_network_range_whole_when_adjacent_rule_changes_union(self):
+        compiled = self.compile(
+            {
+                "allow": [
+                    {
+                        "cidr": "10.0.0.0/25",
+                        "protocol": "tcp",
+                        "port": 1,
+                        "endPort": 10,
+                    },
+                    {
+                        "cidr": "10.0.0.128/25",
+                        "protocol": "tcp",
+                        "port": 5,
+                        "endPort": 6,
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(
+            compiled.allow,
+            ("10.0.0.0/24:tcp:5-6", "10.0.0.0/25:tcp:1-10"),
+        )
+
     def test_rejects_invalid_port_shapes_and_values(self):
         invalid_rules = (
             {"cidr": "192.0.2.0/24", "protocol": "tcp", "endPort": 80},
@@ -809,6 +834,47 @@ class EgressPolicyTests(unittest.TestCase):
                         ]
                     }
                 )
+
+    def test_overlapping_segments_do_not_inflate_native_rule_budget(self):
+        internal_ports = range(1000, 1056, 2)
+        compiled = self.compile(
+            {
+                "allow": [
+                    {
+                        "cidr": "0.0.0.0/0",
+                        "except": ["10.0.0.0/8"],
+                        "protocol": "tcp",
+                        "port": 1,
+                        "endPort": 65535,
+                    },
+                    *(
+                        {
+                            "cidr": "10.0.0.0/8",
+                            "protocol": "tcp",
+                            "port": port,
+                        }
+                        for port in internal_ports
+                    ),
+                ]
+            }
+        )
+
+        expected_external = {
+            f"{cidr}:tcp:1-65535"
+            for cidr in (
+                "0.0.0.0/5",
+                "8.0.0.0/7",
+                "11.0.0.0/8",
+                "12.0.0.0/6",
+                "16.0.0.0/4",
+                "32.0.0.0/3",
+                "64.0.0.0/2",
+                "128.0.0.0/1",
+            )
+        }
+        expected_internal = {f"0.0.0.0/0:tcp:{port}" for port in internal_ports}
+        self.assertEqual(set(compiled.allow), expected_external | expected_internal)
+        self.assertEqual(len(compiled.allow), 36)
 
     def test_bounds_exclusions_times_port_segments(self):
         def rules(count: int) -> list[dict[str, object]]:
