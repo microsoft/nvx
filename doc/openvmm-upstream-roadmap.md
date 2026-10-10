@@ -3,7 +3,11 @@
 ## Scope
 
 - OpenVMM fork base: `e1cdbd916d3aacb216309c8e7779b832546759a1`.
-- OpenVMM fork tip: `2728f33ea9a44d2d0fb956d9f01768ae2100fb62`.
+- Mapped fork tip: `2728f33ea9a44d2d0fb956d9f01768ae2100fb62`, position 166. The graph, PR
+  summary, and commit mapping below cover positions 001-166.
+- NVX's pinned OpenVMM revision: `7bf0ee28b826374a2d386067df0456b81bcae818`, 139 commits past the
+  mapped tip on the same first-parent chain. These commits are not yet assigned to PRs; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `1fd455b19e7c69c72a2d375d0ed1cb35d901c688` (2026-10-01), 18 commits past
   the fork base.
 
@@ -194,7 +198,8 @@ e1cdbd916
   -> PR20 fixup [160] -> PR20/PR25 split [161]
   -> PR18/PR23 split [162]
   -> PR18 fixup [163] -> PR25 fixup [164] -> PR27 [165-166]
-  -> 2728f33ea
+  -> 2728f33ea (mapped tip)
+  -> unassigned [167-305] -> 7bf0ee28b (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main.
@@ -207,6 +212,33 @@ Fold position 160 into PR20, split position 161 between PR20 and PR25, and split
 between PR18 and PR23 before submission. Fold position 163 into PR18's position 113 and position
 164 into PR25's position 155. PR27 can be prepared once PR22 lands; its generic confinement commit
 can be submitted independently if preferred.
+
+## Commits after the mapped tip
+
+The NVX pin extends the chain past position 166 without merges. The 139 later commits are not
+yet classified or assigned to PRs. This table groups them by topic in chain order; ranges are
+inclusive, as in the [PR summary](#pr-summary).
+
+| Positions | Commit range | Count | Topic |
+| ---: | --- | ---: | --- |
+| 167 | `4355c010e` | 1 | Flush buffered portb output before a guest-requested snapshot |
+| 168-278 | `ad38a75c6..974f35652` | 111 | NVX time ABI v1 on KVM, MSHV, and WHP; pinned CPU profiles and the `--cpu-fingerprint` tool; removal of the legacy microVM clock paths; snapshot manifest version 6 as the only format; and MSHV and WHP delivery of LAPIC vectors written into a halted VP's IRR |
+| 279-280 | `8c01aabc1..b7696e7ba` | 2 | Serve microVM virtio-fs share requests as the guest caller |
+| 281-283 | `fc7f7b2c4..4cb5777fa` | 3 | Alder Lake CPU profile and opt-in host CPU profiles |
+| 284-285 | `22a868409..a41cf7351` | 2 | Second microVM virtio-fs slot, which position 302 removes |
+| 286-291 | `d290df675..3951c8415` | 6 | AMD CPU profiles (Milan, Genoa, and Turin) and AMD host profiles |
+| 292 | `762bc1c7a` | 1 | Per-subtree access policy for microVM shares |
+| 293 | `3e1f5bd48` | 1 | WHP answers CPUID leaves 0 and 1 without exits |
+| 294-296 | `92205a8ce..0eccda895` | 3 | Generation-bound microVM snapshots and scratch bound by file identity |
+| 297 | `96e2363b1` | 1 | `--cpu-profile auto` falls back to a host profile |
+| 298 | `f12dcf5e8` | 1 | RAM-backed microVM overlays without scratch |
+| 299-301 | `3796991d5..e5bf79776` | 3 | Egress rules that select a protocol or a destination-port range, and IPv6 in the portable network profile |
+| 302-305 | `3072d7a91..7bf0ee28b` | 4 | Several host directories on one virtio-fs slot, their snapshot, and their path policy |
+
+Some of these commits change mapped work rather than add to it. Positions 255-259 remove the
+legacy microVM clock paths and change files that PR10 and PR17 also change. Position 261 makes
+manifest version 6 the only snapshot format and changes files that PR11 and PR17 also change.
+Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 ## PR summary
 
