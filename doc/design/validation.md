@@ -80,14 +80,20 @@ export owner, that squashed root cannot chown files or create device nodes,
 that a foreign guest identity fails with `EPERM` unless OpenVMM holds
 `CAP_SETUID` and `CAP_SETGID`, in which case it owns what it creates, and
 pre-boot rejection of a root-owned export or, on Windows, of the mode itself.
-Concurrent-share coverage attaches a read-write workspace and a read-only tool
-cache, each with its own tag and denied path, and verifies guest writes to the
-workspace, guest-flag and link rejection of writes to the tool cache, and,
-with the tool cache's tag remounted read-write inside the guest, `EROFS` from
-OpenVMM for every mutation. It also rejects three shares, nested guest
-targets, nested host directories, and ambiguous denied paths before boot, and
-round-trips both shares through a snapshot whose restore must supply both in
-capture order.
+Concurrent-share coverage attaches a read-write workspace, a read-only tool
+cache, and a data directory as the children of one aggregate on the microVM's
+single virtio-fs slot, each with its own denied paths. The data directory
+hides its root except for one directory and one file, the only writable path
+in it. The guest checks that each child is bound at its target with its
+mode, writes to the workspace and to that file, cannot write to the tool
+cache, also through a symbolic link, and cannot create names in the hidden
+root. Through the aggregate's read-write, root-only mount, OpenVMM still
+returns `EROFS` for every mutation of the tool cache, keeps denied paths
+hidden, and refuses hard links between children. OpenVMM rejects a repeated
+`--mount`, `--mount` beside an aggregate, overlapping children, and a
+relative denied path before boot. A snapshot round-trips an open workspace
+file, and a restore that drops, swaps, or renames a child, or offers a single
+`--mount` instead, fails before the guest resumes.
 Access-policy coverage narrows a read-write share's writes to a writable
 directory and file, and verifies guest writes, renames, and links inside them
 and `EROFS` from OpenVMM for every other mutation, including moves into and
