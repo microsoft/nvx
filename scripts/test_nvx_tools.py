@@ -1050,6 +1050,19 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(report.outcome_report, Path("exec-outcome.json"))
 
+    def test_sandbox_timeout_must_be_finite_and_positive(self):
+        for value in ("0", "-1", "nan", "inf"):
+            stderr = io.StringIO()
+            with (
+                self.subTest(value=value),
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit),
+            ):
+                nvx.parse_args(
+                    ["sandbox", "start", "--state-dir", "state", "--timeout", value]
+                )
+            self.assertIn("must be finite and greater than 0", stderr.getvalue())
+
     def test_sandbox_managed_operations_reject_dry_run_before_state_access(self):
         lifecycle_methods = (
             ("provision", "provision"),
@@ -11090,6 +11103,7 @@ def _provision_managed_sandbox(root: Path) -> Path:
         network_proxy=None,
         host_loopback_forward=(),
         cmdline="quiet",
+        timeout=10,
     )
     return state
 
@@ -11218,6 +11232,132 @@ staging.write(report_document[len(report_document) // 2 :])
 staging.close()
 os.rename(staging.name, report)
 sys.exit(125)
+"""
+
+# Stands in for the OpenVMM of a managed sandbox that runs until it is stopped.
+# Like OpenVMM, it reads its capability from standard input, serves the control
+# endpoint one client at a time, rejects an attach with another capability,
+# acknowledges a ping, and on a stop publishes its outcome report and exits.
+_SERVING_OPENVMM = r"""
+import json
+import os
+import secrets
+import socket
+import struct
+import sys
+
+OUTER = struct.Struct("<4sHBB16sQQI")
+APP = struct.Struct("<4sBBHQiI")
+arguments = sys.argv[1:]
+endpoint = arguments[arguments.index("--microvm-control-console") + 1]
+endpoint = endpoint.removeprefix("listen=")
+report = arguments[arguments.index("--microvm-report") + 1]
+capability = sys.stdin.buffer.read()
+instance = secrets.token_bytes(16)
+if os.name == "nt":
+    import _winapi
+
+    def accept():
+        pipe = _winapi.CreateNamedPipe(
+            endpoint.replace("/", "\\"),
+            _winapi.PIPE_ACCESS_DUPLEX,
+            _winapi.PIPE_WAIT,
+            1,
+            65536,
+            65536,
+            0,
+            _winapi.NULL,
+        )
+        try:
+            _winapi.ConnectNamedPipe(pipe, False)
+        except OSError as error:
+            if error.winerror != _winapi.ERROR_PIPE_CONNECTED:
+                raise
+        return pipe
+
+    def receive(pipe, length):
+        return _winapi.ReadFile(pipe, length)[0]
+
+    def send(pipe, data):
+        _winapi.WriteFile(pipe, data)
+
+    def close(pipe):
+        _winapi.CloseHandle(pipe)
+
+else:
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(endpoint)
+    listener.listen(1)
+
+    def accept():
+        return listener.accept()[0]
+
+    def receive(connection, length):
+        return connection.recv(length)
+
+    def send(connection, data):
+        connection.sendall(data)
+
+    def close(connection):
+        connection.close()
+
+
+def read_exact(connection, length):
+    data = b""
+    while len(data) < length:
+        chunk = receive(connection, length - len(data))
+        if not chunk:
+            raise EOFError
+        data += chunk
+    return data
+
+
+def read_record(connection):
+    header = OUTER.unpack(read_exact(connection, OUTER.size))
+    return header[2], read_exact(connection, header[7]) if header[7] else b""
+
+
+def write_record(connection, kind, sequence, payload=b""):
+    header = OUTER.pack(b"NVXS", 1, kind, 0, instance, 1, sequence, len(payload))
+    send(connection, header + payload)
+
+
+while True:
+    connection = accept()
+    try:
+        kind, payload = read_record(connection)
+        if kind != 2 or payload != capability:
+            write_record(connection, 8, 0)
+            continue
+        write_record(connection, 7, 0)
+        sequence = 1
+        while True:
+            request = APP.unpack(read_record(connection)[1][: APP.size])
+            stopping = request[2] == 3
+            if stopping:
+                with open(report, "w", encoding="utf-8") as output:
+                    json.dump(
+                        {
+                            "schema_version": 1,
+                            "outcome": {
+                                "operation": "managed",
+                                "category": "success",
+                                "status_code": 0,
+                            },
+                            "network_policy": {"status": "not-requested"},
+                            "teardown": {"vm_stopped": True},
+                        },
+                        output,
+                    )
+            reply = APP.pack(b"NVXC", 1, 0x85 if stopping else 0x81, 0, request[4], 0, 0)
+            write_record(connection, 5, sequence, reply)
+            sequence += 1
+            if stopping:
+                sys.exit(0)
+    except (EOFError, OSError):
+        pass
+    finally:
+        close(connection)
 """
 
 
@@ -12527,6 +12667,7 @@ class SandboxTests(unittest.TestCase):
                 network_proxy=None,
                 host_loopback_forward=(),
                 cmdline="quiet",
+                timeout=10,
             )
 
             config = json.loads(
@@ -12644,6 +12785,7 @@ class SandboxTests(unittest.TestCase):
                 network_proxy=None,
                 host_loopback_forward=(),
                 cmdline="quiet",
+                timeout=10,
             )
 
             config = json.loads(
@@ -12828,6 +12970,7 @@ class SandboxTests(unittest.TestCase):
                     network_proxy=None,
                     host_loopback_forward=(),
                     cmdline="quiet",
+                    timeout=10,
                 )
             finally:
                 os.chdir(previous)
@@ -13027,6 +13170,7 @@ class SandboxTests(unittest.TestCase):
                     network_proxy=None,
                     host_loopback_forward=(),
                     cmdline="quiet",
+                    timeout=10,
                 )
 
             if sys.platform == "win32":
@@ -13114,6 +13258,7 @@ class SandboxTests(unittest.TestCase):
                 network_proxy=None,
                 host_loopback_forward=(),
                 cmdline="quiet",
+                timeout=10,
             )
 
             config = json.loads(
@@ -13161,9 +13306,10 @@ class SandboxTests(unittest.TestCase):
                     network_proxy=None,
                     host_loopback_forward=(),
                     cmdline="quiet",
+                    timeout=10,
                 )
 
-            sandbox_lifecycle.deprovision(state)
+            sandbox_lifecycle.deprovision(state, 10)
             self.assertFalse(state.exists())
 
     def test_managed_lifecycle_start_requests_openvmm_outcome(self):
@@ -13198,6 +13344,7 @@ class SandboxTests(unittest.TestCase):
                 network_proxy=None,
                 host_loopback_forward=(),
                 cmdline="quiet",
+                timeout=10,
             )
             process = MagicMock()
             process.pid = 123
@@ -13523,7 +13670,7 @@ class SandboxTests(unittest.TestCase):
                     )
             connect.assert_not_called()
 
-            sandbox_lifecycle.deprovision(state)
+            sandbox_lifecycle.deprovision(state, 10)
             self.assertFalse(state.exists())
 
     def test_managed_lifecycle_identifies_legacy_records_by_process_id(self):
@@ -13534,7 +13681,7 @@ class SandboxTests(unittest.TestCase):
             _write_managed_runtime(state, os.getpid(), None)
 
             with self.assertRaisesRegex(common.ScriptError, "must be stopped"):
-                sandbox_lifecycle.deprovision(state)
+                sandbox_lifecycle.deprovision(state, 10)
             self.assertTrue((state / sandbox_lifecycle.RUNTIME_NAME).exists())
 
     def test_managed_lifecycle_rejects_invalid_process_start_times(self):
@@ -13553,7 +13700,7 @@ class SandboxTests(unittest.TestCase):
                     )
                     for operation in (
                         lambda: sandbox_lifecycle.stop(state, 10),
-                        lambda: sandbox_lifecycle.deprovision(state),
+                        lambda: sandbox_lifecycle.deprovision(state, 10),
                     ):
                         with self.assertRaisesRegex(
                             common.ScriptError, "invalid process start time"
@@ -13658,12 +13805,13 @@ class SandboxTests(unittest.TestCase):
             sorted(path.name for path in state.iterdir()),
             [
                 sandbox_lifecycle.CONFIG_NAME,
+                sandbox_lifecycle.LOCK_NAME,
                 sandbox_lifecycle.LOG_NAME,
                 sandbox_lifecycle.OUTCOME_NAME,
             ],
             log,
         )
-        sandbox_lifecycle.deprovision(state)
+        sandbox_lifecycle.deprovision(state, 10)
         self.assertFalse(state.exists())
 
     def test_managed_start_waits_only_for_openvmm_that_closed_its_endpoint(self):
@@ -13744,7 +13892,11 @@ class SandboxTests(unittest.TestCase):
                 self.assertEqual(process.terminate.called, status is None)
                 self.assertEqual(
                     sorted(path.name for path in state.iterdir()),
-                    [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOG_NAME],
+                    [
+                        sandbox_lifecycle.CONFIG_NAME,
+                        sandbox_lifecycle.LOCK_NAME,
+                        sandbox_lifecycle.LOG_NAME,
+                    ],
                 )
 
     def test_managed_start_spawns_openvmm_with_a_prepared_capability_pipe(self):
@@ -13806,6 +13958,1225 @@ class SandboxTests(unittest.TestCase):
             os.fstat(prepared[0])
         self.assertEqual(connect.call_args.args[1], capability)
         session.ping.assert_called_once_with(10)
+
+    def test_managed_start_launches_one_openvmm_for_overlapping_starts(self):
+        # Overlapping starts of one sandbox each launched OpenVMM. The runtime
+        # record and capability could then name different VMs, so that stop
+        # ended one VM or neither, and a failed start removed the other's files
+        # (#464).
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("managed sandboxes require a Linux or Windows host")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        state = _provision_managed_sandbox(Path(temporary.name).resolve())
+        popen = subprocess.Popen
+        launched: list[subprocess.Popen[bytes]] = []
+        attempts: list[None] = []
+        attempts_lock = threading.Lock()
+        overtaken = threading.Event()
+
+        def launch(command: list[str], **options: Any) -> subprocess.Popen[bytes]:
+            with attempts_lock:
+                first = not attempts
+                attempts.append(None)
+            if first:
+                # Gives the other start time to launch its own OpenVMM before
+                # this one records its own, as it could without the lock.
+                overtaken.wait(0.5)
+            else:
+                overtaken.set()
+            # With unknown options, the type checker cannot tell that start
+            # requests binary streams.
+            process = cast(
+                "subprocess.Popen[bytes]",
+                popen(
+                    [sys.executable, "-c", _SERVING_OPENVMM, *command[1:]], **options
+                ),
+            )
+            self.addCleanup(_end_child, process)
+            launched.append(process)
+            return process
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        barrier = threading.Barrier(2)
+        results: list[str] = []
+
+        def contend() -> None:
+            barrier.wait()
+            try:
+                sandbox_lifecycle.start(state, 30)
+                results.append("started")
+            except common.ScriptError as error:
+                results.append(str(error))
+
+        with (
+            patch.object(sandbox_lifecycle, "require_file", side_effect=require),
+            patch.object(sandbox_lifecycle.subprocess, "Popen", side_effect=launch),
+        ):
+            contenders = [
+                threading.Thread(target=contend, daemon=True) for _ in range(2)
+            ]
+            for contender in contenders:
+                contender.start()
+            for contender in contenders:
+                contender.join(120)
+        self.assertFalse(any(contender.is_alive() for contender in contenders))
+
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(
+            sorted(results),
+            ["sandbox is already running or has stale runtime state", "started"],
+        )
+        runtime = json.loads(
+            (state / sandbox_lifecycle.RUNTIME_NAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(runtime["pid"], launched[0].pid)
+
+        # OpenVMM does not inherit the lock, so the next transition can take it
+        # while the VM runs.
+        relocked = threading.Event()
+
+        def relock() -> None:
+            with sandbox_lifecycle._LifecycleLock(state, 30):
+                relocked.set()
+
+        threading.Thread(target=relock, daemon=True).start()
+        self.assertTrue(relocked.wait(30))
+
+        # The capability on record authenticates stop to the only VM, which ends.
+        outcome = sandbox_lifecycle.stop(state, 30)
+        self.assertEqual(outcome["outcome"]["category"], "success")
+        self.assertEqual(launched[0].wait(timeout=30), 0)
+        sandbox_lifecycle.deprovision(state, 10)
+        self.assertFalse(state.exists())
+
+    def test_managed_start_refuses_runtime_files_without_a_record(self):
+        # A start that was killed can leave its capability or control socket, but
+        # no runtime record, while its OpenVMM still runs. Start and deprovision
+        # refuse them rather than launch a second VM for the sandbox or remove
+        # the files of a VM that may still run.
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        for name in (
+            sandbox_lifecycle.CAPABILITY_NAME,
+            sandbox_lifecycle.CONTROL_SOCKET_NAME,
+        ):
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                state = _provision_managed_sandbox(Path(temporary).resolve())
+                leftover = state / name
+                leftover.write_bytes(b"leftover")
+                with (
+                    patch.object(
+                        sandbox_lifecycle, "require_file", side_effect=require
+                    ),
+                    patch.object(sandbox_lifecycle.subprocess, "Popen") as popen,
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        "^sandbox is already running or has stale runtime state$",
+                    ),
+                ):
+                    sandbox_lifecycle.start(state, 10)
+
+                popen.assert_not_called()
+                self.assertEqual(leftover.read_bytes(), b"leftover")
+                self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
+
+                with self.assertRaisesRegex(
+                    common.ScriptError,
+                    "^sandbox has runtime files but no runtime record, so its "
+                    "OpenVMM process may still run",
+                ):
+                    sandbox_lifecycle.deprovision(state, 10)
+                self.assertEqual(leftover.read_bytes(), b"leftover")
+                self.assertEqual(
+                    sorted(path.name for path in state.iterdir()),
+                    sorted(
+                        (
+                            sandbox_lifecycle.CONFIG_NAME,
+                            sandbox_lifecycle.LOCK_NAME,
+                            name,
+                        )
+                    ),
+                )
+
+        # A start creates its capability only if no other holds one.
+        with tempfile.TemporaryDirectory() as temporary:
+            capability = Path(temporary) / sandbox_lifecycle.CAPABILITY_NAME
+            capability.write_bytes(b"leftover")
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "^sandbox is already running or has stale runtime state$",
+            ):
+                sandbox_lifecycle._create_capability(capability, bytes(range(1, 33)))
+            self.assertEqual(capability.read_bytes(), b"leftover")
+
+    def test_managed_cleanups_remove_the_runtime_record_last(self):
+        # An interrupted cleanup then leaves a record that shows OpenVMM gone,
+        # which deprovision accepts, rather than runtime files that it refuses.
+        unlink = Path.unlink
+        removed: list[str] = []
+        expected = [
+            sandbox_lifecycle.CONTROL_SOCKET_NAME,
+            sandbox_lifecycle.CAPABILITY_NAME,
+            sandbox_lifecycle.RUNTIME_NAME,
+        ]
+
+        def tracked_unlink(path: Path, missing_ok: bool = False) -> None:
+            if path.name in sandbox_lifecycle.RUNTIME_FILE_NAMES:
+                removed.append(path.name)
+            unlink(path, missing_ok=missing_ok)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            _write_managed_runtime(state, 123, 456)
+            (state / sandbox_lifecycle.OUTCOME_NAME).write_text(
+                json.dumps(
+                    {
+                        "schema_version": sandbox_lifecycle.OUTCOME_SCHEMA_VERSION,
+                        "outcome": {"category": "success"},
+                        "network_policy": {},
+                        "teardown": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(
+                    sandbox_lifecycle, "_process_running", side_effect=(True, False)
+                ),
+                patch.object(
+                    sandbox_lifecycle.ControlSession,
+                    "connect",
+                    return_value=MagicMock(),
+                ),
+                patch.object(Path, "unlink", autospec=True, side_effect=tracked_unlink),
+            ):
+                sandbox_lifecycle.stop(state, 10)
+        self.assertEqual(removed, expected)
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        removed.clear()
+        session = MagicMock()
+        session.ping.side_effect = TimeoutError("managed control response timed out")
+        context = MagicMock()
+        context.__enter__.return_value = session
+        context.__exit__.return_value = False
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            with (
+                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
+                patch.object(
+                    sandbox_lifecycle.subprocess,
+                    "Popen",
+                    return_value=_openvmm_mock(None),
+                ),
+                patch.object(
+                    sandbox_lifecycle, "_process_start_time", return_value=456
+                ),
+                patch.object(
+                    sandbox_lifecycle.ControlSession, "connect", return_value=context
+                ),
+                patch.object(Path, "unlink", autospec=True, side_effect=tracked_unlink),
+                self.assertRaisesRegex(TimeoutError, "response timed out"),
+            ):
+                sandbox_lifecycle.start(state, 10)
+        self.assertEqual(removed, expected)
+
+    def test_managed_start_keeps_runtime_files_while_openvmm_may_run(self):
+        # A failed start that cannot end its OpenVMM process leaves the runtime
+        # files in place rather than make the sandbox look stopped, so start and
+        # deprovision refuse it while OpenVMM may still run.
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        process = _openvmm_mock(None)
+        process.wait.side_effect = subprocess.TimeoutExpired("openvmm", 5)
+        session = MagicMock()
+        session.ping.side_effect = TimeoutError("managed control response timed out")
+        context = MagicMock()
+        context.__enter__.return_value = session
+        context.__exit__.return_value = False
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            with (
+                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
+                patch.object(
+                    sandbox_lifecycle.subprocess, "Popen", return_value=process
+                ),
+                patch.object(
+                    sandbox_lifecycle, "_process_start_time", return_value=456
+                ),
+                patch.object(
+                    sandbox_lifecycle.ControlSession, "connect", return_value=context
+                ),
+                self.assertRaises(subprocess.TimeoutExpired),
+            ):
+                sandbox_lifecycle.start(state, 10)
+
+            process.kill.assert_called_once_with()
+            self.assertTrue((state / sandbox_lifecycle.RUNTIME_NAME).is_file())
+            self.assertTrue((state / sandbox_lifecycle.CAPABILITY_NAME).is_file())
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                "^sandbox is already running or has stale runtime state$",
+            ):
+                sandbox_lifecycle.start(state, 10)
+            with (
+                patch.object(sandbox_lifecycle, "_process_running", return_value=True),
+                self.assertRaisesRegex(
+                    common.ScriptError, "^sandbox must be stopped before deprovision$"
+                ),
+            ):
+                sandbox_lifecycle.deprovision(state, 10)
+
+    def test_lifecycle_lock_excludes_other_holders(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            acquired = threading.Event()
+
+            def wait_for_lock() -> None:
+                with sandbox_lifecycle._LifecycleLock(state, 30):
+                    acquired.set()
+
+            waiter = threading.Thread(target=wait_for_lock, daemon=True)
+            with sandbox_lifecycle._LifecycleLock(state, 30):
+                waiter.start()
+                self.assertFalse(acquired.wait(0.5))
+            self.assertTrue(acquired.wait(30))
+            waiter.join(30)
+            self.assertFalse(waiter.is_alive())
+            self.assertTrue((state / sandbox_lifecycle.LOCK_NAME).is_file())
+
+    def test_lifecycle_lock_waits_at_most_the_timeout(self):
+        # A transition queued behind another that does not end fails once its
+        # own timeout passes, and changes nothing.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            config = (state / sandbox_lifecycle.CONFIG_NAME).read_bytes()
+            with (
+                sandbox_lifecycle._LifecycleLock(state, 30),
+                patch.object(sandbox_lifecycle.subprocess, "Popen") as popen,
+            ):
+                for operation in (
+                    lambda: sandbox_lifecycle.start(state, 0.2),
+                    lambda: sandbox_lifecycle.stop(state, 0.2),
+                    lambda: sandbox_lifecycle.deprovision(state, 0.2),
+                ):
+                    began = time.monotonic()
+                    with self.assertRaisesRegex(
+                        TimeoutError,
+                        "^another lifecycle transition of the sandbox is still "
+                        "in progress$",
+                    ):
+                        operation()
+                    self.assertLess(time.monotonic() - began, 10)
+            popen.assert_not_called()
+            self.assertEqual(
+                sorted(path.name for path in state.iterdir()),
+                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+            )
+            self.assertEqual(
+                (state / sandbox_lifecycle.CONFIG_NAME).read_bytes(), config
+            )
+
+    def test_lifecycle_lock_waiter_fails_after_deprovision(self):
+        # A transition that waits while deprovision removes the sandbox fails as
+        # for an unprovisioned sandbox, without opening the lock file again.
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("process identity requires a Linux or Windows host")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        state = _provision_managed_sandbox(Path(temporary.name).resolve())
+        # A stale record makes deprovision check its process while it holds the
+        # lock.
+        _write_managed_runtime(state, os.getpid(), None)
+        try_lock_file = sandbox_lifecycle._try_lock_file
+        open_lock_file = sandbox_lifecycle._open_lock_file
+        waiting = threading.Event()
+        waiter_opens: list[Path] = []
+        errors: list[BaseException] = []
+
+        def waiter_thread() -> bool:
+            return threading.current_thread() is not threading.main_thread()
+
+        def try_lock(descriptor: int) -> bool:
+            if waiter_thread():
+                waiting.set()
+            return try_lock_file(descriptor)
+
+        def open_lock(path: Path) -> int:
+            if waiter_thread():
+                waiter_opens.append(path)
+            return open_lock_file(path)
+
+        def stop() -> None:
+            try:
+                sandbox_lifecycle.stop(state, 10)
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        waiter = threading.Thread(target=stop, daemon=True)
+
+        def process_running(_pid: int, _start_time: int | None) -> bool:
+            waiter.start()
+            self.assertTrue(waiting.wait(30))
+            return False
+
+        with (
+            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
+            patch.object(sandbox_lifecycle, "_open_lock_file", side_effect=open_lock),
+            patch.object(
+                sandbox_lifecycle, "_process_running", side_effect=process_running
+            ),
+        ):
+            sandbox_lifecycle.deprovision(state, 10)
+            waiter.join(30)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], common.ScriptError)
+        self.assertEqual(str(errors[0]), "sandbox is not provisioned")
+        self.assertEqual(waiter_opens, [state / sandbox_lifecycle.LOCK_NAME])
+        self.assertFalse(state.exists())
+
+    def test_managed_deprovision_releases_its_lock_if_the_lock_file_lingers(self):
+        # NFS, and Windows file systems without POSIX deletion such as ReFS, keep
+        # a removed file in its directory while it is open, so the directory
+        # empties only once deprovision releases the lock.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            rmdir = Path.rmdir
+            release = sandbox_lifecycle._LifecycleLock.release
+            events: list[str] = []
+
+            def lingering_rmdir(path: Path) -> None:
+                events.append("rmdir")
+                if events.count("rmdir") == 1:
+                    raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+                rmdir(path)
+
+            def tracked_release(lock: sandbox_lifecycle._LifecycleLock) -> None:
+                events.append("release")
+                release(lock)
+
+            with (
+                patch.object(Path, "rmdir", autospec=True, side_effect=lingering_rmdir),
+                patch.object(
+                    sandbox_lifecycle._LifecycleLock,
+                    "release",
+                    autospec=True,
+                    side_effect=tracked_release,
+                ),
+            ):
+                sandbox_lifecycle.deprovision(state, 10)
+
+            self.assertEqual(events, ["rmdir", "release", "rmdir", "release"])
+            self.assertFalse(state.exists())
+
+    def test_managed_deprovision_retries_only_while_lock_files_linger(self):
+        # Deprovision retries removing the emptied directory only while it is not
+        # empty, at once if the last lingering lock file is gone by then. Any
+        # other failure, such as a parent that denies the removal, it reports at
+        # once rather than after its timeout.
+        def check(
+            failure: int, failures: int | None, attempts: int, pauses: int
+        ) -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                state = _provision_managed_sandbox(Path(temporary).resolve())
+                rmdir = Path.rmdir
+                removals: list[Path] = []
+
+                def failing_rmdir(path: Path) -> None:
+                    if path == state:
+                        removals.append(path)
+                        if failures is None or len(removals) <= failures:
+                            raise OSError(failure, os.strerror(failure), str(path))
+                    rmdir(path)
+
+                with (
+                    patch.object(
+                        Path, "rmdir", autospec=True, side_effect=failing_rmdir
+                    ),
+                    patch.object(
+                        sandbox_lifecycle, "_pause", wraps=sandbox_lifecycle._pause
+                    ) as pause,
+                ):
+                    if failures is None:
+                        with self.assertRaises(PermissionError):
+                            sandbox_lifecycle.deprovision(state, 1)
+                    else:
+                        sandbox_lifecycle.deprovision(state, 30)
+
+                self.assertEqual(len(removals), attempts)
+                self.assertEqual(pause.call_count, pauses)
+                if failures is None:
+                    self.assertEqual(list(state.iterdir()), [])
+                else:
+                    self.assertFalse(state.exists())
+
+        for name, failure, failures, attempts, pauses in (
+            ("last lock file gone", errno.ENOTEMPTY, 2, 3, 0),
+            ("hidden lock file", errno.ENOTEMPTY, 4, 5, 1),
+            ("removal denied", errno.EACCES, None, 1, 0),
+        ):
+            with self.subTest(name):
+                check(failure, failures, attempts, pauses)
+
+    def test_managed_deprovision_outlasts_waiters_that_keep_the_lock_file(self):
+        # On NFS and on Windows file systems without POSIX deletion, each waiter's
+        # handle keeps the removed lock file in the directory until the waiter
+        # finds the sandbox gone. Deprovision then retries until they have
+        # closed it, and no waiter creates a new lock file.
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("process identity requires a Linux or Windows host")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        state = _provision_managed_sandbox(Path(temporary.name).resolve())
+        _write_managed_runtime(state, os.getpid(), None)
+        rmdir = Path.rmdir
+        try_lock_file = sandbox_lifecycle._try_lock_file
+        polling: set[int] = set()
+        polling_lock = threading.Lock()
+        both_polling = threading.Event()
+        errors: list[BaseException] = []
+
+        def try_lock(descriptor: int) -> bool:
+            if threading.current_thread() is not threading.main_thread():
+                with polling_lock:
+                    polling.add(threading.get_ident())
+                    if len(polling) == 2:
+                        both_polling.set()
+            return try_lock_file(descriptor)
+
+        def stop() -> None:
+            try:
+                sandbox_lifecycle.stop(state, 30)
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        waiters = [threading.Thread(target=stop, daemon=True) for _ in range(2)]
+
+        def process_running(_pid: int, _start_time: int | None) -> bool:
+            for waiter in waiters:
+                waiter.start()
+            self.assertTrue(both_polling.wait(30))
+            return False
+
+        def lingering_rmdir(path: Path) -> None:
+            if path == state and any(waiter.is_alive() for waiter in waiters):
+                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+            rmdir(path)
+
+        with (
+            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
+            patch.object(
+                sandbox_lifecycle, "_process_running", side_effect=process_running
+            ),
+            patch.object(Path, "rmdir", autospec=True, side_effect=lingering_rmdir),
+        ):
+            sandbox_lifecycle.deprovision(state, 30)
+        for waiter in waiters:
+            waiter.join(30)
+
+        self.assertFalse(any(waiter.is_alive() for waiter in waiters))
+        self.assertEqual(
+            [str(error) for error in errors], ["sandbox is not provisioned"] * 2
+        )
+        self.assertFalse(state.exists())
+
+    def test_managed_deprovision_outlasts_a_transition_that_starts_meanwhile(self):
+        # A transition that starts after deprovision removed the lock file holds
+        # a new one in the directory until it finds the sandbox gone, which must
+        # not make deprovision fail.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            rmdir = Path.rmdir
+            arrived = threading.Event()
+            leave = threading.Event()
+            attempts: list[bool] = []
+
+            def arrive() -> None:
+                with sandbox_lifecycle._LifecycleLock(state, 30):
+                    arrived.set()
+                    leave.wait(30)
+
+            arrival = threading.Thread(target=arrive, daemon=True)
+
+            def contended_rmdir(path: Path) -> None:
+                if path != state:
+                    rmdir(path)
+                    return
+                if not attempts:
+                    attempts.append(False)
+                    arrival.start()
+                    self.assertTrue(arrived.wait(30))
+                    raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+                try:
+                    rmdir(path)
+                except OSError:
+                    attempts.append(False)
+                    leave.set()
+                    raise
+                attempts.append(True)
+
+            with patch.object(
+                Path, "rmdir", autospec=True, side_effect=contended_rmdir
+            ):
+                sandbox_lifecycle.deprovision(state, 30)
+            arrival.join(30)
+
+            self.assertFalse(arrival.is_alive())
+            self.assertEqual(attempts[0], False)
+            self.assertIn(False, attempts[1:])
+            self.assertEqual(attempts[-1], True)
+            self.assertFalse(state.exists())
+
+    def test_provision_waiting_on_deprovision_provisions_a_new_directory(self):
+        # A provision that waits while deprovision removes the sandbox creates
+        # nothing in the directory being removed. Once deprovision has removed
+        # it, the provision creates the directory again, and both succeed.
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("process identity requires a Linux or Windows host")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        state = _provision_managed_sandbox(root)
+        _write_managed_runtime(state, os.getpid(), None)
+        rmdir = Path.rmdir
+        try_lock_file = sandbox_lifecycle._try_lock_file
+        polling = threading.Event()
+        removals: list[bool] = []
+        errors: list[BaseException] = []
+
+        def try_lock(descriptor: int) -> bool:
+            if threading.current_thread() is not threading.main_thread():
+                polling.set()
+            return try_lock_file(descriptor)
+
+        def provision() -> None:
+            try:
+                _provision_managed_sandbox(root)
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        waiter = threading.Thread(target=provision, daemon=True)
+
+        def process_running(_pid: int, _start_time: int | None) -> bool:
+            waiter.start()
+            self.assertTrue(polling.wait(30))
+            return False
+
+        def lingering_rmdir(path: Path) -> None:
+            if path == state and not removals:
+                # As on NFS, the waiter's handle keeps the removed lock file.
+                removals.append(False)
+                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+            rmdir(path)
+            if path == state:
+                removals.append(True)
+
+        with (
+            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
+            patch.object(
+                sandbox_lifecycle, "_process_running", side_effect=process_running
+            ),
+            patch.object(Path, "rmdir", autospec=True, side_effect=lingering_rmdir),
+        ):
+            sandbox_lifecycle.deprovision(state, 30)
+            waiter.join(30)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(removals[0], False)
+        self.assertIn(True, removals[1:])
+        self.assertEqual(
+            sorted(path.name for path in state.iterdir()),
+            [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+        )
+
+    def test_provision_waiting_on_deprovision_retries_once_deprovision_ends(self):
+        # Deprovision clears the mark of the removed lock file once it has removed
+        # the directory, or failed to remove it or the lock file, so a provision
+        # that waited for it retries at once. It then finds the sandbox that
+        # another provision created in between, or provisions the directory that
+        # deprovision left.
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("process identity requires a Linux or Windows host")
+
+        def check(ending: str) -> None:
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            root = Path(temporary.name).resolve()
+            state = _provision_managed_sandbox(root)
+            _write_managed_runtime(state, os.getpid(), None)
+            rmdir = Path.rmdir
+            unlink = Path.unlink
+            try_lock_file = sandbox_lifecycle._try_lock_file
+            polling = threading.Event()
+            denials: list[Path] = []
+            errors: list[BaseException] = []
+
+            def deny(path: Path) -> None:
+                denials.append(path)
+                raise PermissionError(
+                    errno.EACCES, os.strerror(errno.EACCES), str(path)
+                )
+
+            def try_lock(descriptor: int) -> bool:
+                if threading.current_thread() is not threading.main_thread():
+                    polling.set()
+                return try_lock_file(descriptor)
+
+            def provision() -> None:
+                try:
+                    _provision_managed_sandbox(root)
+                except BaseException as error:  # noqa: BLE001
+                    errors.append(error)
+
+            waiter = threading.Thread(target=provision, daemon=True)
+
+            def process_running(_pid: int, _start_time: int | None) -> bool:
+                waiter.start()
+                self.assertTrue(polling.wait(30))
+                return False
+
+            def ending_rmdir(path: Path) -> None:
+                if path == state and ending == "removal denied":
+                    deny(path)
+                rmdir(path)
+                if path == state and ending == "replaced":
+                    # Another provision recreates the directory before the waiter
+                    # could find it gone.
+                    _provision_managed_sandbox(root)
+
+            def ending_unlink(path: Path, missing_ok: bool = False) -> None:
+                # Only the first removal of the lock file fails, so the release
+                # that follows removes it.
+                lock = path == state / sandbox_lifecycle.LOCK_NAME
+                if lock and ending == "unlink denied" and not denials:
+                    deny(path)
+                unlink(path, missing_ok=missing_ok)
+
+            with (
+                patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
+                patch.object(
+                    sandbox_lifecycle, "_process_running", side_effect=process_running
+                ),
+                patch.object(Path, "rmdir", autospec=True, side_effect=ending_rmdir),
+                patch.object(Path, "unlink", autospec=True, side_effect=ending_unlink),
+            ):
+                if ending == "replaced":
+                    sandbox_lifecycle.deprovision(state, 30)
+                else:
+                    with self.assertRaises(PermissionError):
+                        sandbox_lifecycle.deprovision(state, 30)
+                waiter.join(30)
+
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(len(denials), 0 if ending == "replaced" else 1)
+            self.assertEqual(
+                [str(error) for error in errors],
+                ["sandbox is already provisioned"] if ending == "replaced" else [],
+            )
+            self.assertEqual(
+                sorted(path.name for path in state.iterdir()),
+                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+            )
+
+        for ending in ("replaced", "removal denied", "unlink denied"):
+            with self.subTest(ending):
+                check(ending)
+
+    def test_provision_handoff_completes_or_ends_the_removal(self):
+        # While only lingering lock files keep the directory that deprovision
+        # removes, a provision waits. It stops once the path names no directory or
+        # another one, or the directory holds anything else, and once nothing
+        # keeps the directory, it removes it itself, in case deprovision has given
+        # up. A removal that fails for another reason leaves it to provision the
+        # directory in place.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            state = root / "state"
+            state.mkdir()
+            lingering = state / sandbox_lifecycle.LOCK_NAME
+            lingering.write_bytes(b"")
+            removing = os.lstat(state)
+            with self.assertRaisesRegex(
+                TimeoutError,
+                "^another lifecycle transition of the sandbox is still in progress$",
+            ):
+                sandbox_lifecycle._wait_for_handoff(
+                    state, removing, time.monotonic() + 0.1
+                )
+
+            def wait() -> None:
+                sandbox_lifecycle._wait_for_handoff(
+                    state, removing, time.monotonic() + 30
+                )
+
+            with patch.object(sandbox_lifecycle, "_pause", return_value=False) as pause:
+                for name in (sandbox_lifecycle.CONFIG_NAME, "foreign"):
+                    (state / name).write_text("{}", encoding="utf-8")
+                    wait()
+                    (state / name).unlink()
+                # The old directory keeps its identity under another name, so the
+                # new one cannot reuse it.
+                state.rename(root / "old")
+                state.mkdir()
+                wait()
+                self.assertTrue(state.is_dir())
+                state.rmdir()
+                (root / "old").rename(state)
+                lingering.unlink()
+                with patch.object(
+                    Path,
+                    "rmdir",
+                    autospec=True,
+                    side_effect=PermissionError(errno.EACCES, "denied"),
+                ):
+                    wait()
+                self.assertTrue(state.is_dir())
+                wait()
+                self.assertFalse(state.exists())
+                wait()
+            pause.assert_not_called()
+
+    def test_provision_completes_a_removal_that_deprovision_gave_up(self):
+        # Once a lingering lock file makes deprovision release the lock before the
+        # directory is gone, a provision that waits for the removal completes it
+        # itself if deprovision gives up, and then provisions the path again.
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("process identity requires a Linux or Windows host")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        state = _provision_managed_sandbox(root)
+        _write_managed_runtime(state, os.getpid(), None)
+        rmdir = Path.rmdir
+        try_lock_file = sandbox_lifecycle._try_lock_file
+        wait_for_handoff = sandbox_lifecycle._wait_for_handoff
+        polling = threading.Event()
+        deprovisioned = threading.Event()
+        attempts: list[Path] = []
+        handoffs: list[Path] = []
+        errors: list[BaseException] = []
+
+        def try_lock(descriptor: int) -> bool:
+            if threading.current_thread() is not threading.main_thread():
+                polling.set()
+            return try_lock_file(descriptor)
+
+        def provision() -> None:
+            try:
+                _provision_managed_sandbox(root)
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        waiter = threading.Thread(target=provision, daemon=True)
+
+        def process_running(_pid: int, _start_time: int | None) -> bool:
+            waiter.start()
+            self.assertTrue(polling.wait(30))
+            return False
+
+        def abandoned_rmdir(path: Path) -> None:
+            # A lock file lingers at deprovision's first attempt, and its retry is
+            # denied, so that it gives up.
+            if path == state and threading.current_thread() is threading.main_thread():
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise OSError(errno.ENOTEMPTY, os.strerror(errno.ENOTEMPTY))
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+            rmdir(path)
+
+        def handoff(state_dir: Path, removing: os.stat_result, deadline: float) -> None:
+            handoffs.append(state_dir)
+            if not deprovisioned.wait(30):
+                raise AssertionError("deprovision did not give up")
+            wait_for_handoff(state_dir, removing, deadline)
+
+        with (
+            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
+            patch.object(
+                sandbox_lifecycle, "_process_running", side_effect=process_running
+            ),
+            patch.object(Path, "rmdir", autospec=True, side_effect=abandoned_rmdir),
+            patch.object(sandbox_lifecycle, "_wait_for_handoff", side_effect=handoff),
+        ):
+            with self.assertRaises(PermissionError):
+                sandbox_lifecycle.deprovision(state, 30)
+            deprovisioned.set()
+            waiter.join(30)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(attempts, [state, state])
+        self.assertEqual(handoffs, [state])
+        self.assertEqual(
+            sorted(path.name for path in state.iterdir()),
+            [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+        )
+
+    def test_managed_deprovision_accepts_a_removal_that_a_provision_completed(self):
+        # A provision that waits for deprovision to remove the directory may
+        # remove it first and provision the path again. Deprovision then succeeds
+        # rather than report the new sandbox as provisioned again, which it tells
+        # apart even where a new directory could reuse the old inode number.
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("process identity requires a Linux or Windows host")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        state = _provision_managed_sandbox(root)
+        _write_managed_runtime(state, os.getpid(), None)
+        rmdir = Path.rmdir
+        try_lock_file = sandbox_lifecycle._try_lock_file
+        polling = threading.Event()
+        provisioned = threading.Event()
+        attempts: list[Path] = []
+        errors: list[BaseException] = []
+
+        def try_lock(descriptor: int) -> bool:
+            if threading.current_thread() is not threading.main_thread():
+                polling.set()
+            return try_lock_file(descriptor)
+
+        def provision() -> None:
+            try:
+                _provision_managed_sandbox(root)
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+            finally:
+                provisioned.set()
+
+        waiter = threading.Thread(target=provision, daemon=True)
+
+        def process_running(_pid: int, _start_time: int | None) -> bool:
+            waiter.start()
+            self.assertTrue(polling.wait(30))
+            return False
+
+        def contended_rmdir(path: Path) -> None:
+            if path == state and threading.current_thread() is threading.main_thread():
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise OSError(errno.ENOTEMPTY, os.strerror(errno.ENOTEMPTY))
+                # Deprovision retries only once the waiting provision has removed
+                # the directory and provisioned the path again.
+                self.assertTrue(provisioned.wait(30))
+            rmdir(path)
+
+        with (
+            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
+            patch.object(
+                sandbox_lifecycle, "_process_running", side_effect=process_running
+            ),
+            patch.object(Path, "rmdir", autospec=True, side_effect=contended_rmdir),
+        ):
+            sandbox_lifecycle.deprovision(state, 30)
+            waiter.join(30)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(attempts, [state, state])
+        self.assertEqual(
+            sorted(path.name for path in state.iterdir()),
+            [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+        )
+
+    def test_lifecycle_lock_file_transfers_complete_despite_short_counts(self):
+        # The tombstone must be complete before deprovision removes the lock file,
+        # and a waiter must read all of it, even if os.write() or os.read()
+        # transfers only part of it at a time.
+        with tempfile.TemporaryDirectory() as temporary:
+            descriptor = sandbox_lifecycle._open_lock_file(
+                Path(temporary) / sandbox_lifecycle.LOCK_NAME
+            )
+            try:
+                self._check_lock_file_transfers(descriptor)
+            finally:
+                os.close(descriptor)
+
+    def _check_lock_file_transfers(self, descriptor: int) -> None:
+        write = os.write
+        read = os.read
+        tombstone = sandbox_lifecycle.LOCK_TOMBSTONE
+
+        def short_write(fd: int, data: memoryview) -> int:
+            return write(fd, bytes(data[:3]))
+
+        def short_read(fd: int, size: int) -> bytes:
+            return read(fd, min(size, 3))
+
+        with (
+            patch.object(
+                sandbox_lifecycle.os, "write", side_effect=short_write
+            ) as writes,
+            patch.object(sandbox_lifecycle.os, "read", side_effect=short_read),
+        ):
+            sandbox_lifecycle._write_lock_file(descriptor, tombstone)
+            self.assertEqual(
+                sandbox_lifecycle._read_lock_file(descriptor, len(tombstone)),
+                tombstone,
+            )
+        self.assertEqual(writes.call_count, -(-len(tombstone) // 3))
+        self.assertEqual(os.lseek(descriptor, 0, os.SEEK_CUR), 0)
+        with (
+            patch.object(sandbox_lifecycle.os, "write", return_value=0),
+            self.assertRaisesRegex(OSError, "made no progress"),
+        ):
+            sandbox_lifecycle._write_lock_file(descriptor, tombstone)
+
+    def test_managed_deprovision_reports_a_provision_that_starts_meanwhile(self):
+        # A provision that starts after deprovision removed the lock file, and
+        # before it removed the directory, provisions the directory again first.
+        # Deprovision then reports that rather than remove the new sandbox.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            state = _provision_managed_sandbox(root)
+            rmdir = Path.rmdir
+            provisioned: list[Path] = []
+
+            def contended_rmdir(path: Path) -> None:
+                if path == state and not provisioned:
+                    arrival = threading.Thread(
+                        target=lambda: provisioned.append(
+                            _provision_managed_sandbox(root)
+                        ),
+                        daemon=True,
+                    )
+                    arrival.start()
+                    arrival.join(30)
+                rmdir(path)
+
+            with (
+                patch.object(Path, "rmdir", autospec=True, side_effect=contended_rmdir),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "^sandbox was provisioned again while deprovision removed it$",
+                ),
+            ):
+                sandbox_lifecycle.deprovision(state, 10)
+
+            self.assertEqual(provisioned, [state])
+            self.assertEqual(
+                sorted(path.name for path in state.iterdir()),
+                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+            )
+
+    def test_lifecycle_deadlines_reject_retries_after_they_pass(self):
+        # Each wait sleeps at most until its deadline, and no retry starts after
+        # it, so neither a directory that deprovision removes only then nor a lock
+        # file that another transition replaces only then counts.
+        self.assertFalse(sandbox_lifecycle._pause(time.monotonic() - 1))
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "going"
+            directory.mkdir()
+            # A lock file lingers in the directory until the deadline.
+            lingering = directory / sandbox_lifecycle.LOCK_NAME
+            lingering.write_bytes(b"")
+            deadline = 3 / 64
+            clock = [0.0]
+            sleeps: list[float] = []
+
+            def sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                clock[0] += seconds
+                if clock[0] >= deadline and directory.exists():
+                    lingering.unlink()
+                    directory.rmdir()
+
+            with (
+                patch.object(sandbox_lifecycle, "LOCK_RETRY_INTERVAL", 1 / 32),
+                patch.object(
+                    sandbox_lifecycle.time, "monotonic", side_effect=lambda: clock[0]
+                ),
+                patch.object(sandbox_lifecycle.time, "sleep", side_effect=sleep),
+                self.assertRaisesRegex(
+                    TimeoutError,
+                    "^another lifecycle transition of the sandbox is still in "
+                    "progress$",
+                ),
+            ):
+                sandbox_lifecycle._wait_for_handoff(
+                    directory, os.lstat(directory), deadline
+                )
+
+            self.assertEqual(sleeps, [1 / 32, 1 / 64])
+            self.assertFalse(directory.exists())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            names_open_file = sandbox_lifecycle._names_open_file
+            clock = [0.0]
+            checks: list[Path] = []
+
+            def replaced_late(path: Path, descriptor: int) -> bool:
+                checks.append(path)
+                if len(checks) > 1:
+                    return names_open_file(path, descriptor)
+                clock[0] = 1.0
+                return False
+
+            with (
+                patch.object(
+                    sandbox_lifecycle.time, "monotonic", side_effect=lambda: clock[0]
+                ),
+                patch.object(
+                    sandbox_lifecycle, "_names_open_file", side_effect=replaced_late
+                ),
+                self.assertRaisesRegex(
+                    TimeoutError,
+                    "^another lifecycle transition of the sandbox is still in "
+                    "progress$",
+                ),
+                sandbox_lifecycle._LifecycleLock(state, 1),
+            ):
+                self.fail("the lock was acquired after its deadline")
+
+            self.assertEqual(checks, [state / sandbox_lifecycle.LOCK_NAME])
+            self.assertEqual(
+                sorted(path.name for path in state.iterdir()),
+                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+            )
+
+    def test_provision_recreates_a_state_directory_that_deprovision_removed(self):
+        # A deprovision can remove the state directory after provision prepared
+        # it and before provision opens the lock file in it. The provision then
+        # creates the directory again instead of failing.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            state = root / "state"
+            open_lock_file = sandbox_lifecycle._open_lock_file
+            opened: list[Path] = []
+
+            def open_after_deprovision(path: Path) -> int:
+                if not opened:
+                    shutil.rmtree(state)
+                opened.append(path)
+                return open_lock_file(path)
+
+            with patch.object(
+                sandbox_lifecycle, "_open_lock_file", side_effect=open_after_deprovision
+            ):
+                self.assertEqual(_provision_managed_sandbox(root), state)
+
+            self.assertEqual(len(opened), 2)
+            self.assertEqual(
+                sorted(path.name for path in state.iterdir()),
+                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+            )
+
+    def test_provision_waits_out_a_lock_file_pending_deletion(self):
+        # Without POSIX deletion semantics, Windows denies opening a lock file
+        # that deprovision removed until its last handle closes, so a provision
+        # retries. Elsewhere, such a denial is a real error.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            open_lock_path = sandbox_lifecycle._open_lock_path
+            attempts: list[Path] = []
+
+            def pending_deletion(path: Path) -> int:
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise PermissionError(errno.EACCES, "Access is denied", str(path))
+                return open_lock_path(path)
+
+            with patch.object(
+                sandbox_lifecycle, "_open_lock_path", side_effect=pending_deletion
+            ):
+                if os.name == "nt":
+                    _provision_managed_sandbox(root)
+                    self.assertEqual(len(attempts), 2)
+                    self.assertTrue(
+                        (root / "state" / sandbox_lifecycle.CONFIG_NAME).is_file()
+                    )
+                else:
+                    with self.assertRaises(PermissionError):
+                        _provision_managed_sandbox(root)
+                    self.assertEqual(len(attempts), 1)
+
+    def test_lifecycle_lock_refuses_a_linked_lock_file(self):
+        # Deprovision writes to the lock file, so a link to a file elsewhere must
+        # not stand in for it.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            state = _provision_managed_sandbox(root)
+            target = root / "precious"
+            target.write_bytes(b"precious data")
+            lock = state / sandbox_lifecycle.LOCK_NAME
+            links: dict[str, Callable[[], None]] = {
+                "hard link": lambda: os.link(target, lock),
+                "symbolic link": lambda: os.symlink(target, lock),
+            }
+            for kind, link in links.items():
+                with self.subTest(kind=kind):
+                    lock.unlink(missing_ok=True)
+                    try:
+                        link()
+                    except OSError as error:
+                        self.skipTest(f"cannot create a {kind}: {error}")
+                    with self.assertRaisesRegex(
+                        common.ScriptError,
+                        "^sandbox lifecycle lock is not a standalone regular file",
+                    ):
+                        sandbox_lifecycle.deprovision(state, 10)
+                    self.assertEqual(target.read_bytes(), b"precious data")
+                    self.assertTrue((state / sandbox_lifecycle.CONFIG_NAME).is_file())
+
+    def test_lifecycle_lock_rejects_an_unbounded_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = _provision_managed_sandbox(Path(temporary).resolve())
+            for timeout in (0.0, -1.0, float("nan"), float("inf")):
+                with (
+                    self.subTest(timeout=timeout),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "^lifecycle timeout must be finite and greater than 0$",
+                    ),
+                ):
+                    sandbox_lifecycle.stop(state, timeout)
+
+    def test_lifecycle_lock_file_stays_only_in_a_provisioned_sandbox(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            unprovisioned = root / "unprovisioned"
+            unprovisioned.mkdir()
+            with self.assertRaisesRegex(common.ScriptError, "sandbox configuration"):
+                sandbox_lifecycle.start(unprovisioned, 10)
+            with self.assertRaisesRegex(common.ScriptError, "sandbox is not running"):
+                sandbox_lifecycle.stop(unprovisioned, 10)
+            self.assertEqual(list(unprovisioned.iterdir()), [])
+
+            state = _provision_managed_sandbox(root)
+            self.assertEqual(
+                sorted(path.name for path in state.iterdir()),
+                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
+            )
+            # A sandbox that an earlier NVX version provisioned gains a lock file.
+            (state / sandbox_lifecycle.LOCK_NAME).unlink()
+            with self.assertRaisesRegex(common.ScriptError, "sandbox is not running"):
+                sandbox_lifecycle.stop(state, 10)
+            self.assertTrue((state / sandbox_lifecycle.LOCK_NAME).is_file())
+
+            # Deprovision removes every NVX file, the lock file included, even when
+            # a file of another owner keeps the directory.
+            foreign = state / "operator-note.txt"
+            foreign.write_text("operator data\n", encoding="utf-8")
+            with self.assertRaisesRegex(common.ScriptError, "operator-note.txt"):
+                sandbox_lifecycle.deprovision(state, 10)
+            self.assertEqual(list(state.iterdir()), [foreign])
+            foreign.unlink()
+            sandbox_lifecycle.deprovision(state, 10)
+            self.assertFalse(state.exists())
 
     def test_launch_contract_rejects_disk_option_delimiters(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -19,6 +19,7 @@ from nvx_tools.aci_edge_sandboxes_tests import (
 )
 from nvx_tools.adversarial import configure_parser as configure_adversarial_parser
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
+from nvx_tools.benchmark import positive_float
 from nvx_tools.benchmark import run as run_benchmark
 from nvx_tools.build import (
     build_all,
@@ -772,6 +773,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
             network_proxy=args.network_proxy,
             host_loopback_forward=tuple(args.host_loopback_forward),
             cmdline=args.cmdline,
+            timeout=args.timeout,
         )
         return
     if operation == "start":
@@ -808,7 +810,7 @@ def command_sandbox(args: argparse.Namespace) -> None:
     if operation == "deprovision":
         if args.state_dir is None:
             raise ScriptError("sandbox deprovision requires --state-dir")
-        sandbox_lifecycle.deprovision(args.state_dir)
+        sandbox_lifecycle.deprovision(args.state_dir, args.timeout)
         return
     if args.state_dir is not None:
         raise ScriptError(
@@ -1269,9 +1271,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sandbox.add_argument("--memory-mib", type=int, default=256)
     sandbox.add_argument(
         "--timeout",
-        type=float,
+        type=positive_float,
         default=60.0,
-        help="control operation timeout in seconds (default: 60)",
+        help=(
+            "control operation timeout, and the longest wait for another "
+            "lifecycle transition of the sandbox, in seconds (default: 60)"
+        ),
     )
     sandbox.add_argument(
         "--exec-timeout-ms",

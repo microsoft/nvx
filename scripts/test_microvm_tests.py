@@ -16,10 +16,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections.abc import Callable, Collection
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, nullcontext, redirect_stdout
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -830,10 +831,22 @@ class _FakeSandboxCli:
         self.capabilities: list[bytes] = []
         self.probed = False
         self.next_pid = 4000
+        # Operations take effect one at a time, as the lifecycle lock makes
+        # them, and without it, overlapping starts meet after their checks.
+        self.lifecycle_lock = threading.Lock()
+        self.race = threading.Barrier(2, timeout=1)
 
     def __call__(
         self, command: list[str], **_: object
     ) -> subprocess.CompletedProcess[bytes]:
+        with (
+            nullcontext()
+            if "unserialized-starts" in self.faults
+            else self.lifecycle_lock
+        ):
+            return self._dispatch(command)
+
+    def _dispatch(self, command: list[str]) -> subprocess.CompletedProcess[bytes]:
         operation = command[3]
         self.operations.append(operation)
         values: dict[str, str] = {}
@@ -911,6 +924,7 @@ class _FakeSandboxCli:
         if (state / "config.json").exists():
             return self._error("sandbox is already provisioned")
         state.mkdir(parents=True, exist_ok=True)
+        (state / "lifecycle.lock").touch()
         (state / "config.json").write_text(
             json.dumps({"user": values.get("--workload-user", "65534:65534")}),
             encoding="utf-8",
@@ -926,6 +940,20 @@ class _FakeSandboxCli:
             return refusal
         if (state / "runtime.json").exists() and "duplicate-start" not in self.faults:
             return self._error("sandbox is already running or has stale runtime state")
+        if "unserialized-starts" in self.faults:
+            # Without the lock, both overlapping starts pass the check above
+            # before either records its OpenVMM, and both launch one (#464).
+            try:
+                self.race.wait()
+            except threading.BrokenBarrierError:
+                self.race.reset()
+            # Threads of one process cannot replace and remove the same files at
+            # once on Windows, so the launches themselves take turns.
+            with self.lifecycle_lock:
+                return self._launch(state)
+        return self._launch(state)
+
+    def _launch(self, state: Path) -> _CliResult:
         (state / "outcome.json").unlink(missing_ok=True)
         with (state / "openvmm.log").open("a", encoding="utf-8", newline="\n") as log:
             if "noisy-log" in self.faults:
@@ -1101,6 +1129,7 @@ class _FakeSandboxCli:
             "outcome.json",
             "openvmm.log",
             "config.json",
+            "lifecycle.lock",
         ):
             (state / name).unlink(missing_ok=True)
         unknown = sorted(path.name for path in state.iterdir())
@@ -1160,7 +1189,8 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
         "stop",
         "exec",
         "stop",
-        # Restart, crash, and stale runtime state.
+        # Restart with overlapping starts, crash, and stale runtime state.
+        "start",
         "start",
         "exec",
         "exec",
@@ -1296,7 +1326,8 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             "run-starts-workload": "run returned 0, expected 125",
             "failed-start-keeps-runtime": (
                 "after a refused managed start: the state directory holds "
-                "['config.json', 'openvmm.log', 'outcome.json', 'runtime.json']"
+                "['config.json', 'lifecycle.lock', 'openvmm.log', 'outcome.json', "
+                "'runtime.json']"
             ),
             "failed-start-hides-status": (
                 "start returned 1, expected 1 with 'error: OpenVMM exited during "
@@ -1311,6 +1342,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             "stop-leaks-capability": "after stop: the state directory holds",
             "stop-leaks-process": "OpenVMM still runs after stop",
             "restart-loses-state": "the restarted sandbox's state returned status 1",
+            "unserialized-starts": "overlapping public starts returned status 0",
             "deprovision-removes-foreign": "deprovision returned 0, expected 1",
         }
         for fault, message in regressions.items():
@@ -1343,7 +1375,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
         message = str(raised.exception)
         for fragment in (
             "after a refused managed start: the state directory holds "
-            "['.tmpAbC123', 'config.json', 'openvmm.log']",
+            "['.tmpAbC123', 'config.json', 'lifecycle.lock', 'openvmm.log']",
             "sandbox state directory contains files not owned by NVX: .tmpAbC123",
             "fixture preserved for recovery",
         ):
