@@ -2,15 +2,11 @@
 
 set -eu
 
-# The release that rust-toolchain.toml pins.
-RUST_TOOLCHAIN=1.95.0
-RUSTUP_VERSION=1.29.1
-RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
-CARGO_NEXTEST_VERSION=0.9.133
-SCCACHE_VERSION=0.18.0
-SCCACHE_SHA256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
-RUNNER_VERSION=2.337.0
-RUNNER_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
+script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# The versions, artifacts, and checksums of the tools that this script
+# installs; stage the manifest next to the script.
+tool_manifest=${script_directory}/tool-versions.conf
+tool_platform=linux-x86_64
 
 backend=
 check_only=false
@@ -58,6 +54,136 @@ require_command() {
 
 version_at_least() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
+}
+
+tool_manifest_error() {
+    die "invalid tool manifest ${tool_manifest}:${tool_manifest_line}: $*"
+}
+
+# Reads the tool manifest as data, without sourcing or evaluating it, so a
+# fresh host needs nothing beyond the shell. Every line must be well formed.
+load_tool_manifest() {
+    [ -f "$tool_manifest" ] || die "tool manifest not found: ${tool_manifest}"
+    carriage_return=$(printf '\r')
+    blank=$(printf ' \t')
+    tool_manifest_entries=
+    tool_manifest_line=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        tool_manifest_line=$((tool_manifest_line + 1))
+        line=${line%"$carriage_return"}
+        case "$line" in
+            '' | '#'*) continue ;;
+            *["$blank"]*) tool_manifest_error "expected KEY=VALUE without spaces" ;;
+            *=*) ;;
+            *) tool_manifest_error "expected KEY=VALUE without spaces" ;;
+        esac
+        key=${line%%=*}
+        value=${line#*=}
+        tool=${key%%.*}
+        case "$tool" in
+            '' | [!a-z]* | *[!a-z0-9_]*) tool_manifest_error "unsupported key: ${key}" ;;
+        esac
+        case "${key#"$tool"}" in
+            .version | .toolchain) field=version ;;
+            .artifacts.*.name | .artifacts.*.sha256)
+                field=${key##*.}
+                platform=${key#"$tool".artifacts.}
+                platform=${platform%.*}
+                case "$platform" in
+                    '' | *[!a-z0-9_-]*) tool_manifest_error "unsupported key: ${key}" ;;
+                    linux-x86_64 | windows-x86_64) ;;
+                    *) tool_manifest_error "unsupported platform: ${platform}" ;;
+                esac
+                ;;
+            *) tool_manifest_error "unsupported key: ${key}" ;;
+        esac
+        case "${tool_manifest_entries} " in
+            *" ${key}="*) tool_manifest_error "duplicate key: ${key}" ;;
+        esac
+        case "$field" in
+            version)
+                case "$value" in
+                    *[!0-9.]* | .* | *. | *..* | *.*.*.*) value= ;;
+                    *.*.*) ;;
+                    *) value= ;;
+                esac
+                ;;
+            sha256)
+                case "$value" in
+                    *[!0-9a-f]*) value= ;;
+                esac
+                [ "${#value}" -eq 64 ] || value=
+                ;;
+            name)
+                name=$value
+                while :; do
+                    case "$name" in
+                        *'{version}'*) name=${name%%'{version}'*}v${name#*'{version}'} ;;
+                        *) break ;;
+                    esac
+                done
+                case "$name" in
+                    '' | /* | */ | *//* | .* | */.* | *[!A-Za-z0-9._/-]*) value= ;;
+                esac
+                ;;
+        esac
+        [ -n "$value" ] ||
+            tool_manifest_error "invalid value for ${key}: ${line#*=}"
+        tool_manifest_entries="${tool_manifest_entries} ${key}=${value}"
+    done <"$tool_manifest"
+}
+
+# Sets tool_value to the value of a key in the loaded tool manifest.
+tool_manifest_value() {
+    case "${tool_manifest_entries} " in
+        *" ${1}="*) ;;
+        *) die "tool manifest ${tool_manifest} does not define ${1}" ;;
+    esac
+    tool_value=${tool_manifest_entries#*" ${1}="}
+    tool_value=${tool_value%%" "*}
+}
+
+# Sets tool_version, tool_artifact, and tool_sha256 to a tool's release and
+# the name and checksum of its artifact for tool_platform.
+tool_manifest_artifact() {
+    tool_manifest_value "${1}.version"
+    tool_version=$tool_value
+    tool_manifest_value "${1}.artifacts.${tool_platform}.name"
+    tool_artifact=
+    while :; do
+        case "$tool_value" in
+            *'{version}'*)
+                tool_artifact=${tool_artifact}${tool_value%%'{version}'*}${tool_version}
+                tool_value=${tool_value#*'{version}'}
+                ;;
+            *) break ;;
+        esac
+    done
+    tool_artifact=${tool_artifact}${tool_value}
+    tool_manifest_value "${1}.artifacts.${tool_platform}.sha256"
+    tool_sha256=$tool_value
+}
+
+# Pins every tool that this script installs before it inspects or changes
+# the host.
+read_tool_versions() {
+    load_tool_manifest
+    tool_manifest_value rust.toolchain
+    RUST_TOOLCHAIN=$tool_value
+    tool_manifest_value cargo_nextest.version
+    CARGO_NEXTEST_VERSION=$tool_value
+    tool_manifest_artifact rustup
+    RUSTUP_VERSION=$tool_version
+    RUSTUP_ARTIFACT=$tool_artifact
+    RUSTUP_SHA256=$tool_sha256
+    tool_manifest_artifact sccache
+    SCCACHE_VERSION=$tool_version
+    SCCACHE_ARTIFACT=$tool_artifact
+    SCCACHE_SHA256=$tool_sha256
+    tool_manifest_artifact actions_runner
+    RUNNER_VERSION=$tool_version
+    RUNNER_ARTIFACT=$tool_artifact
+    RUNNER_SHA256=$tool_sha256
 }
 
 report_invariant_tsc() {
@@ -202,7 +328,7 @@ prepare_runner_package() {
         "${trusted_tool_root}/runner-package.XXXXXX")
     runner_package_archive=${runner_package_directory}/runner.tar.gz
     runner_package_root=${runner_package_directory}/root
-    runner_package_url=https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz
+    runner_package_url=https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${RUNNER_ARTIFACT}
     trap 'if [ -n "$runner_package_directory" ]; then run_as_root rm -rf "$runner_package_directory"; fi' \
         0 HUP INT TERM
     run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
@@ -446,7 +572,7 @@ install_rust_tools() {
 
     if [ ! -x "$rustup" ]; then
         installer=${trusted_tool_root}/rustup-init-${RUSTUP_VERSION}
-        installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init
+        installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_ARTIFACT}
         run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
             --silent --show-error --output "$installer" "$installer_url"
         printf '%s  %s\n' "$RUSTUP_SHA256" "$installer" |
@@ -499,7 +625,7 @@ install_rust_tools() {
             run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
                 --silent --show-error \
                 --output "$archive" \
-                "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+                "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_ARTIFACT}"
             actual_sha256=$(run_as_root sha256sum "$archive" | awk '{print $1}')
             [ "$actual_sha256" = "$SCCACHE_SHA256" ] ||
                 die "sccache archive checksum mismatch: ${actual_sha256}"
@@ -507,7 +633,7 @@ install_rust_tools() {
             run_as_root tar --extract --gzip \
                 --file "$archive" \
                 --directory "$root"
-            extracted=${root}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache
+            extracted=${root}/${SCCACHE_ARTIFACT%.tar.gz}/sccache
             run_as_root test -x "$extracted" ||
                 die "sccache executable was not found after extraction"
             run_as_root install -m 0755 "$extracted" "$sccache"
@@ -624,14 +750,14 @@ check_environment() {
         'import sys; print(".".join(map(str, sys.version_info[:3])))')
     version_at_least "$python_version" 3.10.0 ||
         die "Python 3.10.0 or newer is required"
-    rust_version=$(run_as_runner env RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN \
+    rust_version=$(run_as_runner env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
         rustc --version | awk '{print $2}')
     [ "$rust_version" = "$RUST_TOOLCHAIN" ] ||
         die "Rust ${RUST_TOOLCHAIN} is required, found ${rust_version}"
     run_as_runner cargo nextest --version |
         grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
         die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
-    installed_targets=$(run_as_runner env RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN \
+    installed_targets=$(run_as_runner env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
         rustup target list --installed)
     for target in \
         x86_64-unknown-none \
@@ -818,6 +944,7 @@ case "$backend" in
     kvm | mshv) ;;
     *) die "--backend must be kvm or mshv" ;;
 esac
+read_tool_versions
 report_invariant_tsc /proc/cpuinfo
 [ "$(id -u)" -ne 0 ] || die "run this script as the SSH administrator, not root"
 require_command sudo

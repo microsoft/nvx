@@ -14,5 +14,7 @@ guest/**/* text eol=lf
 Dockerfile text eol=lf
 kernel/config-microvm text eol=lf
 kernel/config-microvm-debug text eol=lf
+# Linux hosts read the setup tool manifest, including copies staged from Windows.
+scripts/setup/tool-versions.conf text eol=lf
 
 .github/workflows/*.lock.yml linguist-generated=true
