@@ -9,9 +9,15 @@ The implementation is exercised at three levels:
 - OpenVMM VMM tests invoked through `nvx.py test-openvmm`: a test-harness
   microVM lifecycle test and a management-RPC lifecycle, SMP, and snapshot
   test that uses NVX's ACPI-free, MP-enabled x86-64 Linux-direct kernel and
-  initramfs; and
+  Alpine initramfs; and
 - NVX-owned process tests using this repository's Linux kernel and selected
-  Alpine or Ubuntu initramfs through the public OpenVMM CLI.
+  Alpine, Ubuntu, or Azure Linux initramfs through the public OpenVMM CLI.
+
+Alpine, the only sandbox-control guest, supports every NVX-owned scenario.
+Ubuntu and Azure Linux reject the scenarios that
+[`test-microvm`](../usage.md#test-microvm) lists, and their guest chapters
+list what CI runs on them: [Ubuntu](../guests/ubuntu-guest.md#validation) and
+[Azure Linux](../guests/azurelinux-guest.md#validation).
 
 The harness lifecycle test covers portb I/O, status shutdown, rejection of
 host save and pulse save/restore, and a snapshot request that continues
