@@ -453,6 +453,7 @@ jobs:
           scratch="build/ubuntu-shares-${{ inputs.backend }}.ext4"
           workspace="build/ubuntu-shares-workspace-${{ inputs.backend }}"
           toolcache="build/ubuntu-shares-toolcache-${{ inputs.backend }}"
+          files="build/ubuntu-shares-files-${{ inputs.backend }}"
           outside="$(dirname "${workspace}")/nvx-outside-marker"
           logs="build/test-results/ubuntu-${{ inputs.backend }}"
           # Keep the control socket path short.
@@ -466,19 +467,29 @@ jobs:
           }
           trap cleanup EXIT
           prepare_shares() {
-            rm -rf "${workspace}" "${toolcache}"
+            rm -rf "${workspace}" "${toolcache}" "${files}"
             mkdir -p "${workspace}/nvx-denied" "${workspace}/nvx-links" \
-              "${toolcache}/nvx-denied"
+              "${toolcache}/nvx-denied" "${files}/config" "${files}/results"
             printf 'host-to-guest\n' >"${workspace}/nvx-host-marker"
             printf 'host-to-guest\n' >"${toolcache}/nvx-host-marker"
             printf 'secret\n' >"${workspace}/nvx-denied/secret"
             printf 'secret\n' >"${toolcache}/nvx-denied/secret"
             printf 'host-outside\n' >"${outside}"
+            # Each shared file sits beside a file that no share exposes. Every
+            # guest identity may write both shared files, so only the read-only
+            # share can refuse a write.
+            printf 'host-to-guest\n' >"${files}/config/settings.json"
+            printf 'secret\n' >"${files}/config/secret.json"
+            printf 'host-to-guest\n' >"${files}/results/output.txt"
+            printf 'other\n' >"${files}/results/other.txt"
+            chmod 0666 "${files}/config/settings.json" "${files}/results/output.txt"
             chmod 0777 "${workspace}" "${workspace}/nvx-links"
             cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
           }
           # The guest writes to the read-write share, and neither it nor a link
-          # in the read-write share changes the read-only share.
+          # in the read-write share changes the read-only share. It rewrites
+          # only the read-write file, and the files beside the shared files
+          # stay unchanged.
           check_shares() {
             test "$(cat "${workspace}/nvx-guest-marker")" = guest-to-host
             test -d "${workspace}/nvx-guest-directory"
@@ -488,14 +499,24 @@ jobs:
             test "$(cat "${toolcache}/nvx-denied/secret")" = secret
             test "$(cat "${workspace}/nvx-denied/secret")" = secret
             test "$(cat "${outside}")" = host-outside
+            test "$(ls -A "${files}/config" | sort | tr '\n' ' ')" = "secret.json settings.json "
+            test "$(ls -A "${files}/results" | sort | tr '\n' ' ')" = "other.txt output.txt "
+            test "$(cat "${files}/config/settings.json")" = host-to-guest
+            test "$(cat "${files}/config/secret.json")" = secret
+            test "$(cat "${files}/results/output.txt")" = guest-to-host
+            test "$(cat "${files}/results/other.txt")" = other
           }
           share_options=(
             --mount "/workspace,${workspace},rw" --mount-deny nvx-denied
             --mount "/opt/hostedtoolcache,${toolcache},ro" --mount-deny nvx-denied
+            --mount "/config/settings.json,${files}/config/settings.json,ro"
+            --mount "/results/output.txt,${files}/results/output.txt,rw"
           )
           smoke_arguments=(
             --entrypoint /sbin/nvx-sandbox-smoke
             --arg /workspace --arg rw --arg /opt/hostedtoolcache --arg ro
+            --arg /config/settings.json --arg file-ro
+            --arg /results/output.txt --arg file-rw
           )
           prepare_shares
           python3 scripts/nvx.py sandbox \
@@ -507,7 +528,7 @@ jobs:
             --workload-user 65534:65534 \
             --memory-mib 256
           check_shares
-          # A managed sandbox persists both shares and reattaches them on start.
+          # A managed sandbox persists every share and reattaches them on start.
           prepare_shares
           python3 scripts/nvx.py sandbox provision \
             --state-dir "${state}" \
@@ -523,21 +544,28 @@ jobs:
           with open(sys.argv[1], encoding="utf-8") as stream:
               config = json.load(stream)
           shares = [
-              (mount["guest_target"], mount["access"], mount["denied_paths"])
+              (
+                  mount["guest_target"],
+                  mount["access"],
+                  mount["denied_paths"],
+                  mount["kind"],
+              )
               for mount in config["mounts"]
           ]
           expected = [
-              ("/workspace", "rw", ["nvx-denied"]),
-              ("/opt/hostedtoolcache", "ro", ["nvx-denied"]),
+              ("/workspace", "rw", ["nvx-denied"], "directory"),
+              ("/opt/hostedtoolcache", "ro", ["nvx-denied"], "directory"),
+              ("/config/settings.json", "ro", [], "file"),
+              ("/results/output.txt", "rw", [], "file"),
           ]
-          if config["format"] != 4 or "mount" in config or shares != expected:
-              sys.exit(f"managed sandbox did not persist both shares: {config}")
+          if config["format"] != 6 or "mount" in config or shares != expected:
+              sys.exit(f"managed sandbox did not persist every share: {config}")
           EOF
           python3 scripts/nvx.py sandbox start --state-dir "${state}"
           python3 scripts/nvx.py sandbox exec --state-dir "${state}" \
             "${smoke_arguments[@]}"
           python3 scripts/nvx.py sandbox stop --state-dir "${state}"
-          # A clean ext4 journal shows that stop unmounted both shares, the
+          # A clean ext4 journal shows that stop unmounted every share, the
           # overlay, and scratch in order.
           python3 - "${state}/outcome.json" "${scratch}" <<'EOF'
           import json
@@ -556,7 +584,7 @@ jobs:
           EOF
           check_shares
           python3 scripts/nvx.py sandbox deprovision --state-dir "${state}"
-          rm -rf "${workspace}" "${toolcache}" "${scratch}" "${outside}"
+          rm -rf "${workspace}" "${toolcache}" "${files}" "${scratch}" "${outside}"
 
       - name: Run Ubuntu sandbox share access policy on Linux
         if: runner.os != 'Windows' && !inputs.debug-kernel
@@ -901,32 +929,46 @@ jobs:
           $scratch = Join-Path $PWD "build\ubuntu-shares-${{ inputs.backend }}.ext4"
           $workspace = Join-Path $PWD "build\ubuntu-shares-workspace-${{ inputs.backend }}"
           $toolcache = Join-Path $PWD "build\ubuntu-shares-toolcache-${{ inputs.backend }}"
+          $files = Join-Path $PWD "build\ubuntu-shares-files-${{ inputs.backend }}"
           $state = Join-Path $PWD "build\ubuntu-shares-state-${{ inputs.backend }}"
           $outside = Join-Path (Split-Path $workspace) "nvx-outside-marker"
           $logs = "build\test-results\ubuntu-${{ inputs.backend }}"
+          $settings = Join-Path $files "config\settings.json"
+          $output = Join-Path $files "results\output.txt"
           $shareOptions = @(
               "--mount", "/workspace,$workspace,rw", "--mount-deny", "nvx-denied",
-              "--mount", "/opt/hostedtoolcache,$toolcache,ro", "--mount-deny", "nvx-denied"
+              "--mount", "/opt/hostedtoolcache,$toolcache,ro", "--mount-deny", "nvx-denied",
+              "--mount", "/config/settings.json,$settings,ro",
+              "--mount", "/results/output.txt,$output,rw"
           )
           $smokeArguments = @(
               "--entrypoint", "/sbin/nvx-sandbox-smoke",
               "--arg", "/workspace", "--arg", "rw",
-              "--arg", "/opt/hostedtoolcache", "--arg", "ro"
+              "--arg", "/opt/hostedtoolcache", "--arg", "ro",
+              "--arg", "/config/settings.json", "--arg", "file-ro",
+              "--arg", "/results/output.txt", "--arg", "file-rw"
           )
           function Initialize-Shares {
-              foreach ($path in $workspace, $toolcache, $state) {
+              foreach ($path in $workspace, $toolcache, $files, $state) {
                   if (Test-Path $path) { Remove-Item -Recurse -Force $path }
               }
-              New-Item -ItemType Directory -Force (Join-Path $workspace "nvx-denied"), (Join-Path $workspace "nvx-links"), (Join-Path $toolcache "nvx-denied") | Out-Null
+              New-Item -ItemType Directory -Force (Join-Path $workspace "nvx-denied"), (Join-Path $workspace "nvx-links"), (Join-Path $toolcache "nvx-denied"), (Join-Path $files "config"), (Join-Path $files "results") | Out-Null
               foreach ($share in $workspace, $toolcache) {
                   [IO.File]::WriteAllText((Join-Path $share "nvx-host-marker"), "host-to-guest`n")
                   [IO.File]::WriteAllText((Join-Path $share "nvx-denied\secret"), "secret`n")
               }
               [IO.File]::WriteAllText($outside, "host-outside`n")
+              # Each shared file sits beside a file that no share exposes.
+              [IO.File]::WriteAllText($settings, "host-to-guest`n")
+              [IO.File]::WriteAllText((Join-Path $files "config\secret.json"), "secret`n")
+              [IO.File]::WriteAllText($output, "host-to-guest`n")
+              [IO.File]::WriteAllText((Join-Path $files "results\other.txt"), "other`n")
               Copy-Item -Force build\ubuntu-smoke-scratch.ext4 $scratch
           }
           # The guest writes to the read-write share, and neither it nor a link
-          # in the read-write share changes the read-only share.
+          # in the read-write share changes the read-only share. It rewrites
+          # only the read-write file, and the files beside the shared files
+          # stay unchanged.
           function Test-Shares {
               if ([IO.File]::ReadAllText((Join-Path $workspace "nvx-guest-marker")) -ne "guest-to-host`n") {
                   throw "guest write did not reach the read-write share"
@@ -944,16 +986,26 @@ jobs:
               }
               if ([IO.File]::ReadAllText((Join-Path $toolcache "nvx-host-marker")) -ne "host-to-guest`n") { throw "guest changed the read-only share" }
               if ([IO.File]::ReadAllText($outside) -ne "host-outside`n") { throw "a guest link reached host data outside the shares" }
+              foreach ($directory in "config", "results") {
+                  $entries = (Get-ChildItem -Force -Name (Join-Path $files $directory) | Sort-Object) -join " "
+                  $expected = @{ config = "secret.json settings.json"; results = "other.txt output.txt" }[$directory]
+                  if ($entries -ne $expected) { throw "guest changed the directory of a shared file: $entries" }
+              }
+              if ([IO.File]::ReadAllText($settings) -ne "host-to-guest`n") { throw "guest changed the read-only file" }
+              if ([IO.File]::ReadAllText($output) -ne "guest-to-host`n") { throw "guest write did not reach the read-write file" }
+              if ([IO.File]::ReadAllText((Join-Path $files "config\secret.json")) -ne "secret`n") { throw "guest changed a file beside a shared file" }
+              if ([IO.File]::ReadAllText((Join-Path $files "results\other.txt")) -ne "other`n") { throw "guest changed a file beside a shared file" }
           }
           Initialize-Shares
           Invoke-Nvx sandbox --hypervisor "${{ inputs.backend }}" --layer $layer --scratch $scratch @shareOptions @smokeArguments --workload-user 65534:65534 --memory-mib 256
           Test-Shares
-          # A managed sandbox persists both shares and reattaches them on start.
+          # A managed sandbox persists every share and reattaches them on start.
           Initialize-Shares
           Invoke-Nvx sandbox provision --state-dir $state --hypervisor "${{ inputs.backend }}" --layer $layer --scratch $scratch @shareOptions --workload-user 65534:65534
           $config = Get-Content -Raw (Join-Path $state "config.json") | ConvertFrom-Json
-          if ($config.format -ne 4 -or $config.mounts.Count -ne 2 -or $config.mounts[0].guest_target -ne "/workspace" -or $config.mounts[1].access -ne "ro") {
-              throw "managed sandbox did not persist both shares: $($config | ConvertTo-Json -Compress -Depth 5)"
+          $shares = ($config.mounts | ForEach-Object { "$($_.guest_target),$($_.access),$($_.kind)" }) -join " "
+          if ($config.format -ne 6 -or $shares -ne "/workspace,rw,directory /opt/hostedtoolcache,ro,directory /config/settings.json,ro,file /results/output.txt,rw,file") {
+              throw "managed sandbox did not persist every share: $($config | ConvertTo-Json -Compress -Depth 5)"
           }
           try {
               Invoke-Nvx sandbox start --state-dir $state
@@ -971,7 +1023,7 @@ jobs:
           if ($outcome.operation -ne "managed" -or $outcome.category -ne "success" -or $outcome.status_code -ne 0) {
               throw "managed sandbox outcome is invalid: $($outcome | ConvertTo-Json -Compress)"
           }
-          # A clean ext4 journal shows that stop unmounted both shares, the
+          # A clean ext4 journal shows that stop unmounted every share, the
           # overlay, and scratch in order.
           $image = [IO.File]::OpenRead($scratch)
           try {
@@ -986,7 +1038,7 @@ jobs:
           }
           Test-Shares
           Invoke-Nvx sandbox deprovision --state-dir $state
-          Remove-Item -Recurse -Force $workspace, $toolcache, $scratch, $outside
+          Remove-Item -Recurse -Force $workspace, $toolcache, $files, $scratch, $outside
 
       - name: Run Ubuntu sandbox share access policy on Windows
         if: runner.os == 'Windows' && !inputs.debug-kernel

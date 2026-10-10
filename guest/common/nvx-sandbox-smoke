@@ -287,6 +287,13 @@ check_share() {
         echo "NVX-UBUNTU-SANDBOX-SHARE-OK target=$share mode=$share_mode"
         return
     fi
+    case "$share_mode" in
+        file-ro | file-rw)
+            check_file_share "$share" "${share_mode#file-}"
+            echo "NVX-UBUNTU-SANDBOX-SHARE-OK target=$share mode=$share_mode"
+            return
+            ;;
+    esac
     [ "$(cat "$share/nvx-host-marker")" = host-to-guest ]
     [ ! -e "$share/nvx-denied" ]
     case "$share_mode" in
@@ -313,6 +320,32 @@ check_share() {
         *) exit 2 ;;
     esac
     echo "NVX-UBUNTU-SANDBOX-SHARE-OK target=$share mode=$share_mode"
+}
+
+# A share of one host file, bound with mode $2, ro or rw, at a regular file
+# that the agent created in a directory of the container root. The workload
+# reaches the file and nothing beside it, cannot remove or rename it, and gets
+# EROFS from a read-only file; it rewrites a read-write one, and the host
+# checks the file and its siblings.
+check_file_share() {
+    share=$1
+    require_mount "$share" virtiofs "$2" nosuid nodev
+    if [ ! -f "$share" ] || [ -L "$share" ]; then
+        fail "$share is not a regular file"
+    fi
+    [ "$(ls -A "${share%/*}")" = "${share##*/}" ] ||
+        fail "${share%/*} holds more than the shared file"
+    [ "$(cat "$share")" = host-to-guest ] ||
+        fail "$share does not hold the host's contents"
+    if [ "$2" = ro ]; then
+        expect_erofs "$share"
+    else
+        printf 'guest-to-host\n' >"$share" ||
+            fail "the workload cannot rewrite $share"
+    fi
+    if rm -f "$share" 2>/dev/null || mv "$share" "$share.moved" 2>/dev/null; then
+        fail "the workload removed or renamed $share"
+    fi
 }
 
 # With --mount-owner caller, the workload owns what it creates, so it can
@@ -503,7 +536,8 @@ check_devices
 check_cgroup
 check_image
 echo "NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534"
-# Each share is a TARGET MODE pair; a final TARGET alone is read-only.
+# Each share is a TARGET MODE pair; a final TARGET alone is read-only. A MODE
+# of file-ro or file-rw checks a shared file.
 # `limits MEMORY_MAX PIDS_MAX` checks the workload's resource limits.
 rw_share=
 ro_share=

@@ -593,6 +593,12 @@ keep twice `MEMORY_MAX` within the guest's free memory. With
 `--arg TARGET --arg ro|rw`, it also checks a live share at
 `TARGET` as described below, including symbolic links in an `rw` share; the
 share needs a host-created, world-writable `nvx-links` directory for them.
+With `--arg TARGET --arg file-ro|file-rw`, it checks a shared file at
+`TARGET`: a `virtiofs` bind with the given mode, alone in its directory,
+holding `host-to-guest`, which the workload can neither remove nor rename. It
+requires a write to a `file-ro` file to fail with `EROFS`, so the host must let
+every identity write the file, and it writes `guest-to-host` to a `file-rw`
+file.
 Repeat the pair to check several shares; with an `rw` and an `ro` share, it
 also verifies that a link in the `rw` share cannot write into the `ro` share.
 With `--mount-owner caller`, `--arg caller` performs the `rw` checks and also
