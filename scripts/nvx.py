@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -95,9 +96,11 @@ from nvx_tools.sandbox import (
     SandboxLaunch,
     SandboxLayer,
     SandboxMount,
+    aggregate_child_argument,
     aggregate_child_name,
     aggregate_command_line_fragment,
     aggregate_share_tokens,
+    mount_kind,
     parse_workload_identity,
     require_mount_owner_supported,
 )
@@ -146,7 +149,8 @@ class _MountPolicyPathAction(argparse.Action):
 
 def _sandbox_mounts(args: argparse.Namespace) -> tuple[SandboxMount, ...]:
     """Attribute each access-policy path to its share and parse the --mount
-    options.
+    options, each of which shares a directory or, when its host path is a
+    regular file, that file.
 
     With one --mount, every --mount-deny, --mount-allow, and --mount-write
     names a path in it. With several, each names a path in the --mount that
@@ -168,16 +172,17 @@ def _sandbox_mounts(args: argparse.Namespace) -> tuple[SandboxMount, ...]:
             paths[index].append(path)
         attributed[kind] = paths
     owner = args.mount_owner or "vmm"
-    return tuple(
-        SandboxMount.parse(
+    parsed: list[SandboxMount] = []
+    for index, value in enumerate(mounts):
+        mount = SandboxMount.parse(
             value,
             tuple(attributed["denied"][index]),
             owner,
             allowed_paths=tuple(attributed["allowed"][index]),
             writable_paths=tuple(attributed["writable"][index]),
         )
-        for index, value in enumerate(mounts)
-    )
+        parsed.append(replace(mount, kind=mount_kind(mount.host_path)))
+    return tuple(parsed)
 
 
 def _run_share(value: str) -> tuple[str, str, str]:
@@ -204,9 +209,10 @@ def _validate_run_share_targets(targets: list[str]) -> None:
             or any(part in ("", ".", "..") for part in target.split("/")[1:])
         ):
             raise ScriptError(
-                f"invalid --mount target {target!r}: with several shares, each "
-                "target must be an absolute non-root path without empty, dot, or "
-                "parent components, whitespace, '\\', '=', or ','"
+                f"invalid --mount target {target!r}: with several shares, or a "
+                "shared file, each target must be an absolute non-root path "
+                "without empty, dot, or parent components, whitespace, '\\', '=', "
+                "or ','"
             )
         for other in (AGGREGATE_MOUNT_TARGET, *targets[:index]):
             if (
@@ -560,7 +566,11 @@ def command_run(args: argparse.Namespace) -> None:
     if args.cpu_profile is not None:
         command.extend(["--cpu-profile", args.cpu_profile])
     shares = [_run_share(value) for value in args.mount]
-    if len(shares) == 1:
+    # A file is shared as the child of an aggregate, even alone, because the
+    # guest mounts the device's root, which is a directory.
+    kinds = [mount_kind(Path(host_path)) for _, host_path, _ in shares]
+    aggregate = len(shares) > 1 or "file" in kinds
+    if shares and not aggregate:
         command.extend(["--mount", args.mount[0]])
     elif shares:
         _validate_run_share_targets([target for target, _, _ in shares])
@@ -569,17 +579,22 @@ def command_run(args: argparse.Namespace) -> None:
         # restore whose targets differ from those that the guest bound.
         for index, (target, host_path, access) in enumerate(shares):
             name = aggregate_child_name(index, target)
-            command.extend(["--mount-child", f"{name},{host_path},{access}"])
+            command.extend(
+                [
+                    "--mount-child",
+                    aggregate_child_argument(name, host_path, access, kinds[index]),
+                ]
+            )
     if args.mount_owner is not None and not args.mount:
         raise ScriptError("--mount-owner requires --mount")
     for option in MOUNT_POLICY_OPTIONS.values():
         for path in getattr(args, _mount_policy_destination(option)):
-            # OpenVMM attributes each path of several shares to the child whose
+            # OpenVMM attributes each path of an aggregate to the child whose
             # host directory contains it.
-            if len(shares) > 1 and not Path(path).is_absolute():
+            if aggregate and not Path(path).is_absolute():
                 raise ScriptError(
-                    f"with several --mount shares, {option} {path} must be an "
-                    "absolute host path"
+                    f"with several --mount shares, or a shared file, {option} "
+                    f"{path} must be an absolute host path"
                 )
             command.extend([option, str(path)])
     if args.mount_owner is not None:
@@ -596,13 +611,16 @@ def command_run(args: argparse.Namespace) -> None:
     cmdline = args.cmdline
     # A restored guest keeps the binds that its boot made, at the targets that
     # its children's names pin.
-    if len(shares) > 1 and args.restore_snapshot is None:
+    if aggregate and args.restore_snapshot is None:
         cmdline = " ".join(
             token
             for token in (
                 args.cmdline,
                 *aggregate_share_tokens(
-                    [(target, access) for target, _, access in shares]
+                    [
+                        (target, access, kind)
+                        for (target, _, access), kind in zip(shares, kinds, strict=True)
+                    ]
                 ),
             )
             if token
@@ -1150,8 +1168,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="GUEST_TARGET,HOST_PATH[,ro|rw]",
         help=(
-            "live-share a host directory; repeat for more shares, each with its "
-            "own guest target and mode, as children of one virtio-fs device"
+            "live-share a host directory, or a single regular host file without "
+            "its directory; repeat for more shares, each with its own guest "
+            "target and mode, as children of one virtio-fs device"
         ),
     )
     run.add_argument("--mount-deny", action="append", type=Path, default=[])
@@ -1179,7 +1198,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=MOUNT_OWNERS,
         help=(
             "host identity of the share's file operations: vmm (default) or "
-            "caller, with guest root squashed to the directory owner (Linux only)"
+            "caller, with guest root squashed to the owner of the shared "
+            "directory or file (Linux only)"
         ),
     )
     run.add_argument("--net", metavar="IPV4/PREFIX")
@@ -1311,9 +1331,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="GUEST_TARGET,HOST_PATH[,ro|rw]",
         help=(
-            "live-share a host directory inside the container rootfs; repeat "
-            "to attach more shares, each with its own target and mode, as "
-            "children of one virtio-fs device"
+            "live-share a host directory, or a single regular host file without "
+            "its directory, inside the container rootfs; repeat to attach more "
+            "shares, each with its own target and mode, as children of one "
+            "virtio-fs device"
         ),
     )
     sandbox.add_argument(
@@ -1352,7 +1373,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "host identity of the share's file operations: vmm (default) or "
             "caller, the workload identity with guest root squashed to the "
-            "directory owner (Linux only)"
+            "owner of the shared directory or file (Linux only)"
         ),
     )
     sandbox.add_argument("--net", metavar="IPV4/PREFIX")

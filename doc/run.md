@@ -449,12 +449,28 @@ python3 scripts/nvx.py run \
   --mount "/opt/hostedtoolcache,/opt/hostedtoolcache,ro"
 ```
 
-With several mappings, NVX attaches the slot as an aggregate: OpenVMM's
-`--mount-aggregate /run/nvx/shares` with one `--mount-child NAME,HOST_PATH,MODE`
-per mapping, in order. The initramfs mounts the aggregate at `/run/nvx/shares`,
-whose root lists one directory per mapping and only root can enter, and binds
-each directory at its target with its mode and `nosuid,nodev`, as an
-`nvx_share=NAME,TARGET,MODE` token on the kernel command line describes. A
+A `--mount` may also share one regular host file. The guest then reaches that
+file at its target, but neither its directory nor its siblings, for example a
+read-only settings file next to a read-write results file:
+
+```bash
+python3 scripts/nvx.py run \
+  --mount "/config/settings.json,/srv/app/config/settings.json,ro" \
+  --mount "/results/output.txt,/srv/app/results/output.txt,rw"
+```
+
+With several mappings, or a shared file, NVX attaches the slot as an
+aggregate: OpenVMM's `--mount-aggregate /run/nvx/shares` with one
+`--mount-child NAME,HOST_PATH,MODE[,file]` per mapping, in order, where
+OpenVMM's `file` flag marks a shared file, so OpenVMM refuses a directory that
+replaced the file rather than export all of it. The initramfs mounts
+the aggregate at `/run/nvx/shares`, whose root lists one entry per mapping and
+only root can enter, and binds each entry at its target with its mode and
+`nosuid,nodev`, as an `nvx_share=NAME,TARGET,MODE[,file]` token on the kernel
+command line describes. The `file` suffix marks a shared file, which the
+initramfs binds at a regular file that it creates at the target, along with
+the target's missing directories; an existing target must already be a
+regular file. A
 mapping's name is its index, a hyphen, and the first 32 hexadecimal digits of
 the SHA-256 digest of its target. A snapshot records every name, so it pins
 each target: a restore that requests another target fails before the guest
@@ -463,16 +479,26 @@ OpenVMM enforces each mapping's access mode on the host, so a read-only mapping
 rejects writes with `EROFS` even if guest root remounts its bind read-write or
 writes through `/run/nvx/shares`. A rename between mappings fails with
 `EXDEV`, and so does a hard link, unless its destination is read-only, which
-fails with `EROFS` first. Guest targets that equal or contain one another or
-`/run/nvx/shares`, and host directories that equal or contain one another, are
-rejected before boot. The number of mappings is bounded only by the 1024-byte
+fails with `EROFS` first. OpenVMM serves a shared file alone: the guest cannot
+list, inspect, or change the file's directory or reach its siblings, a lookup
+below the file fails with `ENOTDIR`, and a read-write file can be rewritten in
+place but not replaced, renamed, or removed. OpenVMM follows the file's name,
+so the guest sees the file that host software, such as an editor, saves over
+it, and requests fail with `EACCES` while anything but a regular file holds the
+name. Guest targets that equal or contain one another or `/run/nvx/shares`,
+and host paths that equal or contain one another, such as a shared file inside
+a shared directory or two hard links to one file, are rejected before boot.
+The number of mappings is bounded only by the 1024-byte
 budget that their tokens and `--cmdline` share on the kernel command line.
 A snapshot captured with mappings requires the same mappings, in the same
-order, with the same canonical host paths, targets, modes, and filesystem
-identities.
+order, with the same canonical host paths, kinds, targets, modes, and
+filesystem identities, so a restore refuses a shared file that was replaced
+since the capture.
 A repeatable `--mount-deny HOST_PATH` hides an existing file or directory
-inside a mapped root. With several mappings, each `--mount-deny` must be an
-absolute path, and it applies to the mapping whose root contains it. Denied
+inside a mapped root. With several mappings, or a shared file, each
+`--mount-deny`, `--mount-allow`, and `--mount-write` path must be absolute, and
+it applies to the mapping whose root contains it. A shared file takes none of
+them, because its mode applies to the whole file. Denied
 names are omitted from directory listings and remain
 inaccessible through `..`, a symlink/junction, or another mount of the same
 virtio-fs device. Names may contain spaces, but not begin or end with one.
@@ -494,16 +520,16 @@ Treat links in a writable share as untrusted when host software later reads
 the directory.
 By default, OpenVMM performs every guest operation on the mapping as its own
 user. On a Linux host, `--mount-owner caller` instead performs each one as the
-guest caller's UID and GID and squashes guest root to the owner of the host
-directory, so files that guest root creates are owned by that owner rather
-than by root or OpenVMM; see [File ownership](#file-ownership). A snapshot
-captured with a mapping also requires the same `--mount-owner` mode. Capture
-and restore inspect and reopen the guest's open files as OpenVMM's user, so
-unless OpenVMM runs as root, they fail while the guest holds a file that only
-its caller can reach or reopen, such as one open for writing.
-A snapshot captured without a mapping may restore with one new `--mount`, but
-not with several; after resume, mount it explicitly inside the guest because
-the initramfs hook has already completed:
+guest caller's UID and GID and squashes guest root to the owner of the shared
+host directory or file, so files that guest root creates are owned by that
+owner rather than by root or OpenVMM; see [File ownership](#file-ownership). A
+snapshot captured with a mapping also requires the same `--mount-owner` mode.
+Capture and restore inspect and reopen the guest's open files as OpenVMM's
+user, so unless OpenVMM runs as root, they fail while the guest holds a file
+that only its caller can reach or reopen, such as one open for writing.
+A snapshot captured without a mapping may restore with one new `--mount` of a
+directory, but not with several or with a file; after resume, mount it
+explicitly inside the guest because the initramfs hook has already completed:
 
 ```sh
 mkdir -p /mnt/host
@@ -606,16 +632,17 @@ The outer agent retains the initramfs root; the capability-stripped child
 enters only the assembled root with `chroot`, because Linux cannot
 `pivot_root` away from an initramfs `rootfs`.
 
-### Live host-directory shares
+### Live host shares
 
 `sandbox run` and `sandbox provision` accept repeatable
 `--mount GUEST_TARGET,HOST_PATH[,ro|rw]` (default `ro`) options, each with its
 own guest target and access mode, plus repeatable `--mount-deny HOST_PATH`,
 `--mount-allow HOST_PATH`, and `--mount-write HOST_PATH` rules (see
 [Access policy](#access-policy)). OpenVMM exports one host directory through
-the microVM's virtio-fs device, and several as the children of an aggregate on
-that device, and enforces each share's access mode and policy on the host side,
-so edits are visible in both directions without staging or copy-back:
+the microVM's virtio-fs device, and several shares, or a shared file, as the
+children of an aggregate on that device, and enforces each share's access mode
+and policy on the host side, so edits are visible in both directions without
+staging or copy-back:
 
 ```bash
 python3 scripts/nvx.py sandbox \
@@ -627,18 +654,25 @@ python3 scripts/nvx.py sandbox \
   --entrypoint /bin/sh
 ```
 
+A `--mount` whose host path is a regular file shares only that file, as
+[virtio-fs host mapping](#virtio-fs-host-mapping) describes: the workload sees
+it at its target, but neither its directory nor its siblings. A shared file
+takes no `--mount-deny`, `--mount-allow`, or `--mount-write` path, because its
+mode applies to the whole file.
+
 A relative `--mount-deny`, `--mount-allow`, or `--mount-write` path is
 resolved inside its share's host directory. With one share, every such path
 applies to it. With several, each applies to the `--mount` before it and must
 name a path inside that share's directory. The guest targets and the host
-directories of the shares must not equal or contain one another, because one
+paths of the shares must not equal or contain one another, because one
 share could otherwise hide another or reach its files under a different access
-mode.
-NVX and OpenVMM compare the host directories by resolved path and by file
-identity, so one directory reached through two paths, such as a bind mount,
-is rejected too. NVX also compares each directory's identity with those of
-the other directory's ancestors, so a share inside a bind mount of the other
-share's directory is rejected before OpenVMM starts. On Linux, OpenVMM also
+mode, so a shared file may lie beside a shared directory, but not inside it.
+NVX and OpenVMM compare the host paths by resolved path and by file
+identity, so one directory or file reached through two paths, such as a bind
+mount or a hard link, is rejected too. NVX also compares each share's identity
+with those of the other share's ancestors, so a share inside a bind mount of
+the other share's directory is rejected before OpenVMM starts. On Linux,
+OpenVMM also
 compares the filesystem sources that each directory reaches, through the
 mount that contains it and every mount below it, so it also rejects a bind
 mount or nested mount that exposes part of one share inside the other. That
@@ -650,19 +684,22 @@ it.
 After it assembles the container overlay and verifies the workload identity,
 the guest agent creates each target inside the container root and mounts the
 share there with `nosuid,nodev` before the workload enters its private mount
-namespace. With several shares, it mounts the aggregate at `/run/nvx/shares`,
-outside the container root, and binds each child at its target with its mode
-and `nosuid,nodev`, in order, as the `nvx_share=NAME,TARGET,MODE` tokens that
-NVX adds to the kernel command line describe. The number of shares is bounded
+namespace. With several shares, or a shared file, it mounts the aggregate at
+`/run/nvx/shares`, outside the container root, and binds each child at its
+target with its mode and `nosuid,nodev`, in order, as the
+`nvx_share=NAME,TARGET,MODE[,file]` tokens that NVX adds to the kernel command
+line describe. It binds a shared file at a regular file, which it creates when
+the container root has nothing at the target. The number of shares is bounded
 only by the sandbox's 1024-byte kernel command-line budget. A one-shot
 workload exit, a managed `stop`, and any failure after a share is mounted
 unmount the binds in reverse order, then the aggregate, before the overlay is
 unmounted or the VM powers off. Each target must be an absolute, canonical
-path; `/`, `/etc`, and
-the `/proc`, `/sys`, `/dev`, and `/.nvx-agent` trees are reserved for the
-container runtime.
+path; `/` and `/etc`, and the `/etc/machine-id`, `/proc`, `/sys`, `/dev`, and
+`/.nvx-agent` trees, are reserved for the container runtime, which replaces
+`/etc/machine-id` with the workload's machine ID.
 The guest refuses a target whose path crosses a symbolic link in a container
-layer, a repeated child, and overlapping targets, and any validation or mount
+layer, a target that a container layer holds as another kind of file than the
+share's, a repeated child, and overlapping targets, and any validation or mount
 failure aborts the sandbox with status 125 instead of starting the workload
 without its shares.
 
@@ -670,13 +707,16 @@ An `rw` share supports the symbolic links that package managers and
 language toolchains create; see
 [virtio-fs host mapping](#virtio-fs-host-mapping) for their semantics. The
 existing OpenVMM file-identity policy applies to each share. A managed
-sandbox stores each share's absolute host path, mode, denied, allowed, and
-writable paths and the ownership mode in its configuration, and reattaches
-every share on each `start`. A configuration with several shares uses format
-4, which earlier NVX releases reject rather than start without the other
-shares.
+sandbox stores each share's absolute host path, kind, mode, denied, allowed,
+and writable paths and the ownership mode in its configuration, and reattaches
+every share on each `start`, which refuses a host path that no longer holds a
+directory or regular file as recorded. A configuration with several shares
+uses format 4, which earlier NVX releases reject rather than start without the
+other shares.
 A configuration with allowed or writable paths uses format 5, which earlier
 NVX releases reject rather than start a share without its access policy.
+A configuration with a shared file uses format 6, which earlier NVX releases
+reject rather than start without the file.
 
 #### Access policy
 

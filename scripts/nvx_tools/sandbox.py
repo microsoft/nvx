@@ -27,11 +27,14 @@ SANDBOX_COMMAND_LINE_MAX_SIZE = (
 _HOSTNAME = re.compile(r"(?=^.{1,63}$)(?!-)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 DEFAULT_WORKLOAD_IDENTITY = (65534, 65534)
 MOUNT_ACCESS_MODES = ("ro", "rw")
-# OpenVMM attaches one virtio-fs device, tag `microvm`. One share uses it
-# directly. Several share it as the children of an aggregate, named by
-# aggregate_child_name, which the guest mounts at AGGREGATE_MOUNT_TARGET, a
-# directory that only the guest's root can enter, before it binds each child at
-# its target.
+# A share binds a host directory, or a regular host file, which only a child
+# of an aggregate can expose, without anything else of its directory.
+MOUNT_KINDS = ("directory", "file")
+# OpenVMM attaches one virtio-fs device, tag `microvm`. One directory share
+# uses it directly. Several shares, or a file, share it as the children of an
+# aggregate, named by aggregate_child_name, which the guest mounts at
+# AGGREGATE_MOUNT_TARGET, a directory that only the guest's root can enter,
+# before it binds each child at its target.
 MOUNT_TAG = "microvm"
 AGGREGATE_MOUNT_TARGET = "/run/nvx/shares"
 # `vmm` performs every share operation as OpenVMM; `caller` performs each as the
@@ -39,9 +42,9 @@ AGGREGATE_MOUNT_TARGET = "/run/nvx/shares"
 MOUNT_OWNERS = ("vmm", "caller")
 # The container runtime owns these guest paths: it mounts procfs, sysfs, and a
 # private /dev over them, stages its tools under /.nvx-agent, and bind-mounts the
-# workload machine ID into /etc. A live share must not shadow or be shadowed by
-# them.
-RESERVED_MOUNT_TARGETS = ("/proc", "/sys", "/dev", "/.nvx-agent")
+# workload machine ID at /etc/machine-id, which it first replaces with a regular
+# file. A live share must not shadow or be shadowed by them.
+RESERVED_MOUNT_TARGETS = ("/proc", "/sys", "/dev", "/.nvx-agent", "/etc/machine-id")
 RESERVED_EXACT_MOUNT_TARGETS = ("/etc",)
 # OpenVMM accepts at most this many denied, allowed, and writable paths each.
 MAX_MOUNT_POLICY_PATHS = 128
@@ -138,7 +141,9 @@ class SandboxMount:
 
     `denied_paths` hide paths in the share, `allowed_paths` expose paths
     inside denied paths again, and `writable_paths`, when present, are the
-    only paths of a read-write share that the workload can modify.
+    only paths of a read-write share that the workload can modify. A share of
+    `kind` file binds one regular host file, whose mode applies to the whole
+    file, so it has none of them.
     """
 
     guest_target: str
@@ -148,6 +153,7 @@ class SandboxMount:
     owner: str = "vmm"
     allowed_paths: tuple[str, ...] = ()
     writable_paths: tuple[str, ...] = ()
+    kind: str = "directory"
 
     @classmethod
     def parse(
@@ -158,6 +164,7 @@ class SandboxMount:
         *,
         allowed_paths: tuple[str, ...] = (),
         writable_paths: tuple[str, ...] = (),
+        kind: str = "directory",
     ) -> SandboxMount:
         fields = value.split(",")
         if len(fields) not in (2, 3):
@@ -174,6 +181,7 @@ class SandboxMount:
             owner=owner,
             allowed_paths=allowed_paths,
             writable_paths=writable_paths,
+            kind=kind,
         )
 
     def __post_init__(self) -> None:
@@ -186,6 +194,11 @@ class SandboxMount:
             raise ScriptError(
                 f"unsupported sandbox mount owner {self.owner!r}; choose vmm or caller"
             )
+        if self.kind not in MOUNT_KINDS:
+            raise ScriptError(
+                f"unsupported sandbox mount kind {self.kind!r}; choose directory "
+                "or file"
+            )
         raw_path = os.fspath(self.host_path)
         if any(character in raw_path for character in ",\0"):
             raise ScriptError(
@@ -194,6 +207,12 @@ class SandboxMount:
         if ".." in self.host_path.parts:
             raise ScriptError(
                 f"sandbox mount host path contains a parent component: {raw_path}"
+            )
+        if self.kind == "file" and any(paths for _, paths in self.policy_paths()):
+            raise ScriptError(
+                "--mount-deny, --mount-allow, and --mount-write name paths inside "
+                f"a shared directory, but --mount {self.guest_target} shares a "
+                "file, whose mode applies to the whole file"
             )
         for kind, paths in self.policy_paths():
             if len(paths) > MAX_MOUNT_POLICY_PATHS:
@@ -227,7 +246,14 @@ class SandboxMount:
 
     def validated(self) -> SandboxMount:
         require_mount_owner_supported(self.owner)
-        if self.host_path.is_symlink() or not self.host_path.is_dir():
+        # The kind was fixed when the share was requested, so a host path that
+        # became a directory in place of a file is not shared in its place.
+        if self.kind == "file":
+            if self.host_path.is_symlink() or not self.host_path.is_file():
+                raise ScriptError(
+                    f"sandbox mount host path is not a regular file: {self.host_path}"
+                )
+        elif self.host_path.is_symlink() or not self.host_path.is_dir():
             raise ScriptError(
                 f"sandbox mount host path is not a plain directory: {self.host_path}"
             )
@@ -236,7 +262,7 @@ class SandboxMount:
             if status.st_uid == 0 or status.st_gid == 0:
                 raise ScriptError(
                     "--mount-owner caller squashes guest root to the owner of the "
-                    f"shared directory, so {self.host_path} must not be owned by "
+                    f"shared {self.kind}, so {self.host_path} must not be owned by "
                     "UID 0 or GID 0"
                 )
         return self
@@ -256,6 +282,7 @@ class SandboxMount:
             owner=self.owner,
             allowed_paths=self.allowed_paths,
             writable_paths=self.writable_paths,
+            kind=self.kind,
         )
 
     def _absolute_paths(self, paths: tuple[str, ...]) -> tuple[str, ...]:
@@ -282,6 +309,19 @@ def _targets_overlap(left: str, right: str) -> bool:
     return left == right or left.startswith(f"{right}/") or right.startswith(f"{left}/")
 
 
+def mount_kind(host_path: Path) -> str:
+    """Return the kind of share that `host_path` requests: a file for a
+    regular file, and otherwise a directory, which validation then requires."""
+    return "file" if host_path.is_file() else "directory"
+
+
+def mounts_use_aggregate(mounts: Sequence[SandboxMount]) -> bool:
+    """Return whether `mounts` share the virtio-fs device as the children of
+    an aggregate: several shares do, and so does a file, because the guest
+    mounts the device's root, which is a directory."""
+    return len(mounts) > 1 or any(mount.kind == "file" for mount in mounts)
+
+
 def validate_mounts(mounts: tuple[SandboxMount, ...]) -> None:
     """Validate the live shares that one sandbox attaches, in child order."""
     for index, mount in enumerate(mounts):
@@ -295,30 +335,32 @@ def validate_mounts(mounts: tuple[SandboxMount, ...]) -> None:
         raise ScriptError("every sandbox --mount must use the same --mount-owner")
 
 
-def _directory_identity(path: Path) -> tuple[int, int]:
+def _path_identity(path: Path) -> tuple[int, int]:
     status = path.stat()
     return status.st_dev, status.st_ino
 
 
 def validate_mount_host_paths(mounts: tuple[SandboxMount, ...]) -> None:
-    """Reject shares whose host directories overlap, or deny another's paths."""
+    """Reject shares whose host paths overlap, or deny another's paths. A
+    shared file overlaps only a shared directory that contains it, or another
+    share of the same file."""
     if len(mounts) < 2:
         return
     roots = [mount.host_path.resolve() for mount in mounts]
     # Resolving follows symbolic links but not bind mounts, so also compare the
     # file identities that OpenVMM pins for each share: a root with the identity
-    # of another root, or of one of its ancestors, is that directory or lies
-    # inside a bind mount of it. On Linux, OpenVMM also compares the mount
-    # sources that each share reaches, which catches a bind mount that exposes
-    # part of one share inside the other.
+    # of another root, or of one of its ancestors, is that directory or file,
+    # such as through a hard link, or lies inside a bind mount of it. On Linux,
+    # OpenVMM also compares the mount sources that each share reaches, which
+    # catches a bind mount that exposes part of one share inside the other.
     lineages = [
-        [_directory_identity(path) for path in (root, *root.parents)] for root in roots
+        [_path_identity(path) for path in (root, *root.parents)] for root in roots
     ]
     for index, root in enumerate(roots):
         for other_index, other in enumerate(roots[:index]):
             if root == other or other in root.parents or root in other.parents:
                 raise ScriptError(
-                    f"sandbox mount host directories {other} and {root} overlap; "
+                    f"sandbox mount host paths {other} and {root} overlap; "
                     "a share could reach files of another under its access mode"
                 )
             if (
@@ -326,8 +368,9 @@ def validate_mount_host_paths(mounts: tuple[SandboxMount, ...]) -> None:
                 or lineages[other_index][0] in lineages[index]
             ):
                 raise ScriptError(
-                    f"sandbox mount host directories {other} and {root} are the "
-                    "same directory, or one is inside the other through a bind mount"
+                    f"sandbox mount host paths {other} and {root} name the same "
+                    "directory or file, or one is inside the other through a bind "
+                    "mount"
                 )
     for mount, root in zip(mounts, roots, strict=True):
         for kind, paths in mount.absolute_policy_paths():
@@ -357,11 +400,20 @@ def aggregate_child_name(index: int, target: str) -> str:
     return f"{index}-{digest}"
 
 
+def aggregate_child_argument(name: str, host_path: str, access: str, kind: str) -> str:
+    """Return the `--mount-child` value that attaches `host_path` as the child
+    `name`. A file child carries OpenVMM's `file` flag, so OpenVMM refuses a
+    directory that replaced the file instead of exporting all of it."""
+    return f"{name},{host_path},{access}" + (",file" if kind == "file" else "")
+
+
 def mounts_openvmm_arguments(mounts: tuple[SandboxMount, ...]) -> list[str]:
-    """Return the OpenVMM arguments that attach `mounts`: one share directly,
-    and several as the children of an aggregate, in order."""
+    """Return the OpenVMM arguments that attach `mounts`: one directory share
+    directly, and several shares, or a file, as the children of an aggregate,
+    in order."""
     arguments: list[str] = []
-    if len(mounts) == 1:
+    aggregate = mounts_use_aggregate(mounts)
+    if mounts and not aggregate:
         mount = mounts[0]
         arguments.extend(
             (
@@ -376,14 +428,16 @@ def mounts_openvmm_arguments(mounts: tuple[SandboxMount, ...]) -> list[str]:
             arguments.extend(
                 (
                     "--mount-child",
-                    f"{name},{os.fspath(mount.host_path)},{mount.access}",
+                    aggregate_child_argument(
+                        name, os.fspath(mount.host_path), mount.access, mount.kind
+                    ),
                 )
             )
     for mount in mounts:
         # OpenVMM resolves a relative policy path in the only share, and
         # attributes absolute policy paths to the child that contains them.
         policy_paths = (
-            mount.policy_paths() if len(mounts) == 1 else mount.absolute_policy_paths()
+            mount.absolute_policy_paths() if aggregate else mount.policy_paths()
         )
         for kind, paths in policy_paths:
             for path in paths:
@@ -393,15 +447,15 @@ def mounts_openvmm_arguments(mounts: tuple[SandboxMount, ...]) -> list[str]:
     return arguments
 
 
-def aggregate_share_tokens(shares: Sequence[tuple[str, str]]) -> list[str]:
+def aggregate_share_tokens(shares: Sequence[tuple[str, str, str]]) -> list[str]:
     """Return the kernel command-line tokens that tell the guest where to bind
-    each child of an aggregate, given each share's guest target and access, or
-    none for a single share."""
-    if len(shares) < 2:
-        return []
+    each child of an aggregate, given each share's guest target, access, and
+    kind. A file child's token ends in `,file`, so the guest binds it at a
+    file."""
     return [
         f"nvx_share={aggregate_child_name(index, target)},{target},{access}"
-        for index, (target, access) in enumerate(shares)
+        + (",file" if kind == "file" else "")
+        for index, (target, access, kind) in enumerate(shares)
     ]
 
 
@@ -417,10 +471,10 @@ def aggregate_command_line_fragment(accesses: Sequence[str]) -> str:
 
 def mounts_command_line_fragment(mounts: tuple[SandboxMount, ...]) -> str:
     """Return the bootstrap tokens that OpenVMM appends for `mounts`."""
-    if len(mounts) == 1:
-        return mounts[0].command_line_fragment()
     if not mounts:
         return ""
+    if not mounts_use_aggregate(mounts):
+        return mounts[0].command_line_fragment()
     return aggregate_command_line_fragment([mount.access for mount in mounts])
 
 
@@ -536,11 +590,15 @@ class SandboxLaunch:
             tokens.append(f"nvx_memory_max={self.memory_max}")
         if self.pids_max is not None:
             tokens.append(f"nvx_pids_max={self.pids_max + 1}")
-        tokens.extend(
-            aggregate_share_tokens(
-                [(mount.guest_target, mount.access) for mount in self.mounts]
+        if mounts_use_aggregate(self.mounts):
+            tokens.extend(
+                aggregate_share_tokens(
+                    [
+                        (mount.guest_target, mount.access, mount.kind)
+                        for mount in self.mounts
+                    ]
+                )
             )
-        )
         command_line = " ".join(token for token in tokens if token)
         # OpenVMM appends the live-share bootstrap tokens after this command line,
         # so they consume the same x86 budget.

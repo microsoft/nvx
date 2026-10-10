@@ -162,7 +162,7 @@ validate_share_target() {
     # The container runtime mounts or binds these paths after the share, so a
     # share there would be shadowed or would expose host data to runtime writes.
     case "$1" in
-        /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /.nvx-agent | /.nvx-agent/* | /etc)
+        /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /.nvx-agent | /.nvx-agent/* | /etc | /etc/machine-id | /etc/machine-id/*)
             fatal "live share target is reserved: $1"
             ;;
     esac
@@ -171,6 +171,8 @@ validate_share_target() {
 # Creates the mount point of the live share target $1 inside the container
 # rootfs one component at a time, so that a symbolic link in a container layer
 # cannot redirect the share outside that rootfs, and sets share_path to it.
+# With $2 set to file, the last component is a regular file, for a share that
+# binds a host file, and every other component a directory.
 make_share_mount_point() {
     share_path=$rootfs
     share_remainder=${1#/}
@@ -184,6 +186,14 @@ make_share_mount_point() {
         share_path=$share_path/$share_component
         if [ -L "$share_path" ]; then
             fatal "live share target crosses a symbolic link: $1"
+        elif [ -z "$share_remainder" ] && [ "${2:-directory}" = file ]; then
+            if [ -e "$share_path" ]; then
+                [ -f "$share_path" ] ||
+                    fatal "live share target is not a regular file: $1"
+            else
+                (umask 022 && : >"$share_path") ||
+                    fatal "failed to create live share target $1"
+            fi
         elif [ -e "$share_path" ]; then
             [ -d "$share_path" ] ||
                 fatal "live share target is not a directory: $1"
@@ -242,11 +252,19 @@ mount_live_share() {
     echo "NVX-SANDBOX-SHARE: target=$share_target mode=$share_mode tag=$share_tag"
 }
 
-# Splits the aggregate child specification $1, CHILD,TARGET,MODE, into
-# child_name, child_target, and child_mode.
+# Splits the aggregate child specification $1, CHILD,TARGET,MODE[,file], into
+# child_name, child_target, child_mode, and child_kind, which is file for a
+# child that is a host file and directory otherwise.
 parse_share_child() {
     child_name=${1%%,*}
     child_rest=${1#*,}
+    child_kind=directory
+    case "$child_rest" in
+        *,file)
+            child_kind="file"
+            child_rest=${child_rest%,file}
+            ;;
+    esac
     child_target=${child_rest%,*}
     child_mode=${child_rest##*,}
     if [ "$child_rest" = "$1" ] || [ "$child_target" = "$child_rest" ]; then
@@ -263,9 +281,10 @@ parse_share_child() {
 
 # Binds child $2 of the aggregate share mounted at $1 at the target $3 inside
 # the container rootfs, with mode $4 and without set-user-ID programs or
-# device nodes.
+# device nodes. The child is a directory, or a host file when $5 is file, and
+# the kernel refuses to bind either at a mount point of the other kind.
 bind_live_share() {
-    make_share_mount_point "$3"
+    make_share_mount_point "$3" "$5"
     mount -o bind "$1/$2" "$share_path" ||
         fatal "failed to bind live share $2 at $3"
     record_live_share "$share_path"
@@ -277,9 +296,9 @@ bind_live_share() {
 mount_live_shares() {
     # OpenVMM appends one virtfs_dir=, virtfs_tag=, virtfs_mode= triplet for
     # its virtio-fs share, and virtfs_aggregate=1 when that share is an
-    # aggregate of several host directories, which nvx_share=CHILD,TARGET,MODE
-    # tokens place. Parse every token before mounting anything, so that a
-    # malformed bootstrap mounts nothing.
+    # aggregate of host directories and files, which
+    # nvx_share=CHILD,TARGET,MODE[,file] tokens place. Parse every token
+    # before mounting anything, so that a malformed bootstrap mounts nothing.
     share_dir=
     share_tag=
     share_mode=
@@ -347,7 +366,7 @@ mount_live_shares() {
         esac
         share_seen="$share_seen $child_name"
         claim_share_target "$child_target"
-        make_share_mount_point "$child_target"
+        make_share_mount_point "$child_target" "$child_kind"
         set -f
     done
     set +f
@@ -360,7 +379,8 @@ mount_live_shares() {
     for share_spec in $share_children; do
         set +f
         parse_share_child "$share_spec"
-        bind_live_share "$share_dir" "$child_name" "$child_target" "$child_mode"
+        bind_live_share "$share_dir" "$child_name" "$child_target" "$child_mode" \
+            "$child_kind"
         set -f
     done
     set +f

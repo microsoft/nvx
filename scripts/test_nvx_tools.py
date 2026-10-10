@@ -9168,7 +9168,8 @@ class SandboxShareAgentTests(unittest.TestCase):
             'fail() { echo "FAIL: $*" >&2; exit 1; }\n'
             f"{_shell_function(hostmount, 'parse_share')}"
             'parse_share "$1"\n'
-            'printf "%s|%s|%s\\n" "$share_child" "$share_target" "$share_mode"\n'
+            'printf "%s|%s|%s|%s\\n" "$share_child" "$share_target" "$share_mode" '
+            '"$share_kind"\n'
         )
 
         def parse(share: str) -> subprocess.CompletedProcess[str]:
@@ -9182,9 +9183,12 @@ class SandboxShareAgentTests(unittest.TestCase):
 
         name = sandbox.aggregate_child_name(0, "/workspace")
         for share, expected in (
-            (f"{name},/workspace,rw", f"{name}|/workspace|rw\n"),
-            ("0,/opt/tools,ro", "0|/opt/tools|ro\n"),
-            ("a.b_C-9,/x,ro", "a.b_C-9|/x|ro\n"),
+            (f"{name},/workspace,rw", f"{name}|/workspace|rw|directory\n"),
+            ("0,/opt/tools,ro", "0|/opt/tools|ro|directory\n"),
+            ("a.b_C-9,/x,ro", "a.b_C-9|/x|ro|directory\n"),
+            # A file child is bound at a file.
+            ("1,/config/settings.json,ro,file", "1|/config/settings.json|ro|file\n"),
+            ("1,/results/output.txt,rw,file", "1|/results/output.txt|rw|file\n"),
         ):
             with self.subTest(share=share):
                 result = parse(share)
@@ -9197,11 +9201,112 @@ class SandboxShareAgentTests(unittest.TestCase):
             "a/b,/workspace,rw",
             "a:b,/workspace,rw",
             "a*,/workspace,rw",
+            "0,/workspace,file",
+            "0,/workspace,rw,dir",
         ):
             with self.subTest(share=share):
                 result = parse(share)
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("invalid live share", result.stderr)
+
+    def test_hostmount_makes_file_mount_points_without_following_links(self):
+        hostmount = self.AGENT.with_name("nvx-hostmount").read_text(encoding="utf-8")
+        script = (
+            f"{_shell_function(hostmount, 'make_file_mount_point')}"
+            'make_file_mount_point "$1"\n'
+        )
+
+        def make(target: Path) -> int:
+            return subprocess.run(
+                [self.shell, "-s", "--", target.as_posix()],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+            ).returncode
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # A missing file is created with its directories, and an existing
+            # one is kept as it is.
+            created = root / "config" / "settings.json"
+            self.assertEqual(make(created), 0)
+            self.assertEqual(created.read_bytes(), b"")
+            existing = root / "existing.json"
+            existing.write_bytes(b"{}")
+            self.assertEqual(make(existing), 0)
+            self.assertEqual(existing.read_bytes(), b"{}")
+            (root / "directory").mkdir()
+            self.assertEqual(make(root / "directory"), 1)
+            if os.name == "nt":
+                return
+            # A link is refused before anything is created through it, whether
+            # or not its target exists.
+            dangling = root / "dangling.json"
+            dangling.symlink_to(root / "elsewhere.json")
+            self.assertEqual(make(dangling), 1)
+            self.assertFalse((root / "elsewhere.json").exists())
+            linked = root / "linked.json"
+            linked.symlink_to(existing)
+            self.assertEqual(make(linked), 1)
+            self.assertEqual(existing.read_bytes(), b"{}")
+
+    def test_agent_binds_a_file_child_at_a_file(self):
+        rootfs = self.rootfs.as_posix()
+        (self.rootfs / "opt").mkdir()
+        (self.rootfs / "opt" / "existing.json").write_text("{}", encoding="utf-8")
+        result, log = self._run(
+            "nvx_sandbox=1 "
+            + self._aggregate(
+                "0,/workspace,rw",
+                "1,/etc/app/settings.json,ro,file",
+                "2,/opt/existing.json,rw,file",
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Each file child gets a file mount point, created inside the container
+        # rootfs or reused there, and is bound with its own mode.
+        settings = self.rootfs / "etc" / "app" / "settings.json"
+        self.assertTrue(settings.is_file())
+        self.assertEqual(settings.read_text(encoding="utf-8"), "")
+        self.assertEqual(
+            (self.rootfs / "opt" / "existing.json").read_text(encoding="utf-8"), "{}"
+        )
+        self.assertTrue((self.rootfs / "workspace").is_dir())
+        self.assertEqual(
+            log.splitlines(),
+            [
+                f"-t virtiofs -o rw,nosuid,nodev microvm {self.runtime}/shares",
+                f"-o bind {self.runtime}/shares/0 {rootfs}/workspace",
+                f"-o remount,bind,rw,nosuid,nodev {rootfs}/workspace",
+                f"-o bind {self.runtime}/shares/1 {rootfs}/etc/app/settings.json",
+                f"-o remount,bind,ro,nosuid,nodev {rootfs}/etc/app/settings.json",
+                f"-o bind {self.runtime}/shares/2 {rootfs}/opt/existing.json",
+                f"-o remount,bind,rw,nosuid,nodev {rootfs}/opt/existing.json",
+            ],
+        )
+        self.assertIn(
+            f"mountpoints={rootfs}/opt/existing.json {rootfs}/etc/app/settings.json "
+            f"{rootfs}/workspace {self.runtime}/shares\n",
+            result.stdout,
+        )
+
+        # A directory is no file mount point, a file no directory one, and
+        # the runtime binds the machine ID itself.
+        (self.rootfs / "dir").mkdir()
+        (self.rootfs / "file").write_text("x", encoding="utf-8")
+        for child, message in (
+            ("0,/dir,ro,file", "not a regular file"),
+            ("0,/file/settings.json,ro,file", "not a directory"),
+            ("0,/file,ro", "not a directory"),
+            ("0,/etc/machine-id,ro,file", "reserved"),
+            ("0,/etc/machine-id/child,ro", "reserved"),
+        ):
+            with self.subTest(child=child):
+                result, log = self._run(self._aggregate(child))
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(log, "")
 
     def test_agent_rejects_repeated_children_and_overlapping_targets(self):
         for children, message in (
@@ -11763,7 +11868,7 @@ class SandboxTests(unittest.TestCase):
             # reached through two paths, or a share inside a bind mount of the
             # other share's directory, is rejected by its file identities.
             sandbox.validate_mount_host_paths((workspace, toolcache))
-            with patch.object(sandbox, "_directory_identity", return_value=(1, 1)):
+            with patch.object(sandbox, "_path_identity", return_value=(1, 1)):
                 with self.assertRaisesRegex(common.ScriptError, "same directory"):
                     sandbox.validate_mount_host_paths((workspace, toolcache))
             alias = root / "alias"
@@ -11778,7 +11883,7 @@ class SandboxTests(unittest.TestCase):
             cache = sandbox.SandboxMount.parse(
                 f"/opt/hostedtoolcache,{alias / 'cache'}"
             )
-            with patch.object(sandbox, "_directory_identity", side_effect=identity):
+            with patch.object(sandbox, "_path_identity", side_effect=identity):
                 sandbox.validate_mount_host_paths((workspace, toolcache))
                 for mounts in ((workspace, cache), (cache, workspace)):
                     with self.assertRaisesRegex(common.ScriptError, "inside the other"):
@@ -11861,6 +11966,152 @@ class SandboxTests(unittest.TestCase):
             )
             self.assertEqual(command[command.index("--mount-deny") + 1], "secrets")
             self.assertNotIn("--mount-owner", command)
+
+    def test_sandbox_command_shares_a_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            settings = root / "settings.json"
+            layer.write_bytes(b"distro")
+            scratch.write_bytes(b"scratch")
+            settings.write_bytes(b"{}")
+
+            def sandbox_args(*mount: str) -> argparse.Namespace:
+                return nvx.parse_args(
+                    [
+                        "sandbox",
+                        "--layer",
+                        f"distro,{layer},11111111-1111-1111-1111-111111111111",
+                        "--scratch",
+                        str(scratch),
+                        *mount,
+                        "--dry-run",
+                    ]
+                )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(nvx, "require_file", side_effect=require),
+                patch.object(
+                    nvx, "_format_command", return_value="formatted"
+                ) as format_command,
+            ):
+                nvx.command_sandbox(
+                    sandbox_args("--mount", f"/etc/app/settings.json,{settings},ro")
+                )
+                command = format_command.call_args.args[0]
+                name = sandbox.aggregate_child_name(0, "/etc/app/settings.json")
+                # The regular file is a child of its own, without its directory,
+                # which OpenVMM must find to be a regular file.
+                self.assertNotIn("--mount", command)
+                self.assertEqual(
+                    command[command.index("--mount-child") + 1],
+                    f"{name},{settings},ro,file",
+                )
+                self.assertIn(
+                    f"nvx_share={name},/etc/app/settings.json,ro,file",
+                    command[command.index("--cmdline") + 1],
+                )
+                with self.assertRaisesRegex(common.ScriptError, "shares a file"):
+                    nvx.command_sandbox(
+                        sandbox_args(
+                            "--mount",
+                            f"/etc/app/settings.json,{settings},rw",
+                            "--mount-write",
+                            str(settings),
+                        )
+                    )
+
+    def test_run_attaches_a_file_as_an_aggregate_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = root / "settings.json"
+            settings.write_bytes(b"{}")
+            work = root / "work"
+            work.mkdir()
+            with (
+                patch.object(nvx, "require_file", return_value=Path("artifact")),
+                patch.object(
+                    nvx, "_format_command", return_value="formatted"
+                ) as format_command,
+            ):
+                nvx.command_run(
+                    nvx.parse_args(
+                        [
+                            "run",
+                            "--mount",
+                            f"/config/settings.json,{settings},ro",
+                            "--dry-run",
+                        ]
+                    )
+                )
+                command = format_command.call_args.args[0]
+                name = sandbox.aggregate_child_name(0, "/config/settings.json")
+                # Even alone, a file is the child of an aggregate.
+                self.assertNotIn("--mount", command)
+                self.assertEqual(
+                    command[command.index("--mount-aggregate") + 1], "/run/nvx/shares"
+                )
+                self.assertEqual(
+                    command[command.index("--mount-child") + 1],
+                    f"{name},{settings},ro,file",
+                )
+                self.assertEqual(
+                    command[command.index("--cmdline") + 1],
+                    f"nvx_share={name},/config/settings.json,ro,file",
+                )
+
+                # A directory and a file share the aggregate, and only the
+                # file's token is marked.
+                nvx.command_run(
+                    nvx.parse_args(
+                        [
+                            "run",
+                            "--mount",
+                            f"/work,{work},rw",
+                            "--mount",
+                            f"/config/settings.json,{settings},ro",
+                            "--dry-run",
+                        ]
+                    )
+                )
+                command = format_command.call_args.args[0]
+                work_name, settings_name = (
+                    sandbox.aggregate_child_name(index, target)
+                    for index, target in enumerate(("/work", "/config/settings.json"))
+                )
+                self.assertEqual(
+                    command[command.index("--cmdline") + 1],
+                    f"nvx_share={work_name},/work,rw "
+                    f"nvx_share={settings_name},/config/settings.json,ro,file",
+                )
+
+                for arguments, message in (
+                    (["--mount-deny", "secrets"], "absolute host path"),
+                    (["--cmdline", "x" * 1024], "1024-byte"),
+                ):
+                    with self.subTest(arguments=arguments):
+                        invalid = nvx.parse_args(
+                            [
+                                "run",
+                                "--mount",
+                                f"/config/settings.json,{settings},ro",
+                                *arguments,
+                                "--dry-run",
+                            ]
+                        )
+                        with self.assertRaisesRegex(common.ScriptError, message):
+                            nvx.command_run(invalid)
+                invalid = nvx.parse_args(
+                    ["run", f"--mount=/a b,{settings}", "--dry-run"]
+                )
+                with self.assertRaisesRegex(
+                    common.ScriptError, "invalid --mount target"
+                ):
+                    nvx.command_run(invalid)
 
     def test_sandbox_command_forwards_mount_owner(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -12669,6 +12920,233 @@ class SandboxTests(unittest.TestCase):
             ):
                 sandbox_lifecycle._deserialize_launch(config)
 
+    def test_launch_contract_attaches_a_file_as_an_aggregate_child(self):
+        distro = sandbox.SandboxLayer.parse(
+            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
+        )
+        settings = sandbox.SandboxMount.parse(
+            "/etc/app/settings.json,settings.json,ro", kind="file"
+        )
+        launch = sandbox.SandboxLaunch(
+            layers=(distro,), scratch=Path("scratch.ext4"), mounts=(settings,)
+        )
+        name = sandbox.aggregate_child_name(0, "/etc/app/settings.json")
+        # Even alone, a file is the child of an aggregate, because the guest
+        # mounts the device's root, which is a directory.
+        self.assertTrue(sandbox.mounts_use_aggregate(launch.mounts))
+        arguments = launch.openvmm_arguments()
+        self.assertNotIn("--mount", arguments)
+        self.assertEqual(
+            arguments[arguments.index("--mount-aggregate") :],
+            [
+                "--mount-aggregate",
+                "/run/nvx/shares",
+                "--mount-child",
+                f"{name},{os.fspath(Path('settings.json'))},ro,file",
+            ],
+        )
+        self.assertEqual(
+            sandbox.mounts_command_line_fragment(launch.mounts),
+            " virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=ro"
+            " virtfs_aggregate=1",
+        )
+        self.assertTrue(
+            launch.kernel_command_line().endswith(
+                f" nvx_share={name},/etc/app/settings.json,ro,file"
+            )
+        )
+
+        # Files and directories share one aggregate, and only a file's token
+        # is marked.
+        workspace = sandbox.SandboxMount.parse("/workspace,work,rw", ("secrets",))
+        output = sandbox.SandboxMount.parse(
+            "/results/output.txt,output.txt,rw", kind="file"
+        )
+        mixed = sandbox.SandboxLaunch(
+            layers=(distro,),
+            scratch=Path("scratch.ext4"),
+            mounts=(workspace, settings, output),
+        )
+        names = [
+            sandbox.aggregate_child_name(index, mount.guest_target)
+            for index, mount in enumerate(mixed.mounts)
+        ]
+        self.assertTrue(
+            mixed.kernel_command_line().endswith(
+                f" nvx_share={names[0]},/workspace,rw"
+                f" nvx_share={names[1]},/etc/app/settings.json,ro,file"
+                f" nvx_share={names[2]},/results/output.txt,rw,file"
+            )
+        )
+        arguments = mixed.openvmm_arguments()
+        self.assertEqual(
+            arguments[arguments.index("--mount-deny") + 1],
+            os.fspath(Path.cwd() / "work" / "secrets"),
+        )
+
+        # A file's mode applies to the whole file, so no policy path names
+        # one, and the runtime owns the machine ID's path.
+        for option in ("denied_paths", "allowed_paths", "writable_paths"):
+            policy: dict[str, Any] = {option: ("x",)}
+            with self.subTest(option=option):
+                with self.assertRaisesRegex(common.ScriptError, "shares a file"):
+                    sandbox.SandboxMount(
+                        guest_target="/results/output.txt",
+                        host_path=Path("output.txt"),
+                        access="rw",
+                        kind="file",
+                        **policy,
+                    )
+        with self.assertRaisesRegex(
+            common.ScriptError, "unsupported sandbox mount kind"
+        ):
+            sandbox.SandboxMount.parse("/a,a", kind="socket")
+        # The runtime replaces /etc/machine-id with a file, so nothing at or
+        # below it may be shared.
+        for target in ("/etc/machine-id", "/etc/machine-id/child"):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(common.ScriptError, "reserved"):
+                    sandbox.SandboxMount.parse(f"{target},id", kind="file")
+        # Only /etc itself is reserved, not what lies below it.
+        sandbox.SandboxMount.parse("/etc/app,app")
+
+    def test_launch_validation_requires_the_kind_of_each_share(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config"
+            config.mkdir()
+            settings = config / "settings.json"
+            settings.write_bytes(b"{}")
+            self.assertEqual(sandbox.mount_kind(settings), "file")
+            self.assertEqual(sandbox.mount_kind(config), "directory")
+            self.assertEqual(sandbox.mount_kind(root / "missing"), "directory")
+            share = sandbox.SandboxMount(
+                guest_target="/etc/app/settings.json", host_path=settings, kind="file"
+            )
+            self.assertIs(share.validated(), share)
+            # A directory at the file's path is not shared in its place.
+            settings.unlink()
+            settings.mkdir()
+            with self.assertRaisesRegex(common.ScriptError, "not a regular file"):
+                share.validated()
+            settings.rmdir()
+            with self.assertRaisesRegex(common.ScriptError, "not a regular file"):
+                share.validated()
+
+            # A file overlaps a shared directory that contains it, and another
+            # share of the same file, such as through a hard link, but not a
+            # file beside it.
+            settings.write_bytes(b"{}")
+            other = config / "other.json"
+            other.write_bytes(b"{}")
+            link = root / "link.json"
+            os.link(settings, link)
+
+            def file_share(target: str, path: Path) -> sandbox.SandboxMount:
+                return sandbox.SandboxMount(
+                    guest_target=target, host_path=path, kind="file"
+                )
+
+            sandbox.validate_mount_host_paths(
+                (file_share("/a.json", settings), file_share("/b.json", other))
+            )
+            for mounts, message in (
+                (
+                    (
+                        sandbox.SandboxMount(guest_target="/config", host_path=config),
+                        file_share("/a.json", settings),
+                    ),
+                    "overlap",
+                ),
+                (
+                    (file_share("/a.json", settings), file_share("/b.json", link)),
+                    "same directory or file",
+                ),
+            ):
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(common.ScriptError, message):
+                        sandbox.validate_mount_host_paths(mounts)
+
+    def test_managed_configuration_format_records_file_shares(self):
+        def entry(target: str, path: str, kind: str) -> dict[str, object]:
+            return {
+                "guest_target": target,
+                "host_path": path,
+                "access": "ro",
+                "denied_paths": [],
+                "owner": "vmm",
+                "allowed_paths": [],
+                "writable_paths": [],
+                "kind": kind,
+            }
+
+        config: dict[str, object] = {
+            "format": sandbox_lifecycle.FILE_MOUNT_CONFIG_FORMAT,
+            "layers": [
+                {
+                    "role": "distro",
+                    "path": "distro.erofs",
+                    "uuid": "11111111-1111-1111-1111-111111111111",
+                }
+            ],
+            "scratch": "scratch.ext4",
+            "hostname": "nvx-sandbox",
+            "workload_uid": 65534,
+            "workload_gid": 65534,
+            "memory_max": None,
+            "pids_max": None,
+            "mounts": [entry("/etc/app/settings.json", "settings.json", "file")],
+        }
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        def unchanged(mount: sandbox.SandboxMount) -> sandbox.SandboxMount:
+            return mount
+
+        with (
+            patch.object(sandbox, "require_file", side_effect=require),
+            patch.object(sandbox.SandboxMount, "validated", unchanged),
+        ):
+            launch = sandbox_lifecycle._deserialize_launch(config)
+            self.assertEqual([mount.kind for mount in launch.mounts], ["file"])
+            serialized = sandbox_lifecycle._serialize_launch(
+                launch,
+                hypervisor="kvm",
+                memory_mib=256,
+                net=None,
+                network_profile=None,
+                network_egress=None,
+                network_ingress=None,
+                network_egress_allow=(),
+                network_egress_deny=(),
+                host_loopback=None,
+                network_proxy=None,
+                host_loopback_forward=(),
+                cmdline="",
+            )
+            self.assertEqual(
+                serialized["format"], sandbox_lifecycle.FILE_MOUNT_CONFIG_FORMAT
+            )
+            self.assertEqual(serialized["mounts"][0]["kind"], "file")
+            # Only format 6 holds a file share, and every format-6 share
+            # records its kind.
+            config["mounts"] = [entry("/workspace", "work", "directory")]
+            with self.assertRaisesRegex(common.ScriptError, "does not match"):
+                sandbox_lifecycle._deserialize_launch(config)
+            config["mounts"] = [{**entry("/a.json", "a.json", "file"), "kind": None}]
+            with self.assertRaisesRegex(common.ScriptError, "kind"):
+                sandbox_lifecycle._deserialize_launch(config)
+            unmarked = entry("/a.json", "a.json", "file")
+            del unmarked["kind"]
+            config["mounts"] = [unmarked]
+            with self.assertRaisesRegex(common.ScriptError, "malformed"):
+                sandbox_lifecycle._deserialize_launch(config)
+            config["format"] = sandbox_lifecycle.POLICY_CONFIG_FORMAT
+            config["mounts"] = [entry("/a.json", "a.json", "file")]
+            with self.assertRaisesRegex(common.ScriptError, "does not match"):
+                sandbox_lifecycle._deserialize_launch(config)
+
     def test_managed_configuration_format_binds_several_mounts(self):
         def entry(target: str, path: str, owner: str = "vmm") -> dict[str, object]:
             return {
@@ -12709,7 +13187,7 @@ class SandboxTests(unittest.TestCase):
         with (
             patch.object(sandbox, "require_file", side_effect=require),
             patch.object(sandbox.SandboxMount, "validated", unchanged),
-            patch.object(sandbox, "_directory_identity", side_effect=identity),
+            patch.object(sandbox, "_path_identity", side_effect=identity),
         ):
             launch = sandbox_lifecycle._deserialize_launch(config)
             self.assertEqual(

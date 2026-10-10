@@ -377,15 +377,26 @@ lifetimes. It requires FUSE 7.31 or newer and caps writes at 1 MiB. Without
 `--mount` or `--mount-aggregate`, the slot has no HostFs backend or active
 filesystem policy but remains guest-discoverable. `--mount` may appear once and
 attaches one HostFs server. `--mount-aggregate GUEST_TARGET` with a repeatable
-`--mount-child NAME,HOST_PATH[,ro|rw]` instead attaches an aggregate: a
+`--mount-child NAME,HOST_PATH[,ro|rw][,file]` instead attaches an aggregate: a
 synthetic root, mode `0500` and owned by root, which lists one child per host
-directory under its name and refuses every change, and below each child an
-independent HostFs volume with its own access mode and denied, allowed, and
-writable paths. Policy paths of an aggregate are absolute and apply to the
+directory or, with the `file` flag, regular file under its name and refuses
+every change, and below each child an independent HostFs volume with its own
+access mode and denied, allowed, and writable paths. The flag, not the host
+object, sets a child's kind, and OpenVMM refuses a host path of the other kind.
+A file child serves only its file, as the child
+itself: its volume is the file's parent directory, narrowed to the file's name,
+which the guest never reaches, so the guest cannot list or change anything
+beside the file, a lookup below the file fails with `ENOTDIR`, and every
+request fails with `EACCES` while anything but a regular file holds the name.
+A file child takes no policy paths, because its mode applies to the whole file,
+and restore requires each child to be the same kind. `--mount` exports only a
+directory, because the guest mounts the device's root. Policy paths of an
+aggregate are absolute and apply to the
 child whose root contains them. Child names are unique `[A-Za-z0-9._-]`
 names of at most 64 bytes, at most 256 children share at most 128 KiB of
 policy paths, and their host roots must not equal or contain one another, so
-no child can reach the files of another under a different policy. A rename
+no child can reach the files of another under a different policy, while a file
+child may lie beside a directory child. A rename
 between children fails with `EXDEV`. A hard link between children fails with
 `EROFS` when its destination is read-only, which Linux also reports first, and
 otherwise with `EXDEV`. The attachment adds one
@@ -444,15 +455,18 @@ counts, directory snapshots and cookies, and the identities needed to reopen
 objects. Restore requires the same path,
 target, mode, denied, allowed, and writable paths, ownership mode, root
 identity, and reopenable objects for the captured attachment; for an
-aggregate, the same target and the same children, names, modes, host paths,
-root identities, and policies, in the same order, and the contract records a
+aggregate, the same target and the same children, names, kinds, modes, host
+paths, root identities, and policies, in the same order, and the contract
+records a
 digest of the children's identities, so a restore can neither drop, add, nor
 reorder one. The guest binds each child at a target that OpenVMM does not
 record, so NVX names each child after its index and a digest of its guest
 target: the snapshot then pins each target, and a restore that requests
 another target fails before the guest runs. An aggregate's capture also saves
 each child's volume and the synthetic root's directory state in
-device-private schema version 8. A caller-owned
+device-private schema version 8, or 9 when a child is a file, which earlier
+releases reject instead of restoring the file child as a directory. A
+caller-owned
 capture records device-private schema version 6, which earlier releases reject
 instead of restoring the attachment as the VMM. A capture with allowed or
 writable paths records its complete access policy in device-private schema
