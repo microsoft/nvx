@@ -3,6 +3,7 @@
 
 import argparse
 import ast
+import errno
 import inspect
 import io
 import ipaddress
@@ -17,7 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from typing import cast
@@ -2350,6 +2351,35 @@ class ControlSessionTests(unittest.TestCase):
         sleep.assert_called_once_with(0.025)
 
 
+class _PortExclusionSockets:
+    """Create sockets that refuse ports excluded per protocol, as Windows does."""
+
+    def __init__(self, *, tcp: Collection[int] = (), udp: Collection[int] = ()) -> None:
+        self._socket_type = socket.socket
+        self._excluded: dict[int, Collection[int]] = {
+            socket.SOCK_STREAM: tcp,
+            socket.SOCK_DGRAM: udp,
+        }
+        self.created: dict[int, list[MagicMock]] = {
+            socket.SOCK_STREAM: [],
+            socket.SOCK_DGRAM: [],
+        }
+        self.errors: list[OSError] = []
+
+    def __call__(self, _family: int, kind: int) -> MagicMock:
+        endpoint = MagicMock(spec=self._socket_type)
+
+        def bind(address: tuple[str, int]) -> None:
+            if address[1] in self._excluded[kind]:
+                error = PermissionError(errno.EACCES, f"port {address[1]} is excluded")
+                self.errors.append(error)
+                raise error
+
+        endpoint.bind.side_effect = bind
+        self.created[kind].append(endpoint)
+        return endpoint
+
+
 class MicrovmTests(unittest.TestCase):
     def test_managed_lifecycle_spawns_openvmm_with_a_prepared_capability_pipe(self):
         # OpenVMM reads its capability as soon as it starts, so the scenario hands
@@ -2391,38 +2421,91 @@ class MicrovmTests(unittest.TestCase):
         with self.assertRaises(OSError):
             os.fstat(prepared[0])
 
-    def test_host_loopback_listener_pair_retries_protocol_port_conflict(self):
-        first_udp = MagicMock()
-        first_udp.getsockname.return_value = ("127.0.0.1", 50000)
-        first_tcp = MagicMock()
-        first_tcp.bind.side_effect = PermissionError("TCP port is excluded")
-        second_udp = MagicMock()
-        second_udp.getsockname.return_value = ("127.0.0.1", 50001)
-        second_tcp = MagicMock()
+    def test_host_loopback_port_candidates_are_spread_across_the_dynamic_range(self):
+        first, last = microvm_tests.HOST_LOOPBACK_PORT_RANGE
+        candidates = microvm_tests._host_loopback_port_candidates()
 
-        with patch.object(
-            microvm_tests.socket,
-            "socket",
-            side_effect=[first_udp, first_tcp, second_udp, second_tcp],
-        ) as create_socket:
+        self.assertEqual(
+            len(set(candidates)), microvm_tests.HOST_LOOPBACK_PORT_BIND_ATTEMPTS
+        )
+        self.assertTrue(all(first <= port <= last for port in candidates))
+        # Consecutive candidates could all fall in one 100-port exclusion (#473).
+        # Independent draws fit in 100 ports with a probability below 1e-30.
+        self.assertGreaterEqual(max(candidates) - min(candidates), 100)
+
+    def test_host_loopback_listener_pair_escapes_a_tcp_only_exclusion_block(self):
+        # Windows excludes ports per protocol, usually 100 at a time, so a block
+        # that excludes only TCP can outlast the attempt budget (#473).
+        excluded = range(58912, 59012)
+        attempts = microvm_tests.HOST_LOOPBACK_PORT_BIND_ATTEMPTS
+        self.assertGreater(len(excluded), attempts)
+        candidates = [*excluded[: attempts - 1], 61000]
+        sockets = _PortExclusionSockets(tcp=excluded)
+
+        with (
+            patch.object(
+                microvm_tests,
+                "_host_loopback_port_candidates",
+                return_value=candidates,
+            ),
+            patch.object(microvm_tests.socket, "socket", side_effect=sockets),
+        ):
             tcp_listener, udp_listener = microvm_tests._bind_tcp_udp_listener_pair(
                 5.0, microvm_tests.NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS
             )
 
-        self.assertIs(tcp_listener, second_tcp)
-        self.assertIs(udp_listener, second_udp)
-        self.assertEqual(create_socket.call_count, 4)
-        first_udp.bind.assert_called_once_with(("127.0.0.1", 0))
-        first_tcp.bind.assert_called_once_with(("0.0.0.0", 50000))
-        first_tcp.close.assert_called_once_with()
-        first_udp.close.assert_called_once_with()
-        second_udp.bind.assert_called_once_with(("127.0.0.1", 0))
-        second_tcp.bind.assert_called_once_with(("0.0.0.0", 50001))
-        second_tcp.listen.assert_called_once_with(1)
-        second_tcp.settimeout.assert_called_once_with(5.0)
-        second_udp.settimeout.assert_called_once_with(
+        udp_sockets = sockets.created[socket.SOCK_DGRAM]
+        tcp_sockets = sockets.created[socket.SOCK_STREAM]
+        self.assertEqual(
+            [endpoint.bind.call_args.args[0] for endpoint in udp_sockets],
+            [("127.0.0.1", port) for port in candidates],
+        )
+        self.assertEqual(
+            [endpoint.bind.call_args.args[0] for endpoint in tcp_sockets],
+            [("0.0.0.0", port) for port in candidates],
+        )
+        self.assertIs(tcp_listener, tcp_sockets[-1])
+        self.assertIs(udp_listener, udp_sockets[-1])
+        for partial in (*udp_sockets[:-1], *tcp_sockets[:-1]):
+            partial.close.assert_called_once_with()
+        tcp_sockets[-1].close.assert_not_called()
+        udp_sockets[-1].close.assert_not_called()
+        tcp_sockets[-1].listen.assert_called_once_with(1)
+        tcp_sockets[-1].settimeout.assert_called_once_with(5.0)
+        udp_sockets[-1].settimeout.assert_called_once_with(
             microvm_tests.NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS
         )
+
+    def test_host_loopback_listener_pair_reports_every_refused_port(self):
+        attempts = microvm_tests.HOST_LOOPBACK_PORT_BIND_ATTEMPTS
+        candidates = [50000, *range(58912, 58912 + attempts - 1)]
+        sockets = _PortExclusionSockets(tcp=range(58912, 59012), udp=(50000,))
+
+        with (
+            patch.object(
+                microvm_tests,
+                "_host_loopback_port_candidates",
+                return_value=candidates,
+            ),
+            patch.object(microvm_tests.socket, "socket", side_effect=sockets),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            microvm_tests._bind_tcp_udp_listener_pair(5.0, 1.0)
+
+        refused = ", ".join(["50000/udp", *(f"{port}/tcp" for port in candidates[1:])])
+        self.assertEqual(
+            str(raised.exception),
+            "failed to allocate a port available to both TCP and UDP after "
+            f"{attempts} attempts; refused {refused}; "
+            f"last error: {sockets.errors[-1]}",
+        )
+        self.assertIs(raised.exception.__cause__, sockets.errors[-1])
+        self.assertEqual(len(sockets.errors), attempts)
+        for endpoint in (
+            *sockets.created[socket.SOCK_DGRAM],
+            *sockets.created[socket.SOCK_STREAM],
+        ):
+            endpoint.close.assert_called_once_with()
 
     def test_host_loopback_rejections_cover_generic_allow_and_explicit_denial(self):
         with tempfile.TemporaryDirectory() as temporary:

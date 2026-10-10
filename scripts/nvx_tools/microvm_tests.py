@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import queue
+import random
 import re
 import secrets
 import selectors
@@ -202,6 +203,9 @@ HOST_LOOPBACK_UDP_CONTROL_MARKER = b"NVX-HOST-LOOPBACK-UDP-CONTROL-OK"
 HOST_LOOPBACK_ALLOW_MARKER = b"NVX-HOST-LOOPBACK-ALLOW-OK"
 HOST_LOOPBACK_INGRESS_READY_MARKER = b"NVX-HOST-LOOPBACK-INGRESS-READY"
 HOST_LOOPBACK_PORT_BIND_ATTEMPTS = 16
+# IANA's dynamic port range, which is also Windows' default. The host-loopback
+# scenario draws the port of each TCP and UDP listener pair from it.
+HOST_LOOPBACK_PORT_RANGE = (49152, 65535)
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
@@ -3172,22 +3176,39 @@ def _http_server(
         errors.append(error)
 
 
+def _host_loopback_port_candidates() -> list[int]:
+    """Draw distinct ports uniformly from ``HOST_LOOPBACK_PORT_RANGE``.
+
+    Windows excludes ports per protocol, usually in blocks of 100, and gives
+    back-to-back ephemeral binds consecutive ports. Ports that UDP allocates
+    can therefore walk through a block that excludes only TCP until every
+    attempt fails (#473). Independent draws fail only in proportion to the
+    share of the range that is excluded or busy.
+    """
+    first, last = HOST_LOOPBACK_PORT_RANGE
+    return random.SystemRandom().sample(
+        range(first, last + 1), HOST_LOOPBACK_PORT_BIND_ATTEMPTS
+    )
+
+
 def _bind_tcp_udp_listener_pair(
     tcp_timeout: float, udp_timeout: float
 ) -> tuple[socket.socket, socket.socket]:
+    refused: list[str] = []
     last_error: OSError | None = None
-    for _ in range(HOST_LOOPBACK_PORT_BIND_ATTEMPTS):
+    for port in _host_loopback_port_candidates():
         with ExitStack() as sockets:
             udp_listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sockets.callback(udp_listener.close)
-            udp_listener.bind(("127.0.0.1", 0))
-            port = int(udp_listener.getsockname()[1])
-
             tcp_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sockets.callback(tcp_listener.close)
+            protocol = "udp"
             try:
+                udp_listener.bind(("127.0.0.1", port))
+                protocol = "tcp"
                 tcp_listener.bind(("0.0.0.0", port))
             except OSError as error:
+                refused.append(f"{port}/{protocol}")
                 last_error = error
                 continue
 
@@ -3199,7 +3220,8 @@ def _bind_tcp_udp_listener_pair(
 
     raise RuntimeError(
         "failed to allocate a port available to both TCP and UDP "
-        f"after {HOST_LOOPBACK_PORT_BIND_ATTEMPTS} attempts"
+        f"after {HOST_LOOPBACK_PORT_BIND_ATTEMPTS} attempts; "
+        f"refused {', '.join(refused)}; last error: {last_error}"
     ) from last_error
 
 
