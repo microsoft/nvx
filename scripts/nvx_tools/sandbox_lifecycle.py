@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
+import math
 import os
 import secrets
+import stat
 import subprocess
 import time
 import uuid
@@ -37,6 +41,18 @@ CAPABILITY_NAME = "control.capability"
 LOG_NAME = "openvmm.log"
 CONTROL_SOCKET_NAME = "control.sock"
 OUTCOME_NAME = "outcome.json"
+LOCK_NAME = "lifecycle.lock"
+# Files that exist only from the start that launches an OpenVMM process until the
+# stop or failed start that ends it, whether or not the runtime record names it.
+RUNTIME_FILE_NAMES = (RUNTIME_NAME, CAPABILITY_NAME, CONTROL_SOCKET_NAME)
+# How often a caller retries a lifecycle lock that another caller holds, and the
+# removal of a state directory that a removed lock file still keeps.
+LOCK_RETRY_INTERVAL = 0.025
+# Deprovision writes this into the lock file before it removes the file, so that a
+# waiter that then acquires the removed file knows the directory is going away.
+LOCK_TOMBSTONE = b"deprovisioned\n"
+# The errors with which rmdir() reports a directory that is not empty.
+DIRECTORY_NOT_EMPTY = (errno.ENOTEMPTY, errno.EEXIST)
 STATE_FORMAT = 1
 CONFIG_FORMAT = 1
 # Format-1 readers ignore unknown fields, so a configuration with a live share
@@ -180,6 +196,378 @@ def _prepare_state_directory(path: Path, *, create: bool) -> Path:
     if resolved.is_symlink() or not resolved.is_dir():
         raise ScriptError(f"sandbox state path is not a plain directory: {resolved}")
     return resolved
+
+
+def _open_lock_file(path: Path) -> int:
+    """Opens the lifecycle lock file of a state directory, creating it if needed.
+
+    Deprovision writes to the file, so it must be a regular file that no other
+    name links, rather than a link to a file elsewhere.
+    """
+    try:
+        descriptor = _open_lock_path(path)
+    except OSError as error:
+        if error.errno != errno.ELOOP:
+            raise
+        raise ScriptError(
+            f"sandbox lifecycle lock is not a standalone regular file: {path}"
+        ) from error
+    try:
+        status = os.fstat(descriptor)
+        unsafe = not stat.S_ISREG(status.st_mode) or status.st_nlink != 1
+        if os.name == "nt":
+            # The handle refers to a symbolic link or junction, not its target.
+            attributes = status.st_file_attributes
+            unsafe = unsafe or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        if unsafe:
+            raise ScriptError(
+                f"sandbox lifecycle lock is not a standalone regular file: {path}"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_lock_path(path: Path) -> int:
+    """Opens or creates path, without following a link that it names.
+
+    On Windows, the file is shared for deletion, so that deprovision can remove it
+    while it holds the lock and other callers wait for it.
+    """
+    if os.name != "nt":
+        return os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    file_share_read_write_delete = 0x7
+    open_always = 4
+    file_attribute_normal = 0x80
+    file_flag_open_reparse_point = 0x00200000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        os.fspath(path),
+        generic_read | generic_write,
+        file_share_read_write_delete,
+        None,
+        open_always,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if handle is None or handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDWR)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _try_lock_file(descriptor: int) -> bool:
+    """Takes the exclusive lock of an open lock file unless another caller holds it."""
+    if os.name != "nt":
+        import fcntl
+
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    import msvcrt
+
+    try:
+        # A new descriptor is at offset 0, so this locks the file's first byte.
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EDEADLOCK):
+            return False
+        raise
+    return True
+
+
+def _unlock_file(descriptor: int) -> None:
+    if os.name != "nt":
+        import fcntl
+
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return
+
+    import msvcrt
+
+    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+
+def _names_open_file(path: Path, descriptor: int) -> bool:
+    """Returns whether path still names the file open as descriptor.
+
+    Without POSIX deletion semantics, Windows keeps a removed file in its
+    directory until its last handle closes, and denies access to it meanwhile.
+    """
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        if os.name == "nt":
+            return False
+        raise
+    return os.path.samestat(current, os.fstat(descriptor))
+
+
+def _read_lock_file(descriptor: int, size: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    try:
+        data = b""
+        while len(data) < size:
+            chunk = os.read(descriptor, size - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return data
+    finally:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+
+
+def _write_lock_file(descriptor: int, data: bytes) -> None:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    try:
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if not written:
+                raise OSError(
+                    errno.EIO, "sandbox lifecycle lock write made no progress"
+                )
+            remaining = remaining[written:]
+    finally:
+        # msvcrt.locking() unlocks from the file position, as it locked.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+
+
+def _pause(deadline: float) -> bool:
+    """Waits for the next retry of a step that deadline bounds.
+
+    Returns False once the deadline has passed, so that no retry starts after it.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    time.sleep(min(LOCK_RETRY_INTERVAL, remaining))
+    return time.monotonic() < deadline
+
+
+def _transition_in_progress() -> TimeoutError:
+    return TimeoutError(
+        "another lifecycle transition of the sandbox is still in progress"
+    )
+
+
+def _directory_status(path: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def _hold_directory(path: Path) -> tuple[os.stat_result, int | None]:
+    """Returns the identity of a directory, and a descriptor that keeps it if any.
+
+    On POSIX systems, the open descriptor keeps a directory that replaces this one
+    from reusing its inode number. NTFS and ReFS do not reuse file IDs.
+    """
+    if os.name == "nt":
+        return os.lstat(path), None
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return os.fstat(descriptor), descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _wait_for_handoff(
+    state_dir: Path, removing: os.stat_result, deadline: float
+) -> None:
+    """Waits while lingering lock files keep the directory that deprovision removes.
+
+    The wait ends once the path names no directory or another one, or the
+    directory holds anything else, such as a provisioned sandbox, which makes
+    deprovision fail. Once nothing keeps the directory, the caller removes it
+    itself, in case deprovision has given up, as it provisions the path again.
+    """
+    while True:
+        current = _directory_status(state_dir)
+        if current is None or not os.path.samestat(current, removing):
+            return
+        try:
+            entries = tuple(state_dir.iterdir())
+        except OSError:
+            return
+        if not all(_lingers(entry) for entry in entries):
+            return
+        if not entries:
+            try:
+                state_dir.rmdir()
+            except OSError as error:
+                if error.errno not in DIRECTORY_NOT_EMPTY:
+                    return
+            else:
+                return
+        if not _pause(deadline):
+            raise _transition_in_progress()
+
+
+def _lingers(path: Path) -> bool:
+    """Returns whether path is a removed lock file that a handle still keeps.
+
+    NFS renames a removed file that is still open to `.nfs*`, and Windows file
+    systems without POSIX deletion keep it under its own name. A transition that
+    starts after deprovision removed the lock file also holds a lock file there
+    until it finds the sandbox gone.
+    """
+    return path.name == LOCK_NAME or path.name.startswith(".nfs")
+
+
+class _LifecycleLock:
+    """Exclusive lock that serializes the lifecycle transitions of a state directory.
+
+    `provision`, `start`, `stop`, and `deprovision` hold it from their first look
+    at the state until they return, so overlapping transitions take effect one at
+    a time, and each waits at most its timeout for another to finish. The one
+    exception is deprovision, which releases it before it retries removing a
+    directory that a removed lock file still keeps. `exec` does not take it, so a
+    long workload cannot delay `stop`.
+
+    A provisioned state directory keeps the lock file. A release removes it from
+    any other directory, such as one that deprovision emptied or that never held a
+    sandbox. A caller that acquires a lock file that its holder removed meanwhile
+    holds no lock. Unless it provisions the sandbox, it then retries only if the
+    sandbox is still provisioned, so that it creates no lock file in a directory
+    that deprovision is removing. A provision that finds that deprovision removed
+    the lock file, or the whole state directory, provisions a new directory once
+    the old one is gone, unless another provision has provisioned it first.
+    """
+
+    def __init__(self, state_dir: Path, timeout: float, *, provision: bool = False):
+        if not 0 < timeout < math.inf:
+            raise ValueError("lifecycle timeout must be finite and greater than 0")
+        self._state_dir = state_dir
+        self._path = state_dir / LOCK_NAME
+        self._timeout = timeout
+        self._provision = provision
+        self._descriptor: int | None = None
+
+    def __enter__(self) -> _LifecycleLock:
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                descriptor = _open_lock_file(self._path)
+            except FileNotFoundError as error:
+                # Deprovision removed the state directory meanwhile, which only a
+                # provision recreates.
+                if not self._provision:
+                    raise ScriptError(
+                        "sandbox state path is not a plain directory: "
+                        f"{self._state_dir}"
+                    ) from error
+                if time.monotonic() >= deadline:
+                    raise _transition_in_progress() from error
+                _prepare_state_directory(self._state_dir, create=True)
+                continue
+            except PermissionError:
+                # Without POSIX deletion semantics, Windows denies opening a removed
+                # lock file until its last handle closes.
+                if not self._provision or os.name != "nt" or not _pause(deadline):
+                    raise
+                continue
+            try:
+                while not _try_lock_file(descriptor):
+                    if not _pause(deadline):
+                        raise _transition_in_progress()
+                if _names_open_file(self._path, descriptor):
+                    self._descriptor = descriptor
+                    return self
+                tombstone = _read_lock_file(descriptor, len(LOCK_TOMBSTONE))
+                # Deprovision leaves the mark only if lingering lock files, such as
+                # the one that this handle may keep, kept it from removing the
+                # directory, which the path then still names.
+                removing = (
+                    _directory_status(self._state_dir)
+                    if self._provision and tombstone == LOCK_TOMBSTONE
+                    else None
+                )
+            except BaseException:
+                os.close(descriptor)
+                raise
+            os.close(descriptor)
+            if not self._provision:
+                if not path_exists(self._state_dir / CONFIG_NAME):
+                    raise ScriptError("sandbox is not provisioned")
+            elif removing is not None:
+                _wait_for_handoff(self._state_dir, removing, deadline)
+            if time.monotonic() >= deadline:
+                raise _transition_in_progress()
+
+    def remove(self) -> None:
+        """Removes the held lock file, marking it so that waiters know why.
+
+        If the removal fails, the mark goes again, as deprovision then keeps the
+        directory.
+        """
+        assert self._descriptor is not None
+        try:
+            _write_lock_file(self._descriptor, LOCK_TOMBSTONE)
+            self._path.unlink()
+        except BaseException:
+            self.retract()
+            raise
+
+    def retract(self) -> None:
+        """Clears the mark of the removed lock file, so that waiters retry at once.
+
+        Deprovision retracts it before it releases the lock, unless lingering lock
+        files keep the directory, since its waiters then have no removal left to
+        wait for.
+        """
+        assert self._descriptor is not None
+        with contextlib.suppress(OSError):
+            _write_lock_file(self._descriptor, bytes(len(LOCK_TOMBSTONE)))
+
+    def __exit__(self, *_exception: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return
+        self._descriptor = None
+        try:
+            if not path_exists(self._state_dir / CONFIG_NAME):
+                with contextlib.suppress(OSError):
+                    if _names_open_file(self._path, descriptor):
+                        self._path.unlink()
+        finally:
+            # Closing the descriptor releases the lock even if the unlock fails.
+            with contextlib.suppress(OSError):
+                _unlock_file(descriptor)
+            os.close(descriptor)
 
 
 def _serialize_launch(
@@ -532,40 +920,68 @@ def provision(
     network_proxy: str | None,
     host_loopback_forward: tuple[str, ...],
     cmdline: str,
+    timeout: float,
 ) -> None:
     state_dir = _prepare_state_directory(state_path, create=True)
     config_path = state_dir / CONFIG_NAME
     runtime_path = state_dir / RUNTIME_NAME
-    if config_path.exists() or runtime_path.exists():
-        raise ScriptError("sandbox is already provisioned")
-    _write_json(
-        config_path,
-        _serialize_launch(
-            launch.validated(),
-            hypervisor=hypervisor,
-            memory_mib=memory_mib,
-            net=net,
-            network_profile=network_profile,
-            network_egress=network_egress,
-            network_ingress=network_ingress,
-            network_egress_allow=network_egress_allow,
-            network_egress_deny=network_egress_deny,
-            host_loopback=host_loopback,
-            network_proxy=network_proxy,
-            host_loopback_forward=host_loopback_forward,
-            cmdline=cmdline,
-        ),
-    )
+    with _LifecycleLock(state_dir, timeout, provision=True):
+        if config_path.exists() or runtime_path.exists():
+            raise ScriptError("sandbox is already provisioned")
+        _write_json(
+            config_path,
+            _serialize_launch(
+                launch.validated(),
+                hypervisor=hypervisor,
+                memory_mib=memory_mib,
+                net=net,
+                network_profile=network_profile,
+                network_egress=network_egress,
+                network_ingress=network_ingress,
+                network_egress_allow=network_egress_allow,
+                network_egress_deny=network_egress_deny,
+                host_loopback=host_loopback,
+                network_proxy=network_proxy,
+                host_loopback_forward=host_loopback_forward,
+                cmdline=cmdline,
+            ),
+        )
 
 
 def start(state_path: Path, timeout: float) -> None:
     state_dir = _prepare_state_directory(state_path, create=False)
+    with _LifecycleLock(state_dir, timeout):
+        _start(state_dir, timeout)
+
+
+def _create_capability(path: Path, capability: bytes) -> None:
+    """Creates the control capability file of a start, which only it may hold."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as error:
+        raise ScriptError(
+            "sandbox is already running or has stale runtime state"
+        ) from error
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(capability)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _start(state_dir: Path, timeout: float) -> None:
     config = _read_json(
         require_file(state_dir / CONFIG_NAME, "sandbox configuration"),
         "sandbox configuration",
         version=CONFIG_FORMATS,
     )
-    if (state_dir / RUNTIME_NAME).exists():
+    # Any runtime file belongs to an OpenVMM process that may still run, even
+    # without a runtime record, as after a start that was killed. Without them,
+    # every runtime file that appears while this start holds the lifecycle lock
+    # is its own.
+    if any(path_exists(state_dir / name) for name in RUNTIME_FILE_NAMES):
         raise ScriptError("sandbox is already running or has stale runtime state")
     outcome_path = state_dir / OUTCOME_NAME
     outcome_path.unlink(missing_ok=True)
@@ -632,10 +1048,13 @@ def start(state_path: Path, timeout: float) -> None:
         command.extend(["--network-proxy", str(network_proxy)])
 
     capability_path = state_dir / CAPABILITY_NAME
-    capability_path.write_bytes(capability)
-    os.chmod(capability_path, 0o600)
+    _create_capability(capability_path, capability)
     log_path = state_dir / LOG_NAME
-    log = log_path.open("ab", buffering=0)
+    try:
+        log = log_path.open("ab", buffering=0)
+    except BaseException:
+        capability_path.unlink(missing_ok=True)
+        raise
     creationflags = (
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
     )
@@ -684,6 +1103,7 @@ def start(state_path: Path, timeout: float) -> None:
             session.ping(timeout)
     except BaseException as error:
         status: int | None = None
+        ended = process is None
         try:
             if process is not None:
                 # OpenVMM closes the control endpoint as it tears the VM down,
@@ -692,10 +1112,18 @@ def start(state_path: Path, timeout: float) -> None:
                 status = _end_failed_start(
                     process, timeout if isinstance(error, ControlEndpointClosed) else 0
                 )
+                ended = True
         finally:
-            (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
-            capability_path.unlink(missing_ok=True)
-            (state_dir / CONTROL_SOCKET_NAME).unlink(missing_ok=True)
+            # This start found none of these files and has held the lifecycle
+            # lock since, so they are its own. They stay while its OpenVMM may
+            # still run, so that the sandbox does not look stopped. The runtime
+            # record goes last, so that an interrupted cleanup leaves a record
+            # that shows OpenVMM gone rather than runtime files that deprovision
+            # cannot vouch for.
+            if ended:
+                (state_dir / CONTROL_SOCKET_NAME).unlink(missing_ok=True)
+                capability_path.unlink(missing_ok=True)
+                (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
         if status is not None and isinstance(error, Exception):
             raise ScriptError(_startup_exit_message(outcome_path, status)) from error
         raise
@@ -730,6 +1158,11 @@ def exec_workload(
 
 def stop(state_path: Path, timeout: float) -> dict[str, Any]:
     state_dir = _prepare_state_directory(state_path, create=False)
+    with _LifecycleLock(state_dir, timeout):
+        return _stop(state_dir, timeout)
+
+
+def _stop(state_dir: Path, timeout: float) -> dict[str, Any]:
     runtime, capability = _load_running(state_dir)
     pid, start_time = _runtime_process(runtime)
     with ControlSession.connect(_endpoint(runtime), capability, timeout) as session:
@@ -742,32 +1175,119 @@ def stop(state_path: Path, timeout: float) -> dict[str, Any]:
     try:
         outcome = _read_openvmm_outcome(state_dir / OUTCOME_NAME)
     finally:
-        (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
-        (state_dir / CAPABILITY_NAME).unlink(missing_ok=True)
+        # As in a failed start, the runtime record goes last.
         (state_dir / CONTROL_SOCKET_NAME).unlink(missing_ok=True)
+        (state_dir / CAPABILITY_NAME).unlink(missing_ok=True)
+        (state_dir / RUNTIME_NAME).unlink(missing_ok=True)
     return outcome
 
 
-def deprovision(state_path: Path) -> None:
+def deprovision(state_path: Path, timeout: float) -> None:
     state_dir = _prepare_state_directory(state_path, create=False)
-    runtime_path = state_dir / RUNTIME_NAME
-    if runtime_path.is_file():
-        runtime = _read_json(runtime_path, "sandbox runtime state")
-        if _process_running(*_runtime_process(runtime)):
-            raise ScriptError("sandbox must be stopped before deprovision")
-    for name in (
-        RUNTIME_NAME,
-        CAPABILITY_NAME,
-        CONTROL_SOCKET_NAME,
-        OUTCOME_NAME,
-        LOG_NAME,
-        CONFIG_NAME,
-    ):
-        (state_dir / name).unlink(missing_ok=True)
-    unknown = tuple(state_dir.iterdir())
-    if unknown:
-        raise ScriptError(
-            "sandbox state directory contains files not owned by NVX: "
-            + ", ".join(path.name for path in unknown)
-        )
-    state_dir.rmdir()
+    with _LifecycleLock(state_dir, timeout) as lock:
+        runtime_path = state_dir / RUNTIME_NAME
+        if runtime_path.is_file():
+            runtime = _read_json(runtime_path, "sandbox runtime state")
+            if _process_running(*_runtime_process(runtime)):
+                raise ScriptError("sandbox must be stopped before deprovision")
+        elif any(path_exists(state_dir / name) for name in RUNTIME_FILE_NAMES):
+            # As start does, refuse runtime files that no record vouches for.
+            raise ScriptError(
+                "sandbox has runtime files but no runtime record, so its OpenVMM "
+                "process may still run: end any OpenVMM process whose arguments "
+                f"name the state directory, then remove {CAPABILITY_NAME} and "
+                f"{CONTROL_SOCKET_NAME}"
+            )
+        for name in (
+            RUNTIME_NAME,
+            CAPABILITY_NAME,
+            CONTROL_SOCKET_NAME,
+            OUTCOME_NAME,
+            LOG_NAME,
+            CONFIG_NAME,
+        ):
+            (state_dir / name).unlink(missing_ok=True)
+        unknown = tuple(path for path in state_dir.iterdir() if path.name != LOCK_NAME)
+        if unknown:
+            raise ScriptError(
+                "sandbox state directory contains files not owned by NVX: "
+                + ", ".join(path.name for path in unknown)
+            )
+        # Holding the lock until the directory is gone keeps a waiting transition
+        # from creating a new lock file in it.
+        lock.remove()
+        lingering = False
+        try:
+            state_dir.rmdir()
+        except OSError as error:
+            if error.errno not in DIRECTORY_NOT_EMPTY:
+                raise
+            lingering = True
+        finally:
+            if not lingering:
+                lock.retract()
+        if lingering:
+            # A removed lock file that a handle still keeps stays in the directory,
+            # as do the lock files of transitions that start meanwhile. Each
+            # waiter closes its handle once it finds the sandbox gone, so the
+            # directory empties after this call releases the lock.
+            removing, held = _hold_directory(state_dir)
+            try:
+                lock.release()
+                _remove_emptied_state_directory(state_dir, removing, timeout)
+            finally:
+                if held is not None:
+                    os.close(held)
+
+
+def _remove_emptied_state_directory(
+    state_dir: Path, removing: os.stat_result, timeout: float
+) -> None:
+    """Removes a state directory once no lingering lock file keeps it.
+
+    A provision that waits for the removal may complete it and provision the path
+    again, which ends this attempt too. Any failure other than the directory not
+    being empty ends the attempt at once.
+    """
+    deadline = time.monotonic() + timeout
+    retried_at_once = False
+    while True:
+        try:
+            state_dir.rmdir()
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            current = _directory_status(state_dir)
+            if current is None or not os.path.samestat(current, removing):
+                return
+            try:
+                remaining = tuple(state_dir.iterdir())
+            except FileNotFoundError:
+                return
+            unexpected = sorted(path.name for path in remaining if not _lingers(path))
+            # A provision that starts after this deprovision removed the lock
+            # file, and before it removed the directory, provisions it again.
+            if CONFIG_NAME in unexpected:
+                raise ScriptError(
+                    "sandbox was provisioned again while deprovision removed it"
+                ) from error
+            if unexpected:
+                raise ScriptError(
+                    "sandbox state directory contains files not owned by NVX: "
+                    + ", ".join(unexpected)
+                ) from error
+            if error.errno not in DIRECTORY_NOT_EMPTY:
+                raise
+            # Without remaining entries, the last lingering lock file went away
+            # after rmdir failed, so the next attempt follows at once. Another
+            # such failure right after it pauses first, so that a file system that
+            # does not list what keeps the directory cannot make this loop spin.
+            if not remaining and not retried_at_once:
+                retried_at_once = True
+                if time.monotonic() >= deadline:
+                    raise
+                continue
+            retried_at_once = False
+            if not _pause(deadline):
+                raise

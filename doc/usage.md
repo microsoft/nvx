@@ -602,7 +602,7 @@ launches.
 | `--memory-max BYTES` | none | Set the workload cgroup memory limit. |
 | `--pids-max COUNT` | none | Set the workload cgroup process limit. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB. |
-| `--timeout SECONDS` | `60` | Set the control response timeout for managed `start`, `exec`, and `stop`. |
+| `--timeout SECONDS` | `60` | Set the control response timeout for managed `start`, `exec`, and `stop`, and the longest time that `provision`, `start`, `stop`, and `deprovision` wait for another lifecycle transition of the sandbox. It must be finite and greater than 0. |
 | `--exec-timeout-ms MILLISECONDS` | `0` | Set the managed `exec` guest workload timeout in the unsigned 32-bit range `0..4294967295`; zero disables the workload deadline. This is separate from the finite host `--timeout` response deadline. |
 | `--cwd GUEST_PATH` | `/` | Set an absolute working directory inside the workload root for managed `exec`. It is resolved after the workload identity and root are applied; missing, inaccessible, or non-directory paths fail the workload launch. Default and layered environments point `PWD` at this directory; an exact replacement environment controls `PWD` itself. |
 | `--environment KEY=VALUE` | omitted | Set the exact managed `exec` environment. Repeat for multiple entries. Empty values, spaces, additional equals signs, and UTF-8 are preserved. Inline values are visible in the invoking host process arguments; use `--environment-file` for sensitive values. |

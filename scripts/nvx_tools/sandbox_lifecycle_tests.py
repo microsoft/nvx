@@ -2,15 +2,17 @@
 
 The scenario runs `nvx.py sandbox` as subprocesses against the real kernel, the
 Alpine control initramfs, the Ubuntu EROFS layer, and ext4 scratch copies. It
-checks identity admission, fail-closed lifecycle transitions, warm-guest state
-across exec requests and restarts, the guest security profile and resource
-limits, bounded output and outcome reports, and that stop, a crash, and
-deprovision leave no OpenVMM process, control endpoint, capability, or runtime
-record behind while the supplied layer and scratch artifacts stay intact.
+checks identity admission, fail-closed lifecycle transitions, that overlapping
+starts launch one VM, warm-guest state across exec requests and restarts, the
+guest security profile and resource limits, bounded output and outcome reports,
+and that stop, a crash, and deprovision leave no OpenVMM process, control
+endpoint, capability, or runtime record behind while the supplied layer and
+scratch artifacts stay intact.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import hashlib
 import json
@@ -21,6 +23,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -72,13 +75,16 @@ CAPABILITY = sandbox_lifecycle.CAPABILITY_NAME
 LOG = sandbox_lifecycle.LOG_NAME
 SOCKET = sandbox_lifecycle.CONTROL_SOCKET_NAME
 OUTCOME = sandbox_lifecycle.OUTCOME_NAME
+LOCK = sandbox_lifecycle.LOCK_NAME
+PROVISIONED_ENTRIES = frozenset({CONFIG, LOCK})
 # Windows hosts serve the control endpoint as a named pipe outside the state.
 RUNNING_ENTRIES = frozenset(
-    {CONFIG, RUNTIME, CAPABILITY, LOG}
+    {CONFIG, LOCK, RUNTIME, CAPABILITY, LOG}
     if os.name == "nt"
-    else {CONFIG, RUNTIME, CAPABILITY, LOG, SOCKET}
+    else {CONFIG, LOCK, RUNTIME, CAPABILITY, LOG, SOCKET}
 )
-STOPPED_ENTRIES = frozenset({CONFIG, LOG, OUTCOME})
+STOPPED_ENTRIES = frozenset({CONFIG, LOCK, LOG, OUTCOME})
+ALREADY_RUNNING = b"sandbox is already running or has stale runtime state"
 
 
 def openvmm_processes(marker: str) -> tuple[int, ...]:
@@ -249,6 +255,26 @@ class LifecycleAcceptance:
             timeout=2 * self.timeout + 30,
         )
 
+    def record(
+        self,
+        operation: str,
+        result: subprocess.CompletedProcess[bytes],
+        *,
+        state: Path | None,
+        expected: int | None,
+    ) -> None:
+        self.checks.append(
+            {
+                "operation": operation,
+                "argv": evidence_argv([str(value) for value in result.args]),
+                "expected_returncode": expected,
+                "returncode": result.returncode,
+                "stdout_bytes": len(result.stdout),
+                "stderr_bytes": len(result.stderr),
+                "state_entries": None if state is None else state_entries(state),
+            }
+        )
+
     def invoke(
         self,
         operation: str,
@@ -263,17 +289,7 @@ class LifecycleAcceptance:
         standard error when given.
         """
         result = self.run_cli(operation, *arguments, state=state)
-        self.checks.append(
-            {
-                "operation": operation,
-                "argv": evidence_argv([str(value) for value in result.args]),
-                "expected_returncode": expected,
-                "returncode": result.returncode,
-                "stdout_bytes": len(result.stdout),
-                "stderr_bytes": len(result.stderr),
-                "state_entries": None if state is None else state_entries(state),
-            }
-        )
+        self.record(operation, result, state=state, expected=expected)
         if (expected is not None and result.returncode != expected) or (
             diagnostic is not None and diagnostic not in result.stderr
         ):
@@ -361,7 +377,7 @@ class LifecycleAcceptance:
         self.check_bounded_results()
         self.check_deprovision_while_running(runtime)
         self.stop(runtime, layer_digest)
-        restarted = self.start(description="restart")
+        restarted = self.start_overlapping()
         result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
         self.require_output(result, STATE_CONTENT, "the restarted sandbox's state")
         self.check_crash(restarted)
@@ -459,7 +475,7 @@ class LifecycleAcceptance:
             str(PIDS_MAX),
         )
         self.invoke("provision", *options, state=self.state)
-        self.require_entries(self.state, frozenset({CONFIG}), "after provision")
+        self.require_entries(self.state, PROVISIONED_ENTRIES, "after provision")
         config = (self.state / CONFIG).read_bytes()
         self.invoke(
             "provision",
@@ -478,11 +494,47 @@ class LifecycleAcceptance:
                 diagnostic=b"sandbox is not running",
             )
             self.require_entries(
-                self.state, frozenset({CONFIG}), f"after {operation} before start"
+                self.state, PROVISIONED_ENTRIES, f"after {operation} before start"
             )
 
     def start(self, *, description: str) -> dict[str, Any]:
         self.invoke("start", state=self.state)
+        return self.require_started(description)
+
+    def start_overlapping(self) -> dict[str, Any]:
+        """Restarts the sandbox with two overlapping public starts.
+
+        Exactly one of them launches OpenVMM. The other waits for its lifecycle
+        lock and then fails, leaving its runtime record, capability, and VM.
+        """
+        barrier = threading.Barrier(2, timeout=self.timeout + 30)
+
+        def start() -> subprocess.CompletedProcess[bytes]:
+            barrier.wait()
+            return self.run_cli("start", state=self.state)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            starts = [pool.submit(start) for _ in range(2)]
+            results = [future.result() for future in starts]
+        for result in results:
+            self.record("start", result, state=self.state, expected=None)
+        refused = [result for result in results if result.returncode != 0]
+        if (
+            sorted(result.returncode for result in results) != [0, 1]
+            or ALREADY_RUNNING not in refused[0].stderr
+        ):
+            raise RuntimeError(
+                "overlapping public starts returned "
+                + "; ".join(
+                    f"status {result.returncode}, "
+                    f"stderr={bounded_text(result.stderr)!r}"
+                    for result in results
+                )
+                + f", expected one success and one {ALREADY_RUNNING.decode()!r}"
+            )
+        return self.require_started("overlapping restart")
+
+    def require_started(self, description: str) -> dict[str, Any]:
         self.require_entries(self.state, RUNNING_ENTRIES, f"after the {description}")
         runtime = read_runtime(self.state)
         self.save_evidence(
@@ -507,7 +559,7 @@ class LifecycleAcceptance:
             "start",
             state=self.state,
             expected=1,
-            diagnostic=b"sandbox is already running or has stale runtime state",
+            diagnostic=ALREADY_RUNNING,
         )
         if (self.state / RUNTIME).read_bytes() != record:
             raise RuntimeError("a repeated start changed the runtime record")
@@ -651,7 +703,7 @@ class LifecycleAcceptance:
         for operation, diagnostic in (
             ("exec", stale),
             ("stop", stale),
-            ("start", b"sandbox is already running or has stale runtime state"),
+            ("start", ALREADY_RUNNING),
         ):
             self.invoke(operation, state=self.state, expected=1, diagnostic=diagnostic)
             self.require_entries(
@@ -710,6 +762,7 @@ class LifecycleAcceptance:
                 errors.append(error)
         # Every OpenVMM process whose arguments name the fixture is the
         # acceptance's own, even one that no runtime record names.
+        ended = False
         try:
             for pid in openvmm_processes(self.root.name):
                 with contextlib.suppress(OSError):
@@ -719,12 +772,18 @@ class LifecycleAcceptance:
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f"OpenVMM processes {list(strays)} survived")
                 time.sleep(0.05)
+            ended = True
         except Exception as error:
             errors.append(error)
         for state, label in states:
             try:
                 self.copy_evidence(state / LOG, f"{label}openvmm.log")
                 (state / FOREIGN_NAME).unlink(missing_ok=True)
+                if ended and not (state / RUNTIME).exists():
+                    # With no fixture OpenVMM left, runtime files that no record
+                    # names are stale, and deprovision refuses them.
+                    (state / CAPABILITY).unlink(missing_ok=True)
+                    (state / SOCKET).unlink(missing_ok=True)
                 result = self.run_cli("deprovision", state=state)
                 if result.returncode != 0:
                     raise RuntimeError(
