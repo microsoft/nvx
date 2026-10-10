@@ -53,7 +53,7 @@ flowchart LR
    Low["Low RAM<br/>0x00000000 through 0xbfffffff<br/>up to 3 GiB"]
    Gap["Fixed MMIO gap<br/>0xc0000000 through 0xffffffff<br/>1 GiB"]
    High["High RAM<br/>0x100000000 and above"]
-   Slots["Reserved virtio-mmio slots<br/>0xd0000000 through 0xd0008fff"]
+   Slots["Reserved virtio-mmio slots<br/>0xd0000000 through 0xd0007fff"]
 
    Low --- Gap
    Gap --- High
@@ -95,8 +95,8 @@ tokens. A fresh boot then appends host-owned tokens in this order:
 2. the optional fixed workload identity (`nvx_workload_uid=` and
    `nvx_workload_gid=`) and workload lifecycle (`nvx_lifecycle=`);
 3. `nvx_snapshot_tier=<tier>` for a capture with sandbox blocks;
-4. device-discovery tokens in fixed address order: network, the first
-   filesystem slot, boot console, sandbox blocks, and the control console
+4. device-discovery tokens in fixed address order: network, the filesystem
+   slot, boot console, sandbox blocks, and the control console
    followed by `nvx_control_tty=hvc2`; and
 5. network bootstrap tokens, including gateway DNS only when the egress
    policy permits it, which names the IPv4 gateway or else the IPv6 one,
@@ -112,8 +112,9 @@ fails with `E_CMDLINE_CLOCK_TOKEN`.
 Callers may not supply `earlycon=`, `console=`, `virtio_mmio.device=`,
 `virtnet_ip=`, `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`, `virtnet_ip6=`,
 `virtnet_gw6=`, `virtfs_dir=`, `virtfs_tag=`, `virtfs_mode=`,
-`nvx_snapshot_tier=`, `nr_cpus=`, `nvx_workload_uid=`, `nvx_workload_gid=`,
-or `nvx_lifecycle=` tokens. A machine with a control console also applies the
+`virtfs_aggregate=`, `nvx_snapshot_tier=`, `nr_cpus=`, `nvx_workload_uid=`,
+`nvx_workload_gid=`, or `nvx_lifecycle=` tokens. A machine with a control
+console also applies the
 [control-console command-line rules](machine-and-device-abi.md#control-console).
 Embedded NULs are rejected, and the complete NUL-terminated command line must
 fit in 64 KiB. The same effective string and its SHA-256 digest become part of
