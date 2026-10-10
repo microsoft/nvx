@@ -16,6 +16,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
 from nvx_tools import benchmark, performance  # noqa: E402
+from nvx_tools.common import sha256_file  # noqa: E402
 
 COLD_START_LOG = """
     base                     :    101.0 ms  (min 100, max 102, n=5)
@@ -194,6 +195,132 @@ def lifecycle_document(
             }
         },
     }
+
+
+# Snapshot generation from run 35393916034, whose minority fast path the
+# stability guard rejects.
+MINORITY_FAST_PATH_MS = [
+    763.3528,
+    1219.9358,
+    1242.3189,
+    1256.6633,
+    1275.0555,
+    1274.4436,
+    737.5818,
+    1257.1264,
+    1240.7679,
+    1231.9344,
+]
+BENCHMARK_HOST: dict[str, object] = {
+    "schema_version": 1,
+    "runner_name": "azure-windows-3",
+    "machine_name": "VMSSVAOAN000002",
+    "os": "Windows-2022Server-10.0.20348-SP0",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+    "logical_processors": 16,
+    "memory_bytes": 64 * 1024**3,
+    "azure": {
+        "vm_size": "Standard_D16ds_v5",
+        "os_disk": {
+            "storage_account_type": "Premium_LRS",
+            "size_gib": 128,
+            "caching": "ReadWrite",
+        },
+        "data_disks": [],
+        "resource_disk_size_kib": 0,
+    },
+    "volumes": {
+        "scratch": {
+            "path": "F:\\nvx-benchmark-scratch\\job",
+            "volume": "F:",
+            "filesystem": "NTFS",
+            "size_bytes": 512 * 1024**3,
+        }
+    },
+}
+
+
+def profiled_lifecycle_document(
+    samples_ms: list[float] | None = None,
+) -> dict[str, object]:
+    """Return a Windows lifecycle result with host provenance and storage
+    telemetry whose scratch volume writes 160 MiB/s during fast flushes and
+    96 MiB/s during slow ones."""
+    document = lifecycle_document("whp")
+    capture = cast(
+        dict[str, object], cast(dict[str, object], document["snapshot_capture"])["whp"]
+    )
+    if samples_ms is not None:
+        capture.update(
+            samples_ms=samples_ms,
+            p50_ms=statistics.median(samples_ms),
+            min_ms=min(samples_ms),
+            max_ms=max(samples_ms),
+        )
+    raw_samples: list[dict[str, object]] = []
+    for generation_ms in cast(list[float], capture["samples_ms"]):
+        raw_samples.append(
+            {
+                "generation_duration_ns": round(generation_ms * 1_000_000),
+                "records": [
+                    {
+                        "operation": "capture",
+                        "phase": "mapped_memory_flush",
+                        "exclusive": True,
+                        "duration_ns": round((generation_ms - 20) * 1_000_000),
+                        "process_elapsed_ns": 2_000_000_000,
+                        "pid": 4242,
+                        "source": "openvmm",
+                    }
+                ],
+                "storage_telemetry": {
+                    "volumes": {"F:": ["scratch"], "C:": ["workspace", "system"]},
+                    "phases": {
+                        "capture.mapped_memory_flush": {
+                            "volumes": {
+                                "F:": {
+                                    "write_mib_per_second": (
+                                        160.0 if generation_ms < 1000 else 96.0
+                                    ),
+                                    "average_write_latency_ms": 31.25,
+                                    "average_queue_length": 3.94,
+                                    "busy_percent": 99.4,
+                                },
+                                "C:": {"write_mib_per_second": 0.25},
+                            },
+                            "cpu": {"busy_percent": 6.2},
+                            "memory": {
+                                "cache_dirty_mib_max": 12.34,
+                                "lazy_write_mib_per_second": 0.0,
+                            },
+                            "defender": {"cpu_percent": 0.04},
+                        }
+                    },
+                },
+            }
+        )
+    capture["profile"] = {"schema_version": 1, "raw_samples": raw_samples}
+    document["host"] = BENCHMARK_HOST
+    return document
+
+
+def validate_attempt(source: Path, log: Path) -> int:
+    with (
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(io.StringIO()),
+    ):
+        return nvx.main(
+            [
+                "performance",
+                "validate-openvmm",
+                "--platform",
+                "windows-whp-virtual-machine",
+                "--input",
+                str(source),
+                "--attempt-log",
+                str(log),
+            ]
+        )
 
 
 class PerformanceTests(unittest.TestCase):
@@ -751,6 +878,284 @@ class PerformanceTests(unittest.TestCase):
 
         self.assertEqual(status, 2)
         self.assertIn("does not match platform", stderr.getvalue())
+
+    def test_validate_openvmm_records_every_attempt_outcome(self):
+        invalid = lifecycle_document("whp")
+        cast(dict[str, object], invalid["controls"])["backend"] = "kvm"
+        documents = (
+            profiled_lifecycle_document(MINORITY_FAST_PATH_MS),
+            invalid,
+            profiled_lifecycle_document(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "acceptance-attempts.json"
+            statuses: list[int] = []
+            digests: list[str] = []
+            for index, document in enumerate(documents, 1):
+                source = root / f"acceptance-attempt-{index}.json"
+                source.write_text(json.dumps(document), encoding="utf-8")
+                digests.append(sha256_file(source))
+                statuses.append(validate_attempt(source, log))
+            recorded = json.loads(log.read_text(encoding="utf-8"))
+
+        self.assertEqual(statuses, [75, 2, 0])
+        self.assertEqual(recorded["schema_version"], 1)
+        self.assertEqual(recorded["platform"], "windows-whp-virtual-machine")
+        attempts = recorded["attempts"]
+        self.assertEqual(
+            [
+                (attempt["attempt"], attempt["file"], attempt["sha256"])
+                for attempt in attempts
+            ],
+            [
+                (index, f"acceptance-attempt-{index}.json", digest)
+                for index, digest in enumerate(digests, 1)
+            ],
+        )
+        self.assertEqual(
+            [(attempt["status"], attempt["exit_status"]) for attempt in attempts],
+            [("unstable", 75), ("invalid", 2), ("valid", 0)],
+        )
+        self.assertRegex(attempts[0]["message"], r"split 2/8.*59\.8% gap")
+        self.assertIn("does not match platform", attempts[1]["message"])
+        self.assertIsNone(attempts[2]["message"])
+
+    def test_collect_names_the_published_attempt_and_reports_every_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            log = root / "acceptance-attempts.json"
+            for index, document in enumerate(
+                (
+                    profiled_lifecycle_document(MINORITY_FAST_PATH_MS),
+                    profiled_lifecycle_document(),
+                ),
+                1,
+            ):
+                source = root / f"acceptance-attempt-{index}.json"
+                source.write_text(json.dumps(document), encoding="utf-8")
+                validate_attempt(source, log)
+            published = root / "acceptance.json"
+            published.write_bytes((root / "acceptance-attempt-2.json").read_bytes())
+            summary = root / "summary.md"
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                result_path = performance.collect_results(
+                    "windows-whp-virtual-machine",
+                    "abc123",
+                    logs,
+                    root / "results",
+                    summary_path=summary,
+                    lifecycle_input=published,
+                    lifecycle_attempt_log=log,
+                )
+            markdown = summary.read_text(encoding="utf-8")
+
+            self.assertLessEqual(
+                performance.LIFECYCLE_METRICS,
+                {result.metric for result in performance.read_results(result_path)},
+            )
+        self.assertIn(
+            "Lifecycle metrics come from attempt 2 of 2: acceptance-attempt-2.json",
+            stdout.getvalue(),
+        )
+        self.assertIn("### Lifecycle attempts", markdown)
+        self.assertRegex(
+            markdown,
+            r"\| 1 \| `acceptance-attempt-1\.json` \| unstable: unstable snapshot "
+            r"generation at .*split 2/8.* \| 1241\.54 ms \| no \|",
+        )
+        self.assertIn(
+            "| 2 | `acceptance-attempt-2.json` | valid | 31.00 ms | yes |", markdown
+        )
+        self.assertIn("### Benchmark host", markdown)
+        self.assertIn("| Runner | azure-windows-3 |", markdown)
+        self.assertIn("| Azure VM size | Standard_D16ds_v5 |", markdown)
+        self.assertIn(
+            "| Azure OS disk | Premium_LRS, 128 GiB, ReadWrite caching |", markdown
+        )
+        self.assertIn("### Snapshot generation storage telemetry", markdown)
+        self.assertIn(
+            "#### Attempt 1: unstable (`acceptance-attempt-1.json`)", markdown
+        )
+        self.assertIn(
+            "#### Attempt 2: valid, published (`acceptance-attempt-2.json`)", markdown
+        )
+        self.assertIn("Scratch volume: `F:`.", markdown)
+        self.assertIn(
+            "| 1 | 763.35 ms | 743.35 ms | 160.0 MiB/s | 31.25 ms | 3.9 | 99% | "
+            "0.2 MiB/s | 6% | 12.3 MiB | 0.0 MiB/s | 0.0% |",
+            markdown,
+        )
+        self.assertIn(
+            "| 2 | 1219.94 ms | 1199.94 ms | 96.0 MiB/s | 31.25 ms | 3.9 | 99% | ",
+            markdown,
+        )
+        self.assertEqual(markdown.count("| Sample | Generation | Flush |"), 2)
+
+    def test_collect_rejects_a_lifecycle_input_that_no_valid_attempt_supplied(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            log = root / "acceptance-attempts.json"
+            unstable = root / "acceptance-attempt-1.json"
+            document = profiled_lifecycle_document(MINORITY_FAST_PATH_MS)
+            unstable.write_text(json.dumps(document), encoding="utf-8")
+            validate_attempt(unstable, log)
+            published = root / "acceptance.json"
+            published.write_text(
+                json.dumps(profiled_lifecycle_document()), encoding="utf-8"
+            )
+            results = root / "results"
+
+            with self.assertRaisesRegex(
+                performance.PerformanceError, "matches 0 valid attempts"
+            ):
+                performance.collect_results(
+                    "windows-whp-virtual-machine",
+                    "abc123",
+                    logs,
+                    results,
+                    lifecycle_input=published,
+                    lifecycle_attempt_log=log,
+                )
+            self.assertFalse(results.exists())
+            with self.assertRaisesRegex(
+                performance.PerformanceError, "requires a lifecycle input"
+            ):
+                performance.collect_results(
+                    "windows-whp-virtual-machine",
+                    "abc123",
+                    logs,
+                    results,
+                    lifecycle_attempt_log=log,
+                )
+
+    def test_attempt_log_rejects_malformed_entries(self):
+        valid = {
+            "attempt": 1,
+            "file": "acceptance-attempt-1.json",
+            "sha256": "a" * 64,
+            "status": "valid",
+            "exit_status": 0,
+            "message": None,
+        }
+        cases: dict[str, tuple[dict[str, object], str]] = {
+            "platform": (
+                {"schema_version": 1, "platform": "linux-kvm", "attempts": [valid]},
+                "records platform 'linux-kvm'",
+            ),
+            "schema": (
+                {
+                    "schema_version": 2,
+                    "platform": "windows-whp-virtual-machine",
+                    "attempts": [valid],
+                },
+                "unsupported schema_version 2",
+            ),
+            "status": (
+                {
+                    "schema_version": 1,
+                    "platform": "windows-whp-virtual-machine",
+                    "attempts": [{**valid, "exit_status": 75}],
+                },
+                r"invalid lifecycle attempt at .*attempts\[0\]",
+            ),
+            "order": (
+                {
+                    "schema_version": 1,
+                    "platform": "windows-whp-virtual-machine",
+                    "attempts": [{**valid, "attempt": 2}],
+                },
+                r"invalid lifecycle attempt at .*attempts\[0\]",
+            ),
+            "digest": (
+                {
+                    "schema_version": 1,
+                    "platform": "windows-whp-virtual-machine",
+                    "attempts": [{**valid, "sha256": "not-a-digest"}],
+                },
+                r"invalid lifecycle attempt at .*attempts\[0\]",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "acceptance-attempts.json"
+            for name, (document, error) in cases.items():
+                with self.subTest(name=name):
+                    log.write_text(json.dumps(document), encoding="utf-8")
+                    with self.assertRaisesRegex(performance.PerformanceError, error):
+                        performance.read_lifecycle_attempt_log(
+                            log, "windows-whp-virtual-machine"
+                        )
+
+    def test_lifecycle_diagnostics_report_host_and_telemetry_without_a_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "acceptance.json"
+            source.write_text(
+                json.dumps(profiled_lifecycle_document()), encoding="utf-8"
+            )
+            summary = root / "summary.md"
+
+            performance.collect_openvmm_results(
+                "windows-whp-virtual-machine",
+                "abc123",
+                source,
+                root / "results",
+                summary,
+            )
+            markdown = summary.read_text(encoding="utf-8")
+
+        self.assertNotIn("### Lifecycle attempts", markdown)
+        self.assertIn("| Machine | VMSSVAOAN000002 |", markdown)
+        self.assertIn("### Snapshot generation storage telemetry", markdown)
+        self.assertNotIn("#### Attempt", markdown)
+        self.assertEqual(markdown.count("| 160.0 MiB/s |"), 10)
+
+    def test_collect_cli_accepts_lifecycle_attempt_logs(self):
+        collect = nvx.parse_args(
+            [
+                "performance",
+                "collect",
+                "--platform",
+                "windows-whp-virtual-machine",
+                "--commit",
+                "abc123",
+                "--input-dir",
+                "logs",
+                "--output-dir",
+                "results",
+                "--lifecycle-input",
+                "acceptance.json",
+                "--lifecycle-attempt-log",
+                "acceptance-attempts.json",
+            ]
+        )
+        validate = nvx.parse_args(
+            [
+                "performance",
+                "validate-openvmm",
+                "--platform",
+                "windows-whp-virtual-machine",
+                "--input",
+                "acceptance-attempt-1.json",
+                "--attempt-log",
+                "acceptance-attempts.json",
+            ]
+        )
+
+        self.assertEqual(
+            collect.lifecycle_attempt_log, Path("acceptance-attempts.json")
+        )
+        self.assertEqual(validate.attempt_log, Path("acceptance-attempts.json"))
 
     def test_collect_appends_ci_benchmark_table(self):
         with tempfile.TemporaryDirectory() as temporary:

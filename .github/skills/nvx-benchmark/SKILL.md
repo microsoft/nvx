@@ -213,6 +213,8 @@ Verify that the retained result set contains the acceptance JSON, raw logs under
 `performance/`, `device-io/device-io.log`, `summary.md`, collected CSV files, and
 `benchmark-metadata.json` records with the expected commit, platform, and sampling
 counts. Require the expected artifact hashes only in the device-I/O metadata record.
+Check that the `host` provenance in the acceptance JSON and metadata names the
+measured machine and the scratch volume that the run used.
 
 ## Report
 
