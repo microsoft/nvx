@@ -24,7 +24,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Implementation of the `nvx.py` commands |
 | `scripts/nvx.py` | Canonical build, run, test, benchmark, and packaging CLI |
-| `scripts/setup` | Development host and GitHub Actions runner bootstrap scripts |
+| `scripts/setup` | Development host and GitHub Actions runner bootstrap scripts, and the manifest of the tool versions that they install |
 | `scripts/nvx_adversarial_executor.py` | Credential-free adversarial executor protocol entry point |
 | `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
 | `build/sources` | Generated Linux, Alpine, and Ubuntu release sources; ignored by Git |
@@ -274,7 +274,8 @@ point used by local children and administrator-owned remote wrappers.
 `performance.py` collects, persists, and gates CI performance results, and the
 `test_*.py` files beside `nvx.py` are the tooling's unit tests.
 
-The `setup/` scripts bootstrap development hosts and GitHub Actions runners;
+The `setup/` scripts bootstrap development hosts and GitHub Actions runners
+with the tool versions that `setup/tool-versions.conf` pins;
 see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 `nvx-hosts.example.json` is the template for the
 [remote agent host](setup.md#remote-agent-hosts) inventory, and CI runs

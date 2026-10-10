@@ -86,14 +86,16 @@ sudo chmod a+rw /dev/mshv
 test -r /dev/mshv && test -w /dev/mshv
 ```
 
-RPM-based MSHV hosts also need the native toolchain used to build the pinned
-cargo-nextest release:
+RPM-based MSHV hosts also need the native toolchain used to build the
+cargo-nextest release that
+[`scripts/setup/tool-versions.conf`](../scripts/setup/tool-versions.conf) pins:
 
 ```bash
 sudo tdnf install -y \
   gcc glibc-devel kernel-headers binutils make \
   pkgconf pkgconf-pkg-config openssl-devel libarchive
-cargo install --locked cargo-nextest --version 0.9.133
+cargo install --locked cargo-nextest --version \
+  "$(sed -n 's/^cargo_nextest\.version=//p' scripts/setup/tool-versions.conf)"
 ```
 
 ### Windows / WHP

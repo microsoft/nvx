@@ -26,7 +26,7 @@ on:
       - rust-toolchain.toml
       - scripts/nvx.py
       - scripts/nvx_tools/**
-      - scripts/setup/setup-linux-runner.sh
+      - scripts/setup/tool-versions.conf
 
 permissions:
   contents: read
@@ -95,7 +95,7 @@ jobs:
           done
           git -C openvmm log -1 --format='OpenVMM %H %s'
 
-      # Read the versions that CI and the runner bootstrap pin, so this
+      # Read the versions that CI and the setup tool manifest pin, so this
       # environment follows their updates.
       - name: Resolve pinned tool versions
         id: versions
@@ -105,7 +105,7 @@ jobs:
           set -euo pipefail
           rust_toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
           crate_msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' aci_edge_sandboxes/Cargo.toml)
-          nextest=$(sed -n 's/^CARGO_NEXTEST_VERSION=//p' scripts/setup/setup-linux-runner.sh)
+          nextest=$(sed -n 's/^cargo_nextest\.version=//p' scripts/setup/tool-versions.conf)
           {
             echo "rust-toolchain=${rust_toolchain}"
             echo "crate-msrv=${crate_msrv}"

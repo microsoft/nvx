@@ -3,8 +3,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.json"
+TOOL_MANIFEST="$SCRIPT_DIR/../../scripts/setup/tool-versions.conf"
 config_value() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"
+}
+# Reads one pin from the canonical setup-tool manifest.
+tool_value() {
+    local value
+    value="$(sed -n "s/^${1//./\\.}=//p" "$TOOL_MANIFEST")"
+    if [[ ! "$value" =~ $2 ]]; then
+        echo "tool manifest $TOOL_MANIFEST does not define a valid $1" >&2
+        exit 1
+    fi
+    printf '%s\n' "$value"
 }
 
 ROOT="${SPECULA_STATE_ROOT:-$(config_value state_root)}"
@@ -14,10 +25,13 @@ SPECULA_MIN_COMMIT="$(config_value specula_min_commit)"
 SPECULA_MIN_VERSION="$(config_value specula_min_version)"
 SPECULA_MAX_VERSION_EXCLUSIVE="$(config_value specula_max_version_exclusive)"
 COPILOT_VERSION=1.0.86
-RUST_VERSION=1.95.0
-RUSTUP_VERSION=1.29.1
-RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
-CARGO_NEXTEST_VERSION=0.9.133
+VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+$'
+RUST_VERSION="$(tool_value rust.toolchain "$VERSION_PATTERN")"
+RUSTUP_VERSION="$(tool_value rustup.version "$VERSION_PATTERN")"
+RUSTUP_ARTIFACT="$(tool_value rustup.artifacts.linux-x86_64.name '^[A-Za-z0-9._/{}-]+$')"
+RUSTUP_ARTIFACT="${RUSTUP_ARTIFACT//\{version\}/$RUSTUP_VERSION}"
+RUSTUP_SHA256="$(tool_value rustup.artifacts.linux-x86_64.sha256 '^[0-9a-f]{64}$')"
+CARGO_NEXTEST_VERSION="$(tool_value cargo_nextest.version "$VERSION_PATTERN")"
 SOURCE="$(config_value specula_source)"
 VENV="$(dirname -- "$(dirname -- "$(config_value specula_binary)")")"
 TLA2TOOLS_SHA256=9d36716ffb5e49d1ba8fae4651eba59f3189887e12eb90e204a42d2e6e993fef
@@ -102,7 +116,7 @@ if ! sudo -u "$RUNNER_USER" -H bash -lc "command -v rustup >/dev/null 2>&1"; the
     trap 'rm -f "$rustup_installer"' EXIT
     curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
         --output "$rustup_installer" \
-        "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"
+        "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$RUSTUP_ARTIFACT"
     printf '%s  %s\n' "$RUSTUP_SHA256" "$rustup_installer" |
         sha256sum --check --strict
     chmod 0755 "$rustup_installer"

@@ -4358,16 +4358,22 @@ python3() {
         linux_setup = (
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
         ).read_text(encoding="utf-8")
+        manifest = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "tool-versions.conf"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn('$SccacheVersion = "0.18.0"', windows_setup)
+        # The manifest pins sccache and its checksums, and both runner setups
+        # install that release; test_tool_versions.py checks the manifest.
+        self.assertRegex(manifest, r"(?m)^sccache\.version=[0-9]+\.[0-9]+\.[0-9]+$")
+        for platform in ("linux-x86_64", "windows-x86_64"):
+            self.assertRegex(
+                manifest,
+                rf"(?m)^sccache\.artifacts\.{platform}\.sha256=[0-9a-f]{{64}}$",
+            )
+        self.assertIn("\n    tool_manifest_artifact sccache\n", linux_setup)
         self.assertIn(
-            '$SccacheSha256 = "1a63c1be2beab3f04d27e4cc145443e092e02d3dd83a51030989829d7023091b"',
+            '\n$sccacheRelease = Get-ToolArtifact $ToolManifest "sccache" $ToolPlatform\n',
             windows_setup,
-        )
-        self.assertIn("SCCACHE_VERSION=0.18.0", linux_setup)
-        self.assertIn(
-            "SCCACHE_SHA256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89",
-            linux_setup,
         )
         for configuration in (windows_setup, linux_setup):
             self.assertIn("RUSTC_WRAPPER", configuration)
@@ -4723,17 +4729,30 @@ python3() {
         self.assertIn("rust-toolchain.toml", ReleaseBuildConstants.PROJECT_SOURCE_PATHS)
 
         setup = root / "scripts" / "setup"
-        for path, pattern in (
-            (setup / "setup-linux-runner.sh", r"^RUST_TOOLCHAIN=(.*)$"),
-            (setup / "setup-linux-mshv.sh", r"^RUST_TOOLCHAIN=(.*)$"),
-            (setup / "setup-windows-whp.ps1", r'^\$RustToolchain = "(.*)"$'),
-            (root / ".github" / "specula" / "setup-runner.sh", r"^RUST_VERSION=(.*)$"),
+        # The setup scripts and the Specula runner setup take the release from
+        # the setup tool manifest, which rustup cannot read.
+        self.assertEqual(
+            re.findall(
+                r"^rust\.toolchain=(.*)$",
+                (setup / "tool-versions.conf").read_text(encoding="utf-8"),
+                re.MULTILINE,
+            ),
+            [toolchain],
+        )
+        for path, reader in (
+            (setup / "setup-linux-runner.sh", "\n    RUST_TOOLCHAIN=$tool_value\n"),
+            (setup / "setup-linux-mshv.sh", "\n    RUST_TOOLCHAIN=$tool_value\n"),
+            (
+                setup / "setup-windows-whp.ps1",
+                '\n$RustToolchain = Get-ToolManifestValue $ToolManifest "rust.toolchain"\n',
+            ),
+            (
+                root / ".github" / "specula" / "setup-runner.sh",
+                '\nRUST_VERSION="$(tool_value rust.toolchain "$VERSION_PATTERN")"\n',
+            ),
         ):
             with self.subTest(path=path.name):
-                self.assertEqual(
-                    re.findall(pattern, path.read_text(encoding="utf-8"), re.MULTILINE),
-                    [toolchain],
-                )
+                self.assertIn(reader, path.read_text(encoding="utf-8"))
 
     def test_ci_takes_rust_toolchain_from_repository_pin(self):
         github = BuildConstants.REPO_ROOT / ".github"

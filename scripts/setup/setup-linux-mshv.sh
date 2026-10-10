@@ -2,15 +2,14 @@
 
 set -eu
 
-# The release that rust-toolchain.toml pins.
-RUST_TOOLCHAIN=1.95.0
-RUSTUP_VERSION=1.29.1
-RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 PYTHON_MINIMUM_VERSION=3.10.0
-CARGO_NEXTEST_VERSION=0.9.133
 
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 workspace=$(CDPATH='' cd -- "${script_directory}/../.." && pwd)
+# The versions, artifacts, and checksums of the tools that this script
+# installs; stage the manifest next to the script.
+tool_manifest=${script_directory}/tool-versions.conf
+tool_platform=linux-x86_64
 guest_bundle=
 bundle_only=false
 check_only=false
@@ -44,6 +43,128 @@ require_command() {
 
 version_at_least() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
+}
+
+tool_manifest_error() {
+    die "invalid tool manifest ${tool_manifest}:${tool_manifest_line}: $*"
+}
+
+# Reads the tool manifest as data, without sourcing or evaluating it, so a
+# fresh host needs nothing beyond the shell. Every line must be well formed.
+load_tool_manifest() {
+    [ -f "$tool_manifest" ] || die "tool manifest not found: ${tool_manifest}"
+    carriage_return=$(printf '\r')
+    blank=$(printf ' \t')
+    tool_manifest_entries=
+    tool_manifest_line=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        tool_manifest_line=$((tool_manifest_line + 1))
+        line=${line%"$carriage_return"}
+        case "$line" in
+            '' | '#'*) continue ;;
+            *["$blank"]*) tool_manifest_error "expected KEY=VALUE without spaces" ;;
+            *=*) ;;
+            *) tool_manifest_error "expected KEY=VALUE without spaces" ;;
+        esac
+        key=${line%%=*}
+        value=${line#*=}
+        tool=${key%%.*}
+        case "$tool" in
+            '' | [!a-z]* | *[!a-z0-9_]*) tool_manifest_error "unsupported key: ${key}" ;;
+        esac
+        case "${key#"$tool"}" in
+            .version | .toolchain) field=version ;;
+            .artifacts.*.name | .artifacts.*.sha256)
+                field=${key##*.}
+                platform=${key#"$tool".artifacts.}
+                platform=${platform%.*}
+                case "$platform" in
+                    '' | *[!a-z0-9_-]*) tool_manifest_error "unsupported key: ${key}" ;;
+                    linux-x86_64 | windows-x86_64) ;;
+                    *) tool_manifest_error "unsupported platform: ${platform}" ;;
+                esac
+                ;;
+            *) tool_manifest_error "unsupported key: ${key}" ;;
+        esac
+        case "${tool_manifest_entries} " in
+            *" ${key}="*) tool_manifest_error "duplicate key: ${key}" ;;
+        esac
+        case "$field" in
+            version)
+                case "$value" in
+                    *[!0-9.]* | .* | *. | *..* | *.*.*.*) value= ;;
+                    *.*.*) ;;
+                    *) value= ;;
+                esac
+                ;;
+            sha256)
+                case "$value" in
+                    *[!0-9a-f]*) value= ;;
+                esac
+                [ "${#value}" -eq 64 ] || value=
+                ;;
+            name)
+                name=$value
+                while :; do
+                    case "$name" in
+                        *'{version}'*) name=${name%%'{version}'*}v${name#*'{version}'} ;;
+                        *) break ;;
+                    esac
+                done
+                case "$name" in
+                    '' | /* | */ | *//* | .* | */.* | *[!A-Za-z0-9._/-]*) value= ;;
+                esac
+                ;;
+        esac
+        [ -n "$value" ] ||
+            tool_manifest_error "invalid value for ${key}: ${line#*=}"
+        tool_manifest_entries="${tool_manifest_entries} ${key}=${value}"
+    done <"$tool_manifest"
+}
+
+# Sets tool_value to the value of a key in the loaded tool manifest.
+tool_manifest_value() {
+    case "${tool_manifest_entries} " in
+        *" ${1}="*) ;;
+        *) die "tool manifest ${tool_manifest} does not define ${1}" ;;
+    esac
+    tool_value=${tool_manifest_entries#*" ${1}="}
+    tool_value=${tool_value%%" "*}
+}
+
+# Sets tool_version, tool_artifact, and tool_sha256 to a tool's release and
+# the name and checksum of its artifact for tool_platform.
+tool_manifest_artifact() {
+    tool_manifest_value "${1}.version"
+    tool_version=$tool_value
+    tool_manifest_value "${1}.artifacts.${tool_platform}.name"
+    tool_artifact=
+    while :; do
+        case "$tool_value" in
+            *'{version}'*)
+                tool_artifact=${tool_artifact}${tool_value%%'{version}'*}${tool_version}
+                tool_value=${tool_value#*'{version}'}
+                ;;
+            *) break ;;
+        esac
+    done
+    tool_artifact=${tool_artifact}${tool_value}
+    tool_manifest_value "${1}.artifacts.${tool_platform}.sha256"
+    tool_sha256=$tool_value
+}
+
+# Pins every tool that this script installs before it inspects or changes
+# the host.
+read_tool_versions() {
+    load_tool_manifest
+    tool_manifest_value rust.toolchain
+    RUST_TOOLCHAIN=$tool_value
+    tool_manifest_value cargo_nextest.version
+    CARGO_NEXTEST_VERSION=$tool_value
+    tool_manifest_artifact rustup
+    RUSTUP_VERSION=$tool_version
+    RUSTUP_ARTIFACT=$tool_artifact
+    RUSTUP_SHA256=$tool_sha256
 }
 
 run_as_root() {
@@ -92,7 +213,7 @@ install_rust_tools() {
         require_command curl
         installer=$(mktemp "${TMPDIR:-/tmp}/rustup-init-${RUSTUP_VERSION}.XXXXXX")
         trap 'rm -f "$installer"' 0 HUP INT TERM
-        installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init
+        installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_ARTIFACT}
         curl --fail --proto '=https' --tlsv1.2 --silent --show-error \
             --output "$installer" "$installer_url"
         printf '%s  %s\n' "$RUSTUP_SHA256" "$installer" | sha256sum --check -
@@ -290,6 +411,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+read_tool_versions
 workspace=$(CDPATH='' cd -- "$workspace" 2>/dev/null && pwd) ||
     die "workspace directory not found: $workspace"
 

@@ -523,8 +523,9 @@ cargo +RELEASE build -p guest_test_uefi --target x86_64-unknown-uefi --profile r
 ```
 
 Then change the release in `rust-toolchain.toml`,
-`OpenVMMBuildConstants.RUST_TOOLCHAIN`, the three setup scripts in
-`scripts/setup`, and the Specula runner setup together; a test in
+`OpenVMMBuildConstants.RUST_TOOLCHAIN`, and `rust.toolchain` in the
+[setup tool manifest](../scripts/setup/README.md#tool-versions), which the
+setup scripts and the Specula runner setup read, together; a test in
 `scripts/test_nvx_tools.py` fails while they differ. Update every self-hosted
 runner as the setup guide describes before the change merges.
 
@@ -591,7 +592,7 @@ the public OpenVMM submodule without a deploy key, grants access to the
 runner's `/dev/kvm`, installs the Python development tools into a virtual
 environment on the image's Python 3, which `validate-nvx` also uses, and
 installs Rust and cargo-nextest at the versions that
-`rust-toolchain.toml`, the crate manifest, and the Linux runner bootstrap
+`rust-toolchain.toml`, the crate manifest, and the setup tool manifest
 pin. It restores the shared guest artifacts
 through the `restore-only` input of
 [`build-guest-artifacts`](../.github/actions/build-guest-artifacts/action.yml)
