@@ -113,37 +113,46 @@ workload.
 ### Live host shares
 
 A live share exposes a host directory, such as a source checkout or a tool
-cache, to the workload without copying it into an image: edits are visible in
-both directions without staging or copy-back.
+cache, or a single host file, such as a settings file, to the workload without
+copying it into an image: edits are visible in both directions without staging
+or copy-back.
 
-The microVM has one virtio-fs slot, tag `microvm`. One `--mount` attaches a
-HostFs server to it. Several attach an aggregate instead, whose children, named
+The microVM has one virtio-fs slot, tag `microvm`. One `--mount` of a directory
+attaches a HostFs server to it. Several, or a shared file, attach an aggregate
+instead, whose children, named
 by their index and a digest of their guest target, are independent HostFs
 volumes, so the shares keep independent `ro` or `rw` modes and access
-policies. On every request, whichever guest
+policies. A file child serves only its file, never the file's directory or
+siblings, because the guest mounts the device's root, which is a directory.
+On every request, whichever guest
 mount or link reaches the share, the host enforces the share's mode and its
 denied, allowed, and writable paths, and accesses host files as the identity
 that `--mount-owner` selects. Guest mount flags are therefore not a security
 boundary, and the access policy adds no guest configuration. Before OpenVMM
-starts, NVX rejects policy paths outside their share and guest targets or host
-directories that equal or contain one another, because one share could
-otherwise hide another or reach its files under a different policy, and it
-rejects shares whose kernel command-line tokens exceed the sandbox's budget.
+starts, NVX rejects policy paths outside their share or for a shared file, and
+guest targets or host paths that equal or contain one another, because one
+share could otherwise hide another or reach its files under a different policy,
+and it rejects shares whose kernel command-line tokens exceed the sandbox's
+budget.
 [Machine and device ABI](machine-and-device-abi.md#filesystem) defines the
 device contract.
 
 OpenVMM appends one `virtfs_dir=`, `virtfs_tag=`, `virtfs_mode=` triplet for
 its share, and `virtfs_aggregate=1` for an aggregate, which it mounts
-read-write when any child is. NVX then adds one `nvx_share=NAME,TARGET,MODE`
-token per child. Because a child's name holds a digest of its target, a
+read-write when any child is. NVX then adds one
+`nvx_share=NAME,TARGET,MODE[,file]` token per child, where `file` marks a
+shared file. Because a child's name holds a digest of its target, a
 snapshot pins each target, and a restore that requests another target fails
 before the guest runs. The init agent parses every token, and creates every
 target, before it mounts anything, so a malformed bootstrap mounts nothing. It
 creates each target inside the container root one component at a time and
 refuses a path that crosses a symbolic link, so an image layer cannot redirect
-a share outside that root. It also refuses a repeated child, overlapping
+a share outside that root. The last component of a shared file's target is a
+regular file, which the agent creates when the container root lacks it, and of
+any other target a directory. It also refuses a repeated child, overlapping
 targets, and targets that the container entry helper later mounts or binds
-over, where the runtime would hide the share or write into it. A single share
+over, such as `/etc/machine-id`, where the runtime would hide the share or
+write into it. A single share
 is mounted at its target with its mode and `nosuid,nodev`. An aggregate is
 mounted at `/run/nvx/shares`, outside the container root, where its root lists
 the children and only root can enter, and each child is bound at its target
@@ -152,8 +161,9 @@ inherits the mounts, and teardown unmounts the binds in reverse order before
 the aggregate. Any
 refusal or mount failure aborts the sandbox with status 125 instead of
 starting the workload without its shares. A managed sandbox records its
-shares when it is provisioned and reattaches them on every start.
-[Live host-directory shares](../run.md#live-host-directory-shares) describes
+shares, including whether each is a file, when it is provisioned, and
+reattaches them on every start.
+[Live host shares](../run.md#live-host-shares) describes
 the options and their rules.
 
 ## Image preparation and distribution (Proposed)

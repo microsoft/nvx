@@ -1989,17 +1989,24 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
 
     @staticmethod
     def _host(child: str) -> Path:
-        return Path(child.split(",", 1)[1].rsplit(",", 1)[0])
+        value = child.removesuffix(",file")
+        return Path(value.split(",", 1)[1].rsplit(",", 1)[0])
 
     def _run(
         self,
         *,
         guest_writes_toolcache: bool = False,
         guest_links_children: bool = False,
+        guest_writes_settings: bool = False,
     ) -> list[list[str]]:
         launched: list[list[str]] = []
         children = self._children
         host = self._host
+        captured: dict[str, tuple[int, int]] = {}
+
+        def identity(path: Path) -> tuple[int, int]:
+            status = path.stat()
+            return status.st_dev, status.st_ino
 
         def guest(
             command: list[str], script: str, marker: bytes, **_kwargs: object
@@ -2008,15 +2015,22 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
             self.assertEqual(marker, microvm_tests.FILESYSTEM_SHARES_MARKER)
             self.assertIn("touch /run/nvx/shares/1/mutation", script)
             self.assertIn("ln /run/nvx/shares/1/seed /run/nvx/shares/0/linked", script)
-            workspace, toolcache, data = (host(child) for child in children(command))
+            self.assertIn("ls /run/nvx/shares/3/secret.json", script)
+            workspace, toolcache, data, settings, output = (
+                host(child) for child in children(command)
+            )
             (workspace / "from-guest").write_bytes(b"NVX-GUEST-WRITE\n")
             (workspace / "guest-directory").mkdir()
             with (data / "notes one.txt").open("ab") as notes:
                 notes.write(b"NVX-GUEST-NOTE\n")
+            output.write_bytes(b"NVX-GUEST-OUTPUT\n")
             if guest_writes_toolcache:
                 (toolcache / "mutation").write_bytes(b"")
             if guest_links_children:
                 (workspace / "linked").write_bytes(b"NVX-TOOLCACHE")
+            if guest_writes_settings:
+                with settings.open("ab") as file:
+                    file.write(b"append\n")
 
         class FakeProcess:
             def __init__(self, command: list[str], _log_path: Path) -> None:
@@ -2038,6 +2052,11 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
             def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
                 command = self.command
                 requested = children(command)
+                denied = [
+                    command[index + 1]
+                    for index, value in enumerate(command)
+                    if value == "--mount-deny"
+                ]
                 if "--snapshot-destination" in command:
                     snapshot = Path(
                         command[command.index("--snapshot-destination") + 1]
@@ -2046,6 +2065,8 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
                     for name in ("manifest.bin", "state.bin", "memory.bin"):
                         (snapshot / name).write_bytes(name.encode())
                     (host(requested[0]) / "journal").write_bytes(b"NVX-BEFORE")
+                    host(requested[4]).write_bytes(b"NVX-FILE-BEFORE")
+                    captured["settings"] = identity(host(requested[3]))
                     return openvmm_process.OpenvmmProcessResult(
                         0, b"NVX-FILESYSTEM-SHARES-BEFORE\n"
                     )
@@ -2056,26 +2077,47 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
                             b"requires the --mount-aggregate and --mount-child options"
                         )
                     elif (
-                        len(requested) != 3
+                        len(requested) != 5
                         or host(requested[0]).name != "workspace"
-                        or names != ["0", "1", "2"]
+                        or names != ["0", "1", "2", "3", "4"]
                     ):
                         error = b"do not match the snapshot contract"
+                    elif identity(host(requested[3])) != captured["settings"]:
+                        error = (
+                            b"restore-time filesystem root identity does not match "
+                            b"the snapshot attachment"
+                        )
                     else:
                         with (host(requested[0]) / "journal").open("ab") as journal:
                             journal.write(b"NVX-AFTER")
+                        with host(requested[4]).open("ab") as output:
+                            output.write(b"NVX-FILE-AFTER")
                         return openvmm_process.OpenvmmProcessResult(
                             0, b"NVX-FILESYSTEM-SHARES-AFTER\n"
                         )
                     return openvmm_process.OpenvmmProcessResult(1, error + b"\n")
                 if command.count("--mount") == 2:
                     error = b"the argument '--mount' cannot be used multiple times"
-                elif "--mount" in command:
+                elif "--mount" in command and "--mount-aggregate" in command:
                     error = b"'--mount-aggregate' cannot be used with '--mount'"
-                elif "secrets" in command:
+                elif "--mount" in command:
+                    error = b"microVM filesystem root is not a plain directory"
+                elif any(
+                    child.endswith(",file") and host(child).is_dir()
+                    for child in requested
+                ):
+                    error = b"microVM filesystem root is not a regular file"
+                elif any(
+                    not child.endswith(",file") and host(child).is_file()
+                    for child in requested
+                ):
+                    error = b"microVM filesystem root is not a plain directory"
+                elif "secrets" in denied:
                     error = b"--mount-deny requires an absolute host path"
+                elif any(Path(path).name == "settings.json" for path in denied):
+                    error = b"--mount-child 3 exposes the file settings.json"
                 else:
-                    error = b"host directories must not overlap"
+                    error = b"host paths must not overlap"
                 return openvmm_process.OpenvmmProcessResult(2, error + b"\n")
 
         with (
@@ -2104,14 +2146,23 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
         boot = launched[0]
         self.assertNotIn("--mount", boot)
         self.assertEqual(boot[boot.index("--mount-aggregate") + 1], "/run/nvx/shares")
-        workspace, toolcache, data = self._children(boot)
+        workspace, toolcache, data, settings, output = self._children(boot)
         self.assertTrue(workspace.startswith("0,") and workspace.endswith(",rw"))
         self.assertTrue(toolcache.startswith("1,") and toolcache.endswith(",ro"))
         self.assertTrue(data.startswith("2,") and data.endswith(",rw"))
+        # The files are children of their own, without their directories,
+        # which OpenVMM must find to be regular files.
+        self.assertTrue(
+            settings.startswith("3,") and settings.endswith("settings.json,ro,file")
+        )
+        self.assertTrue(
+            output.startswith("4,") and output.endswith("output.txt,rw,file")
+        )
         cmdline = boot[boot.index("--cmdline") + 1]
         self.assertIn(
             "nvx_share=0,/workspace,rw nvx_share=1,/opt/hostedtoolcache,ro "
-            "nvx_share=2,/srv/data,rw",
+            "nvx_share=2,/srv/data,rw nvx_share=3,/config/settings.json,ro,file "
+            "nvx_share=4,/results/output.txt,rw,file",
             cmdline,
         )
 
@@ -2130,31 +2181,55 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
         self.assertEqual(policy(boot, "--mount-allow"), ["public", "notes one.txt"])
         self.assertEqual(policy(boot, "--mount-write"), ["notes one.txt"])
 
-        # Four invalid sets fail before boot, then a capture with every share,
-        # four invalid restores, and the restore with every share in order.
-        self.assertEqual(len(launched), 1 + 4 + 1 + 5)
+        # Nine invalid sets fail before boot, then a capture with every share,
+        # four invalid restores, the restore with every share in order, and a
+        # restore after the host replaced the read-only file.
+        self.assertEqual(len(launched), 1 + 9 + 1 + 5 + 1)
         self.assertEqual(launched[1].count("--mount"), 2)
         self.assertEqual(len(self._children(launched[2])), 2)
-        capture = launched[5]
-        self.assertIn("--snapshot-destination", capture)
-        self.assertEqual(self._children(capture), [workspace, toolcache, data])
-        self.assertEqual(self._children(launched[6]), [workspace, toolcache])
+        # A file inside a directory child, a directory with the `file` flag, a
+        # file without it, a file as a lone share, and a file child named by a
+        # policy path.
+        inside = self._children(launched[3])
+        self.assertEqual(self._host(inside[1]), self._host(settings))
+        self.assertEqual(self._host(inside[0]), self._host(settings).parent)
         self.assertEqual(
-            [self._host(child).name for child in self._children(launched[7])],
-            ["toolcache", "workspace", "data"],
+            self._children(launched[4]),
+            [f"0,{self._host(settings).parent},ro,file"],
+        )
+        self.assertEqual(self._children(launched[5]), [f"0,{self._host(settings)},ro"])
+        self.assertTrue(
+            launched[6][launched[6].index("--mount") + 1].endswith("settings.json,ro")
+        )
+        self.assertEqual(
+            policy(launched[9], "--mount-deny")[-1], self._host(settings).name
+        )
+        capture = launched[10]
+        self.assertIn("--snapshot-destination", capture)
+        every = [workspace, toolcache, data, settings, output]
+        self.assertEqual(self._children(capture), every)
+        self.assertEqual(self._children(launched[11]), [workspace, toolcache])
+        self.assertEqual(
+            [self._host(child).name for child in self._children(launched[12])],
+            ["toolcache", "workspace", "data", "settings.json", "output.txt"],
         )
         # Renaming a child, with the same host directory, mode, and order, is
         # enough to fail.
         self.assertEqual(
-            self._children(launched[8]),
-            [workspace, toolcache, data.replace("2,", "data,", 1)],
+            self._children(launched[13]),
+            [workspace, toolcache, data.replace("2,", "data,", 1), settings, output],
         )
-        self.assertIn("--mount", launched[9])
-        self.assertEqual(self._children(launched[10]), [workspace, toolcache, data])
+        self.assertIn("--mount", launched[14])
+        self.assertEqual(self._children(launched[15]), every)
+        self.assertEqual(self._children(launched[16]), every)
 
     def test_scenario_rejects_a_write_to_the_read_only_share(self):
         with self.assertRaisesRegex(RuntimeError, "modified the read-only share"):
             self._run(guest_writes_toolcache=True)
+
+    def test_scenario_rejects_a_write_to_the_read_only_file(self):
+        with self.assertRaisesRegex(RuntimeError, "changed the shared files"):
+            self._run(guest_writes_settings=True)
 
     def test_scenario_rejects_a_hard_link_between_children(self):
         with self.assertRaisesRegex(RuntimeError, "hard link joined two children"):

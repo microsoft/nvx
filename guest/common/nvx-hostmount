@@ -2,10 +2,12 @@
 
 # Mounts the live host share that OpenVMM's virtfs_dir=, virtfs_tag=, and
 # virtfs_mode= tokens describe. When virtfs_aggregate=1 marks it as an
-# aggregate of several host directories, its root lists one child per
-# directory, which only root can enter, and each nvx_share=CHILD,TARGET,MODE
-# token binds one child at TARGET with MODE, without set-user-ID programs or
-# device nodes. With --unmount, the binds and then the share are unmounted.
+# aggregate of host directories and files, its root lists one child per
+# directory or file, which only root can enter, and each
+# nvx_share=CHILD,TARGET,MODE[,file] token binds one child at TARGET with
+# MODE, without set-user-ID programs or device nodes; the file suffix marks a
+# child that is a host file, which is bound at a file. With --unmount, the
+# binds and then the share are unmounted.
 
 fail() {
     echo "virtfs: $*" >&2
@@ -36,11 +38,19 @@ set +f
 [ -n "$vmode" ] || vmode=ro
 [ "$aggregate" = true ] || shares=
 
-# Splits the share specification $1 into share_child, share_target, and
-# share_mode.
+# Splits the share specification $1 into share_child, share_target,
+# share_mode, and share_kind, which is file for a child that is a host file
+# and directory otherwise.
 parse_share() {
     share_child=${1%%,*}
     share_rest=${1#*,}
+    share_kind=directory
+    case "$share_rest" in
+        *,file)
+            share_kind="file"
+            share_rest=${share_rest%,file}
+            ;;
+    esac
     share_target=${share_rest%,*}
     share_mode=${share_rest##*,}
     case "$share_child" in
@@ -50,6 +60,26 @@ parse_share() {
     case "$share_target" in /?*) ;; *) fail "invalid live share target in $1" ;; esac
     [ "$share_rest" != "$1" ] && [ "$share_target" != "$share_rest" ] ||
         fail "invalid live share $1"
+}
+
+# Reports whether $1 is a mount point. BusyBox's mountpoint inspects only
+# directories, so a bound file is found in the mount table instead.
+is_mount_point() {
+    if [ -d "$1" ]; then
+        mountpoint -q "$1"
+    else
+        awk -v target="$1" '$2 == target { found = 1 } END { exit !found }' \
+            /proc/self/mounts
+    fi
+}
+
+# Makes $1 a regular file to bind a file child at, creating it and its
+# missing directories unless it already is one. A link at $1 is refused
+# before anything is created, so that creating the file cannot write
+# through the link.
+make_file_mount_point() {
+    [ ! -L "$1" ] && mkdir -p "${1%/*}/" &&
+        { [ -e "$1" ] || : >"$1"; } && [ -f "$1" ]
 }
 
 if [ "${1:-}" = --unmount ]; then
@@ -62,7 +92,7 @@ if [ "${1:-}" = --unmount ]; then
     for share in $reversed; do
         set +f
         parse_share "$share"
-        if mountpoint -q "$share_target" && ! umount "$share_target"; then
+        if is_mount_point "$share_target" && ! umount "$share_target"; then
             echo "virtfs: failed to unmount live share $share_child at $share_target" >&2
             status=1
         fi
@@ -85,9 +115,16 @@ set -f
 for share in $shares; do
     set +f
     parse_share "$share"
-    [ -d "$vdir/$share_child" ] || fail "live share $share_child is not exported"
-    if ! mkdir -p "$share_target" ||
-        ! mount -o bind "$vdir/$share_child" "$share_target" ||
+    if [ "$share_kind" = file ]; then
+        [ -f "$vdir/$share_child" ] || fail "live share $share_child is not an exported file"
+        make_file_mount_point "$share_target" ||
+            fail "failed to create the file mount point of live share $share_child at $share_target"
+    else
+        [ -d "$vdir/$share_child" ] || fail "live share $share_child is not exported"
+        mkdir -p "$share_target" ||
+            fail "failed to create the mount point of live share $share_child at $share_target"
+    fi
+    if ! mount -o bind "$vdir/$share_child" "$share_target" ||
         ! mount -o "remount,bind,$share_mode,nosuid,nodev" "$share_target"; then
         fail "failed to bind live share $share_child at $share_target"
     fi

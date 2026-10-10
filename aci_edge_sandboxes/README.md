@@ -622,29 +622,33 @@ translation, for example to turn a host working directory into a
 
 - OpenVMM offers one virtio-fs device, which the backend attaches as an
   aggregate: a synthetic, read-only root that lists one exported host
-  directory per child, mounted at `/run/nvx/hostfs/root`, a guest directory
-  that only the guest's root can enter. The exported directories are the
-  outermost mapped directories and the parents of the outermost mapped files,
-  so mapped paths may lie anywhere, on any volume. The guest agent then
-  bind-mounts each mapped path at its guest path, read-only or read-write, so
-  workloads see only the mapped paths.
-- The host enforces each mapping's access. An exported directory is
-  read-write only if it holds a read-write mapping, and OpenVMM then limits
-  writes to its read-write mappings, so only a read-only path inside a
-  read-write mapping is read-only through the guest's bind mount alone. The
-  parent of mapped files exposes only its mapped paths: OpenVMM hides
-  everything else in it, so unmapped siblings are not exported at all.
-  Mapping a whole volume (`/` or `C:\`) is refused; map directories inside it.
-  So is mapping a file directly in a volume's root, such as `C:\notes.txt` or
-  `/notes.txt`, because its parent would be the volume's root; move the file
-  into a directory, and map the file or the directory.
+  directory or file per child, mounted at `/run/nvx/hostfs/root`, a guest
+  directory that only the guest's root can enter. The children are the
+  outermost mapped directories and the mapped files outside them, so mapped
+  paths may lie anywhere, on any volume. The guest agent then bind-mounts
+  each mapped path at its guest path, read-only or read-write, so workloads
+  see only the mapped paths.
+- The host enforces each mapping's access. A child is read-write only if it
+  holds a read-write mapping, and OpenVMM then limits writes to its
+  read-write mappings, so only a read-only path inside a read-write mapping
+  is read-only through the guest's bind mount alone. OpenVMM exports a mapped
+  file alone: the guest reaches neither its siblings nor its directory, which
+  it cannot list, inspect, or change, so a read-write file can be rewritten
+  in place but not replaced, renamed, or removed. OpenVMM follows the file's
+  name, so the guest sees the file that a host program, such as an editor,
+  saves over it, and the file's accesses fail with `EACCES` while anything
+  but a regular file holds the name. Start refuses to run a sandbox whose
+  mapped file a directory replaced, or whose mapped directory a file
+  replaced, and OpenVMM refuses such a child too, so a file grant never
+  becomes a directory grant. Mapping a whole volume (`/` or `C:\`) is
+  refused; map directories inside it.
 - Denied paths inside an exported directory are hidden by OpenVMM itself: they
   are absent from listings and inaccessible through any name, except a host
   hard link to a file inside a denied directory, which OpenVMM cannot tell
   from any other file. Below its exported directory, a path that OpenVMM hides
-  or singles out, such as a mapped file or a read-write path inside a
-  read-only one, must not contain colons, backslashes, links, or whitespace
-  other than spaces, and no name in it may begin or end with a space.
+  or singles out, such as a read-write path inside a read-only one, must not
+  contain colons, backslashes, links, or whitespace other than spaces, and no
+  name in it may begin or end with a space.
 - Mapped paths must exist and be directories or regular files. A path listed
   both read-only and read-write is mapped read-only. A denied path must not
   contain a mapped path, and a denied path that does not exist yet must not
@@ -653,16 +657,18 @@ translation, for example to turn a host working directory into a
   read-only file inside a read-write directory is refused. Mapping over the
   guest's own system directories (`/usr`, `/etc`, and so on) is refused.
   Violations are reported as `policy_validation`.
-- OpenVMM exposes at most 128 paths in each exported directory, so mapping
-  more than 128 individual files from one directory fails at provision with
-  `policy_validation`; map the directory instead. Likewise, OpenVMM hides at
-  most 128 denied paths, and singles out at most 128 read-write paths inside
-  read-only ones, in each exported directory.
-- A sandbox maps at most 4096 paths from at most 256 exported directories.
-  OpenVMM's command line must fit the 32,767 characters of a Windows process
+- A sandbox maps at most 4096 paths through at most 256 children. A policy
+  whose mapped directories, and mapped files outside them, would need more
+  children is refused rather than served through the directories that hold
+  its files, which would grant more than the files; map directories that
+  contain the files instead. OpenVMM hides at most 128 denied paths, and
+  singles out at most 128 read-write paths inside read-only ones, in each
+  exported directory.
+- OpenVMM's command line must fit the 32,767 characters of a Windows process
   command line, with 1,024 held in reserve, on every host, which typically
   leaves room for several hundred paths. Provision rejects a policy beyond
-  these limits with `policy_validation`.
+  these limits with `policy_validation`, as it does one whose children would
+  export one object twice, such as two mapped host hard links to one file.
 - Provision records the identity of every mapped and denied object inside a
   read-write mapping, and start refuses to run if one changed, so a workload
   cannot rename a denied or read-only object and leave a decoy at its path for

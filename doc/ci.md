@@ -266,14 +266,23 @@ managed sandbox then repeats
 the read-write check through `provision`, `start`, `exec`, and `stop`, and must
 report a successful outcome with a cleanly unmounted scratch filesystem, which
 shows that `stop` unmounted the share and overlay first. Each backend then
-attaches a read-write `/workspace` share and a read-only
-`/opt/hostedtoolcache` share to one sandbox at the same time, as the children
-of one aggregate virtio-fs device, each with its own denied subdirectory. The smoke script runs the read-write and read-only
+attaches a read-write `/workspace` share, a read-only `/opt/hostedtoolcache`
+share, a read-only `/config/settings.json` file, and a read-write
+`/results/output.txt` file to one sandbox at the same time, as the children
+of one aggregate virtio-fs device; each directory has its own denied
+subdirectory, and each file lies beside a file that no share exposes. The
+smoke script runs the read-write and read-only
 checks on the two shares and verifies that a link in the read-write share
-cannot write into the read-only share; the host requires the guest's writes in
-the workspace, an unchanged tool cache, and unchanged denied files, both for a
-one-shot run and for a managed sandbox whose format-4 configuration must
-persist both shares and whose `stop` must leave a cleanly unmounted scratch
+cannot write into the read-only share. It requires each file to be a
+`virtiofs` bind mount with its mode, alone in its guest directory, the
+read-only file to refuse writes with `EROFS`, and the workload to rewrite the
+read-write file but neither remove nor rename either one. The host requires
+the guest's writes in the workspace and the read-write file, an unchanged tool
+cache, read-only file, and denied files, and unchanged files beside the shared
+files, both for a
+one-shot run and for a managed sandbox whose format-6 configuration must
+persist every share and its kind and whose `stop` must leave a cleanly
+unmounted scratch
 filesystem. Each backend then attaches a read-write `/workspace` share whose
 [access policy](run.md#access-policy) denies `nvx-denied`, allows
 `nvx-denied/nvx-allowed`, and makes only `nvx-writable` writable, with every

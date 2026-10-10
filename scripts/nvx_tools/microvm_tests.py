@@ -5444,24 +5444,37 @@ def _tree_contents(root: Path) -> dict[str, bytes | None]:
     return contents
 
 
-# The guest binds each child of the aggregate at its target with its mode.
+# The guest binds each child of the aggregate at its target with its mode, and
+# each file child at a file.
 _SHARE_TOKENS = (
     "nvx_share=0,/workspace,rw nvx_share=1,/opt/hostedtoolcache,ro "
-    "nvx_share=2,/srv/data,rw"
+    "nvx_share=2,/srv/data,rw nvx_share=3,/config/settings.json,ro,file "
+    "nvx_share=4,/results/output.txt,rw,file"
 )
+
+
+def _shared_files(files: Path) -> tuple[Path, Path]:
+    """Return the read-only settings file and the read-write output file that
+    the filesystem-shares scenario shares from `files`, each beside a file
+    that it does not share."""
+    return files / "config" / "settings.json", files / "results" / "output.txt"
 
 
 def _aggregate_arguments(
     workspace: Path,
     toolcache: Path,
     data: Path,
-    names: tuple[str, str, str] = ("0", "1", "2"),
+    files: Path,
+    names: tuple[str, str, str, str, str] = ("0", "1", "2", "3", "4"),
 ) -> tuple[str, ...]:
     """Return the OpenVMM options that share the read-write workspace, the
-    read-only tool cache, and the data directory as the children `names` of
-    one aggregate. The data directory's root hides everything but `public` and
-    `notes one.txt`, and only the notes are writable."""
-    workspace_name, toolcache_name, data_name = names
+    read-only tool cache, the data directory, and the settings and output
+    files below `files` as the children `names` of one aggregate. The data
+    directory's root hides everything but `public` and `notes one.txt`, and
+    only the notes are writable. The settings file is read-only and the output
+    file read-write, and neither shares its directory."""
+    workspace_name, toolcache_name, data_name, settings_name, output_name = names
+    settings, output = _shared_files(files)
     return (
         "--mount-aggregate",
         "/run/nvx/shares",
@@ -5471,6 +5484,10 @@ def _aggregate_arguments(
         f"{toolcache_name},{toolcache},ro",
         "--mount-child",
         f"{data_name},{data},rw",
+        "--mount-child",
+        f"{settings_name},{settings},ro,file",
+        "--mount-child",
+        f"{output_name},{output},rw,file",
         "--mount-deny",
         str(data),
         "--mount-allow",
@@ -5491,6 +5508,7 @@ def _shares_command(
     workspace: Path,
     toolcache: Path,
     data: Path,
+    files: Path,
 ) -> list[str]:
     command = workload_boot_command(
         executable,
@@ -5500,7 +5518,7 @@ def _shares_command(
         memory_mib,
         f"quiet loglevel=0 {_SHARE_TOKENS}",
     )
-    command.extend(_aggregate_arguments(workspace, toolcache, data))
+    command.extend(_aggregate_arguments(workspace, toolcache, data, files))
     return command
 
 
@@ -5514,17 +5532,22 @@ def run_filesystem_shares(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    """Attach a read-write workspace, a read-only tool cache, and a data
-    directory with a hidden root together, as the children of one aggregate."""
+    """Attach a read-write workspace, a read-only tool cache, a data directory
+    with a hidden root, and a read-only and a read-write file, each without
+    its directory, together, as the children of one aggregate."""
     with tempfile.TemporaryDirectory(prefix="nvx-filesystem-shares-") as temporary:
         root = Path(temporary)
         workspace = root / "workspace"
         toolcache = root / "toolcache"
         data = root / "data"
+        files = root / "files"
+        settings, output = _shared_files(files)
         (workspace / "secrets").mkdir(parents=True)
         (toolcache / "tools").mkdir(parents=True)
         (toolcache / "credentials").mkdir()
         (data / "public").mkdir(parents=True)
+        settings.parent.mkdir(parents=True)
+        output.parent.mkdir(parents=True)
         (workspace / "seed").write_bytes(b"NVX-WORKSPACE")
         (workspace / "secrets" / "token").write_bytes(b"NVX-SECRET")
         (toolcache / "seed").write_bytes(b"NVX-TOOLCACHE")
@@ -5533,10 +5556,23 @@ def run_filesystem_shares(
         (data / "public" / "readme").write_bytes(b"NVX-PUBLIC")
         (data / "notes one.txt").write_bytes(b"NVX-NOTES\n")
         (data / "private.txt").write_bytes(b"NVX-PRIVATE")
+        settings.write_bytes(b"NVX-SETTINGS")
+        (settings.parent / "secret.json").write_bytes(b"NVX-CONFIG-SECRET")
+        output.write_bytes(b"NVX-OUTPUT\n")
+        (output.parent / "other.txt").write_bytes(b"NVX-OTHER")
         toolcache_contents = _tree_contents(toolcache)
+        files_contents = _tree_contents(files)
 
         command = _shares_command(
-            executable, backend, kernel, initrd, memory_mib, workspace, toolcache, data
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            workspace,
+            toolcache,
+            data,
+            files,
         )
         command.extend(
             (
@@ -5570,6 +5606,12 @@ def run_filesystem_shares(
             raise RuntimeError(
                 "guest changed the data share beyond its one writable path"
             )
+        files_contents["results/output.txt"] = b"NVX-GUEST-OUTPUT\n"
+        if _tree_contents(files) != files_contents:
+            raise RuntimeError(
+                "guest changed the shared files' directories, the read-only "
+                "file, or the read-write file other than as it wrote"
+            )
 
         nested = workspace / "nested"
         nested.mkdir()
@@ -5598,6 +5640,48 @@ def run_filesystem_shares(
                 ),
                 b"must not overlap",
             ),
+            # A file overlaps a directory child that contains it.
+            (
+                "file-inside-child",
+                (
+                    "--mount-aggregate",
+                    "/run/nvx/shares",
+                    "--mount-child",
+                    f"0,{settings.parent},rw",
+                    "--mount-child",
+                    f"1,{settings},ro,file",
+                ),
+                b"must not overlap",
+            ),
+            # The `file` flag, not the host object, decides a child's kind, so
+            # a directory never stands in for a file, nor a file for a
+            # directory.
+            (
+                "directory-as-file",
+                (
+                    "--mount-aggregate",
+                    "/run/nvx/shares",
+                    "--mount-child",
+                    f"0,{settings.parent},ro,file",
+                ),
+                b"not a regular file",
+            ),
+            (
+                "file-as-directory",
+                (
+                    "--mount-aggregate",
+                    "/run/nvx/shares",
+                    "--mount-child",
+                    f"0,{settings},ro",
+                ),
+                b"not a plain directory",
+            ),
+            # The guest mounts the root of a lone share, which is a directory.
+            (
+                "file-mount",
+                ("--mount", f"/config/settings.json,{settings},ro"),
+                b"not a plain directory",
+            ),
         ):
             invalid = workload_boot_command(
                 executable, backend, kernel, initrd, memory_mib, "quiet loglevel=0"
@@ -5613,6 +5697,8 @@ def run_filesystem_shares(
                 b"cannot be used with",
             ),
             ("relative-deny", ("--mount-deny", "secrets"), b"absolute host path"),
+            # A file child's mode applies to the whole file.
+            ("file-policy", ("--mount-deny", str(settings)), b"exposes the file"),
         ):
             invalid = _shares_command(
                 executable,
@@ -5623,6 +5709,7 @@ def run_filesystem_shares(
                 workspace,
                 toolcache,
                 data,
+                files,
             )
             invalid.extend(arguments)
             _expect_boot_failure(
@@ -5642,6 +5729,7 @@ def run_filesystem_shares(
                     workspace,
                     toolcache,
                     data,
+                    files,
                 ),
                 "--snapshot-destination",
                 str(snapshot),
@@ -5665,7 +5753,7 @@ def run_filesystem_shares(
             raise RuntimeError("aggregate snapshot source crossed the capture boundary")
         fingerprint = _snapshot_fingerprint(snapshot)
 
-        aggregate = _aggregate_arguments(workspace, toolcache, data)
+        aggregate = _aggregate_arguments(workspace, toolcache, data, files)
         for name, arguments, expected in (
             (
                 "missing-share",
@@ -5681,13 +5769,15 @@ def run_filesystem_shares(
             ),
             (
                 "swapped-shares",
-                _aggregate_arguments(toolcache, workspace, data),
+                _aggregate_arguments(toolcache, workspace, data, files),
                 b"do not match the snapshot contract",
             ),
             # The children's names pin the targets where the guest bound them.
             (
                 "renamed-share",
-                _aggregate_arguments(workspace, toolcache, data, ("0", "1", "data")),
+                _aggregate_arguments(
+                    workspace, toolcache, data, files, ("0", "1", "data", "3", "4")
+                ),
                 b"do not match the snapshot contract",
             ),
             (
@@ -5720,8 +5810,27 @@ def run_filesystem_shares(
             raise RuntimeError("aggregate snapshot restore modified snapshot artifacts")
         if (workspace / "journal").read_bytes() != b"NVX-BEFORENVX-AFTER":
             raise RuntimeError("read-write share did not resume after restore")
+        if output.read_bytes() != b"NVX-FILE-BEFORENVX-FILE-AFTER":
+            raise RuntimeError("read-write file did not resume after restore")
         if _tree_contents(toolcache) != toolcache_contents:
             raise RuntimeError("restored guest modified the read-only share")
+        if settings.read_bytes() != b"NVX-SETTINGS":
+            raise RuntimeError("restored guest modified the read-only file")
+
+        # A snapshot pins the object that a file child names, so a file that
+        # the host puts in its place, such as by saving over it, is another.
+        replacement = settings.with_name("settings.json.new")
+        replacement.write_bytes(b"NVX-SETTINGS")
+        replacement.replace(settings)
+        replaced = snapshot_restore_command(executable, backend, snapshot)
+        replaced.extend(aggregate)
+        _expect_process_failure(
+            replaced,
+            output_dir / "filesystem-shares-replaced-file.log",
+            timeout,
+            b"root identity does not match",
+            (FILESYSTEM_SHARES_AFTER_MARKER,),
+        )
 
 
 def _policy_arguments(share: Path) -> tuple[str, ...]:

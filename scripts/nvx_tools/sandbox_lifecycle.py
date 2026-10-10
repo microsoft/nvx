@@ -52,12 +52,23 @@ MULTI_MOUNT_CONFIG_FORMAT = 4
 # configuration with either lists every share under `mounts` in a format that
 # they reject.
 POLICY_CONFIG_FORMAT = 5
+# Format-5 readers know only directory shares, so a configuration with a file
+# share lists every share under `mounts`, with its kind, in a format that they
+# reject rather than share a directory that later appears at the file's path.
+FILE_MOUNT_CONFIG_FORMAT = 6
 CONFIG_FORMATS = (
     CONFIG_FORMAT,
     MOUNT_CONFIG_FORMAT,
     OWNER_CONFIG_FORMAT,
     MULTI_MOUNT_CONFIG_FORMAT,
     POLICY_CONFIG_FORMAT,
+    FILE_MOUNT_CONFIG_FORMAT,
+)
+# The formats that list every share under `mounts`.
+MOUNTS_CONFIG_FORMATS = (
+    MULTI_MOUNT_CONFIG_FORMAT,
+    POLICY_CONFIG_FORMAT,
+    FILE_MOUNT_CONFIG_FORMAT,
 )
 OUTCOME_SCHEMA_VERSION = 1
 
@@ -228,9 +239,13 @@ def _serialize_launch(
         "cmdline": cmdline,
     }
     config_format = _config_format(launch.mounts)
-    if config_format in (MULTI_MOUNT_CONFIG_FORMAT, POLICY_CONFIG_FORMAT):
+    if config_format in MOUNTS_CONFIG_FORMATS:
         config["mounts"] = [
-            _serialize_mount(mount, policy=config_format == POLICY_CONFIG_FORMAT)
+            _serialize_mount(
+                mount,
+                policy=config_format != MULTI_MOUNT_CONFIG_FORMAT,
+                kind=config_format == FILE_MOUNT_CONFIG_FORMAT,
+            )
             for mount in launch.mounts
         ]
     else:
@@ -239,6 +254,8 @@ def _serialize_launch(
 
 
 def _config_format(mounts: tuple[SandboxMount, ...]) -> int:
+    if any(mount.kind == "file" for mount in mounts):
+        return FILE_MOUNT_CONFIG_FORMAT
     if any(mount.allowed_paths or mount.writable_paths for mount in mounts):
         return POLICY_CONFIG_FORMAT
     if len(mounts) > 1:
@@ -248,7 +265,9 @@ def _config_format(mounts: tuple[SandboxMount, ...]) -> int:
     return MOUNT_CONFIG_FORMAT if mounts else CONFIG_FORMAT
 
 
-def _serialize_mount(mount: SandboxMount, *, policy: bool = False) -> dict[str, Any]:
+def _serialize_mount(
+    mount: SandboxMount, *, policy: bool = False, kind: bool = False
+) -> dict[str, Any]:
     absolute = mount.absolute()
     serialized: dict[str, Any] = {
         "guest_target": absolute.guest_target,
@@ -260,6 +279,8 @@ def _serialize_mount(mount: SandboxMount, *, policy: bool = False) -> dict[str, 
     if policy:
         serialized["allowed_paths"] = list(absolute.allowed_paths)
         serialized["writable_paths"] = list(absolute.writable_paths)
+    if kind:
+        serialized["kind"] = absolute.kind
     return serialized
 
 
@@ -270,7 +291,9 @@ def _deserialize_paths(mount: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(str(path) for path in cast(list[object], paths))
 
 
-def _deserialize_mount(value: object, *, policy: bool = False) -> SandboxMount:
+def _deserialize_mount(
+    value: object, *, policy: bool = False, kind: bool = False
+) -> SandboxMount:
     if not isinstance(value, dict):
         raise TypeError("sandbox mount configuration must be an object")
     mount = cast(dict[str, Any], value)
@@ -283,17 +306,22 @@ def _deserialize_mount(value: object, *, policy: bool = False) -> SandboxMount:
         owner=str(mount.get("owner", "vmm")),
         allowed_paths=_deserialize_paths(mount, "allowed_paths") if policy else (),
         writable_paths=_deserialize_paths(mount, "writable_paths") if policy else (),
+        kind=str(mount["kind"]) if kind else "directory",
     )
 
 
 def _deserialize_mounts(config: dict[str, Any]) -> tuple[SandboxMount, ...]:
-    if config.get("format") in (MULTI_MOUNT_CONFIG_FORMAT, POLICY_CONFIG_FORMAT):
+    config_format = config.get("format")
+    if config_format in MOUNTS_CONFIG_FORMATS:
         mounts = config["mounts"]
         if not isinstance(mounts, list):
             raise TypeError("sandbox mounts configuration must be a list")
-        policy = config.get("format") == POLICY_CONFIG_FORMAT
         return tuple(
-            _deserialize_mount(mount, policy=policy)
+            _deserialize_mount(
+                mount,
+                policy=config_format != MULTI_MOUNT_CONFIG_FORMAT,
+                kind=config_format == FILE_MOUNT_CONFIG_FORMAT,
+            )
             for mount in cast(list[object], mounts)
         )
     mount = config.get("mount")

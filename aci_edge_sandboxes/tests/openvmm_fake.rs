@@ -1487,6 +1487,87 @@ fn filesystem_and_network_policies_reach_openvmm() {
 }
 
 #[test]
+fn mapped_files_are_exported_without_their_directories() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let base = fixture.directory.path();
+    // The layout of microsoft/nvx#282: a read-only and a read-write file, each beside a file
+    // that the policy does not map.
+    for (name, contents) in [
+        ("config/settings.json", "settings"),
+        ("config/secret.json", "secret"),
+        ("results/output.txt", "output"),
+        ("results/other.txt", "other"),
+    ] {
+        let path = base.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        readonly_paths: vec![base.join("config/settings.json")],
+        readwrite_paths: vec![base.join("results/output.txt")],
+        denied_paths: Vec::new(),
+    });
+    let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
+    nvx.start(&sandbox_id).unwrap();
+    let arguments = fixture.launch_arguments(&sandbox_id);
+    let value = |name: &str| {
+        arguments
+            .windows(2)
+            .filter(|pair| pair[0] == name)
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>()
+    };
+    // Each file is a child of its own, which OpenVMM must find to be a regular file, and nothing
+    // hides, exposes, or narrows its directory.
+    let children = value("--mount-child");
+    assert_eq!(children.len(), 2, "{arguments:?}");
+    for (child, (name, mode)) in children
+        .iter()
+        .zip([("config/settings.json", "ro"), ("results/output.txt", "rw")])
+    {
+        let (_, rest) = child.split_once(',').unwrap();
+        let rest = rest.strip_suffix(",file").expect(child);
+        let (host, child_mode) = rest.rsplit_once(',').unwrap();
+        assert!(Path::new(host).ends_with(name), "{child}");
+        assert_eq!(child_mode, mode, "{child}");
+    }
+    for option in ["--mount-deny", "--mount-allow", "--mount-write"] {
+        assert!(value(option).is_empty(), "{option}: {arguments:?}");
+    }
+    let record = state_json(&fixture, &sandbox_id, "sandbox.json");
+    let children = record["filesystem"]["children"].as_array().unwrap();
+    assert!(
+        children.iter().all(|child| child["file"] == true),
+        "{record}"
+    );
+    let table = fixture.mapping_table(&sandbox_id);
+    let entries: Vec<(&str, bool)> = table
+        .iter()
+        .map(|entry| {
+            (
+                entry["source"].as_str().unwrap(),
+                entry["read_only"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(entries, [("0", true), ("1", false)]);
+    nvx.stop(&sandbox_id).unwrap();
+
+    // A directory that replaces a granted file would grant all of it, so start refuses it.
+    let output = base.join("results/output.txt");
+    fs::remove_file(&output).unwrap();
+    fs::create_dir(&output).unwrap();
+    let error = nvx.start(&sandbox_id).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::BackendError, "{error}");
+    fs::remove_dir(&output).unwrap();
+    fs::write(&output, "output").unwrap();
+    nvx.start(&sandbox_id).unwrap();
+    nvx.stop(&sandbox_id).unwrap();
+    nvx.deprovision(&sandbox_id).unwrap();
+}
+
+#[test]
 fn mapped_files_are_not_working_directories() {
     let fixture = Fixture::new();
     let nvx = fixture.nvx();

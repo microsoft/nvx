@@ -20,11 +20,11 @@
 //! file, with a diagnostic and the `cwd-failed` category.
 //!
 //! Host paths are mapped as OpenVMM and the guest agent map them: the command line exports
-//! numbered `--mount-child` directories through `--mount-aggregate`, the kernel command line
-//! announces the number of mappings with `nvx_maps=`, and `MAPS` requests deliver the mapping
-//! table in order. The fake checks each entry against the exported directories, refuses
-//! workloads until the table is complete, and records it in `fake-openvmm-<token>-maps.json`
-//! next to the kernel.
+//! numbered `--mount-child` directories, and files with the `file` flag, through
+//! `--mount-aggregate`, the kernel command line announces the number of mappings with
+//! `nvx_maps=`, and `MAPS` requests deliver the mapping table in order. The fake checks each
+//! entry against the exported children, refuses workloads until the table is complete, and
+//! records it in `fake-openvmm-<token>-maps.json` next to the kernel.
 //!
 //! Each workload gets the environment that its exec request selects, in the order in which the
 //! guest agent builds it. The default environment is the documented guest bootstrap environment:
@@ -347,11 +347,19 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             {
                 let invalid = || format!("invalid --mount-child {child}");
                 let (name, rest) = child.split_once(',').ok_or_else(invalid)?;
+                // Like OpenVMM, a child exposes a directory or, with the `file` flag, a regular
+                // file, and refuses a host path of the other kind.
+                let (rest, file) = match rest.strip_suffix(",file") {
+                    Some(rest) => (rest, true),
+                    None => (rest, false),
+                };
                 let (host, mode) = rest.rsplit_once(',').ok_or_else(invalid)?;
-                if name != index.to_string()
-                    || !Path::new(host).is_dir()
-                    || !["ro", "rw"].contains(&mode)
-                {
+                let kind_matches = if file {
+                    Path::new(host).is_file()
+                } else {
+                    Path::new(host).is_dir()
+                };
+                if name != index.to_string() || !kind_matches || !["ro", "rw"].contains(&mode) {
                     return Err(invalid());
                 }
                 children.push(PathBuf::from(host));
@@ -369,7 +377,12 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     for option in ["--mount-deny", "--mount-allow", "--mount-write"] {
         for path in values.get(option).into_iter().flatten() {
             let path = Path::new(path);
-            if !path.exists() || !children.iter().any(|root| path.starts_with(root)) {
+            // No policy path names a file child, which contains nothing.
+            if !path.exists()
+                || !children
+                    .iter()
+                    .any(|root| root.is_dir() && path.starts_with(root))
+            {
                 return Err(format!("invalid {option} {}", path.display()));
             }
         }
