@@ -126,6 +126,12 @@ Change OpenVMM through a pull request to `nanvix/openvmm` that follows
 including their Clippy, rustdoc, test, and formatting checks, then promote
 the reviewed revision into NVX.
 
+`nanvix/openvmm` is a fork of
+[microsoft/openvmm](https://github.com/microsoft/openvmm). The
+[OpenVMM upstream roadmap](openvmm-upstream-roadmap.md) groups the fork's
+microVM commits into planned upstream pull requests and marks those that stay
+fork-only.
+
 ### Pin promotion
 
 A pin promotion moves the `openvmm` gitlink to a reviewed OpenVMM revision:

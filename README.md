@@ -78,3 +78,5 @@ python scripts\nvx.py run
 - [Package and source delivery](doc/distribution.md) - Instructions for packaging and distributing
 	NVX.
 - [Contributing](doc/contribute.md) - Guidelines for contributing to NVX.
+- [OpenVMM upstream roadmap](doc/openvmm-upstream-roadmap.md) - Plan for upstreaming the OpenVMM
+  fork's microVM commits.
