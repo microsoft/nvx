@@ -756,7 +756,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 | `--timeout SECONDS` | `10` | Set the time allowed for each boot marker. |
 | `--teardown-mode {guest-exit,host-terminate,host-sigterm}` | `guest-exit` | Select how to stop a measured VM; `host-sigterm` is a deprecated alias. |
 | `--skip-build` | off | Reuse existing release binaries. |
-| `--snapshot-profile` | off | Retain OpenVMM lifecycle phase samples and host counters; implied by the `snapshot-profile` suite. |
+| `--snapshot-profile` | off | Retain OpenVMM lifecycle phase samples and host counters, and on Windows sample storage, CPU, writeback, and Defender telemetry during each capture; implied by the `snapshot-profile` suite. |
 | `--cache-state {warm,cold,both}` | `both` | Select artifact cache states for the `snapshot-profile` suite. |
 | `--output PATH` | none | Write the benchmark result as JSON. |
 | `--output-dir PATH` | none | Write canonical workload logs to a directory. |
@@ -778,6 +778,8 @@ too: `auto` rejects such a catalog without falling back.
 The `e2e` suite uses the general memory size and measures cold start, snapshot
 generation, snapshot restore, guest-exit teardown, and peak RSS against the
 shell-ready markers. CI uses the default 128 MiB baseline.
+JSON results and workload metadata record the benchmark host's provenance under
+`host`, without credentials or Azure resource identifiers.
 See [Benchmark](benchmarks.md) for suite semantics, platform support, metric
 definitions, and complete examples.
 
@@ -799,6 +801,7 @@ python3 scripts/nvx.py performance collect
     [--require-shared-suite]
     [--require-shell-snapshot-restore-512]
     [--lifecycle-input PATH]
+    [--lifecycle-attempt-log PATH]
     [--summary PATH]
 ```
 
@@ -810,7 +813,14 @@ restore metric from a 2-, 4-, or 8-vCPU run.
 result, producing the 29-metric microVM CI result. A directory whose metadata
 selects `device-io` is collected as five additional ABI-2, one-vCPU `ops/s`
 metrics; CI merges them into a 34-metric one-vCPU result.
-`--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS diagnostics.
+`--lifecycle-attempt-log` reads the attempt log that `validate-openvmm`
+records. The `--lifecycle-input` file must be a byte-identical copy of exactly
+one valid logged attempt, or collection fails before it writes a CSV; the
+command names that attempt.
+`--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS
+diagnostics, the benchmark host provenance, and any snapshot-generation storage
+telemetry. With `--lifecycle-attempt-log`, it also lists every attempt, marks
+the published one, and reports the telemetry of rejected attempts.
 
 #### `performance validate-openvmm`
 
@@ -818,12 +828,16 @@ metrics; CI merges them into a 34-metric one-vCPU result.
 python3 scripts/nvx.py performance validate-openvmm
     --platform PLATFORM
     --input PATH
+    [--attempt-log PATH]
 ```
 
 Validates a complete 128 MiB, guest-exit OpenVMM `e2e` result without
 writing a CSV. Snapshot-generation instability exits with status 75 so
 callers can remeasure the temporary host condition selectively; other
-malformed or incomplete inputs exit with status 2.
+malformed or incomplete inputs exit with status 2. `--attempt-log` appends
+the input's path, SHA-256 digest, outcome (`valid`, `unstable`, or
+`invalid`), exit status, and error to a JSON attempt log, creating it on the
+first attempt.
 
 #### `performance collect-openvmm`
 

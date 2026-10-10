@@ -4951,6 +4951,23 @@ python3() {
                     script.count("Lifecycle snapshot generation was unstable"),
                     1,
                 )
+                self.assertEqual(script.count("--attempt-log"), 1)
+                self.assertIn("acceptance-attempts.json", script)
+        # Publication names the attempt that supplied the lifecycle metrics.
+        for step, log in (
+            (
+                "Publish Linux performance results",
+                '--lifecycle-attempt-log "${run_dir}/acceptance-attempts.json"',
+            ),
+            (
+                "Publish Windows performance results",
+                '--lifecycle-attempt-log "$RunDir/acceptance-attempts.json"',
+            ),
+        ):
+            with self.subTest(step=step):
+                script = _composite_action_script(action, step)
+                self.assertEqual(script.count(log), 1)
+                self.assertLess(script.index("--lifecycle-input"), script.index(log))
 
     def test_windows_benchmarks_use_provisioned_data_volume_scratch(self):
         action = (
@@ -5385,6 +5402,8 @@ function python {
         $global:LASTEXITCODE = $script:BenchmarkStatus
     }
     elseif ($args[1] -eq "performance") {
+        $log = $args[[Array]::IndexOf($args, "--attempt-log") + 1]
+        Add-Content -LiteralPath "attempt-logs.txt" -Value $log
         $global:LASTEXITCODE = $script:ValidationStatuses[$script:ValidationCount]
         $script:ValidationCount += 1
     }
@@ -5413,6 +5432,13 @@ function python {
                 output.mkdir(parents=True)
                 accepted = output / "acceptance.json"
                 accepted.write_text('{"attempt":"stale"}', encoding="utf-8")
+                # A rerun in the same directory must not keep a previous
+                # run's attempt log or later attempts.
+                attempt_log = output / "acceptance-attempts.json"
+                attempt_log.write_text('{"attempts":"stale"}', encoding="utf-8")
+                (output / "acceptance-attempt-2.json").write_text(
+                    '{"attempt":"stale"}', encoding="utf-8"
+                )
                 setup = (
                     "$ValidationStatuses = @("
                     + ", ".join(str(status) for status in statuses)
@@ -5434,6 +5460,20 @@ function python {
                 )
                 expected_status = benchmark_status or statuses[-1]
                 self.assertEqual(result.returncode, expected_status, result.stderr)
+                self.assertFalse(attempt_log.exists())
+                validations = root / "attempt-logs.txt"
+                self.assertEqual(
+                    (
+                        validations.read_text(encoding="utf-8").splitlines()
+                        if validations.exists()
+                        else []
+                    ),
+                    [
+                        "data/runs/windows-whp-virtual-machine/microvm-v2/1vcpu/"
+                        "acceptance-attempts.json"
+                    ]
+                    * (0 if benchmark_status else len(statuses)),
+                )
                 self.assertEqual(
                     sorted(path.name for path in output.glob("acceptance-attempt-*")),
                     [
@@ -5477,12 +5517,13 @@ function python {
 benchmark_count=0
 validation_count=0
 python3() {
-    local argument output="" input="" platform="" previous=""
+    local argument output="" input="" platform="" attempt_log="" previous=""
     for argument in "$@"; do
         case "${previous}" in
         --output) output="${argument}" ;;
         --input) input="${argument}" ;;
         --platform) platform="${argument}" ;;
+        --attempt-log) attempt_log="${argument}" ;;
         esac
         previous="${argument}"
     done
@@ -5495,7 +5536,7 @@ python3() {
     fi
     if [[ "${2-} ${3-}" == "performance validate-openvmm" ]]; then
         validation_count=$((validation_count + 1))
-        echo "validate ${platform} ${input}"
+        echo "validate ${platform} ${input} ${attempt_log}"
         return "${VALIDATION_STATUSES[validation_count - 1]}"
     fi
     echo "unexpected command: $*" >&2
@@ -5525,6 +5566,13 @@ python3() {
                 output.mkdir(parents=True)
                 accepted = output / "acceptance.json"
                 accepted.write_text('{"attempt":"stale"}', encoding="utf-8")
+                # A rerun in the same directory must not keep a previous
+                # run's attempt log or later attempts.
+                attempt_log = output / "acceptance-attempts.json"
+                attempt_log.write_text('{"attempts":"stale"}', encoding="utf-8")
+                (output / "acceptance-attempt-2.json").write_text(
+                    '{"attempt":"stale"}', encoding="utf-8"
+                )
                 setup = (
                     "VALIDATION_STATUSES=("
                     + " ".join(str(status) for status in statuses)
@@ -5549,6 +5597,7 @@ python3() {
                 )
                 expected_status = benchmark_status or statuses[-1]
                 self.assertEqual(result.returncode, expected_status, result.stderr)
+                self.assertFalse(attempt_log.exists())
                 expected_stdout: list[str] = []
                 for index in range(1, len(statuses) + 1):
                     attempt = f"{run_dir}/acceptance-attempt-{index}.json"
@@ -5559,7 +5608,10 @@ python3() {
                         )
                     expected_stdout.append(f"benchmark {platform} {attempt}")
                     if not benchmark_status:
-                        expected_stdout.append(f"validate {platform} {attempt}")
+                        expected_stdout.append(
+                            f"validate {platform} {attempt} "
+                            f"{run_dir}/acceptance-attempts.json"
+                        )
                 self.assertEqual(result.stdout.splitlines(), expected_stdout)
                 self.assertEqual(
                     sorted(path.name for path in output.glob("acceptance-attempt-*")),
@@ -14258,6 +14310,301 @@ class BenchmarkTests(unittest.TestCase):
         )
         for line in [*records.splitlines(), committed.removesuffix(b"\n")]:
             self.assertTrue(benchmark.contains_output_line(log, line), line)
+
+    def test_capture_samples_storage_from_the_request_through_source_exit(self):
+        records = self.incident_capture_records()
+        snapshot_requested = threading.Event()
+
+        class FakeProcess:
+            pid = BenchmarkTests.INCIDENT_PID
+            returncode = 0
+
+            def poll(self) -> None:
+                return None
+
+            def wait(self) -> int:
+                return 0
+
+        class FakeInteraction:
+            def __init__(self, snapshot: Path) -> None:
+                self.process = FakeProcess()
+                self.snapshot = snapshot
+                self.writes: list[bytes] = []
+
+            def read_output(self, chunks: queue.Queue[bytes | None]) -> None:
+                chunks.put(benchmark.BOOT_MARKER + b"\r\n")
+                chunks.put(benchmark.SMP_PROBE_COMPLETION_MARKER + b"\r\n")
+                if snapshot_requested.wait(5):
+                    chunks.put(
+                        b"nvx-snapshot\r\n"
+                        + benchmark.SNAPSHOT_GUEST_DISPATCH_MARKER
+                        + b"\r\n"
+                    )
+                chunks.put(None)
+
+            def read_stderr(self, chunks: queue.Queue[bytes | None]) -> None:
+                if snapshot_requested.wait(5):
+                    chunks.put(records)
+                    self.snapshot.mkdir()
+                chunks.put(None)
+
+            def write_input(self, data: bytes) -> None:
+                self.writes.append(data)
+                if data == b"nvx-snapshot\n":
+                    snapshot_requested.set()
+
+            def close(self) -> None:
+                pass
+
+        class FakeTelemetry:
+            def __init__(self, interaction: FakeInteraction) -> None:
+                self.interaction = interaction
+                self.events: list[str] = []
+                self.windows: dict[str, tuple[int, int]] = {}
+
+            def start(self) -> None:
+                self.events.append(f"start after {len(self.interaction.writes)}")
+
+            def stop(self) -> None:
+                self.events.append("stop")
+
+            def result(self, windows: dict[str, tuple[int, int]]) -> dict[str, object]:
+                self.events.append("result")
+                self.windows = windows
+                return {"phases": {}}
+
+        for retained in (True, False):
+            with (
+                self.subTest(retained=retained),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                snapshot_requested.clear()
+                snapshot = Path(temporary) / "snapshot"
+                interaction = FakeInteraction(snapshot)
+                telemetry = FakeTelemetry(interaction)
+                profiles: list[dict[str, object]] = []
+                with (
+                    patch.object(
+                        benchmark, "InteractiveProcess", return_value=interaction
+                    ),
+                    patch.object(benchmark, "_try_peak_rss", return_value=1024),
+                    patch.object(
+                        benchmark, "process_resource_counters", return_value={}
+                    ),
+                    patch.object(benchmark, "terminate"),
+                    patch.object(
+                        benchmark.host_telemetry,
+                        "create_storage_telemetry",
+                        return_value=telemetry,
+                    ) as create,
+                ):
+                    benchmark.capture_snapshot(
+                        ["openvmm"],
+                        snapshot,
+                        processors=1,
+                        timeout=10,
+                        snapshot_profile=True,
+                        profile_sink=profiles if retained else None,
+                    )
+
+                if not retained:
+                    # Warmups keep no profile, so they sample nothing.
+                    create.assert_not_called()
+                    continue
+                volumes, origin = create.call_args.args
+                self.assertEqual(volumes["scratch"], Path(temporary))
+                self.assertEqual(volumes["workspace"], BuildConstants.REPO_ROOT)
+                self.assertIsInstance(origin, int)
+                # Sampling starts after the SMP probe script, before the request.
+                self.assertEqual(
+                    telemetry.events, ["start after 1", "stop", "result", "stop"]
+                )
+                self.assertEqual(interaction.writes[1:], [b"nvx-snapshot\n"])
+                flush_start, flush_end = telemetry.windows[
+                    "capture.mapped_memory_flush"
+                ]
+                self.assertEqual(flush_end - flush_start, 2700)
+                generation_start, generation_end = telemetry.windows[
+                    "capture.snapshot_generation"
+                ]
+                self.assertEqual(generation_end - generation_start, 1_903_503)
+                self.assertEqual(profiles[0]["storage_telemetry"], {"phases": {}})
+
+    def test_profile_phase_windows_use_the_tightest_clock_offset(self):
+        records: list[dict[str, object]] = [
+            {
+                "operation": "capture",
+                "phase": "save_state",
+                "duration_ns": 1_000,
+                "process_elapsed_ns": 5_000,
+                "observer_elapsed_ns": 20_500,
+                "source": "openvmm",
+            },
+            {
+                "operation": "capture",
+                "phase": "mapped_memory_flush",
+                "duration_ns": 900_000,
+                "process_elapsed_ns": 905_000,
+                "observer_elapsed_ns": 920_000,
+                "source": "openvmm",
+            },
+            {
+                "operation": "capture",
+                "phase": "snapshot_generation",
+                "duration_ns": 950_000,
+                "process_elapsed_ns": 955_000,
+                "source": "openvmm_clock",
+            },
+            {
+                "operation": "capture",
+                "phase": "source_teardown",
+                "duration_ns": 9_000,
+                "observer_elapsed_ns": 990_000,
+                "source": "benchmark_observer",
+            },
+        ]
+
+        # The save_state record arrived 0.5 us late, so the flush record's
+        # 15 us offset bounds OpenVMM's clock.
+        self.assertEqual(
+            benchmark.snapshot_profile_phase_windows(records),
+            {
+                "capture.save_state": (19_000, 20_000),
+                "capture.mapped_memory_flush": (20_000, 920_000),
+                "capture.snapshot_generation": (20_000, 970_000),
+                "capture.source_teardown": (981_000, 990_000),
+            },
+        )
+
+    def test_capture_telemetry_line_describes_the_ram_flush_window(self):
+        records = [
+            {
+                "operation": "capture",
+                "phase": "mapped_memory_flush",
+                "duration_ns": 1_165_314_800,
+            }
+        ]
+        sample: dict[str, object] = {
+            "records": records,
+            "storage_telemetry": {
+                "volumes": {"F:": ["scratch"]},
+                "phases": {
+                    "capture.mapped_memory_flush": {
+                        "volumes": {
+                            "F:": {
+                                "write_mib_per_second": 128.44,
+                                "average_write_latency_ms": 31.2,
+                                "average_queue_length": 3.94,
+                                "busy_percent": 99.4,
+                            }
+                        },
+                        "cpu": {"busy_percent": 6.2},
+                    }
+                },
+            },
+        }
+
+        self.assertEqual(
+            benchmark.describe_capture_telemetry(sample),
+            "mapped_memory_flush 1165.315 ms: scratch F: write 128.4 MiB/s at "
+            "31.2 ms, queue 3.9, 99% busy; CPU 6% busy",
+        )
+        self.assertIsNone(benchmark.describe_capture_telemetry({"records": records}))
+
+    def test_result_documents_record_host_provenance(self):
+        args = nvx.parse_args(["benchmark"])
+        with (
+            patch.object(benchmark, "_git_revision", return_value="revision"),
+            patch.object(
+                benchmark,
+                "benchmark_host_provenance",
+                return_value={"runner_name": "azure-windows-3"},
+            ) as host,
+        ):
+            document = benchmark.result_document(args, None, None)
+
+        host.assert_called_once_with(args)
+        self.assertEqual(document["host"], {"runner_name": "azure-windows-3"})
+
+    def test_host_provenance_names_workspace_temporary_and_scratch_volumes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary).resolve() / "scratch"
+            scratch.mkdir()
+            args = nvx.parse_args(["benchmark", "--scratch-dir", str(scratch)])
+            system_temporary = Path(tempfile.gettempdir()).resolve()
+            with (
+                benchmark.benchmark_scratch_directory(args),
+                patch.object(
+                    benchmark.host_telemetry,
+                    "host_provenance",
+                    return_value={"schema_version": 1},
+                ) as provenance,
+            ):
+                host = benchmark.benchmark_host_provenance(args)
+
+        self.assertEqual(host, {"schema_version": 1})
+        provenance.assert_called_once_with(
+            {
+                "workspace": BuildConstants.REPO_ROOT,
+                "temporary": system_temporary,
+                "scratch": scratch,
+            }
+        )
+
+    def test_device_io_resume_ignores_host_provenance(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "device-io",
+                "--backend",
+                "whp",
+                "--platform",
+                "windows-whp-baremetal",
+            ]
+        )
+        benchmark.apply_benchmark_suite_defaults(args)
+        hosts = iter(({"machine_name": "first"}, {"machine_name": "second"}))
+
+        def host_provenance(_: argparse.Namespace) -> dict[str, str]:
+            return next(hosts, {"machine_name": "third"})
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                benchmark, "benchmark_host_provenance", side_effect=host_provenance
+            ),
+            patch.object(benchmark, "sha256_file", return_value="0" * 64),
+            patch.object(
+                benchmark,
+                "_device_io_helper_provenance",
+                return_value={"source": "helper"},
+            ),
+            patch.object(benchmark, "_git_revision", return_value="revision"),
+            patch.object(benchmark, "_git_status", return_value=[]),
+        ):
+            output = Path(temporary)
+
+            def write() -> Path:
+                return benchmark.write_benchmark_metadata(
+                    args,
+                    output,
+                    Path("openvmm.exe"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    "whp",
+                )
+
+            path = write()
+            written = path.read_text(encoding="utf-8")
+            self.assertEqual(json.loads(written)["host"], {"machine_name": "first"})
+            self.assertEqual(write(), path)
+            self.assertEqual(path.read_text(encoding="utf-8"), written)
+            args.device_io_port += 1
+            with self.assertRaisesRegex(
+                ValueError, "resume controls or provenance do not match"
+            ):
+                write()
 
     def test_measure_once_observes_restore_marker_split_by_profile_record(self):
         record = (

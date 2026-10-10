@@ -33,7 +33,7 @@ from pathlib import Path
 from string import Template
 from typing import IO, Literal, Protocol, TextIO, TypedDict, cast
 
-from . import common
+from . import common, host_telemetry
 from .adversarial_oracles import ProcessTreeContainment
 from .build_constants import (
     AlpineBuildConstants,
@@ -234,6 +234,7 @@ class E2EComparison(TypedDict):
 class ResultDocument(TypedDict):
     timestamp_utc: str
     controls: dict[str, object]
+    host: dict[str, object]
     backends: dict[str, BenchmarkResult]
     snapshot_capture: dict[str, SnapshotCaptureResult]
     snapshot_restore: dict[str, BenchmarkResult]
@@ -1224,6 +1225,75 @@ def summarize_lifecycle_profiles(
         "raw_samples": raw_samples,
         "phases": phases,
     }
+
+
+def snapshot_profile_phase_windows(
+    records: Sequence[dict[str, object]],
+) -> dict[str, tuple[int, int]]:
+    """Map each profiled phase to its start and end on the observer clock.
+
+    OpenVMM's clock starts at its own process start, which the observer does
+    not see. The host observes every record after OpenVMM writes it, so the
+    smallest observed-minus-reported time bounds the clock offset most
+    tightly.
+    """
+    offsets = [
+        observed - reported
+        for record in records
+        if record.get("source") == "openvmm"
+        and isinstance(observed := record.get("observer_elapsed_ns"), int)
+        and isinstance(reported := record.get("process_elapsed_ns"), int)
+    ]
+    windows: dict[str, tuple[int, int]] = {}
+    for record in records:
+        duration = record.get("duration_ns")
+        reported = record.get("process_elapsed_ns")
+        observed = record.get("observer_elapsed_ns")
+        if not isinstance(duration, int):
+            continue
+        if isinstance(reported, int) and offsets:
+            end = reported + min(offsets)
+        elif isinstance(observed, int):
+            end = observed
+        else:
+            continue
+        windows[f"{record.get('operation')}.{record.get('phase')}"] = (
+            end - duration,
+            end,
+        )
+    return windows
+
+
+def describe_capture_telemetry(sample: dict[str, object]) -> str | None:
+    """Describe the host activity during a profiled capture's RAM flush."""
+    telemetry = sample.get("storage_telemetry")
+    records = sample.get("records")
+    if not isinstance(telemetry, dict) or not isinstance(records, list):
+        return None
+    telemetry = cast(dict[str, object], telemetry)
+    phases = telemetry.get("phases")
+    volumes = telemetry.get("volumes")
+    if not isinstance(phases, dict) or not isinstance(volumes, dict):
+        return None
+    window = cast(dict[str, object], phases).get("capture.mapped_memory_flush")
+    flush = next(
+        (
+            record
+            for record in cast(list[dict[str, object]], records)
+            if record.get("operation") == "capture"
+            and record.get("phase") == "mapped_memory_flush"
+        ),
+        None,
+    )
+    if not isinstance(window, dict) or flush is None:
+        return None
+    description = host_telemetry.describe_storage_window(
+        cast(dict[str, object], window), cast(dict[str, object], volumes)
+    )
+    return (
+        f"mapped_memory_flush {_profile_int(flush, 'duration_ns') / 1_000_000:.3f} "
+        f"ms: {description}"
+    )
 
 
 def terminate(process: subprocess.Popen[bytes]) -> None:
@@ -4449,6 +4519,7 @@ def write_benchmark_metadata(
         "host_affinity_set": args.cpus,
         "host_cpu_reserve": args.host_cpu_reserve,
         "scratch_directory": scratch_directory_control(args),
+        "host": benchmark_host_provenance(args),
         "memory_mib": {
             "lifecycle": args.memory_mib,
             "virtfs": args.virtfs_memory_mib,
@@ -4494,13 +4565,28 @@ def write_benchmark_metadata(
             existing = json.loads(path.read_text(encoding="utf-8"))
         except (UnicodeError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid resumable benchmark metadata {path}") from error
-        if existing != document:
+        if _resume_identity(existing) != _resume_identity(document):
             raise ValueError(
                 f"device-io resume controls or provenance do not match {path}"
             )
         return path
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _resume_identity(document: object) -> object:
+    """Return the metadata that a resumed device-io series must match.
+
+    Host provenance describes the invocation that started the series and can
+    differ on a resume of the same host, such as after a metadata timeout.
+    """
+    if not isinstance(document, dict):
+        return document
+    return {
+        key: value
+        for key, value in cast(dict[str, object], document).items()
+        if key != "host"
+    }
 
 
 def run_workload_benchmarks(
@@ -4771,6 +4857,7 @@ def capture_snapshot(
     snapshot_request_bytes = None
     snapshot_published_ns = None
     peak_bytes = 0
+    storage: host_telemetry.StorageTelemetry | None = None
 
     def observe_snapshot_publication() -> None:
         nonlocal snapshot_published_ns
@@ -4784,10 +4871,19 @@ def capture_snapshot(
     def request_snapshot() -> None:
         nonlocal snapshot_requested, snapshot_started_ns
         nonlocal snapshot_dispatched_ns, snapshot_request_bytes, deadline
+        nonlocal storage
         payload = snapshot_request_script(
             processors,
             teardown_mode=teardown_mode,
         ).encode("utf-8")
+        if snapshot_profile and profile_sink is not None:
+            # Sampling starts before the request so that its first sample
+            # shifts no host-observed capture interval.
+            storage = host_telemetry.create_storage_telemetry(
+                capture_telemetry_volumes(snapshot_path), process_started_ns
+            )
+            if storage is not None:
+                storage.start()
         snapshot_started_ns = time.perf_counter_ns()
         interaction.write_input(payload)
         snapshot_dispatched_ns = time.perf_counter_ns()
@@ -4868,6 +4964,8 @@ def capture_snapshot(
         monitor.finish()
         returncode = process.wait()
         source_exited_ns = time.perf_counter_ns()
+        if storage is not None:
+            storage.stop()
         monitor.check_exit(returncode)
         if snapshot_published_ns is None and snapshot_path.is_dir():
             snapshot_published_ns = source_exited_ns
@@ -4893,6 +4991,12 @@ def capture_snapshot(
             source_exited_ns,
             snapshot_request_bytes,
         )
+        if storage is not None:
+            profile_sample["storage_telemetry"] = storage.result(
+                snapshot_profile_phase_windows(
+                    cast(list[dict[str, object]], profile_sample["records"])
+                )
+            )
         if snapshot_profile and profile_sink is not None:
             profile_sink.append(profile_sample)
         request_to_publication_ms = (
@@ -4912,10 +5016,28 @@ def capture_snapshot(
             raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
         raise
     finally:
+        if storage is not None:
+            storage.stop()
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_bytes(output.contents())
         interaction.close()
+
+
+def capture_telemetry_volumes(snapshot_path: Path) -> dict[str, Path]:
+    """Return the volumes whose activity can bound snapshot generation.
+
+    OpenVMM creates the automatic guest RAM backing file beside the snapshot
+    destination, so the capture's RAM flush writes to the scratch volume.
+    """
+    volumes = {
+        "scratch": snapshot_path.parent,
+        "workspace": BuildConstants.REPO_ROOT,
+    }
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        volumes["system"] = Path(system_root)
+    return volumes
 
 
 def summarize_snapshot_samples(
@@ -5018,6 +5140,13 @@ def benchmark_snapshot_capture(
                 f"peak RSS={bytes_to_mib(peak_bytes):.3f} MiB",
                 flush=True,
             )
+            telemetry = (
+                describe_capture_telemetry(profile_samples[-1])
+                if snapshot_profile
+                else None
+            )
+            if telemetry is not None:
+                print(f"    {telemetry}", flush=True)
     return summarize_snapshot_samples(
         samples,
         request_to_publication_samples,
@@ -5885,6 +6014,7 @@ def result_document(
             "cache_state": args.cache_state,
             "scratch_directory": scratch_directory_control(args),
         },
+        "host": benchmark_host_provenance(args),
         "backends": {},
         "snapshot_capture": {},
         "snapshot_restore": {},
@@ -5985,6 +6115,10 @@ def run_native_linux(args: argparse.Namespace) -> int:
             command_prefix=prefix,
         )
     results = result_document(args, kernel, initrd, backend)
+    print(
+        "Benchmark host: " + host_telemetry.describe_host_provenance(results["host"]),
+        flush=True,
+    )
     if run_guest:
         assert executable is not None and kernel is not None and initrd is not None
 
@@ -6127,6 +6261,24 @@ def _resolved_scratch_directory(args: argparse.Namespace) -> Path:
     if scratch is None:
         scratch = Path(tempfile.gettempdir())
     return Path(scratch).resolve()
+
+
+def _system_temporary_directory(args: argparse.Namespace) -> Path:
+    temporary = getattr(args, "system_temporary_dir", None)
+    if temporary is None:
+        temporary = Path(tempfile.gettempdir())
+    return Path(temporary).resolve()
+
+
+def benchmark_host_provenance(args: argparse.Namespace) -> dict[str, object]:
+    """Return safe provenance for this host and the benchmark's volumes."""
+    return host_telemetry.host_provenance(
+        {
+            "workspace": BuildConstants.REPO_ROOT,
+            "temporary": _system_temporary_directory(args),
+            "scratch": _resolved_scratch_directory(args),
+        }
+    )
 
 
 def _kvm_worker_scratch_arguments(args: argparse.Namespace) -> list[str]:
@@ -6338,6 +6490,7 @@ def benchmark_scratch_directory(args: argparse.Namespace) -> Generator[None]:
         raise ValueError(f"benchmark scratch directory does not exist: {scratch}")
     args.scratch_dir = scratch
     previous = tempfile.tempdir
+    args.system_temporary_dir = Path(tempfile.gettempdir()).resolve()
     tempfile.tempdir = str(scratch)
     try:
         yield
@@ -6463,6 +6616,10 @@ def run_benchmark(args: argparse.Namespace) -> int:
         )
 
     results = result_document(args, kernel, initrd)
+    print(
+        "Benchmark host: " + host_telemetry.describe_host_provenance(results["host"]),
+        flush=True,
+    )
     if run_profile:
         assert kernel is not None and initrd is not None
         executable = boot_binaries["whp"]

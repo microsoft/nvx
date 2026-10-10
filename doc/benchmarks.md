@@ -502,6 +502,32 @@ minor and major faults, total page faults, and, when `smaps_rollup` is available
 and private RSS bytes. Windows reports working set, peak working set, private commit, and page
 faults.
 
+On Windows, each retained capture sample also carries `storage_telemetry`. From just before the
+host requests the snapshot until the source process exits, a coordinator thread samples
+cumulative host counters about every 50 ms: read and write bytes, request counts, response
+times, idle time, and queue depth of the scratch, workspace, and system volumes; CPU idle,
+kernel, and user time; and the system cache's dirty pages and threshold, lazy-writer and flush
+pages, and modified- and mapped-page-writer pages. About every 500 ms, and in the first and last
+samples, it adds the CPU time and I/O transfers of the Microsoft Defender processes
+`MsMpEng.exe` and `MpDefenderCoreService.exe`. CI jobs run as Network Service, which cannot read
+performance counters, so the sampler uses only interfaces that any account can query: volume
+performance IOCTLs, `GetSystemTimes`, and `NtQuerySystemInformation`. Windows maintains disk
+counters only on demand, and the volume IOCTL returns none until a consumer asks for them, so the
+sampler keeps the disk performance WMI data block, which every account may query, open while it
+samples; it changes no system setting. A failed read is recorded
+in `errors` and never fails the benchmark. The raw `samples` are retained, and `phases`
+summarizes `capture.snapshot_generation` and `capture.mapped_memory_flush`. Each counter group,
+a volume, CPU times, cache counters, or Defender's processes, spans the samples nearest to each
+phase's start and end that carry it, so a failed read does not hide what neighboring samples
+recorded. The observer clock is aligned with OpenVMM's by the smallest observed-minus-reported
+time of the capture's records. Each summary reports the sampled interval it spans; per-volume
+throughput, IOPS, average latency, average queue length, busy time, and peak queue depth; CPU busy
+time; the lazy-writer, flush, and page-writer rates; the peak dirty cache and its threshold; and
+Defender CPU time and I/O. A counter group whose samples differ from the summary's, such as
+Defender's sparser process counters, reports its own interval.
+Linux captures do not flush a file-backed guest RAM image, take about 1 to 4 ms, and record no
+storage telemetry.
+
 `profile.phases` groups samples by `operation.phase` and stores raw `samples_ms` plus p50,
 nearest-rank p95, minimum, and maximum. The top-level JSON path is
 `snapshot_profile_matrix.<backend>.<memory_mib>`. Each memory entry contains the capture result and
@@ -582,6 +608,16 @@ bimodal host-stall series into topology-wide history. On the Linux CI runners,
 snapshot generation takes about 1 ms on KVM and about 4 ms on MSHV, so a
 sub-millisecond CPU stall in two samples is enough to cross the gap limit.
 
+Each validation also appends the attempt's file, SHA-256 digest, outcome (`valid`,
+`unstable`, or `invalid`), exit status, and error to `acceptance-attempts.json`,
+which the acceptance step removes, with any earlier attempt files, before measuring.
+The publish step passes that log to `performance collect --lifecycle-attempt-log`.
+Collection fails before it writes a CSV unless `acceptance.json` is a byte-identical
+copy of exactly one valid attempt; it then prints the attempt that supplied the
+published lifecycle metrics. The step summary lists every attempt with its outcome,
+snapshot-generation p50, and whether it was published, and reports the storage
+telemetry of each attempt, rejected ones included.
+
 Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
 uploads its raw results and lifecycle profiles to the immutable
 `benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
@@ -592,6 +628,25 @@ platform results from an earlier workflow attempt. The `acceptance-attempt-N.jso
 files identify the bounded lifecycle remeasurements within one workflow attempt,
 not the workflow's `github.run_attempt`.
 
+Lifecycle JSON results and workload `benchmark-metadata.json` files record host
+provenance under `host`: the runner name from `RUNNER_NAME`, the machine name,
+operating system, CPU model, logical processor count, and physical memory, and the
+volume, file system, size, system-volume flag, disk number, and SCSI address behind
+the workspace, temporary, and scratch directories. The disk number and SCSI address
+tell the Azure OS disk from a data-disk LUN or the temporary disk. On a possible Azure
+VM, the coordinator queries the instance metadata service once, directly rather than
+through a proxy, and keeps only the VM size; each managed disk's SKU, size, caching
+policy, write-accelerator and ephemeral settings, and data-disk LUN; the throughput
+and IOPS limits that Ultra Disks report; and the temporary disk's size. It never
+records names, resource or VM identifiers, the subscription, tags, network addresses,
+or credentials, and records an unreachable service as `azure.error`. Acceptance and
+diagnostic suites print the provenance before they measure, and the step summary
+includes it as the benchmark host table. A device-io resume ignores `host` when it
+compares controls and provenance. Runner and machine names are diagnostic only: the
+regression gate pools every runner of a series into one history, and a series should
+be split by runner only if evidence shows a persistent runner-specific offset larger
+than the gate's tolerance.
+
 When investigating instability, compare each attempt's
 `snapshot_capture.<backend>.profile.raw_samples` with its `samples_ms`. For example, a
 slow `capture.mapped_memory_flush` with otherwise stable capture phases localizes
@@ -601,6 +656,25 @@ while the flush and publication phases stay flat instead points to a host CPU st
 Reproduce with the exact executable and guest artifact hashes on the same host
 before attributing the delay to a source change. Keep the stability thresholds and
 bounded remeasurement unchanged when collecting diagnostic evidence.
+
+On Windows, the job log prints each measured capture's `capture.mapped_memory_flush`
+time with the host activity during it, and the step summary tabulates the same
+telemetry for every attempt: the scratch volume's write throughput, average write
+latency, average queue length, and busy time; writes to the other monitored
+volumes; CPU busy time; the peak dirty cache; lazy-writer throughput; and Defender
+CPU time. Compare slow flushes with fast ones in the same series:
+
+- Disk throttling: the slow flushes write scratch at a lower, flat rate with longer
+  latency and queue while it stays busy, and the other columns stay quiet. Compare
+  that rate with the published limits of the disk SKU and size in the host table.
+- Scanning: Defender CPU time or I/O rises during the slow flushes.
+- Writeback: lazy writes, the dirty cache, or writes to the other volumes rise
+  during the slow flushes.
+- Unrelated host load: CPU busy time rises while scratch stays idle for part of
+  the flush.
+
+In the JSON, the flush's own page writes appear in `memory.cache_flush_mib_per_second`,
+and the raw samples show how the rates change within a flush.
 
 Snapshot generation is bounded by the write throughput of the benchmark's
 temporary directory, because capture flushes guest RAM through a backing file
@@ -620,6 +694,18 @@ system temporary directory. Windows-coordinated KVM workers receive the WSL
 translation of the same directory instead of falling back to WSL's `/tmp`.
 Use `--scratch-dir` for manual runs whose temporary directory shares a volume
 with other I/O-heavy work.
+
+Treat a change to the storage behind benchmark scratch or the runner workspace as a
+performance-platform change. This includes a different VM size, disk SKU, size,
+performance tier, caching policy, or bursting setting, and moving scratch between
+the OS, data, and temporary disks. Because snapshot generation is bounded by the
+scratch volume's write throughput, such a change shifts
+`openvmm_snapshot_generation` and can shift the other lifecycle metrics. Apply it to
+every pooled runner of the series at once; a change on some runners only would mix
+two storage regimes in one history. In the same pull request, reset the affected
+metrics by removing them from the series' history files, such as
+`data/windows-whp-virtual-machine-microvm-v2-1vcpu.csv`, so that the gate restarts
+their ten-point warmup instead of comparing the new storage with the old baseline.
 
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10

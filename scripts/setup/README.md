@@ -74,7 +74,10 @@ publishes it as the machine-level `NVX_BENCHMARK_SCRATCH` variable. Network
 Service receives Modify access to that directory tree, as for `_work/_sccache`.
 CI places benchmark snapshots and guest RAM backing files there so their
 flushes avoid the burst-limited system disk. Check mode requires the directory
-when a data volume exists.
+when a data volume exists. Changing the storage behind benchmark scratch or the
+runner workspace is a performance-platform change: apply it to every Windows
+runner at once and reset the affected history, as
+[CI collection](../../doc/benchmarks.md#ci-collection) describes.
 Persistent runners do not have Docker access. Guest artifacts are built with
 Docker on a GitHub-hosted runner instead.
 Linux provisioning runs through the SSH administrator, but the listener and

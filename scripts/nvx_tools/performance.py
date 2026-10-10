@@ -13,11 +13,12 @@ import sys
 import tempfile
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from .common import bytes_to_mib, positive_int
+from . import host_telemetry
+from .common import bytes_to_mib, positive_int, sha256_file
 
 LEGACY_CSV_FIELDS = ["commit", "metric", "unit", "direction", "p50"]
 CSV_FIELDS = [
@@ -77,6 +78,10 @@ LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES = 2
 LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 = 1.25
 LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP = 1.25
 UNSTABLE_LIFECYCLE_EXIT_CODE = 75
+LIFECYCLE_ATTEMPT_LOG_SCHEMA_VERSION = 1
+LIFECYCLE_ATTEMPT_STATUSES = {0: "valid", UNSTABLE_LIFECYCLE_EXIT_CODE: "unstable"}
+"""Validation statuses by exit status; any other status is ``invalid``."""
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 NUMBER = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SHELL_SNAPSHOT_MEMORIES_MIB = (128, 256, 512)
@@ -136,6 +141,20 @@ class BenchmarkDimensions:
     platform: str
     microvm_abi_version: int
     processors: int
+
+
+@dataclass(frozen=True)
+class LifecycleAttempt:
+    """One bounded lifecycle measurement and its validation outcome."""
+
+    number: int
+    file: str
+    sha256: str | None
+    status: str
+    exit_status: int
+    message: str | None
+    published: bool = False
+    document: dict[str, object] | None = None
 
 
 MetricValue = tuple[str, str, float]
@@ -1177,12 +1196,170 @@ def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
     )
 
 
+def record_lifecycle_attempt(
+    log_path: Path,
+    platform: str,
+    input_path: Path,
+    exit_status: int,
+    message: str | None,
+) -> LifecycleAttempt:
+    """Append a lifecycle validation outcome to the attempt log.
+
+    The log keeps every bounded remeasurement in order, so collection can
+    name the attempt that supplied the published lifecycle metrics.
+    """
+    attempts = (
+        read_lifecycle_attempt_log(log_path, platform) if log_path.exists() else []
+    )
+    try:
+        location = Path(
+            os.path.relpath(input_path.resolve(), log_path.resolve().parent)
+        ).as_posix()
+    except ValueError:
+        location = str(input_path.resolve())
+    attempt = LifecycleAttempt(
+        number=len(attempts) + 1,
+        file=location,
+        sha256=sha256_file(input_path) if input_path.is_file() else None,
+        status=LIFECYCLE_ATTEMPT_STATUSES.get(exit_status, "invalid"),
+        exit_status=exit_status,
+        message=message,
+    )
+    attempts.append(attempt)
+    document = {
+        "schema_version": LIFECYCLE_ATTEMPT_LOG_SCHEMA_VERSION,
+        "platform": platform,
+        "attempts": [
+            {
+                "attempt": item.number,
+                "file": item.file,
+                "sha256": item.sha256,
+                "status": item.status,
+                "exit_status": item.exit_status,
+                "message": item.message,
+            }
+            for item in attempts
+        ],
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return attempt
+
+
+def read_lifecycle_attempt_log(log_path: Path, platform: str) -> list[LifecycleAttempt]:
+    try:
+        document = _json_object(
+            json.loads(log_path.read_text(encoding="utf-8")), str(log_path)
+        )
+    except FileNotFoundError as error:
+        raise PerformanceError(
+            f"lifecycle attempt log not found: {log_path}"
+        ) from error
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PerformanceError(
+            f"invalid lifecycle attempt log {log_path}: {error}"
+        ) from error
+    if document.get("schema_version") != LIFECYCLE_ATTEMPT_LOG_SCHEMA_VERSION:
+        raise PerformanceError(
+            f"{log_path} has unsupported schema_version "
+            f"{document.get('schema_version')!r}"
+        )
+    if document.get("platform") != platform:
+        raise PerformanceError(
+            f"{log_path} records platform {document.get('platform')!r}, "
+            f"expected {platform!r}"
+        )
+    entries = document.get("attempts")
+    if not isinstance(entries, list):
+        raise PerformanceError(f"expected an attempt list at {log_path}:attempts")
+    attempts: list[LifecycleAttempt] = []
+    for index, value in enumerate(cast(list[object], entries)):
+        location = f"{log_path}:attempts[{index}]"
+        entry = _json_object(value, location)
+        number = entry.get("attempt")
+        file = entry.get("file")
+        digest = entry.get("sha256")
+        status = entry.get("status")
+        exit_status = entry.get("exit_status")
+        message = entry.get("message")
+        if (
+            isinstance(number, bool)
+            or number != index + 1
+            or not isinstance(file, str)
+            or not file
+            or isinstance(exit_status, bool)
+            or not isinstance(exit_status, int)
+            or status != LIFECYCLE_ATTEMPT_STATUSES.get(exit_status, "invalid")
+            or not (digest is None or isinstance(digest, str))
+            or (isinstance(digest, str) and not SHA256_HEX.fullmatch(digest))
+            or not (message is None or isinstance(message, str))
+        ):
+            raise PerformanceError(f"invalid lifecycle attempt at {location}")
+        attempts.append(
+            LifecycleAttempt(
+                number=index + 1,
+                file=file,
+                sha256=digest,
+                status=str(status),
+                exit_status=exit_status,
+                message=message,
+            )
+        )
+    return attempts
+
+
+def read_lifecycle_attempts(
+    log_path: Path, platform: str, published_path: Path
+) -> list[LifecycleAttempt]:
+    """Read every logged attempt and mark the one published as
+    ``published_path``, which must be a byte-identical copy of exactly one
+    valid attempt."""
+    attempts = read_lifecycle_attempt_log(log_path, platform)
+    try:
+        digest = sha256_file(published_path)
+    except OSError as error:
+        raise PerformanceError(
+            f"cannot read lifecycle result {published_path}: {error}"
+        ) from error
+    published = [
+        attempt
+        for attempt in attempts
+        if attempt.status == "valid" and attempt.sha256 == digest
+    ]
+    if len(published) != 1:
+        raise PerformanceError(
+            f"{published_path} matches {len(published)} valid attempts in "
+            f"{log_path}; expected exactly one"
+        )
+    return [
+        replace(
+            attempt,
+            published=attempt is published[0],
+            document=_read_attempt_document(log_path.parent / attempt.file),
+        )
+        for attempt in attempts
+    ]
+
+
+def _read_attempt_document(path: Path) -> dict[str, object] | None:
+    # A rejected attempt's diagnostics must not block publication.
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return cast(dict[str, object], document) if isinstance(document, dict) else None
+
+
 def append_openvmm_diagnostics(
     path: Path,
     platform: str,
     lifecycle: LifecycleData,
     source: Path,
+    attempts: Sequence[LifecycleAttempt] = (),
 ) -> None:
+    """Append lifecycle diagnostics, the benchmark host, and storage
+    telemetry. ``attempts`` adds every logged lifecycle attempt, including
+    rejected ones, to the attempt and telemetry tables."""
     document = lifecycle.document
     backend = lifecycle.backend
     cold_start = _openvmm_value(document, "backends", backend, "p50_ms", source)
@@ -1291,8 +1468,201 @@ def append_openvmm_diagnostics(
             "",
         ]
     )
+    lines.extend(_lifecycle_attempt_lines(attempts, backend))
+    host = _optional_object(document.get("host"))
+    if host:
+        lines.extend(_host_provenance_lines(host))
+    sources = (
+        [
+            (attempt.document, _attempt_label(attempt))
+            for attempt in attempts
+            if attempt.document is not None
+        ]
+        if attempts
+        else [(document, None)]
+    )
+    lines.extend(_storage_telemetry_lines(sources, backend))
     with path.open("a", encoding="utf-8", newline="\n") as output:
         output.write("\n" + "\n".join(lines))
+
+
+def _optional_object(value: object) -> dict[str, object]:
+    return cast(dict[str, object], value) if isinstance(value, dict) else {}
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
+
+
+def _attempt_label(attempt: LifecycleAttempt) -> str:
+    published = ", published" if attempt.published else ""
+    return f"Attempt {attempt.number}: {attempt.status}{published} (`{attempt.file}`)"
+
+
+def _lifecycle_attempt_lines(
+    attempts: Sequence[LifecycleAttempt], backend: str
+) -> list[str]:
+    if not attempts:
+        return []
+    lines = [
+        "### Lifecycle attempts",
+        "",
+        "| Attempt | File | Result | Snapshot generation p50 | Published |",
+        "| ---: | --- | --- | ---: | --- |",
+    ]
+    for attempt in attempts:
+        capture = _optional_object(
+            _optional_object((attempt.document or {}).get("snapshot_capture")).get(
+                backend
+            )
+        )
+        result = attempt.status
+        if attempt.message is not None:
+            result = f"{result}: {attempt.message}"
+        lines.append(
+            f"| {attempt.number} | `{attempt.file}` | {_markdown_cell(result)} | "
+            f"{_summary_number(capture.get('p50_ms'), ' ms', 2)} | "
+            f"{'yes' if attempt.published else 'no'} |"
+        )
+    return [*lines, ""]
+
+
+def _host_provenance_lines(host: dict[str, object]) -> list[str]:
+    lines = ["### Benchmark host", "", "| Property | Value |", "| --- | --- |"]
+    lines.extend(
+        f"| {label} | {_markdown_cell(value)} |"
+        for label, value in host_telemetry.host_provenance_rows(host)
+    )
+    return [*lines, ""]
+
+
+def _summary_number(value: object, unit: str, digits: int) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "n/a"
+    return f"{value:.{digits}f}{unit}"
+
+
+def _storage_telemetry_lines(
+    sources: Sequence[tuple[dict[str, object], str | None]], backend: str
+) -> list[str]:
+    sections: list[str] = []
+    for document, label in sources:
+        table = _storage_telemetry_table(document, backend)
+        if not table:
+            continue
+        if label is not None:
+            sections.extend([f"#### {label}", ""])
+        sections.extend([*table, ""])
+    if not sections:
+        return []
+    return [
+        "### Snapshot generation storage telemetry",
+        "",
+        (
+            "Each row describes one measured capture. Rates and averages span "
+            "the telemetry samples nearest to the start and end of its "
+            "`capture.mapped_memory_flush` phase. Other volumes are the "
+            "monitored workspace and system volumes that do not hold scratch."
+        ),
+        "",
+        *sections,
+    ]
+
+
+def _storage_telemetry_table(document: dict[str, object], backend: str) -> list[str]:
+    capture = _optional_object(
+        _optional_object(document.get("snapshot_capture")).get(backend)
+    )
+    raw_samples = _optional_object(capture.get("profile")).get("raw_samples")
+    if not isinstance(raw_samples, list):
+        return []
+    rows: list[str] = []
+    scratch_volumes: set[str] = set()
+    for number, sample in enumerate(
+        map(_optional_object, cast(list[object], raw_samples)), 1
+    ):
+        telemetry = _optional_object(sample.get("storage_telemetry"))
+        if not telemetry:
+            continue
+        window = _optional_object(
+            _optional_object(telemetry.get("phases")).get("capture.mapped_memory_flush")
+        )
+        roles = _optional_object(telemetry.get("volumes"))
+        volumes = _optional_object(window.get("volumes"))
+        scratch_keys = {
+            key
+            for key, value in roles.items()
+            if isinstance(value, list) and "scratch" in cast(list[object], value)
+        }
+        scratch_volumes.update(scratch_keys)
+        scratch = _optional_object(
+            next((volumes[key] for key in scratch_keys if key in volumes), None)
+        )
+        other_writes = [
+            value
+            for key, stats in volumes.items()
+            if key not in scratch_keys
+            and isinstance(
+                value := _optional_object(stats).get("write_mib_per_second"),
+                (int, float),
+            )
+        ]
+        memory = _optional_object(window.get("memory"))
+        defender = _optional_object(window.get("defender"))
+        generation = sample.get("generation_duration_ns")
+        records = sample.get("records")
+        flush = next(
+            (
+                record.get("duration_ns")
+                for record in map(
+                    _optional_object,
+                    cast(list[object], records) if isinstance(records, list) else [],
+                )
+                if record.get("operation") == "capture"
+                and record.get("phase") == "mapped_memory_flush"
+            ),
+            None,
+        )
+        cells = [
+            str(number),
+            _summary_number(
+                generation / 1_000_000 if isinstance(generation, int) else None,
+                " ms",
+                2,
+            ),
+            _summary_number(
+                flush / 1_000_000 if isinstance(flush, int) else None, " ms", 2
+            ),
+            _summary_number(scratch.get("write_mib_per_second"), " MiB/s", 1),
+            _summary_number(scratch.get("average_write_latency_ms"), " ms", 2),
+            _summary_number(scratch.get("average_queue_length"), "", 1),
+            _summary_number(scratch.get("busy_percent"), "%", 0),
+            _summary_number(sum(other_writes) if other_writes else None, " MiB/s", 1),
+            _summary_number(
+                _optional_object(window.get("cpu")).get("busy_percent"), "%", 0
+            ),
+            _summary_number(memory.get("cache_dirty_mib_max"), " MiB", 1),
+            _summary_number(memory.get("lazy_write_mib_per_second"), " MiB/s", 1),
+            _summary_number(defender.get("cpu_percent"), "%", 1),
+        ]
+        rows.append("| " + " | ".join(cells) + " |")
+    if not rows:
+        return []
+    scratch_names = ", ".join(f"`{name}`" for name in sorted(scratch_volumes))
+    return [
+        f"Scratch volume: {scratch_names or 'not monitored'}.",
+        "",
+        (
+            "| Sample | Generation | Flush | Scratch write | Write latency | "
+            "Queue | Busy | Other write | CPU busy | Dirty cache | Lazy writes | "
+            "Defender CPU |"
+        ),
+        (
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
+            "| ---: | ---: |"
+        ),
+        *rows,
+    ]
 
 
 def collect_openvmm_results(
@@ -1343,11 +1713,14 @@ def collect_results(
     summary_path: Path | None = None,
     lifecycle_input: Path | None = None,
     require_shell_snapshot_restore_512: bool = False,
+    lifecycle_attempt_log: Path | None = None,
 ) -> Path:
     if not platform or "/" in platform or platform in {".", ".."}:
         raise PerformanceError(f"invalid platform name: {platform!r}")
     if not commit:
         raise PerformanceError("commit must not be empty")
+    if lifecycle_attempt_log is not None and lifecycle_input is None:
+        raise PerformanceError("a lifecycle attempt log requires a lifecycle input")
     if require_shell_snapshot_restore_512 and (
         require_network
         or require_shell_snapshot
@@ -1425,6 +1798,17 @@ def collect_results(
         if lifecycle_input is not None
         else None
     )
+    attempts: list[LifecycleAttempt] = []
+    if lifecycle_attempt_log is not None:
+        assert lifecycle_input is not None
+        attempts = read_lifecycle_attempts(
+            lifecycle_attempt_log, platform, lifecycle_input
+        )
+        source = next(attempt for attempt in attempts if attempt.published)
+        print(
+            f"Lifecycle metrics come from attempt {source.number} of "
+            f"{len(attempts)}: {source.file}"
+        )
     if lifecycle is not None:
         lifecycle_dimensions = (
             lifecycle.microvm_abi_version,
@@ -1608,6 +1992,7 @@ def collect_results(
                 platform,
                 lifecycle,
                 lifecycle_input,
+                attempts,
             )
     print(f"Collected {len(results)} p50 metric(s) for {platform}: {output_path}")
     return output_path
@@ -1964,6 +2349,14 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="merge a 128 MiB e2e lifecycle benchmark JSON result",
     )
+    collect.add_argument(
+        "--lifecycle-attempt-log",
+        type=Path,
+        help=(
+            "lifecycle attempt log that must name --lifecycle-input as exactly "
+            "one valid attempt; the summary reports every attempt"
+        ),
+    )
     collect.add_argument("--summary", type=Path)
 
     validate_openvmm = commands.add_parser(
@@ -1971,6 +2364,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     validate_openvmm.add_argument("--platform", required=True)
     validate_openvmm.add_argument("--input", type=Path, required=True)
+    validate_openvmm.add_argument(
+        "--attempt-log",
+        type=Path,
+        help="append the validation outcome to this lifecycle attempt log",
+    )
 
     collect_openvmm = commands.add_parser(
         "collect-openvmm", help="convert an OpenVMM benchmark JSON result to p50 CSV"
@@ -2042,15 +2440,28 @@ def command_performance(args: argparse.Namespace) -> int:
                 require_shell_snapshot_restore_512=(
                     args.require_shell_snapshot_restore_512
                 ),
+                lifecycle_attempt_log=args.lifecycle_attempt_log,
             )
             return 0
         if args.performance_command == "validate-openvmm":
+            status, message = 0, None
             try:
                 read_lifecycle_data(args.platform, args.input)
             except UnstablePerformanceError as error:
-                print(f"ERROR: {error}", file=sys.stderr)
-                return UNSTABLE_LIFECYCLE_EXIT_CODE
-            return 0
+                status, message = UNSTABLE_LIFECYCLE_EXIT_CODE, str(error)
+            except PerformanceError as error:
+                status, message = 2, str(error)
+            if message is not None:
+                print(f"ERROR: {message}", file=sys.stderr)
+            if args.attempt_log is not None:
+                attempt = record_lifecycle_attempt(
+                    args.attempt_log, args.platform, args.input, status, message
+                )
+                print(
+                    f"Recorded lifecycle attempt {attempt.number} "
+                    f"({attempt.status}) in {args.attempt_log}"
+                )
+            return status
         if args.performance_command == "collect-openvmm":
             collect_openvmm_results(
                 args.platform,

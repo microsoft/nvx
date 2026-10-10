@@ -52,7 +52,9 @@ runs:
         fi
         run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
         acceptance_output="${run_dir}/acceptance.json"
-        rm -f "${acceptance_output}"
+        attempt_log="${run_dir}/acceptance-attempts.json"
+        rm -f "${acceptance_output}" "${attempt_log}" \
+          "${run_dir}"/acceptance-attempt-*.json
         for attempt in 1 2; do
           attempt_output="${run_dir}/acceptance-attempt-${attempt}.json"
           python3 scripts/nvx.py benchmark \
@@ -71,7 +73,8 @@ runs:
           validation_status=0
           python3 scripts/nvx.py performance validate-openvmm \
             --platform "${{ inputs.platform }}" \
-            --input "${attempt_output}" || validation_status=$?
+            --input "${attempt_output}" \
+            --attempt-log "${attempt_log}" || validation_status=$?
           if [[ "${validation_status}" -eq 0 ]]; then
             cp "${attempt_output}" "${acceptance_output}"
             break
@@ -220,8 +223,15 @@ runs:
         }
         $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
         $AcceptanceOutput = "$RunDir/acceptance.json"
-        if (Test-Path -LiteralPath $AcceptanceOutput) {
-          Remove-Item -LiteralPath $AcceptanceOutput
+        $AttemptLog = "$RunDir/acceptance-attempts.json"
+        foreach ($Stale in $AcceptanceOutput, $AttemptLog) {
+          if (Test-Path -LiteralPath $Stale) {
+            Remove-Item -LiteralPath $Stale
+          }
+        }
+        if (Test-Path -LiteralPath $RunDir) {
+          Get-ChildItem -LiteralPath $RunDir -Filter "acceptance-attempt-*.json" |
+            Remove-Item
         }
         foreach ($Attempt in 1, 2) {
           $AttemptOutput = "$RunDir/acceptance-attempt-$Attempt.json"
@@ -242,7 +252,8 @@ runs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts\nvx.py performance validate-openvmm `
             --platform "${{ inputs.platform }}" `
-            --input $AttemptOutput
+            --input $AttemptOutput `
+            --attempt-log $AttemptLog
           $ValidationStatus = $LASTEXITCODE
           if ($ValidationStatus -eq 0) {
             Copy-Item -LiteralPath $AttemptOutput -Destination $AcceptanceOutput
@@ -373,6 +384,7 @@ runs:
           --require-shell-snapshot \
           --require-shared-suite \
           --lifecycle-input "${run_dir}/acceptance.json" \
+          --lifecycle-attempt-log "${run_dir}/acceptance-attempts.json" \
           --summary "${GITHUB_STEP_SUMMARY}"
         device_run_dir="${run_dir}/device-io"
         device_results_dir="${device_run_dir}/results"
@@ -411,6 +423,7 @@ runs:
           --require-shell-snapshot `
           --require-shared-suite `
           --lifecycle-input "$RunDir/acceptance.json" `
+          --lifecycle-attempt-log "$RunDir/acceptance-attempts.json" `
           --summary $env:GITHUB_STEP_SUMMARY
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $DeviceRunDir = "$RunDir/device-io"
