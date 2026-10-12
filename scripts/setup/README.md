@@ -6,6 +6,9 @@ These scripts prepare an existing NVX checkout on a supported host:
 - `setup-windows-whp.ps1` configures Windows/WHP build prerequisites.
 - `setup-linux-runner.sh` configures a Linux/KVM or Linux/MSHV Actions runner.
 
+For Azure VMSS bootstrapping, see [Azure provisioning](azure/README.md). The
+scripts in this directory remain usable on supported hosts outside Azure.
+
 They do not create machines or initialize a checkout. The runner modes consume
 a short-lived registration token from standard input and do not store repository
 credentials in the scripts. Initialize the OpenVMM submodule before using the

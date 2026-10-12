@@ -3291,6 +3291,7 @@ class CiConfigurationTests(unittest.TestCase):
             (("openvmm",), (True, True, True, True)),
             (("rust-toolchain.toml",), (True, True, True, True)),
             (("scripts/setup/setup-windows-whp.ps1",), (True, True, True, True)),
+            (("scripts/setup/azure/build_package.py",), (True, True, True, True)),
             (("scripts/setup/README.md",), (True, False, True, True)),
             ((".github/workflows/ci.yml",), (True, True, True, True)),
             ((".github/actions/validate-runner/action.yml",), (True, True, True, True)),
