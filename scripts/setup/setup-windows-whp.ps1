@@ -33,7 +33,11 @@ param(
     [string]$BenchmarkScratchDirectory,
 
     [Parameter()]
-    [switch]$RunnerTokenStdin
+    [switch]$RunnerTokenStdin,
+
+    [Parameter()]
+    [ValidatePattern('^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$')]
+    [string]$ExtraRunnerLabels
 )
 
 Set-StrictMode -Version 2.0
@@ -128,6 +132,28 @@ function Get-ToolArtifact {
     }
 }
 
+function Get-ExpectedRunnerLabels {
+    param(
+        [string]$AdditionalLabels,
+        [switch]$BenchmarkRunner
+    )
+
+    $labels = @("windows", "whp", "virtual-machine")
+    if ($BenchmarkRunner) {
+        $labels += "benchmark"
+    }
+    if (-not [string]::IsNullOrEmpty($AdditionalLabels)) {
+        foreach ($label in $AdditionalLabels.Split(',')) {
+            if ($label -cnotmatch '^[A-Za-z0-9_.-]+$' -or
+                $labels -contains $label) {
+                throw "invalid or duplicate runner label: $label"
+            }
+            $labels += $label
+        }
+    }
+    return $labels -join ','
+}
+
 # The versions, artifacts, and checksums of the tools that this script
 # installs; stage the manifest next to the script.
 $ToolPlatform = "windows-x86_64"
@@ -146,6 +172,9 @@ $runnerRelease = Get-ToolArtifact $ToolManifest "actions_runner" $ToolPlatform
 $RunnerVersion = $runnerRelease.Version
 $RunnerArtifact = $runnerRelease.Name
 $RunnerSha256 = $runnerRelease.Sha256
+
+$ExpectedRunnerLabels = Get-ExpectedRunnerLabels `
+    -AdditionalLabels $ExtraRunnerLabels -BenchmarkRunner:$BenchmarkRunner
 
 if (-not $RunnerOnly) {
     if ([string]::IsNullOrWhiteSpace($Workspace)) {
@@ -418,6 +447,23 @@ function Assert-ActionsRunnerWritablePaths {
         if (-not $item.PSIsContainer) {
             throw "runner writable path is not a directory: $path"
         }
+    }
+}
+
+function Assert-FreshRunnerDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = Get-Item -LiteralPath $Path -Force
+    $unexpected = @(Get-ChildItem -LiteralPath $Path -Force |
+        Where-Object {
+            $_.Name -ne "_work" -or
+            -not $_.PSIsContainer -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        })
+    if (-not $root.PSIsContainer -or
+        $root.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+        $unexpected.Count -ne 0) {
+        throw "refusing to install into partial runner directory: $Path"
     }
 }
 
@@ -1101,15 +1147,6 @@ function Assert-RunnerPackage {
     }
 }
 
-# CI's platform jobs require the benchmark label, which exactly one runner of
-# each backend's pool carries.
-function Get-ActionsRunnerLabels {
-    if ($BenchmarkRunner) {
-        return "windows,whp,virtual-machine,benchmark"
-    }
-    return "windows,whp,virtual-machine"
-}
-
 function Install-ActionsRunner {
     param([Parameter()][string]$Token)
     $archiveName = $RunnerArtifact
@@ -1131,9 +1168,7 @@ function Install-ActionsRunner {
 
         $listener = Join-Path $RunnerDirectory "bin\Runner.Listener.exe"
         if (-not (Test-Path -LiteralPath $listener -PathType Leaf)) {
-            if (@(Get-ChildItem -LiteralPath $RunnerDirectory -Force).Count -ne 0) {
-                throw "refusing to install into partial runner directory: $RunnerDirectory"
-            }
+            Assert-FreshRunnerDirectory -Path $RunnerDirectory
             Copy-Item `
                 -Path (Join-Path $packageRoot "*") `
                 -Destination $RunnerDirectory `
@@ -1157,7 +1192,7 @@ function Install-ActionsRunner {
     $runnerConfiguration = Join-Path $RunnerDirectory ".runner"
     $serviceFile = Join-Path $RunnerDirectory ".service"
     $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-    $labels = Get-ActionsRunnerLabels
+    $labels = $ExpectedRunnerLabels
     $runnerNameValidated = $false
     if (Test-Path -LiteralPath $runnerConfiguration -PathType Leaf) {
         $configuration = Get-Content -LiteralPath $runnerConfiguration -Raw |
@@ -1342,7 +1377,7 @@ function Assert-ActionsRunner {
     }
     if (-not [string]::IsNullOrWhiteSpace($RunnerName)) {
         $labelsFile = Join-Path $RunnerDirectory ".nvx-labels"
-        $expectedLabels = Get-ActionsRunnerLabels
+        $expectedLabels = $ExpectedRunnerLabels
         if (-not (Test-Path -LiteralPath $labelsFile -PathType Leaf) -or
             (Get-Content -LiteralPath $labelsFile -Raw).Trim() -ne
             $expectedLabels) {
