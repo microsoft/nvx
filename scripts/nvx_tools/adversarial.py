@@ -563,7 +563,7 @@ class ExecutorClient:
             cleanup_error = error
         finally:
             self._closed = True
-            for stream in (self._stdin, self._stdout, self._stderr_stream):
+            for stream in (self._stdin, self._stderr_stream):
                 try:
                     stream.close()
                 except OSError as error:
@@ -577,12 +577,17 @@ class ExecutorClient:
         self._terminate()
 
     def _read_responses(self) -> None:
-        while line := self._stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1):
-            if len(line) > MAX_PROTOCOL_LINE_BYTES:
-                self._responses.put(None)
-                return
-            self._responses.put(line)
-        self._responses.put(None)
+        # Close stdout here, after the last read: a close from another thread
+        # waits for a blocked readline, which an inherited pipe can hold open.
+        try:
+            while line := self._stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1):
+                if len(line) > MAX_PROTOCOL_LINE_BYTES:
+                    self._responses.put(None)
+                    return
+                self._responses.put(line)
+            self._responses.put(None)
+        finally:
+            self._stdout.close()
 
     def _terminate(self) -> None:
         if self._process.poll() is None:

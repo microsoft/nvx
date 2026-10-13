@@ -2194,6 +2194,42 @@ class CopilotContainmentTests(unittest.TestCase):
         self.assertEqual(environment["PATH"], "test-path")
         self.assertNotIn("GITHUB_TOKEN", environment)
 
+    def test_external_executor_close_ignores_inherited_stdout(self) -> None:
+        # The wrapper exits at once, but its child keeps the stdout pipe open.
+        wrapper_source = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'],"
+            " stdin=subprocess.DEVNULL, stdout=1, stderr=subprocess.DEVNULL)\n"
+        )
+        real_popen = subprocess.Popen
+
+        def start_wrapper(_argv: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            kwargs["env"] = None
+            return real_popen([sys.executable, "-c", wrapper_source], **kwargs)  # type: ignore[arg-type]
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("nvx_tools.adversarial.shutil.which", return_value="wrapper"),
+            patch(
+                "nvx_tools.adversarial.subprocess.Popen",
+                side_effect=start_wrapper,
+            ),
+        ):
+            client = ExecutorClient(
+                run_dir=Path(temporary),
+                command="wrapper",
+                label="inherited",
+            )
+            client._process.wait(timeout=5.0)
+            started = time.monotonic()
+            client.close()
+            elapsed = time.monotonic() - started
+        self.assertLess(
+            elapsed,
+            5.0,
+            msg=f"close() blocked {elapsed:.2f}s waiting on inherited stdout",
+        )
+
     def test_executor_rejects_boolean_schema_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             executor = AdversarialExecutor(Path(temporary))
