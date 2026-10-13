@@ -11,6 +11,7 @@ Do not maintain a second copy of the runner setup or its tool versions here.
 | Component | Responsibility |
 | --- | --- |
 | `linux/bootstrap-runner.sh` | Validate Azure instance identity, prepare the attached disk and backend, derive a runner name, and register using managed identity and Key Vault. |
+| `linux/block-runner-metadata.sh` | Block the dedicated runner account from Azure instance metadata with a verified, reboot-persistent IPv4 owner rule. |
 | `linux/setup-data-disk.sh` | Find an Azure managed disk by LUN, preserve recognized ext4 data, and initialize only a blank or owned incomplete disk. |
 | `linux/setup-mshv.sh`, `linux/verify-mshv.sh` | Optional Azure Linux 3 Dom0 boot preparation and post-boot verification. This differs from the checkout/build helper `../setup-linux-mshv.sh`. |
 | `windows/bootstrap-runner.ps1` | Validate instance identity; set up disk, WHP/Hyper-V features, reboot continuation, and the Network Service runner. |
@@ -62,6 +63,12 @@ administrator authorized-key set; an empty array preserves existing keys.
 Bootstrap resumes through a SYSTEM startup task after disk or feature
 reboots, then removes the task after successful registration. GitHub jobs
 run as Network Service with access to Azure instance metadata blocked.
+Linux jobs run as `nvx-runner`, whose metadata block is installed before
+registration. The runner service requires the block on every start; root
+retains metadata access for bootstrap and token retrieval. Windows selects
+managed NVMe disks by physical drive number and the documented
+[Azure namespace mapping](https://learn.microsoft.com/en-us/azure/virtual-machines/enable-nvme-remote-faqs)
+(namespace ID = data-disk LUN + 1); unknown or ambiguous mappings stop setup.
 
 Both platforms require an attached managed disk at `dataDisk.lun` (0–63),
 a suitable nested-virtualization-capable image, network access to the
@@ -88,6 +95,7 @@ no Azure or GitHub API calls. It rejects unknown or credential-like
 configuration values, generates SHA-256 hashes for the exact source files
 and payload, and enforces Azure's 65,535-byte decoded custom-data limit.
 The output directory must be outside the repository.
+It must be new or empty so files from another platform cannot be reused.
 
 | Output | Role |
 | --- | --- |

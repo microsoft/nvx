@@ -32,7 +32,7 @@ param(
     # Administrator account the SSH keys are installed for. Only used for
     # logging/diagnostics: OpenSSH on Windows authorizes all administrators
     # through administrators_authorized_keys.
-    [string] $AdminUsername = 'azrsadmin',
+    [string] $AdminUsername = 'ciadmin',
 
     # Base64 (UTF8) encoded newline-separated list of SSH public keys.
     [string] $PublicKeysBase64 = '',

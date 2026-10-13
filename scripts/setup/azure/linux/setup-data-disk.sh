@@ -115,7 +115,7 @@ elif [ "${#PARTITIONS[@]}" -eq 0 ]; then
         table_id=$(printf '%s\n' "$dump" | awk -F: '$1 == "label-id" { gsub(/[[:space:]]/, "", $2); print tolower($2) }')
         entries=$(printf '%s\n' "$dump" | awk '/^[^#].* : / { count++ } END { print count+0 }')
         if [ "$table_id" != "$INIT_TABLE_ID" ] || [ "$entries" -ne 0 ]; then
-            echo "ERROR: $DISKDEV contains signatures not belonging to an interrupted AzTemplates initialization; refusing to repartition it" >&2
+            echo "ERROR: $DISKDEV contains signatures not belonging to an interrupted runner disk initialization; refusing to repartition it" >&2
             exit 1
         fi
         echo "Recovering an interrupted empty GPT-table creation on $DISKDEV"
@@ -153,7 +153,7 @@ elif [ "${#PARTITIONS[@]}" -eq 1 ]; then
         # This is the recoverable state left by a crash after mkpart and
         # before mkfs. Never format if any unknown signature is present.
         if [ "$PART_TYPE" != "$INIT_PART_TYPE" ]; then
-            echo "ERROR: blank partition $TARGETDEV lacks the AzTemplates initialization marker; refusing to format it" >&2
+            echo "ERROR: blank partition $TARGETDEV lacks the runner disk initialization marker; refusing to format it" >&2
             exit 1
         fi
         if has_signatures "$TARGETDEV"; then

@@ -45,6 +45,7 @@ runs:
         ${SHELLCHECK} --shell=bash \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
           scripts/setup/azure/linux/bootstrap-runner.sh \
+          scripts/setup/azure/linux/block-runner-metadata.sh \
           scripts/setup/azure/linux/setup-data-disk.sh \
           scripts/setup/azure/linux/setup-mshv.sh \
           scripts/setup/azure/linux/verify-mshv.sh
@@ -65,6 +66,7 @@ runs:
         ${SHFMT} -d -ln bash -i 4 -ci \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
           scripts/setup/azure/linux/bootstrap-runner.sh \
+          scripts/setup/azure/linux/block-runner-metadata.sh \
           scripts/setup/azure/linux/setup-data-disk.sh \
           scripts/setup/azure/linux/setup-mshv.sh \
           scripts/setup/azure/linux/verify-mshv.sh

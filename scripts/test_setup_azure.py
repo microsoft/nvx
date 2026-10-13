@@ -207,9 +207,29 @@ class PackageTests(unittest.TestCase):
                     "setup-linux-runner.sh",
                     "tool-versions.conf",
                     "bootstrap-runner.sh",
+                    "block-runner-metadata.sh",
                     "setup-data-disk.sh",
                 },
             )
+            metadata_unit = next(
+                entry
+                for entry in cloud["write_files"]
+                if entry["path"]
+                == "/etc/systemd/system/nvx-runner-metadata-block.service"
+            )
+            self.assertEqual(metadata_unit["permissions"], "0644")
+            self.assertIn(
+                "ExecStart=/opt/nvx-bootstrap/block-runner-metadata.sh",
+                metadata_unit["content"],
+            )
+            bootstrap = names["bootstrap-runner.sh"]
+            self.assertLess(
+                bootstrap.index(b'systemctl restart "$metadata_service"'),
+                bootstrap.index(b"runner_token=$("),
+            )
+            self.assertIn(b'systemctl enable "$metadata_service"', bootstrap)
+            self.assertIn(b"Requires=%s", bootstrap)
+            self.assertIn(b"ExecStartPre=+%s", bootstrap)
             self.assertEqual(json.loads(names["config.json"]), config)
             self.assertEqual(
                 names["setup-linux-runner.sh"], builder.source("setup-linux-runner.sh")
@@ -240,10 +260,64 @@ class PackageTests(unittest.TestCase):
                             "tool-versions.conf",
                             "setup-data-disk.sh",
                             "bootstrap-runner.sh",
+                            "block-runner-metadata.sh",
                         },
                         additional,
                     )
                     self.assertLessEqual(manifest["customDataBytes"], 65535)
+
+    def test_linux_runner_metadata_firewall_is_idempotent_and_fail_closed(self):
+        shell = shutil.which("bash")
+        if shell is None:
+            self.skipTest("Bash is unavailable")
+        source = builder.source("linux/block-runner-metadata.sh").decode()
+        mock = r"""
+id() {
+    case "$*" in
+        -u) printf '0\n' ;;
+        '-u nvx-runner') printf '1001\n' ;;
+        *) return 1 ;;
+    esac
+}
+iptables() {
+    case "$*" in
+        '-w 10 -C OUTPUT -d 169.254.169.254/32 -m owner --uid-owner 1001 -j REJECT')
+            [ "$installed" -eq 1 ] ;;
+        '-w 10 -D OUTPUT -d 169.254.169.254/32 -m owner --uid-owner 1001 -j REJECT')
+            [ "$installed" -eq 1 ] || return 1
+            installed=0 ;;
+        '-w 10 -I OUTPUT 1 -d 169.254.169.254/32 -m owner --uid-owner 1001 -j REJECT')
+            [ "$fail_insert" -eq 0 ] || return 1
+            installed=1
+            insertions=$((insertions + 1)) ;;
+        *) printf 'Unexpected firewall operation: %s\n' "$*" >&2; return 1 ;;
+    esac
+}
+""".replace("\r\n", "\n")
+        for initially_installed, fail_insert in ((0, 0), (1, 0), (0, 1)):
+            with self.subTest(existing=initially_installed, failure=fail_insert):
+                script = (
+                    f"installed={initially_installed}\nfail_insert={fail_insert}\n"
+                    "insertions=0\n"
+                    + mock
+                    + source
+                    + '\ntest "$installed" -eq 1 && test "$insertions" -eq 1\n'
+                )
+                result = subprocess.run(
+                    [shell, "-s"],
+                    input=script.encode(),
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                if fail_insert:
+                    self.assertNotEqual(result.returncode, 0)
+                else:
+                    self.assertEqual(
+                        result.returncode,
+                        0,
+                        result.stdout.decode() + result.stderr.decode(),
+                    )
 
     def test_windows_package_round_trip(self):
         config = self.configuration("windows")
@@ -348,6 +422,18 @@ $definition = $ast.Find({
     $node.Name -eq 'Get-RunnerName'
 }, $true)
 . ([scriptblock]::Create($definition.Extent.Text))
+$labelsDefinition = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-ExtraRunnerLabels'
+}, $true)
+. ([scriptblock]::Create($labelsDefinition.Extent.Text))
+if ((Get-ExtraRunnerLabels -RunnerLabels @('Windows', 'WHP', 'Virtual-Machine', 'isolated')) -ne
+    'isolated') { throw 'Windows bootstrap rejected valid case-insensitive runner labels' }
+$rejected = $false
+try { Get-ExtraRunnerLabels -RunnerLabels @('windows', 'kvm', 'virtual-machine') | Out-Null }
+catch { $rejected = $true }
+if (-not $rejected) { throw 'Windows bootstrap accepted the wrong backend label' }
 $script:config = Get-Content -LiteralPath (Join-Path $env:NVX_TEST_BOOTSTRAP 'config.json') -Raw |
     ConvertFrom-Json
 $script:metadata = [pscustomobject]@{
@@ -407,6 +493,101 @@ Write-Output NVX_AZURE_WINDOWS_MOCK_OK
             self.assertIn("NVX_AZURE_WINDOWS_MOCK_OK", result.stdout)
             self.assertEqual(len(manifest["guestFiles"]), 5)
 
+    def test_windows_disk_selection_requires_exact_guest_lun(self):
+        powershell = shutil.which("powershell.exe")
+        if os.name != "nt" or powershell is None:
+            self.skipTest("Windows PowerShell is unavailable")
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:NVX_TEST_DISK_SCRIPT, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Data disk helper has parse errors' }
+foreach ($name in @('Get-DiskAddress', 'Test-ManagedNvmeDisk',
+        'Get-ManagedNvmeLun', 'Select-ManagedDataDisk')) {
+    $definition = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name
+    }, $true)
+    if (-not $definition) { throw "Missing selection function: $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+$nvme = [pscustomobject]@{
+    Number = 2; IsBoot = $false; IsSystem = $false
+    FriendlyName = 'MSFT NVMe Accelerator'; Model = ''
+    Location = 'Integrated : Adapter 1 : Target 0 : LUN 0'
+}
+$guest = [pscustomobject]@{
+    Index = 2; DeviceID = '\\.\PHYSICALDRIVE2'; SCSILogicalUnit = 1
+}
+if ((Select-ManagedDataDisk -Disks @($nvme) -GuestDisks @($guest) -Lun 0).Number -ne 2) {
+    throw 'Windows NVMe namespace 1 did not map to Azure LUN 0'
+}
+if ($null -ne (Select-ManagedDataDisk -Disks @($nvme) -GuestDisks @($guest) -Lun 1)) {
+    throw 'A sole disk at the wrong Azure LUN was selected'
+}
+if ($null -ne (Select-ManagedDataDisk -Disks @($nvme) -GuestDisks @() -Lun 0)) {
+    throw 'An NVMe disk without a verified guest mapping was selected'
+}
+$guest.SCSILogicalUnit = 0
+if ($null -ne (Select-ManagedDataDisk -Disks @($nvme) -GuestDisks @($guest) -Lun 0)) {
+    throw 'An NVMe disk without a data namespace was selected'
+}
+$guest.SCSILogicalUnit = 1
+if ($null -ne (Select-ManagedDataDisk -Disks @($nvme) -GuestDisks @($guest, $guest) -Lun 0)) {
+    throw 'A duplicate guest mapping was selected'
+}
+$other = [pscustomobject]@{
+    Number = 3; IsBoot = $false; IsSystem = $false
+    FriendlyName = 'Virtual_Disk NVMe Premium'; Model = ''
+    Location = 'NVMe controller'
+}
+$otherGuest = [pscustomobject]@{
+    Index = 3; DeviceID = '\\.\PHYSICALDRIVE3'; SCSILogicalUnit = 1
+}
+if ($null -ne (Select-ManagedDataDisk -Disks @($nvme, $other) `
+        -GuestDisks @($guest, $otherGuest) -Lun 0)) {
+    throw 'Ambiguous Azure NVMe LUN was selected'
+}
+$scsi = [pscustomobject]@{
+    Number = 4; IsBoot = $false; IsSystem = $false
+    FriendlyName = 'Microsoft Virtual Disk'; Model = ''
+    Location = 'Integrated : Adapter 1 : Target 0 : LUN 4'
+}
+if ((Select-ManagedDataDisk -Disks @($scsi) -GuestDisks @() -Lun 4).Number -ne 4) {
+    throw 'Exact SCSI LUN no longer selects its disk'
+}
+$scsi.Location = 'Integrated : Adapter 1 : Target 0 : LUN 0'
+if ($null -ne (Select-ManagedDataDisk -Disks @($scsi, $nvme) `
+        -GuestDisks @($guest) -Lun 0)) {
+    throw 'A disk was selected despite contradictory controller mappings'
+}
+"""
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            env={
+                **os.environ,
+                "NVX_TEST_DISK_SCRIPT": str(
+                    builder.ROOT / "windows/setup-data-disk.ps1"
+                ),
+            },
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_model_patch_is_exact_payload(self):
         cases: tuple[tuple[Literal["linux", "windows"], str], ...] = (
             ("linux", "cloud-init.yaml"),
@@ -456,6 +637,24 @@ Write-Output NVX_AZURE_WINDOWS_MOCK_OK
                 self.configuration("windows"), builder.REPO / "generated"
             )
         self.assertFalse((builder.REPO / "generated").exists())
+
+    def test_package_output_must_be_new_or_empty(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "package"
+            builder.build_package(self.configuration("windows"), output)
+            files = {path.name: path.read_bytes() for path in output.iterdir()}
+            with self.assertRaisesRegex(ValueError, "must be empty"):
+                builder.build_package(self.configuration("linux"), output)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in output.iterdir()}, files
+            )
+            empty = Path(temporary) / "empty"
+            empty.mkdir()
+            builder.build_package(self.configuration("linux"), empty)
+            self.assertEqual(
+                {path.name for path in empty.iterdir()},
+                {"cloud-init.yaml", "manifest.json", "model-patch.json"},
+            )
 
     def test_invalid_common_values(self):
         cases: list[tuple[str, object]] = [
@@ -523,6 +722,23 @@ Write-Output NVX_AZURE_WINDOWS_MOCK_OK
         config["runnerLabels"] = ["kvm", "linux", "virtual-machine"]
         with self.assertRaisesRegex(ValueError, "runnerLabels must start"):
             builder.normalize_config(config)
+        config = self.configuration("linux")
+        config["adminUsername"] = "root"
+        with self.assertRaisesRegex(ValueError, "must not be root"):
+            builder.normalize_config(config)
+
+    def test_required_runner_labels_ignore_case(self):
+        cases: tuple[tuple[Literal["linux", "windows"], list[str]], ...] = (
+            ("linux", ["LINUX", "KVM", "Virtual-Machine"]),
+            ("windows", ["Windows", "WHP", "Virtual-Machine"]),
+        )
+        for platform, labels in cases:
+            with self.subTest(platform=platform):
+                config = self.configuration(platform)
+                config["runnerLabels"] = labels
+                self.assertEqual(
+                    builder.normalize_config(config)["runnerLabels"], labels
+                )
 
     def test_windows_drive_and_path_validation(self):
         for update in (

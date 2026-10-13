@@ -69,6 +69,20 @@ function Get-RunnerName {
     return '{0}-{1}' -f $config.runnerNamePrefix, ([long]$instance + $config.runnerNumberOffset)
 }
 
+function Get-ExtraRunnerLabels {
+    param([string[]]$RunnerLabels)
+    $requiredLabels = @('windows', 'whp', 'virtual-machine')
+    if ($RunnerLabels.Count -lt $requiredLabels.Count) {
+        throw 'Runner labels must preserve the platform and backend labels.'
+    }
+    for ($index = 0; $index -lt $requiredLabels.Count; $index++) {
+        if ($RunnerLabels[$index] -ne $requiredLabels[$index]) {
+            throw 'Runner labels must preserve the platform and backend labels.'
+        }
+    }
+    return @($RunnerLabels | Select-Object -Skip $requiredLabels.Count) -join ','
+}
+
 function Set-RunnerMetadataFirewall {
     $name = 'NvxRunnerDenyMetadata'
     $principal = 'D:(A;;CC;;;S-1-5-20)'
@@ -142,7 +156,7 @@ try {
         -DataDiskLun $config.dataDisk.lun -DataDriveLetter $drive `
         -TempDiskFallbackLetter $config.dataDisk.temporaryDriveFallback
     if ($LASTEXITCODE -ne 0) { throw "Managed data disk setup failed: $LASTEXITCODE" }
-    $diskReady = Get-ItemProperty -Path 'HKLM:\SOFTWARE\AzTemplates\DataDiskSetup' `
+    $diskReady = Get-ItemProperty -Path 'HKLM:\SOFTWARE\NvxRunner\DataDiskSetup' `
         -Name Completed -ErrorAction SilentlyContinue
     if (-not $diskReady -or $diskReady.Completed -ne 1) {
         Write-Output 'Data disk setup scheduled a reboot; runner setup continues at startup.'
@@ -189,17 +203,7 @@ try {
     [Environment]::SetEnvironmentVariable('Path', $machinePath, 'Machine')
     $env:Path = $machinePath
 
-    $requiredLabels = @('windows', 'whp', 'virtual-machine')
-    $configuredLabels = @($config.runnerLabels)
-    if ($configuredLabels.Count -lt $requiredLabels.Count) {
-        throw 'Runner labels must preserve the platform and backend labels.'
-    }
-    for ($index = 0; $index -lt $requiredLabels.Count; $index++) {
-        if ($configuredLabels[$index] -cne $requiredLabels[$index]) {
-            throw 'Runner labels must preserve the platform and backend labels.'
-        }
-    }
-    $extraLabels = @($configuredLabels | Select-Object -Skip $requiredLabels.Count) -join ','
+    $extraLabels = Get-ExtraRunnerLabels -RunnerLabels @($config.runnerLabels)
     $arguments = @(
         '-RunnerOnly', '-RepositoryUrl', "https://github.com/$($config.repository)",
         '-RunnerDirectory', $config.runnerDirectory

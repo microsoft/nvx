@@ -1,4 +1,4 @@
-# Idempotent setup of the single Azure managed data disk at LUN 0.
+# Idempotent setup of the configured Azure managed data disk.
 # Existing filesystems are never formatted. If the Azure temporary disk owns
 # the requested letter and hosts the pagefile, setup continues through a scheduled startup task
 # after one controlled reboot.
@@ -11,22 +11,25 @@ param(
 $ErrorActionPreference = 'Stop'
 $DataDriveLetter = $DataDriveLetter.TrimEnd(':').ToUpperInvariant()
 $TempDiskFallbackLetter = $TempDiskFallbackLetter.TrimEnd(':').ToUpperInvariant()
+if ($DataDiskLun -lt 0 -or $DataDiskLun -gt 63) {
+    throw 'Data disk LUN must be between 0 and 63.'
+}
 if ($DataDriveLetter.Length -ne 1 -or $TempDiskFallbackLetter.Length -ne 1) {
     throw 'Drive-letter parameters must each contain one letter.'
 }
 
 $logDir = 'C:\WindowsAzure\Logs'
-$stateDir = Join-Path $env:ProgramFiles 'AzTemplates'
+$stateDir = Join-Path $env:ProgramFiles 'NvxRunner'
 $continuationScript = Join-Path $stateDir 'setup-datadisk.ps1'
-$continuationTask = 'AzTemplates-SetupDataDisk'
-$pendingPath = 'HKLM:\SOFTWARE\AzTemplates\DataDiskSetup'
+$continuationTask = 'NvxRunner-SetupDataDisk'
+$pendingPath = 'HKLM:\SOFTWARE\NvxRunner\DataDiskSetup'
 $initMarkerType = '{8f8f0f40-5c84-4a2a-8c22-8fbff2e8bc91}'
 $basicDataType = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'
 
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 $logFile = Join-Path $logDir 'setup-datadisk.log'
-$mutex = [System.Threading.Mutex]::new($false, 'Global\AzTemplates-SetupDataDisk')
+$mutex = [System.Threading.Mutex]::new($false, 'Global\NvxRunner-SetupDataDisk')
 $mutexHeld = $false
 try {
     $mutexHeld = $mutex.WaitOne((New-TimeSpan -Minutes 15))
@@ -87,7 +90,52 @@ function Test-LocalNvmeDisk {
 
 function Test-ManagedNvmeDisk {
     param([Parameter(Mandatory = $true)] $Disk)
-    "$($Disk.FriendlyName) $($Disk.Model)" -match '(?i)MSFT NVMe Accelerator'
+    "$($Disk.FriendlyName) $($Disk.Model)" -match '(?i)MSFT NVMe Accelerator|Virtual_Disk NVMe Premium'
+}
+
+function Get-ManagedNvmeLun {
+    param(
+        [Parameter(Mandatory = $true)] $Disk,
+        [object[]] $GuestDisks
+    )
+    $deviceId = "\\.\PHYSICALDRIVE$($Disk.Number)"
+    $matchingDrives = @($GuestDisks | Where-Object {
+        $_.Index -eq $Disk.Number -and $_.DeviceID -ieq $deviceId
+    })
+    if ($matchingDrives.Count -ne 1) { return $null }
+    $namespaceId = $matchingDrives[0].SCSILogicalUnit
+    if ($null -eq $namespaceId -or $namespaceId -lt 1 -or $namespaceId -gt 64) {
+        return $null
+    }
+    # Azure exposes data-disk LUN n as NVMe namespace/SCSI logical unit n+1.
+    return ([int]$namespaceId - 1)
+}
+
+function Select-ManagedDataDisk {
+    param(
+        [object[]] $Disks,
+        [object[]] $GuestDisks,
+        [int] $Lun
+    )
+    $nonBootDisks = @($Disks | Where-Object { -not $_.IsBoot -and -not $_.IsSystem })
+    $scsiCandidates = @($nonBootDisks | Where-Object {
+        if (Test-ManagedNvmeDisk $_) { return $false }
+        $address = Get-DiskAddress $_
+        $null -ne $address.Adapter -and $address.Adapter -ge 1 -and
+        $address.Target -eq 0 -and $address.Lun -eq $Lun
+    })
+    $nvmeCandidates = @($nonBootDisks | Where-Object {
+        if (-not (Test-ManagedNvmeDisk $_)) { return $false }
+        $nvmeLun = Get-ManagedNvmeLun -Disk $_ -GuestDisks $GuestDisks
+        $null -ne $nvmeLun -and $nvmeLun -eq $Lun
+    })
+    if ($scsiCandidates.Count -eq 1 -and $nvmeCandidates.Count -eq 0) {
+        return $scsiCandidates[0]
+    }
+    if ($scsiCandidates.Count -eq 0 -and $nvmeCandidates.Count -eq 1) {
+        return $nvmeCandidates[0]
+    }
+    return $null
 }
 
 function Get-FreeDriveLetter {
@@ -167,27 +215,21 @@ $allDisks = @()
 for ($attempt = 1; $attempt -le 12; $attempt++) {
     Update-HostStorageCache
     $allDisks = @(Get-Disk)
-    $nonBootDisks = @($allDisks | Where-Object { -not $_.IsBoot -and -not $_.IsSystem })
-    $scsiCandidates = @($nonBootDisks | Where-Object {
-        $address = Get-DiskAddress $_
-        $null -ne $address.Adapter -and $address.Adapter -ge 1 -and
-        $address.Target -eq 0 -and $address.Lun -eq $DataDiskLun
-    })
-    $nvmeCandidates = @($nonBootDisks | Where-Object { Test-ManagedNvmeDisk $_ })
-    if ($scsiCandidates.Count -eq 1) {
-        $dataDisk = $scsiCandidates[0]
-        break
+    $guestDisks = @()
+    if (@($allDisks | Where-Object { Test-ManagedNvmeDisk $_ }).Count -gt 0) {
+        $guestDisks = @(Get-CimInstance -ClassName Win32_DiskDrive)
     }
-    if ($scsiCandidates.Count -eq 0 -and $nvmeCandidates.Count -eq 1) {
-        $dataDisk = $nvmeCandidates[0]
-        break
-    }
+    $dataDisk = Select-ManagedDataDisk -Disks $allDisks -GuestDisks $guestDisks -Lun $DataDiskLun
+    if ($dataDisk) { break }
     Start-Sleep -Seconds 5
 }
 
 foreach ($disk in $allDisks) {
     $address = Get-DiskAddress $disk
-    Write-DiskLog "Disk $($disk.Number): Boot=$($disk.IsBoot) System=$($disk.IsSystem) Style=$($disk.PartitionStyle) Bus=$($disk.BusType) FriendlyName='$($disk.FriendlyName)' Model='$($disk.Model)' Location='$($disk.Location)' Adapter=$($address.Adapter) Target=$($address.Target) Lun=$($address.Lun)"
+    $nvmeLun = if (Test-ManagedNvmeDisk $disk) {
+        Get-ManagedNvmeLun -Disk $disk -GuestDisks $guestDisks
+    }
+    Write-DiskLog "Disk $($disk.Number): Boot=$($disk.IsBoot) System=$($disk.IsSystem) Style=$($disk.PartitionStyle) Bus=$($disk.BusType) FriendlyName='$($disk.FriendlyName)' Model='$($disk.Model)' Location='$($disk.Location)' Adapter=$($address.Adapter) Target=$($address.Target) Lun=$($address.Lun) AzureNvmeLun=$nvmeLun"
 }
 if (-not $dataDisk) {
     Write-DiskLog "ERROR: could not uniquely identify managed data disk LUN $DataDiskLun."
@@ -222,7 +264,7 @@ if ($dConflict -and $dConflict.DiskNumber -ne $dataDisk.Number) {
         $currentBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
         $requestedBoot = Get-RegistryValue -Path $pendingPath -Name RebootRequestedFromBoot
         if ($requestedBoot -and $requestedBoot -ne $currentBoot) {
-            Write-DiskLog 'ERROR: the D: pagefile conflict persists after the continuation reboot.'
+            Write-DiskLog "ERROR: the ${DataDriveLetter}: pagefile conflict persists after the continuation reboot."
             exit 1
         }
         Set-ItemProperty -Path $pendingPath -Name TempDiskNumber -Value $conflictDisk.Number

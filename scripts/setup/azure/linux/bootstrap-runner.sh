@@ -43,6 +43,11 @@ runner_directory=${values[4]}
 export NVX_DATA_DISK_LUN=${values[5]}
 export NVX_DATA_DISK_MOUNT_POINT=${values[6]}
 kernel_mode=${values[7]}
+admin_uid=$(id -u "$admin_username")
+[ "$admin_uid" -ne 0 ] || {
+    echo "ERROR: the runner administrator must not be root" >&2
+    exit 1
+}
 
 runner_name=$(
     python3 - "$config_path" <<'PY'
@@ -88,8 +93,6 @@ if [ "$backend" = mshv ] && [ "$kernel_mode" = azurelinux-mshv ]; then
         exit 0
     fi
     bash "$setup_root/verify-mshv.sh"
-elif [ "$backend" = mshv ] && [ -x /usr/local/bin/aztemplates-verify-mshv.sh ]; then
-    /usr/local/bin/aztemplates-verify-mshv.sh
 fi
 [ -c "/dev/$backend" ] || {
     echo "ERROR: /dev/$backend is unavailable" >&2
@@ -105,6 +108,11 @@ if [ -n "$extra_runner_labels" ]; then
     setup_arguments+=(--extra-runner-labels "$extra_runner_labels")
 fi
 sudo -u "$admin_username" -H sh "$setup_root/setup-linux-runner.sh" "${setup_arguments[@]}"
+
+metadata_service=nvx-runner-metadata-block.service
+systemctl enable "$metadata_service"
+systemctl restart "$metadata_service"
+systemctl is-active --quiet "$metadata_service"
 
 runner_token=
 cleanup() { runner_token=; }
@@ -152,4 +160,20 @@ printf '%s\n' "$runner_token" |
         "${setup_arguments[@]}" --runner-name "$runner_name" \
         --runner-token-stdin
 runner_token=
+
+read -r service_name <"$runner_directory/.service"
+if [[ ! "$service_name" =~ ^actions\.runner\.[A-Za-z0-9_.-]+\.service$ ||
+    "$service_name" == *..* ]] ||
+    [ "$(systemctl show "$service_name" --property=User --value)" != nvx-runner ]; then
+    echo "ERROR: the registered runner service is not owned by nvx-runner" >&2
+    exit 1
+fi
+drop_in="/etc/systemd/system/${service_name}.d"
+mkdir -p "$drop_in"
+printf '[Unit]\nRequires=%s\nAfter=%s\n[Service]\nExecStartPre=+%s\n' \
+    "$metadata_service" "$metadata_service" "$setup_root/block-runner-metadata.sh" \
+    >"$drop_in/azure-metadata.conf"
+systemctl daemon-reload
+systemctl restart "$service_name"
+systemctl is-active --quiet "$service_name"
 echo NVX_CLOUD_RUNNER_SETUP_COMPLETE=1

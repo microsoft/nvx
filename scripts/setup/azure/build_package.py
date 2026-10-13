@@ -248,6 +248,8 @@ def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
         "runnerNumberOffset": offset,
     }
     if os_type == "linux":
+        if admin_username == "root":
+            raise ValueError("Linux adminUsername must not be root")
         if set(disk) != {"lun", "mountPoint"}:
             raise ValueError("Linux dataDisk must contain only lun and mountPoint")
         mount_point = linux_path(disk["mountPoint"], "dataDisk.mountPoint")
@@ -411,6 +413,7 @@ def linux_payload(
         "tool-versions.conf": source("tool-versions.conf"),
         "setup-data-disk.sh": source("linux/setup-data-disk.sh"),
         "bootstrap-runner.sh": source("linux/bootstrap-runner.sh"),
+        "block-runner-metadata.sh": source("linux/block-runner-metadata.sh"),
     }
     if config["kernelMode"] == "azurelinux-mshv":
         files["setup-mshv.sh"] = source("linux/setup-mshv.sh")
@@ -441,6 +444,19 @@ def linux_payload(
             "owner": "root:root",
             "permissions": "0644",
             "content": service,
+        }
+    )
+    entries.append(
+        {
+            "path": "/etc/systemd/system/nvx-runner-metadata-block.service",
+            "owner": "root:root",
+            "permissions": "0644",
+            "content": (
+                "[Unit]\nDescription=Block Azure metadata for NVX CI runner jobs\n\n"
+                "[Service]\nType=oneshot\nRemainAfterExit=yes\n"
+                "ExecStart=/opt/nvx-bootstrap/block-runner-metadata.sh\n\n"
+                "[Install]\nWantedBy=multi-user.target\n"
+            ),
         }
     )
     document = {
@@ -506,7 +522,10 @@ def windows_payload(
 def build_package(config: object, output: str | Path) -> PackageManifest:
     config = normalize_config(config)
     version = rust_version()
-    output = Path(output).resolve()
+    output = Path(output)
+    if output.is_symlink():
+        raise ValueError("Package output must not be a symbolic link")
+    output = output.resolve()
     if output == REPO or output.is_relative_to(REPO):
         raise ValueError("Generated packages must be outside the NVX source directory")
     data, files, generated = (
@@ -537,6 +556,8 @@ def build_package(config: object, output: str | Path) -> PackageManifest:
     generated["model-patch.json"] = (json.dumps(patch, indent=2) + "\n").encode()
     generated["manifest.json"] = (json.dumps(manifest, indent=2) + "\n").encode()
     output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise ValueError(f"Package output directory must be empty: {output}")
     for name, content in generated.items():
         target = output / name
         if target.is_symlink():
