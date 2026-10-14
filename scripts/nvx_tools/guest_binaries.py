@@ -33,58 +33,61 @@ class GuestBinaryBuildResult:
     binaries: dict[str, str]
 
 
-def guest_binary_source_files() -> tuple[Path, ...]:
+def guest_binary_source_files(root: Path | None = None) -> tuple[Path, ...]:
     """Return the complete ordered input set of the PR 1 guest executables."""
+    root = Path(root or BuildConstants.REPO_ROOT)
+    crate = root / "nvx-rs"
     files = {
-        GuestRustBuildConstants.MANIFEST,
-        GuestRustBuildConstants.LOCKFILE,
-        GuestRustBuildConstants.BUILD_SCRIPT,
-        GuestRustBuildConstants.TOOLCHAIN_FILE,
-        *GuestRustBuildConstants.BUILD_RECIPE_FILES,
+        crate / "Cargo.toml",
+        crate / "Cargo.lock",
+        crate / "build.rs",
+        root / "rust-toolchain.toml",
+        root / "scripts" / "nvx_tools" / "build_constants.py",
+        root / "scripts" / "nvx_tools" / "guest_binaries.py",
     }
-    for directory in GuestRustBuildConstants.SOURCE_DIRECTORIES:
-        if not directory.is_dir():
-            raise ScriptError(f"nvx-rs source directory not found: {directory}")
-        files.update(
-            path
-            for path in directory.rglob("*")
-            if path.is_file() and "target" not in path.relative_to(directory).parts
-        )
+    source = crate / "src"
+    if not source.is_dir():
+        raise ScriptError(f"nvx-rs source directory not found: {source}")
+    files.update(
+        path
+        for path in source.rglob("*")
+        if path.is_file() and "target" not in path.relative_to(source).parts
+    )
     return tuple(
         sorted(
             (require_file(path, "Rust guest binary source input") for path in files),
-            key=lambda path: path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
+            key=lambda path: path.relative_to(root).as_posix(),
         )
     )
 
 
-def guest_binary_source_sha256() -> str:
+def guest_binary_source_sha256(root: Path | None = None) -> str:
     """Hash the paths and contents that determine every Rust guest executable."""
+    root = Path(root or BuildConstants.REPO_ROOT)
     inventory = {
         "domain": GuestRustBuildConstants.SOURCE_DIGEST_DOMAIN,
         "format": GuestRustBuildConstants.SOURCE_DIGEST_FORMAT,
         "files": [
             {
-                "path": path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
+                "path": path.relative_to(root).as_posix(),
                 "sha256": normalized_sha256_file(path),
             }
-            for path in guest_binary_source_files()
+            for path in guest_binary_source_files(root)
         ],
     }
     encoded = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
-def pinned_guest_rust_toolchain() -> str:
+def pinned_guest_rust_toolchain(root: Path | None = None) -> str:
     """Read and validate the repository's exact Rust release pin."""
-    contents = require_file(
-        GuestRustBuildConstants.TOOLCHAIN_FILE, "Rust toolchain pin"
-    ).read_text(encoding="utf-8")
+    toolchain_file = (root or BuildConstants.REPO_ROOT) / "rust-toolchain.toml"
+    contents = require_file(toolchain_file, "Rust toolchain pin").read_text(
+        encoding="utf-8"
+    )
     matches = re.findall(r'^channel = "([^"]+)"$', contents, re.MULTILINE)
     if len(matches) != 1:
-        raise ScriptError(
-            f"{GuestRustBuildConstants.TOOLCHAIN_FILE} must define one toolchain channel"
-        )
+        raise ScriptError(f"{toolchain_file} must define one toolchain channel")
     [toolchain] = matches
     if toolchain != GuestRustBuildConstants.TOOLCHAIN:
         raise ScriptError(

@@ -100,6 +100,50 @@ class GuestBinaryBuildTests(unittest.TestCase):
             GuestRustBuildConstants.TOOLCHAIN,
         )
 
+    def test_toolchain_pin_must_match_the_guest_build_constants(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "rust-toolchain.toml").write_text(
+                '[toolchain]\nchannel = "9.9.9"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                guest_binaries.ScriptError,
+                "Rust guest build toolchain mismatch",
+            ):
+                guest_binaries.pinned_guest_rust_toolchain(root)
+
+    def test_source_inventory_preserves_the_callers_root_spelling(self):
+        with tempfile.TemporaryDirectory(
+            prefix=".test-guest-binary-root-",
+            dir=BuildConstants.REPO_ROOT,
+        ) as temporary:
+            root = Path(temporary)
+            relative_root = Path(os.path.relpath(root, Path.cwd()))
+            crate = root / "nvx-rs"
+            source = crate / "src"
+            tools = root / "scripts" / "nvx_tools"
+            source.mkdir(parents=True)
+            tools.mkdir(parents=True)
+            for path in (
+                crate / "Cargo.toml",
+                crate / "Cargo.lock",
+                crate / "build.rs",
+                source / "lib.rs",
+                tools / "build_constants.py",
+                tools / "guest_binaries.py",
+                root / "rust-toolchain.toml",
+            ):
+                path.write_text(f"{path.name}\n", encoding="utf-8")
+
+            inventory = guest_binaries.guest_binary_source_files(relative_root)
+
+            self.assertTrue(all(not path.is_absolute() for path in inventory))
+            self.assertEqual(
+                guest_binaries.guest_binary_source_sha256(relative_root),
+                guest_binaries.guest_binary_source_sha256(root),
+            )
+
     def test_build_uses_fresh_remapped_target_and_writes_manifest(self):
         with tempfile.TemporaryDirectory(
             prefix=".test-guest-binaries-",

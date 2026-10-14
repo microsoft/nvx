@@ -40,6 +40,7 @@ from .common import (
     artifact_path,
     download_verified,
     format_size,
+    normalized_sha256_file,
     openvmm_git_state,
     require_file,
     require_success,
@@ -48,7 +49,11 @@ from .common import (
     run_checked,
     sha256_file,
 )
-from .guest_binaries import build_guest_binaries, inspect_guest_binaries
+from .guest_binaries import (
+    build_guest_binaries,
+    guest_binary_source_files,
+    inspect_guest_binaries,
+)
 from .guests import GuestDescriptor, guest_descriptor
 
 
@@ -349,20 +354,22 @@ def merge_kernel_config_fragment(base: str, fragment: str) -> str:
 
 
 def _initramfs_source_files() -> tuple[Path, ...]:
-    sources = [
+    sources = {
         BuildConstants.REPO_ROOT / DockerBuildConstants.DOCKERFILE,
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build_config.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build_constants.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "common.py",
+        BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "guest_binaries.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "guests.py",
+        *guest_binary_source_files(),
         *(
             path
             for directory in AlpineBuildConstants.GUEST_SOURCE_DIRECTORIES
             for path in (BuildConstants.REPO_ROOT / directory).rglob("*")
             if path.is_file()
         ),
-    ]
+    }
     return tuple(
         sorted(
             (require_file(path, "initramfs provenance input") for path in sources),
@@ -382,7 +389,7 @@ def initramfs_provenance_inputs() -> dict[str, object]:
         "source_files": [
             {
                 "path": path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
-                "sha256": sha256_file(path),
+                "sha256": normalized_sha256_file(path),
             }
             for path in _initramfs_source_files()
         ],
@@ -891,7 +898,7 @@ def _guest_customization_files(descriptor: GuestDescriptor) -> tuple[Path, ...]:
         )
         if path.is_file()
     )
-    return (*common, *alpine)
+    return (*common, *alpine, *guest_binary_source_files())
 
 
 def build_initramfs(config: InitramfsBuildConfig) -> None:

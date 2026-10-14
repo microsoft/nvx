@@ -177,6 +177,7 @@ class GuestRustBuildConstants:
     BUILD_MANIFEST_FORMAT: Final = 1
     BUILD_MANIFEST_DOMAIN: Final = "nvx-rust-guest-binary-build"
     OUTPUT_DIRECTORY_NAME: Final = "guest-binaries"
+    SOURCE_PATHS: Final = ("nvx-rs", "rust-toolchain.toml")
     BINARIES: Final = (
         "nvx-console-pending",
         "nvx-mmio-write",
@@ -412,6 +413,7 @@ class ReleaseBuildConstants:
     PROJECT_SOURCE_PATHS: Final = (
         ".github/agents/nvx-adversary.md",
         "guest",
+        "nvx-rs",
         "ubuntu",
         "azurelinux",
         "data/linux-kvm-virtual-machine.csv",
@@ -433,6 +435,7 @@ class ReleaseBuildConstants:
         "requirements-dev.txt",
         "rust-toolchain.toml",
     )
+    PROJECT_SOURCE_EXCLUDES: Final = (Path("nvx-rs") / "target",)
     GUEST_ARTIFACT_NAMES: Final = (
         KernelBuildConstants.BINARY_NAME,
         KernelBuildConstants.CONFIG_NAME,
