@@ -48,7 +48,7 @@ from .common import (
     run_checked,
     sha256_file,
 )
-from .guest_binaries import build_guest_binaries
+from .guest_binaries import build_guest_binaries, inspect_guest_binaries
 from .guests import GuestDescriptor, guest_descriptor
 
 
@@ -818,8 +818,13 @@ def _install_guest_files(
         if name == "nvx-bashrc":
             destination.chmod(0o644)
 
-    binary_directory = config.work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME
-    result = build_guest_binaries(binary_directory)
+    prebuilt = os.environ.get(GuestRustBuildConstants.BINARIES_VARIABLE)
+    if prebuilt:
+        binary_directory = Path(prebuilt)
+        result = inspect_guest_binaries(binary_directory)
+    else:
+        binary_directory = config.work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME
+        result = build_guest_binaries(binary_directory)
     for name in GuestRustBuildConstants.BINARIES:
         source = binary_directory / name
         destination = root / "sbin" / name

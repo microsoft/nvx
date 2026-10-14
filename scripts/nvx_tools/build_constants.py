@@ -363,6 +363,10 @@ class InitramfsBuildConstants:
 
 class DockerBuildConstants:
     DOCKERFILE: Final = Path("docker") / "Dockerfile"
+    RUST_BUILDER_IMAGE: Final = (
+        f"rust:{GuestRustBuildConstants.TOOLCHAIN}-slim-bookworm@"
+        "sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082"
+    )
     ALPINE_TARGET: Final = "artifacts"
     UBUNTU_TARGET: Final = "ubuntu-guest-artifacts"
     AZURELINUX_TARGET: Final = "azurelinux-guest-artifacts"

@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import cast
 
 from .build_constants import BuildConstants, GuestRustBuildConstants
-from .common import ScriptError, require_file, require_tool, run_checked, sha256_file
+from .common import (
+    ScriptError,
+    normalized_sha256_file,
+    require_file,
+    require_tool,
+    run_checked,
+    sha256_file,
+)
 from .elf import check_static_executables
 
 
@@ -59,7 +66,7 @@ def guest_binary_source_sha256() -> str:
         "files": [
             {
                 "path": path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
-                "sha256": sha256_file(path),
+                "sha256": normalized_sha256_file(path),
             }
             for path in guest_binary_source_files()
         ],
@@ -287,6 +294,44 @@ def check_guest_binaries(toolchain: str | None = None) -> None:
             cwd=GuestRustBuildConstants.DIRECTORY,
             env=environment,
         )
+
+
+def inspect_guest_binaries(directory: Path) -> GuestBinaryBuildResult:
+    """Validate and identify a current, previously staged guest build."""
+    directory = directory.resolve()
+    retired = _validate_owned_output(directory)
+    missing = [
+        binary
+        for binary in GuestRustBuildConstants.BINARIES
+        if not (directory / binary).is_file()
+    ]
+    if retired or missing:
+        raise ScriptError(
+            f"guest binary output is not a current build of every executable: "
+            f"{directory}"
+        )
+    paths = [directory / binary for binary in GuestRustBuildConstants.BINARIES]
+    check_static_executables(paths)
+    result = GuestBinaryBuildResult(
+        source_sha256=guest_binary_source_sha256(),
+        binaries={
+            binary: sha256_file(path)
+            for binary, path in zip(
+                GuestRustBuildConstants.BINARIES, paths, strict=True
+            )
+        },
+    )
+    manifest_path = directory / GuestRustBuildConstants.BUILD_MANIFEST_NAME
+    manifest = cast(
+        dict[str, object],
+        json.loads(manifest_path.read_text(encoding="utf-8")),
+    )
+    if manifest != _manifest(result):
+        raise ScriptError(
+            "Rust guest binary build manifest does not match the current "
+            "sources, build pins, and executables"
+        )
+    return result
 
 
 def build_guest_binaries(output: Path) -> GuestBinaryBuildResult:

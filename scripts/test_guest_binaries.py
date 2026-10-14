@@ -207,9 +207,16 @@ class GuestBinaryBuildTests(unittest.TestCase):
                     guest_binaries.guest_binary_source_sha256(), first_source
                 )
                 result = guest_binaries.build_guest_binaries(output)
+                inspected = guest_binaries.inspect_guest_binaries(output)
+                (source / "lib.rs").write_bytes(b"pub fn fixture() {}\r\n")
+                self.assertEqual(
+                    guest_binaries.guest_binary_source_sha256(),
+                    result.source_sha256,
+                )
 
             # One Cargo build produces every binary from the canonical recipe.
             self.assertEqual(len(commands), 1)
+            self.assertEqual(inspected, result)
             [command] = commands
             self.assertEqual(command[:3], ["cargo", "+1.95.0", "build"])
             self.assertEqual(
@@ -246,6 +253,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 [path.name for path in check_static.call_args.args[0]],
                 list(GuestRustBuildConstants.BINARIES),
             )
+            self.assertEqual(check_static.call_count, 2)
             self.assertEqual(
                 set(result.binaries), set(GuestRustBuildConstants.BINARIES)
             )
@@ -435,6 +443,37 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 ):
                     guest_binaries.build_guest_binaries(output)
                 cargo.assert_not_called()
+                self.assertEqual(_contents(output), before)
+
+    def test_inspection_refuses_an_earlier_build(self):
+        # A build upgrades these outputs in place, but none is a current build.
+        earlier = tuple(
+            binary
+            for binary in GuestRustBuildConstants.BINARIES
+            if binary not in GuestRustBuildConstants.ADDED_BINARIES
+        )
+        retired = (*GuestRustBuildConstants.BINARIES, "nvx-port-io")
+        for case, binaries in (
+            ("build without the added executables", earlier),
+            ("build from before nvx-port-io retired", retired),
+        ):
+            with (
+                self.subTest(case),
+                tempfile.TemporaryDirectory(
+                    prefix=".test-guest-binary-inspect-",
+                    dir=BuildConstants.REPO_ROOT,
+                ) as temporary,
+            ):
+                output = Path(temporary) / "output"
+                _write_build_output(output, binaries, recorded=binaries)
+                before = _contents(output)
+                with (
+                    _fake_guest_build(),
+                    self.assertRaisesRegex(
+                        guest_binaries.ScriptError, "not a current build"
+                    ),
+                ):
+                    guest_binaries.inspect_guest_binaries(output)
                 self.assertEqual(_contents(output), before)
 
     def test_initialization_failure_removes_allocated_work_directory(self):
