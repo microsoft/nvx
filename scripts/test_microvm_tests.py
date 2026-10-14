@@ -4949,10 +4949,17 @@ class MicrovmTests(unittest.TestCase):
                 )
         runner = inspect.getsource(microvm_tests._run_snapshot_tier)
         self.assertIn("_check_restore_status(\n            restore_console,", runner)
+        # The status baseline is taken before the milestone reads, so a query
+        # one of them consumes still counts for the wait.
         self.assertLess(
-            runner.index("console.wait_for_time_abi_status(STATUS_TIMEOUT_SECONDS)"),
+            runner.index("status_baseline = console.status_queries"),
+            runner.index("console.wait_for(released_marker, timeout)"),
+        )
+        self.assertLess(
+            runner.index("console.wait_for_time_abi_status("),
             runner.index('console.send_bytes(b"Z")\n                restored = '),
         )
+        self.assertIn("since=status_baseline", runner)
 
     def test_snapshot_tier_entry_points_reject_unsupported_tiers(self):
         with self.assertRaisesRegex(ValueError, "unsupported snapshot tier 'invalid'"):

@@ -457,17 +457,28 @@ class TcpConsole:
                 raise RuntimeError(f"TCP console closed before line marker {marker!r}")
             self._consume(chunk)
 
-    def wait_for_time_abi_status(self, timeout: float) -> None:
-        """Wait until the guest's next ``nvx-time status`` query exits.
+    @property
+    def status_queries(self) -> int:
+        """How many ``nvx-time status`` queries the monitor has observed so far."""
+        return 0 if self._monitor is None else self._monitor.status_queries
+
+    def wait_for_time_abi_status(
+        self, timeout: float, *, since: int | None = None
+    ) -> None:
+        """Wait until a ``nvx-time status`` query exits after ``since``.
+
+        ``since`` is a ``status_queries`` count captured before the caller's
+        earlier reads, so a query that one of those reads already consumed still
+        counts. By default the wait is for the next query after this call.
 
         The monitor validates what the query printed when its exit line
         arrives, so a failed or pending check raises here.
         """
         if self._monitor is None:
             raise ValueError("TCP console has no time ABI monitor")
-        before = self._monitor.status_queries
+        baseline = self._monitor.status_queries if since is None else since
         deadline = time.monotonic() + timeout
-        while self._monitor.status_queries == before:
+        while self._monitor.status_queries == baseline:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(

@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1864,6 +1865,45 @@ class RunnerWiringTests(unittest.TestCase):
         self.addCleanup(unmonitored.close)
         with self.assertRaisesRegex(ValueError, "no time ABI monitor"):
             openvmm_process.TcpConsole(unmonitored).wait_for_time_abi_status(1.0)
+
+    def test_tcp_console_status_query_consumed_with_restore_milestone(self):
+        class ScriptedConnection:
+            """Returns each scripted chunk from one recv, so the reads do not depend on TCP segmenting."""
+
+            def __init__(self, *chunks: bytes) -> None:
+                self._chunks = list(chunks)
+
+            def settimeout(self, _timeout: float) -> None:
+                pass
+
+            def recv(self, _size: int) -> bytes:
+                if not self._chunks:
+                    raise TimeoutError("scripted console is quiet")
+                return self._chunks.pop(0)
+
+            def close(self) -> None:
+                pass
+
+        monitor = TimeAbiMonitor(MSHV_RESTORE)
+        restore = RESTORE_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
+        # One read carries the milestone and the whole status query after it.
+        connection = ScriptedConnection(
+            (
+                "NVX-SNAPSHOT-TIER-RELEASED\n" + restore + RUNTIME_LINE + STATUS_OK
+            ).encode()
+        )
+        console = openvmm_process.TcpConsole(cast(socket.socket, connection), monitor)
+        baseline = console.status_queries
+        console.wait_for(b"NVX-SNAPSHOT-TIER-RELEASED", 1.0)
+        self.assertEqual(monitor.status_queries, 1)
+        # The query the milestone read consumed counts for a wait since the baseline.
+        console.wait_for_time_abi_status(0.2, since=baseline)
+        self.assertEqual(monitor.status_queries, 1)
+        self.assertEqual(len(monitor.restores), 1)
+        # Without a baseline the wait is for the next query, which never comes.
+        with self.assertRaisesRegex(TimeoutError, "did not exit"):
+            console.wait_for_time_abi_status(0.2)
+        console.close()
 
     def test_tcp_console_queries_only_cold_boots_that_ask(self):
         for command, enabled in (

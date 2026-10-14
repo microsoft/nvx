@@ -7253,6 +7253,9 @@ def _run_snapshot_tier(
                 console = TcpConsole.connect(
                     address, timeout, monitor=TimeAbiMonitor(restore_command)
                 )
+                # A status query that one of the milestone reads below consumes
+                # must still count for the wait after them.
+                status_baseline = console.status_queries
                 console.send_bytes(b"Z")
                 console.wait_for(repair_marker, timeout)
                 if workload_start:
@@ -7262,7 +7265,9 @@ def _run_snapshot_tier(
                 # The guest's status query waits for the restore's deferred
                 # checks. It then waits for one byte from here before nvx-exit,
                 # so the query's lines reach the console before the VM stops.
-                console.wait_for_time_abi_status(STATUS_TIMEOUT_SECONDS)
+                console.wait_for_time_abi_status(
+                    STATUS_TIMEOUT_SECONDS, since=status_baseline
+                )
                 console.send_bytes(b"Z")
                 restored = process.wait(timeout)
                 restore_console = console.finish()
