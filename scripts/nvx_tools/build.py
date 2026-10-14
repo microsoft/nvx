@@ -29,6 +29,7 @@ from .build_constants import (
     AzureLinuxBuildConstants,
     BuildConstants,
     DockerBuildConstants,
+    GuestRustBuildConstants,
     InitramfsBuildConstants,
     KernelBuildConstants,
     OpenVMMBuildConstants,
@@ -47,6 +48,7 @@ from .common import (
     run_checked,
     sha256_file,
 )
+from .guest_binaries import build_guest_binaries
 from .guests import GuestDescriptor, guest_descriptor
 
 
@@ -600,53 +602,6 @@ def _install(source: Path, destination: Path) -> dict[str, str]:
     }
 
 
-def _build_static_helper(
-    work: Path,
-    source: Path,
-    destination: Path,
-    cflags: tuple[str, ...] = InitramfsBuildConstants.STATIC_HELPER_CFLAGS,
-    compiler_name: str = "cc",
-) -> dict[str, str]:
-    compiler = require_tool(compiler_name)
-    output = work / source.stem
-    run_checked(
-        [
-            compiler,
-            *cflags,
-            "-o",
-            output,
-            source,
-        ]
-    )
-    shutil.copyfile(output, destination)
-    destination.chmod(0o755)
-    return {
-        "source_sha256": sha256_file(source),
-        "binary_sha256": sha256_file(output),
-    }
-
-
-def _build_device_io_helper(work: Path, destination: Path) -> dict[str, str]:
-    compiler = require_tool("cc")
-    source = BuildConstants.REPO_ROOT / "guest" / "common" / "nvx-device-io.c"
-    output = work / "nvx-device-io"
-    run_checked(
-        [
-            compiler,
-            *InitramfsBuildConstants.DEVICE_IO_CFLAGS,
-            "-o",
-            output,
-            source,
-        ]
-    )
-    shutil.copyfile(output, destination)
-    destination.chmod(0o755)
-    return {
-        "source_sha256": sha256_file(source),
-        "binary_sha256": sha256_file(output),
-    }
-
-
 def _apk_add(root: Path, *packages: str) -> None:
     loader = root / "lib" / "ld-musl-x86_64.so.1"
     environment = os.environ.copy()
@@ -863,31 +818,20 @@ def _install_guest_files(
         if name == "nvx-bashrc":
             destination.chmod(0o644)
 
-    for name in InitramfsBuildConstants.STATIC_HELPERS:
-        helpers[name] = _build_static_helper(
-            config.work,
-            common / f"{name}.c",
-            root / "sbin" / name,
-        )
-    for name in InitramfsBuildConstants.MUSL_STATIC_HELPERS:
-        helpers[name] = _build_static_helper(
-            config.work,
-            common / f"{name}.c",
-            root / "sbin" / name,
-            compiler_name=InitramfsBuildConstants.MUSL_COMPILER,
-        )
-    probe = InitramfsBuildConstants.TIME_PROBE_NAME
-    helpers[probe] = _build_static_helper(
-        config.work,
-        common / f"{probe}.c",
-        root / "sbin" / probe,
-        InitramfsBuildConstants.TIME_PROBE_CFLAGS,
-        compiler_name=InitramfsBuildConstants.MUSL_COMPILER,
-    )
-    helpers["nvx-device-io"] = _build_device_io_helper(
-        config.work,
-        root / "sbin" / "nvx-device-io",
-    )
+    binary_directory = config.work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME
+    result = build_guest_binaries(binary_directory)
+    for name in GuestRustBuildConstants.BINARIES:
+        source = binary_directory / name
+        destination = root / "sbin" / name
+        shutil.copyfile(source, destination)
+        destination.chmod(0o755)
+        binary_sha256 = sha256_file(destination)
+        if binary_sha256 != result.binaries[name]:
+            raise ScriptError(f"installed Rust guest binary changed: {name}")
+        helpers[name] = {
+            "source_sha256": result.source_sha256,
+            "binary_sha256": binary_sha256,
+        }
     return helpers
 
 

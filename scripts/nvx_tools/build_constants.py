@@ -176,6 +176,7 @@ class GuestRustBuildConstants:
     BUILD_MANIFEST_NAME: Final = "manifest.json"
     BUILD_MANIFEST_FORMAT: Final = 1
     BUILD_MANIFEST_DOMAIN: Final = "nvx-rust-guest-binary-build"
+    OUTPUT_DIRECTORY_NAME: Final = "guest-binaries"
     BINARIES: Final = (
         "nvx-console-pending",
         "nvx-mmio-write",
@@ -358,49 +359,6 @@ class InitramfsBuildConstants:
     TIMESTAMP: Final = 0
     CPIO_FORMAT: Final = "newc"
     GZIP_COMPRESSION_LEVEL: Final = 9
-    STATIC_HELPER_CFLAGS: Final = (
-        "-static",
-        "-Os",
-        "-s",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    )
-    DEVICE_IO_CFLAGS: Final = (
-        "-nostdlib",
-        "-static",
-        "-Os",
-        "-fno-builtin",
-        "-fno-pie",
-        "-fno-stack-protector",
-        "-no-pie",
-        "-Wl,--build-id=none",
-        "-Wl,-z,noexecstack",
-        "-s",
-    )
-    STATIC_HELPERS: Final = (
-        "nvx-reseed",
-        "nvx-mmio-write",
-        "nvx-console-pending",
-        "nvx-managed-agent",
-    )
-    # Time tools, nvx-exit, and nvx-ingress are linked against musl: a static
-    # glibc binary adds about 700 KB to the initramfs, and every unpacked
-    # kilobyte delays cold boot. nvx-exit is also a restored guest's usual
-    # first exec.
-    MUSL_COMPILER: Final = "musl-gcc"
-    MUSL_STATIC_HELPERS: Final = ("nvx-time", "nvx-exit", "nvx-ingress")
-    TIME_PROBE_NAME: Final = "nvx-time-probe"
-    TIME_PROBE_CFLAGS: Final = (
-        "-std=gnu11",
-        "-static",
-        "-O2",
-        "-pthread",
-        "-s",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    )
 
 
 class DockerBuildConstants:
