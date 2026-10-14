@@ -156,7 +156,9 @@ def create_reproducible_release_archive(source: Path, output: Path) -> None:
                     archive.writestr(info, b"")
                 else:
                     with path.open("rb") as source_file:
-                        with archive.open(info, "w") as destination_file:
+                        with archive.open(
+                            info, "w", force_zip64=True
+                        ) as destination_file:
                             shutil.copyfileobj(
                                 source_file,
                                 destination_file,

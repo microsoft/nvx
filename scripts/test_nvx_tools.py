@@ -21904,6 +21904,25 @@ class SharedFileTests(unittest.TestCase):
 
             self.assertFalse((root / "SHA256SUMS").exists())
 
+    def test_zip_release_archive_streams_members_past_zip64_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-1.0.0-test"
+            payload = source / "bin" / "openvmm"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"x" * 4096)
+            payload.chmod(0o755)
+            common.write_sha256_sums(source)
+            output = root / "nvx-1.0.0-test.zip"
+
+            with patch.object(zipfile, "ZIP64_LIMIT", 1024):
+                archive.create_reproducible_release_archive(source, output)
+
+            with zipfile.ZipFile(output) as package:
+                self.assertEqual(
+                    package.read(f"{source.name}/bin/openvmm"), b"x" * 4096
+                )
+
     def test_release_archives_are_reproducible_with_fixed_layout_and_modes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
