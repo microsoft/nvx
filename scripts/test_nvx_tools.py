@@ -3329,8 +3329,8 @@ class CiConfigurationTests(unittest.TestCase):
             (("ubuntu/packages.lock.json",), (True, True, False, False)),
             (("azurelinux/packages.lock.json",), (True, True, False, False)),
             (("aci_edge_sandboxes/src/lib.rs",), (True, True, False, False)),
-            (("nvx-rs/src/lib.rs",), (True, True, False, False)),
-            (("nvx-rs/Cargo.lock",), (True, True, False, False)),
+            (("nvx-rs/src/lib.rs",), (True, True, False, True)),
+            (("nvx-rs/Cargo.lock",), (True, True, False, True)),
             (("scripts/nvx_tools/microvm_tests.py",), (True, True, False, False)),
             (
                 (".github/workflows/run-nvx-microvm-tests.yml",),
@@ -3432,6 +3432,7 @@ class CiConfigurationTests(unittest.TestCase):
             match.group(1): {
                 path.replace("**", "example").replace("*", "example")
                 for path in re.findall(r"'([^']+)'", match.group(2))
+                if not path.startswith("!")
             }
             for match in re.finditer(
                 r"^\s+([A-Z_]+)_INPUT_HASH: \$\{\{ hashFiles\((.+)\) \}\}$",
@@ -5329,6 +5330,7 @@ Write-Output (Get-ActionsRunnerLabels)
 
         setup = (workflows / "copilot-setup-steps.yml").read_text(encoding="utf-8")
         self.assertIn("      - rust-toolchain.toml\n", setup)
+        self.assertIn("      - nvx-rs/**\n", setup)
         self.assertIn(
             "rust-toolchain.toml",
             _workflow_step(
@@ -5337,6 +5339,7 @@ Write-Output (Get-ActionsRunnerLabels)
         )
         rust = _workflow_step(setup, "copilot-setup-steps", "Install Rust toolchains")
         self.assertIn('rustup default "${RUST_TOOLCHAIN}"', rust)
+        self.assertIn("x86_64-unknown-linux-musl", rust)
         self.assertNotIn("stable", rust)
 
         # A binary built by another compiler must not satisfy the cache.
@@ -8739,6 +8742,29 @@ class BuildTests(unittest.TestCase):
             action,
         )
 
+    def test_ci_guest_image_keys_include_the_rust_source_identity(self):
+        # hashFiles hashes contents only, so a module move that kept every
+        # file's bytes reused images whose provenance named the old paths.
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "rust_source_identity=$(python3 scripts/nvx.py guest-binary-source-identity)",
+            action,
+        )
+        for key in (
+            "alpine=alpine-image-v2-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}",
+            "ubuntu=ubuntu-initramfs-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
+            "ubuntu-distro=ubuntu-distro-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
+            "azurelinux=azurelinux-initramfs-v2-${AZURELINUX_VERSION}-${AZURELINUX_INPUT_HASH}",
+        ):
+            with self.subTest(key=key.split("=", 1)[0]):
+                self.assertIn(f'echo "{key}-${{rust_source_identity}}"', action)
+
     def test_ci_guest_cache_keys_include_build_configuration(self):
         action = (
             BuildConstants.REPO_ROOT
@@ -8892,10 +8918,28 @@ class BuildTests(unittest.TestCase):
             / "build-guest-artifacts"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        for variable in ("ALPINE_INPUT_HASH", "UBUNTU_INPUT_HASH"):
+        for variable in (
+            "ALPINE_INPUT_HASH",
+            "UBUNTU_INPUT_HASH",
+            "AZURELINUX_INPUT_HASH",
+        ):
             assignment = next(line for line in action.splitlines() if variable in line)
             self.assertIn("'scripts/nvx_tools/common.py'", assignment)
             self.assertIn("'scripts/nvx_tools/guests.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/elf.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/guest_binaries.py'", assignment)
+            self.assertIn("'nvx-rs/**'", assignment)
+            self.assertIn("'!nvx-rs/target/**'", assignment)
+            self.assertIn("'rust-toolchain.toml'", assignment)
+        for prefix in (
+            "alpine-image",
+            "ubuntu-initramfs",
+            "ubuntu-distro",
+            "azurelinux-initramfs",
+        ):
+            with self.subTest(cache=prefix):
+                self.assertIn(f"{prefix}-v2-", action)
+                self.assertNotIn(f"{prefix}-v1-", action)
 
     def test_quality_checks_include_shared_identity_probe(self):
         action = (

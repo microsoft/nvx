@@ -360,6 +360,7 @@ def _initramfs_source_files() -> tuple[Path, ...]:
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build_config.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "build_constants.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "common.py",
+        BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "elf.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "guest_binaries.py",
         BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "guests.py",
         *guest_binary_source_files(),

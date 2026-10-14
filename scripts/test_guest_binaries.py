@@ -144,6 +144,45 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 guest_binaries.guest_binary_source_sha256(root),
             )
 
+    def test_source_identity_follows_a_content_preserving_module_move(self):
+        # The guest image cache keys append this identity because hashFiles
+        # hashes contents only: moving a module into its own mod.rs keeps every
+        # file's bytes but changes the source that guest provenance records.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            crate = root / "nvx-rs"
+            module = crate / "src" / "guest" / "ingress"
+            tools = root / "scripts" / "nvx_tools"
+            module.mkdir(parents=True)
+            tools.mkdir(parents=True)
+            for path in (
+                crate / "Cargo.toml",
+                crate / "Cargo.lock",
+                crate / "build.rs",
+                crate / "src" / "lib.rs",
+                module / "encode.rs",
+                tools / "build_constants.py",
+                tools / "guest_binaries.py",
+                root / "rust-toolchain.toml",
+            ):
+                path.write_text(f"{path.name}\n", encoding="utf-8")
+
+            def contents() -> list[bytes]:
+                return [
+                    path.read_bytes()
+                    for path in guest_binaries.guest_binary_source_files(root)
+                ]
+
+            original_contents = contents()
+            original_identity = guest_binaries.guest_binary_source_sha256(root)
+            (module / "encode").mkdir()
+            (module / "encode.rs").rename(module / "encode" / "mod.rs")
+
+            self.assertEqual(contents(), original_contents)
+            self.assertNotEqual(
+                guest_binaries.guest_binary_source_sha256(root), original_identity
+            )
+
     def test_build_uses_fresh_remapped_target_and_writes_manifest(self):
         with tempfile.TemporaryDirectory(
             prefix=".test-guest-binaries-",
@@ -690,6 +729,29 @@ class GuestBinaryCliTests(unittest.TestCase):
         with patch.object(nvx, "test_guest_binaries") as test:
             args.handler(args)
         test.assert_called_once_with(Path("build/guest-binaries"))
+
+    def test_source_identity_command_prints_the_recorded_source_digest(self):
+        # The guest image cache keys end with this output, so it must be the
+        # digest that a build records as the binaries' source.
+        for argv, root in (
+            (["guest-binary-source-identity"], BuildConstants.REPO_ROOT),
+            (
+                ["guest-binary-source-identity", "--root", "checkout"],
+                Path("checkout"),
+            ),
+        ):
+            with self.subTest(argv=argv):
+                args = nvx.parse_args(argv)
+                stdout = io.StringIO()
+                with (
+                    patch.object(
+                        nvx, "guest_binary_source_sha256", return_value="c" * 64
+                    ) as identity,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    args.handler(args)
+                identity.assert_called_once_with(root)
+                self.assertEqual(stdout.getvalue(), "c" * 64 + "\n")
 
 
 if __name__ == "__main__":
