@@ -2198,7 +2198,7 @@ class CopilotContainmentTests(unittest.TestCase):
         # The wrapper exits at once, but its child keeps the stdout pipe open.
         wrapper_source = (
             "import subprocess, sys\n"
-            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'],"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'],"
             " stdin=subprocess.DEVNULL, stdout=1, stderr=subprocess.DEVNULL)\n"
         )
         real_popen = subprocess.Popen
@@ -2269,7 +2269,14 @@ class CopilotContainmentTests(unittest.TestCase):
                 label="noisy-inherited",
             )
             client._process.wait(timeout=5.0)
+            started = time.monotonic()
             client.close()
+            elapsed = time.monotonic() - started
+            self.assertLess(
+                elapsed,
+                5.0,
+                msg=f"close() blocked {elapsed:.2f}s waiting on inherited stdout",
+            )
             retained_at_close = client._responses.qsize()
             time.sleep(1.5)
             retained_later = client._responses.qsize()
