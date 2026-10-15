@@ -2230,6 +2230,55 @@ class CopilotContainmentTests(unittest.TestCase):
             msg=f"close() blocked {elapsed:.2f}s waiting on inherited stdout",
         )
 
+    def test_external_executor_close_stops_retaining_lines_from_inherited_stdout(
+        self,
+    ) -> None:
+        # The wrapper exits at once, but its child keeps writing to the stdout
+        # pipe for about six seconds, past close()'s two-second join. Nothing reads
+        # the queue after close(), so the reader must stop retaining what it reads,
+        # or a noisy child can grow it.
+        child_source = (
+            "import sys, time\n"
+            "for _ in range(600):\n"
+            "    sys.stdout.write('x\\n')\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.01)\n"
+        )
+        wrapper_source = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', CHILD],"
+            " stdin=subprocess.DEVNULL, stdout=1, stderr=subprocess.DEVNULL)\n"
+        ).replace("CHILD", repr(child_source))
+        real_popen = subprocess.Popen
+
+        def start_wrapper(_argv: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            kwargs["env"] = None
+            return real_popen([sys.executable, "-c", wrapper_source], **kwargs)  # type: ignore[arg-type]
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("nvx_tools.adversarial.shutil.which", return_value="wrapper"),
+            patch(
+                "nvx_tools.adversarial.subprocess.Popen",
+                side_effect=start_wrapper,
+            ),
+        ):
+            client = ExecutorClient(
+                run_dir=Path(temporary),
+                command="wrapper",
+                label="noisy-inherited",
+            )
+            client._process.wait(timeout=5.0)
+            client.close()
+            retained_at_close = client._responses.qsize()
+            time.sleep(1.5)
+            retained_later = client._responses.qsize()
+        self.assertEqual(
+            retained_later,
+            retained_at_close,
+            msg="the reader kept queuing lines from stdout after close()",
+        )
+
     def test_executor_rejects_boolean_schema_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             executor = AdversarialExecutor(Path(temporary))

@@ -485,6 +485,7 @@ class ExecutorClient:
         self._stdin = self._process.stdin
         self._stdout = self._process.stdout
         self._responses: queue.Queue[bytes | None] = queue.Queue()
+        self._closing = threading.Event()
         self._reader = threading.Thread(
             target=self._read_responses,
             name=f"nvx-executor-reader-{label}",
@@ -563,6 +564,7 @@ class ExecutorClient:
             cleanup_error = error
         finally:
             self._closed = True
+            self._closing.set()
             for stream in (self._stdin, self._stderr_stream):
                 try:
                     stream.close()
@@ -581,11 +583,16 @@ class ExecutorClient:
         # waits for a blocked readline, which an inherited pipe can hold open.
         try:
             while line := self._stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1):
+                if self._closing.is_set():
+                    # Nothing reads the queue after close(). Keep draining the pipe,
+                    # which a surviving child may still write to, but retain nothing.
+                    continue
                 if len(line) > MAX_PROTOCOL_LINE_BYTES:
                     self._responses.put(None)
                     return
                 self._responses.put(line)
-            self._responses.put(None)
+            if not self._closing.is_set():
+                self._responses.put(None)
         finally:
             self._stdout.close()
 
