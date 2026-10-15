@@ -2198,7 +2198,7 @@ class CopilotContainmentTests(unittest.TestCase):
         # The wrapper exits at once, but its child keeps the stdout pipe open.
         wrapper_source = (
             "import subprocess, sys\n"
-            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'],"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'],"
             " stdin=subprocess.DEVNULL, stdout=1, stderr=subprocess.DEVNULL)\n"
         )
         real_popen = subprocess.Popen
