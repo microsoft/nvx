@@ -2286,6 +2286,45 @@ class CopilotContainmentTests(unittest.TestCase):
             msg="the reader kept queuing lines from stdout after close()",
         )
 
+    @unittest.skipIf(os.name == "nt", "process groups are POSIX-only")
+    def test_external_executor_close_releases_a_pipe_held_by_a_descendant(
+        self,
+    ) -> None:
+        # The wrapper exits at once, but its child holds the stdout pipe for 30
+        # seconds. close() must release the pipe, so the reader thread ends
+        # instead of waiting out the child.
+        wrapper_source = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+            " stdin=subprocess.DEVNULL, stdout=1, stderr=subprocess.DEVNULL)\n"
+        )
+        real_popen = subprocess.Popen
+
+        def start_wrapper(_argv: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            kwargs["env"] = None
+            return real_popen([sys.executable, "-c", wrapper_source], **kwargs)  # type: ignore[arg-type]
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("nvx_tools.adversarial.shutil.which", return_value="wrapper"),
+            patch(
+                "nvx_tools.adversarial.subprocess.Popen",
+                side_effect=start_wrapper,
+            ),
+        ):
+            client = ExecutorClient(
+                run_dir=Path(temporary),
+                command="wrapper",
+                label="held-pipe",
+            )
+            client._process.wait(timeout=5.0)
+            client.close()
+            reader_alive = client._reader.is_alive()
+        self.assertFalse(
+            reader_alive,
+            msg="the pipe was still held by a descendant after close()",
+        )
+
     def test_executor_rejects_boolean_schema_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             executor = AdversarialExecutor(Path(temporary))

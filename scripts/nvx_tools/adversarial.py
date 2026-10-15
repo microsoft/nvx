@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
 import queue
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -468,7 +470,9 @@ class ExecutorClient:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=self._stderr_stream,
-                start_new_session=self._local and os.name != "nt",
+                # Its own session on POSIX, so close() can kill the whole group,
+                # including descendants that keep the stdout pipe open.
+                start_new_session=os.name != "nt",
                 creationflags=(
                     subprocess.CREATE_NEW_PROCESS_GROUP
                     if self._local and os.name == "nt"
@@ -572,8 +576,28 @@ class ExecutorClient:
                     if cleanup_error is None:
                         cleanup_error = error
             self._reader.join(timeout=2.0)
+            if self._reader.is_alive():
+                self._kill_process_group()
+                self._reader.join(timeout=2.0)
         if cleanup_error is not None:
             raise cleanup_error
+
+    def _kill_process_group(self) -> None:
+        # A descendant still holding stdout keeps the reader blocked. Kill the
+        # group so the pipe closes and the reader can release the descriptor.
+        if os.name == "nt":
+            # taskkill can only reach descendants of a live root process.
+            if self._process.poll() is None:
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    subprocess.run(
+                        ["taskkill.exe", "/PID", str(self._process.pid), "/T", "/F"],
+                        check=False,
+                        capture_output=True,
+                        timeout=5.0,
+                    )
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(self._process.pid, signal.SIGKILL)
 
     def abort(self) -> None:
         self._terminate()
