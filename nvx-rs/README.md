@@ -155,8 +155,8 @@ as `nvx/`.
 ## Guest binaries
 
 The `guest` feature adds the programs that run in NVX's Linux guests: the
-`nvx::guest` module and one binary per program. Guest images install these
-executables as `/sbin/nvx-*`.
+`nvx::guest` module and one binary per program. The Alpine, Ubuntu, and Azure
+Linux images ship all nine at their established `/sbin/nvx-*` paths.
 
 | Binary | Program |
 | --- | --- |
@@ -181,6 +181,10 @@ python3 scripts/nvx.py build-guest-binaries \
   --output build/nvx-rs-guest-binaries
 ```
 
+Native guest builds, the digest-pinned Docker Rust stage, and CI all call this
+routine. Docker builds the set once and installs identical bytes in all three
+guest images; Ubuntu determinism checks rebuild from fresh targets.
+
 ## Testing
 
 ```bash
@@ -189,12 +193,11 @@ NVX_BUNDLE=skip cargo test --all-features   # unit, golden-fixture, and fake-Ope
 ```
 
 The tests need no hypervisor. The fake-OpenVMM test drives `Instance` end to end
-against `nvx-fake-openvmm`, and the protocol tests compare the wire constants
-with the guest agent's source in `guest/common/nvx-managed-agent.c`. On Linux,
-a loopback test drives the host `ControlSession` through a broker shim into the
-real managed agent's session, dispatch, and execution engine, and `nvx.py` also
-lints and tests the guest binaries, and runs their integration tests against a
-build of them:
+against `nvx-fake-openvmm`, and shared protocol definitions plus golden byte
+fixtures cover both sides of every record. On Linux, a loopback test drives the
+host `ControlSession` through a broker shim into the real managed agent's
+session, dispatch, and execution engine, and `nvx.py` also lints and tests the
+guest binaries, and runs their integration tests against a build of them:
 
 ```bash
 python3 ../scripts/nvx.py check-guest-binaries

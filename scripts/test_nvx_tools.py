@@ -6558,6 +6558,31 @@ class BuildConstantsTests(unittest.TestCase):
         )
         self.assertEqual(forbidden, [])
 
+    def test_guest_binary_third_party_notices_cover_the_rust_runtime(self):
+        notices = (BuildConstants.REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8"
+        )
+        musl = next(
+            line for line in notices.splitlines() if line.startswith("| musl libc |")
+        )
+        self.assertEqual(
+            set(re.findall(r"`/sbin/(nvx-[a-z-]+)`", musl)),
+            set(GuestRustBuildConstants.BINARIES),
+        )
+        for component in (
+            "Rust core and standard libraries",
+            "Rust `compiler_builtins`",
+            "Rust `libc` crate",
+            "Rust `nix` crate 0.31.3",
+            "Rust `getrandom` crate 0.4.3",
+            "Rust `bitflags` crate 2.13.2",
+            "Rust `cfg-if` crate 1.0.5",
+            "Rust `memoffset` crate 0.9.1",
+            "Apache-2.0 WITH LLVM-exception",
+        ):
+            with self.subTest(component=component):
+                self.assertIn(component, notices)
+
     def test_project_source_archive_excludes_the_nvx_rs_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
