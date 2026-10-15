@@ -2198,6 +2198,40 @@ class CopilotContainmentTests(unittest.TestCase):
         self.assertEqual(environment["PATH"], "test-path")
         self.assertNotIn("GITHUB_TOKEN", environment)
 
+    @unittest.skipUnless(os.name == "nt", "the job object is Windows-only")
+    def test_external_executor_setup_failure_ends_the_suspended_wrapper(self) -> None:
+        started: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def start_wrapper(_argv: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            kwargs["env"] = None
+            process = real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                **kwargs,  # type: ignore[arg-type]
+            )
+            started.append(process)
+            return process
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("nvx_tools.adversarial.shutil.which", return_value="wrapper"),
+            patch("nvx_tools.adversarial.subprocess.Popen", side_effect=start_wrapper),
+            patch(
+                "nvx_tools.adversarial._resume_in_kill_on_close_job",
+                side_effect=OSError("job setup refused"),
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "job setup refused"):
+                ExecutorClient(
+                    run_dir=Path(temporary),
+                    command="wrapper",
+                    label="setup-failure",
+                )
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(
+            started[0].poll(), "the suspended wrapper was left running"
+        )
+
     def test_external_executor_close_ignores_inherited_stdout(self) -> None:
         # The wrapper exits at once, but its child keeps the stdout pipe open.
         wrapper_source = (

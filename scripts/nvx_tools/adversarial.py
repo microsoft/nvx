@@ -517,7 +517,6 @@ if sys.platform == "win32":
                 raise OSError(f"NtResumeProcess failed with status {status:#x}")
         except OSError:
             _KERNEL32.CloseHandle(job)
-            process.kill()
             raise
         finally:
             _KERNEL32.CloseHandle(handle)
@@ -588,8 +587,20 @@ class ExecutorClient:
         if os.name == "nt" and not self._local:
             try:
                 self._job = _resume_in_kill_on_close_job(self._process)
-            except OSError:
-                self._stderr_stream.close()
+            except BaseException:
+                # The wrapper started suspended and no client exists to close it,
+                # so end it here and release its pipes before re-raising.
+                self._process.kill()
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    self._process.wait(timeout=5.0)
+                for stream in (
+                    self._process.stdin,
+                    self._process.stdout,
+                    self._stderr_stream,
+                ):
+                    if stream is not None:
+                        with contextlib.suppress(OSError):
+                            stream.close()
                 raise
         if self._process.stdin is None or self._process.stdout is None:
             self._process.terminate()
