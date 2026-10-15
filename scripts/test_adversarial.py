@@ -2183,6 +2183,10 @@ class CopilotContainmentTests(unittest.TestCase):
             patch(
                 "nvx_tools.adversarial.subprocess.Popen", return_value=process
             ) as popen,
+            # The process is a mock, so there is no real process to place in a job.
+            patch(
+                "nvx_tools.adversarial._resume_in_kill_on_close_job", return_value=None
+            ),
         ):
             with ExecutorClient(
                 run_dir=Path(temporary),
@@ -2286,7 +2290,6 @@ class CopilotContainmentTests(unittest.TestCase):
             msg="the reader kept queuing lines from stdout after close()",
         )
 
-    @unittest.skipIf(os.name == "nt", "process groups are POSIX-only")
     def test_external_executor_close_releases_a_pipe_held_by_a_descendant(
         self,
     ) -> None:

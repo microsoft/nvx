@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import json
 import math
 import os
@@ -430,6 +431,111 @@ class CopilotController:
         return math.ceil(raw_nano_units / NANO_AI_UNITS_PER_CREDIT)
 
 
+CREATE_SUSPENDED = 0x0000_0004
+
+
+def _creation_flags(*, local: bool) -> int:
+    """Return the process-creation flags for an executor on this platform."""
+    if os.name != "nt":
+        return 0
+    # An external wrapper starts suspended, so it can join its job before it runs.
+    return subprocess.CREATE_NEW_PROCESS_GROUP if local else CREATE_SUSPENDED
+
+
+if sys.platform == "win32":
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _NTDLL = ctypes.WinDLL("ntdll")
+    _KERNEL32.CreateJobObjectW.restype = ctypes.c_void_p
+    _KERNEL32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _KERNEL32.SetInformationJobObject.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    ]
+    _KERNEL32.OpenProcess.restype = ctypes.c_void_p
+    _KERNEL32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    _KERNEL32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _KERNEL32.CloseHandle.argtypes = [ctypes.c_void_p]
+    _NTDLL.NtResumeProcess.argtypes = [ctypes.c_void_p]
+    _NTDLL.NtResumeProcess.restype = ctypes.c_long
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(f"counter{index}", ctypes.c_uint64) for index in range(6)]
+
+    class _BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class _ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimitInformation),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    def _resume_in_kill_on_close_job(process: subprocess.Popen[bytes]) -> int:
+        """Put a suspended process in a kill-on-close job, then resume it.
+
+        Returns the job handle. Closing it ends the process and every descendant
+        it still holds, including ones that outlive the process itself.
+        """
+        job = _KERNEL32.CreateJobObjectW(None, None)
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = _ExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = 0x0000_2000  # kill on job close
+        if not _KERNEL32.SetInformationJobObject(
+            job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            error = ctypes.get_last_error()
+            _KERNEL32.CloseHandle(job)
+            raise ctypes.WinError(error)
+        access = 0x0100 | 0x0001 | 0x0800  # set quota, terminate, suspend/resume
+        handle = _KERNEL32.OpenProcess(access, False, process.pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            _KERNEL32.CloseHandle(job)
+            raise ctypes.WinError(error)
+        try:
+            if not _KERNEL32.AssignProcessToJobObject(job, handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            status = _NTDLL.NtResumeProcess(handle)
+            if status != 0:
+                raise OSError(f"NtResumeProcess failed with status {status:#x}")
+        except OSError:
+            _KERNEL32.CloseHandle(job)
+            process.kill()
+            raise
+        finally:
+            _KERNEL32.CloseHandle(handle)
+        return int(job)
+
+    def _close_kill_on_close_job(job: int) -> None:
+        _KERNEL32.CloseHandle(job)
+
+else:
+
+    def _resume_in_kill_on_close_job(process: subprocess.Popen[bytes]) -> int | None:
+        del process
+        return None
+
+    def _close_kill_on_close_job(job: int) -> None:
+        del job
+
+
 class ExecutorClient:
     """Bounded JSONL client for a local executor or administrator-owned wrapper."""
 
@@ -473,15 +579,18 @@ class ExecutorClient:
                 # Its own session on POSIX, so close() can kill the whole group,
                 # including descendants that keep the stdout pipe open.
                 start_new_session=os.name != "nt",
-                creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP
-                    if self._local and os.name == "nt"
-                    else 0
-                ),
+                creationflags=_creation_flags(local=self._local),
             )
         except OSError:
             self._stderr_stream.close()
             raise
+        self._job = None
+        if os.name == "nt" and not self._local:
+            try:
+                self._job = _resume_in_kill_on_close_job(self._process)
+            except OSError:
+                self._stderr_stream.close()
+                raise
         if self._process.stdin is None or self._process.stdout is None:
             self._process.terminate()
             self._stderr_stream.close()
@@ -579,14 +688,23 @@ class ExecutorClient:
             if self._reader.is_alive():
                 self._kill_process_group()
                 self._reader.join(timeout=2.0)
+            if self._job is not None:
+                # Closing a kill-on-close job ends every process it still holds.
+                _close_kill_on_close_job(self._job)
+                self._job = None
         if cleanup_error is not None:
             raise cleanup_error
 
     def _kill_process_group(self) -> None:
         # A descendant still holding stdout keeps the reader blocked. Kill the
         # group so the pipe closes and the reader can release the descriptor.
+        if self._job is not None:
+            _close_kill_on_close_job(self._job)
+            self._job = None
+            return
         if os.name == "nt":
-            # taskkill can only reach descendants of a live root process.
+            # Local executors run in their own group, which taskkill can reach
+            # while the root process is alive.
             if self._process.poll() is None:
                 with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                     subprocess.run(
