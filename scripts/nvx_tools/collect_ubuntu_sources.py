@@ -22,6 +22,7 @@ from .common import (
     ScriptError,
     download,
     download_verified,
+    is_link_or_junction,
     require_tool,
     run_checked,
     sha256_file,
@@ -645,7 +646,7 @@ def _encoded_package_directory(name: str, version: str) -> str:
 
 
 def _validate_source_output(output: Path) -> None:
-    if output.is_symlink() or (output.exists() and not output.is_dir()):
+    if is_link_or_junction(output) or (output.exists() and not output.is_dir()):
         raise ScriptError(f"Ubuntu source output is not a directory: {output}")
     if not output.exists():
         return
@@ -661,15 +662,22 @@ def _validate_source_output(output: Path) -> None:
 
 
 def _reset_source_output(output: Path) -> None:
+    # Refuse a link here: rmtree below would follow it into another directory.
+    if is_link_or_junction(output) or (output.exists() and not output.is_dir()):
+        raise ScriptError(f"Ubuntu source output is not a directory: {output}")
     for generated in (output / "packages", output / "metadata"):
-        if generated.is_symlink() or (generated.exists() and not generated.is_dir()):
+        if is_link_or_junction(generated) or (
+            generated.exists() and not generated.is_dir()
+        ):
             raise ScriptError(
                 f"Ubuntu source generated path is not a directory: {generated}"
             )
         if generated.exists():
             shutil.rmtree(generated)
     for generated in (output / "manifest.json", output / "SHA256SUMS"):
-        if generated.is_symlink() or (generated.exists() and not generated.is_file()):
+        if is_link_or_junction(generated) or (
+            generated.exists() and not generated.is_file()
+        ):
             raise ScriptError(
                 f"Ubuntu source generated path is not a file: {generated}"
             )

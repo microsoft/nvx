@@ -10,6 +10,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -28,6 +29,22 @@ from .build_constants import (
 
 class ScriptError(RuntimeError):
     """Raised for an actionable command-line workflow failure."""
+
+
+def is_link_or_junction(path: Path) -> bool:
+    """Return whether ``path`` is a symbolic link or, on Windows, a junction.
+
+    ``Path.is_symlink()`` misses junctions, which redirect a path the same way.
+    """
+    try:
+        metadata = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    if sys.platform == "win32":
+        return metadata.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    return False
 
 
 def strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

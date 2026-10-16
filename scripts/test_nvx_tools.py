@@ -8157,6 +8157,30 @@ class BuildTests(unittest.TestCase):
             ),
         )
 
+    @unittest.skipUnless(
+        sys.platform == "win32", "junctions are Windows reparse points"
+    )
+    def test_ubuntu_source_output_refuses_a_junction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            (target / "packages").mkdir(parents=True)
+            (target / "packages" / "keep.txt").write_text("keep", encoding="utf-8")
+            junction = root / "output"
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+                check=True,
+                capture_output=True,
+            )
+
+            with self.assertRaisesRegex(common.ScriptError, "not a directory"):
+                collect_ubuntu_sources._validate_source_output(junction)
+            with self.assertRaisesRegex(common.ScriptError, "not a directory"):
+                collect_ubuntu_sources._reset_source_output(junction)
+            self.assertEqual(
+                (target / "packages" / "keep.txt").read_text(encoding="utf-8"), "keep"
+            )
+
     def test_ubuntu_dsc_validation_matches_source_index(self):
         payload = b"source"
         digest = hashlib.sha256(payload).hexdigest()
