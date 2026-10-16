@@ -511,6 +511,7 @@ def _extend_network_arguments(
     network_egress_allow: tuple[str, ...],
     network_egress_deny: tuple[str, ...],
 ) -> None:
+    sandbox_lifecycle.require_host_loopback_prefix(args.net, args.host_loopback)
     if args.net is not None:
         command.extend(["--net", args.net, "--network-profile", args.network_profile])
     if args.network_egress is not None:

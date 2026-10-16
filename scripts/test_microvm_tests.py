@@ -2708,6 +2708,34 @@ class MicrovmTests(unittest.TestCase):
         with self.assertRaises(OSError):
             os.fstat(prepared[0])
 
+    def test_nvx_rejects_host_loopback_access_on_a_slash_30_before_launch(self):
+        # OpenVMM presents host peers inside the guest subnet, which a /30 cannot spare.
+        def arguments(net: str, host_loopback: str | None) -> list[str]:
+            command: list[str] = []
+            nvx._extend_network_arguments(
+                command,
+                argparse.Namespace(
+                    net=net,
+                    network_profile="portable",
+                    network_egress=None,
+                    network_ingress=None,
+                    host_loopback=host_loopback,
+                    network_proxy=None,
+                    host_loopback_forward=[],
+                ),
+                (),
+                (),
+            )
+            return command
+
+        with self.assertRaisesRegex(
+            nvx.ScriptError, r"host-loopback access needs a guest network prefix of /29"
+        ):
+            arguments("10.0.0.2/30", "allow")
+        self.assertIn("--host-loopback", arguments("10.0.0.2/30", "deny"))
+        self.assertIn("--host-loopback", arguments("10.0.0.2/29", "allow"))
+        self.assertNotIn("--host-loopback", arguments("10.0.0.2/30", None))
+
     def test_host_loopback_port_candidates_are_spread_across_the_dynamic_range(self):
         first, last = microvm_tests.HOST_LOOPBACK_PORT_RANGE
         candidates = microvm_tests._host_loopback_port_candidates()

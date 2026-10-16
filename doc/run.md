@@ -473,12 +473,12 @@ traffic, which stays with the guest, as it would with any host process
 listening on loopback alone. With ingress `allow` as well, the listeners that
 OpenVMM publishes on every host address admit the host instead.
 
-A `/30` guest network holds only the gateway and the guest, so OpenVMM
-presents IPv4 host peers at the gateway instead. TCP still works, but the
-guest's UDP replies to host clients over `127.0.0.1` then do not return
-through the published port, so use a `/29` or larger network with
-`--host-loopback allow`. The NVX Rust API rejects host-loopback access for a
-`/30`. The IPv6 subnet of a `/30` keeps an address for host peers.
+Explicit `--host-loopback allow` requires an IPv4 guest network of `/29` or
+larger. A `/30` holds only the gateway and the guest, so OpenVMM would present
+IPv4 host peers at the gateway and lose UDP replies to host clients over
+`127.0.0.1`. NVX rejects the combination before launch, in the command-line
+tools and the Rust API alike. The IPv6 subnet of a `/30` keeps an address for
+host peers. Section 3.5.4 of the architecture guide states the rule.
 
 Repeat `--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form, at
 most 64 times, to publish further localhost ports at guest ports of your

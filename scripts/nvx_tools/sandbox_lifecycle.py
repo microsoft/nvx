@@ -36,6 +36,8 @@ from .control_session import (
 from .sandbox import SandboxLaunch, SandboxLayer, SandboxMount
 
 CONFIG_NAME = "config.json"
+# Longest guest network prefix that host-loopback access accepts, as nvx-rs enforces it.
+MAX_HOST_LOOPBACK_PREFIX = 29
 RUNTIME_NAME = "runtime.json"
 CAPABILITY_NAME = "control.capability"
 LOG_NAME = "openvmm.log"
@@ -197,6 +199,23 @@ def write_exec_outcome(path: Path, result: ManagedExecResult) -> None:
             },
         },
     )
+
+
+def require_host_loopback_prefix(net: object, host_loopback: object) -> None:
+    """Refuse host-loopback access on a guest network too narrow to present host peers.
+
+    OpenVMM presents a host peer at an address of the guest subnet, which a /30 cannot
+    spare, so the access would silently lose IPv4 UDP replies.
+    """
+    if host_loopback != "allow" or not isinstance(net, str):
+        return
+    prefix = net.partition("/")[2]
+    if prefix.isdecimal() and int(prefix) > MAX_HOST_LOOPBACK_PREFIX:
+        raise ScriptError(
+            "host-loopback access needs a guest network prefix of "
+            f"/{MAX_HOST_LOOPBACK_PREFIX} or shorter, which leaves an address at which "
+            "OpenVMM presents host peers to the guest"
+        )
 
 
 def _prepare_state_directory(path: Path, *, create: bool) -> Path:
@@ -950,6 +969,7 @@ def provision(
     cmdline: str,
     timeout: float,
 ) -> None:
+    require_host_loopback_prefix(net, host_loopback)
     state_dir = _prepare_state_directory(state_path, create=True)
     config_path = state_dir / CONFIG_NAME
     runtime_path = state_dir / RUNTIME_NAME
@@ -1011,6 +1031,7 @@ def _start(state_dir: Path, timeout: float) -> None:
     # is its own.
     if any(path_exists(state_dir / name) for name in RUNTIME_FILE_NAMES):
         raise ScriptError("sandbox is already running or has stale runtime state")
+    require_host_loopback_prefix(config.get("net"), config.get("host_loopback"))
     outcome_path = state_dir / OUTCOME_NAME
     outcome_path.unlink(missing_ok=True)
     launch = _deserialize_launch(config)

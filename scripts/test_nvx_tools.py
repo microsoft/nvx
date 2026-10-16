@@ -1569,6 +1569,51 @@ class CliTests(unittest.TestCase):
                     validated.assert_not_called()
             self.assertFalse(state.exists())
 
+    def test_managed_sandboxes_reject_host_loopback_on_a_slash_30_before_launch(self):
+        # Provisioning and starting a stored configuration must refuse the same
+        # combination as the command line, before any state or OpenVMM is involved.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer = root / "distro.erofs"
+            scratch = root / "scratch.ext4"
+            layer.write_bytes(b"layer")
+            scratch.write_bytes(b"scratch")
+            launch = sandbox.SandboxLaunch(
+                layers=(
+                    sandbox.SandboxLayer.parse(
+                        f"distro,{layer},11111111-1111-1111-1111-111111111111"
+                    ),
+                ),
+                scratch=scratch,
+            )
+            options = {
+                "hypervisor": "whp",
+                "memory_mib": 128,
+                "net": "10.0.0.2/30",
+                "network_profile": "portable",
+                "network_egress": None,
+                "network_ingress": None,
+                "network_egress_allow": (),
+                "network_egress_deny": (),
+                "host_loopback": "allow",
+                "network_proxy": None,
+                "host_loopback_forward": (),
+                "cmdline": "quiet",
+            }
+            state = root / "state"
+            with self.assertRaisesRegex(common.ScriptError, "prefix of /29"):
+                sandbox_lifecycle.provision(state, launch, timeout=1, **options)
+            self.assertFalse((state / sandbox_lifecycle.CONFIG_NAME).exists())
+
+            # A configuration stored before the rule existed is refused when started.
+            stored = sandbox_lifecycle._serialize_launch(launch, **options)
+            state.mkdir(exist_ok=True)
+            (state / sandbox_lifecycle.CONFIG_NAME).write_text(
+                json.dumps(stored), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(common.ScriptError, "prefix of /29"):
+                sandbox_lifecycle.start(state, 1)
+
     def test_managed_provision_persists_lowered_policy_not_source_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
