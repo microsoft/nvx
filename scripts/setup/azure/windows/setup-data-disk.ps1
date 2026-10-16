@@ -261,6 +261,7 @@ if ($dConflict -and $dConflict.DiskNumber -ne $dataDisk.Number) {
         Write-DiskLog "Azure temporary disk at ${DataDriveLetter}: hosts the active pagefile. Moving the pagefile to C: and scheduling post-reboot continuation."
         $memoryManagement = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
         Ensure-RegistryKey $pendingPath
+        Set-ItemProperty -Path $pendingPath -Name Completed -Value 0
         $currentBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
         $requestedBoot = Get-RegistryValue -Path $pendingPath -Name RebootRequestedFromBoot
         if ($requestedBoot -and $requestedBoot -ne $currentBoot) {

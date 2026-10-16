@@ -148,7 +148,7 @@ catch {
 $sshd = Get-Service -Name sshd -ErrorAction SilentlyContinue
 if (-not $sshd) {
     Write-Log 'sshd service not found after capability install' 'ERROR'
-    throw 'OpenSSH Server is not available on this image. Redeploy with enableSsh=false or use an image that supports OpenSSH.'
+    throw 'OpenSSH Server is not available on this image. Use an image that supports OpenSSH Server.'
 }
 
 foreach ($svc in @('sshd', 'ssh-agent')) {

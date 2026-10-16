@@ -77,6 +77,31 @@ class PackageTests(unittest.TestCase):
                         exec(self.embedded_linux(index), {})
             return output.getvalue()
 
+    def execute_windows(self, script: str, **environment: str) -> str:
+        powershell = shutil.which("powershell.exe")
+        if os.name != "nt" or powershell is None:
+            self.skipTest("Windows PowerShell is unavailable")
+        sentinel = "NVX_AZURE_WINDOWS_MOCK_OK"
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script + f"\nWrite-Output {sentinel}\n",
+            ],
+            env={**os.environ, **environment},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(sentinel, result.stdout)
+        return result.stdout
+
     def test_embedded_linux_configuration_reader(self):
         config = self.configuration("linux")
         values = self.execute_linux(0, config).splitlines()
@@ -587,6 +612,229 @@ if ($null -ne (Select-ManagedDataDisk -Disks @($scsi, $nvme) `
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_windows_pending_disk_reboot_invalidates_completion_before_continuing(self):
+        script = r"""
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$diskAst = [Management.Automation.Language.Parser]::ParseFile(
+    $env:NVX_TEST_DISK_SCRIPT, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Data disk helper has parse errors' }
+$pending = $diskAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+    $node.Clauses[0].Item1.Extent.Text -eq '$activePagefile -or $configuredPagefile'
+}, $true)
+if (-not $pending) { throw 'Missing pagefile reboot branch' }
+# Keep the successful exit inside the isolated test scope.
+$pendingBranch = [scriptblock]::Create($pending.Extent.Text.Replace('exit 0', 'return'))
+$bootstrapAst = [Management.Automation.Language.Parser]::ParseFile(
+    $env:NVX_TEST_WINDOWS_BOOTSTRAP, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Windows bootstrap has parse errors' }
+$readCompletion = $bootstrapAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left.Extent.Text -eq '$diskReady'
+}, $true)
+$gate = $bootstrapAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+    $node.Clauses[0].Item1.Extent.Text -eq '-not $diskReady -or $diskReady.Completed -ne 1'
+}, $true)
+if (-not $readCompletion -or -not $gate) { throw 'Missing disk completion gate' }
+$checkGate = [scriptblock]::Create(
+    $readCompletion.Extent.Text + "`n" + $gate.Extent.Text + "`n" +
+    '$script:gatePassed = $true')
+$pendingPath = 'HKLM:\SOFTWARE\NvxRunner\DataDiskSetup'
+$DataDriveLetter = 'F'
+$fallback = 'T'
+$conflictDisk = [pscustomobject]@{ Number = 1 }
+function Write-DiskLog { param($Message) }
+function Ensure-RegistryKey { param($Path) }
+function Get-CimInstance {
+    param($ClassName)
+    if ($ClassName -ne 'Win32_OperatingSystem') { throw 'Unexpected CIM query' }
+    return [pscustomobject]@{ LastBootUpTime = [datetime]'2026-10-16T00:00:00Z' }
+}
+function Get-RegistryValue {
+    param($Path, $Name)
+    return $script:state[$Name]
+}
+function Set-ItemProperty {
+    param($Path, $Name, $Value)
+    if ($Path -eq $pendingPath) {
+        if ($Name -ne 'Completed' -and $script:state.Completed -ne 0) {
+            throw 'Completion was not invalidated before pending reboot state'
+        }
+        $script:state[$Name] = $Value
+    }
+    elseif ($Name -ne 'PagingFiles') { throw 'Unexpected registry write' }
+}
+function Register-Continuation {
+    if ($script:state.Completed -ne 0) { throw 'Continuation retained completion' }
+    $script:continuations++
+}
+function shutdown.exe {
+    if ($script:state.Completed -ne 0 -or $script:continuations -ne 1) {
+        throw 'Reboot scheduled before pending state was ready'
+    }
+    $script:reboots++
+    $global:LASTEXITCODE = 0
+}
+function Get-ItemProperty {
+    param($Path, $Name, $ErrorAction)
+    if ($Path -ne $pendingPath -or $Name -ne 'Completed') {
+        throw 'Unexpected registry read'
+    }
+    return [pscustomobject]$script:state
+}
+foreach ($case in @(
+    @{ Active = $true; Configured = $false },
+    @{ Active = $false; Configured = $true },
+    @{ Active = $true; Configured = $true },
+    @{ Active = $false; Configured = $false }
+)) {
+    $activePagefile = $case.Active
+    $configuredPagefile = $case.Configured
+    $script:state = @{ Completed = 1 }
+    $script:continuations = 0
+    $script:reboots = 0
+    & $pendingBranch
+    $expectsReboot = $activePagefile -or $configuredPagefile
+    if ($script:state.Completed -ne [int](-not $expectsReboot) -or
+        $script:continuations -ne [int]$expectsReboot -or
+        $script:reboots -ne [int]$expectsReboot) {
+        throw 'Unexpected completion or reboot state'
+    }
+    $script:gatePassed = $false
+    & $checkGate
+    if ($script:gatePassed -eq $expectsReboot) {
+        throw 'Bootstrap did not honor pending disk completion'
+    }
+    $script:state.Completed = 1
+    $script:gatePassed = $false
+    & $checkGate
+    if (-not $script:gatePassed) { throw 'Completed disk setup did not allow bootstrap' }
+}
+"""
+        self.execute_windows(
+            script,
+            NVX_TEST_DISK_SCRIPT=str(builder.ROOT / "windows/setup-data-disk.ps1"),
+            NVX_TEST_WINDOWS_BOOTSTRAP=str(
+                builder.ROOT / "windows/bootstrap-runner.ps1"
+            ),
+        )
+
+    def test_windows_runner_metadata_firewall_is_idempotent_and_fail_closed(self):
+        script = r"""
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:NVX_TEST_WINDOWS_BOOTSTRAP, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Windows bootstrap has parse errors' }
+$definition = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Set-RunnerMetadataFirewall'
+}, $true)
+if (-not $definition) { throw 'Missing metadata firewall function' }
+. ([scriptblock]::Create($definition.Extent.Text))
+function Reset-Firewall {
+    $script:rule = [pscustomobject]@{
+        Direction = 'Outbound'; Action = 'Block'; Enabled = 'True'
+    }
+    $script:addresses = @('169.254.169.254')
+    $script:users = 'D:(A;;CC;;;NS)'
+    $script:creations = 0
+    $script:failCreation = $false
+}
+function Get-NetFirewallRule {
+    param($Name, $ErrorAction)
+    if ($Name -ne 'NvxRunnerDenyMetadata') { throw 'Unexpected firewall rule name' }
+    return $script:rule
+}
+function New-NetFirewallRule {
+    param($Name, $DisplayName, $Direction, $Action, $RemoteAddress, $LocalUser, $Profile)
+    if ($Name -ne 'NvxRunnerDenyMetadata' -or $DisplayName -ne $Name -or
+        $Direction -ne 'Outbound' -or $Action -ne 'Block' -or
+        $RemoteAddress -ne '169.254.169.254' -or
+        $LocalUser -ne 'D:(A;;CC;;;S-1-5-20)' -or $Profile -ne 'Any') {
+        throw 'Incorrect metadata firewall creation arguments'
+    }
+    if ($script:failCreation) { throw 'Mock firewall creation failed' }
+    $script:creations++
+    $script:rule = [pscustomobject]@{
+        Direction = $Direction; Action = $Action; Enabled = 'True'
+    }
+    $script:addresses = @($RemoteAddress)
+    $script:users = $LocalUser
+    return $script:rule
+}
+function Get-NetFirewallAddressFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process { [pscustomobject]@{ RemoteAddress = $script:addresses } }
+}
+function Get-NetFirewallSecurityFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process { [pscustomobject]@{ LocalUser = $script:users } }
+}
+Reset-Firewall
+Set-RunnerMetadataFirewall
+if ($script:creations -ne 0) { throw 'Valid existing firewall rule was replaced' }
+Reset-Firewall
+$script:rule = $null
+Set-RunnerMetadataFirewall
+Set-RunnerMetadataFirewall
+if ($script:creations -ne 1) { throw 'Firewall creation was not idempotent' }
+foreach ($case in @('principal', 'address', 'extra-address', 'missing-address',
+        'direction', 'action', 'disabled')) {
+    Reset-Firewall
+    switch ($case) {
+        'principal' { $script:users = 'D:(A;;CC;;;S-1-5-18)' }
+        'address' { $script:addresses = @('169.254.169.253') }
+        'extra-address' { $script:addresses += '169.254.169.253' }
+        'missing-address' { $script:addresses = @() }
+        'direction' { $script:rule.Direction = 'Inbound' }
+        'action' { $script:rule.Action = 'Allow' }
+        'disabled' { $script:rule.Enabled = 'False' }
+    }
+    $rejected = $false
+    try { Set-RunnerMetadataFirewall }
+    catch {
+        if ($_.Exception.Message -ne
+            'The runner account is not blocked from Azure instance metadata.') { throw }
+        $rejected = $true
+    }
+    if (-not $rejected -or $script:creations -ne 0) {
+        throw "Invalid firewall rule was accepted: $case"
+    }
+}
+Reset-Firewall
+$script:rule = $null
+$script:failCreation = $true
+$rejected = $false
+try { Set-RunnerMetadataFirewall }
+catch {
+    if ($_.Exception.Message -ne 'Mock firewall creation failed') { throw }
+    $rejected = $true
+}
+if (-not $rejected) { throw 'Firewall creation failure was ignored' }
+"""
+        self.execute_windows(
+            script,
+            NVX_TEST_WINDOWS_BOOTSTRAP=str(
+                builder.ROOT / "windows/bootstrap-runner.ps1"
+            ),
+        )
+
+    def test_windows_missing_ssh_advice_uses_supported_image_requirement(self):
+        source = builder.source("windows/vmss-bootstrap.ps1").decode()
+        self.assertNotIn("enableSsh", source)
+        self.assertIn("Use an image that supports OpenSSH Server.", source)
 
     def test_model_patch_is_exact_payload(self):
         cases: tuple[tuple[Literal["linux", "windows"], str], ...] = (
