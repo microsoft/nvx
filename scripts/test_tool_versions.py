@@ -6,7 +6,8 @@ install (#129). These tests check that the manifest pins each tool for both
 platforms, that the POSIX shell and PowerShell readers in the setup scripts
 accept, reject, and resolve manifests exactly as the reference reader below
 does, that each setup script reads the manifest before it inspects or changes
-the host, and that no script, workflow, or guide hard-codes a pin.
+the host, and that no script, workflow, or guide hard-codes a pin. Runner-label selection
+and fresh-install directory checks are exercised without provisioning a host.
 """
 
 from __future__ import annotations
@@ -1045,6 +1046,219 @@ class ToolManifestConsumerTests(unittest.TestCase):
                 f"nextest={entries['cargo_nextest.version']}",
                 output.read_text(encoding="utf-8").splitlines(),
             )
+
+
+class RunnerSetupTests(unittest.TestCase):
+    def test_linux_extra_labels_keep_required_labels(self):
+        shells = _posix_shells()
+        if not shells:
+            self.skipTest("a POSIX shell is unavailable")
+        source = LINUX_RUNNER.read_text(encoding="utf-8")
+        functions = "".join(
+            _shell_function(source, name) for name in ("die", "append_runner_labels")
+        )
+        start = source.index(
+            "\nexpected_runner_labels=linux,${backend},virtual-machine\n"
+        )
+        end = source.index('\nif [ "$check_only" = false ]; then', start)
+        labels = source[start:end]
+        self.assertIn("--extra-runner-labels)", source)
+        for backend in ("kvm", "mshv"):
+            for benchmark in ("false", "true"):
+                required = f"linux,{backend},virtual-machine"
+                if benchmark == "true":
+                    required += ",benchmark"
+                for extra, expected in (
+                    ("", required),
+                    ("pool", f"{required},pool"),
+                    ("pool.1,fast-2", f"{required},pool.1,fast-2"),
+                ):
+                    with self.subTest(
+                        backend=backend, benchmark=benchmark, extra=extra
+                    ):
+                        script = (
+                            f"set -eu\n{functions}"
+                            "backend=$1\nbenchmark_runner=$2\nextra_runner_labels=$3\n"
+                            f"{labels}"
+                            'printf "%s\\n" "$expected_runner_labels"\n'
+                        )
+                        result = subprocess.run(
+                            [
+                                *shells[0],
+                                "-c",
+                                script,
+                                "labels",
+                                backend,
+                                benchmark,
+                                extra,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout.strip(), expected)
+
+    def test_linux_extra_labels_reject_duplicates_and_invalid_values(self):
+        shells = _posix_shells()
+        if not shells:
+            self.skipTest("a POSIX shell is unavailable")
+        source = LINUX_RUNNER.read_text(encoding="utf-8")
+        script = (
+            "set -eu\n"
+            + "".join(
+                _shell_function(source, name)
+                for name in ("die", "append_runner_labels")
+            )
+            + 'expected_runner_labels="linux,kvm,virtual-machine,benchmark"\n'
+            + 'append_runner_labels "$1"\n'
+        )
+        for labels in (
+            "",
+            "linux",
+            "KVM",
+            "benchmark",
+            "Benchmark",
+            "pool,POOL",
+            "pool,pool",
+            ",pool",
+            "pool,",
+            "pool,,fast",
+            "bad label",
+            "bad/label",
+        ):
+            with self.subTest(labels=labels):
+                result = subprocess.run(
+                    [*shells[0], "-c", script, "labels", labels],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("error:", result.stderr)
+
+    def test_windows_extra_labels_keep_required_labels_and_reject_duplicates(self):
+        powershells = _powershells()
+        if not powershells:
+            self.skipTest("PowerShell is unavailable")
+        source = WINDOWS.read_text(encoding="utf-8")
+        self.assertIn("$ExpectedRunnerLabels = Get-ExpectedRunnerLabels", source)
+        script = """
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:NVX_TEST_SETUP_SCRIPT, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Windows setup has parse errors' }
+$definition = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-ExpectedRunnerLabels'
+}, $true)
+. ([scriptblock]::Create($definition.Extent.Text))
+try {
+    [Console]::Out.WriteLine((Get-ExpectedRunnerLabels `
+        -AdditionalLabels $env:NVX_TEST_EXTRA_LABELS `
+        -BenchmarkRunner:($env:NVX_TEST_BENCHMARK -eq 'true')))
+}
+catch {
+    [Console]::Out.WriteLine("error: " + $_.Exception.Message)
+    exit 1
+}
+"""
+        cases = (
+            ("", False, "windows,whp,virtual-machine"),
+            ("", True, "windows,whp,virtual-machine,benchmark"),
+            ("pool,fast-2", False, "windows,whp,virtual-machine,pool,fast-2"),
+            ("pool,fast-2", True, "windows,whp,virtual-machine,benchmark,pool,fast-2"),
+            ("Windows", False, None),
+            ("whp", False, None),
+            ("benchmark", True, None),
+            ("Benchmark", True, None),
+            ("pool,POOL", False, None),
+            (",pool", False, None),
+            ("bad label", False, None),
+        )
+        for powershell in powershells:
+            for extra, benchmark, expected in cases:
+                with self.subTest(
+                    powershell=powershell, extra=extra, benchmark=benchmark
+                ):
+                    result = _run_powershell(
+                        powershell,
+                        script,
+                        {
+                            "NVX_TEST_SETUP_SCRIPT": str(WINDOWS),
+                            "NVX_TEST_EXTRA_LABELS": extra,
+                            "NVX_TEST_BENCHMARK": str(benchmark).lower(),
+                        },
+                    )
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("error:", result.stdout)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout.strip(), expected)
+
+    def test_windows_runner_accepts_only_a_prepared_work_directory(self):
+        powershells = _powershells()
+        if not powershells:
+            self.skipTest("PowerShell is unavailable")
+        source = WINDOWS.read_text(encoding="utf-8")
+        self.assertIn("Assert-FreshRunnerDirectory -Path $RunnerDirectory", source)
+        script = """
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:NVX_TEST_SETUP_SCRIPT, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Windows setup has parse errors' }
+$definition = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Assert-FreshRunnerDirectory'
+}, $true)
+. ([scriptblock]::Create($definition.Extent.Text))
+try {
+    Assert-FreshRunnerDirectory -Path $env:NVX_TEST_RUNNER_DIRECTORY
+    [Console]::Out.WriteLine('accepted')
+}
+catch {
+    [Console]::Out.WriteLine('rejected: ' + $_.Exception.Message)
+    exit 1
+}
+"""
+        for powershell in powershells:
+            for case, valid in (
+                ("empty", True),
+                ("prewarmed", True),
+                ("unexpected-file", False),
+                ("work-file", False),
+            ):
+                with self.subTest(powershell=powershell, case=case):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        directory = Path(temporary) / "runner"
+                        directory.mkdir()
+                        if case == "prewarmed":
+                            (directory / "_work" / "_sccache").mkdir(parents=True)
+                        elif case == "unexpected-file":
+                            (directory / "config.cmd").write_text("partial")
+                        elif case == "work-file":
+                            (directory / "_work").write_text("not a directory")
+                        result = _run_powershell(
+                            powershell,
+                            script,
+                            {
+                                "NVX_TEST_SETUP_SCRIPT": str(WINDOWS),
+                                "NVX_TEST_RUNNER_DIRECTORY": str(directory),
+                            },
+                        )
+                        self.assertEqual(result.returncode == 0, valid, result.stdout)
+                        self.assertIn(
+                            "accepted" if valid else "rejected:", result.stdout
+                        )
 
 
 if __name__ == "__main__":

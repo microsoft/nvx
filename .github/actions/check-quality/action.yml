@@ -43,7 +43,12 @@ runs:
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
         ${SHELLCHECK} --shell=bash \
-          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
+          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
+          scripts/setup/azure/linux/bootstrap-runner.sh \
+          scripts/setup/azure/linux/block-runner-metadata.sh \
+          scripts/setup/azure/linux/setup-data-disk.sh \
+          scripts/setup/azure/linux/setup-mshv.sh \
+          scripts/setup/azure/linux/verify-mshv.sh
         python -m pyright --pythonplatform Linux
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts .github/specula
@@ -59,7 +64,12 @@ runs:
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
         ${SHFMT} -d -ln bash -i 4 -ci \
-          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
+          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
+          scripts/setup/azure/linux/bootstrap-runner.sh \
+          scripts/setup/azure/linux/block-runner-metadata.sh \
+          scripts/setup/azure/linux/setup-data-disk.sh \
+          scripts/setup/azure/linux/setup-mshv.sh \
+          scripts/setup/azure/linux/verify-mshv.sh
 
     - name: Check Markdown links
       shell: bash
@@ -75,14 +85,22 @@ runs:
       run: |
         $tokens = $null
         $errors = $null
-        [void][System.Management.Automation.Language.Parser]::ParseFile(
-          (Resolve-Path "scripts/setup/setup-windows-whp.ps1"),
-          [ref]$tokens,
-          [ref]$errors
-        )
-        foreach ($error in $errors) {
-          Write-Error $error -ErrorAction Continue
-        }
-        if ($errors.Count -ne 0) {
-          exit 1
+        foreach ($path in @(
+          "scripts/setup/setup-windows-whp.ps1",
+          "scripts/setup/azure/windows/bootstrap-runner.ps1",
+          "scripts/setup/azure/windows/install-package.ps1",
+          "scripts/setup/azure/windows/setup-data-disk.ps1",
+          "scripts/setup/azure/windows/vmss-bootstrap.ps1"
+        )) {
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path $path), [ref]$tokens, [ref]$errors
+          )
+          foreach ($error in $errors) {
+            Write-Error "$path : $error" -ErrorAction Continue
+          }
+          if ($errors.Count -ne 0) {
+            exit 1
+          }
         }

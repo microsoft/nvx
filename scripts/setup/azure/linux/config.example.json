@@ -1,0 +1,20 @@
+{
+  "os": "linux",
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "resourceGroup": "nvx-linux-ci-rg",
+  "vmssName": "nvx-linux-ci-vmss",
+  "repository": "microsoft/nvx",
+  "adminUsername": "ciadmin",
+  "keyVaultName": "nvx-ci-example-vault",
+  "bootstrapSecretName": "github-runner-bootstrap-token",
+  "runnerNamePrefix": "nvx-linux",
+  "runnerNumberOffset": 1,
+  "runnerLabels": ["linux", "kvm", "virtual-machine"],
+  "backend": "kvm",
+  "kernelMode": "preinstalled",
+  "runnerDirectory": "/opt/nvx-runner",
+  "dataDisk": {
+    "lun": 0,
+    "mountPoint": "/mnt/data"
+  }
+}

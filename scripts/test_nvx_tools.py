@@ -3291,6 +3291,7 @@ class CiConfigurationTests(unittest.TestCase):
             (("openvmm",), (True, True, True, True)),
             (("rust-toolchain.toml",), (True, True, True, True)),
             (("scripts/setup/setup-windows-whp.ps1",), (True, True, True, True)),
+            (("scripts/setup/azure/build_package.py",), (True, True, True, True)),
             (("scripts/setup/README.md",), (True, False, True, True)),
             ((".github/workflows/ci.yml",), (True, True, True, True)),
             ((".github/actions/validate-runner/action.yml",), (True, True, True, True)),
@@ -5194,12 +5195,14 @@ python3() {
             windows_setup,
         )
         # Registration and check mode share one label set.
-        self.assertEqual(windows_setup.count('"windows,whp,virtual-machine"'), 1)
+        self.assertEqual(
+            windows_setup.count('@("windows", "whp", "virtual-machine")'), 1
+        )
         for function_name, assignment in (
-            ("Install-ActionsRunner", "\n    $labels = Get-ActionsRunnerLabels\n"),
+            ("Install-ActionsRunner", "\n    $labels = $ExpectedRunnerLabels\n"),
             (
                 "Assert-ActionsRunner",
-                "\n        $expectedLabels = Get-ActionsRunnerLabels\n",
+                "\n        $expectedLabels = $ExpectedRunnerLabels\n",
             ),
         ):
             with self.subTest(function=function_name):
@@ -5224,13 +5227,11 @@ if ($errors.Count -ne 0) {{
 $definition = $ast.Find({{
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq "Get-ActionsRunnerLabels"
+        $node.Name -eq "Get-ExpectedRunnerLabels"
     }}, $true)
 . ([scriptblock]::Create($definition.Extent.Text))
-$BenchmarkRunner = $false
-Write-Output (Get-ActionsRunnerLabels)
-$BenchmarkRunner = $true
-Write-Output (Get-ActionsRunnerLabels)
+Write-Output (Get-ExpectedRunnerLabels)
+Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
 """
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness],

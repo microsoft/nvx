@@ -1,0 +1,22 @@
+{
+  "os": "windows",
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "resourceGroup": "nvx-windows-ci-rg",
+  "vmssName": "nvx-windows-ci-vmss",
+  "repository": "microsoft/nvx",
+  "adminUsername": "ciadmin",
+  "keyVaultName": "nvx-ci-example-vault",
+  "bootstrapSecretName": "github-runner-bootstrap-token",
+  "runnerNamePrefix": "nvx-windows",
+  "runnerNumberOffset": 1,
+  "runnerLabels": ["windows", "whp", "virtual-machine"],
+  "runnerDirectory": "C:\\actions-runner",
+  "benchmarkScratchDirectory": "F:\\nvx-benchmark-scratch",
+  "sshDefaultShell": "powershell",
+  "publicKeys": [],
+  "dataDisk": {
+    "lun": 0,
+    "driveLetter": "F",
+    "temporaryDriveFallback": "T"
+  }
+}

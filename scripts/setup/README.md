@@ -6,6 +6,9 @@ These scripts prepare an existing NVX checkout on a supported host:
 - `setup-windows-whp.ps1` configures Windows/WHP build prerequisites.
 - `setup-linux-runner.sh` configures a Linux/KVM or Linux/MSHV Actions runner.
 
+For Azure VMSS bootstrapping, see [Azure provisioning](azure/README.md). The
+scripts in this directory remain usable on supported hosts outside Azure.
+
 They do not create machines or initialize a checkout. The runner modes consume
 a short-lived registration token from standard input and do not store repository
 credentials in the scripts. Initialize the OpenVMM submodule before using the
@@ -37,7 +40,7 @@ $token = gh api --method POST `
   repos/microsoft/nvx/actions/runners/registration-token --jq .token
 $token | ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File C:\setup-windows-whp.ps1 -RunnerOnly `
-  -RunnerName azure-windows-3 -RunnerTokenStdin
+  -RunnerName nvx-windows-3 -RunnerTokenStdin
 $token = $null
 ```
 
@@ -45,7 +48,13 @@ Both scripts verify the Actions runner package against the manifest's
 checksum. Linux runner labels are `linux`, the selected backend, and
 `virtual-machine`. Windows labels are
 `windows`, `whp`, and `virtual-machine`. Runner names remain unique identities
-but are not registered as labels. `--benchmark-runner` on Linux and
+but are not registered as labels. Use `--extra-runner-labels LABELS` on Linux
+or `-ExtraRunnerLabels LABELS` on Windows to add comma-separated pool labels
+without removing these required labels. Labels may contain letters, digits,
+underscores, periods, and hyphens, and must not duplicate another label
+(case-insensitively). Changing a configured runner's labels requires a fresh
+registration token; check mode requires the same additional labels.
+`--benchmark-runner` on Linux and
 `-BenchmarkRunner` on Windows also register the `benchmark` label, which CI's
 platform jobs require. Exactly one runner of each backend's pool carries it, so
 that every run measures the backend's performance series on the same VM, and
@@ -65,6 +74,9 @@ that runner's host matches.
 On Linux, omit `--runner-name` to prepare host dependencies without reconciling
 an existing runner's service or cache directory. Pass its name in a subsequent
 invocation to update the service; `--check-only` still validates runner state.
+On Windows, an initial `-RunnerOnly` pass may create `_work` for sccache before
+registration; a subsequent named pass accepts that directory but refuses
+unrelated partial runner installations.
 Rustup bootstrap binaries are versioned and SHA-256 verified before execution;
 Linux provisioning also installs `zstd` for native Actions cache archives.
 Both runner setup scripts install a pinned, SHA-256-verified `sccache` binary.
@@ -102,7 +114,7 @@ workflow jobs run as the dedicated `nvx-runner` account, which has neither sudo
 nor Docker access.
 Linux provisioning and check mode warn, but don't stop, when the host CPU
 doesn't expose an invariant TSC (`nonstop_tsc` in `/proc/cpuinfo`). The flag
-is evidence only. Before the time ABI, guests on such an Azure VM hit
+is evidence only. Before the time ABI, guests on such hosts hit
 cross-vCPU TSC warps during CPU activation (#265); under it, the guest warp
 probe (H6) checks their skew against the ABI's 1 µs bound, so qualify such a
 VM with `python3 scripts/nvx.py doctor --backend <backend>` before
@@ -120,7 +132,7 @@ sh scripts/setup/setup-linux-runner.sh \
 
 ```powershell
 .\scripts\setup\setup-windows-whp.ps1 `
-  -RunnerOnly -RunnerName azure-windows-3 -CheckOnly
+  -RunnerOnly -RunnerName nvx-windows-3 -CheckOnly
 ```
 
 ### Rust toolchain
@@ -147,7 +159,7 @@ scp scripts/setup/setup-windows-whp.ps1 scripts/setup/tool-versions.conf HOST:C:
 ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File C:\setup-windows-whp.ps1 -RunnerOnly
 ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File C:\setup-windows-whp.ps1 -RunnerOnly -RunnerName azure-windows-3 -CheckOnly
+  -File C:\setup-windows-whp.ps1 -RunnerOnly -RunnerName nvx-windows-3 -CheckOnly
 ```
 
 ## Linux / MSHV
