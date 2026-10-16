@@ -4309,6 +4309,112 @@ class MicrovmTests(unittest.TestCase):
                 self.assertEqual(log_path.read_bytes(), result.output)
                 self.assertEqual(queues.return_value.get.call_count, 4)
 
+    def test_process_transcript_grows_while_the_process_runs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                interaction.return_value.process.wait.return_value = 0
+                queues.return_value.get.side_effect = [b"BOOT\n", None]
+                queues.return_value.get_nowait.side_effect = queue.Empty
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process:
+                    process.wait_for(b"BOOT", 1)
+                    # Consumed bytes are on disk while OpenVMM is still running.
+                    self.assertEqual(log_path.read_bytes(), b"BOOT\n")
+                    process.wait(1)
+                self.assertEqual(log_path.read_bytes(), b"BOOT\n")
+
+    def test_process_transcript_open_failure_surfaces_before_start(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            log_path.mkdir()
+            with patch.object(openvmm_process, "InteractiveProcess") as interaction:
+                with self.assertRaises(OSError):
+                    openvmm_process.OpenvmmProcess(["openvmm"], log_path)
+            interaction.assert_not_called()
+
+    def test_process_close_writes_output_delivered_after_the_last_wait(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                queues.return_value.get_nowait.side_effect = [b"LATE\n", queue.Empty]
+                process = openvmm_process.OpenvmmProcess(["openvmm"], log_path)
+                process.close()
+            self.assertEqual(log_path.read_bytes(), b"LATE\n")
+
+    def test_process_close_keeps_output_queued_during_interaction_close(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            closed: list[bool] = []
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                interaction.return_value.close.side_effect = lambda: closed.append(True)
+
+                pending = [b"LAST\n"]
+
+                def get_nowait() -> bytes:
+                    # The reader queues its last chunk only while the interaction shuts down.
+                    if closed and pending:
+                        return pending.pop()
+                    raise queue.Empty
+
+                queues.return_value.get_nowait.side_effect = get_nowait
+                process = openvmm_process.OpenvmmProcess(["openvmm"], log_path)
+                process.close()
+                self.assertEqual(process.output, b"LAST\n")
+            self.assertEqual(log_path.read_bytes(), b"LAST\n")
+
+    def test_process_close_keeps_queued_output_when_interaction_close_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                interaction.return_value.close.side_effect = OSError("reader stuck")
+                queues.return_value.get_nowait.side_effect = [b"QUEUED\n", queue.Empty]
+                process = openvmm_process.OpenvmmProcess(["openvmm"], log_path)
+                with self.assertRaises(OSError):
+                    process.close()
+                self.assertEqual(process.output, b"QUEUED\n")
+            self.assertEqual(log_path.read_bytes(), b"QUEUED\n")
+
+    def test_process_close_releases_resources_when_the_transcript_write_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                patch.object(openvmm_process.threading, "Thread"),
+                patch.object(openvmm_process.queue, "Queue") as queues,
+            ):
+                interaction.return_value.process.poll.return_value = None
+                queues.return_value.get_nowait.side_effect = [b"LATE\n", queue.Empty]
+                process = openvmm_process.OpenvmmProcess(["openvmm"], log_path)
+                failing = MagicMock()
+                failing.closed = False
+                failing.write.side_effect = OSError("no space left on device")
+                process._log.close()
+                process._log = failing
+                with self.assertRaises(OSError):
+                    process.close()
+            interaction.return_value.close.assert_called_once_with()
+            failing.close.assert_called_once_with()
+
     def test_process_wait_clamps_elapsed_process_timeout(self):
         with tempfile.TemporaryDirectory() as temporary:
             with (
