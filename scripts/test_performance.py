@@ -7,6 +7,7 @@ import io
 import json
 import re
 import statistics
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -2388,6 +2389,188 @@ class PerformanceTests(unittest.TestCase):
                     root / "results",
                     lifecycle_input=lifecycle_path,
                 )
+
+    def test_reset_check_ignores_side_branch_history_that_never_reset_a_row(self):
+        # A side branch forked before the measurement can hold fewer rows than the
+        # measurement without resetting them. Comparing it with the previous commit
+        # in log order would flag the throughput row, which it never removed.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            history_file = repo / "data" / "linux-kvm.csv"
+            performance.write_results(
+                history_file,
+                [performance.Result("s0", "latency", "ms", "lower", 10.0)],
+            )
+            git("add", "data")
+            git("commit", "-q", "-m", "seed")
+            main = git("rev-parse", "--abbrev-ref", "HEAD")
+            git("checkout", "-q", "-b", "side")
+            performance.write_results(
+                history_file,
+                [performance.Result("x", "latency", "ms", "lower", 11.0)],
+            )
+            git("commit", "-q", "-am", "side change")
+            git("checkout", "-q", main)
+            performance.write_results(
+                history_file,
+                [
+                    performance.Result("s0", "latency", "ms", "lower", 10.0),
+                    performance.Result("A", "throughput", "MB/s", "higher", 20.0),
+                ],
+            )
+            git("commit", "-q", "-am", "measured")
+            measured = git("rev-parse", "HEAD")
+            # The merge keeps the side branch's latency change and A's throughput row.
+            git("merge", "-q", "--no-commit", "--no-ff", "-X", "ours", "side")
+            performance.write_results(
+                history_file,
+                [
+                    performance.Result("x", "latency", "ms", "lower", 11.0),
+                    performance.Result("A", "throughput", "MB/s", "higher", 20.0),
+                ],
+            )
+            git("commit", "-q", "-am", "merge side")
+
+            self.assertEqual(
+                performance._reset_dimensions_since(repo, history_file, measured),
+                set(),
+            )
+
+    def test_reset_check_ignores_a_merged_branch_that_predates_an_earlier_reset(self):
+        # Dev resets latency before measurement A. A branch forked before that reset
+        # keeps the old latency rows and adds throughput; merging it into dev keeps the
+        # reset, so the merge drops latency relative to that branch. The reset preceded A,
+        # so A's latency row must not be discarded.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            history_file = repo / "data" / "linux-kvm.csv"
+            performance.write_results(
+                history_file,
+                [performance.Result("s0", "latency", "ms", "lower", 10.0)],
+            )
+            git("add", "data")
+            git("commit", "-q", "-m", "seed")
+            main = git("rev-parse", "--abbrev-ref", "HEAD")
+            git("checkout", "-q", "-b", "branch")
+            performance.write_results(
+                history_file,
+                [
+                    performance.Result("s0", "latency", "ms", "lower", 12.0),
+                    performance.Result("b", "throughput", "MB/s", "higher", 5.0),
+                ],
+            )
+            git("commit", "-q", "-am", "branch work")
+            git("checkout", "-q", main)
+            performance.write_results(history_file, [])
+            git("commit", "-q", "-am", "reset latency before the measurement")
+            git("commit", "-q", "--allow-empty", "-m", "measured")
+            measured = git("rev-parse", "HEAD")
+            git("merge", "-q", "--no-commit", "--no-ff", "-X", "ours", "branch")
+            performance.write_results(
+                history_file,
+                [performance.Result("b", "throughput", "MB/s", "higher", 5.0)],
+            )
+            git("commit", "-q", "-am", "merge branch")
+
+            self.assertEqual(
+                performance._reset_dimensions_since(repo, history_file, measured),
+                set(),
+            )
+
+    def test_persist_drops_rows_measured_before_a_later_history_reset(self):
+        # A row measured before a commit that reset its metric must not refill the reset
+        # series, or nine post-reset rows would already gate the metric. Unaffected metrics
+        # measured at the same commit still persist.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            def commit(message: str) -> str:
+                git("add", "data")
+                git("commit", "-q", "--allow-empty", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            history = repo / "data"
+            source = repo / "source"
+            history_file = history / "linux-kvm.csv"
+            source_file = source / "linux-kvm.csv"
+            performance.write_results(
+                history_file,
+                [
+                    performance.Result("seed", "latency", "ms", "lower", 10.0),
+                    performance.Result("seed", "throughput", "MB/s", "higher", 20.0),
+                ],
+            )
+            measured = commit("seed")
+
+            # Commit B resets only the latency metric; throughput keeps its history.
+            performance.write_results(
+                history_file,
+                [performance.Result("seed", "throughput", "MB/s", "higher", 20.0)],
+            )
+            commit("reset latency")
+
+            for number in range(9):
+                sha = commit(f"post-reset {number}")
+                performance.write_results(
+                    source_file,
+                    [performance.Result(sha, "latency", "ms", "lower", 100.0)],
+                )
+                performance.persist_results(source, history, git_checkout=repo)
+
+            # The measurement of A arrives after the reset. It must not refill latency.
+            performance.write_results(
+                source_file,
+                [
+                    performance.Result(measured, "latency", "ms", "lower", 10.0),
+                    performance.Result(measured, "throughput", "MB/s", "higher", 20.0),
+                ],
+            )
+            performance.persist_results(source, history, git_checkout=repo)
+
+            rows = performance.read_results(history_file)
+            latency = [row for row in rows if row.metric == "latency"]
+            throughput = [row for row in rows if row.metric == "throughput"]
+            self.assertEqual(len(latency), 9)
+            self.assertNotIn(measured, {row.commit for row in latency})
+            self.assertEqual({row.commit for row in throughput}, {"seed", measured})
 
     def test_persist_and_gate_isolate_processor_counts(self):
         with tempfile.TemporaryDirectory() as temporary:

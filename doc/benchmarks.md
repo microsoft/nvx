@@ -731,6 +731,8 @@ host doesn't record, such as a performance tier or bursting setting, reset at le
 affected metrics by removing them from the series' history files, such as
 `data/windows-whp-virtual-machine-microvm-v2-1vcpu.csv`, so that the gate restarts
 their ten-point warmup instead of comparing the new storage with the old baseline.
+Results measured before such a reset commit are not persisted into the reset
+series, so a `dev` run that finishes after the reset cannot refill it.
 
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10
