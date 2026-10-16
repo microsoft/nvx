@@ -485,6 +485,8 @@ class ExecutorClient:
         self._stdin = self._process.stdin
         self._stdout = self._process.stdout
         self._responses: queue.Queue[bytes | None] = queue.Queue()
+        # Set when close gives up on a reader that a surviving process keeps blocked.
+        self._abandoned = False
         self._reader = threading.Thread(
             target=self._read_responses,
             name=f"nvx-executor-reader-{label}",
@@ -563,13 +565,22 @@ class ExecutorClient:
             cleanup_error = error
         finally:
             self._closed = True
-            for stream in (self._stdin, self._stdout, self._stderr_stream):
+            for stream in (self._stdin, self._stderr_stream):
                 try:
                     stream.close()
                 except OSError as error:
                     if cleanup_error is None:
                         cleanup_error = error
             self._reader.join(timeout=2.0)
+            if self._reader.is_alive():
+                # A process that outlived the wrapper still holds stdout. Closing the buffered
+                # stream would wait for the blocked reader, so the reader closes it when it
+                # ends, and it retains nothing further.
+                self._abandoned = True
+                if cleanup_error is None:
+                    cleanup_error = ScriptError(
+                        "executor output is still held open by a surviving process"
+                    )
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -577,12 +588,19 @@ class ExecutorClient:
         self._terminate()
 
     def _read_responses(self) -> None:
-        while line := self._stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1):
-            if len(line) > MAX_PROTOCOL_LINE_BYTES:
-                self._responses.put(None)
-                return
-            self._responses.put(line)
-        self._responses.put(None)
+        try:
+            while line := self._stdout.readline(MAX_PROTOCOL_LINE_BYTES + 1):
+                if self._abandoned:
+                    # Keep draining so a surviving process is not blocked on a full pipe,
+                    # but retain nothing once the client has been closed.
+                    continue
+                if len(line) > MAX_PROTOCOL_LINE_BYTES:
+                    self._responses.put(None)
+                    return
+                self._responses.put(line)
+            self._responses.put(None)
+        finally:
+            self._stdout.close()
 
     def _terminate(self) -> None:
         if self._process.poll() is None:

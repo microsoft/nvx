@@ -8,6 +8,7 @@ import ctypes
 import hashlib
 import json
 import os
+import queue
 import signal
 import socket
 import subprocess
@@ -23,6 +24,7 @@ from unittest.mock import MagicMock, call, patch
 
 from nvx_tools.adversarial import (
     LOCAL_EXECUTOR_STATE_ROOT,
+    SCHEMA_VERSION,
     CampaignConfig,
     CopilotController,
     ExecutorClient,
@@ -2598,6 +2600,81 @@ class CopilotContainmentTests(unittest.TestCase):
         repair_prompt = observed_prompts[1].decode("utf-8")
         self.assertIn("allowed_case_ids", repair_prompt)
         self.assertIn(case_id, repair_prompt)
+
+
+class ExecutorCloseTests(unittest.TestCase):
+    def test_close_is_bounded_when_a_surviving_child_holds_executor_stdout(self):
+        # The wrapper exits after starting a child that inherits its stdout, so the protocol
+        # reader stays blocked. Closing must not wait for that child to exit.
+        with tempfile.TemporaryDirectory(prefix="nvx-executor-close-") as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            pid_file = root / "child.pid"
+            child = (
+                f'"{sys.executable}" -c "import os, sys, time; '
+                "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(20)\""
+                f' "{pid_file}"'
+            )
+            if os.name == "nt":
+                wrapper = root / "wrapper.cmd"
+                wrapper.write_bytes(f'@echo off\r\nstart "" /B {child}\r\n'.encode())
+            else:
+                wrapper = root / "wrapper.sh"
+                wrapper.write_bytes(f"#!/bin/sh\n{child} &\n".encode())
+                wrapper.chmod(0o755)
+            client = ExecutorClient(
+                run_dir=run_dir,
+                command=str(wrapper),
+                label="surviving-child",
+            )
+            try:
+                with self.assertRaises(ExecutorUnavailableError):
+                    client.request(
+                        {"schema_version": SCHEMA_VERSION, "operation": "shutdown"},
+                        timeout=0.5,
+                    )
+                started = time.monotonic()
+                with self.assertRaises(ScriptError):
+                    client.close()
+                self.assertLess(time.monotonic() - started, 8.0)
+            finally:
+                # The surviving child holds the log and must not outlive the test.
+                deadline = time.monotonic() + 5.0
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if pid_file.exists():
+                    pid = pid_file.read_text(encoding="utf-8")
+                    if os.name == "nt":
+                        subprocess.run(
+                            ["taskkill.exe", "/PID", pid, "/T", "/F"],
+                            check=False,
+                            capture_output=True,
+                        )
+                    else:
+                        os.kill(int(pid), signal.SIGKILL)
+
+    def test_reader_closes_its_stream_when_the_output_ends(self):
+        client = ExecutorClient.__new__(ExecutorClient)
+        client._stdout = MagicMock()
+        client._stdout.readline.side_effect = [b'{"ok": true}\n', b""]
+        client._responses = queue.Queue()
+        client._abandoned = False
+        client._read_responses()
+        client._stdout.close.assert_called_once_with()
+        self.assertEqual(client._responses.get_nowait(), b'{"ok": true}\n')
+        self.assertIsNone(client._responses.get_nowait())
+
+    def test_abandoned_reader_drains_output_without_retaining_it(self):
+        client = ExecutorClient.__new__(ExecutorClient)
+        client._stdout = MagicMock()
+        client._stdout.readline.side_effect = [b"late\n", b"later\n", b""]
+        client._responses = queue.Queue()
+        client._abandoned = True
+        client._read_responses()
+        client._stdout.close.assert_called_once_with()
+        self.assertIsNone(client._responses.get_nowait())
+        self.assertTrue(client._responses.empty())
 
 
 if __name__ == "__main__":
