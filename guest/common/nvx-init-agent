@@ -396,7 +396,7 @@ teardown() {
         echo "NVX-SANDBOX-ERROR: failed to unmount the container overlay" >&2
         status=1
     fi
-    for role in custom runtime distro; do
+    for role in distro; do
         directory=$layers/$role
         if mountpoint -q "$directory" && ! umount "$directory"; then
             echo "NVX-SANDBOX-ERROR: failed to unmount the $role layer" >&2
@@ -423,8 +423,6 @@ configure_cgroups
 
 layer_capacity=$(cmdline_value nvx_layer_capacity_sectors || true)
 distro=false
-runtime_layer=false
-custom=false
 layer_count=0
 # Kernel command-line tokens are deliberately split on spaces.
 # shellcheck disable=SC2086
@@ -446,18 +444,10 @@ for token in $cmdline; do
                     [ "$distro" = false ] || fatal "duplicate distro layer"
                     distro=true
                     ;;
-                runtime)
-                    [ "$runtime_layer" = false ] || fatal "duplicate runtime layer"
-                    runtime_layer=true
-                    ;;
-                custom)
-                    [ "$custom" = false ] || fatal "duplicate custom layer"
-                    custom=true
-                    ;;
                 *) fatal "unknown layer role: $role" ;;
             esac
             layer_count=$((layer_count + 1))
-            [ "$layer_count" -le 3 ] || fatal "at most three layers are supported"
+            [ "$layer_count" -le 1 ] || fatal "exactly one layer is supported"
             set +f
             mount_layer "$role" "$address" "$expected_uuid" "$layer_capacity"
             set -f
@@ -470,12 +460,6 @@ set +f
 lowerdirs=
 if [ "$distro" = true ]; then
     lowerdirs=$layers/distro
-fi
-if [ "$runtime_layer" = true ]; then
-    lowerdirs=$layers/runtime${lowerdirs:+:$lowerdirs}
-fi
-if [ "$custom" = true ]; then
-    lowerdirs=$layers/custom${lowerdirs:+:$lowerdirs}
 fi
 
 scratch_spec=$(cmdline_value nvx_scratch || true)

@@ -667,8 +667,8 @@ mount -t virtiofs microvm /mnt/host
 
 ## Experimental single-workload sandbox
 
-The `sandbox` command launches the microVM with one to three compressed
-EROFS lower layers and one preformatted ext4 scratch image:
+The `sandbox` command launches the microVM with one compressed EROFS `distro`
+layer and one preformatted ext4 scratch image:
 
 ```bash
 python3 scripts/nvx.py build-distro-layer \

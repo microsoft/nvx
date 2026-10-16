@@ -7588,13 +7588,13 @@ class MicrovmTests(unittest.TestCase):
             for index, value in enumerate(command)
             if value == "--microvm-sandbox-block"
         ]
-        self.assertEqual(len(values), 4)
+        # NVX attaches only the distro layer and scratch; the freed runtime and custom
+        # windows stay unused.
+        self.assertEqual(len(values), 2)
         self.assertTrue(values[0].startswith("distro:file:"))
-        self.assertTrue(values[1].startswith("runtime:file:"))
-        self.assertTrue(values[2].startswith("custom:file:"))
-        self.assertTrue(values[3].startswith("scratch:file:"))
-        self.assertTrue(all(value.endswith(",ro") for value in values[:3]))
-        self.assertFalse(values[3].endswith(",ro"))
+        self.assertTrue(values[0].endswith(",ro"))
+        self.assertTrue(values[1].startswith("scratch:file:"))
+        self.assertFalse(values[1].endswith(",ro"))
         self.assertEqual(
             run_guest_script.call_args.args[2],
             microvm_tests.SANDBOX_BLOCKS_COMPLETION_MARKER,

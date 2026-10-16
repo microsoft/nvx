@@ -12547,15 +12547,12 @@ class AgentBundlingTests(unittest.TestCase):
 
 
 class SandboxTests(unittest.TestCase):
-    def test_launch_contract_orders_roles_and_builds_agent_command_line(self):
-        custom = sandbox.SandboxLayer.parse(
-            "custom,custom.erofs,22222222-2222-2222-2222-222222222222"
-        )
+    def test_launch_contract_builds_agent_command_line(self):
         distro = sandbox.SandboxLayer.parse(
             "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
         )
         launch = sandbox.SandboxLaunch(
-            layers=(custom, distro),
+            layers=(distro,),
             scratch=Path("scratch.ext4"),
             entrypoint="/bin/workload",
             args=("--serve",),
@@ -12566,15 +12563,10 @@ class SandboxTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [layer.role for layer in launch.ordered_layers()],
-            ["distro", "custom"],
-        )
-        self.assertEqual(
             launch.kernel_command_line("quiet"),
             (
                 "quiet nvx_sandbox=1 "
                 "nvx_layer=distro,0xd0003000,11111111-1111-1111-1111-111111111111 "
-                "nvx_layer=custom,0xd0005000,22222222-2222-2222-2222-222222222222 "
                 "nvx_scratch=0xd0006000,ext4 "
                 "nvx_entrypoint=/bin/workload nvx_hostname=example "
                 "nvx_arg=--serve nvx_memory_max=268435456 nvx_pids_max=65"
@@ -12588,8 +12580,6 @@ class SandboxTests(unittest.TestCase):
                 "--microvm-sandbox-block",
                 "distro:file:distro.erofs,ro",
                 "--microvm-sandbox-block",
-                "custom:file:custom.erofs,ro",
-                "--microvm-sandbox-block",
                 "scratch:file:scratch.ext4",
                 "--microvm-workload-identity",
                 "1000:1001",
@@ -12600,7 +12590,7 @@ class SandboxTests(unittest.TestCase):
         distro = sandbox.SandboxLayer.parse(
             "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
         )
-        with self.assertRaisesRegex(common.ScriptError, "duplicate.*distro"):
+        with self.assertRaisesRegex(common.ScriptError, "exactly one"):
             sandbox.SandboxLaunch(
                 layers=(distro, distro),
                 scratch=Path("scratch.ext4"),
@@ -12618,6 +12608,17 @@ class SandboxTests(unittest.TestCase):
             launch.kernel_command_line("x" * sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE)
         with self.assertRaisesRegex(common.ScriptError, "between 1"):
             sandbox.parse_workload_identity("0:0")
+
+    def test_layer_parser_rejects_the_runtime_and_custom_roles(self):
+        # Nothing produces or attaches these layers, so NVX accepts only distro.
+        for role in ("runtime", "custom"):
+            with (
+                self.subTest(role=role),
+                self.assertRaisesRegex(common.ScriptError, "unsupported layer role"),
+            ):
+                sandbox.SandboxLayer.parse(
+                    f"{role},layer.erofs,11111111-1111-1111-1111-111111111111"
+                )
 
     def test_layer_parser_rejects_invalid_role_and_uuid(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):

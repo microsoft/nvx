@@ -12,11 +12,10 @@ from uuid import UUID
 
 from .common import ScriptError, require_file
 
-LAYER_ROLES = ("distro", "runtime", "custom")
+# Only the distro layer is produced and attached. OpenVMM reserves the other MMIO windows.
+LAYER_ROLES = ("distro",)
 BLOCK_MMIO_BASES = {
     "distro": 0xD000_3000,
-    "runtime": 0xD000_4000,
-    "custom": 0xD000_5000,
     "scratch": 0xD000_6000,
 }
 KERNEL_COMMAND_LINE_MAX_SIZE = 2048
@@ -520,14 +519,8 @@ class SandboxLaunch:
     mounts: tuple[SandboxMount, ...] = ()
 
     def __post_init__(self) -> None:
-        if not 1 <= len(self.layers) <= len(LAYER_ROLES):
-            raise ScriptError("a sandbox requires one to three read-only layers")
-        roles = [layer.role for layer in self.layers]
-        duplicates = sorted({role for role in roles if roles.count(role) > 1})
-        if duplicates:
-            raise ScriptError(
-                f"duplicate sandbox layer role(s): {', '.join(duplicates)}"
-            )
+        if len(self.layers) != 1:
+            raise ScriptError("a sandbox requires exactly one read-only layer: distro")
         if not self.entrypoint.startswith("/") or any(
             character.isspace() for character in self.entrypoint
         ):
