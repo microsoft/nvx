@@ -174,6 +174,6 @@ printf '[Unit]\nRequires=%s\nAfter=%s\n[Service]\nExecStartPre=+%s\n' \
     "$metadata_service" "$metadata_service" "$setup_root/block-runner-metadata.sh" \
     >"$drop_in/azure-metadata.conf"
 systemctl daemon-reload
-systemctl restart "$service_name"
 systemctl is-active --quiet "$service_name"
+systemctl disable setup-nvx-github-runner.service
 echo NVX_CLOUD_RUNNER_SETUP_COMPLETE=1

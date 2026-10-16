@@ -54,18 +54,28 @@ Azure Linux 3 MSHV host stack, checks the Dom0 boot entry, requests a reboot,
 and verifies `/dev/mshv` afterwards; it is not an Ubuntu kernel installer.
 Place `runnerDirectory` under the mounted data directory if runner work
 and cache must use that disk; merely mounting it does not move `_work`.
+Disk setup installs the distribution's partitioning utility when it is
+missing, verifies an existing mount before changing fstab, and verifies the
+selected device again after mounting it. MSHV setup accepts only a Dom0
+default wired into the active GRUB configuration; a saved entry alone is
+insufficient.
 
 Windows uses WHP and defines `dataDisk.driveLetter`,
 `dataDisk.temporaryDriveFallback`, optional
 `benchmarkScratchDirectory` on the managed data volume, `sshDefaultShell`,
-and `publicKeys`. A nonempty public-key array becomes the configured
+and `publicKeys`. Scratch must not overlap the runner installation outside
+its writable `_work` subtree. A nonempty public-key array becomes the configured
 administrator authorized-key set; an empty array preserves existing keys.
 Bootstrap resumes through a SYSTEM startup task after disk or feature
 reboots, then removes the task after successful registration. GitHub jobs
 run as Network Service with access to Azure instance metadata blocked.
 Linux jobs run as `nvx-runner`, whose metadata block is installed before
 registration. The runner service requires the block on every start; root
-retains metadata access for bootstrap and token retrieval. Windows selects
+retains metadata access for bootstrap and token retrieval. Successful Linux
+registration disables the provisioning unit without restarting the runner;
+the metadata-block unit remains enabled. Windows requires an unrestricted,
+all-profile metadata block for Network Service and rejects existing rules
+with narrower filters. Windows selects
 managed NVMe disks by physical drive number and the documented
 [Azure namespace mapping](https://learn.microsoft.com/en-us/azure/virtual-machines/enable-nvme-remote-faqs)
 (namespace ID = data-disk LUN + 1); unknown or ambiguous mappings stop setup.

@@ -102,6 +102,28 @@ class PackageTests(unittest.TestCase):
         self.assertIn(sentinel, result.stdout)
         return result.stdout
 
+    def shell_function(self, path: str, name: str) -> str:
+        source = builder.source(path).decode()
+        start = source.index(f"\n{name}() {{\n") + 1
+        return source[start : source.index("\n}\n", start) + 3]
+
+    def execute_bash(
+        self, script: str, *arguments: str
+    ) -> subprocess.CompletedProcess[bytes]:
+        shell = shutil.which("bash")
+        if shell is None:
+            self.skipTest("Bash is unavailable")
+        result = subprocess.run(
+            [shell, "-s", "--", *arguments],
+            input=(script + "\nprintf '%s\\n' NVX_AZURE_LINUX_MOCK_OK\n").encode(),
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0:
+            self.assertIn(b"NVX_AZURE_LINUX_MOCK_OK", result.stdout)
+        return result
+
     def test_embedded_linux_configuration_reader(self):
         config = self.configuration("linux")
         values = self.execute_linux(0, config).splitlines()
@@ -344,6 +366,328 @@ iptables() {
                         result.stdout.decode() + result.stderr.decode(),
                     )
 
+    def test_linux_partitioning_tools_use_distribution_packages(self):
+        source = builder.source("linux/setup-data-disk.sh").decode()
+        self.assertLess(
+            source.index("\nensure_partitioning_tool\n"), source.index('\nDISK=""')
+        )
+        function = self.shell_function(
+            "linux/setup-data-disk.sh", "ensure_partitioning_tool"
+        )
+        mock = r"""
+set -euo pipefail
+manager=$1
+installed=$2
+install_result=$3
+supply_tool=$4
+command() {
+    if [ "$1" = -v ]; then
+        case "$2" in
+            sfdisk) [ "$installed" -eq 1 ]; return ;;
+            apt-get | tdnf | dnf) [ "$manager" = "$2" ]; return ;;
+        esac
+    fi
+    builtin command "$@"
+}
+install_mock() {
+    case "$*" in
+        'apt-get install -y fdisk')
+            [ "$DEBIAN_FRONTEND" = noninteractive ] ;;
+        'tdnf install -y util-linux' | 'dnf install -y util-linux') ;;
+        *) echo 'ERROR: unexpected package installation' >&2; return 1 ;;
+    esac
+    echo "$*"
+    if [ "$install_result" -ne 0 ]; then
+        echo 'ERROR: mock package installation failed' >&2
+        return 1
+    fi
+    installed=$supply_tool
+}
+apt-get() { install_mock apt-get "$@"; }
+tdnf() { install_mock tdnf "$@"; }
+dnf() { install_mock dnf "$@"; }
+"""
+        cases = (
+            ("none", "1", "0", "1", None),
+            ("apt-get", "0", "0", "1", "apt-get install -y fdisk"),
+            ("tdnf", "0", "0", "1", "tdnf install -y util-linux"),
+            ("dnf", "0", "0", "1", "dnf install -y util-linux"),
+            ("none", "0", "0", "0", "no supported package manager"),
+            ("apt-get", "0", "1", "0", "mock package installation failed"),
+            ("apt-get", "0", "0", "0", "unavailable after installing"),
+        )
+        for manager, installed, status, supplied, expected in cases:
+            with self.subTest(manager=manager, installed=installed, status=status):
+                result = self.execute_bash(
+                    mock + function + "\nensure_partitioning_tool\n",
+                    manager,
+                    installed,
+                    status,
+                    supplied,
+                )
+                succeeds = installed == "1" or (
+                    manager != "none" and status == "0" and supplied == "1"
+                )
+                self.assertEqual(
+                    result.returncode == 0,
+                    succeeds,
+                    (result.stdout + result.stderr).decode(),
+                )
+                if expected is not None:
+                    self.assertIn(
+                        expected,
+                        (result.stdout if succeeds else result.stderr).decode(),
+                    )
+                if installed == "1":
+                    self.assertNotIn(b"install -y", result.stdout)
+
+    def test_linux_runner_finalization_does_not_restart_registered_service(self):
+        source = builder.source("linux/bootstrap-runner.sh").decode()
+        tail = source[
+            source.index('\nread -r service_name <"$runner_directory/.service"') :
+        ]
+        original = 'drop_in="/etc/systemd/system/${service_name}.d"'
+        self.assertEqual(tail.count(original), 1)
+        tail = tail.replace(
+            original, 'drop_in="${test_systemd_root}/${service_name}.d"'
+        )
+        mock = r"""
+set -euo pipefail
+runner_directory=$1
+test_systemd_root=$2
+scenario=$3
+metadata_service=nvx-runner-metadata-block.service
+setup_root=/opt/nvx-bootstrap
+disabled=0
+verified=0
+systemctl() {
+    case "$*" in
+        'show actions.runner.test.pool.service --property=User --value')
+            if [ "$scenario" = wrong-user ]; then echo root; else echo nvx-runner; fi ;;
+        daemon-reload) ;;
+        'is-active --quiet actions.runner.test.pool.service')
+            if [ "$scenario" = inactive ]; then
+                echo 'ERROR: mock runner is inactive' >&2
+                return 1
+            fi
+            verified=1 ;;
+        'disable setup-nvx-github-runner.service')
+            [ "$verified" -eq 1 ] || return 1
+            if [ "$scenario" = disable-failure ]; then
+                echo 'ERROR: mock provisioning disable failed' >&2
+                return 1
+            fi
+            disabled=1 ;;
+        *) echo "ERROR: unexpected service operation: $*" >&2; return 1 ;;
+    esac
+}
+"""
+        for scenario in ("success", "wrong-user", "inactive", "disable-failure"):
+            with (
+                self.subTest(scenario=scenario),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                runner = root / "runner"
+                runner.mkdir()
+                (runner / ".service").write_bytes(b"actions.runner.test.pool.service\n")
+                result = self.execute_bash(
+                    mock + tail + '\ntest "$disabled" -eq 1\n',
+                    runner.as_posix(),
+                    (root / "systemd").as_posix(),
+                    scenario,
+                )
+                self.assertEqual(
+                    result.returncode == 0,
+                    scenario == "success",
+                    (result.stdout + result.stderr).decode(),
+                )
+                if scenario == "success":
+                    self.assertIn(b"NVX_CLOUD_RUNNER_SETUP_COMPLETE=1", result.stdout)
+                    drop_in = (
+                        root
+                        / "systemd"
+                        / "actions.runner.test.pool.service.d"
+                        / "azure-metadata.conf"
+                    )
+                    self.assertIn(
+                        "Requires=nvx-runner-metadata-block.service",
+                        drop_in.read_text(),
+                    )
+                else:
+                    self.assertNotIn(
+                        b"NVX_CLOUD_RUNNER_SETUP_COMPLETE=1", result.stdout
+                    )
+
+    def test_linux_disk_checks_identity_before_fstab_and_after_mount(self):
+        source = builder.source("linux/setup-data-disk.sh").decode()
+        tail = source[source.index('\nif mountpoint -q "$MOUNTPOINT"; then') :]
+        self.assertIn("/etc/fstab", tail)
+        tail = tail.replace("/etc/fstab", '"$test_fstab"').replace(
+            "/var/log/setup-datadisk-e2fsck.log", '"$test_log"'
+        )
+        function = self.shell_function(
+            "linux/setup-data-disk.sh", "verify_mount_identity"
+        )
+        mock = r"""
+set -euo pipefail
+MOUNTPOINT=$1
+test_fstab=$2
+test_log=$3
+mounted=$4
+mock_mounted_device=$5
+mock_target_device=$6
+TARGETDEV=/dev/mock-selected
+mount_calls=0
+mountpoint() { [ "$mounted" -eq 1 ]; }
+findmnt() {
+    case "$*" in
+        '-rn -S /dev/mock-selected') return 1 ;;
+        "-rn -o MAJ:MIN --target $MOUNTPOINT")
+            [ "$mock_mounted_device" != query-failure ] || return 1
+            printf '%s\n' "$mock_mounted_device" ;;
+        *) echo 'ERROR: unexpected findmnt query' >&2; return 1 ;;
+    esac
+}
+lsblk() {
+    [ "$*" = '-dno MAJ:MIN /dev/mock-selected' ] || return 1
+    printf '%s\n' "$mock_target_device"
+}
+blkid() {
+    case "$*" in
+        '-s PARTUUID -o value /dev/mock-selected') echo selected-part ;;
+        '-s UUID -o value /dev/mock-selected') echo selected-filesystem ;;
+        *) echo 'ERROR: unexpected filesystem probe' >&2; return 1 ;;
+    esac
+}
+e2fsck() { [ "$*" = '-n /dev/mock-selected' ]; }
+mount() {
+    [ "$*" = "$MOUNTPOINT" ] || return 1
+    mounted=1
+    mount_calls=$((mount_calls + 1))
+}
+chown() { [ "$1" = root:root ]; }
+chmod() { [ "$1" = 0644 ]; }
+restorecon() { [ "$*" = "$test_fstab" ]; }
+systemctl() { [ "$*" = daemon-reload ]; }
+"""
+        for mounted, device, target, succeeds in (
+            ("1", "8:1", "8:1", True),
+            ("1", "8:9", "8:1", False),
+            ("0", "8:1", "8:1", True),
+            ("0", "8:9", "8:1", False),
+            ("1", "query-failure", "8:1", False),
+            ("1", "8:1", "", False),
+        ):
+            with (
+                self.subTest(mounted=mounted, device=device, target=target),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                fstab = root / "fstab"
+                original = (
+                    f"UUID=original {(root / 'mount').as_posix()} ext4 defaults 0 2\n"
+                )
+                fstab.write_text(original)
+                result = self.execute_bash(
+                    mock + function + tail,
+                    (root / "mount").as_posix(),
+                    fstab.as_posix(),
+                    (root / "fsck.log").as_posix(),
+                    mounted,
+                    device,
+                    target,
+                )
+                self.assertEqual(
+                    result.returncode == 0,
+                    succeeds,
+                    (result.stdout + result.stderr).decode(),
+                )
+                if not succeeds and mounted == "1":
+                    self.assertEqual(fstab.read_text(), original)
+                if succeeds:
+                    self.assertIn("PARTUUID=selected-part", fstab.read_text())
+                    self.assertIn(b"setup-datadisk.sh finished OK", result.stdout)
+                else:
+                    self.assertNotIn(b"setup-datadisk.sh finished OK", result.stdout)
+                    self.assertIn(b"ERROR:", result.stderr)
+
+    def test_mshv_default_requires_active_dom0_selection(self):
+        functions = self.shell_function(
+            "linux/setup-mshv.sh", "fail"
+        ) + self.shell_function("linux/setup-mshv.sh", "verify_dom0_default")
+        mock = r"""
+set -euo pipefail
+GRUB_CFG=$1
+mock_saved_entry=$2
+mock_next_entry=$3
+set_result=$4
+persist=$5
+set_calls=0
+grub2-set-default() {
+    [ "$*" = Dom0 ] || return 1
+    set_calls=$((set_calls + 1))
+    [ "$set_result" -eq 0 ] || return 1
+    if [ "$persist" -eq 1 ]; then mock_saved_entry=Dom0; fi
+}
+grub2-editenv() {
+    [ "$*" = '- list' ] || return 1
+    printf 'saved_entry=%s\nnext_entry=%s\n' "$mock_saved_entry" "$mock_next_entry"
+}
+"""
+        saved = 'load_env\nset default="${saved_entry}"\n'
+        conditional = (
+            'load_env\nif [ "${next_entry}" ]; then\n'
+            '  set default="${next_entry}"\nelse\n'
+            '  set default="${saved_entry}"\nfi\n'
+        )
+        cases = (
+            ('set default="Dom0"\n', "Linux", "", "0", "1", True, 0),
+            ('set default="0"\n', "Dom0", "", "0", "1", False, 0),
+            ('set default="Dom00"\n', "Dom0", "", "0", "1", False, 0),
+            (saved, "Linux", "", "0", "1", True, 1),
+            (conditional, "Linux", "", "0", "1", True, 1),
+            (conditional, "Dom0", "Linux", "0", "1", False, 1),
+            ('set default="${saved_entry}"\n', "Dom0", "", "0", "1", False, 0),
+            (
+                'load_env -f /another/grubenv\nset default="${saved_entry}"\n',
+                "Dom0",
+                "",
+                "0",
+                "1",
+                False,
+                0,
+            ),
+            (saved, "Linux", "", "1", "1", False, 1),
+            (saved, "Dom00", "", "0", "0", False, 1),
+            ('set default="Dom0"\nset default="0"\n', "Dom0", "", "0", "1", False, 0),
+        )
+        for config, saved_entry, next_entry, status, persist, succeeds, calls in cases:
+            with (
+                self.subTest(config=config, next_entry=next_entry, status=status),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                path = Path(temporary) / "grub.cfg"
+                path.write_bytes(config.encode())
+                result = self.execute_bash(
+                    mock
+                    + functions
+                    + "\nverify_dom0_default\n"
+                    + f'test "$set_calls" -eq {calls}\n',
+                    path.as_posix(),
+                    saved_entry,
+                    next_entry,
+                    status,
+                    persist,
+                )
+                self.assertEqual(
+                    result.returncode == 0,
+                    succeeds,
+                    (result.stdout + result.stderr).decode(),
+                )
+                if not succeeds:
+                    self.assertIn(b"ERROR:", result.stdout)
+
     def test_windows_package_round_trip(self):
         config = self.configuration("windows")
         with tempfile.TemporaryDirectory() as temporary:
@@ -397,7 +741,15 @@ iptables() {
             manifest = builder.build_package(self.configuration("windows"), output)
             script = r"""
 $ErrorActionPreference = 'Stop'
-function Set-Acl { param($LiteralPath, $AclObject) }
+$script:trustedOwners = 0
+function Set-Acl {
+    param($LiteralPath, $AclObject)
+    $owner = $AclObject.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($owner.Value -ne 'S-1-5-32-544' -or -not $AclObject.AreAccessRulesProtected) {
+        throw 'Bootstrap directory ACL does not establish trusted ownership'
+    }
+    $script:trustedOwners++
+}
 $script:bootstraps = 0
 function powershell.exe {
     $script:bootstraps++
@@ -409,8 +761,11 @@ $replacement = '$root = ' + [char]39 +
     $env:NVX_TEST_BOOTSTRAP.Replace("'", "''") + [char]39
 $source = $scriptText.Replace($needle, $replacement)
 $configPath = Join-Path $env:NVX_TEST_PACKAGE 'custom-data.json'
+New-Item -ItemType Directory -Path $env:NVX_TEST_BOOTSTRAP | Out-Null
 & ([scriptblock]::Create($source)) -ConfigPath $configPath
-if ($script:bootstraps -ne 1) { throw 'Installer did not dispatch exactly one bootstrap' }
+if ($script:bootstraps -ne 1 -or $script:trustedOwners -ne 1) {
+    throw 'Installer did not establish ownership before dispatching bootstrap'
+}
 $manifest = Get-Content -LiteralPath (Join-Path $env:NVX_TEST_PACKAGE 'manifest.json') -Raw |
     ConvertFrom-Json
 foreach ($file in $manifest.guestFiles.PSObject.Properties) {
@@ -746,8 +1101,23 @@ if (-not $definition) { throw 'Missing metadata firewall function' }
 function Reset-Firewall {
     $script:rule = [pscustomobject]@{
         Direction = 'Outbound'; Action = 'Block'; Enabled = 'True'
+        Profile = 'Any'; Platform = @()
+        PolicyAppId = ''; PackageFamilyName = ''; RemoteDynamicKeywordAddresses = @()
     }
     $script:addresses = @('169.254.169.254')
+    $script:localAddresses = @('Any')
+    $script:ports = [pscustomobject]@{
+        Protocol = 'Any'; LocalPort = @('Any'); RemotePort = @('Any')
+        IcmpType = @('Any'); DynamicTarget = 'Any'
+    }
+    $script:application = [pscustomobject]@{ Program = 'Any'; Package = 'Any' }
+    $script:service = [pscustomobject]@{ Service = 'Any' }
+    $script:interface = [pscustomobject]@{ InterfaceAlias = @('Any') }
+    $script:interfaceType = [pscustomobject]@{ InterfaceType = 'Any' }
+    $script:security = [pscustomobject]@{
+        Authentication = 'NotRequired'; Encryption = 'NotRequired'
+        RemoteUser = 'Any'; RemoteMachine = 'Any'
+    }
     $script:users = 'D:(A;;CC;;;NS)'
     $script:creations = 0
     $script:failCreation = $false
@@ -758,17 +1128,21 @@ function Get-NetFirewallRule {
     return $script:rule
 }
 function New-NetFirewallRule {
-    param($Name, $DisplayName, $Direction, $Action, $RemoteAddress, $LocalUser, $Profile)
+    param($Name, $DisplayName, $Direction, $Action, $RemoteAddress, $LocalUser, $Profile,
+        $Authentication, $Encryption)
     if ($Name -ne 'NvxRunnerDenyMetadata' -or $DisplayName -ne $Name -or
         $Direction -ne 'Outbound' -or $Action -ne 'Block' -or
         $RemoteAddress -ne '169.254.169.254' -or
-        $LocalUser -ne 'D:(A;;CC;;;S-1-5-20)' -or $Profile -ne 'Any') {
+        $LocalUser -ne 'D:(A;;CC;;;S-1-5-20)' -or $Profile -ne 'Any' -or
+        $Authentication -ne 'NotRequired' -or $Encryption -ne 'NotRequired') {
         throw 'Incorrect metadata firewall creation arguments'
     }
     if ($script:failCreation) { throw 'Mock firewall creation failed' }
     $script:creations++
     $script:rule = [pscustomobject]@{
         Direction = $Direction; Action = $Action; Enabled = 'True'
+        Profile = $Profile; Platform = @()
+        PolicyAppId = ''; PackageFamilyName = ''; RemoteDynamicKeywordAddresses = @()
     }
     $script:addresses = @($RemoteAddress)
     $script:users = $LocalUser
@@ -776,22 +1150,67 @@ function New-NetFirewallRule {
 }
 function Get-NetFirewallAddressFilter {
     param([Parameter(ValueFromPipeline = $true)]$InputObject)
-    process { [pscustomobject]@{ RemoteAddress = $script:addresses } }
+    process {
+        [pscustomobject]@{
+            LocalAddress = $script:localAddresses; RemoteAddress = $script:addresses
+        }
+    }
+}
+function Get-NetFirewallPortFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process { $script:ports }
+}
+function Get-NetFirewallApplicationFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process { $script:application }
+}
+function Get-NetFirewallServiceFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process { $script:service }
+}
+function Get-NetFirewallInterfaceFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process { $script:interface }
+}
+function Get-NetFirewallInterfaceTypeFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process { $script:interfaceType }
 }
 function Get-NetFirewallSecurityFilter {
     param([Parameter(ValueFromPipeline = $true)]$InputObject)
-    process { [pscustomobject]@{ LocalUser = $script:users } }
+    process {
+        [pscustomobject]@{
+            LocalUser = $script:users
+            RemoteUser = $script:security.RemoteUser
+            RemoteMachine = $script:security.RemoteMachine
+            Authentication = $script:security.Authentication
+            Encryption = $script:security.Encryption
+        }
+    }
 }
 Reset-Firewall
 Set-RunnerMetadataFirewall
 if ($script:creations -ne 0) { throw 'Valid existing firewall rule was replaced' }
+Reset-Firewall
+$script:ports.Protocol = 256
+Set-RunnerMetadataFirewall
+Reset-Firewall
+$script:application.Package = $null
+foreach ($field in @('PolicyAppId', 'PackageFamilyName', 'RemoteDynamicKeywordAddresses')) {
+    $script:rule.PSObject.Properties.Remove($field)
+}
+Set-RunnerMetadataFirewall
 Reset-Firewall
 $script:rule = $null
 Set-RunnerMetadataFirewall
 Set-RunnerMetadataFirewall
 if ($script:creations -ne 1) { throw 'Firewall creation was not idempotent' }
 foreach ($case in @('principal', 'address', 'extra-address', 'missing-address',
-        'direction', 'action', 'disabled')) {
+        'direction', 'action', 'disabled', 'profile', 'platform', 'local-address',
+        'protocol', 'local-port', 'remote-port', 'icmp-type', 'dynamic-target',
+        'program', 'package', 'service', 'interface', 'interface-type',
+        'remote-user', 'remote-machine', 'authentication', 'encryption',
+        'policy-app', 'package-family', 'dynamic-address')) {
     Reset-Firewall
     switch ($case) {
         'principal' { $script:users = 'D:(A;;CC;;;S-1-5-18)' }
@@ -801,6 +1220,26 @@ foreach ($case in @('principal', 'address', 'extra-address', 'missing-address',
         'direction' { $script:rule.Direction = 'Inbound' }
         'action' { $script:rule.Action = 'Allow' }
         'disabled' { $script:rule.Enabled = 'False' }
+        'profile' { $script:rule.Profile = 'Domain' }
+        'platform' { $script:rule.Platform = @('6.3') }
+        'local-address' { $script:localAddresses = @('10.0.0.4') }
+        'protocol' { $script:ports.Protocol = 'TCP' }
+        'local-port' { $script:ports.LocalPort = @('443') }
+        'remote-port' { $script:ports.RemotePort = @('443') }
+        'icmp-type' { $script:ports.IcmpType = @('8') }
+        'dynamic-target' { $script:ports.DynamicTarget = 'ProximityApps' }
+        'program' { $script:application.Program = 'C:\restricted.exe' }
+        'package' { $script:application.Package = 'S-1-15-2-1' }
+        'service' { $script:service.Service = 'RestrictedService' }
+        'interface' { $script:interface.InterfaceAlias = @('RestrictedInterface') }
+        'interface-type' { $script:interfaceType.InterfaceType = 'Wireless' }
+        'remote-user' { $script:security.RemoteUser = 'D:(A;;CC;;;S-1-5-18)' }
+        'remote-machine' { $script:security.RemoteMachine = 'D:(A;;CC;;;S-1-5-18)' }
+        'authentication' { $script:security.Authentication = 'Required' }
+        'encryption' { $script:security.Encryption = 'Required' }
+        'policy-app' { $script:rule.PolicyAppId = 'RestrictedPolicy' }
+        'package-family' { $script:rule.PackageFamilyName = 'RestrictedPackage' }
+        'dynamic-address' { $script:rule.RemoteDynamicKeywordAddresses = @('{00000000-0000-0000-0000-000000000001}') }
     }
     $rejected = $false
     try { Set-RunnerMetadataFirewall }
@@ -1021,6 +1460,33 @@ if (-not $rejected) { throw 'Firewall creation failure was ignored' }
         config["runnerLabels"] = ["windows", "virtual-machine", "whp"]
         with self.assertRaisesRegex(ValueError, "runnerLabels must start"):
             builder.normalize_config(config)
+
+    def test_windows_scratch_does_not_overlap_protected_runner_paths(self):
+        for scratch, valid in (
+            (r"F:\runner", False),
+            (r"f:\RUNNER", False),
+            (r"F:\runner\scratch", False),
+            (r"f:\RUNNER\_worker\scratch", False),
+            (r"F:\runner\_workingscratch", False),
+            (r"F:\runner\_work", True),
+            (r"f:\RUNNER\_WORK\scratch", True),
+            (r"F:\runner2\scratch", True),
+            (r"F:\scratch", True),
+        ):
+            with self.subTest(scratch=scratch):
+                config = self.configuration("windows")
+                config["runnerDirectory"] = r"F:\runner"
+                config["benchmarkScratchDirectory"] = scratch
+                if valid:
+                    self.assertEqual(
+                        builder.normalize_config(config).get(
+                            "benchmarkScratchDirectory"
+                        ),
+                        scratch,
+                    )
+                else:
+                    with self.assertRaisesRegex(ValueError, "runner installation"):
+                        builder.normalize_config(config)
 
     def test_optional_defaults(self):
         for platform in ("linux", "windows"):

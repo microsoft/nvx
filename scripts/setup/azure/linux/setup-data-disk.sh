@@ -27,6 +27,28 @@ INIT_TABLE_ID=6f746dc1-31d4-4b7c-b2ee-9cf6075517a1
 exec > >(tee -a "$LOG") 2>&1
 echo "=== setup-datadisk.sh run at $(date --iso-8601=seconds) ==="
 
+ensure_partitioning_tool() {
+    if command -v sfdisk >/dev/null 2>&1; then
+        return
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y fdisk
+    elif command -v tdnf >/dev/null 2>&1; then
+        tdnf install -y util-linux
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y util-linux
+    else
+        echo "ERROR: sfdisk is unavailable and no supported package manager was found" >&2
+        exit 1
+    fi
+    command -v sfdisk >/dev/null 2>&1 || {
+        echo "ERROR: sfdisk is unavailable after installing the partitioning tools" >&2
+        exit 1
+    }
+}
+
+ensure_partitioning_tool
+
 # Azure exposes managed data disks differently on SCSI and NVMe/Boost
 # controllers. Both paths identify the managed disk by Azure LUN.
 DISK=""
@@ -92,6 +114,23 @@ verify_new_filesystem() {
     e2fsck -fn "$1" >/var/log/setup-datadisk-e2fsck.log 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "ERROR: validation of newly created filesystem $1 failed (rc=$rc); see /var/log/setup-datadisk-e2fsck.log" >&2
+        exit 1
+    fi
+}
+
+verify_mount_identity() {
+    local mounted_device target_device
+    mounted_device=$(findmnt -rn -o MAJ:MIN --target "$MOUNTPOINT") || {
+        echo "ERROR: could not identify the mounted device at $MOUNTPOINT" >&2
+        exit 1
+    }
+    target_device=$(lsblk -dno MAJ:MIN "$TARGETDEV" | tr -d '[:space:]') || {
+        echo "ERROR: could not identify the selected device $TARGETDEV" >&2
+        exit 1
+    }
+    if [ -z "$mounted_device" ] || [ -z "$target_device" ] ||
+        [ "$mounted_device" != "$target_device" ]; then
+        echo "ERROR: $MOUNTPOINT is not mounted from $TARGETDEV" >&2
         exit 1
     fi
 }
@@ -185,7 +224,9 @@ if [ "$FSTYPE" != "ext4" ]; then
     exit 1
 fi
 
-if ! mountpoint -q "$MOUNTPOINT"; then
+if mountpoint -q "$MOUNTPOINT"; then
+    verify_mount_identity
+else
     if ! findmnt -rn -S "$TARGETDEV" >/dev/null 2>&1; then
         rc=0
         e2fsck -n "$TARGETDEV" >/var/log/setup-datadisk-e2fsck.log 2>&1 || rc=$?
@@ -230,14 +271,7 @@ else
 fi
 
 systemctl daemon-reload
-if mountpoint -q "$MOUNTPOINT"; then
-    MOUNTED_DEVICE=$(findmnt -rn -o MAJ:MIN --target "$MOUNTPOINT" || true)
-    TARGET_DEVICE=$(lsblk -dno MAJ:MIN "$TARGETDEV" 2>/dev/null | tr -d '[:space:]')
-    if [ -z "$MOUNTED_DEVICE" ] || [ "$MOUNTED_DEVICE" != "$TARGET_DEVICE" ]; then
-        echo "ERROR: $MOUNTPOINT is not mounted from $TARGETDEV" >&2
-        exit 1
-    fi
-else
+if ! mountpoint -q "$MOUNTPOINT"; then
     mount "$MOUNTPOINT" || mountpoint -q "$MOUNTPOINT"
 fi
 
@@ -245,4 +279,5 @@ if ! mountpoint -q "$MOUNTPOINT"; then
     echo "ERROR: $MOUNTPOINT is not mounted after setup" >&2
     exit 1
 fi
+verify_mount_identity
 echo "=== setup-datadisk.sh finished OK ==="

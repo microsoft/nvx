@@ -122,17 +122,49 @@ if command -v grub2-script-check >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------- step 5
-# Make sure Dom0 is actually selected. The RPM snippet normally emits
-# 'set default="Dom0"'; grub2-set-default covers images that use the
-# saved_entry mechanism instead. At least one must end up pointing at Dom0.
-grub2-set-default "Dom0" 2>/dev/null || true
+# A saved entry matters only when the generated configuration uses it.
+verify_dom0_default() {
+    local defaults value default_count=0 saved_default=0 grub_environment next_entry
+    defaults=$(awk '
+        /^[[:space:]]*set[[:space:]]+default=/ {
+            sub(/^[^=]*=/, "")
+            sub(/[[:space:]]*#.*/, "")
+            gsub(/["\047]/, "")
+            sub(/^[[:space:]]*/, "")
+            sub(/[[:space:]]*$/, "")
+            print
+        }
+    ' "$GRUB_CFG") || fail "could not read the active GRUB default"
+    while IFS= read -r value; do
+        case "$value" in
+            Dom0) default_count=$((default_count + 1)) ;;
+            "\$saved_entry" | "\${saved_entry}")
+                default_count=$((default_count + 1))
+                saved_default=1
+                ;;
+            "\$next_entry" | "\${next_entry}")
+                [ "$default_count" -eq 0 ] || fail "GRUB overrides its default after selecting Dom0"
+                ;;
+            *) fail "GRUB default '$value' does not select Dom0" ;;
+        esac
+    done <<<"$defaults"
+    [ "$default_count" -eq 1 ] || fail "GRUB has no unique Dom0 default"
+    if [ "$saved_default" -eq 1 ]; then
+        grep -qE '^[[:space:]]*load_env[[:space:]]*(#.*)?$' "$GRUB_CFG" ||
+            fail "GRUB uses saved_entry without loading the default grubenv"
+        grub2-set-default Dom0 || fail "could not set the saved Dom0 default"
+    fi
+    grub_environment=$(grub2-editenv - list) || fail "could not read grubenv"
+    if [ "$saved_default" -eq 1 ]; then
+        printf '%s\n' "$grub_environment" | grep -qx 'saved_entry=Dom0' ||
+            fail "the saved GRUB default is not Dom0"
+    fi
+    next_entry=$(printf '%s\n' "$grub_environment" | sed -n 's/^next_entry=//p')
+    [ -z "$next_entry" ] || [ "$next_entry" = Dom0 ] ||
+        fail "the one-time GRUB entry '$next_entry' overrides Dom0"
+}
 
-default_ok=0
-grep -qE '^[[:space:]]*set[[:space:]]+default="?Dom0"?' "$GRUB_CFG" && default_ok=1
-if [ -r /boot/grub2/grubenv ] && grep -q '^saved_entry=Dom0' /boot/grub2/grubenv; then
-    default_ok=1
-fi
-[ "$default_ok" = "1" ] || fail "Dom0 exists but is not the default boot entry"
+verify_dom0_default
 echo "Dom0 is the default boot entry"
 
 echo "--- resulting menuentries ---"

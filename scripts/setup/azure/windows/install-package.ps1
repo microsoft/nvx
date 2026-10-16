@@ -25,6 +25,7 @@ if (Test-Path -LiteralPath $root) {
 else { New-Item -ItemType Directory -Path $root | Out-Null }
 $acl = [Security.AccessControl.DirectorySecurity]::new()
 $acl.SetAccessRuleProtection($true, $false)
+$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
 foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
         [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl',

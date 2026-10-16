@@ -325,6 +325,18 @@ def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
         raise ValueError(
             "benchmarkScratchDirectory must be on the configured data drive"
         )
+    if scratch is not None:
+        runner_path = ntpath.normcase(directory)
+        scratch_path = ntpath.normcase(scratch)
+        work_path = ntpath.join(runner_path, "_work")
+        if (
+            scratch_path == runner_path or scratch_path.startswith(runner_path + "\\")
+        ) and not (
+            scratch_path == work_path or scratch_path.startswith(work_path + "\\")
+        ):
+            raise ValueError(
+                "benchmarkScratchDirectory must not overlap the runner installation outside _work"
+            )
     default_shell = text(
         values.get("sshDefaultShell", "powershell"),
         "sshDefaultShell",

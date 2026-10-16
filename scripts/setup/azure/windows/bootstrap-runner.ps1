@@ -90,17 +90,52 @@ function Set-RunnerMetadataFirewall {
     if (-not $rule) {
         $rule = New-NetFirewallRule -Name $name -DisplayName $name `
             -Direction Outbound -Action Block -RemoteAddress '169.254.169.254' `
-            -LocalUser $principal -Profile Any
+            -LocalUser $principal -Profile Any `
+            -Authentication NotRequired -Encryption NotRequired
     }
-    $addresses = @($rule | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress)
-    $users = ($rule | Get-NetFirewallSecurityFilter).LocalUser
-    $canonicalUsers = [Security.AccessControl.RawSecurityDescriptor]::new($users).
+    $addressFilter = $rule | Get-NetFirewallAddressFilter
+    $portFilter = $rule | Get-NetFirewallPortFilter
+    $applicationFilter = $rule | Get-NetFirewallApplicationFilter
+    $serviceFilter = $rule | Get-NetFirewallServiceFilter
+    $interfaceFilter = $rule | Get-NetFirewallInterfaceFilter
+    $interfaceTypeFilter = $rule | Get-NetFirewallInterfaceTypeFilter
+    $securityFilter = $rule | Get-NetFirewallSecurityFilter
+    $addresses = @($addressFilter.RemoteAddress)
+    $unrestricted = @(
+        ($addressFilter.LocalAddress -join ',')
+        ($portFilter.LocalPort -join ',')
+        ($portFilter.RemotePort -join ',')
+        ($portFilter.IcmpType -join ',')
+        ([string]$portFilter.DynamicTarget)
+        ([string]$applicationFilter.Program)
+        ([string]$serviceFilter.Service)
+        ($interfaceFilter.InterfaceAlias -join ',')
+        ([string]$interfaceTypeFilter.InterfaceType)
+        ([string]$securityFilter.RemoteUser)
+        ([string]$securityFilter.RemoteMachine)
+    )
+    $restrictedRule = $false
+    foreach ($field in @('PolicyAppId', 'PackageFamilyName', 'RemoteDynamicKeywordAddresses')) {
+        $property = $rule.PSObject.Properties[$field]
+        if ($property -and -not [string]::IsNullOrEmpty($property.Value -join ',')) {
+            $restrictedRule = $true
+            break
+        }
+    }
+    $canonicalUsers = [Security.AccessControl.RawSecurityDescriptor]::new($securityFilter.LocalUser).
         GetSddlForm([Security.AccessControl.AccessControlSections]::All)
     $canonicalPrincipal = [Security.AccessControl.RawSecurityDescriptor]::new($principal).
         GetSddlForm([Security.AccessControl.AccessControlSections]::All)
     if ($rule.Direction -ne 'Outbound' -or $rule.Action -ne 'Block' -or
-        $rule.Enabled -ne 'True' -or $addresses.Count -ne 1 -or
-        $addresses[0] -ne '169.254.169.254' -or $canonicalUsers -ne $canonicalPrincipal) {
+        $rule.Enabled -ne 'True' -or $rule.Profile -ne 'Any' -or
+        ($rule.Platform -join ',') -ne '' -or
+        $restrictedRule -or [string]$applicationFilter.Package -notin @('', 'Any') -or
+        [string]$portFilter.Protocol -notin @('Any', '256') -or
+        $securityFilter.Authentication -ne 'NotRequired' -or
+        $securityFilter.Encryption -ne 'NotRequired' -or
+        @($unrestricted | Where-Object { $_ -ne 'Any' }).Count -ne 0 -or
+        $addresses.Count -ne 1 -or $addresses[0] -ne '169.254.169.254' -or
+        $canonicalUsers -ne $canonicalPrincipal) {
         throw 'The runner account is not blocked from Azure instance metadata.'
     }
 }
