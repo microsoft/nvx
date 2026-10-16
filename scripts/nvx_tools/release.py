@@ -36,6 +36,7 @@ from .build_constants import (
     AlpineBuildConstants,
     AzureLinuxBuildConstants,
     BuildConstants,
+    GuestRustBuildConstants,
     InitramfsBuildConstants,
     KernelBuildConstants,
     OpenVMMBuildConstants,
@@ -59,6 +60,10 @@ from .common import (
     write_sha256_sums,
 )
 from .development_release import development_release_tag
+from .guest_binaries import (
+    guest_binary_source_files,
+    pinned_guest_rust_toolchain,
+)
 from .ubuntu import converter_input_sha256, customization_files, package_lock_sha256
 
 GITHUB_API_VERSION = "2022-11-28"
@@ -1231,6 +1236,7 @@ def _validate_source_manifest_metadata(
     alpine_value = manifest.get("alpine")
     ubuntu_value = manifest.get("ubuntu")
     azurelinux_value = manifest.get("azurelinux")
+    guest_rust_value = manifest.get("guest_rust")
     source_value = kernel_inputs.get("source")
     config_value = kernel_inputs.get("input_config")
     if not all(
@@ -1240,6 +1246,7 @@ def _validate_source_manifest_metadata(
             alpine_value,
             ubuntu_value,
             azurelinux_value,
+            guest_rust_value,
             source_value,
             config_value,
         )
@@ -1249,8 +1256,17 @@ def _validate_source_manifest_metadata(
     alpine = cast(dict[str, object], alpine_value)
     ubuntu = cast(dict[str, object], ubuntu_value)
     azurelinux = cast(dict[str, object], azurelinux_value)
+    guest_rust = cast(dict[str, object], guest_rust_value)
     source = cast(dict[str, object], source_value)
     input_config = cast(dict[str, object], config_value)
+    expected_guest_rust = {
+        "toolchain": pinned_guest_rust_toolchain(),
+        "target": GuestRustBuildConstants.TARGET,
+    }
+    if guest_rust != expected_guest_rust:
+        raise ScriptError(
+            "SOURCE-MANIFEST.json Rust guest toolchain does not match the build pin"
+        )
     source_patches = source.get("patches")
     if not isinstance(source_patches, list):
         raise ScriptError("kernel provenance source patches must be a list")
@@ -1295,7 +1311,11 @@ def _validate_source_manifest_metadata(
         "minirootfs_url": AlpineBuildConstants.MINIROOTFS_URL,
         "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
         "guest_sources": [
-            path.as_posix() for path in AlpineBuildConstants.GUEST_SOURCE_DIRECTORIES
+            *(
+                path.as_posix()
+                for path in AlpineBuildConstants.GUEST_SOURCE_DIRECTORIES
+            ),
+            *GuestRustBuildConstants.SOURCE_PATHS,
         ],
         "package_manifests": [
             (
@@ -1329,6 +1349,7 @@ def _validate_source_manifest_metadata(
                 for path in UbuntuBuildConstants.GUEST_SOURCE_DIRECTORIES
             ),
             UbuntuBuildConstants.PACKAGE_LOCK_RELATIVE_PATH.as_posix(),
+            *GuestRustBuildConstants.SOURCE_PATHS,
         ],
         "package_manifests": [
             (
@@ -1363,6 +1384,7 @@ def _validate_source_manifest_metadata(
                 for path in AzureLinuxBuildConstants.GUEST_SOURCE_DIRECTORIES
             ),
             AzureLinuxBuildConstants.PACKAGE_LOCK_RELATIVE_PATH.as_posix(),
+            *GuestRustBuildConstants.SOURCE_PATHS,
         ],
         "package_manifests": [
             (
@@ -1699,6 +1721,8 @@ def verify_source_tree() -> None:
         manifest,
         kernel_provenance_inputs(),
     )
+    guest_binary_source_files()
+    pinned_guest_rust_toolchain()
     required = {
         BuildConstants.REPO_ROOT
         / "kernel"

@@ -691,6 +691,13 @@ class ToolManifestReaderTests(unittest.TestCase):
                         [f"{name}={value}" for name, value in expected.items()],
                     )
 
+    def test_linux_setups_install_the_pinned_musl_target(self):
+        for script in (LINUX_RUNNER, LINUX_MSHV):
+            with self.subTest(script=script.name):
+                source = script.read_text(encoding="utf-8")
+                self.assertIn('target add --toolchain "$RUST_TOOLCHAIN"', source)
+                self.assertIn("x86_64-unknown-linux-musl", source)
+
     def test_windows_setup_pins_its_tools_to_the_manifest(self):
         powershells = _powershells()
         if not powershells:

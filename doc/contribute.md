@@ -92,7 +92,7 @@ and snapshot test, which boots NVX's kernel and Alpine initramfs when
 [`test-openvmm`](usage.md#test-openvmm) runs it.
 
 NVX owns behavior that depends on its patched Linux kernel, its Alpine,
-Ubuntu, and Azure Linux userspaces, guest helpers, SMP behavior, or virtio
+Ubuntu, and Azure Linux userspaces, guest binaries and scripts, SMP behavior, or virtio
 devices. Add those scenarios to
 `scripts/nvx_tools/microvm_tests.py` and run them with
 `scripts/nvx.py test-microvm --backend BACKEND`. Keep guest workloads in
@@ -104,7 +104,8 @@ registers them.
 
 Unit tests for the host tooling live in `scripts/test_*.py`. The
 `aci_edge_sandboxes` and `nvx-rs` crates keep unit tests alongside their Rust
-source and integration tests in their `tests` directories. Tests of the NVX
+source and integration tests in their `tests` directories. The latter also
+runs `tests/guest_tools.rs` against the exact guest-profile binaries. Tests of the NVX
 mechanics, such as the golden fixtures of the control protocol, belong in
 `nvx-rs`, and tests of the ACI Edge Sandboxes contract in
 `aci_edge_sandboxes`. The `scripts/nvx.py test-aci-edge-sandboxes --backend

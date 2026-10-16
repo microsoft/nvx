@@ -16,7 +16,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `doc` | User and contributor documentation |
 | `docker` | Reproducible guest build environment |
 | `kernel` | Reproducible configs and complete Linux patch series |
-| `guest` | Common guest sources plus Alpine-control and Ubuntu shell helpers |
+| `guest` | Common and distribution-specific guest scripts |
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
 | `aci_edge_sandboxes` | Rust crate `aci_edge_sandboxes`: state-aware sandbox API with an OpenVMM backend and an opt-in native-agent backend |
@@ -52,9 +52,9 @@ nvx/
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
 |   `-- copilot-instructions.md  Repository-wide Copilot instructions
 |-- .vscode/settings.json        Shared VS Code settings
-|-- guest/                       Guest-owned scripts and static helpers
-|   |-- common/                  Shared init, agent, snapshot, time, and test helpers
-|   |-- alpine/                  Alpine-control container entry helpers
+|-- guest/                       Guest-owned scripts
+|   |-- common/                  Shared init, agent, snapshot, and probe scripts
+|   |-- alpine/                  Alpine-control container entry scripts
 |   `-- ubuntu/                  Ubuntu interactive-shell startup policy
 |-- ubuntu/
 |   `-- packages.lock.json       Exact supplemental Ubuntu binary package closure
@@ -201,9 +201,10 @@ OpenVMM release.
 
 ### `guest/`, `ubuntu/`, and `azurelinux/`
 
-`guest/common` contains scripts and static helper sources shared by the Alpine,
-Ubuntu, and Azure Linux initramfs builds, plus the Azure Linux variants of the
-container-entry helpers. `init` controls early boot and then starts an
+`guest/common` contains scripts shared by the Alpine, Ubuntu, and Azure Linux
+initramfs builds, plus the Azure Linux variants of the container-entry
+scripts. The nine compiled `/sbin/nvx-*` programs live under `nvx-rs/src/guest`
+and `nvx-rs/src/bin`. `init` controls early boot and then starts an
 initramfs program named by `nvx_exec=`, the Alpine-only `nvx-init-agent`
 sandbox profile, `nvx-managed-agent` for a managed workload, a virtio restore
 probe for benchmark profiling, or the interactive shell. On an interactive
@@ -213,14 +214,16 @@ the container launch and entry scripts that only the Alpine initramfs installs;
 the entry script stages Alpine's musl loader and `setpriv` inside the
 workload's root.
 
-The sandbox helpers resolve fixed virtio-blk roles through
+The sandbox scripts resolve fixed virtio-blk roles through
 sysfs, assemble EROFS lower layers over ext4 scratch, place the workload in its
 cgroup before release, construct its mount/PID/UTS namespaces, enter its
 filesystem root after dropping capabilities, and retain the agent as the outer
 PID 1. In a managed sandbox, the agent supervises `nvx-managed-agent` and
 performs the ordered unmount teardown after a stop request. The remaining
 common helpers handle shutdown, virtio-fs mounting, snapshot preparation, and
-the guest side of the time ABI, or provide device-access and diagnostic probes.
+the guest side of the time ABI. The Rust guest binaries provide shutdown,
+managed control, restore repair, device access, ingress announcements, and
+diagnostic probes.
 
 `ubuntu/packages.lock.json` pins the complete
 supplemental `.deb` closure installed without maintainer-script execution.
@@ -270,8 +273,8 @@ authenticated control protocol of the guest agent, artifact discovery and
 bundled-release staging, OpenVMM's command line, the lowering of network and
 filesystem policies, process and platform primitives for Linux and Windows
 hosts, the supervision of VM instances, and a fake OpenVMM for tests. Its
-`guest` feature adds the programs that will replace the C programs of
-`guest/common/`, built as static musl executables. It is a
+`guest` feature builds the nine static executables that every guest image
+installs at `/sbin/nvx-*`. It is a
 standalone crate with its own `Cargo.lock`, like `aci_edge_sandboxes`, and
 builds independently of the OpenVMM submodule. See its
 [README](../nvx-rs/README.md).
@@ -326,7 +329,7 @@ see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 | `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
 | `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
 | `rust-toolchain.toml` | Rust release that builds OpenVMM, its test guests, and the repository's Rust code |
-| `SOURCE-MANIFEST.json` | Distribution version, OpenVMM microVM ABI and control-protocol versions, and exact Linux, Alpine, Ubuntu, and Azure Linux input identities and output locations |
+| `SOURCE-MANIFEST.json` | Distribution version, OpenVMM microVM ABI and control-protocol versions, Rust guest toolchain and source roots, and exact Linux, Alpine, Ubuntu, and Azure Linux input identities and output locations |
 | `VERSION` | Distribution version consumed by packaging tools |
 | `.gitmodules` | OpenVMM repository URL, path, and tracking branch |
 | `.gitignore` | Excludes build products, caches, virtual environments, logs, and platform metadata |
