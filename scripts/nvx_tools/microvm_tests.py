@@ -3145,6 +3145,32 @@ def run_ipv6_egress_policy(
             endpoint.close()
 
 
+HOST_LOOPBACK_HTTP_REQUEST_LIMIT = 8192
+
+
+def _read_http_request(connection: socket.socket, timeout: float) -> bytes:
+    """Read a request up to its blank line, however TCP splits it.
+
+    A request can arrive in several reads, so one ``recv`` is not enough. The
+    read stops at the header terminator, at the peer's close, or when the
+    request is too large or the deadline passes.
+    """
+    deadline = time.monotonic() + timeout
+    request = bytearray()
+    while b"\r\n\r\n" not in request:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("host-loopback HTTP request did not complete in time")
+        connection.settimeout(remaining)
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        request.extend(chunk)
+        if len(request) > HOST_LOOPBACK_HTTP_REQUEST_LIMIT:
+            raise RuntimeError("host-loopback HTTP request exceeds its size limit")
+    return bytes(request)
+
+
 def _http_server(
     listener: socket.socket,
     expected_path: bytes,
@@ -3155,8 +3181,7 @@ def _http_server(
     try:
         connection, _ = listener.accept()
         with connection:
-            connection.settimeout(timeout)
-            request = connection.recv(4096)
+            request = _read_http_request(connection, timeout)
             if not request.startswith(b"GET " + expected_path + b" HTTP/1."):
                 raise RuntimeError(
                     f"unexpected host-loopback HTTP request: {request!r}"

@@ -231,6 +231,46 @@ def _fresh_openvmm_command(*_args: object, **_kwargs: object) -> list[str]:
     return ["openvmm"]
 
 
+class HostLoopbackHttpFixtureTests(unittest.TestCase):
+    def _exchange(self, pieces: list[bytes]) -> tuple[bytes, list[Exception]]:
+        """Send the request in pieces with a gap, and return the reply and fixture errors."""
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        errors: list[Exception] = []
+        server = threading.Thread(
+            target=microvm_tests._http_server,
+            args=(listener, b"/proxy", b"NVX-BODY", 2.0, errors),
+            daemon=True,
+        )
+        server.start()
+        response = b""
+        with socket.create_connection(listener.getsockname(), timeout=5) as client:
+            for index, piece in enumerate(pieces):
+                if index:
+                    time.sleep(0.25)
+                client.sendall(piece)
+            while chunk := client.recv(4096):
+                response += chunk
+        server.join(5)
+        return response, errors
+
+    def test_a_single_send_request_is_answered(self) -> None:
+        response, errors = self._exchange(
+            [b"GET /proxy HTTP/1.1\r\nHost: localhost\r\n\r\n"]
+        )
+        self.assertTrue(response.startswith(b"HTTP/1.1 200 OK"), response)
+        self.assertEqual(errors, [])
+
+    def test_a_request_split_across_reads_is_answered(self) -> None:
+        response, errors = self._exchange(
+            [b"GET ", b"/proxy HTTP/1.1\r\nHost: localhost\r\n\r\n"]
+        )
+        self.assertTrue(response.startswith(b"HTTP/1.1 200 OK"), response)
+        self.assertEqual(errors, [])
+
+
 class MicrovmTestParserTests(unittest.TestCase):
     def test_parser_defaults_to_all_correctness_scenarios(self):
         args = nvx.parse_args(["test-microvm", "--backend", "mshv"])
