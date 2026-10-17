@@ -1,12 +1,137 @@
-//! Tests of the egress policy compiler: ports of the cases of `scripts/test_egress_policy.py`.
+//! Tests of the egress policy compiler: the parity fixture that the Python compiler recorded, and
+//! ports of the cases of `scripts/test_egress_policy.py`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use super::*;
 use crate::ErrorKind;
 use crate::host::network::address::probe;
+use crate::host::python::path::{posix_str, windows_str};
+
+/// The fixture that `scripts/generate_egress_policy_fixtures.py` writes, or the file that
+/// `NVX_EGRESS_POLICY_FIXTURE` names, such as a larger corpus generated with `--random-cases`.
+fn fixture() -> Value {
+    let path = std::env::var_os("NVX_EGRESS_POLICY_FIXTURE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/egress-policy.json")
+        });
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// Returns the bytes that a fixture case describes: text, or hexadecimal, each repeated.
+fn input(segments: &Value) -> Vec<u8> {
+    let mut data = Vec::new();
+    for segment in segments.as_array().unwrap() {
+        let bytes = match (segment.get("text"), segment.get("hex")) {
+            (Some(text), None) => text.as_str().unwrap().as_bytes().to_vec(),
+            (None, Some(hex)) => {
+                let hex = hex.as_str().unwrap();
+                (0..hex.len())
+                    .step_by(2)
+                    .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                    .collect()
+            }
+            _ => panic!("invalid segment {segment}"),
+        };
+        let repeat = segment
+            .get("repeat")
+            .map_or(1, |count| count.as_u64().unwrap());
+        for _ in 0..repeat {
+            data.extend_from_slice(&bytes);
+        }
+    }
+    data
+}
+
+/// Describes a compilation as the fixture does.
+fn outcome(result: Result<CompiledEgressPolicy>) -> Value {
+    match result {
+        Ok(compiled) => json!({"allow": compiled.allow, "deny": compiled.deny}),
+        Err(error) => json!({"error": error.message()}),
+    }
+}
+
+/// Returns the expected outcome of a fixture case for a file that messages call `path`.
+fn expected(expected: &Value, path: &str) -> Value {
+    match expected.get("error") {
+        Some(message) => json!({"error": message.as_str().unwrap().replace("{path}", path)}),
+        None => expected.clone(),
+    }
+}
+
+#[test]
+fn every_fixture_case_compiles_as_python_compiled_it() {
+    let fixture = fixture();
+    let cases = fixture["cases"].as_array().unwrap();
+    assert!(cases.len() > 500, "{} cases", cases.len());
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("policy.json");
+    let file_display = python_path(&file).display;
+    let mut failures = Vec::new();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let data = input(&case["input"]);
+        let actual = outcome(compile_policy_bytes(&data, Path::new("policy.json")));
+        let wanted = expected(&case["expected"], "policy.json");
+        if actual != wanted {
+            failures.push(format!("{name}:\n  expected {wanted}\n  actual   {actual}"));
+            continue;
+        }
+        std::fs::write(&file, &data).unwrap();
+        let actual = outcome(compile_policy_file(&file));
+        let wanted = expected(&case["expected"], &file_display);
+        if actual != wanted {
+            failures.push(format!(
+                "{name} (file):\n  expected {wanted}\n  actual   {actual}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn unreadable_files_fail_as_in_python() {
+    let fixture = fixture();
+    let directory = tempfile::tempdir().unwrap();
+    for case in fixture["files"].as_array().unwrap() {
+        let path = match case["name"].as_str().unwrap() {
+            "missing" => directory.path().join("missing.json"),
+            "directory" => directory.path().to_path_buf(),
+            name => panic!("unknown file case {name}"),
+        };
+        let error = compile_policy_file(&path).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io);
+        assert_eq!(
+            outcome(Err(error)),
+            expected(&case["expected"], &python_path(&path).display),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn paths_print_as_pathlib_prints_them() {
+    let fixture = fixture();
+    for case in fixture["paths"].as_array().unwrap() {
+        let path = case["path"].as_str().unwrap();
+        let posix = String::from_utf8(posix_str(path.as_bytes())).unwrap();
+        assert_eq!(posix, case["posix"].as_str().unwrap(), "{path:?}");
+        let units: Vec<u16> = path.encode_utf16().collect();
+        let windows = String::from_utf16(&windows_str(&units)).unwrap();
+        assert_eq!(windows, case["windows"].as_str().unwrap(), "{path:?}");
+    }
+}
 
 // Ports of `scripts/test_egress_policy.py`, one test for each of its tests, under the same names.
 
