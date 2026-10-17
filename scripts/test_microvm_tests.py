@@ -945,7 +945,12 @@ class _FakeSandboxCli:
         state.mkdir(parents=True, exist_ok=True)
         (state / "lifecycle.lock").touch()
         (state / "config.json").write_text(
-            json.dumps({"user": values.get("--workload-user", "65534:65534")}),
+            json.dumps(
+                {
+                    "user": values.get("--workload-user", "65534:65534"),
+                    "hypervisor": values["--hypervisor"],
+                }
+            ),
             encoding="utf-8",
         )
         return 0, b"", b""
@@ -1114,13 +1119,29 @@ class _FakeSandboxCli:
         if "stop-leaks-capability" not in self.faults:
             (state / "control.capability").unlink()
         (state / "control.sock").unlink(missing_ok=True)
+        config = json.loads((state / "config.json").read_text(encoding="utf-8"))
+        teardown = {name: True for name in microvm_tests.OUTCOME_TEARDOWN_FIELDS}
+        if "stop-reports-incomplete-teardown" in self.faults:
+            teardown["vm_stopped"] = False
         (state / "outcome.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
+                    "instance_id": "22" * 16,
+                    "backend": (
+                        "auto"
+                        if "stop-reports-another-backend" in self.faults
+                        else config["hypervisor"]
+                    ),
                     "outcome": sandbox_lifecycle_tests.MANAGED_SUCCESS,
-                    "network_policy": {},
-                    "teardown": {},
+                    "network_policy": {
+                        "status": (
+                            "applied"
+                            if "stop-reports-a-network-policy" in self.faults
+                            else "not-requested"
+                        )
+                    },
+                    "teardown": teardown,
                 }
             ),
             encoding="utf-8",
@@ -1352,6 +1373,13 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             "overwrite-report": "exec returned 0, expected 1",
             "stop-leaks-capability": "after stop: the state directory holds",
             "stop-leaks-process": "OpenVMM still runs after stop",
+            "stop-reports-another-backend": "the managed report names backend 'auto'",
+            "stop-reports-a-network-policy": (
+                "the managed report has network policy status 'applied'"
+            ),
+            "stop-reports-incomplete-teardown": (
+                "the managed report has incomplete teardown"
+            ),
             "restart-loses-state": "the restarted sandbox's state returned status 1",
             "unserialized-starts": "overlapping public starts returned status 0",
             "deprovision-removes-foreign": "deprovision returned 0, expected 1",
@@ -2685,29 +2713,148 @@ class _EphemeralPortSockets:
 
 
 class MicrovmTests(unittest.TestCase):
-    def test_managed_lifecycle_spawns_openvmm_with_a_prepared_capability_pipe(self):
-        # OpenVMM reads its capability as soon as it starts, so the scenario hands
-        # it a pipe that already holds the capability and the end of file (#440).
-        prepared: list[int] = []
-        spawned: list[object] = []
+    @staticmethod
+    def _managed_report(backend: str = "kvm") -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "instance_id": "33" * 16,
+            "backend": backend,
+            "outcome": {
+                "operation": "managed",
+                "category": "success",
+                "status_code": 0,
+            },
+            "network_policy": {
+                "status": "not-requested",
+                "status_code": 0,
+                "mode": "none",
+                "allow_rule_count": 0,
+                "deny_rule_count": 0,
+                "host_loopback": False,
+            },
+            "teardown": {name: True for name in microvm_tests.OUTCOME_TEARDOWN_FIELDS},
+        }
 
-        def prepare(capability: bytes) -> int:
-            descriptor = control_session.capability_pipe(capability)
-            prepared.append(descriptor)
-            return descriptor
+    def _run_managed_lifecycle(
+        self,
+        output_dir: Path,
+        *,
+        returncode: int = 0,
+        console: bytes = b"NVX-GUEST-BOOT-OK: managed\n",
+        report: dict[str, object] | None = None,
+        rejected: int = 1,
+    ) -> list[tuple[list[str], dict[str, str], object]]:
+        """Runs the scenario with a stand-in for the nvx-rs test, which leaves
+        `console`, `report`, and `returncode` as the real one would."""
+        runs: list[tuple[list[str], dict[str, str], object]] = []
 
-        def launch(_command: list[str], *, stdin: object, **_options: object) -> None:
-            # The pipe stays open until OpenVMM has started with it.
-            self.assertIsInstance(stdin, int)
-            os.fstat(cast(int, stdin))
-            spawned.append(stdin)
-            raise RuntimeError("stopped after the spawn")
+        def run_test(
+            command: list[str], *, cwd: object, env: dict[str, str], check: bool
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertFalse(check)
+            runs.append((command, env, cwd))
+            openvmm = cast(list[str], json.loads(env["NVX_MANAGED_LIFECYCLE_COMMAND"]))
+            # The test copies the guest console into the output directory.
+            output_dir = Path(env["NVX_MANAGED_LIFECYCLE_OUTPUT_DIR"])
+            (output_dir / "managed-lifecycle-guest.log").write_bytes(console)
+            report_path = Path(openvmm[openvmm.index("--microvm-report") + 1])
+            report_path.write_text(
+                json.dumps(self._managed_report() if report is None else report),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, returncode)
 
         with (
+            patch.object(microvm_tests.shutil, "which", return_value="cargo"),
+            patch.object(microvm_tests.subprocess, "run", side_effect=run_test),
+            patch.object(microvm_tests, "OpenvmmProcess") as process,
+        ):
+            process.return_value.__enter__.return_value.wait.return_value = (
+                openvmm_process.OpenvmmProcessResult(rejected, b"")
+            )
+            microvm_tests.run_managed_lifecycle(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                "kvm",
+                memory_mib=256,
+                timeout=5,
+                output_dir=output_dir,
+            )
+        return runs
+
+    def test_managed_lifecycle_runs_the_nvx_rs_test_and_checks_what_it_leaves(self):
+        # nvx-rs/tests/managed_lifecycle.rs drives the control session; the
+        # scenario hands it OpenVMM's command, then checks the outcome report
+        # and the guest console.
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            runs = self._run_managed_lifecycle(output_dir)
+            preserved = json.loads(
+                (output_dir / "managed-outcome.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(len(runs), 1)
+        command, environment, cwd = runs[0]
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                "test",
+                "--manifest-path",
+                os.fspath(BuildConstants.REPO_ROOT / "nvx-rs" / "Cargo.toml"),
+                "--locked",
+                "--test",
+                "managed_lifecycle",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ],
+        )
+        # The repository root selects the pinned Rust release.
+        self.assertEqual(cwd, BuildConstants.REPO_ROOT)
+        self.assertEqual(environment["OPENVMM_LOG"], "off")
+        self.assertEqual(environment["NVX_MANAGED_LIFECYCLE_TIMEOUT"], "5")
+        self.assertEqual(
+            environment["NVX_MANAGED_LIFECYCLE_OUTPUT_DIR"],
+            os.fspath(output_dir.resolve()),
+        )
+        openvmm = json.loads(environment["NVX_MANAGED_LIFECYCLE_COMMAND"])
+        # Cargo runs the test in the nvx-rs directory, so every path is absolute.
+        for option in ("--kernel", "--initrd", "--microvm-report"):
+            self.assertTrue(Path(openvmm[openvmm.index(option) + 1]).is_absolute())
+        self.assertTrue(Path(openvmm[0]).is_absolute())
+        # The microVM console listens on TCP, at the address that the test
+        # copies it from.
+        self.assertEqual(
+            openvmm[openvmm.index("--virtio-console") + 1],
+            f"listen=tcp:{environment['NVX_MANAGED_LIFECYCLE_CONSOLE']}",
+        )
+        self.assertRegex(
+            environment["NVX_MANAGED_LIFECYCLE_CONSOLE"], r"\A127\.0\.0\.1:[0-9]+\Z"
+        )
+        self.assertEqual(
+            openvmm[openvmm.index("--microvm-control-console") + 1],
+            f"listen={environment['NVX_MANAGED_LIFECYCLE_ENDPOINT']}",
+        )
+        for option, value in (
+            ("--microvm-workload-identity", "65534:65534"),
+            ("--microvm-lifecycle", "managed"),
+        ):
+            self.assertEqual(openvmm[openvmm.index(option) + 1], value)
+        self.assertIn("--microvm-control-auth-stdin", openvmm)
+        self.assertEqual(preserved, self._managed_report())
+
+    def test_managed_lifecycle_requires_cargo(self):
+        with (
             tempfile.TemporaryDirectory() as temporary,
-            patch.object(microvm_tests, "capability_pipe", side_effect=prepare),
-            patch.object(microvm_tests.subprocess, "Popen", side_effect=launch),
-            self.assertRaisesRegex(RuntimeError, "^stopped after the spawn$"),
+            patch.object(microvm_tests.shutil, "which", return_value=None),
+            patch.object(microvm_tests.subprocess, "run") as run,
+            self.assertRaisesRegex(
+                common.ScriptError,
+                "runs the nvx-rs test managed_lifecycle with Cargo, which is not "
+                "on PATH",
+            ),
         ):
             microvm_tests.run_managed_lifecycle(
                 Path("openvmm"),
@@ -2718,12 +2865,46 @@ class MicrovmTests(unittest.TestCase):
                 timeout=5,
                 output_dir=Path(temporary),
             )
+        run.assert_not_called()
 
-        self.assertEqual(len(prepared), 1)
-        self.assertEqual(spawned, prepared)
-        # The scenario closes its copy of the pipe once OpenVMM has it.
-        with self.assertRaises(OSError):
-            os.fstat(prepared[0])
+    def test_managed_lifecycle_fails_with_the_test_and_with_the_report(self):
+        violation = f"{time_abi.VIOLATION_PREFIX}code=bogus\n".encode()
+        failures: tuple[tuple[dict[str, Any], type[Exception], str], ...] = (
+            (
+                {"returncode": 101},
+                RuntimeError,
+                "the managed lifecycle test managed_lifecycle failed with exit "
+                "status 101",
+            ),
+            # The guest's own explanation comes before the test's failure.
+            (
+                {"returncode": 101, "console": violation},
+                time_abi.TimeAbiFailure,
+                "guest reported time ABI violation",
+            ),
+            (
+                {"report": self._managed_report(backend="whp")},
+                RuntimeError,
+                "managed lifecycle outcome report was invalid",
+            ),
+            (
+                {"report": {**self._managed_report(), "teardown": {}}},
+                RuntimeError,
+                "structured outcome report has an invalid teardown outcome",
+            ),
+            (
+                {"rejected": 0},
+                RuntimeError,
+                "managed lifecycle without a control endpoint was not rejected",
+            ),
+        )
+        for options, error, message in failures:
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+                self.assertRaisesRegex(error, re.escape(message)),
+            ):
+                self._run_managed_lifecycle(Path(temporary), **options)
 
     def test_host_loopback_port_candidates_are_spread_across_the_dynamic_range(self):
         first, last = microvm_tests.HOST_LOOPBACK_PORT_RANGE
@@ -4757,13 +4938,29 @@ class MicrovmTests(unittest.TestCase):
             if isinstance(node, ast.Call)
             and ast.unparse(node.func) == "TcpConsole.connect"
         ]
-        # The managed lifecycle, the console-snapshot capture and restore, and
-        # the snapshot-tier capture, restore, and gate-timeout restore.
-        self.assertEqual(len(connects), 6)
+        # The console-snapshot capture and restore, and the snapshot-tier
+        # capture, restore, and gate-timeout restore.
+        self.assertEqual(len(connects), 5)
         for keywords in connects:
             self.assertRegex(
                 keywords.get("monitor", ""), r"^TimeAbiMonitor\(\w*command\)$"
             )
+        # The managed lifecycle's console is a file, which the same monitor
+        # scans once the nvx-rs test that drives the guest has ended.
+        managed = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "run_managed_lifecycle"
+        )
+        self.assertIn(
+            "TimeAbiMonitor(command)",
+            [
+                ast.unparse(node)
+                for node in ast.walk(managed)
+                if isinstance(node, ast.Call)
+            ],
+        )
         # Only the cold boots whose shell is on the virtio console ask for
         # nvx-time status. Restores never ask, and in the managed lifecycle
         # init starts the managed agent instead of a shell.

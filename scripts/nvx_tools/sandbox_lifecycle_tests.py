@@ -180,10 +180,50 @@ def state_entries(state: Path) -> list[str] | None:
 
 def managed_outcome(state: Path) -> object:
     """Returns the outcome section of the OpenVMM report in a state directory."""
+    return managed_report(state).get("outcome")
+
+
+def managed_report(state: Path) -> dict[str, object]:
+    """Returns the OpenVMM report in a state directory, or an empty mapping if
+    it is not an object."""
     report: object = json.loads((state / OUTCOME).read_text(encoding="utf-8"))
     if not isinstance(report, dict):
-        return None
-    return cast(dict[str, object], report).get("outcome")
+        return {}
+    return cast(dict[str, object], report)
+
+
+def check_managed_report(report: dict[str, object], backend: str) -> None:
+    """Checks the report of a managed sandbox that stopped cleanly.
+
+    These are the report checks of the direct-mode managed lifecycle
+    (nvx-rs/tests/managed_lifecycle.rs) that hold for the layered root too: the
+    report names the backend, no network policy was requested, and every
+    teardown step completed.
+    """
+    outcome = report.get("outcome")
+    if outcome != MANAGED_SUCCESS:
+        raise RuntimeError(f"the managed outcome is {outcome!r}")
+    if report.get("backend") != backend:
+        raise RuntimeError(
+            f"the managed report names backend {report.get('backend')!r}"
+        )
+    policy = report.get("network_policy")
+    status = (
+        cast(dict[str, object], policy).get("status")
+        if isinstance(policy, dict)
+        else None
+    )
+    if status != "not-requested":
+        raise RuntimeError(f"the managed report has network policy status {status!r}")
+    teardown = report.get("teardown")
+    if (
+        not isinstance(teardown, dict)
+        or not teardown
+        or not all(
+            value is True for value in cast(dict[str, object], teardown).values()
+        )
+    ):
+        raise RuntimeError(f"the managed report has incomplete teardown: {teardown!r}")
 
 
 def bounded_evidence(data: bytes, omitted: int = 0) -> bytes:
@@ -681,9 +721,7 @@ class LifecycleAcceptance:
             raise RuntimeError("stop left the control endpoint behind")
         self.require_processes((), "after stop")
         self.copy_evidence(self.state / OUTCOME, "outcome.json")
-        outcome = managed_outcome(self.state)
-        if outcome != MANAGED_SUCCESS:
-            raise RuntimeError(f"the managed outcome is {outcome!r}")
+        check_managed_report(managed_report(self.state), self.backend)
         # A clean journal shows that stop unmounted the overlay and scratch
         # before the VM powered off.
         if not scratch_journal_clean(self.scratch):
