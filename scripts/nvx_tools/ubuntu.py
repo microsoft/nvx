@@ -1028,7 +1028,18 @@ def converter_input_sha256(customization_files: Sequence[Path]) -> str:
                 "path": path.relative_to(BuildConstants.REPO_ROOT).as_posix(),
                 "sha256": sha256_file(path),
             }
-            for path in sorted(customization_files)
+            # In the order of POSIX paths, whose names compare with case, as
+            # on the Linux hosts that build the artifacts; Windows paths
+            # compare without it, which put nvx-rs/build.rs before
+            # nvx-rs/Cargo.toml and changed the digest.
+            for path in sorted(
+                customization_files,
+                key=lambda path: (
+                    PurePosixPath(
+                        path.relative_to(BuildConstants.REPO_ROOT).as_posix()
+                    ).parts
+                ),
+            )
         ],
     }
     encoded = json.dumps(

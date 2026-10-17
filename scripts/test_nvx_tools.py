@@ -7803,6 +7803,48 @@ class BuildTests(unittest.TestCase):
             },
         )
 
+    def test_ubuntu_input_digest_orders_paths_alike_on_every_os(self):
+        # Linux hosts build the Ubuntu artifacts, and every host checks their
+        # manifests, so the digest must take the files in the order of POSIX
+        # paths: by component, with case. Windows paths compare without case,
+        # which put build.rs before Cargo.toml.
+        names = (
+            "nvx-rs/build.rs",
+            "nvx-rs/Cargo.toml",
+            "nvx-rs/src/cli.rs",
+            "nvx-rs/src/cli/args.rs",
+            "guest/common/init",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = [root / name for name in names]
+            for path in files:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(path.name.encode())
+            with (
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(ubuntu, "load_package_lock", return_value=()),
+                patch.object(ubuntu.json, "dumps", wraps=ubuntu.json.dumps) as dumps,
+            ):
+                forward = ubuntu.converter_input_sha256(files)
+                backward = ubuntu.converter_input_sha256(files[::-1])
+
+        self.assertEqual(forward, backward)
+        document = cast(dict[str, object], dumps.call_args.args[0])
+        self.assertEqual(
+            [
+                cast(dict[str, str], entry)["path"]
+                for entry in cast(list[object], document["customization_files"])
+            ],
+            [
+                "guest/common/init",
+                "nvx-rs/Cargo.toml",
+                "nvx-rs/build.rs",
+                "nvx-rs/src/cli/args.rs",
+                "nvx-rs/src/cli.rs",
+            ],
+        )
+
     def test_guest_descriptors_preserve_alpine_and_select_guest_outputs(self):
         alpine = guests.guest_descriptor("alpine")
         ubuntu_guest = guests.guest_descriptor("ubuntu")
