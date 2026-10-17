@@ -158,7 +158,6 @@ nvx/
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
-|   |-- nvx_rs_fixtures.py       Golden fixtures of the nvx-rs ports of Python code, recorded from that code
 |   |-- publish_development_release.py Development release publisher run by CI
 |   `-- test_*.py                Python tooling unit tests
 |-- SECURITY.md                 Microsoft security vulnerability reporting policy

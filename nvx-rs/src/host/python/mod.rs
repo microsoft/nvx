@@ -24,9 +24,10 @@
 //!   applies them to its state files.
 //!
 //! Character properties come from the Unicode 16.0.0 database of Python 3.14, in [`unicode`],
-//! which `scripts/nvx_rs_fixtures.py` generates. The same script records what Python does with
+//! which `scripts/nvx_rs_fixtures.py` generated. The same script recorded what Python does with
 //! fixed and seeded random inputs in `tests/fixtures`, and the golden tests compare these
-//! implementations, and the ports that use them, with those records. Python decodes
+//! implementations, and the ports that use them, with those records. microsoft/nvx#359 retired
+//! the script with the Python code that it recorded, so the records are frozen. Python decodes
 //! operating-system strings that are not valid Unicode into surrogates: [`path`] prints such
 //! paths as Python does, and the filesystem queries refuse them.
 

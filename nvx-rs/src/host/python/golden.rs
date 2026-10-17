@@ -1,5 +1,5 @@
-//! Checks the Python semantics against `tests/fixtures/python.json`, which
-//! `scripts/nvx_rs_fixtures.py` records from Python, and the helpers of the other golden tests.
+//! Checks the Python semantics against `tests/fixtures/python.json`, which the retired
+//! `scripts/nvx_rs_fixtures.py` recorded from Python, and the helpers of the other golden tests.
 
 use std::fmt::Debug;
 

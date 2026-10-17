@@ -1,6 +1,7 @@
 //! Checks the launch profile and the option checks against `tests/fixtures/sandbox.json` and
-//! `tests/fixtures/sandbox_options.json`, which `scripts/nvx_rs_fixtures.py` records from
-//! `scripts/nvx_tools/sandbox.py` and `scripts/nvx.py`.
+//! `tests/fixtures/sandbox_options.json`, which the retired `scripts/nvx_rs_fixtures.py`
+//! recorded from the Python launch profile and option checks of `nvx.py sandbox`, which nvx-rs
+//! replaced.
 //!
 //! The fixtures hold the paths of both `pathlib` flavors, with a fixed current directory, so
 //! every case runs on every host. The cases that read files run on files of a temporary

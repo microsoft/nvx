@@ -1,5 +1,5 @@
 {
-"generator": "scripts/nvx_rs_fixtures.py",
+"generator": "scripts/nvx_rs_fixtures.py, retired by microsoft/nvx#359",
 "python": "3.14",
 "unicode": "16.0.0",
 "space": [[9, 13], [28, 32], [133, 133], [160, 160], [5760, 5760], [8192, 8202], [8232, 8233], [8239, 8239], [8287, 8287], [12288, 12288]],

@@ -1,5 +1,5 @@
 {
-"generator": "scripts/nvx_rs_fixtures.py",
+"generator": "scripts/nvx_rs_fixtures.py, retired by microsoft/nvx#359",
 "python": "3.14",
 "cwds": {"posix": "/fixture/cwd", "windows": "C:\\fixture\\cwd"},
 "identities": [

@@ -105,13 +105,11 @@ from a `\ud800` escape or a path that is not Unicode, shows the surrogate as
 document nested more deeply than its stack allows; this reader has no such
 limit, so those documents fail as invalid policies instead.
 
-[`scripts/nvx_rs_fixtures.py`](../scripts/nvx_rs_fixtures.py) records the
-Python compiler's outcomes for every policy that `scripts/test_egress_policy.py`
-compiles, hand-written edge cases, and a seeded random corpus in
-[`tests/fixtures/egress-policy.json`](tests/fixtures/egress-policy.json), which
-the tests replay without Python; `NVX_EGRESS_POLICY_FIXTURE` points the tests at
-a larger corpus that the script writes with `--output` and `--random-cases`. See
-[Python parity](#python-parity) for how to regenerate and check the fixtures.
+[`tests/fixtures/egress-policy.json`](tests/fixtures/egress-policy.json) holds
+the Python compiler's outcomes for every policy that its tests compiled,
+hand-written edge cases, and a seeded random corpus, which the tests replay
+without Python; `NVX_EGRESS_POLICY_FIXTURE` points the tests at another corpus
+in the same format. See [Python parity](#python-parity).
 
 ## Python parity
 
@@ -130,22 +128,19 @@ Python decodes operating-system strings that are not valid Unicode into
 surrogates: paths print as Python prints them, and the filesystem queries
 refuse them.
 
-[`scripts/nvx_rs_fixtures.py`](../scripts/nvx_rs_fixtures.py) records what the
-Python code does with fixed inputs and seeded random corpora in
-`tests/fixtures`: `python.json` for the Python semantics, `sandbox.json` and
+`tests/fixtures` holds what the Python code did with fixed inputs and seeded
+random corpora: `python.json` for the Python semantics, `sandbox.json` and
 `sandbox_options.json` for the launch profile and the sandbox options, for
 POSIX and Windows paths alike, `egress-policy.json` for the policy compiler,
 and `cli.json` for `nvx.py sandbox` as a command; see
-[Golden scenarios](#golden-scenarios). It also generates the Unicode tables of
-`src/host/python/unicode.rs`. The golden tests compare the ports with these
-records and need no Python. The records depend on the interpreter, so
-regenerate them with CPython 3.14 after a change to the Python code or the
-generator; CI's Pythons are older, so CI does not check them:
-
-```bash
-python3 scripts/nvx_rs_fixtures.py           # rewrite every generated file
-python3 scripts/nvx_rs_fixtures.py --check   # fail if any is out of date
-```
+[Golden scenarios](#golden-scenarios). `scripts/nvx_rs_fixtures.py` recorded
+them with CPython 3.14, and generated the Unicode tables of
+`src/host/python/unicode.rs`, until `nvx.py` delegated to `nvx-rs` and
+[microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359) retired the
+script with the Python code that it recorded. The golden tests compare the
+ports with these records and need no Python. The records are now the
+reference of that behavior: a deliberate change of behavior updates the
+records that it changes by hand, in the same change.
 
 ## The nvx-rs CLI
 
@@ -339,19 +334,19 @@ NVX_OPENVMM=target/debug/nvx-fake-openvmm \
 
 ### Golden scenarios
 
-`tests/fixtures/cli.json` holds scenarios that the fixture script records from
-`nvx.py sandbox`, run as a command with the root's OpenVMM a copy of
-`nvx-fake-openvmm`, and from the Python functions behind `egress compile` and
-`artifacts`: the option and usage errors, dry runs, one-shot runs, the
-lifecycles of sandboxes in every configuration format, and the refusals of the
-lifecycle operations. Each step records the exit status, standard output and
-error, and the state files, with the root, process IDs, and random identifiers
-as placeholders. Its `posix` and `windows` sections are recorded on each kind
-of host, and the script rewrites or checks the section of the host that runs it.
-It then also plays every scenario with `nvx-rs`, and each lifecycle with
-`nvx.py` and `nvx-rs` taking turns both ways, and fails if any step differs
-from `nvx.py`. `tests/cli.rs` replays the section of its host with `nvx-rs`,
-without Python.
+`tests/fixtures/cli.json` holds scenarios that the fixture script recorded from
+the Python implementation of `nvx.py sandbox`, run as a command with the root's
+OpenVMM a copy of `nvx-fake-openvmm`, and from the Python functions behind
+`egress compile` and `artifacts`: the option and usage errors, dry runs,
+one-shot runs, the lifecycles of sandboxes in every configuration format, and
+the refusals of the lifecycle operations. Each step records the exit status,
+standard output and error, and the state files, with the root, process IDs, and
+random identifiers as placeholders. Its `posix` and `windows` sections were
+recorded on each kind of host, where the script also played every scenario with
+`nvx-rs`, and each lifecycle with the Python implementation and `nvx-rs` taking
+turns both ways, and found no difference. `tests/cli.rs` replays the section of
+its host with `nvx-rs`, without Python; since `nvx.py sandbox` runs `nvx-rs`,
+these scenarios are its reference.
 
 ## Features
 

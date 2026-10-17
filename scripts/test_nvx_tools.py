@@ -931,429 +931,6 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "snapshot already fixes"):
             nvx.command_run(args)
 
-    def test_sandbox_rejects_systemd_entrypoint(self):
-        for entrypoint in nvx.SYSTEMD_ENTRYPOINTS:
-            with self.subTest(entrypoint=entrypoint):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        "--entrypoint",
-                        entrypoint,
-                        "--layer",
-                        "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                        "--scratch",
-                        "scratch.ext4",
-                    ]
-                )
-                with self.assertRaisesRegex(
-                    common.ScriptError,
-                    "systemd entrypoints",
-                ):
-                    nvx.command_sandbox(args)
-
-    def test_sandbox_allows_non_systemd_sbin_init(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--entrypoint",
-                    "/sbin/init",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(nvx, "_format_command", return_value="formatted"),
-            ):
-                nvx.command_sandbox(args)
-
-    def test_sandbox_rejects_systemd_from_bound_distro_metadata(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            layer.with_name(f"{layer.name}.manifest.json").write_text(
-                json.dumps(
-                    {
-                        "format": 1,
-                        "artifact": layer.name,
-                        "artifact_sha256": common.sha256_file(layer),
-                        "packages": [{"name": "systemd"}],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--entrypoint",
-                    "/sbin/init",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                ]
-            )
-            with self.assertRaisesRegex(common.ScriptError, "systemd images"):
-                nvx.command_sandbox(args)
-
-    def test_sandbox_command_parses_typed_launch_contract(self):
-        args = nvx.parse_args(
-            [
-                "sandbox",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                "--entrypoint",
-                "/bin/workload",
-                "--arg=--serve",
-                "--memory-max",
-                "268435456",
-                "--pids-max",
-                "64",
-                "--workload-user",
-                "1000:1001",
-            ]
-        )
-
-        self.assertEqual(args.layer[0].role, "distro")
-        self.assertEqual(args.scratch, Path("scratch.ext4"))
-        self.assertEqual(args.sandbox_arg, ["--serve"])
-        self.assertEqual(args.memory_max, 268435456)
-        self.assertEqual(args.pids_max, 64)
-        self.assertEqual(args.workload_user, (1000, 1001))
-        self.assertIs(args.handler, nvx.command_sandbox)
-
-    def test_sandbox_command_parses_state_aware_operations(self):
-        provision = nvx.parse_args(
-            [
-                "sandbox",
-                "provision",
-                "--state-dir",
-                "state",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-            ]
-        )
-        self.assertEqual(provision.sandbox_operation, "provision")
-        self.assertEqual(provision.state_dir, Path("state"))
-
-        execute = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--entrypoint",
-                "/bin/sh",
-                "--arg=-c",
-                "--arg=echo managed",
-                "--exec-timeout-ms",
-                "5000",
-            ]
-        )
-        self.assertEqual(execute.sandbox_operation, "exec")
-        self.assertEqual(execute.sandbox_arg, ["-c", "echo managed"])
-        self.assertEqual(execute.exec_timeout_ms, 5000)
-        self.assertFalse(execute.inherit_default_environment)
-
-        configured = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--cwd",
-                "/work tree",
-                "--environment",
-                "EMPTY=",
-                "--environment",
-                "VALUE=space = value",
-                "--inherit-default-environment",
-            ]
-        )
-        self.assertEqual(configured.cwd, "/work tree")
-        self.assertEqual(
-            configured.environment,
-            ["EMPTY=", "VALUE=space = value"],
-        )
-        self.assertTrue(configured.inherit_default_environment)
-
-        report = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--outcome-report",
-                "exec-outcome.json",
-            ]
-        )
-        self.assertEqual(report.outcome_report, Path("exec-outcome.json"))
-
-    def test_sandbox_timeout_must_be_finite_and_positive(self):
-        for value in ("0", "-1", "nan", "inf"):
-            stderr = io.StringIO()
-            with (
-                self.subTest(value=value),
-                contextlib.redirect_stderr(stderr),
-                self.assertRaises(SystemExit),
-            ):
-                nvx.parse_args(
-                    ["sandbox", "start", "--state-dir", "state", "--timeout", value]
-                )
-            self.assertIn("must be finite and greater than 0", stderr.getvalue())
-
-    def test_sandbox_managed_operations_reject_dry_run_before_state_access(self):
-        lifecycle_methods = (
-            ("provision", "provision"),
-            ("start", "start"),
-            ("exec", "exec_workload"),
-            ("stop", "stop"),
-            ("deprovision", "deprovision"),
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            state.mkdir()
-            marker = state / "marker"
-            marker.write_text("preserved", encoding="utf-8")
-
-            for operation, lifecycle_method in lifecycle_methods:
-                with self.subTest(operation=operation):
-                    args = nvx.parse_args(
-                        [
-                            "sandbox",
-                            operation,
-                            "--state-dir",
-                            str(state),
-                            "--dry-run",
-                        ]
-                    )
-                    with (
-                        patch.object(
-                            sandbox_lifecycle,
-                            lifecycle_method,
-                        ) as lifecycle,
-                        self.assertRaisesRegex(
-                            common.ScriptError,
-                            "--dry-run is only valid for sandbox run",
-                        ),
-                    ):
-                        nvx.command_sandbox(args)
-                    lifecycle.assert_not_called()
-                    self.assertEqual(marker.read_text(encoding="utf-8"), "preserved")
-
-    def test_sandbox_exec_forwards_explicit_empty_environment_and_cwd(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            environment_file = Path(temporary) / "environment.json"
-            environment_file.write_text("[]", encoding="utf-8")
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "exec",
-                    "--state-dir",
-                    "state",
-                    "--cwd",
-                    "/work",
-                    "--environment-file",
-                    str(environment_file),
-                ]
-            )
-            result = sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b"")
-            with (
-                patch.object(
-                    sandbox_lifecycle,
-                    "exec_workload",
-                    return_value=result,
-                ) as execute,
-                self.assertRaises(SystemExit) as exit_context,
-            ):
-                nvx.command_sandbox(args)
-
-        self.assertEqual(exit_context.exception.code, 0)
-        execute.assert_called_once_with(
-            Path("state"),
-            ("/bin/sh",),
-            timeout_ms=0,
-            response_timeout=60.0,
-            cwd="/work",
-            environment=(),
-            inherit_default_environment=False,
-        )
-
-    def test_sandbox_exec_forwards_environment_inheritance(self):
-        cases: tuple[tuple[list[str], tuple[str, ...] | None], ...] = (
-            (["--environment", "A=1"], ("A=1",)),
-            (
-                ["--environment", "A=1", "--environment", "TERM=dumb"],
-                ("A=1", "TERM=dumb"),
-            ),
-            # Without entries the workload gets the defaults whatever the flag says.
-            ([], None),
-        )
-        for environment_args, environment in cases:
-            with self.subTest(environment=environment):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        "exec",
-                        "--state-dir",
-                        "state",
-                        *environment_args,
-                        "--inherit-default-environment",
-                    ]
-                )
-                result = sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b"")
-                with (
-                    patch.object(
-                        sandbox_lifecycle,
-                        "exec_workload",
-                        return_value=result,
-                    ) as execute,
-                    self.assertRaises(SystemExit),
-                ):
-                    nvx.command_sandbox(args)
-                execute.assert_called_once_with(
-                    Path("state"),
-                    ("/bin/sh",),
-                    timeout_ms=0,
-                    response_timeout=60.0,
-                    cwd=None,
-                    environment=environment,
-                    inherit_default_environment=True,
-                )
-
-    def test_sandbox_exec_rejects_ambiguous_or_one_shot_environment(self):
-        both = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--environment",
-                "A=1",
-                "--environment-file",
-                "environment.json",
-            ]
-        )
-        with self.assertRaisesRegex(common.ScriptError, "mutually exclusive"):
-            nvx.command_sandbox(both)
-
-        one_shot = nvx.parse_args(["sandbox", "run", "--environment", "A=1"])
-        with self.assertRaisesRegex(common.ScriptError, "require.*exec"):
-            nvx.command_sandbox(one_shot)
-
-        for operation in ("run", "start"):
-            inheriting = nvx.parse_args(
-                ["sandbox", operation, "--inherit-default-environment"]
-            )
-            with (
-                self.subTest(operation=operation),
-                self.assertRaisesRegex(common.ScriptError, "require.*exec"),
-            ):
-                nvx.command_sandbox(inheriting)
-
-    def test_sandbox_environment_file_is_bounded_before_state_access(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "environment.json"
-            path.write_bytes(b" " * (1024 * 1024 + 1))
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "exec",
-                    "--state-dir",
-                    "absent-state",
-                    "--environment-file",
-                    str(path),
-                ]
-            )
-            with (
-                patch.object(sandbox_lifecycle, "exec_workload") as execute,
-                self.assertRaisesRegex(common.ScriptError, "exceeds.*byte limit"),
-            ):
-                nvx.command_sandbox(args)
-            execute.assert_not_called()
-
-    def test_sandbox_environment_is_validated_before_state_access(self):
-        too_many = [
-            value
-            for index in range(257)
-            for value in ("--environment", f"KEY{index}=value")
-        ]
-        cases = (
-            (too_many, "exceeds 256 entries"),
-            (["--environment", "NO_EQUALS"], "non-empty KEY=VALUE"),
-            (["--environment", "=empty-key"], "non-empty KEY=VALUE"),
-            (["--environment", "KEY=embedded\0nul"], "non-empty KEY=VALUE"),
-            (
-                ["--environment", "KEY=" + "\N{SNOWMAN}" * 1365],
-                "at most 4096 bytes",
-            ),
-            (
-                ["--environment", "DUPLICATE=one", "--environment", "DUPLICATE=two"],
-                "duplicate key",
-            ),
-        )
-        for environment_args, message in cases:
-            with self.subTest(message=message):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        "exec",
-                        "--state-dir",
-                        "absent-state",
-                        *environment_args,
-                    ]
-                )
-                with (
-                    patch.object(sandbox_lifecycle, "exec_workload") as execute,
-                    self.assertRaisesRegex(common.ScriptError, message),
-                ):
-                    nvx.command_sandbox(args)
-                execute.assert_not_called()
-
-    def test_sandbox_environment_file_entries_are_validated_before_state_access(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "environment.json"
-            path.write_text(
-                json.dumps(["DUPLICATE=one", "DUPLICATE=two"]),
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "exec",
-                    "--state-dir",
-                    "absent-state",
-                    "--environment-file",
-                    str(path),
-                ]
-            )
-            with (
-                patch.object(sandbox_lifecycle, "exec_workload") as execute,
-                self.assertRaisesRegex(common.ScriptError, "duplicate key"),
-            ):
-                nvx.command_sandbox(args)
-            execute.assert_not_called()
-
     def test_network_requires_explicit_portable_profile(self):
         args = nvx.parse_args(
             [
@@ -1374,7 +951,7 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "--net and --network-profile"):
             nvx.command_run(missing_network)
 
-    def test_run_and_sandbox_forward_network_arguments(self):
+    def test_run_forwards_network_arguments(self):
         network_arguments = (
             "--net 10.0.0.2/24 --network-profile portable "
             "--network-egress deny --network-ingress deny "
@@ -1382,39 +959,21 @@ class CliTests(unittest.TestCase):
             "--network-egress-deny 10.0.0.0/8 --host-loopback allow "
             "--network-proxy 10.0.0.1:3128 --host-loopback-forward tcp:8080:80"
         ).split()
-        commands = [
-            ["run", "--dry-run", *network_arguments],
-            [
-                "sandbox",
-                "--dry-run",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                *network_arguments,
-            ],
-        ]
 
         def require(path: Path, _description: str) -> Path:
             return path
 
-        for arguments in commands:
-            with self.subTest(command=arguments[0]):
-                args = nvx.parse_args(arguments)
-                with (
-                    patch.object(nvx, "require_file", side_effect=require),
-                    patch.object(sandbox, "require_file", side_effect=require),
-                    patch.object(
-                        nvx, "_format_command", return_value="formatted"
-                    ) as format_command,
-                ):
-                    args.handler(args)
+        args = nvx.parse_args(["run", "--dry-run", *network_arguments])
+        with (
+            patch.object(nvx, "require_file", side_effect=require),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            args.handler(args)
 
-                command = format_command.call_args.args[0]
-                self.assertEqual(
-                    command[command.index("--net") :],
-                    network_arguments,
-                )
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[command.index("--net") :], network_arguments)
 
     def test_run_lowers_structured_egress_policy_before_launch(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1502,275 +1061,33 @@ class CliTests(unittest.TestCase):
                     nvx.command_run(args)
                 require.assert_not_called()
 
-    def test_sandbox_rejects_policy_mixing_before_validating_layer_files(self):
-        for operation in ("run", "provision"):
-            with self.subTest(operation=operation):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        operation,
-                        "--layer",
-                        "distro,absent.erofs,00000000-0000-4000-8000-000000000001",
-                        "--scratch",
-                        "absent.ext4",
-                        "--network-egress",
-                        "deny",
-                        "--network-egress-policy-file",
-                        "absent.json",
-                        "--network-egress-allow",
-                        "192.0.2.1",
-                    ]
-                )
-                with (
-                    patch.object(nvx.SandboxLaunch, "validated") as validated,
-                    self.assertRaisesRegex(common.ScriptError, "cannot be combined"),
-                ):
-                    nvx.command_sandbox(args)
-                validated.assert_not_called()
-
-    def test_policy_file_rejects_scoped_ipv6_before_launch_or_provision(self):
+    def test_run_policy_file_rejects_scoped_ipv6_before_launch(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            policy = root / "policy.json"
+            policy = Path(temporary) / "policy.json"
             policy.write_text(
                 json.dumps({"allow": [{"to": [{"cidr": "fe80::1%eth0/64"}]}]}),
                 encoding="utf-8",
             )
-            options = [
-                "--network-egress",
-                "deny",
-                "--network-egress-policy-file",
-                str(policy),
-            ]
-            message = (
-                r"^allow\[0\]\.to\[0\]\.cidr must not name an IPv6 scope: "
-                r"fe80::1%eth0/64$"
+            args = nvx.parse_args(
+                [
+                    "run",
+                    "--dry-run",
+                    "--network-egress",
+                    "deny",
+                    "--network-egress-policy-file",
+                    str(policy),
+                ]
             )
-            args = nvx.parse_args(["run", "--dry-run", *options])
             with (
                 patch.object(nvx, "require_file") as require,
-                self.assertRaisesRegex(common.ScriptError, message),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    r"^allow\[0\]\.to\[0\]\.cidr must not name an IPv6 scope: "
+                    r"fe80::1%eth0/64$",
+                ),
             ):
                 nvx.command_run(args)
             require.assert_not_called()
-
-            state = root / "state"
-            operations: tuple[tuple[str, list[str]], ...] = (
-                ("run", []),
-                ("provision", ["--state-dir", str(state)]),
-            )
-            for operation, extra in operations:
-                with self.subTest(operation=operation):
-                    args = nvx.parse_args(
-                        [
-                            "sandbox",
-                            operation,
-                            *extra,
-                            "--layer",
-                            "distro,absent.erofs,00000000-0000-4000-8000-000000000001",
-                            "--scratch",
-                            "absent.ext4",
-                            *options,
-                        ]
-                    )
-                    with (
-                        patch.object(nvx.SandboxLaunch, "validated") as validated,
-                        self.assertRaisesRegex(common.ScriptError, message),
-                    ):
-                        nvx.command_sandbox(args)
-                    validated.assert_not_called()
-            self.assertFalse(state.exists())
-
-    def test_managed_provision_persists_lowered_policy_not_source_path(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            policy = root / "policy.json"
-            state = root / "state"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-            policy.write_text(
-                json.dumps(
-                    {
-                        "allow": [
-                            {
-                                "to": [
-                                    {
-                                        "cidr": "192.0.2.0/24",
-                                        "except": ["192.0.2.128/25"],
-                                    }
-                                ],
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "provision",
-                    "--state-dir",
-                    str(state),
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-policy-file",
-                    str(policy),
-                ]
-            )
-
-            nvx.command_sandbox(args)
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            policy.unlink()
-
-            self.assertEqual(config["network_egress"], "deny")
-            self.assertEqual(config["network_egress_allow"], ["192.0.2.0/25"])
-            self.assertEqual(config["network_egress_deny"], [])
-            self.assertNotIn("network_egress_policy_file", config)
-
-    def test_public_cli_provision_persists_policy_after_source_removal(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            policy = root / "policy.json"
-            state = root / "state"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-            policy.write_text(
-                json.dumps(
-                    {
-                        "allow": [
-                            {
-                                "to": [
-                                    {
-                                        "cidr": "192.0.2.0/24",
-                                        "except": ["192.0.2.128/25"],
-                                    }
-                                ],
-                                "ports": [
-                                    {
-                                        "protocol": "tcp",
-                                        "port": 8000,
-                                        "endPort": 8001,
-                                    }
-                                ],
-                            }
-                        ],
-                        "deny": [
-                            {
-                                "to": [{"cidr": "192.0.2.0/24"}],
-                                "ports": [{"protocol": "tcp", "port": 8001}],
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(nvx.__file__).resolve()),
-                    "sandbox",
-                    "provision",
-                    "--state-dir",
-                    str(state),
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-policy-file",
-                    str(policy),
-                ],
-                cwd=BuildConstants.REPO_ROOT,
-                capture_output=True,
-                timeout=10,
-            )
-            self.assertEqual(
-                result.returncode,
-                0,
-                result.stderr.decode("utf-8", "replace"),
-            )
-            policy.unlink()
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-
-            self.assertEqual(
-                config["network_egress_allow"],
-                ["192.0.2.0/25:tcp:8000-8001"],
-            )
-            self.assertEqual(
-                config["network_egress_deny"],
-                ["192.0.2.0/24:tcp:8001"],
-            )
-            self.assertNotIn(str(policy), json.dumps(config))
-
-    def test_invalid_policy_has_no_managed_state_side_effect(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            policy = root / "policy.json"
-            state = root / "state"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-            policy.write_text(
-                '{"allow":[{"to":[{"cidr":"192.0.2.0/24"}],'
-                '"ports":[{"protocol":"icmp","port":8}]}]}',
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "provision",
-                    "--state-dir",
-                    str(state),
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-policy-file",
-                    str(policy),
-                ]
-            )
-
-            with self.assertRaises(common.ScriptError):
-                nvx.command_sandbox(args)
-            self.assertFalse(state.exists())
-
-    def test_managed_non_launch_operations_reject_network_policy_options(self):
-        args = nvx.parse_args(
-            [
-                "sandbox",
-                "start",
-                "--state-dir",
-                "state",
-                "--network-egress",
-                "deny",
-                "--network-egress-policy-file",
-                "policy.json",
-            ]
-        )
-        with (
-            patch.object(sandbox_lifecycle, "start") as start,
-            self.assertRaisesRegex(
-                common.ScriptError, "only valid for sandbox run or provision"
-            ),
-        ):
-            nvx.command_sandbox(args)
-        start.assert_not_called()
 
     def test_run_parses_denied_filesystem_paths(self):
         args = nvx.parse_args(
@@ -2510,6 +1827,34 @@ fake = sys.argv[2]
 nvx_rs._command = lambda arguments, program: [sys.executable, fake, *arguments]
 raise SystemExit(nvx_rs.run(sys.argv[3:], program="nvx.py"))
 """
+# Runs nvx.main in a fresh Python, with the stand-in in place of nvx-rs: the
+# arguments before "--" tell the stand-in what to do.
+NVX_PY_DRIVER = r"""
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import nvx
+from nvx_tools import nvx_rs
+
+separator = sys.argv.index("--")
+fake = [sys.executable, sys.argv[2], *sys.argv[3:separator]]
+nvx_rs._command = lambda arguments, program: fake
+raise SystemExit(nvx.main(sys.argv[separator + 1 :]))
+"""
+# Runs nvx.main as nvx.py in a fresh Python, with the nvx-rs that NVX_RS names
+# and the artifact root that the second argument names.
+NVX_PY_REAL_DRIVER = r"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+sys.argv[0] = "nvx.py"
+import nvx
+from nvx_tools import nvx_rs
+
+nvx_rs.ROOT = Path(sys.argv[2])
+raise SystemExit(nvx.main(sys.argv[3:]))
+"""
 
 
 @contextlib.contextmanager
@@ -2981,6 +2326,264 @@ class NvxRsTests(unittest.TestCase):
                     )
                     for name in guests.GUEST_NAMES
                 ],
+            )
+
+
+class SandboxDelegationTests(unittest.TestCase):
+    def test_sandbox_records_canonical_options_in_command_line_order(self):
+        args = nvx.parse_args(
+            [
+                "sandbox",
+                "--layer",
+                "distro,a.erofs,11111111-1111-1111-1111-111111111111",
+                "--scratch=s.ext4",
+                "--mount",
+                "/a,dir-a",
+                "--mount-deny",
+                "x",
+                "--mount=/b,dir-b,rw",
+                "--mount-write",
+                "y",
+                "provision",
+                "--state",
+                "state",
+                "--arg=-c",
+                "--arg",
+                "true",
+                "--environment",
+                "A=B=C",
+                "--inherit",
+                "--dry",
+                "--hyp",
+                "kvm",
+                "--cmdline=",
+                "--timeout",
+                "-1",
+            ]
+        )
+        self.assertEqual(args.sandbox_operation, "provision")
+        # Abbreviations are resolved, the order is kept, and every value is
+        # attached, so that a value that starts with "-" stays a value.
+        self.assertEqual(
+            args.sandbox_arguments,
+            [
+                "--layer=distro,a.erofs,11111111-1111-1111-1111-111111111111",
+                "--scratch=s.ext4",
+                "--mount=/a,dir-a",
+                "--mount-deny=x",
+                "--mount=/b,dir-b,rw",
+                "--mount-write=y",
+                "--state-dir=state",
+                "--arg=-c",
+                "--arg=true",
+                "--environment=A=B=C",
+                "--inherit-default-environment",
+                "--dry-run",
+                "--hypervisor=kvm",
+                "--cmdline=",
+                "--timeout=-1",
+            ],
+        )
+        # nvx-rs converts, checks, and defaults every value.
+        for name in ("layer", "scratch", "workload_user", "timeout", "memory_mib"):
+            self.assertFalse(hasattr(args, name), name)
+        default = nvx.parse_args(["sandbox"])
+        self.assertEqual(default.sandbox_operation, "run")
+        self.assertEqual(default.sandbox_arguments, [])
+
+    def test_sandbox_runs_nvx_rs_and_exits_with_its_status(self):
+        program = argparse.ArgumentParser().prog
+        with patch.object(nvx_rs, "run", return_value=7) as run:
+            self.assertEqual(
+                nvx.main(
+                    [
+                        "sandbox",
+                        "exec",
+                        "--state-dir",
+                        "state",
+                        "--entrypoint",
+                        "/bin/true",
+                    ]
+                ),
+                7,
+            )
+        run.assert_called_once_with(
+            ["sandbox", "exec", "--state-dir=state", "--entrypoint=/bin/true"],
+            program=program,
+        )
+
+    def test_sandbox_usage_errors_stay_with_argparse(self):
+        for arguments in (
+            ["sandbox", "--bogus"],
+            ["sandbox", "--hypervisor", "hyper-v"],
+            ["sandbox", "pause"],
+            ["sandbox", "--layer"],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch.object(nvx_rs, "run") as run,
+                patch("sys.stderr", new_callable=io.StringIO),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                nvx.main(arguments)
+            self.assertEqual(raised.exception.code, 2)
+            run.assert_not_called()
+
+    def test_sandbox_reports_a_missing_nvx_rs_as_an_error(self):
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                nvx_rs, "require_binary", side_effect=common.ScriptError("no nvx-rs")
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(nvx.main(["sandbox", "stop", "--state-dir", "s"]), 1)
+        self.assertEqual(stderr.getvalue(), "error: no nvx-rs\n")
+
+    def _main_driver(self, fake: Path, mode: list[str], arguments: list[str]):
+        return [
+            sys.executable,
+            "-c",
+            NVX_PY_DRIVER,
+            str(SCRIPTS_DIRECTORY),
+            str(fake),
+            *mode,
+            "--",
+            *arguments,
+        ]
+
+    def test_sandbox_shares_the_standard_streams_and_status_of_nvx_rs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = Path(temporary) / "fake_nvx_rs.py"
+            fake.write_text(FAKE_NVX_RS, encoding="utf-8")
+            result = subprocess.run(
+                self._main_driver(
+                    fake,
+                    ["streams", "3"],
+                    ["sandbox", "exec", "--state-dir", "state"],
+                ),
+                capture_output=True,
+                timeout=60,
+            )
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, b"standard output\n")
+        self.assertEqual(result.stderr, b"standard error\n")
+
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX signals")
+    def test_ctrl_c_ends_a_sandbox_command_once(self):
+        # nvx-rs reports Ctrl-C; nvx.py prints nothing more and keeps 130.
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = Path(temporary) / "fake_nvx_rs.py"
+            fake.write_text(FAKE_NVX_RS, encoding="utf-8")
+            started = Path(temporary) / "started"
+            process = subprocess.Popen(
+                self._main_driver(
+                    fake,
+                    ["interruptible", str(started)],
+                    ["sandbox", "exec", "--state-dir", "state"],
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 30
+                while not started.exists():
+                    self.assertLess(time.monotonic(), deadline)
+                    self.assertIsNone(process.poll())
+                    time.sleep(0.02)
+                _signal_process_group(process.pid, "SIGINT")
+                stdout, stderr = process.communicate(timeout=30)
+            finally:
+                if process.poll() is None:
+                    _signal_process_group(process.pid, "SIGKILL")
+                    process.wait()
+        self.assertEqual(process.returncode, 130)
+        self.assertEqual(stderr, b"Interrupted\n")
+        self.assertEqual(stdout, b"")
+
+    @unittest.skipUnless(
+        os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
+    )
+    def test_the_real_nvx_rs_runs_the_options_that_nvx_py_reads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            openvmm = (
+                f"openvmm/target/release/openvmm{'.exe' if os.name == 'nt' else ''}"
+            )
+            for relative in ("build/vmlinux", "build/initramfs.cpio.gz", openvmm):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"artifact")
+            (root / "distro.erofs").write_bytes(b"layer")
+            (root / "scratch.ext4").write_bytes(b"scratch")
+            (root / "share" / "hidden").mkdir(parents=True)
+            uuid = "11111111-1111-1111-1111-111111111111"
+
+            def nvx_py(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        NVX_PY_REAL_DRIVER,
+                        str(SCRIPTS_DIRECTORY),
+                        str(root),
+                        *arguments,
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    timeout=60,
+                )
+
+            result = nvx_py(
+                "sandbox",
+                "--dry",
+                "--layer",
+                f"distro,distro.erofs,{uuid}",
+                "--scratch",
+                "scratch.ext4",
+                "--arg=-c",
+                "--arg",
+                "true",
+                "--mount",
+                f"/data,{root / 'share'},rw",
+                "--mount-deny",
+                "hidden",
+                "--hyp",
+                "kvm",
+                "--memory-max",
+                "268435456",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, b"")
+            command = result.stdout.decode("utf-8")
+            self.assertTrue(command.startswith(">> "), command)
+            for expected in (
+                "--microvm-sandbox-block distro:file:distro.erofs,ro",
+                "--microvm-sandbox-block scratch:file:scratch.ext4",
+                "--hypervisor kvm",
+                "nvx_arg=-c nvx_arg=true nvx_memory_max=268435456",
+                "--mount-deny hidden",
+            ):
+                self.assertIn(expected, command)
+            # A value that nvx-rs refuses is a usage error of nvx.py sandbox.
+            result = nvx_py("sandbox", "--workload-user", "0:0")
+            self.assertEqual(result.returncode, 2)
+            stderr = result.stderr.decode("utf-8").replace("\r\n", "\n")
+            self.assertTrue(stderr.startswith("usage: nvx.py sandbox [-h] "), stderr)
+            self.assertTrue(
+                stderr.endswith(
+                    "nvx.py sandbox: error: argument --workload-user: "
+                    "--workload-user UID must be between 1 and 4294967295\n"
+                ),
+                stderr,
+            )
+            result = nvx_py("sandbox", "exec", "--state-dir", "state")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(
+                result.stderr.decode("utf-8").replace("\r\n", "\n"),
+                f"error: sandbox state path is not a plain directory: "
+                f"{root / 'state'}\n",
             )
 
 
@@ -13241,248 +12844,6 @@ class SandboxTests(unittest.TestCase):
             validated = launch(share).validated()
             self.assertEqual(validated.mounts[0].host_path, share)
 
-    def test_sandbox_command_forwards_mount_to_openvmm(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            share = root / "share"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            share.mkdir()
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--mount",
-                    f"/workspace,{share},rw",
-                    "--mount-deny",
-                    "secrets",
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-            self.assertEqual(
-                command[command.index("--mount") + 1], f"/workspace,{share},rw"
-            )
-            self.assertEqual(command[command.index("--mount-deny") + 1], "secrets")
-            self.assertNotIn("--mount-owner", command)
-
-    def test_sandbox_command_shares_a_file(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            settings = root / "settings.json"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            settings.write_bytes(b"{}")
-
-            def sandbox_args(*mount: str) -> argparse.Namespace:
-                return nvx.parse_args(
-                    [
-                        "sandbox",
-                        "--layer",
-                        f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                        "--scratch",
-                        str(scratch),
-                        *mount,
-                        "--dry-run",
-                    ]
-                )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(
-                    sandbox_args("--mount", f"/etc/app/settings.json,{settings},ro")
-                )
-                command = format_command.call_args.args[0]
-                name = sandbox.aggregate_child_name(0, "/etc/app/settings.json")
-                # The regular file is a child of its own, without its directory,
-                # which OpenVMM must find to be a regular file.
-                self.assertNotIn("--mount", command)
-                self.assertEqual(
-                    command[command.index("--mount-child") + 1],
-                    f"{name},{settings},ro,file",
-                )
-                self.assertIn(
-                    f"nvx_share={name},/etc/app/settings.json,ro,file",
-                    command[command.index("--cmdline") + 1],
-                )
-                with self.assertRaisesRegex(common.ScriptError, "shares a file"):
-                    nvx.command_sandbox(
-                        sandbox_args(
-                            "--mount",
-                            f"/etc/app/settings.json,{settings},rw",
-                            "--mount-write",
-                            str(settings),
-                        )
-                    )
-
-    def test_sandbox_command_shares_host_paths_with_commas(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            alpha = root / "alpha,beta"
-            reports = root / "2026, final"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            for share in (alpha, reports):
-                (share / "secret").mkdir(parents=True)
-
-            def sandbox_args(*mounts: str) -> argparse.Namespace:
-                return nvx.parse_args(
-                    [
-                        "sandbox",
-                        "--layer",
-                        f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                        "--scratch",
-                        str(scratch),
-                        *mounts,
-                        "--dry-run",
-                    ]
-                )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(
-                    sandbox_args(
-                        "--mount", f"/work,{alpha},rw", "--mount-deny", "secret"
-                    )
-                )
-                command = format_command.call_args.args[0]
-                self.assertEqual(
-                    command[command.index("--mount") + 1], f"/work,{alpha},rw"
-                )
-                self.assertEqual(command[command.index("--mount-deny") + 1], "secret")
-
-                nvx.command_sandbox(
-                    sandbox_args(
-                        "--mount",
-                        f"/work,{alpha},rw",
-                        "--mount-deny",
-                        "secret",
-                        "--mount",
-                        f"/reports,{reports},ro",
-                        "--mount-deny",
-                        "secret",
-                    )
-                )
-                command = format_command.call_args.args[0]
-                work, report = (
-                    sandbox.aggregate_child_name(index, target)
-                    for index, target in enumerate(("/work", "/reports"))
-                )
-                self.assertEqual(
-                    [
-                        (value, command[index + 1])
-                        for index, value in enumerate(command)
-                        if value in ("--mount-child", "--mount-deny")
-                    ],
-                    [
-                        ("--mount-child", f"{work},{alpha},rw"),
-                        ("--mount-child", f"{report},{reports},ro"),
-                        ("--mount-deny", os.fspath(alpha / "secret")),
-                        ("--mount-deny", os.fspath(reports / "secret")),
-                    ],
-                )
-                with self.assertRaisesRegex(
-                    common.ScriptError, "end the value with ,ro or ,rw"
-                ):
-                    nvx.command_sandbox(sandbox_args("--mount", f"/work,{alpha}"))
-
-            # A managed sandbox records the host path as given and attaches it
-            # on start.
-            state = root / "state"
-            sandbox_lifecycle.provision(
-                state,
-                sandbox.SandboxLaunch(
-                    layers=(
-                        sandbox.SandboxLayer(
-                            role="distro",
-                            path=layer,
-                            uuid="11111111-1111-1111-1111-111111111111",
-                        ),
-                    ),
-                    scratch=scratch,
-                    mounts=(
-                        sandbox.SandboxMount.parse(
-                            f"/reports,{reports},ro", ("secret",)
-                        ),
-                    ),
-                ),
-                hypervisor="whp",
-                memory_mib=256,
-                net=None,
-                network_profile=None,
-                network_egress=None,
-                network_ingress=None,
-                network_egress_allow=(),
-                network_egress_deny=(),
-                host_loopback=None,
-                network_proxy=None,
-                host_loopback_forward=(),
-                cmdline="quiet",
-                timeout=10,
-            )
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual(config["mount"]["host_path"], os.fspath(reports))
-            process = MagicMock()
-            process.pid = 123
-            process.stdin = io.BytesIO()
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess, "Popen", return_value=process
-                ) as popen,
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=MagicMock(),
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-            command = popen.call_args.args[0]
-            self.assertEqual(
-                command[command.index("--mount") + 1], f"/reports,{reports},ro"
-            )
-            self.assertEqual(command[command.index("--mount-deny") + 1], "secret")
-
     def test_run_attaches_a_file_as_an_aggregate_child(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -13570,433 +12931,6 @@ class SandboxTests(unittest.TestCase):
                     common.ScriptError, "invalid --mount target"
                 ):
                     nvx.command_run(invalid)
-
-    def test_sandbox_command_forwards_mount_owner(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            share = root / "share"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            share.mkdir()
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--mount",
-                    f"/workspace,{share},rw",
-                    "--mount-owner",
-                    "caller",
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                if sys.platform == "win32":
-                    with self.assertRaisesRegex(common.ScriptError, "Linux host"):
-                        nvx.command_sandbox(args)
-                    format_command.assert_not_called()
-                    return
-                if share.stat().st_uid == 0:
-                    self.skipTest("caller ownership refuses a root-owned share")
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-            self.assertEqual(command[command.index("--mount-owner") + 1], "caller")
-            self.assertLess(command.index("--mount"), command.index("--mount-owner"))
-
-    def test_sandbox_command_rejects_misplaced_mount_options(self):
-        deny_only = nvx.parse_args(
-            [
-                "sandbox",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                "--mount-deny",
-                "secrets",
-            ]
-        )
-        with self.assertRaisesRegex(common.ScriptError, "requires --mount"):
-            nvx.command_sandbox(deny_only)
-        owner_only = nvx.parse_args(
-            [
-                "sandbox",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                "--mount-owner",
-                "caller",
-            ]
-        )
-        with self.assertRaisesRegex(common.ScriptError, "--mount-owner requires"):
-            nvx.command_sandbox(owner_only)
-        for operation in ("start", "exec", "stop", "deprovision"):
-            with self.subTest(operation=operation):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        operation,
-                        "--state-dir",
-                        "state",
-                        "--mount",
-                        "/workspace,share,rw",
-                    ]
-                )
-                with self.assertRaisesRegex(common.ScriptError, "only valid"):
-                    nvx.command_sandbox(args)
-
-    def test_sandbox_command_attributes_policy_paths_to_the_preceding_mount(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            work.mkdir()
-            tools.mkdir()
-            common_args = [
-                "sandbox",
-                "--layer",
-                f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                str(scratch),
-            ]
-            args = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount-deny",
-                    "logs",
-                    "--mount-allow",
-                    "logs/payloads",
-                    "--mount-write",
-                    "out",
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools},ro",
-                    "--mount-deny",
-                    "credentials",
-                    "--dry-run",
-                ]
-            )
-            workspace, toolcache = nvx._sandbox_mounts(args)
-            self.assertEqual(
-                (
-                    workspace.denied_paths,
-                    workspace.allowed_paths,
-                    workspace.writable_paths,
-                ),
-                (("logs",), ("logs/payloads",), ("out",)),
-            )
-            self.assertEqual(
-                (
-                    toolcache.denied_paths,
-                    toolcache.allowed_paths,
-                    toolcache.writable_paths,
-                ),
-                (("credentials",), (), ()),
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-
-            def values(option: str) -> list[str]:
-                return [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value == option
-                ]
-
-            # With several shares, OpenVMM attributes absolute paths.
-            self.assertEqual(
-                values("--mount-allow"), [os.fspath(work / "logs" / "payloads")]
-            )
-            self.assertEqual(values("--mount-write"), [os.fspath(work / "out")])
-
-            for arguments, message in (
-                (["--mount-write", "out"], "--mount-write requires --mount"),
-                # A --mount-write after the read-only share would narrow it.
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools},ro",
-                        "--mount-write",
-                        "cache",
-                    ],
-                    "is read-only",
-                ),
-                (
-                    [
-                        "--mount-allow",
-                        "logs",
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "each --mount-allow must follow the --mount",
-                ),
-                # A path in one share cannot be attributed to the other.
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount-write",
-                        os.fspath(tools / "cache"),
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "--mount-write .* is not inside the host directory",
-                ),
-                # Only a denied path may name a share's root.
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount-deny",
-                        "logs",
-                        "--mount-allow",
-                        os.fspath(work),
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "--mount-allow .* is not inside the host directory",
-                ),
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount-write",
-                        os.fspath(work),
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "--mount-write .* is not inside the host directory",
-                ),
-            ):
-                with self.subTest(message=message):
-                    with self.assertRaisesRegex(common.ScriptError, message):
-                        nvx.command_sandbox(nvx.parse_args([*common_args, *arguments]))
-
-    def test_sandbox_command_hides_a_share_root_behind_its_allowed_paths(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            (work / "src").mkdir(parents=True)
-            tools.mkdir()
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount-deny",
-                    os.fspath(work),
-                    "--mount-allow",
-                    os.fspath(work / "src"),
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools}",
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-
-            def values(option: str) -> list[str]:
-                return [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value == option
-                ]
-
-            # OpenVMM hides the workspace's root behind its one allowed path.
-            workspace = sandbox.aggregate_child_name(0, "/workspace")
-            toolcache = sandbox.aggregate_child_name(1, "/opt/hostedtoolcache")
-            self.assertEqual(
-                values("--mount-child"),
-                [f"{workspace},{work},rw", f"{toolcache},{tools},ro"],
-            )
-            self.assertEqual(values("--mount-deny"), [os.fspath(work)])
-            self.assertEqual(values("--mount-allow"), [os.fspath(work / "src")])
-
-    def test_sandbox_command_attributes_mount_deny_to_the_preceding_mount(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            work.mkdir()
-            tools.mkdir()
-            common_args = [
-                "sandbox",
-                "--layer",
-                f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                str(scratch),
-            ]
-            args = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount-deny",
-                    "secrets",
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools},ro",
-                    "--mount-deny",
-                    "credentials",
-                    "--mount-deny",
-                    "logs",
-                    "--dry-run",
-                ]
-            )
-            mounts = nvx._sandbox_mounts(args)
-            self.assertEqual(
-                [(mount.guest_target, mount.denied_paths) for mount in mounts],
-                [
-                    ("/workspace", ("secrets",)),
-                    ("/opt/hostedtoolcache", ("credentials", "logs")),
-                ],
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-            workspace = sandbox.aggregate_child_name(0, "/workspace")
-            toolcache = sandbox.aggregate_child_name(1, "/opt/hostedtoolcache")
-            self.assertNotIn("--mount", command)
-            self.assertEqual(
-                [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value in ("--mount-aggregate", "--mount-child")
-                ],
-                [
-                    "/run/nvx/shares",
-                    f"{workspace},{work},rw",
-                    f"{toolcache},{tools},ro",
-                ],
-            )
-            self.assertEqual(
-                [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value == "--mount-deny"
-                ],
-                [
-                    os.fspath(work / "secrets"),
-                    os.fspath(tools / "credentials"),
-                    os.fspath(tools / "logs"),
-                ],
-            )
-            cmdline = command[command.index("--cmdline") + 1]
-            self.assertIn(
-                f"nvx_share={workspace},/workspace,rw "
-                f"nvx_share={toolcache},/opt/hostedtoolcache,ro",
-                cmdline,
-            )
-
-            # With one share, a --mount-deny may come first; with several, it
-            # must follow the share whose directory it hides.
-            single = nvx.parse_args(
-                [*common_args, "--mount-deny", "secrets", "--mount", f"/w,{work},rw"]
-            )
-            self.assertEqual(nvx._sandbox_mounts(single)[0].denied_paths, ("secrets",))
-            leading = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount-deny",
-                    "secrets",
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools}",
-                ]
-            )
-            with self.assertRaisesRegex(common.ScriptError, "must follow the --mount"):
-                nvx.command_sandbox(leading)
-            # More shares are children of the same aggregate.
-            (root / "cache").mkdir()
-            three = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount",
-                    f"/a,{work}",
-                    "--mount",
-                    f"/b,{tools}",
-                    "--mount",
-                    f"/c,{root / 'cache'}",
-                    "--dry-run",
-                ]
-            )
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(three)
-            command = format_command.call_args.args[0]
-            self.assertEqual(command.count("--mount-child"), 3)
 
     def test_run_shares_host_paths_with_commas(self):
         with tempfile.TemporaryDirectory() as temporary:

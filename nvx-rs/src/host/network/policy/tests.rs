@@ -10,9 +10,8 @@ use crate::ErrorKind;
 use crate::host::network::address::probe;
 use crate::host::python::path::{posix_str, windows_str};
 
-/// The fixture that `scripts/nvx_rs_fixtures.py` writes, or the file that
-/// `NVX_EGRESS_POLICY_FIXTURE` names, such as a larger corpus that it writes with `--output` and
-/// `--random-cases`.
+/// The fixture that the retired `scripts/nvx_rs_fixtures.py` recorded from the Python compiler,
+/// or the file in its format that `NVX_EGRESS_POLICY_FIXTURE` names, such as a larger corpus.
 fn fixture() -> Value {
     let path = std::env::var_os("NVX_EGRESS_POLICY_FIXTURE")
         .map(PathBuf::from)
