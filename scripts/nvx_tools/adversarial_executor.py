@@ -204,6 +204,12 @@ def sanitized_environment() -> dict[str, str]:
         for key, value in os.environ.items()
         if key.upper() in _ENVIRONMENT_ALLOWLIST
     }
+    # The scenarios run in the repository root, where a relative NVX_RS would
+    # name another executable than the one that the initialization validated
+    # in the executor's working directory.
+    configured = environment.get(nvx_rs.VARIABLE)
+    if configured:
+        environment[nvx_rs.VARIABLE] = str(Path(configured).absolute())
     environment["PYTHONUNBUFFERED"] = "1"
     return environment
 

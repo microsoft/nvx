@@ -78,6 +78,7 @@ from nvx_tools.build_constants import (
     ReleaseBuildConstants,
 )
 from nvx_tools.common import ScriptError
+from nvx_tools.nvx_rs import find_binary as find_nvx_rs
 
 
 def _executor_result(
@@ -2152,12 +2153,48 @@ class CopilotContainmentTests(unittest.TestCase):
             environment,
             {
                 "PATH": "test-path",
-                "NVX_RS": "test-nvx-rs",
+                "NVX_RS": str(Path("test-nvx-rs").absolute()),
                 "CARGO_HOME": "test-cargo-home",
                 "RUSTUP_HOME": "test-rustup-home",
                 "PYTHONUNBUFFERED": "1",
             },
         )
+
+    def test_scenarios_run_the_relative_nvx_rs_that_the_executor_validated(
+        self,
+    ) -> None:
+        # The executor validates a relative NVX_RS in its own working
+        # directory, and the scenarios run in another, the repository root,
+        # so the environment that they inherit names that executable.
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        with tempfile.TemporaryDirectory() as temporary:
+            executor_directory = Path(temporary)
+            executable = executor_directory / "bin" / "nvx-rs"
+            executable.parent.mkdir()
+            executable.write_bytes(b"")
+            os.chdir(executor_directory)
+            try:
+                with patch.dict(os.environ, {"NVX_RS": os.path.join("bin", "nvx-rs")}):
+                    validated = find_nvx_rs()
+                    environment = sanitized_environment()
+            finally:
+                os.chdir(previous)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from nvx_tools import nvx_rs; print(nvx_rs.find_binary())",
+                ],
+                cwd=Path(__file__).resolve().parent,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(validated, executable.absolute())
+        self.assertEqual(completed.stdout.strip(), str(validated))
 
     def test_scenarios_find_nvx_rs_with_the_executor_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
