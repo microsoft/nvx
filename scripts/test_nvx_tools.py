@@ -17542,6 +17542,7 @@ class ReleaseTests(unittest.TestCase):
     def test_runtime_provenance_validation_uses_required_paths(self):
         build_dir = Path("build")
         binary = Path("openvmm")
+        nvx_rs_binary = Path("nvx-rs")
 
         def artifact_path(name: str) -> Path:
             return build_dir / name
@@ -17552,6 +17553,7 @@ class ReleaseTests(unittest.TestCase):
         with (
             patch.object(release, "artifact_path", side_effect=artifact_path),
             patch.object(release, "openvmm_binary_path", return_value=binary),
+            patch.object(nvx_rs, "find_binary", return_value=nvx_rs_binary),
             patch.object(
                 release,
                 "require_file",
@@ -17560,11 +17562,12 @@ class ReleaseTests(unittest.TestCase):
             patch.object(release, "_validate_openvmm_provenance") as openvmm,
             patch.object(release, "_validate_kernel_provenance"),
             patch.object(release, "_validate_initramfs_provenance"),
+            patch.object(release, "_validate_nvx_rs_provenance") as nvx_rs_check,
         ):
             release.validate_runtime_artifact_provenance()
 
         self.assertEqual(
-            require.call_args_list[-3:],
+            require.call_args_list[-4:],
             [
                 call(
                     build_dir / OpenVMMBuildConstants.PROVENANCE_NAME,
@@ -17578,11 +17581,83 @@ class ReleaseTests(unittest.TestCase):
                     build_dir / InitramfsBuildConstants.PROVENANCE_NAME,
                     "initramfs build provenance",
                 ),
+                call(build_dir / nvx_rs.PROVENANCE_NAME, "nvx-rs build provenance"),
             ],
         )
         openvmm.assert_called_once_with(
             binary, build_dir / OpenVMMBuildConstants.PROVENANCE_NAME
         )
+        # The nvx-rs that nvx.py runs, of any target.
+        nvx_rs_check.assert_called_once_with(
+            nvx_rs_binary, build_dir / nvx_rs.PROVENANCE_NAME, target=None
+        )
+
+    def test_runtime_provenance_validation_rejects_a_stale_nvx_rs(self):
+        # nvx.py never rebuilds an nvx-rs that exists, so one left from
+        # before a change of its sources, or that its provenance does not
+        # describe, would run. The adversarial executor validates it first.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_dir = root / "build"
+            build_dir.mkdir()
+            provenance = build_dir / nvx_rs.PROVENANCE_NAME
+            other = root / "other-nvx-rs"
+            other.write_bytes(b"another nvx-rs")
+
+            def require_file(path: Path, _description: str) -> Path:
+                return path
+
+            def validate() -> None:
+                with (
+                    patch.object(
+                        release, "artifact_path", side_effect=build_dir.joinpath
+                    ),
+                    patch.object(release, "openvmm_binary_path"),
+                    patch.object(release, "require_file", side_effect=require_file),
+                    patch.object(release, "_validate_openvmm_provenance"),
+                    patch.object(release, "_validate_kernel_provenance"),
+                    patch.object(release, "_validate_initramfs_provenance"),
+                ):
+                    release.validate_runtime_artifact_provenance()
+
+            self.nvx_rs_path.write_bytes(b"nvx-rs")
+            provenance.write_text(
+                json.dumps(
+                    nvx_rs.provenance_record(
+                        self.nvx_rs_path, "x86_64-unknown-linux-gnu"
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with _without_nvx_rs_variable():
+                validate()
+                # A rebuild after the record.
+                self.nvx_rs_path.write_bytes(b"rebuilt nvx-rs")
+                with self.assertRaisesRegex(
+                    common.ScriptError, "does not describe .* as a build from the"
+                ):
+                    validate()
+            # The nvx-rs that NVX_RS names is the one that nvx.py runs.
+            with (
+                patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}),
+                self.assertRaisesRegex(common.ScriptError, re.escape(str(other))),
+            ):
+                validate()
+            provenance.write_text(
+                json.dumps(nvx_rs.provenance_record(other, "x86_64-unknown-linux-gnu")),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}):
+                validate()
+            # A record of other sources.
+            record = nvx_rs.provenance_record(other, "x86_64-unknown-linux-gnu")
+            record["source_sha256"] = "0" * 64
+            provenance.write_text(json.dumps(record), encoding="utf-8")
+            with (
+                patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}),
+                self.assertRaisesRegex(common.ScriptError, "current nvx-rs sources"),
+            ):
+                validate()
 
     def test_package_rejects_dirty_openvmm_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:

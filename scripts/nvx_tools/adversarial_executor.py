@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from nvx_tools import nvx_rs
 from nvx_tools.adversarial_broker import (
     SCHEMA_VERSION,
     CaseDefinition,
@@ -176,6 +177,14 @@ def _artifact_metadata() -> dict[str, object]:
         "openvmm_provenance": require_file(
             artifact_path(OpenVMMBuildConstants.PROVENANCE_NAME),
             "OpenVMM provenance",
+        ),
+        # The nvx-rs that the scenarios run through nvx.py, which never
+        # rebuilds it, so a stale one would run without its provenance check.
+        "nvx_rs": nvx_rs.find_binary()
+        or require_file(nvx_rs.binary_path(), "nvx-rs executable"),
+        "nvx_rs_provenance": require_file(
+            artifact_path(nvx_rs.PROVENANCE_NAME),
+            "nvx-rs provenance",
         ),
     }
     validate_runtime_artifact_provenance()

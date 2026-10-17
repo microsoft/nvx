@@ -52,9 +52,10 @@ file, build script, and `src/` tree and `rust-toolchain.toml`, and to the
 Rust release, target, and Cargo features of the build. `nvx.py` records it
 when it builds `nvx-rs`, `download` installs a release's, and
 [`record-nvx-rs-provenance`](#record-nvx-rs-provenance) records it for a
-build made otherwise. [`package`](#package) refuses an `nvx-rs` that it does
-not describe as built from the checkout's sources, so a stale build never
-ships unnoticed.
+build made otherwise. [`package`](#package) and the
+[adversarial executor](adversarial-testing.md#nvx-rs-on-the-target) refuse an
+`nvx-rs` that it does not describe as built from the checkout's sources, so a
+stale build never ships or runs unnoticed.
 
 ## Commands
 

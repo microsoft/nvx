@@ -1216,7 +1216,23 @@ def _validate_nvx_rs_provenance(
     return provenance
 
 
+def _require_runtime_nvx_rs() -> tuple[Path, Path]:
+    """Return the nvx-rs that nvx.py runs without building it and its
+    provenance."""
+    executable = nvx_rs.find_binary() or require_file(
+        nvx_rs.binary_path(), "nvx-rs executable"
+    )
+    provenance = require_file(
+        artifact_path(nvx_rs.PROVENANCE_NAME), "nvx-rs build provenance"
+    )
+    return executable, provenance
+
+
 def validate_runtime_artifact_provenance() -> None:
+    """Check that OpenVMM, the kernel, the Alpine initramfs, and the nvx-rs
+    that nvx.py runs match their build provenance and this checkout's
+    sources, so that nothing stale runs, such as an nvx-rs left from before a
+    change of its sources, which nvx.py never rebuilds."""
     binary = require_file(openvmm_binary_path(), "OpenVMM release binary")
     kernel = require_file(
         artifact_path(KernelBuildConstants.BINARY_NAME),
@@ -1239,6 +1255,7 @@ def validate_runtime_artifact_provenance() -> None:
         kernel_provenance_path,
         initramfs_provenance_path,
     ) = _require_runtime_provenance_paths()
+    nvx_rs_executable, nvx_rs_provenance_path = _require_runtime_nvx_rs()
     _validate_openvmm_provenance(binary, openvmm_provenance_path)
     _validate_kernel_provenance(kernel, kernel_config, kernel_provenance_path)
     _validate_initramfs_provenance(
@@ -1246,6 +1263,7 @@ def validate_runtime_artifact_provenance() -> None:
         package_manifest,
         initramfs_provenance_path,
     )
+    _validate_nvx_rs_provenance(nvx_rs_executable, nvx_rs_provenance_path, target=None)
 
 
 def _require_release_nvx_rs() -> tuple[Path, Path, dict[str, object]]:

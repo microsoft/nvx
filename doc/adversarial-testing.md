@@ -98,7 +98,8 @@ The executor:
 1. requires the exact controller NVX commit;
 2. runs `scripts/nvx.py verify`;
 3. validates and hashes the kernel, initramfs, initramfs package manifest,
-   OpenVMM executable, and provenance documents before baseline boot;
+   OpenVMM executable, the [nvx-rs](#nvx-rs-on-the-target) that the scenarios
+   run, and their provenance documents before baseline boot;
 4. starts filesystem and network canaries plus the watchdog;
 5. refuses every scenario or canary dispatch after sticky oracle evidence
    records a filesystem or network violation;
@@ -167,12 +168,23 @@ outside the home directory.
 
 A scenario's timeout includes any build, an existing nvx-rs is never rebuilt,
 and a target may have no network access for Cargo. So, before exposure, build
-both at the staged commit from the repository root:
+both at the staged commit from the repository root, and record the provenance
+of the nvx-rs build:
 
 ```bash
 cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target
 cargo test --no-run --locked --manifest-path nvx-rs/Cargo.toml --test managed_lifecycle
+python3 scripts/nvx.py record-nvx-rs-provenance
 ```
+
+Because `nvx.py` never rebuilds an nvx-rs that exists, the executor checks it
+with the other artifacts before the baseline boot: the provenance in
+`build/nvx-rs.provenance.json` must describe the nvx-rs that the scenarios
+run, the one at `NVX_RS` or else in `nvx-rs/target/release`, as built from the
+staged commit's nvx-rs sources. A stale build, or a missing one, fails the
+initialization instead of running unnoticed. Run `record-nvx-rs-provenance`
+with `NVX_RS` set when it names the build. On a target with the release built
+from the staged commit, [`download`](usage.md#download) installs both.
 
 ### Independent oracles
 
