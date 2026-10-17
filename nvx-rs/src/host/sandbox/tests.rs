@@ -51,11 +51,9 @@ fn native(path: &str) -> String {
 }
 
 #[test]
-fn launch_contract_orders_roles_and_builds_agent_command_line() {
-    let custom =
-        SandboxLayer::parse("custom,custom.erofs,22222222-2222-2222-2222-222222222222").unwrap();
+fn launch_contract_builds_agent_command_line() {
     let launch = SandboxLaunch::new(
-        vec![custom, distro()],
+        vec![distro()],
         "scratch.ext4",
         SandboxSettings {
             entrypoint: "/bin/workload".to_owned(),
@@ -73,12 +71,11 @@ fn launch_contract_orders_roles_and_builds_agent_command_line() {
         .iter()
         .map(|layer| layer.role())
         .collect();
-    assert_eq!(roles, [LayerRole::Distro, LayerRole::Custom]);
+    assert_eq!(roles, [LayerRole::Distro]);
     assert_eq!(
         launch.kernel_command_line("quiet").unwrap(),
         "quiet nvx_sandbox=1 \
          nvx_layer=distro,0xd0003000,11111111-1111-1111-1111-111111111111 \
-         nvx_layer=custom,0xd0005000,22222222-2222-2222-2222-222222222222 \
          nvx_scratch=0xd0006000,ext4 \
          nvx_entrypoint=/bin/workload nvx_hostname=example \
          nvx_arg=--serve nvx_memory_max=268435456 nvx_pids_max=65"
@@ -90,8 +87,6 @@ fn launch_contract_orders_roles_and_builds_agent_command_line() {
             "microvm",
             "--microvm-sandbox-block",
             "distro:file:distro.erofs,ro",
-            "--microvm-sandbox-block",
-            "custom:file:custom.erofs,ro",
             "--microvm-sandbox-block",
             "scratch:file:scratch.ext4",
             "--microvm-workload-identity",
@@ -147,7 +142,7 @@ fn launch_settings_are_checked_in_python_order() {
             "s.ext4",
             SandboxSettings::default()
         )),
-        "a sandbox requires one to three read-only layers"
+        "a sandbox requires exactly one read-only distro layer"
     );
     assert_eq!(
         message(SandboxLaunch::new(
@@ -155,16 +150,37 @@ fn launch_settings_are_checked_in_python_order() {
             "s.ext4",
             SandboxSettings::default()
         )),
-        "a sandbox requires one to three read-only layers"
+        "duplicate sandbox layer role(s): distro"
     );
-    let custom = SandboxLayer::parse("custom,c.erofs,11111111111111111111111111111111").unwrap();
+    // The configuration of a sandbox provisioned before microsoft/nvx#556 may name the retired
+    // roles, which no launch accepts, alone or beside the distro layer.
+    let retired = |role| SandboxLayer::new(role, "r.erofs", "22222222-2222-2222-2222-222222222222");
+    for role in [LayerRole::Runtime, LayerRole::Custom] {
+        for layers in [vec![retired(role)], vec![distro(), retired(role)]] {
+            assert_eq!(
+                message(SandboxLaunch::new(
+                    layers,
+                    "s.ext4",
+                    SandboxSettings::default()
+                )),
+                "a sandbox requires exactly one read-only distro layer"
+            );
+        }
+    }
+    // Duplicates come first, and name every repeated role.
     assert_eq!(
         message(SandboxLaunch::new(
-            vec![custom.clone(), distro(), custom],
+            vec![
+                retired(LayerRole::Custom),
+                distro(),
+                retired(LayerRole::Custom),
+                retired(LayerRole::Runtime),
+                retired(LayerRole::Runtime),
+            ],
             "s.ext4",
             SandboxSettings::default()
         )),
-        "duplicate sandbox layer role(s): custom"
+        "duplicate sandbox layer role(s): custom, runtime"
     );
     // The entrypoint is checked before the hostname.
     for entrypoint in ["bin/sh", "/bin/s h", "/bin/sh\x1c"] {
@@ -880,7 +896,7 @@ fn launch_validation_requires_the_layers_and_the_scratch_image() {
     let fixture = Fixture::new();
     let missing = SandboxLaunch::new(
         vec![SandboxLayer::new(
-            LayerRole::Runtime,
+            LayerRole::Distro,
             &fixture.path("missing.erofs"),
             "11111111-1111-1111-1111-111111111111",
         )],
@@ -893,7 +909,7 @@ fn launch_validation_requires_the_layers_and_the_scratch_image() {
     assert_eq!(
         error.to_string(),
         format!(
-            "runtime EROFS layer not found: {}",
+            "distro EROFS layer not found: {}",
             fixture.path("missing.erofs")
         )
     );

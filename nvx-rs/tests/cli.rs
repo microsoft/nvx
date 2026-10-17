@@ -521,6 +521,36 @@ fn start_requires_the_guest_features_of_layered_sandboxes() {
 }
 
 #[test]
+fn a_sandbox_of_a_retired_layer_role_does_not_start() {
+    // An older nvx.py provisioned sandboxes with runtime and custom layers, which a sandbox no
+    // longer takes (microsoft/nvx#556): their configuration still reads, and the launch refuses
+    // it before OpenVMM starts.
+    let root = populated_root();
+    let output = run(&root, &provision(&root, "retired", ""));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let config = root.path.join("retired").join("config.json");
+    let mut document: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    document["layers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "path": root.path.join("runtime.erofs").to_str().unwrap(),
+            "role": "runtime",
+            "uuid": "22222222-2222-2222-2222-222222222222",
+        }));
+    fs::write(&config, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+    let output = run(&root, &lifecycle("start", &root, "retired"));
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stderr),
+        "error: a sandbox requires exactly one read-only distro layer\n"
+    );
+    assert!(!root.path.join("retired").join("runtime.json").exists());
+    let output = run(&root, &lifecycle("deprovision", &root, "retired"));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+}
+
+#[test]
 fn artifacts_default_to_the_checkout_that_holds_the_executable() {
     let output = Command::new(NVX_RS)
         .arg("artifacts")

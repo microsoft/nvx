@@ -1,12 +1,12 @@
-//! The sandbox launch profile: a microVM that runs one workload in a container over read-only
-//! EROFS layers and a private ext4 scratch disk, with live virtio-fs shares.
+//! The sandbox launch profile: a microVM that runs one workload in a container over a read-only
+//! EROFS distro layer and a private ext4 scratch disk, with live virtio-fs shares.
 //!
 //! This is the profile of `nvx.py sandbox`, ported from the launch profile that
 //! `scripts/nvx_tools/sandbox.py` held until microsoft/nvx#359, with its limits, option
 //! semantics, OpenVMM arguments, kernel command line, and messages:
 //!
-//! - [`SandboxLayer`]: one to three EROFS layers, `ROLE,PATH,EROFS_UUID`, each of a
-//!   [`LayerRole`], which the guest stacks in role order on its own block device.
+//! - [`SandboxLayer`]: the EROFS distro layer, `ROLE,PATH,EROFS_UUID`, the one
+//!   [`LayerRole`] that a sandbox takes (microsoft/nvx#556), on its own block device.
 //! - [`SandboxMount`]: a live share of a host directory or regular file at a guest target, with
 //!   its access mode, owner, and access-policy paths; [`mount`] holds the rules of guest targets,
 //!   the aggregate of several shares, and the checks of host paths.
@@ -171,9 +171,9 @@ impl SandboxLaunch {
     /// `pathlib.Path` normalizes it.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), checking in this
-    /// order: one to three layers, no duplicate roles, the entrypoint, the arguments, the
-    /// hostname, a non-root identity, positive limits, and shares whose targets do not overlap
-    /// and that have one owner.
+    /// order: no duplicate roles, exactly one layer, the distro layer, the entrypoint, the
+    /// arguments, the hostname, a non-root identity, positive limits, and shares whose targets do
+    /// not overlap and that have one owner.
     pub fn new(
         layers: Vec<SandboxLayer>,
         scratch: &str,
@@ -189,10 +189,8 @@ impl SandboxLaunch {
         scratch: &str,
         settings: SandboxSettings,
     ) -> Result<Self> {
-        if !(1..=LAYER_ROLES.len()).contains(&layers.len()) {
-            return Err(refused("a sandbox requires one to three read-only layers"));
-        }
-        let mut duplicates: Vec<&str> = LAYER_ROLES
+        // A configuration may name a retired role, so the duplicates are those of every role.
+        let mut duplicates: Vec<&str> = layer::KNOWN_LAYER_ROLES
             .iter()
             .filter(|&&role| layers.iter().filter(|layer| layer.role() == role).count() > 1)
             .map(|role| role.as_str())
@@ -203,6 +201,11 @@ impl SandboxLaunch {
                 "duplicate sandbox layer role(s): {}",
                 duplicates.join(", ")
             )));
+        }
+        if !matches!(&layers[..], [layer] if layer.role() == LayerRole::Distro) {
+            return Err(refused(
+                "a sandbox requires exactly one read-only distro layer",
+            ));
         }
         let SandboxSettings {
             entrypoint,
@@ -293,7 +296,8 @@ impl SandboxLaunch {
         mount::validate_mount_host_paths_with(&self.settings.mounts, host)
     }
 
-    /// Returns the layers in role order: distro, runtime, then custom.
+    /// Returns the layers in role order, which is the distro layer alone, since a launch holds
+    /// only it.
     pub fn ordered_layers(&self) -> Vec<&SandboxLayer> {
         LAYER_ROLES
             .iter()

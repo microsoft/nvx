@@ -20,6 +20,7 @@ use super::options::{
 };
 use super::*;
 use crate::host::python::golden::{Mismatches, cases, fixture, flavor, hex, text, texts};
+use crate::host::python::uuid::parse_uuid;
 
 /// Returns the message of a result's error, or `None` if it succeeded.
 fn error<T>(result: &Result<T>) -> Option<String> {
@@ -73,6 +74,23 @@ fn outcome(case: &Value, key: &str) -> std::result::Result<Value, String> {
         Some(Value::String(message)) => Err(message.clone()),
         _ => Ok(case[key].clone()),
     }
+}
+
+/// Returns the layer of a launch's recorded `--layer` value.
+///
+/// The generator recorded launches of every role, and a sandbox now takes only the distro layer
+/// (microsoft/nvx#556), which `--layer` alone accepts. A layer of a retired role is therefore the
+/// one that the configuration of a sandbox provisioned before then names, which the launch
+/// refuses, as the records of those launches say.
+fn recorded_layer(flavor: Flavor, value: &str) -> SandboxLayer {
+    SandboxLayer::parse_in(flavor, value).unwrap_or_else(|_| {
+        let [role, path, uuid] = value.split(',').collect::<Vec<_>>()[..] else {
+            panic!("the generator records launches whose layers parse: {value}");
+        };
+        let role = LayerRole::from_name(role).expect("a retired role");
+        let uuid = parse_uuid(uuid).expect("the UUID of a recorded layer");
+        SandboxLayer::new_in(flavor, role, path, uuid)
+    })
 }
 
 #[test]
@@ -184,9 +202,8 @@ fn launches_give_the_arguments_and_command_lines_that_python_gives() {
         let flavor = flavor(case);
         let layers = texts(case, "layers")
             .iter()
-            .map(|value| SandboxLayer::parse_in(flavor, value))
-            .collect::<Result<Vec<_>>>()
-            .expect("the generator records launches whose layers parse");
+            .map(|value| recorded_layer(flavor, value))
+            .collect();
         let mounts = case["mounts"]
             .as_array()
             .unwrap()
