@@ -18,6 +18,29 @@ python3 scripts/nvx.py run --help
 python3 scripts/nvx.py performance gate --help
 ```
 
+## nvx-rs
+
+`nvx.py` runs [`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli), the Rust
+implementation of NVX's runtime steps, for the [`sandbox`](#sandbox) command,
+which it runs entirely, and for the egress-policy and artifact steps of
+[`run`](#run). It runs, in this order:
+
+1. the executable that the `NVX_RS` environment variable names;
+2. `nvx-rs/target/release/nvx-rs`, or `nvx-rs.exe` on Windows, in the
+   checkout, where `cargo build --release` puts it; or else
+3. that executable, after it builds it from the repository root with
+   `cargo build --release --locked --features cli --manifest-path
+   nvx-rs/Cargo.toml --target-dir nvx-rs/target`, the Rust release that
+   `rust-toolchain.toml` pins, and Cargo's output on standard error, so that
+   it never mixes with the output of the command.
+
+Without `NVX_RS`, a built executable, or Cargo, such a command fails and names
+these choices; [rustup](https://rustup.rs) installs Cargo. `nvx.py` rebuilds
+nothing on its own once the executable exists, so run the build command again,
+or delete the executable, after changing `nvx-rs`. The `managed-lifecycle`
+scenario of [`test-microvm`](#test-microvm) also needs Cargo, which runs its
+`nvx-rs` test.
+
 ## Commands
 
 | Command | Description |
@@ -384,9 +407,14 @@ only the same-host restore scenarios `smp`, `smp-snapshot`,
 test hook, which makes OpenVMM's default CPU profile selection, `auto`, fall
 back to a host profile on a host that a built-in profile serves, checks the
 fallback's warning, captures the guest, and restores it on the snapshot's host
-profile. The command
-requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug` and its
-`build/vmlinux-debug.config`), the selected initramfs, and
+profile. The `managed-lifecycle` scenario boots a guest whose init hands
+the boot to the managed agent, and runs the ignored `nvx-rs` test
+`tests/managed_lifecycle.rs` with Cargo, which starts OpenVMM with the
+scenario's command line and drives the guest's control session; the scenario
+then checks OpenVMM's outcome report and the guest console. The scenarios that
+drive `sandbox`, or that compile egress policies, run [`nvx-rs`](#nvx-rs). The
+command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`
+and its `build/vmlinux-debug.config`), the selected initramfs, and
 `openvmm/target/release/openvmm[.exe]`.
 
 ### `doctor`
@@ -639,9 +667,11 @@ python3 scripts/nvx.py run
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 
 The command requires the OpenVMM release binary, `build/vmlinux`, and the
-selected `build/initramfs*.cpio.gz`. Ubuntu selection never falls back to
-Alpine. See [Run](run.md) for host setup, guest shutdown, networking, and
-virtio-fs examples.
+selected `build/initramfs*.cpio.gz`, which it looks up with `nvx-rs artifacts`,
+and compiles `--network-egress-policy-file` with `nvx-rs egress compile`; see
+[nvx-rs](#nvx-rs). It builds and runs the OpenVMM command itself. Ubuntu
+selection never falls back to Alpine. See [Run](run.md) for host setup, guest
+shutdown, networking, and virtio-fs examples.
 
 If no built-in CPU profile serves an Intel or AMD host's CPU, OpenVMM falls
 back to a host profile and warns with `NVX-CPU-PROFILE-FALLBACK:` at every
@@ -702,6 +732,16 @@ python3 scripts/nvx.py sandbox
 
 Network policy and live-share options configure only the `run` and `provision`
 launches.
+
+`sandbox` runs `nvx-rs sandbox` (see [nvx-rs](#nvx-rs)) with the operation and
+the options given, and its exit status is the command's: 1 for an error, 2 for
+a usage error, 130 after Ctrl-C, and otherwise the status that the workload or
+OpenVMM returns. `nvx.py` parses the options only for its help and for the
+usage errors of unknown options, invalid choices, and missing values, so it
+still accepts abbreviated options, which it passes to `nvx-rs` in full.
+`nvx-rs` checks their values, and its usage and messages name
+`nvx.py sandbox`; its usage text wraps at 80 columns whatever the terminal's
+width.
 
 | Option | Default | Description |
 | --- | --- | --- |

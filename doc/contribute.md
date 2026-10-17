@@ -100,7 +100,13 @@ devices. Add those scenarios to
 The scenarios that drive the public `nvx.py sandbox` commands live in
 `scripts/nvx_tools/managed_exec_tests.py` and
 `scripts/nvx_tools/sandbox_lifecycle_tests.py`, and `microvm_tests.py`
-registers them.
+registers them. `nvx.py sandbox` and the control protocol belong to `nvx-rs`
+([microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359)), so the
+scenarios drive them as commands, compile egress policies with
+`nvx-rs egress compile`, and leave the control session to `nvx-rs`: the
+`managed-lifecycle` scenario builds OpenVMM's command line and runs the ignored
+`nvx-rs` test `tests/managed_lifecycle.rs`, which drives the guest. Add no
+Python client of the control protocol, lifecycle, or egress logic.
 
 Unit tests for the host tooling live in `scripts/test_*.py`. The
 `aci_edge_sandboxes` and `nvx-rs` crates keep unit tests alongside their Rust

@@ -159,6 +159,16 @@ cd nvx-rs
 cargo build --release --features cli   # target/release/nvx-rs
 ```
 
+`nvx.py` runs the executable that `NVX_RS` names, else
+`nvx-rs/target/release/nvx-rs[.exe]` of its checkout, and else builds that one
+with Cargo first, with its output on standard error; see
+[Usage](../doc/usage.md#nvx-rs). It runs `nvx-rs --root REPOSITORY --prog
+"nvx.py sandbox" sandbox OPERATION OPTIONS` with the options that the user
+gave, in full, and the standard streams and exit status of the command;
+`nvx-rs egress compile PATH` and `nvx-rs --root REPOSITORY artifacts` for
+`nvx.py run`; and `nvx-rs egress compile PATH` for the egress scenarios of
+`nvx.py test-microvm`.
+
 Errors print `error: MESSAGE` to standard error and exit with status 1, as
 `nvx.py` reports a `ScriptError`. Usage errors print the parser's usage and
 `PROG: error: MESSAGE` and exit with status 2, as `argparse` does, and help
@@ -512,3 +522,16 @@ rustdoc with warnings denied, the minimum supported Rust version (1.89), and a
 macOS check. On Linux, it also lints, builds, and tests the guest binaries
 through `nvx.py`. `python3 scripts/nvx.py test-aci-edge-sandboxes --backend kvm`
 exercises the crate on a real hypervisor through `aci_edge_sandboxes`.
+
+`tests/managed_lifecycle.rs` is an ignored test of the managed lifecycle of a
+guest whose init hands the boot to the managed agent, on a real hypervisor:
+authenticated sessions and reconnects, request-scoped working directories and
+environments, the workload identity, timeouts, refused working directories,
+and stop, which `nvx::host::session` drives. `nvx.py test-microvm --scenario
+managed-lifecycle` builds OpenVMM's command line for its guest and backend,
+runs the test with Cargo, and checks the outcome report and the guest console
+that it leaves:
+
+```bash
+python3 ../scripts/nvx.py test-microvm --backend kvm --scenario managed-lifecycle
+```
