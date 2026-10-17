@@ -671,6 +671,47 @@ def _packaged_guest_artifact_names(package_root: Path) -> list[str]:
     return names
 
 
+def _install_executable(source: Path, destination: Path) -> None:
+    _replace_runtime_file(source, destination)
+    if os.name != "nt":
+        destination.chmod(0o755)
+
+
+def _packaged_nvx_rs(
+    package_root: Path, package_name: str
+) -> tuple[tuple[Path, Path] | None, str]:
+    """Return the package's nvx-rs and its provenance if the provenance shows
+    the build of this checkout's nvx-rs sources that nvx.py runs, and
+    otherwise None, with the reason.
+
+    nvx.py runs the nvx-rs that download installs without rebuilding it, so an
+    nvx-rs of other sources, such as that of an older release or of a checkout
+    whose nvx-rs changed, or with other features, would run with this
+    checkout's nvx.py. A package whose nvx-rs does not match its own
+    provenance is broken, and fails.
+    """
+    name = nvx_rs.binary_path().name
+    executable = package_root / "bin" / name
+    provenance = package_root / "provenance" / nvx_rs.PROVENANCE_NAME
+    if not executable.is_file():
+        return None, f"{package_name} ships no bin/{name}"
+    if not provenance.is_file():
+        return None, f"{package_name} ships no provenance for its bin/{name}"
+    target = nvx_rs.release_target()
+    record = _read_json_object(provenance, "packaged nvx-rs build provenance")
+    if not _describes_checkout_nvx_rs(record, target=target):
+        return (
+            None,
+            f"the bin/{name} of {package_name} is not the {target} build of this "
+            "checkout's nvx-rs sources that nvx.py runs",
+        )
+    if record.get("executable_sha256") != sha256_file(executable):
+        raise ScriptError(
+            f"the bin/{name} of {package_name} does not match its build provenance"
+        )
+    return (executable, provenance), ""
+
+
 def _install_release_archive(archive_path: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="nvx-release-") as temporary:
         extraction_root = Path(temporary)
@@ -706,7 +747,10 @@ def _install_release_archive(archive_path: Path) -> None:
                 InitramfsBuildConstants.PROVENANCE_NAME,
             )
         }
-        _replace_runtime_file(binary_source, binary_destination)
+        packaged_nvx_rs, nvx_rs_skipped = _packaged_nvx_rs(
+            package_root, archive_path.name
+        )
+        _install_executable(binary_source, binary_destination)
         for name, source in guest_sources.items():
             _replace_runtime_file(source, artifact_path(name))
         for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
@@ -714,6 +758,21 @@ def _install_release_archive(archive_path: Path) -> None:
                 artifact_path(name).unlink(missing_ok=True)
         for name, source in provenance_sources.items():
             _replace_runtime_file(source, artifact_path(name))
+        nvx_rs_provenance = artifact_path(nvx_rs.PROVENANCE_NAME)
+        if packaged_nvx_rs is None:
+            # Remove the nvx-rs that an earlier download or build left, which
+            # may not match this checkout, so that nvx.py builds one from it.
+            nvx_rs.binary_path().unlink(missing_ok=True)
+            nvx_rs_provenance.unlink(missing_ok=True)
+            print(
+                f">> {nvx_rs_skipped}, so nvx.py builds nvx-rs from this checkout "
+                f"with Cargo when a command needs it, unless {nvx_rs.VARIABLE} "
+                "names one"
+            )
+        else:
+            executable, provenance = packaged_nvx_rs
+            _install_executable(executable, nvx_rs.binary_path())
+            _replace_runtime_file(provenance, nvx_rs_provenance)
 
 
 def download_checkout_release(repository: str, platform: str) -> None:

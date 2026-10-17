@@ -27,14 +27,18 @@ which it runs entirely, and for the egress-policy and artifact steps of
 
 1. the executable that the `NVX_RS` environment variable names;
 2. `nvx-rs/target/release/nvx-rs`, or `nvx-rs.exe` on Windows, in the
-   checkout, where `cargo build --release` puts it; or else
+   checkout, where `cargo build --release` puts it, and where
+   [`download`](#download) installs the `nvx-rs` of a release; or else
 3. that executable, after it builds it from the repository root with
    `cargo build --release --locked --features cli --manifest-path
    nvx-rs/Cargo.toml --target-dir nvx-rs/target`, the Rust release that
    `rust-toolchain.toml` pins, and Cargo's output on standard error, so that
    it never mixes with the output of the command.
 
-Without `NVX_RS`, a built executable, or Cargo, such a command fails and names
+After `download`, `nvx.py` needs no Cargo: every release package ships
+`bin/nvx-rs`, or `bin/nvx-rs.exe`, which `download` installs when the
+release was built from the checkout's `nvx-rs` sources. Without `NVX_RS`, a
+built or installed executable, or Cargo, such a command fails and names
 these choices; [rustup](https://rustup.rs) installs Cargo. `nvx.py` rebuilds
 nothing on its own once the executable exists, so run the build command again,
 or delete the executable, after changing `nvx-rs`. The `managed-lifecycle`
@@ -46,7 +50,7 @@ The provenance of the `nvx-rs` that `nvx.py` runs,
 digest of the `nvx-rs` sources that built it, the crate's manifest, lock
 file, build script, and `src/` tree and `rust-toolchain.toml`, and to the
 Rust release, target, and Cargo features of the build. `nvx.py` records it
-when it builds `nvx-rs`, and
+when it builds `nvx-rs`, `download` installs a release's, and
 [`record-nvx-rs-provenance`](#record-nvx-rs-provenance) records it for a
 build made otherwise. [`package`](#package) refuses an `nvx-rs` that it does
 not describe as built from the checkout's sources, so a stale build never
@@ -622,7 +626,22 @@ checkout to install a newer release.
 
 Installing a release replaces the packaged guest artifacts under `build/` and
 removes any known guest artifact that the release does not declare, such as the
-Azure Linux guest that source-inclusive packages omit.
+Azure Linux guest that source-inclusive packages omit. It installs the
+packaged OpenVMM at `openvmm/target/release/openvmm[.exe]` and the packaged
+`nvx-rs` at `nvx-rs/target/release/nvx-rs[.exe]`, both executable, with their
+provenance in `build/`, so that [`run`](#run) and [`sandbox`](#sandbox) need
+no Cargo.
+
+`download` installs the packaged `nvx-rs` only when its provenance describes
+the build of the checkout's `nvx-rs` sources that `nvx.py` runs, with the Rust
+release that the checkout pins, the release target, and the `cli` feature,
+because `nvx.py` runs that executable without rebuilding it. A fallback
+release built from other `nvx-rs` sources, and a release from before packages
+shipped `nvx-rs`, still install everything else: `download` then removes any
+earlier `nvx-rs` and its provenance and reports why, and `nvx.py` builds
+`nvx-rs` from the checkout with Cargo when a command needs it; see
+[nvx-rs](#nvx-rs). A package whose `nvx-rs` does not match its own provenance
+fails the download before it replaces anything.
 
 Windows release downloads support WHP. Linux release downloads support KVM
 and MSHV. `download` first uses `GH_TOKEN` or `GITHUB_TOKEN` when configured.

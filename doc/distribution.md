@@ -115,6 +115,16 @@ it writes a `.tar.gz` or `.zip` archive outside the staged directory; see
 packaged file, `bin/nvx-rs[.exe]` and its provenance included, and every
 archive marks the executables in `bin/` executable.
 
+[`download`](usage.md#download) verifies the package against its `SHA256SUMS`
+and installs OpenVMM, the guest artifacts, their provenance, and `nvx-rs` into
+the checkout, `nvx-rs` at `nvx-rs/target/release/nvx-rs[.exe]` with its
+provenance in `build/`, so that `nvx.py run` and `nvx.py sandbox` need no
+Cargo. It installs `nvx-rs` only when its provenance describes the build of
+the checkout's `nvx-rs` sources that `nvx.py` runs. Releases from before
+packages shipped `nvx-rs` remain installable: `download` installs the rest and
+leaves `nvx.py` to build `nvx-rs` with Cargo, as it does for a fallback
+release whose `nvx-rs` sources differ from the checkout's.
+
 CI follows the binary-only path. On a `dev` push, or a ready pull request from
 a branch of this repository, that changes more than documentation, the
 `linux-kvm`, `linux-mshv`, and `windows-whp` platform jobs each stage

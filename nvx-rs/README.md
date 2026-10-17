@@ -166,13 +166,15 @@ provenance in `provenance/nvx-rs.provenance.json`
 ([Package and source delivery](../doc/distribution.md)). The `nvx-rs` of an
 extracted release runs as is: without `--root`, it uses the release that holds
 it; see [Artifact root](#artifact-root).
+[`nvx.py download`](../doc/usage.md#download) installs it in a checkout of the
+sources that built it, so that `nvx.py` runs it without Cargo.
 
 `nvx.py` runs the executable that `NVX_RS` names, else
 `nvx-rs/target/release/nvx-rs[.exe]` of its checkout, and else builds that one
 with Cargo first, with its output on standard error; see
 [Usage](../doc/usage.md#nvx-rs). `nvx.py` records the provenance of the builds
-that it makes, and `nvx.py record-nvx-rs-provenance` that of a build made
-otherwise. It runs `nvx-rs --root REPOSITORY --prog
+that it makes and installs, and `nvx.py record-nvx-rs-provenance` that of a
+build made otherwise. It runs `nvx-rs --root REPOSITORY --prog
 "nvx.py sandbox" sandbox OPERATION OPTIONS` with the options that the user
 gave, in full, and the standard streams and exit status of the command;
 `nvx-rs egress compile PATH` and `nvx-rs --root REPOSITORY artifacts` for

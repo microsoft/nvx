@@ -6,7 +6,8 @@ steps of `nvx.py run` (nvx-rs/README.md). It runs, in this order:
 
 1. the executable that the NVX_RS environment variable names;
 2. nvx-rs/target/release/nvx-rs[.exe] in this checkout, where `cargo build
-   --release` puts it; or else
+   --release` puts it, and where `nvx.py download` installs the nvx-rs of a
+   release built from this checkout's nvx-rs sources; or else
 3. that executable, after it builds it with Cargo, whose output goes to
    standard error so that it never mixes with the output of the command.
 
@@ -19,7 +20,8 @@ binds it to its source revision. nvx.py records it for the nvx-rs that it
 builds, and `nvx.py record-nvx-rs-provenance` for one built otherwise.
 Packaging rejects an nvx-rs that it does not describe as built from this
 checkout's sources. Releases ship nvx-rs as bin/nvx-rs[.exe], built for
-RELEASE_TARGETS with FEATURES, with its provenance.
+RELEASE_TARGETS with FEATURES, with its provenance, and `nvx.py download`
+installs both only when that provenance names this checkout's sources.
 """
 
 from __future__ import annotations
@@ -96,9 +98,8 @@ def binary_path() -> Path:
     """Return the nvx-rs of this checkout, nvx-rs/target/release/nvx-rs[.exe],
     where BUILD_COMMAND puts it.
 
-    This is also where a release's bin/nvx-rs[.exe] belongs once `nvx.py
-    download` installs it, as it installs bin/openvmm[.exe] where the OpenVMM
-    build puts it.
+    This is also where `nvx.py download` installs a release's bin/nvx-rs[.exe],
+    as it installs bin/openvmm[.exe] where the OpenVMM build puts it.
     """
     name = f"{BINARY_NAME}.exe" if os.name == "nt" else BINARY_NAME
     return DIRECTORY / "target" / "release" / name
@@ -209,8 +210,9 @@ def _format_command(command: Sequence[str]) -> str:
 def _missing_cargo_message() -> str:
     return (
         f"nvx-rs is not built at {binary_path()}, and Cargo is not on PATH to "
-        f"build it: set {VARIABLE} to an nvx-rs executable, install a release "
-        "that includes it with `nvx.py download`, or install Rust "
+        f"build it: set {VARIABLE} to an nvx-rs executable, install the nvx-rs "
+        "of a release built from this checkout's nvx-rs sources with "
+        "`nvx.py download`, or install Rust "
         "(https://rustup.rs) and build it from the repository root with "
         f"`{_format_command(BUILD_COMMAND)}`"
     )

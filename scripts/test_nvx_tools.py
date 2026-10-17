@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 import uuid
 import zipfile
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import cast
 from unittest.mock import MagicMock, call, patch
@@ -16479,6 +16479,17 @@ def _missing_release() -> urllib.error.HTTPError:
 
 
 class ReleaseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # Installing a release replaces or removes nvx-rs; no test may do
+        # either to the nvx-rs of this checkout.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.nvx_rs_path = Path(temporary.name) / nvx_rs.binary_path().name
+        patcher = patch.object(nvx_rs, "binary_path", return_value=self.nvx_rs_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_alpine_source_validation_rejects_malformed_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             source_dir = Path(temporary)
@@ -18132,59 +18143,98 @@ class ReleaseTests(unittest.TestCase):
             )
             self.assertFalse(staging.exists())
 
+    def _runtime_release_archive(
+        self,
+        root: Path,
+        *,
+        nvx_rs_contents: bytes | None,
+        nvx_rs_provenance: Mapping[str, object] | None,
+    ) -> Path:
+        """Write the archive of a binary package for this OS, with or without
+        nvx-rs, and with or without its provenance, which `nvx_rs_provenance`
+        changes from the record of a build of this checkout's sources."""
+        package_root = root / "package" / "nvx-1.2.3-test"
+        binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+        binary = package_root / "bin" / binary_name
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"openvmm")
+        for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
+            guest = package_root / "guest" / name
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_bytes(name.encode("ascii"))
+        for name in (
+            OpenVMMBuildConstants.PROVENANCE_NAME,
+            KernelBuildConstants.PROVENANCE_NAME,
+            InitramfsBuildConstants.PROVENANCE_NAME,
+        ):
+            provenance = package_root / "provenance" / name
+            provenance.parent.mkdir(parents=True, exist_ok=True)
+            provenance.write_bytes(name.encode("ascii"))
+        if nvx_rs_contents is not None:
+            packaged_nvx_rs = package_root / "bin" / self.nvx_rs_path.name
+            packaged_nvx_rs.write_bytes(nvx_rs_contents)
+            # The installed nvx-rs is executable, whatever mode the archive
+            # records.
+            packaged_nvx_rs.chmod(0o644)
+            if nvx_rs_provenance is not None:
+                record = nvx_rs.provenance_record(
+                    packaged_nvx_rs, nvx_rs.release_target()
+                )
+                record.update(nvx_rs_provenance)
+                (package_root / "provenance" / nvx_rs.PROVENANCE_NAME).write_text(
+                    json.dumps(record), encoding="utf-8"
+                )
+        (package_root / "SOURCE-MANIFEST.json").write_text(
+            json.dumps({"linux": {}, "alpine": {}, "ubuntu": {}, "azurelinux": {}}),
+            encoding="utf-8",
+        )
+        common.write_sha256_sums(package_root)
+        if os.name == "nt":
+            archive_path = root / "nvx-1.2.3-windows-whp.zip"
+            with zipfile.ZipFile(archive_path, "w") as package:
+                for path in package_root.rglob("*"):
+                    package.write(path, path.relative_to(package_root.parent))
+        else:
+            archive_path = root / "nvx-1.2.3-linux-kvm.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as package:
+                package.add(package_root, arcname=package_root.name)
+        return archive_path
+
+    def _install_runtime_archive(self, root: Path, archive_path: Path) -> str:
+        """Install the archive into the runtime directory below `root`, and
+        return what the installer printed."""
+        binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+        with (
+            patch.object(
+                release,
+                "artifact_path",
+                side_effect=(root / "runtime" / "build").joinpath,
+            ),
+            patch.object(
+                release,
+                "openvmm_binary_path",
+                return_value=root / "runtime" / "openvmm" / binary_name,
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            release._install_release_archive(archive_path)
+        return stdout.getvalue()
+
     def test_release_archive_installs_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            package_root = root / "package" / "nvx-1.2.3-test"
-            binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
-            binary = package_root / "bin" / binary_name
-            binary.parent.mkdir(parents=True)
-            binary.write_bytes(b"openvmm")
-            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
-                guest = package_root / "guest" / name
-                guest.parent.mkdir(parents=True, exist_ok=True)
-                guest.write_bytes(name.encode("ascii"))
-            for name in (
-                OpenVMMBuildConstants.PROVENANCE_NAME,
-                KernelBuildConstants.PROVENANCE_NAME,
-                InitramfsBuildConstants.PROVENANCE_NAME,
-            ):
-                provenance = package_root / "provenance" / name
-                provenance.parent.mkdir(parents=True, exist_ok=True)
-                provenance.write_bytes(name.encode("ascii"))
-            common.write_sha256_sums(package_root)
-
-            if os.name == "nt":
-                archive_path = root / "nvx-1.2.3-windows-whp.zip"
-                with zipfile.ZipFile(archive_path, "w") as package:
-                    for path in package_root.rglob("*"):
-                        package.write(path, path.relative_to(package_root.parent))
-            else:
-                archive_path = root / "nvx-1.2.3-linux-kvm.tar.gz"
-                with tarfile.open(archive_path, "w:gz") as package:
-                    package.add(package_root, arcname=package_root.name)
-
+            archive_path = self._runtime_release_archive(
+                root, nvx_rs_contents=b"nvx-rs", nvx_rs_provenance={}
+            )
             build_dir = root / "runtime" / "build"
             binary_destination = (
-                root / "runtime" / "openvmm" / "target" / "release" / binary_name
+                root
+                / "runtime"
+                / "openvmm"
+                / ("openvmm.exe" if os.name == "nt" else "openvmm")
             )
 
-            def artifact_path(name: str) -> Path:
-                return build_dir / name
-
-            with (
-                patch.object(
-                    release,
-                    "artifact_path",
-                    side_effect=artifact_path,
-                ),
-                patch.object(
-                    release,
-                    "openvmm_binary_path",
-                    return_value=binary_destination,
-                ),
-            ):
-                release._install_release_archive(archive_path)
+            output = self._install_runtime_archive(root, archive_path)
 
             self.assertEqual(binary_destination.read_bytes(), b"openvmm")
             for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
@@ -18201,6 +18251,123 @@ class ReleaseTests(unittest.TestCase):
                     (build_dir / name).read_bytes(),
                     name.encode("ascii"),
                 )
+            # nvx-rs, which this checkout's sources built, goes where nvx.py
+            # finds it, executable, with its provenance beside OpenVMM's.
+            self.assertEqual(self.nvx_rs_path.read_bytes(), b"nvx-rs")
+            self.assertEqual(output, "")
+            if os.name != "nt":
+                self.assertEqual(self.nvx_rs_path.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(binary_destination.stat().st_mode & 0o777, 0o755)
+            installed_provenance = build_dir / nvx_rs.PROVENANCE_NAME
+            self.assertEqual(
+                json.loads(installed_provenance.read_text(encoding="utf-8")),
+                nvx_rs.provenance_record(self.nvx_rs_path, nvx_rs.release_target()),
+            )
+            release._validate_nvx_rs_provenance(
+                self.nvx_rs_path, installed_provenance, target=None
+            )
+            # nvx.py then runs it without Cargo.
+            with (
+                _without_nvx_rs_variable(),
+                patch("shutil.which", return_value=None),
+                patch("subprocess.run") as run,
+            ):
+                self.assertEqual(nvx_rs.require_binary(), self.nvx_rs_path)
+            run.assert_not_called()
+
+    def test_release_archive_leaves_nvx_rs_of_other_sources_to_cargo(self):
+        # nvx.py runs the nvx-rs that download installs without rebuilding it,
+        # so download installs only the build of the checkout's nvx-rs sources
+        # that nvx.py runs, and removes an earlier one and its provenance, so
+        # that nvx.py builds nvx-rs from the checkout instead. Releases that
+        # predate nvx-rs install too.
+        name = self.nvx_rs_path.name
+        archive_name = (
+            "nvx-1.2.3-windows-whp.zip"
+            if os.name == "nt"
+            else "nvx-1.2.3-linux-kvm.tar.gz"
+        )
+        target = nvx_rs.release_target()
+        other_target = (
+            "x86_64-unknown-linux-gnu"
+            if target == nvx_rs.RELEASE_TARGETS["linux"]
+            else nvx_rs.RELEASE_TARGETS["linux"]
+        )
+        other_build = (
+            f"the bin/{name} of {archive_name} is not the {target} build of this "
+            "checkout's nvx-rs sources that nvx.py runs"
+        )
+        cases: tuple[tuple[str, bytes | None, dict[str, object] | None, str], ...] = (
+            ("older release", None, None, f"{archive_name} ships no bin/{name}"),
+            (
+                "no provenance",
+                b"nvx-rs",
+                None,
+                f"{archive_name} ships no provenance for its bin/{name}",
+            ),
+            ("other sources", b"nvx-rs", {"source_sha256": "0" * 64}, other_build),
+            ("other Rust release", b"nvx-rs", {"toolchain": "1.0.0"}, other_build),
+            ("other features", b"nvx-rs", {"features": ["cli", "x"]}, other_build),
+            ("other target", b"nvx-rs", {"target": other_target}, other_build),
+            ("other format", b"nvx-rs", {"format": 2}, other_build),
+        )
+        for case, contents, provenance, reason in cases:
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                archive_path = self._runtime_release_archive(
+                    root, nvx_rs_contents=contents, nvx_rs_provenance=provenance
+                )
+                build_dir = root / "runtime" / "build"
+                build_dir.mkdir(parents=True)
+                stale_provenance = build_dir / nvx_rs.PROVENANCE_NAME
+                stale_provenance.write_text("{}", encoding="utf-8")
+                self.nvx_rs_path.write_bytes(b"stale nvx-rs")
+
+                output = self._install_runtime_archive(root, archive_path)
+
+                self.assertTrue(
+                    (build_dir / KernelBuildConstants.BINARY_NAME).is_file()
+                )
+                self.assertFalse(self.nvx_rs_path.exists())
+                self.assertFalse(stale_provenance.exists())
+                self.assertIn(reason, output)
+                self.assertIn(
+                    "so nvx.py builds nvx-rs from this checkout with Cargo when a "
+                    "command needs it, unless NVX_RS names one",
+                    output,
+                )
+                # Without Cargo, nvx.py names the ways to get nvx-rs.
+                with (
+                    _without_nvx_rs_variable(),
+                    patch("shutil.which", return_value=None),
+                    self.assertRaisesRegex(common.ScriptError, "nvx.py download"),
+                ):
+                    nvx_rs.require_binary()
+
+    def test_release_archive_with_inconsistent_nvx_rs_installs_nothing(self):
+        # A package whose nvx-rs does not match its own provenance is broken,
+        # so download fails before it replaces anything.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = self._runtime_release_archive(
+                root,
+                nvx_rs_contents=b"nvx-rs",
+                nvx_rs_provenance={"executable_sha256": "0" * 64},
+            )
+            self.nvx_rs_path.write_bytes(b"earlier nvx-rs")
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                re.escape(
+                    f"the bin/{self.nvx_rs_path.name} of {archive_path.name} does "
+                    "not match its build provenance"
+                ),
+            ):
+                self._install_runtime_archive(root, archive_path)
+            self.assertFalse((root / "runtime").exists())
+            self.assertEqual(self.nvx_rs_path.read_bytes(), b"earlier nvx-rs")
 
     def test_source_release_archive_removes_stale_azure_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -18262,6 +18429,7 @@ class ReleaseTests(unittest.TestCase):
                     "openvmm_binary_path",
                     return_value=binary_destination,
                 ),
+                contextlib.redirect_stdout(io.StringIO()),
             ):
                 release._install_release_archive(archive_path)
 
