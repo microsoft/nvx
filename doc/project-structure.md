@@ -101,11 +101,11 @@ nvx/
 |   |   |-- protocol/            Control-console codec shared by the host and the guest
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
-|   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VM instances, and the sandbox launch profile
+|   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VM instances, the sandbox launch profile, and the `nvx-rs` CLI (feature `cli`)
 |   |   |-- testing/             Fake OpenVMM (feature `testing`)
 |   |   |-- guest/               Programs that run in Linux guests (feature `guest`)
-|   |   `-- bin/                 nvx-fake-openvmm test double and the guest binaries
-|   |-- tests/                   Fake-OpenVMM instance lifecycle and guest-binary tests, and the golden fixtures that Python recorded
+|   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
+|   |-- tests/                   Fake-OpenVMM instance lifecycle, CLI, and guest-binary tests, and the golden fixtures that Python recorded
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     OpenVMM Git submodule
@@ -275,7 +275,9 @@ bundled-release staging, OpenVMM's command line, the lowering of network and
 filesystem policies, the compiler of `nvx.py`'s egress policy files, process
 and platform primitives for Linux and Windows
 hosts, the supervision of VM instances, the sandbox launch profile of
-`nvx.py sandbox`, and a fake OpenVMM for tests. Its
+`nvx.py sandbox`, the `nvx-rs` command-line interface that ports
+`nvx.py sandbox`, egress policy compilation, and artifact lookup, and a fake
+OpenVMM for tests. Its
 `guest` feature builds the nine static executables that every guest image
 installs at `/sbin/nvx-*`. It is a
 standalone crate with its own `Cargo.lock`, like `aci_edge_sandboxes`, and
