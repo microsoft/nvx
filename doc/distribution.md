@@ -93,6 +93,12 @@ OpenVMM is MIT licensed: retain its notice, but its source does not have to be
 published merely because it is aggregated with Linux. See
 `THIRD_PARTY_NOTICES.md`.
 
+The `nvx-rs` executables are MIT licensed NVX code that statically links the
+Rust standard library and permissively licensed crates, with musl and LLVM's
+`libunwind` on Linux and the Microsoft C runtime on Windows.
+`THIRD_PARTY_NOTICES.md` lists each with its license; `nvx-rs/Cargo.lock`
+pins every crate by checksum.
+
 ## Release archives
 
 Turn a staged release directory into one deterministic archive:

@@ -7241,6 +7241,93 @@ class BuildConstantsTests(unittest.TestCase):
             with self.subTest(component=component):
                 self.assertIn(component, notices)
 
+    def test_nvx_rs_third_party_notices_cover_every_linked_crate(self):
+        # The crates of `cargo tree --locked --features cli -e normal` for the
+        # release targets, x86_64-unknown-linux-musl and x86_64-pc-windows-msvc:
+        # what bin/nvx-rs[.exe] links, and serde_derive with the crates that it
+        # runs on while nvx-rs builds.
+        shipped = {
+            "bitflags",
+            "block-buffer",
+            "cfg-if",
+            "cpufeatures",
+            "crypto-common",
+            "digest",
+            "generic-array",
+            "getrandom",
+            "itoa",
+            "libc",
+            "memchr",
+            "memoffset",
+            "nix",
+            "proc-macro2",
+            "quote",
+            "serde",
+            "serde_core",
+            "serde_derive",
+            "serde_json",
+            "sha2",
+            "syn",
+            "typenum",
+            "unicode-ident",
+            "windows-link",
+            "windows-sys",
+            "zmij",
+        }
+        # Build scripts, other targets, and the tests.
+        unshipped = {
+            "autocfg",
+            "cfg_aliases",
+            "errno",
+            "fastrand",
+            "linux-raw-sys",
+            "once_cell",
+            "r-efi",
+            "rustix",
+            "tempfile",
+            "version_check",
+        }
+        lock = (BuildConstants.REPO_ROOT / "nvx-rs" / "Cargo.lock").read_text(
+            encoding="utf-8"
+        )
+        versions = dict(
+            re.findall(
+                r'^\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"$',
+                lock,
+                re.MULTILINE,
+            )
+        )
+        # A new dependency is one or the other, and a shipped one needs notices.
+        self.assertEqual(set(versions) - {"nvx-rs"}, shipped | unshipped)
+        self.assertFalse(shipped & unshipped)
+        notices = (BuildConstants.REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8"
+        )
+        rows = {
+            line.split(" | ", 1)[0]: line
+            for line in notices.splitlines()
+            if line.startswith("| ")
+        }
+        for name in sorted(shipped):
+            with self.subTest(crate=name):
+                row = rows[f"| Rust `{name}` crate {versions[name]}"]
+                self.assertIn("bin/nvx-rs", row)
+                self.assertIn("nvx-rs/Cargo.lock", row)
+        # The runtimes that the release executables link statically.
+        for component, location in (
+            ("| Rust core and standard libraries", "`bin/nvx-rs`"),
+            ("| Rust `compiler_builtins`", "`bin/nvx-rs[.exe]`"),
+            ("| musl libc", "`bin/nvx-rs` of the `linux-kvm` and `linux-mshv`"),
+            ("| LLVM `libunwind`", "the Linux `bin/nvx-rs`"),
+            (
+                "| Microsoft C runtime: the Visual C++ runtime and the Universal C "
+                "Runtime",
+                "`bin/nvx-rs.exe`",
+            ),
+        ):
+            with self.subTest(component=component):
+                self.assertIn(location, rows[component])
+
     def test_project_source_archive_excludes_the_nvx_rs_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
