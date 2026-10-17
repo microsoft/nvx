@@ -115,14 +115,17 @@ it writes a `.tar.gz` or `.zip` archive outside the staged directory; see
 packaged file, `bin/nvx-rs[.exe]` and its provenance included, and every
 archive marks the executables in `bin/` executable.
 
-CI follows the binary-only path. On a `dev` push that changes more than
-documentation, the `linux-kvm`, `linux-mshv`, and `windows-whp` platform jobs
-each stage `dist/nvx-<version>-<platform>` with `--binary-only`, then archive
-it as `.tar.gz` on Linux and `.zip` on Windows through the
+CI follows the binary-only path. On a `dev` push, or a ready pull request from
+a branch of this repository, that changes more than documentation, the
+`linux-kvm`, `linux-mshv`, and `windows-whp` platform jobs each stage
+`dist/nvx-<version>-<platform>` with `--binary-only`, then archive it as
+`.tar.gz` on Linux and `.zip` on Windows through the
 [`package-release`](../.github/actions/package-release/action.yml) action,
 with the `nvx-rs` and provenance that the NVX CLI job of their operating
-system built and tested. The development release job checks that each
-package ships OpenVMM and `nvx-rs` before it publishes them.
+system built and tested. Only `dev` pushes upload the archives, so a pull
+request proves that its packages build without publishing them. The
+development release job checks that each package ships OpenVMM and `nvx-rs`
+before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
 

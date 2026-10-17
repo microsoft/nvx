@@ -1,5 +1,5 @@
 name: Package release
-description: Build and upload an NVX binary release for one platform
+description: Build an NVX binary release for one platform, and upload it for publication
 
 inputs:
   platform:
@@ -7,6 +7,9 @@ inputs:
     required: true
   nvx-rs-artifact:
     description: Base name of the nvx-rs artifacts for the runner's OS
+    required: true
+  upload:
+    description: Whether to upload the package for the development release
     required: true
 
 runs:
@@ -75,7 +78,7 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Upload Linux release
-      if: runner.os != 'Windows'
+      if: runner.os != 'Windows' && inputs.upload == 'true'
       uses: actions/upload-artifact@v7
       with:
         name: release-${{ inputs.platform }}
@@ -85,7 +88,7 @@ runs:
         retention-days: 1
 
     - name: Upload Windows release
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.upload == 'true'
       uses: actions/upload-artifact@v7
       with:
         name: release-${{ inputs.platform }}

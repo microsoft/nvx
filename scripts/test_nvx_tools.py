@@ -5377,6 +5377,40 @@ python3() {
             )
             self.assertLess(names.index("Make nvx-rs executable"), names.index(name))
 
+    def test_pull_requests_package_releases_that_only_dev_uploads(self):
+        # Pull requests package and archive each platform's release, which
+        # proves that it builds; only a dev push uploads it for publication.
+        github = BuildConstants.REPO_ROOT / ".github"
+        platform = (github / "workflows" / "run-platform.yml").read_text(
+            encoding="utf-8"
+        )
+        package = (github / "actions" / "package-release" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        step = _workflow_step(platform, "run", "Package release")
+        self.assertIn("        if: inputs.package-release\n", step)
+        self.assertNotIn("github.event_name", _yaml_scalar(step, "if"))
+        self.assertIn(
+            "          upload: ${{ github.event_name == 'push' && "
+            "github.ref == 'refs/heads/dev' }}",
+            step,
+        )
+        steps = _composite_action_steps(package)
+        names = [_yaml_scalar(step, "name") for step in steps]
+        for name, operating_system in (
+            ("Upload Linux release", "runner.os != 'Windows'"),
+            ("Upload Windows release", "runner.os == 'Windows'"),
+        ):
+            with self.subTest(step=name):
+                self.assertEqual(
+                    _yaml_scalar(steps[names.index(name)], "if"),
+                    f"{operating_system} && inputs.upload == 'true'",
+                )
+        for name in ("Package Linux release", "Package Windows release"):
+            self.assertNotIn("upload", _yaml_scalar(steps[names.index(name)], "if"))
+            self.assertIn("--binary-only", steps[names.index(name)])
+            self.assertIn("archive-release", steps[names.index(name)])
+
     def test_ci_preserves_failed_openvmm_test_diagnostics(self):
         workflow = (
             BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
