@@ -1,5 +1,5 @@
-//! The lowering of egress rules into OpenVMM's native rules, the core of the egress policy
-//! compiler of [`policy`](super::policy).
+//! The lowering of egress rules into OpenVMM's native rules, which the egress policy compiler of
+//! [`policy`](super::policy) and [`openvmm_arguments`](super::openvmm_arguments) share.
 //!
 //! It ports `scripts/nvx_tools/egress_policy.py` exactly. Rules of one action, allow or deny,
 //! become [`Rule`]s: one address family, the address intervals that the rule's destinations

@@ -866,10 +866,19 @@ through `endPort`, an `icmp` entry matches ICMP alone, or ICMPv6 for IPv6
 networks, and `any` matches every protocol or, with a port or a port range,
 TCP and UDP on those ports.
 
-Rules are expanded into OpenVMM rules exactly: exceptions are subtracted from
-their networks, a port range becomes one OpenVMM range rule for each network,
-and protocol `any` with a port or a port range becomes a TCP and a UDP rule.
-Rules that would expand to more than 256 OpenVMM rules are rejected. Egress
+Rules are lowered into OpenVMM rules exactly, by the lowering that compiles
+NVX's egress policy files
+([`nvx::host::network::policy`](../nvx-rs/src/host/network/policy/mod.rs)):
+exceptions are subtracted from their networks, protocol `any` with a port or a
+port range becomes a TCP and a UDP rule, the destinations of each action merge
+into the fewest networks that cover them, a rule for every port of a protocol,
+or for every protocol, subsumes the narrower rules that it covers, and
+overlapping and adjacent port ranges of a network merge into one range rule.
+The rules of each action are passed in order of family, address, prefix length,
+protocol, and ports, and an action that still needs more than 256 OpenVMM rules
+is rejected. Networks are read as policy files read them, so host bits are
+cleared and IPv4 netmasks such as `/255.255.0.0` are accepted, but request
+validation still refuses both before the backend sees them. Egress
 denied without allow rules, with ingress and host loopback denied, attaches no
 network device;
 otherwise the guest gets `10.0.0.2/24` behind the profile's NAT gateway
@@ -1072,6 +1081,49 @@ affect Rust callers and builds:
   `DEP_ACI_EDGE_SANDBOXES_ARTIFACTS_DIR`.
 - A relative `process.cwd` is still rejected with `policy_validation`, and the
   message now points at `nvx::guest_path`.
+
+The OpenVMM backend lowers egress rules with the lowering that compiles NVX's
+egress policy files
+([`nvx::host::network::policy`](../nvx-rs/src/host/network/policy/mod.rs)),
+instead of expanding each rule on its own. What the rules match is unchanged,
+and so are the error codes, but these change:
+
+- **Rule order.** The `--network-egress-allow` and `--network-egress-deny`
+  values follow family, address, prefix length, protocol, and ports, instead of
+  string order: `::/0` precedes `2001:db8::/32`, and `tcp:80` precedes
+  `tcp:443`. OpenVMM's matching does not depend on the order.
+- **Rule count.** Each action's destinations merge into the fewest networks, a
+  rule for every port of a protocol, or for every protocol, subsumes the
+  narrower rules that it covers, and overlapping and adjacent port ranges of a
+  network merge. Policies usually need fewer OpenVMM rules, so some that
+  exceeded the limit of 256 are now accepted: 256 adjacent `/24` destinations
+  become one `/16` rule. Port ranges that overlap only partly across networks
+  can need a rule for their union, so a policy near the limit can also need
+  more rules than before.
+- **Messages.** The backend's own rule checks, which `Backend` callers reach
+  without the request validation of `AciEdgeSandbox`, report the policy
+  compiler's messages, which name the field:
+  - `network.egress.allow[0].ports[0]: ICMP has no ports` became
+    `network.egress.allow[0].ports[0].port is not supported with icmp`;
+  - `....endPort must not be below port` became `....endPort 80 cannot be
+    below port 90`, and ports outside 1 through 65535 report `....port must be
+    between 1 and 65535`;
+  - `...to[0]: the destination is not a network` and `...to[0].except: an
+    exception is not a network within the destination` became
+    `...to[0].cidr is not a valid IPv4 or IPv6 CIDR: VALUE`,
+    `...to[0].cidr must not name an IPv6 scope: VALUE`, and
+    `...to[0].except[1] must be contained in NETWORK`; and
+  - `network.egress.allow expands to 300 OpenVMM rules; the openvmm backend
+    accepts at most 256`, and the rule-level `expands to more than 256 OpenVMM
+    rules` and `covers more than 256 networks after removing its exceptions`,
+    became `network.egress.allow emits at most 256 native rules`. This is the
+    one message that requests through `AciEdgeSandbox` can also reach.
+- **Accepted rules.** Without request validation, the backend now reads a
+  network as policy files do: host bits are cleared and IPv4 netmasks are
+  accepted, so `10.0.0.7/24` is `10.0.0.0/24`, while port 0, which the backend
+  passed to OpenVMM before, is refused. Request validation still refuses such
+  networks with `malformed_request` first. A deny rule that covers the guest
+  network of host-loopback forwards is detected after the same normalization.
 
 ## Limitations
 

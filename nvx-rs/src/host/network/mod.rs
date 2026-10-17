@@ -3,11 +3,14 @@
 //!
 //! OpenVMM's portable profile enforces an egress default plus IPv4 and IPv6 allow and deny rules
 //! that match a network of one family and, optionally, one protocol (TCP, UDP, or ICMP) and, for
-//! TCP or UDP, one port or an inclusive range of ports; deny rules take precedence. [`EgressRule`]s
-//! are expanded into that form exactly: exceptions are subtracted from their networks, a rule
-//! without destinations matches `0.0.0.0/0` and `::/0`, and `any` protocol with a port or a port
-//! range becomes a TCP and a UDP rule. Rules that cannot be expressed exactly are rejected.
-//! [`policy`] compiles the egress policy files of `nvx.py` into OpenVMM's rules too.
+//! TCP or UDP, one port or an inclusive range of ports; deny rules take precedence.
+//! [`EgressRule`]s are lowered into that form exactly, by the lowering that also compiles egress
+//! policy files ([`policy`]): exceptions are subtracted from their networks, a rule without
+//! destinations matches `0.0.0.0/0` and `::/0`, `any` protocol with a port or a port range becomes
+//! a TCP and a UDP rule, destinations merge into the fewest networks that cover them, rules for
+//! every port of a protocol subsume narrower rules, and overlapping and adjacent port ranges
+//! merge. Each action emits at most [`MAX_RULES`] OpenVMM rules, sorted by family, address, prefix
+//! length, protocol, and ports.
 //!
 //! Host-loopback access is bidirectional: with it allowed, the guest reaches host loopback
 //! services through its gateway, and OpenVMM publishes the guest's listeners on host loopback.
@@ -20,8 +23,11 @@ pub mod policy;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 
+use self::address::{Family, Interval};
+use self::lowering::{PortValue, Rule, RuleProtocol};
 use crate::error::{Error, Result};
-use crate::net::cidr::{self, Cidr};
+use crate::host::python::text::PyText;
+use crate::net::cidr;
 
 /// Largest number of allow rules, and of deny rules, that OpenVMM accepts.
 pub const MAX_RULES: usize = 256;
@@ -68,11 +74,14 @@ pub enum Protocol {
 }
 
 /// A destination network of an [`EgressRule`], without its exceptions.
+///
+/// Networks are read as egress policy files read their CIDRs ([`policy`]): host bits are cleared,
+/// IPv4 netmasks such as `/255.0.0.0` are accepted, and IPv6 scopes are refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     /// Destination address or CIDR, such as `"10.0.0.0/8"` or `"192.0.2.1"`.
     pub cidr: String,
-    /// Sub-networks of `cidr` that the rule does not match.
+    /// Sub-networks of `cidr` that the rule does not match, each within `cidr`.
     pub except: Vec<String>,
 }
 
@@ -155,7 +164,9 @@ impl EgressRule {
 }
 
 /// The egress rules of one action, and the name by which messages refer to them, such as
-/// `egress.allow`. Messages name a rule by its index, as in `egress.allow[0]`.
+/// `egress.allow`. Messages name a rule by its index and its fields by their MXC names, as in
+/// `egress.allow[0].to[1].cidr`, and the action by the name, as in `egress.allow emits at most 256
+/// native rules`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressRules {
     /// The name of the rules in messages.
@@ -275,10 +286,12 @@ impl NetworkPolicy {
 /// Without a policy, or when egress is denied without allow rules and ingress and host-loopback
 /// access are denied, no network device is attached. Otherwise the portable profile applies the
 /// egress posture, the ingress default, the host-loopback access, and the host-loopback forwards.
+/// Each action's rules are lowered as an egress policy file's are ([`policy`]), and fail with its
+/// messages, which name the rules after [`EgressRules::name`].
 ///
-/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule cannot be
-/// expressed exactly, when the rules of one action expand to more than [`MAX_RULES`] OpenVMM
-/// rules, when host-loopback access is allowed for a guest network whose prefix is longer than
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is invalid,
+/// when the rules of one action need more than [`MAX_RULES`] OpenVMM rules, when host-loopback
+/// access is allowed for a guest network whose prefix is longer than
 /// [`MAX_HOST_LOOPBACK_PREFIX`], or when the host-loopback forwards break the rules of
 /// [`NetworkPolicy::host_loopback_forwards`].
 pub fn openvmm_arguments(
@@ -327,30 +340,21 @@ pub fn openvmm_arguments(
     ]
     .map(str::to_owned)
     .to_vec();
+    // As in an egress policy file, the allow rules are checked and lowered before the deny rules.
+    let mut deny = Vec::new();
     for (rules, option) in [
         (&policy.allow, "--network-egress-allow"),
         (&policy.deny, "--network-egress-deny"),
     ] {
-        let field = &rules.name;
-        let mut expanded = Vec::new();
-        for (index, rule) in rules.rules.iter().enumerate() {
-            expand_rule(rule, &format!("{field}[{index}]"), &mut expanded)?;
-        }
-        expanded.sort_unstable();
-        expanded.dedup();
-        if expanded.len() > MAX_RULES {
-            return Err(Error::unsupported(format!(
-                "{field} expands to {} OpenVMM rules; the openvmm backend accepts at most \
-                 {MAX_RULES}",
-                expanded.len()
-            )));
-        }
-        for rule in expanded {
+        let parsed = parse_rules(rules)?;
+        let lowered = lowering::lower(&parsed.concat(), &rules.name)?;
+        for rule in lowered {
             arguments.push(option.to_owned());
             arguments.push(rule);
         }
+        deny = parsed;
     }
-    check_loopback_forwards(policy, guest_network)?;
+    check_loopback_forwards(policy, &deny, guest_network)?;
     for forward in &policy.host_loopback_forwards {
         arguments.push("--host-loopback-forward".to_owned());
         arguments.push(format!(
@@ -363,10 +367,67 @@ pub fn openvmm_arguments(
     Ok(arguments)
 }
 
-/// Checks the host-loopback forwards of a policy whose rules expand, and whose host-loopback
+/// Parses the rules of one action, each into the rules that the lowering takes, as an egress
+/// policy file's MXC rules are parsed: an empty `to` or `ports` is a rule without that field.
+fn parse_rules(rules: &EgressRules) -> Result<Vec<Vec<Rule>>> {
+    rules
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| parse_rule(rule, &format!("{}[{index}]", rules.name)))
+        .collect()
+}
+
+/// Parses one rule, which messages call `description`.
+fn parse_rule(rule: &EgressRule, description: &str) -> Result<Vec<Rule>> {
+    let mut destinations = None;
+    if !rule.to.is_empty() {
+        let mut parsed = Vec::with_capacity(rule.to.len());
+        for (index, peer) in rule.to.iter().enumerate() {
+            let description = format!("{description}.to[{index}]");
+            let network = |value: &str, field: &str| lowering::network(&PyText::from(value), field);
+            let parent = network(&peer.cidr, &format!("{description}.cidr"))?;
+            parsed.push(lowering::destination(
+                parent,
+                peer.except.iter().enumerate().map(|(exception, value)| {
+                    network(value, &format!("{description}.except[{exception}]"))
+                }),
+                &description,
+            )?);
+        }
+        destinations = Some(lowering::group_destinations(&parsed));
+    }
+    let mut selectors = None;
+    if !rule.ports.is_empty() {
+        let mut parsed = Vec::new();
+        for (index, port) in rule.ports.iter().enumerate() {
+            let protocol = match port.protocol {
+                Protocol::Tcp => RuleProtocol::Tcp,
+                Protocol::Udp => RuleProtocol::Udp,
+                Protocol::Icmp => RuleProtocol::Icmp,
+                Protocol::Any => RuleProtocol::Any,
+            };
+            let value = |port: u16| PortValue::Integer(i128::from(port));
+            parsed.extend(lowering::port_selectors(
+                protocol,
+                port.port.map(value),
+                port.end_port.map(value),
+                &format!("{description}.ports[{index}]"),
+            )?);
+        }
+        selectors = Some(parsed);
+    }
+    Ok(lowering::mxc_rules(destinations, selectors))
+}
+
+/// Checks the host-loopback forwards of a policy whose rules lower, and whose host-loopback
 /// access is allowed when it has forwards, against the rules of
-/// [`NetworkPolicy::host_loopback_forwards`].
-fn check_loopback_forwards(policy: &NetworkPolicy, guest_network: &str) -> Result<()> {
+/// [`NetworkPolicy::host_loopback_forwards`]. `deny` holds the parsed deny rules.
+fn check_loopback_forwards(
+    policy: &NetworkPolicy,
+    deny: &[Vec<Rule>],
+    guest_network: &str,
+) -> Result<()> {
     let forwards = &policy.host_loopback_forwards;
     if forwards.is_empty() {
         return Ok(());
@@ -407,11 +468,19 @@ fn check_loopback_forwards(policy: &NetworkPolicy, guest_network: &str) -> Resul
             "host-loopback forwards need egress allowed by default for their replies".to_owned(),
         );
     }
-    let Some(network) = guest_subnet(guest_network) else {
+    let Some((first, last)) = guest_subnet(guest_network) else {
         return unsupported(format!("guest network {guest_network:?} is not valid"));
     };
-    for (index, rule) in policy.deny.rules.iter().enumerate() {
-        if rule_covers(rule, network) {
+    // A deny rule covers the guest network if it selects one of its addresses, on any protocol.
+    for (index, rules) in deny.iter().enumerate() {
+        let covers = rules.iter().any(|rule| {
+            rule.family == Family::V4
+                && rule
+                    .addresses
+                    .iter()
+                    .any(|&(start, end)| start <= last && first <= end)
+        });
+        if covers {
             return unsupported(format!(
                 "{}[{index}] cannot cover the guest network, which carries host-loopback forward \
                  replies",
@@ -422,132 +491,15 @@ fn check_loopback_forwards(policy: &NetworkPolicy, guest_network: &str) -> Resul
     Ok(())
 }
 
-/// Returns the IPv4 network of `guest_network`, a static guest address in `ADDRESS/PREFIX` form.
-fn guest_subnet(guest_network: &str) -> Option<Cidr> {
+/// Returns the addresses of the IPv4 network of `guest_network`, a static guest address in
+/// `ADDRESS/PREFIX` form.
+fn guest_subnet(guest_network: &str) -> Option<Interval> {
     let (address, prefix) = guest_network.split_once('/')?;
     let address: Ipv4Addr = address.parse().ok()?;
     let prefix = cidr::parse_prefix_length(prefix).filter(|prefix| (1..=32).contains(prefix))?;
     let mask = u32::MAX << (32 - u32::from(prefix));
-    Cidr::parse(&format!(
-        "{}/{prefix}",
-        Ipv4Addr::from(u32::from(address) & mask)
-    ))
-    .ok()
-}
-
-/// Returns whether `rule`, whose destinations parse, matches an address of `network`.
-fn rule_covers(rule: &EgressRule, network: Cidr) -> bool {
-    rule.to.is_empty()
-        || rule.to.iter().any(|peer| {
-            let Ok(destination) = Cidr::parse(&peer.cidr) else {
-                return false;
-            };
-            let excluded = peer
-                .except
-                .iter()
-                .filter_map(|value| Cidr::parse(value).ok())
-                .collect::<Vec<_>>();
-            destination
-                .subtract(&excluded, MAX_RULES)
-                .is_none_or(|remainder| remainder.iter().any(|part| part.overlaps(network)))
-        })
-}
-
-/// Appends the OpenVMM rules equivalent to `rule`.
-fn expand_rule(rule: &EgressRule, field: &str, output: &mut Vec<String>) -> Result<()> {
-    let unsupported = |message: String| Err(Error::unsupported(format!("{field}{message}")));
-    let mut networks = Vec::new();
-    if rule.to.is_empty() {
-        networks.extend([Cidr::everything(false), Cidr::everything(true)]);
-    }
-    for (index, peer) in rule.to.iter().enumerate() {
-        let Ok(network) = Cidr::parse(&peer.cidr) else {
-            return unsupported(format!(".to[{index}]: the destination is not a network"));
-        };
-        let mut excluded = Vec::new();
-        for value in &peer.except {
-            match Cidr::parse(value) {
-                Ok(exclusion) if network.contains(exclusion) => excluded.push(exclusion),
-                _ => {
-                    return unsupported(format!(
-                        ".to[{index}].except: an exception is not a network within the destination"
-                    ));
-                }
-            }
-        }
-        let Some(remainder) = network.subtract(&excluded, MAX_RULES - networks.len()) else {
-            return unsupported(format!(
-                " covers more than {MAX_RULES} networks after removing its exceptions"
-            ));
-        };
-        networks.extend(remainder);
-    }
-
-    let mut selectors = Vec::new();
-    if rule.ports.is_empty() {
-        selectors.push(Selector::Everything);
-    }
-    for (index, port) in rule.ports.iter().enumerate() {
-        let protocols: &[&'static str] = match port.protocol {
-            Protocol::Tcp => &["tcp"],
-            Protocol::Udp => &["udp"],
-            Protocol::Icmp => &["icmp"],
-            Protocol::Any => &["tcp", "udp"],
-        };
-        let Some(start) = port.port else {
-            if port.end_port.is_some() {
-                return unsupported(format!(".ports[{index}].endPort requires port"));
-            }
-            if port.protocol == Protocol::Any {
-                selectors.push(Selector::Everything);
-            } else {
-                selectors.extend(protocols.iter().copied().map(Selector::Protocol));
-            }
-            continue;
-        };
-        if port.protocol == Protocol::Icmp {
-            return unsupported(format!(".ports[{index}]: ICMP has no ports"));
-        }
-        let end = port.end_port.unwrap_or(start);
-        if end < start {
-            return unsupported(format!(".ports[{index}].endPort must not be below port"));
-        }
-        selectors.extend(
-            protocols
-                .iter()
-                .map(|&protocol| Selector::Ports(protocol, start, end)),
-        );
-    }
-
-    for network in &networks {
-        for selector in &selectors {
-            output.push(match *selector {
-                Selector::Everything => network.to_string(),
-                Selector::Protocol(protocol) => format!("{network}:{protocol}"),
-                Selector::Ports(protocol, start, end) if start == end => {
-                    format!("{network}:{protocol}:{start}")
-                }
-                Selector::Ports(protocol, start, end) => {
-                    format!("{network}:{protocol}:{start}-{end}")
-                }
-            });
-            if output.len() > MAX_RULES * 4 {
-                return unsupported(format!(" expands to more than {MAX_RULES} OpenVMM rules"));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The traffic that one OpenVMM rule selects at its destination network.
-#[derive(Clone, Copy)]
-enum Selector {
-    /// Every protocol and port.
-    Everything,
-    /// Every port of TCP or UDP, or every ICMP message.
-    Protocol(&'static str),
-    /// The TCP or UDP ports from the first through the last, both included.
-    Ports(&'static str, u16, u16),
+    let network = u32::from(address) & mask;
+    Some((u128::from(network), u128::from(network | !mask)))
 }
 
 #[cfg(test)]
@@ -727,6 +679,9 @@ mod tests {
             EgressRule::to("10.0.0.0/8"),
             EgressRule::to("10.0.0.0/24"),
             EgressRule::to("10.0.0.77").on_port(Protocol::Tcp, 443),
+            // Networks are read as egress policy files read them, host bits and netmasks included.
+            EgressRule::to("10.0.0.77/24"),
+            EgressRule::to("10.0.0.0/255.255.255.0"),
         ] {
             rejected(&valid.clone().with_deny(rule), "forward replies");
         }
@@ -791,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_rules_expand_exactly() {
+    fn ipv6_rules_lower_exactly() {
         let egress = NetworkPolicy::new(Access::Deny)
             .with_allow(EgressRule::to("2001:db8:1::/64").on_port(Protocol::Tcp, 443))
             .with_allow(EgressRule {
@@ -809,21 +764,183 @@ mod tests {
             .with_allow(EgressRule::to("::/0").on_protocol(Protocol::Icmp))
             .with_deny(EgressRule::to("2001:db8:1::123"));
         let arguments = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap();
+        // Rules sort by family and then by address, so `::/0` leads the IPv6 rules.
         assert_eq!(
             rules(&arguments, "--network-egress-allow"),
             [
                 "192.0.2.0/24:icmp",
+                "::/0:icmp",
                 "2001:db8:1::/64:tcp:443",
                 "2001:db8:2::/128:tcp:53",
                 "2001:db8:2::/128:udp:53",
                 "2001:db8:2::2/127:tcp:53",
                 "2001:db8:2::2/127:udp:53",
-                "::/0:icmp",
             ]
         );
         assert_eq!(
             rules(&arguments, "--network-egress-deny"),
             ["2001:db8:1::123/128"]
+        );
+    }
+
+    #[test]
+    fn rules_lower_like_egress_policy_files() {
+        let lowered = |rules: Vec<EgressRule>| {
+            let mut egress = NetworkPolicy::new(Access::Deny);
+            egress.allow.rules = rules;
+            let arguments = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap();
+            self::rules(&arguments, "--network-egress-allow")
+        };
+        let tcp = |cidr: &str, port, end_port| {
+            EgressRule::to(cidr).on_port_range(Protocol::Tcp, port, end_port)
+        };
+        // Destinations merge into the fewest networks, and port ranges into one range.
+        assert_eq!(
+            lowered(vec![EgressRule {
+                to: (0..300)
+                    .map(|index| Destination::new(format!("10.0.{}.0/24", index % 256)))
+                    .collect(),
+                ports: vec![PortSelector {
+                    protocol: Protocol::Tcp,
+                    port: Some(1),
+                    end_port: Some(2),
+                }],
+            }]),
+            ["10.0.0.0/16:tcp:1-2"]
+        );
+        assert_eq!(
+            lowered(vec![
+                tcp("192.0.2.7", 8000, 8004),
+                tcp("192.0.2.7", 8003, 8010),
+                tcp("192.0.2.6", 8000, 8010),
+            ]),
+            ["192.0.2.6/31:tcp:8000-8010"]
+        );
+        // Rules for every port of a protocol, or every protocol, subsume narrower ones.
+        assert_eq!(
+            lowered(vec![
+                EgressRule::to("192.0.2.7").on_port(Protocol::Tcp, 443),
+                EgressRule::to("192.0.2.0/24").on_protocol(Protocol::Tcp),
+                EgressRule::to("198.51.100.0/24").on_port(Protocol::Udp, 53),
+                EgressRule::to("198.51.100.0/23"),
+            ]),
+            ["192.0.2.0/24:tcp", "198.51.100.0/23"]
+        );
+        // Host bits are cleared, as an egress policy file's are.
+        assert_eq!(
+            lowered(vec![EgressRule::to("10.0.0.5/255.255.255.0")]),
+            ["10.0.0.0/24"]
+        );
+    }
+
+    #[test]
+    fn invalid_rules_are_rejected_with_the_policy_compilers_messages() {
+        let port = |protocol, port, end_port| EgressRule {
+            to: vec![Destination::new("10.0.0.0/8")],
+            ports: vec![PortSelector {
+                protocol,
+                port,
+                end_port,
+            }],
+        };
+        let excluding = |cidr: &str, except: &str| EgressRule {
+            to: vec![
+                Destination::new("192.0.2.0/24"),
+                Destination {
+                    cidr: cidr.to_owned(),
+                    except: vec![except.to_owned()],
+                },
+            ],
+            ports: Vec::new(),
+        };
+        for (rule, message) in [
+            (
+                port(Protocol::Icmp, Some(8), None),
+                "egress.allow[0].ports[0].port is not supported with icmp",
+            ),
+            // Structural validation rejects these first, unless the backend is called directly.
+            (
+                port(Protocol::Tcp, Some(90), Some(80)),
+                "egress.allow[0].ports[0].endPort 80 cannot be below port 90",
+            ),
+            (
+                port(Protocol::Udp, None, Some(80)),
+                "egress.allow[0].ports[0].endPort requires port",
+            ),
+            (
+                port(Protocol::Tcp, Some(0), None),
+                "egress.allow[0].ports[0].port must be between 1 and 65535",
+            ),
+            (
+                port(Protocol::Any, Some(80), Some(0)),
+                "egress.allow[0].ports[0].endPort must be between 1 and 65535",
+            ),
+            (
+                EgressRule::to("example.com"),
+                "egress.allow[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: example.com",
+            ),
+            (
+                EgressRule::to("fe80::1%eth0/64"),
+                "egress.allow[0].to[0].cidr must not name an IPv6 scope: fe80::1%eth0/64",
+            ),
+            (
+                excluding("10.0.0.0/8", "11.0.0.0/16"),
+                "egress.allow[0].to[1].except[0] must be contained in 10.0.0.0/8",
+            ),
+            (
+                excluding("10.0.0.7/8", "10.1.0.0/+16"),
+                "egress.allow[0].to[1].except[0] is not a valid IPv4 or IPv6 CIDR: 10.1.0.0/+16",
+            ),
+            // 129 separate ranges of both TCP and UDP need 258 OpenVMM rules.
+            (
+                EgressRule {
+                    to: vec![Destination::new("10.0.0.0/8")],
+                    ports: (0..129)
+                        .map(|index| PortSelector {
+                            protocol: Protocol::Any,
+                            port: Some(3 * index + 1),
+                            end_port: Some(3 * index + 2),
+                        })
+                        .collect(),
+                },
+                "egress.allow emits at most 256 native rules",
+            ),
+        ] {
+            let egress = NetworkPolicy::new(Access::Deny).with_allow(rule.clone());
+            let error = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{rule:?}");
+            assert_eq!(error.message(), message, "{rule:?}");
+        }
+        // The allow rules are checked and lowered before the deny rules.
+        let egress = NetworkPolicy::new(Access::Allow)
+            .with_allow(EgressRule::to("10.0.0.0/33"))
+            .with_deny(port(Protocol::Icmp, Some(8), None));
+        let error = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap_err();
+        assert_eq!(
+            error.message(),
+            "egress.allow[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: 10.0.0.0/33"
+        );
+    }
+
+    #[test]
+    fn exceptions_that_split_a_network_too_finely_are_rejected() {
+        // Without a limit, these exceptions would split the address space into 512 * 23 networks.
+        let peer = Destination {
+            cidr: "0.0.0.0/0".to_owned(),
+            except: (0..512u32)
+                .map(|index| std::net::Ipv4Addr::from(index << 23).to_string())
+                .collect(),
+        };
+        let rule = EgressRule {
+            to: vec![peer],
+            ports: Vec::new(),
+        };
+        let egress = NetworkPolicy::new(Access::Deny).with_allow(rule);
+        let error = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            error.message(),
+            "egress.allow emits at most 256 native rules"
         );
     }
 
@@ -912,76 +1029,6 @@ mod tests {
         assert_eq!(
             rules(&arguments, "--network-egress-deny"),
             ["192.0.2.7/32:tcp:8005"]
-        );
-    }
-
-    #[test]
-    fn inexpressible_rules_are_rejected() {
-        let port = |protocol, port, end_port| EgressRule {
-            to: vec![Destination::new("10.0.0.0/8")],
-            ports: vec![PortSelector {
-                protocol,
-                port,
-                end_port,
-            }],
-        };
-        for rule in [
-            port(Protocol::Icmp, Some(8), None),
-            // Structural validation rejects these first, unless the backend is called directly.
-            port(Protocol::Tcp, Some(90), Some(80)),
-            port(Protocol::Udp, None, Some(80)),
-            EgressRule {
-                to: (0..300)
-                    .map(|index| Destination::new(format!("10.0.{}.0/24", index % 256)))
-                    .collect(),
-                ports: vec![PortSelector {
-                    protocol: Protocol::Tcp,
-                    port: Some(1),
-                    end_port: Some(2),
-                }],
-            },
-            // 129 separate ranges of both TCP and UDP need 258 OpenVMM rules.
-            EgressRule {
-                to: vec![Destination::new("10.0.0.0/8")],
-                ports: (0..129)
-                    .map(|index| PortSelector {
-                        protocol: Protocol::Any,
-                        port: Some(3 * index + 1),
-                        end_port: Some(3 * index + 2),
-                    })
-                    .collect(),
-            },
-        ] {
-            let egress = NetworkPolicy::new(Access::Deny).with_allow(rule.clone());
-            assert_eq!(
-                openvmm_arguments(Some(&egress), "10.0.0.2/24")
-                    .unwrap_err()
-                    .kind(),
-                ErrorKind::Unsupported,
-                "{rule:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn exceptions_that_split_a_network_too_finely_are_rejected() {
-        // Without a limit, these exceptions would split the address space into 512 * 23 networks.
-        let peer = Destination {
-            cidr: "0.0.0.0/0".to_owned(),
-            except: (0..512u32)
-                .map(|index| std::net::Ipv4Addr::from(index << 23).to_string())
-                .collect(),
-        };
-        let rule = EgressRule {
-            to: vec![peer],
-            ports: Vec::new(),
-        };
-        let egress = NetworkPolicy::new(Access::Deny).with_allow(rule);
-        let error = openvmm_arguments(Some(&egress), "10.0.0.2/24").unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unsupported);
-        assert!(
-            error.message().contains("covers more than 256 networks"),
-            "{error}"
         );
     }
 }
