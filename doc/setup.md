@@ -251,7 +251,8 @@ Production campaigns also require an administrator-owned, no-argument
 executor wrapper that provisions a separate disposable target and forwards
 the bounded executor protocol. See
 [Copilot-driven adversarial testing](adversarial-testing.md)
-for the containment and credential requirements.
+for the containment and credential requirements, and for the Rust toolchain
+and nvx-rs that the target needs.
 
 Apply the configured Python and POSIX shell formatters with:
 

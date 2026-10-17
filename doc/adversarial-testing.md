@@ -112,7 +112,12 @@ The executor:
 
 Child test processes receive a small environment allowlist. In particular,
 GitHub, Copilot, SSH-agent, token, and arbitrary controller environment
-variables are not forwarded.
+variables are not forwarded. The allowlist carries the paths that
+[nvx-rs](#nvx-rs-on-the-target) needs: `NVX_RS`, `CARGO_HOME`, and
+`RUSTUP_HOME`. It omits Cargo's other settings and credentials, such as
+`CARGO_TARGET_DIR`, `RUSTFLAGS`, and registry tokens, and `RUSTUP_TOOLCHAIN`,
+so that [`rust-toolchain.toml`](../rust-toolchain.toml) still selects the Rust
+release.
 
 The controller may start the executor locally, but production campaigns must
 use `--executor-command`. This option names one trusted executable and accepts
@@ -123,7 +128,8 @@ It must not evaluate protocol data as a shell command.
 The wrapper and target provisioner must:
 
 - create a fresh disposable target for every executor process;
-- stage the exact NVX commit and provenance-bound artifacts before exposure;
+- stage the exact NVX commit, provenance-bound artifacts, and
+  [nvx-rs](#nvx-rs-on-the-target) before exposure;
 - provide KVM, MSHV, or WHP without production or GitHub credentials;
 - deny production network access and bound target CPU, memory, disk, and time;
 - run only the executor entry point for the restricted principal;
@@ -140,6 +146,33 @@ Local executor artifacts use the short `build/adv/<run-id>` state root rather
 than nesting below `--output-dir`. This keeps the deepest deterministic
 microVM log paths below the legacy Windows `MAX_PATH` boundary. The controller
 metadata and summary record the absolute target artifact root.
+
+### nvx-rs on the target
+
+Besides the guest and OpenVMM artifacts, a target needs nvx-rs, the Rust
+command-line interface that `nvx.py` runs ([Usage](usage.md#nvx-rs)). Of the
+catalogued scenarios, `managed-lifecycle` runs the nvx-rs test
+`managed_lifecycle` with Cargo, and `l3-l4-egress-policy` compiles its egress
+policy with nvx-rs and runs `nvx.py run`, which runs nvx-rs too. They find
+nvx-rs where `nvx.py` does: at `NVX_RS`, then at
+`nvx-rs/target/release/nvx-rs[.exe]`, and otherwise they build it there with
+Cargo.
+
+A target therefore needs the Rust toolchain: rustup, with Cargo on the
+executor's `PATH` and the Rust release that `rust-toolchain.toml` pins
+installed. A prebuilt nvx-rs at `NVX_RS` or in `nvx-rs/target/release` saves
+its build but not the toolchain, which `managed-lifecycle` needs. Because the
+executor passes `NVX_RS`, `CARGO_HOME`, and `RUSTUP_HOME`, either may live
+outside the home directory.
+
+A scenario's timeout includes any build, an existing nvx-rs is never rebuilt,
+and a target may have no network access for Cargo. So, before exposure, build
+both at the staged commit from the repository root:
+
+```bash
+cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target
+cargo test --no-run --locked --manifest-path nvx-rs/Cargo.toml --test managed_lifecycle
+```
 
 ### Independent oracles
 
@@ -169,8 +202,8 @@ targets rather than the quarantined machine.
 
 ## Running a campaign
 
-First prepare the normal NVX guest and OpenVMM release artifacts. For a local
-KVM virtual machine:
+First prepare the normal NVX guest and OpenVMM release artifacts, and
+[nvx-rs](#nvx-rs-on-the-target). For a local KVM virtual machine:
 
 ```bash
 python3 scripts/nvx.py test-adversarial \

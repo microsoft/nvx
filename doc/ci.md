@@ -649,7 +649,10 @@ Copilot or initiate login.
 
 The wrapper provisions a distinct disposable KVM, MSHV, or WHP target with no
 production or GitHub credentials and forwards only the typed executor
-protocol. Existing persistent microVM and performance runners are not valid
+protocol. Besides the guest and OpenVMM artifacts, the target needs the Rust
+toolchain and a prebuilt nvx-rs for the scenarios that run it, as
+[nvx-rs on the target](adversarial-testing.md#nvx-rs-on-the-target) explains.
+Existing persistent microVM and performance runners are not valid
 adversarial targets. Loss of the target heartbeat, a policy oracle, or a
 teardown/post-campaign boot failure fails the job and requires quarantine and
 reimage.

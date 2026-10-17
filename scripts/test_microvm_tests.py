@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
 from nvx_tools import (  # noqa: E402
+    adversarial_executor,
     benchmark,
     common,
     managed_exec_tests,
@@ -2769,7 +2770,18 @@ class MicrovmTests(unittest.TestCase):
             preserved = json.loads(
                 (output_dir / "managed-outcome.json").read_text(encoding="utf-8")
             )
+            # An adversarial campaign requires this report, with its teardown.
+            reports, teardown_complete = adversarial_executor._inventory_outcomes(
+                output_dir,
+                required_names=adversarial_executor._REQUIRED_OUTCOME_REPORTS[
+                    "managed-lifecycle"
+                ],
+            )
 
+        self.assertTrue(teardown_complete, reports)
+        self.assertEqual(
+            [report["path"] for report in reports], ["managed-outcome.json"]
+        )
         self.assertEqual(len(runs), 1)
         command, environment, cwd = runs[0]
         self.assertEqual(
@@ -2820,6 +2832,27 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(openvmm[openvmm.index(option) + 1], value)
         self.assertIn("--microvm-control-auth-stdin", openvmm)
         self.assertEqual(preserved, self._managed_report())
+
+    def test_managed_lifecycle_hands_the_test_an_absolute_pid_journal(self):
+        # The nvx-rs test records OpenVMM in an adversarial campaign's journal
+        # from the nvx-rs directory, so a relative journal resolves here.
+        variable = "NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL"
+        relative = os.path.join("journal", "openvmm-pids.jsonl")
+        for value, expected in (
+            (relative, os.path.abspath(relative)),
+            (os.path.abspath(relative), os.path.abspath(relative)),
+            (None, None),
+        ):
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.dict(os.environ),
+            ):
+                os.environ.pop(variable, None)
+                if value is not None:
+                    os.environ[variable] = value
+                runs = self._run_managed_lifecycle(Path(temporary))
+                self.assertEqual(runs[0][1].get(variable), expected)
 
     def test_managed_lifecycle_requires_cargo(self):
         with (

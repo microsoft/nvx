@@ -931,6 +931,14 @@ def run_managed_lifecycle(
             )
         )
         environment = os.environ.copy()
+        # The test records OpenVMM's process ID for an adversarial campaign
+        # as the microVM scenarios do, but from the nvx-rs directory, so a
+        # relative journal resolves here.
+        journal = environment.get("NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL")
+        if journal:
+            environment["NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL"] = os.path.abspath(
+                journal
+            )
         environment.update(
             {
                 "OPENVMM_LOG": "off",

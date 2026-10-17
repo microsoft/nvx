@@ -26,7 +26,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -179,12 +179,19 @@ fn capture_console(address: String, path: PathBuf, deadline: Instant) -> thread:
     })
 }
 
-/// Records OpenVMM's process ID for an adversarial campaign, as `record_adversarial_openvmm_pid`
+/// Records OpenVMM's process ID for an adversarial campaign in the journal that
+/// `NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL` names, if it is set, as `record_adversarial_openvmm_pid`
 /// of the microVM tests does.
 fn record_pid(pid: u32) {
-    let Ok(journal) = env::var("NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL") else {
-        return;
-    };
+    if let Some(journal) = env::var_os("NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL") {
+        append_pid(Path::new(&journal), pid);
+    }
+}
+
+/// Appends an entry for `pid` to a process ID journal and syncs it. Each entry is a line,
+/// `{"pid":PID,"recorded_at_ns":NS}`, which `_read_openvmm_pids` of
+/// `scripts/nvx_tools/adversarial_executor.py` reads to check that OpenVMM exited.
+fn append_pid(journal: &Path, pid: u32) {
     let recorded_at_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the clock is after the epoch")
@@ -200,6 +207,40 @@ fn record_pid(pid: u32) {
     )
     .expect("the process ID journal is writable");
     stream.sync_all().expect("the process ID journal syncs");
+}
+
+#[test]
+fn the_process_id_journal_has_the_entries_that_the_adversarial_executor_reads() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("openvmm-pids.jsonl");
+    append_pid(&journal, 4321);
+    append_pid(&journal, u32::MAX);
+    let text = fs::read_to_string(&journal).unwrap();
+    assert!(
+        text.ends_with('\n') && !text.contains('\r'),
+        "each entry ends with a line feed: {text:?}"
+    );
+    let pids: Vec<u64> = text
+        .lines()
+        .map(|line| {
+            let entry: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(line).expect("an entry is a JSON object");
+            assert_eq!(
+                entry.keys().collect::<Vec<_>>(),
+                ["pid", "recorded_at_ns"],
+                "an entry has exactly these properties: {line}"
+            );
+            let recorded_at_ns = entry["recorded_at_ns"]
+                .as_u64()
+                .expect("the time is an integer");
+            assert!(
+                (1..=i64::MAX.unsigned_abs()).contains(&recorded_at_ns),
+                "the time fits the executor's range: {line}"
+            );
+            entry["pid"].as_u64().expect("the process ID is an integer")
+        })
+        .collect();
+    assert_eq!(pids, [4321, u64::from(u32::MAX)]);
 }
 
 #[test]
