@@ -101,11 +101,11 @@ nvx/
 |   |   |-- protocol/            Control-console codec shared by the host and the guest
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
-|   |   |-- host/                Artifacts, launch, policy lowering, sessions, and VM instances
+|   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, and VM instances
 |   |   |-- testing/             Fake OpenVMM (feature `testing`)
 |   |   |-- guest/               Programs that run in Linux guests (feature `guest`)
 |   |   `-- bin/                 nvx-fake-openvmm test double and the guest binaries
-|   |-- tests/                   Fake-OpenVMM instance lifecycle and guest-binary tests
+|   |-- tests/                   Fake-OpenVMM instance lifecycle and guest-binary tests, and the egress policy parity fixture
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     OpenVMM Git submodule
@@ -155,6 +155,7 @@ nvx/
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI
+|   |-- generate_egress_policy_fixtures.py Egress policy parity fixture of nvx-rs, from egress_policy.py
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
@@ -271,7 +272,8 @@ API, the policy honor matrix, and tests.
 The Rust crate `nvx-rs`, whose library `nvx` holds the NVX mechanics: the
 authenticated control protocol of the guest agent, artifact discovery and
 bundled-release staging, OpenVMM's command line, the lowering of network and
-filesystem policies, process and platform primitives for Linux and Windows
+filesystem policies, the compiler of `nvx.py`'s egress policy files, process
+and platform primitives for Linux and Windows
 hosts, the supervision of VM instances, and a fake OpenVMM for tests. Its
 `guest` feature builds the nine static executables that every guest image
 installs at `/sbin/nvx-*`. It is a
