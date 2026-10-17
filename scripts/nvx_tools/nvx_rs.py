@@ -17,6 +17,9 @@ of its executable to source_sha256() of the sources that built it, and to the
 Rust release, target, and features of the build, as OpenVMM's provenance
 binds it to its source revision. nvx.py records it for the nvx-rs that it
 builds, and `nvx.py record-nvx-rs-provenance` for one built otherwise.
+Packaging rejects an nvx-rs that it does not describe as built from this
+checkout's sources. Releases ship nvx-rs as bin/nvx-rs[.exe], built for
+RELEASE_TARGETS with FEATURES, with its provenance.
 """
 
 from __future__ import annotations

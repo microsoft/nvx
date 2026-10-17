@@ -2,14 +2,22 @@
 # pyright: reportPrivateUsage=false
 
 import io
+import os
+import re
 import sys
+import tarfile
 import tempfile
 import unittest
+import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
+import publish_development_release  # noqa: E402
 from nvx_tools import development_release  # noqa: E402
+from nvx_tools.build_constants import BuildConstants  # noqa: E402
+from nvx_tools.common import ScriptError  # noqa: E402
 
 
 class DevelopmentReleaseTests(unittest.TestCase):
@@ -476,6 +484,125 @@ class DevelopmentReleaseTests(unittest.TestCase):
         self.assertIn("--draft", command)
         self.assertIn("--prerelease", command)
         self.assertFalse(any(item.endswith((".zip", ".tar.gz")) for item in command))
+
+
+def _write_package(path: Path, members: Mapping[str, bytes | None]) -> None:
+    """Write a release archive whose package root holds `members`, files with
+    their contents, or directories where the contents are None."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    root = path.name.removesuffix(".tar.gz").removesuffix(".zip")
+    if path.name.endswith(".tar.gz"):
+        with tarfile.open(path, "w:gz") as archive:
+            for name, data in members.items():
+                info = tarfile.TarInfo(f"{root}/{name}")
+                if data is None:
+                    info.type = tarfile.DIRTYPE
+                    archive.addfile(info)
+                    continue
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        return
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(
+                f"{root}/{name}" + ("/" if data is None else ""), data or b""
+            )
+
+
+class DevelopmentReleasePackageTests(unittest.TestCase):
+    """The packages that publication checks: each ships OpenVMM and nvx-rs."""
+
+    def _packages(self, directory: Path) -> dict[str, Path]:
+        packages = publish_development_release.release_packages(directory, "1.2.3")
+        for platform, package in packages.items():
+            suffix = ".exe" if platform.startswith("windows-") else ""
+            _write_package(
+                package,
+                {
+                    "SHA256SUMS": b"sums",
+                    f"bin/openvmm{suffix}": b"openvmm",
+                    f"bin/nvx-rs{suffix}": b"nvx-rs",
+                },
+            )
+        return packages
+
+    def test_packages_are_named_after_their_platforms(self):
+        self.assertEqual(
+            publish_development_release.release_packages(Path("dist"), "1.2.3"),
+            {
+                "linux-kvm": Path("dist") / "nvx-1.2.3-linux-kvm.tar.gz",
+                "linux-mshv": Path("dist") / "nvx-1.2.3-linux-mshv.tar.gz",
+                "windows-whp": Path("dist") / "nvx-1.2.3-windows-whp.zip",
+            },
+        )
+
+    def test_every_package_must_ship_openvmm_and_nvx_rs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            packages = self._packages(Path(temporary))
+            publish_development_release.check_release_packages(packages)
+            for platform, members, missing in (
+                ("linux-kvm", {"bin/openvmm": b"openvmm"}, "bin/nvx-rs"),
+                ("linux-mshv", {"bin/nvx-rs": b"nvx-rs"}, "bin/openvmm"),
+                (
+                    "linux-kvm",
+                    {"bin/openvmm": b"openvmm", "bin/nvx-rs": None},
+                    "bin/nvx-rs",
+                ),
+                # Windows packages ship Windows executables.
+                (
+                    "windows-whp",
+                    {"bin/openvmm.exe": b"openvmm", "bin/nvx-rs": b"nvx-rs"},
+                    "bin/nvx-rs.exe",
+                ),
+            ):
+                with self.subTest(platform=platform, members=sorted(members)):
+                    package = packages[platform]
+                    package.unlink()
+                    _write_package(package, members)
+                    with self.assertRaisesRegex(
+                        ScriptError,
+                        f"^{re.escape(package.name)} does not ship {missing}$",
+                    ):
+                        publish_development_release.check_release_packages(packages)
+                    self._packages(Path(temporary))
+            packages["linux-mshv"].unlink()
+            with self.assertRaisesRegex(
+                ScriptError, "development release package nvx-1.2.3-linux-mshv.tar.gz"
+            ):
+                publish_development_release.check_release_packages(packages)
+
+    def test_publication_checks_the_packages_before_it_publishes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "VERSION").write_text("1.2.3\n", encoding="ascii")
+            packages = self._packages(root / "dist")
+            environment = {"GH_REPO": "example/nvx", "GITHUB_SHA": "a" * 40}
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                with (
+                    patch.dict(os.environ, environment),
+                    patch.object(BuildConstants, "REPO_ROOT", root),
+                    patch.object(
+                        publish_development_release, "publish_development_release"
+                    ) as publish,
+                ):
+                    publish_development_release.main()
+                    publish.assert_called_once_with(
+                        "example/nvx",
+                        "a" * 40,
+                        "1.2.3",
+                        tuple(
+                            Path("dist") / package.name for package in packages.values()
+                        ),
+                    )
+                    publish.reset_mock()
+                    _write_package(packages["windows-whp"], {"bin/openvmm.exe": b""})
+                    with self.assertRaisesRegex(ScriptError, "bin/nvx-rs.exe"):
+                        publish_development_release.main()
+                    publish.assert_not_called()
+            finally:
+                os.chdir(previous)
 
 
 if __name__ == "__main__":

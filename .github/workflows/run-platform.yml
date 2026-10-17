@@ -27,6 +27,10 @@ on:
         description: Base name of the compatible OpenVMM artifacts
         required: true
         type: string
+      nvx-rs-artifact:
+        description: Base name of the nvx-rs artifacts for the runner's OS
+        required: true
+        type: string
       teardown-mode:
         description: Guest teardown mode used by the benchmark
         required: true
@@ -134,3 +138,4 @@ jobs:
         uses: ./.github/actions/package-release
         with:
           platform: ${{ inputs.release-platform }}
+          nvx-rs-artifact: ${{ inputs.nvx-rs-artifact }}

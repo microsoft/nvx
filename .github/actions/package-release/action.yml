@@ -5,10 +5,33 @@ inputs:
   platform:
     description: Platform suffix used in the package and artifact names
     required: true
+  nvx-rs-artifact:
+    description: Base name of the nvx-rs artifacts for the runner's OS
+    required: true
 
 runs:
   using: composite
   steps:
+    # Every package ships the nvx-rs that the NVX CLI job of its OS built and
+    # tested, with its provenance, which nvx.py download installs where
+    # nvx.py looks for them.
+    - name: Download nvx-rs executable
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.nvx-rs-artifact }}-executable
+        path: nvx-rs/target/release
+
+    - name: Download nvx-rs provenance
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.nvx-rs-artifact }}-provenance
+        path: build
+
+    - name: Make nvx-rs executable
+      if: runner.os != 'Windows'
+      shell: bash
+      run: chmod +x nvx-rs/target/release/nvx-rs
+
     - name: Rematerialize canonical kernel inputs
       if: runner.os == 'Windows'
       shell: powershell

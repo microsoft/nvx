@@ -48,7 +48,9 @@ file, build script, and `src/` tree and `rust-toolchain.toml`, and to the
 Rust release, target, and Cargo features of the build. `nvx.py` records it
 when it builds `nvx-rs`, and
 [`record-nvx-rs-provenance`](#record-nvx-rs-provenance) records it for a
-build made otherwise.
+build made otherwise. [`package`](#package) refuses an `nvx-rs` that it does
+not describe as built from the checkout's sources, so a stale build never
+ships unnoticed.
 
 ## Commands
 
@@ -360,7 +362,8 @@ the executable's SHA-256 to the digest of this checkout's `nvx-rs` sources,
 the Rust release that `rust-toolchain.toml` pins, the target, and the `cli`
 feature, so record it right after building `nvx-rs` from this checkout. For
 `x86_64-unknown-linux-musl`, the target of the Linux release packages, the
-executable must be static. `nvx.py` records the builds that it makes itself.
+executable must be static. CI's NVX CLI jobs record the builds that they hand
+to the packages, and `nvx.py` records the builds that it makes itself.
 
 ### `build`
 
@@ -1196,7 +1199,13 @@ python3 scripts/nvx.py package
 | `--binary-only` | Stage binaries only; publish corresponding source separately. |
 | `--force` | Replace an existing staging destination. |
 
-Exactly one of `--include-source` and `--binary-only` is required. See
+Exactly one of `--include-source` and `--binary-only` is required. Every
+package ships `nvx-rs` with its provenance, which must describe
+`nvx-rs/target/release/nvx-rs[.exe]` as built from the checkout's sources
+for the release target of the host's operating system:
+`x86_64-unknown-linux-musl`, a static executable, on Linux, and
+`x86_64-pc-windows-msvc` on Windows; see
+[`record-nvx-rs-provenance`](#record-nvx-rs-provenance). See
 [Package and source delivery](distribution.md) for release procedures and
 source-publication requirements.
 

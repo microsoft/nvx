@@ -1,9 +1,22 @@
 # Package and source delivery
 
 `package` stages a release directory, `dist/<version>` by default, from the
-built OpenVMM binary and guest artifacts. [Build](build.md) lists the
-artifacts and provenance it requires and the binary release layout. Every
-package is either binary-only or source-inclusive, and you must choose one.
+built OpenVMM binary, `nvx-rs` executable, and guest artifacts. [Build](build.md)
+lists the artifacts and provenance it requires and the binary release layout.
+Every package is either binary-only or source-inclusive, and you must choose
+one.
+
+Every package ships the release build of `nvx-rs`, the Rust command-line
+interface that `nvx.py` runs ([Usage](usage.md#nvx-rs)): `bin/nvx-rs`, a
+static `x86_64-unknown-linux-musl` executable, in the Linux packages, and
+`bin/nvx-rs.exe`, an `x86_64-pc-windows-msvc` executable with a static C
+runtime, in the Windows package. `provenance/nvx-rs.provenance.json` binds it
+to the digest of the `nvx-rs` sources that built it, the Rust release, the
+target, and the `cli` feature, and the packaged `SOURCE-MANIFEST.json` records
+the same in its `nvx_rs` section with the executable's SHA-256. `package`
+requires `nvx-rs/target/release/nvx-rs[.exe]` and its provenance in `build/`,
+which must describe it as such a build of the checkout's sources; see
+[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance).
 
 ## Binary-only packages
 
@@ -92,13 +105,18 @@ python3 scripts/nvx.py archive-release \
 
 `archive-release` checks the staged files against their `SHA256SUMS` before
 it writes a `.tar.gz` or `.zip` archive outside the staged directory; see
-[`archive-release`](usage.md#archive-release).
+[`archive-release`](usage.md#archive-release). `SHA256SUMS` lists every
+packaged file, `bin/nvx-rs[.exe]` and its provenance included, and every
+archive marks the executables in `bin/` executable.
 
 CI follows the binary-only path. On a `dev` push that changes more than
 documentation, the `linux-kvm`, `linux-mshv`, and `windows-whp` platform jobs
 each stage `dist/nvx-<version>-<platform>` with `--binary-only`, then archive
 it as `.tar.gz` on Linux and `.zip` on Windows through the
-[`package-release`](../.github/actions/package-release/action.yml) action.
+[`package-release`](../.github/actions/package-release/action.yml) action,
+with the `nvx-rs` and provenance that the NVX CLI job of their operating
+system built and tested. The development release job checks that each
+package ships OpenVMM and `nvx-rs` before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
 

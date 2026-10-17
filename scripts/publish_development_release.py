@@ -13,6 +13,14 @@ from nvx_tools.build_constants import (
 )
 from nvx_tools.common import ScriptError, require_file
 from nvx_tools.development_release import publish_development_release
+from nvx_tools.release import require_release_package_executables
+
+# The release platforms and the archive formats of their packages.
+PLATFORMS = (
+    ("linux-kvm", ".tar.gz"),
+    ("linux-mshv", ".tar.gz"),
+    ("windows-whp", ".zip"),
+)
 
 
 def _required_environment(name: str) -> str:
@@ -22,22 +30,37 @@ def _required_environment(name: str) -> str:
     return value
 
 
+def release_packages(directory: Path, version: str) -> dict[str, Path]:
+    """Return the package archive of each release platform in `directory`."""
+    return {
+        platform: directory / f"nvx-{version}-{platform}{extension}"
+        for platform, extension in PLATFORMS
+    }
+
+
+def check_release_packages(packages: dict[str, Path]) -> None:
+    """Fail unless every package ships the executables of its platform,
+    OpenVMM and nvx-rs, which `nvx.py download` installs."""
+    for platform, package in packages.items():
+        require_file(package, f"development release package {package.name}")
+        require_release_package_executables(package, platform)
+
+
 def main() -> None:
     version_path = require_file(BuildConstants.REPO_ROOT / "VERSION", "NVX version")
     try:
         version = version_path.read_text(encoding="ascii").strip()
     except OSError as error:
         raise ScriptError(f"failed to read {version_path}: {error}") from error
-    packages = (
-        Path(ReleaseBuildConstants.DIRECTORY_NAME) / f"nvx-{version}-linux-kvm.tar.gz",
-        Path(ReleaseBuildConstants.DIRECTORY_NAME) / f"nvx-{version}-linux-mshv.tar.gz",
-        Path(ReleaseBuildConstants.DIRECTORY_NAME) / f"nvx-{version}-windows-whp.zip",
-    )
+    repository = _required_environment("GH_REPO")
+    target_sha = _required_environment("GITHUB_SHA")
+    packages = release_packages(Path(ReleaseBuildConstants.DIRECTORY_NAME), version)
+    check_release_packages(packages)
     publish_development_release(
-        _required_environment("GH_REPO"),
-        _required_environment("GITHUB_SHA"),
+        repository,
+        target_sha,
         version,
-        packages,
+        tuple(packages.values()),
     )
 
 

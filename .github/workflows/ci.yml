@@ -140,6 +140,14 @@ jobs:
             nvx-rs/target/release/nvx-rs
           echo "NVX_RS=${GITHUB_WORKSPACE}/nvx-rs/target/release/nvx-rs" >> "${GITHUB_ENV}"
 
+      # Packages ship the build with its provenance, which binds it to the
+      # nvx-rs sources, the pinned Rust release, the target, and the features.
+      - name: Record nvx-rs provenance
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py record-nvx-rs-provenance
+          --target x86_64-unknown-linux-musl
+
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
 
@@ -148,6 +156,15 @@ jobs:
         with:
           name: nvx-rs-linux-musl-executable
           path: nvx-rs/target/release/nvx-rs
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Upload nvx-rs provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-linux-musl-provenance
+          path: build/nvx-rs.provenance.json
           if-no-files-found: error
           overwrite: true
           retention-days: 1
@@ -213,6 +230,12 @@ jobs:
           "NVX_RS=$env:GITHUB_WORKSPACE\nvx-rs\target\release\nvx-rs.exe" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Record nvx-rs provenance
+        shell: powershell
+        run: |
+          python scripts\nvx.py record-nvx-rs-provenance --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
 
@@ -221,6 +244,15 @@ jobs:
         with:
           name: nvx-rs-windows-msvc-executable
           path: nvx-rs/target/release/nvx-rs.exe
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Upload nvx-rs provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-windows-msvc-provenance
+          path: build/nvx-rs.provenance.json
           if-no-files-found: error
           overwrite: true
           retention-days: 1
@@ -953,7 +985,7 @@ jobs:
       runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
       backend: kvm
       openvmm-artifact: openvmm-linux-gnu
-      nvx-rs-artifact: nvx-rs-linux-musl-executable
+      nvx-rs-artifact: nvx-rs-linux-musl
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -986,7 +1018,7 @@ jobs:
       runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
       backend: mshv
       openvmm-artifact: openvmm-linux-gnu
-      nvx-rs-artifact: nvx-rs-linux-musl-executable
+      nvx-rs-artifact: nvx-rs-linux-musl
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -1019,7 +1051,7 @@ jobs:
       runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
       backend: whp
       openvmm-artifact: openvmm-windows-msvc
-      nvx-rs-artifact: nvx-rs-windows-msvc-executable
+      nvx-rs-artifact: nvx-rs-windows-msvc
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -1055,7 +1087,7 @@ jobs:
       runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
       backend: kvm
       openvmm-artifact: openvmm-linux-gnu
-      nvx-rs-artifact: nvx-rs-linux-musl-executable
+      nvx-rs-artifact: nvx-rs-linux-musl
       debug-kernel: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
@@ -1083,7 +1115,7 @@ jobs:
       runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
       backend: mshv
       openvmm-artifact: openvmm-linux-gnu
-      nvx-rs-artifact: nvx-rs-linux-musl-executable
+      nvx-rs-artifact: nvx-rs-linux-musl
       debug-kernel: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
@@ -1111,7 +1143,7 @@ jobs:
       runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
       backend: whp
       openvmm-artifact: openvmm-windows-msvc
-      nvx-rs-artifact: nvx-rs-windows-msvc-executable
+      nvx-rs-artifact: nvx-rs-windows-msvc
       debug-kernel: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
@@ -1152,6 +1184,7 @@ jobs:
       release-platform: linux-kvm
       benchmark-platform: linux-kvm-virtual-machine
       openvmm-artifact: openvmm-linux-gnu
+      nvx-rs-artifact: nvx-rs-linux-musl
       teardown-mode: guest-exit
       benchmark-cpus: 0-7
       host-cpu-reserve: 0
@@ -1191,6 +1224,7 @@ jobs:
       release-platform: linux-mshv
       benchmark-platform: linux-mshv-virtual-machine
       openvmm-artifact: openvmm-linux-musl
+      nvx-rs-artifact: nvx-rs-linux-musl
       teardown-mode: guest-exit
       benchmark-cpus: 0-7
       host-cpu-reserve: 0
@@ -1230,6 +1264,7 @@ jobs:
       release-platform: windows-whp
       benchmark-platform: windows-whp-virtual-machine
       openvmm-artifact: openvmm-windows-msvc
+      nvx-rs-artifact: nvx-rs-windows-msvc
       teardown-mode: guest-exit
       benchmark-cpus: 0-7
       host-cpu-reserve: 0

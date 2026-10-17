@@ -366,20 +366,29 @@ then restores executable permissions on Linux.
 
 `nvx.py` runs [`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli) for its `sandbox`
 command and for the egress-policy and artifact steps of its `run` command, so
-the microVM test jobs take `nvx-rs` the same way. Each NVX CLI job builds it
-for its operating system with `--release --locked --features cli`, puts it at
-`nvx-rs/target/release/`, where `nvx.py` looks for it, and runs the CLI tests
-with it, with `NVX_RS` naming it for the tests that run it directly: `nvx-cli-linux` builds a static `x86_64-unknown-linux-musl`
-executable, which runs on every self-hosted Linux runner, and
-`nvx-cli-windows` an executable with a static C runtime, which needs no Visual
-C++ redistributable. Once the tests pass, the job uploads it as the one-day
-`nvx-rs-linux-musl-executable` or `nvx-rs-windows-msvc-executable` artifact,
-and each microVM test job of that operating system downloads it into
-`nvx-rs/target/release/` and restores its executable permission on Linux.
-The platform jobs run neither `nvx.py sandbox` nor `nvx.py run`, so they don't
-take it. The `managed-lifecycle` scenario also builds and runs the ignored
-`nvx-rs` test `tests/managed_lifecycle.rs` with Cargo on the runner, as
-`test-aci-edge-sandboxes` builds the tests of its crate.
+the microVM test jobs take `nvx-rs` the same way, and every release package
+ships it. Each NVX CLI job builds it for its operating system with
+`--release --locked --features cli`, puts it at `nvx-rs/target/release/`,
+where `nvx.py` looks for it, and runs the CLI tests with it, with `NVX_RS`
+naming it for the tests that run it directly: `nvx-cli-linux` builds a static
+`x86_64-unknown-linux-musl` executable, which runs on every self-hosted Linux
+runner, and `nvx-cli-windows` an `x86_64-pc-windows-msvc` executable with a
+static C runtime, which needs no Visual C++ redistributable. Each job records
+the build's provenance with
+[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance), and, once the
+tests pass, uploads the executable and the provenance as the one-day
+`nvx-rs-linux-musl-executable` and `nvx-rs-linux-musl-provenance` artifacts, or
+the `nvx-rs-windows-msvc-*` pair. The workflows that take them name the pair by
+its base name, `nvx-rs-linux-musl` or `nvx-rs-windows-msvc`, as they name the
+OpenVMM artifacts. Each microVM test job of that operating system downloads
+the executable into `nvx-rs/target/release/` and restores its executable
+permission on Linux. The platform jobs run neither `nvx.py sandbox` nor
+`nvx.py run`, but their
+[`package-release`](../.github/actions/package-release/action.yml) step
+downloads both, the provenance into `build/`, so that each package ships the
+`nvx-rs` of its operating system. The `managed-lifecycle` scenario also builds
+and runs the ignored `nvx-rs` test `tests/managed_lifecycle.rs` with Cargo on
+the runner, as `test-aci-edge-sandboxes` builds the tests of its crate.
 
 Once the required artifacts are
 ready, benchmarks run in parallel with the NVX test layer, each on its backend's
@@ -437,7 +446,7 @@ reads, and uses Python 3.12, the release that the self-hosted runners provide;
 the Windows job also installs the pinned Rust release with the minimal profile
 for the curl shim test and the `nvx-rs` build. Each job first builds the
 `nvx-rs` executable that `nvx.py` runs, tests with it, and hands it to the
-microVM test jobs of its operating system, as described above. Fork pull requests lack the OpenVMM deploy key, so the
+microVM test and platform jobs of its operating system, as described above. Fork pull requests lack the OpenVMM deploy key, so the
 CLI jobs run, like the hypervisor jobs, only for pushes and same-repository
 pull requests. Because the microVM and platform jobs of each operating system
 wait for its CLI job, a broken CLI does not occupy the hypervisor runners.
@@ -622,7 +631,9 @@ executables.
 
 The development release job depends on `aci-edge-sandboxes` and `nvx-rs` and
 requires their combined Linux/Windows results to be successful; failed,
-cancelled, or skipped crate checks cannot publish a release.
+cancelled, or skipped crate checks cannot publish a release. Before it uploads
+anything, it checks that each platform's package ships `bin/openvmm` and
+`bin/nvx-rs`, or their `.exe` forms on Windows, which `download` installs.
 
 Each `nvx-microvm-tests-{kvm,mshv,whp}` job then runs
 `nvx.py test-aci-edge-sandboxes` on its self-hosted runner; the debug-kernel

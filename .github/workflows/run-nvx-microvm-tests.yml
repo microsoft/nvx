@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       nvx-rs-artifact:
-        description: Name of the nvx-rs executable artifact for the runner's OS
+        description: Base name of the nvx-rs artifacts for the runner's OS
         required: true
         type: string
       debug-kernel:
@@ -94,7 +94,7 @@ jobs:
       - name: Download nvx-rs executable
         uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.nvx-rs-artifact }}
+          name: ${{ inputs.nvx-rs-artifact }}-executable
           path: nvx-rs/target/release
 
       - name: Make nvx-rs executable
