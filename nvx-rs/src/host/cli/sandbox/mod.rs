@@ -746,36 +746,41 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
 /// OpenVMM shares the terminal and its process group, so Ctrl-C reaches it too. As
 /// `subprocess.run` does, the CLI then gives it 0.25 s to exit on Unix before it kills it, and on
 /// Windows, where Python cannot interrupt its wait, waits for it to exit; either way the command
-/// ends as interrupted.
+/// ends as interrupted, also when OpenVMM exited first, since Python's wait raises
+/// `KeyboardInterrupt` once Ctrl-C arrives.
 fn run_openvmm(command: &[String]) -> Result<i32> {
     let mut child = Command::new(&command[0])
         .args(&command[1..])
         .spawn()
         .map_err(|error| Exit::error(spawn_error(&error, &command[0])))?;
     loop {
-        if let Some(status) = poll(&mut child)? {
-            return Ok(status);
-        }
+        let status = poll(&mut child)?;
         if platform::interrupted() {
-            if cfg!(windows) {
-                while poll(&mut child)?.is_none() {
-                    thread::sleep(Duration::from_millis(10));
-                }
-            } else {
-                let deadline = std::time::Instant::now() + Duration::from_millis(250);
-                while poll(&mut child)?.is_none() {
-                    if std::time::Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
+            if status.is_none() {
+                end_interrupted(&mut child)?;
             }
             return Err(Exit::Interrupted);
         }
+        if let Some(status) = status {
+            return Ok(status);
+        }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Ends the OpenVMM of an interrupted run as `subprocess.run` does: on Unix, it waits 0.25 s for
+/// OpenVMM to exit and then kills it, and on Windows, it waits for OpenVMM to exit.
+fn end_interrupted(child: &mut Child) -> Result {
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    while poll(child)?.is_none() {
+        if cfg!(unix) && std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 /// Returns the status of `child` if it has exited: `Popen.returncode`, which on Unix is the

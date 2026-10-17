@@ -605,9 +605,18 @@ mod interrupts {
 
     use super::*;
 
-    /// Sends SIGINT to the CLI once its OpenVMM has started, and returns its output.
-    fn interrupt(root: &Root, arguments: &[String], started: &Path) -> (Output, Duration) {
-        let child = Command::new(NVX_RS)
+    /// Sends SIGINT once OpenVMM has started, to the CLI alone or, as a terminal's Ctrl-C does,
+    /// to its whole process group, which a run's OpenVMM shares, and returns the CLI's output.
+    fn interrupt(
+        root: &Root,
+        arguments: &[String],
+        started: &Path,
+        group: bool,
+    ) -> (Output, Duration) {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new(NVX_RS);
+        command
             .arg("--root")
             .arg(&root.path)
             .args(arguments)
@@ -615,27 +624,30 @@ mod interrupts {
             .env_remove("NVX_OPENVMM")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if group {
+            command.process_group(0);
+        }
+        let child = command.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
         while !started.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
         thread::sleep(Duration::from_millis(200));
         let interrupted = Instant::now();
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap()),
-            nix::sys::signal::Signal::SIGINT,
-        )
-        .unwrap();
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+        if group {
+            nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGINT).unwrap();
+        } else {
+            nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).unwrap();
+        }
         let output = child.wait_with_output().unwrap();
         (output, interrupted.elapsed())
     }
 
-    #[test]
-    fn interrupting_a_run_kills_openvmm_and_exits_with_130() {
-        let root = populated_root();
+    /// Returns the arguments of a one-shot run of `/bin/sleep 60` in the fake OpenVMM, and the
+    /// file that the fake writes when it starts.
+    fn sleeping_run(root: &Root) -> (Vec<String>, PathBuf) {
         let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
         let arguments: Vec<String> = [
             "sandbox",
@@ -655,11 +667,32 @@ mod interrupts {
         .map(str::to_owned)
         .to_vec();
         // The fake records its command line when it starts.
-        let started = root.path.join("build").join("fake-openvmm-.json");
-        let (output, elapsed) = interrupt(&root, &arguments, &started);
+        (
+            arguments,
+            root.path.join("build").join("fake-openvmm-.json"),
+        )
+    }
+
+    #[test]
+    fn interrupting_a_run_kills_openvmm_and_exits_with_130() {
+        let root = populated_root();
+        let (arguments, started) = sleeping_run(&root);
+        let (output, elapsed) = interrupt(&root, &arguments, &started, false);
         assert_eq!(output.status.code(), Some(130));
         assert_eq!(text(&output.stderr), "Interrupted\n");
         assert!(text(&output.stdout).starts_with(">> "));
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    }
+
+    #[test]
+    fn interrupting_a_run_ends_it_as_interrupted_even_if_openvmm_exits_first() {
+        // A terminal's Ctrl-C reaches OpenVMM too, which the fake lets end it at once; Python's
+        // wait raises KeyboardInterrupt all the same, rather than return OpenVMM's status.
+        let root = populated_root();
+        let (arguments, started) = sleeping_run(&root);
+        let (output, elapsed) = interrupt(&root, &arguments, &started, true);
+        assert_eq!(output.status.code(), Some(130));
+        assert_eq!(text(&output.stderr), "Interrupted\n");
         assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
     }
 
@@ -682,7 +715,7 @@ mod interrupts {
             .map(str::to_owned),
         );
         let started = root.path.join("state").join("runtime.json");
-        let (output, elapsed) = interrupt(&root, &arguments, &started);
+        let (output, elapsed) = interrupt(&root, &arguments, &started, false);
         assert_eq!(output.status.code(), Some(130));
         assert_eq!(text(&output.stderr), "Interrupted\n");
         assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");

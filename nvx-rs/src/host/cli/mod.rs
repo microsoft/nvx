@@ -180,7 +180,14 @@ pub fn main() -> i32 {
     // Like Python, which installs its handler as it starts, run on without one if that fails.
     let _ = platform::watch_interrupts();
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match run(&arguments) {
+    let result = run(&arguments);
+    // Python raises KeyboardInterrupt wherever Ctrl-C finds its command, so a command that Ctrl-C
+    // reached ends as interrupted even if it finished meanwhile, as a run does whose OpenVMM the
+    // same Ctrl-C ended.
+    if platform::interrupted() {
+        return Exit::Interrupted.report();
+    }
+    match result {
         Ok(()) => 0,
         Err(exit) => exit.report(),
     }
