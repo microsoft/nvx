@@ -11,6 +11,9 @@ use super::Transport;
 use crate::host::sys::{self, Errno};
 use crate::hypervisor::Hypervisor;
 
+#[cfg(feature = "cli")]
+pub(crate) use crate::host::sys::{interrupted, watch_interrupts};
+
 /// Whether this host can run NVX microVMs.
 pub const SUPPORTED: bool = true;
 

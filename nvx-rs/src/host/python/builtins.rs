@@ -398,6 +398,49 @@ pub(crate) fn parse_digits(text: &str, base: u32) -> Result<(bool, Vec<u8>), Int
     Ok((negative, digits))
 }
 
+/// Parses `text` as `float(text)` does, or returns `None` where it raises `ValueError`.
+///
+/// Python maps Unicode whitespace to spaces and Unicode decimal digits to ASCII digits, and
+/// refuses any other character outside ASCII. Single underscores may separate digits. It then
+/// strips surrounding ASCII whitespace and reads a decimal number with an optional exponent, or
+/// `inf`, `infinity`, or `nan` in any case, each with an optional sign; numbers beyond the range
+/// of a float become infinities.
+#[cfg(feature = "cli")]
+pub(crate) fn parse_float(text: &str) -> Option<f64> {
+    let mut ascii = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_ascii() {
+            ascii.push(character);
+        } else if is_space(character) {
+            ascii.push(' ');
+        } else {
+            ascii.push(char::from(b'0' + decimal_value(character)? as u8));
+        }
+    }
+    let mut digits = String::with_capacity(ascii.len());
+    let mut previous = '\0';
+    for character in ascii.chars() {
+        if character == '_' {
+            if !previous.is_ascii_digit() {
+                return None;
+            }
+        } else {
+            if previous == '_' && !character.is_ascii_digit() {
+                return None;
+            }
+            digits.push(character);
+        }
+        previous = character;
+    }
+    if previous == '_' {
+        return None;
+    }
+    let number = digits.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'));
+    // Rust reads the grammar of `PyOS_string_to_double`: digits with an optional fraction and
+    // exponent, or `inf`, `infinity`, and `nan` in any case, after an optional sign.
+    number.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +552,52 @@ mod tests {
         assert!(!Int::zero().is_positive());
         assert!(!Int::zero().is_negative());
         assert_eq!(Int::from(-7_i64).to_string(), "-7");
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn floats_parse_as_python_float() {
+        for (text, expected) in [
+            ("60", 60.0),
+            (" 0.25 ", 0.25),
+            ("1_000.5", 1000.5),
+            ("1e1_0", 1e10),
+            (".5", 0.5),
+            ("5.", 5.0),
+            ("1.e2", 100.0),
+            ("+1E-2", 0.01),
+            ("\u{664}\u{662}", 42.0),
+            ("\u{3000}7\u{85}", 7.0),
+            ("1e400", f64::INFINITY),
+            ("-Infinity", f64::NEG_INFINITY),
+            ("iNf", f64::INFINITY),
+        ] {
+            assert_eq!(parse_float(text), Some(expected), "{text:?}");
+        }
+        assert!(parse_float("-nan").is_some_and(f64::is_nan));
+        for text in [
+            "",
+            " ",
+            ".",
+            "e5",
+            "1e",
+            "_1",
+            "1_",
+            "1__0",
+            "1_.5",
+            "1._5",
+            "inf_",
+            "0x10",
+            "1 2",
+            "nan(1)",
+            "in",
+            "\u{200b}1",
+            "1\0",
+            "+",
+            "--1",
+        ] {
+            assert_eq!(parse_float(text), None, "{text:?}");
+        }
     }
 
     #[test]

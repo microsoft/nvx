@@ -35,6 +35,9 @@ host = [
 bundled = ["host", "dep:sha2"]
 # Test doubles: the fake OpenVMM of `testing::fake_openvmm` and its `nvx-fake-openvmm` binary.
 testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:nix", "dep:windows-sys"]
+# The `nvx-rs` command-line interface of `host::cli` and its `nvx-rs` binary, which `nvx.py`
+# runs for the steps that it delegates.
+cli = ["host"]
 # The serde form of `Hypervisor`. The `host` feature enables it.
 serde = ["dep:serde"]
 # The programs that run in Linux guests: the `guest` module and the `nvx-*` guest binaries. Build
@@ -53,6 +56,7 @@ windows-sys = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
@@ -92,6 +96,12 @@ tempfile = "3.10"
 name = "nvx-fake-openvmm"
 path = "src/bin/nvx-fake-openvmm.rs"
 required-features = ["testing"]
+doc = false
+
+[[bin]]
+name = "nvx-rs"
+path = "src/bin/nvx-rs.rs"
+required-features = ["cli"]
 doc = false
 
 # The guest binaries. Their unit tests live in the library, so the binaries have no test harness.

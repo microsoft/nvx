@@ -16,6 +16,8 @@
 //!   hosts compile but report NVX as unavailable.
 //! - [`sandbox`] is the launch profile of `nvx.py sandbox`: a container over read-only EROFS
 //!   layers and a private ext4 scratch disk, with live shares, and the checks of its options.
+//! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which `nvx.py` runs for the
+//!   steps that it delegates: artifact lookup, egress policy compilation, and sandboxes.
 //!
 //! The ports of `nvx.py` code keep its Python semantics, which the private `python` module
 //! provides.
@@ -27,6 +29,8 @@
 #![deny(unsafe_code)]
 
 pub mod artifacts;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod filesystem;
 pub mod instance;
 pub mod launch;

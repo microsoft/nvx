@@ -4,9 +4,11 @@
 //! standard library or this module, which makes its system calls through `nix` and confines the
 //! unsafe ones behind wrappers that establish their ownership and async-signal-safety invariants.
 //! `nix` has no wrapper for `pidfd_open`, `pidfd_send_signal`, `close_range`, or `getdents64`, so
-//! those go through `nix`'s re-export of libc. The Windows platform module still calls
-//! `windows-sys` directly.
+//! those go through `nix`'s re-export of libc, as does the query of the `SIGINT` disposition that
+//! precedes the CLI's handler. The Windows platform module still calls `windows-sys` directly.
 
+#[cfg(feature = "cli")]
+mod interrupt;
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
@@ -16,6 +18,8 @@ mod socket;
 pub(crate) use nix::errno::Errno;
 use nix::unistd::{getegid, geteuid};
 
+#[cfg(feature = "cli")]
+pub(crate) use interrupt::{interrupted, watch_interrupts};
 #[cfg(target_os = "linux")]
 pub(crate) use process::{PidFd, detach};
 #[cfg(all(test, target_os = "linux"))]
