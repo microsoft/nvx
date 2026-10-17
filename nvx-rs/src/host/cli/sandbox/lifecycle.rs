@@ -43,7 +43,7 @@ use crate::host::python::json::{Document, Node};
 use crate::host::python::path::PurePath;
 use crate::host::python::value::py_str;
 use crate::host::sandbox::{SandboxLaunch, require_file};
-use crate::protocol::CAPABILITY_LEN;
+use crate::protocol::{CAPABILITY_LEN, GuestFeatures};
 
 /// The launch configuration.
 pub(crate) const CONFIG_NAME: &str = "config.json";
@@ -446,6 +446,10 @@ pub(crate) fn start(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -
     start_locked(&state_dir, artifacts, timeout)
 }
 
+/// The control features that the layered sandbox root must provide for the requests of
+/// `nvx-rs sandbox`.
+pub(crate) const REQUIRED_FEATURES: GuestFeatures = GuestFeatures::LAYERED_SANDBOX;
+
 /// Starts the sandbox of a locked state directory, as `_start` does.
 fn start_locked(state_dir: &PurePath, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
     let config_path = state_dir.join(CONFIG_NAME);
@@ -573,8 +577,9 @@ fn start_locked(state_dir: &PurePath, artifacts: &Artifacts<'_>, timeout: f64) -
     }
 }
 
-/// Launches OpenVMM, records it, and waits until its guest is ready, leaving the launched process
-/// in `launched` for the caller to end if that fails.
+/// Launches OpenVMM, records it, and waits until its guest is ready and provides the features of
+/// [`REQUIRED_FEATURES`], leaving the launched process in `launched` for the caller to end if
+/// that fails.
 fn launch_and_connect(
     command: &[String],
     capability: &[u8; CAPABILITY_LEN],
@@ -623,6 +628,15 @@ fn launch_and_connect(
     )?;
     let mut session = Session::connect(endpoint, pid, capability, timeout)?;
     session.ping(timeout)?;
+    let features = session.features(timeout)?;
+    let missing = features.missing(REQUIRED_FEATURES);
+    if !missing.is_empty() {
+        return Err(Exit::error(format!(
+            "the guest image lacks control features that layered sandboxes need ({}); use an \
+             NVX release or build that includes them",
+            missing.join(", ")
+        )));
+    }
     Ok(())
 }
 

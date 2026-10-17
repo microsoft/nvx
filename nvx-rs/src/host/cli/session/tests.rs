@@ -730,6 +730,31 @@ fn output_beyond_the_guest_limit_breaks_the_protocol() {
 }
 
 #[test]
+fn features_of_a_guest_that_predates_them_are_none() {
+    let (mut session, worker) = session_with(|guest| {
+        let (kind, request_id, _) = guest.request();
+        assert_eq!(kind, APP_FEATURES);
+        guest.send(APP_ERROR, request_id, 95, UNSUPPORTED_OPERATION);
+        let (_, request_id, _) = guest.request();
+        guest.send(
+            APP_READY,
+            request_id,
+            0,
+            &GuestFeatures::SANDBOX_AGENT.encode(),
+        );
+        let (_, request_id, _) = guest.request();
+        guest.send(APP_ERROR, request_id, 22, b"invalid-request");
+    });
+    assert_eq!(session.features(5.0).unwrap(), GuestFeatures::NONE);
+    assert_eq!(session.features(5.0).unwrap(), GuestFeatures::SANDBOX_AGENT);
+    assert_eq!(
+        message(session.features(5.0)),
+        "managed guest returned an invalid features response"
+    );
+    worker.join().unwrap();
+}
+
+#[test]
 fn protocol_violations_keep_the_messages_of_python() {
     let (mut session, worker) = session_with(|guest| {
         let (_, request_id, _) = guest.request();

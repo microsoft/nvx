@@ -33,9 +33,9 @@ use crate::host::python::path::PurePath;
 use crate::host::sandbox::options::validate_exec_environment;
 use crate::host::session::{ControlSession, SessionError};
 use crate::protocol::{
-    APP_ERROR, APP_EXEC, APP_EXIT, APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP,
-    APP_STOPPED, CAPABILITY_LEN, MAX_OUTPUT_BYTES, Workload, WorkloadEnvironment,
-    encode_exec_payload,
+    APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_PING, APP_READY, APP_STDERR, APP_STDOUT,
+    APP_STOP, APP_STOPPED, CAPABILITY_LEN, GuestFeatures, MAX_OUTPUT_BYTES, UNSUPPORTED_OPERATION,
+    Workload, WorkloadEnvironment, encode_exec_payload,
 };
 
 /// The exit categories that `exec` accepts, `MANAGED_EXIT_CATEGORIES`. A cancellation, which this
@@ -314,6 +314,28 @@ impl Session {
             return Err(Exit::error("managed guest did not acknowledge readiness"));
         }
         Ok(())
+    }
+
+    /// Asks the guest agent which control features its image provides. An agent that predates
+    /// the request refuses it as an unsupported operation, so its image provides none.
+    pub(crate) fn features(&mut self, timeout: f64) -> Result<GuestFeatures> {
+        let request_id = request_id()?;
+        let deadline = Deadline::after(timeout);
+        self.send(APP_FEATURES, request_id, &[], deadline)?;
+        let (kind, response_id, status, payload) = self.receive(deadline)?;
+        if response_id != request_id {
+            return Err(Exit::error(
+                "managed guest returned a mismatched request ID",
+            ));
+        }
+        match kind {
+            APP_READY if status == 0 => GuestFeatures::decode(&payload)
+                .map_err(|_| Exit::error("managed guest returned an invalid features response")),
+            APP_ERROR if payload == UNSUPPORTED_OPERATION => Ok(GuestFeatures::NONE),
+            _ => Err(Exit::error(
+                "managed guest returned an invalid features response",
+            )),
+        }
     }
 
     /// Runs a workload and returns how it ended, as `ControlSession.exec` does: the request and

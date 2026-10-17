@@ -1067,6 +1067,24 @@ fn agent_feature_sets_match_the_c_modes() {
 }
 
 #[test]
+fn layered_sandboxes_need_only_per_execution_environments() {
+    // The CLI's exec sends working directories and environments; it never cancels a workload or
+    // asks for a workload account (microsoft/nvx#566).
+    assert_eq!(GuestFeatures::LAYERED_SANDBOX.bits(), 1 << 4);
+    assert!(GuestFeatures::SANDBOX_AGENT.contains(GuestFeatures::LAYERED_SANDBOX));
+    assert!(
+        GuestFeatures::SANDBOX_AGENT
+            .missing(GuestFeatures::LAYERED_SANDBOX)
+            .is_empty()
+    );
+    assert_eq!(
+        (GuestFeatures::CANCEL | GuestFeatures::WORKLOAD_ACCOUNT)
+            .missing(GuestFeatures::LAYERED_SANDBOX),
+        ["per-execution environments"]
+    );
+}
+
+#[test]
 fn host_exec_encoding_round_trips_through_the_guest_decoder() {
     let environment = strings(&["FOO=a b", "EMPTY="]);
     let workload = Workload {
