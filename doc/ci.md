@@ -369,7 +369,7 @@ command and for the egress-policy and artifact steps of its `run` command, so
 the microVM test jobs take `nvx-rs` the same way. Each NVX CLI job builds it
 for its operating system with `--release --locked --features cli`, puts it at
 `nvx-rs/target/release/`, where `nvx.py` looks for it, and runs the CLI tests
-with it: `nvx-cli-linux` builds a static `x86_64-unknown-linux-musl`
+with it, with `NVX_RS` naming it for the tests that run it directly: `nvx-cli-linux` builds a static `x86_64-unknown-linux-musl`
 executable, which runs on every self-hosted Linux runner, and
 `nvx-cli-windows` an executable with a static C runtime, which needs no Visual
 C++ redistributable. Once the tests pass, the job uploads it as the one-day

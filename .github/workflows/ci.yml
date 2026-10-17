@@ -124,7 +124,8 @@ jobs:
       # artifact steps of its run command. A static musl build runs on every
       # self-hosted Linux runner, so the microVM jobs take this one, as they
       # take OpenVMM from its build jobs. It goes where `cargo build
-      # --release` puts it, where nvx.py, and so the CLI tests, look for it.
+      # --release` puts it, where nvx.py, and so the CLI tests, look for it,
+      # and NVX_RS names it for the tests that run it directly.
       - name: Build nvx-rs
         shell: bash
         run: |
@@ -137,6 +138,7 @@ jobs:
             --manifest-path nvx-rs/Cargo.toml --target x86_64-unknown-linux-musl
           install -D -m 0755 nvx-rs/target/x86_64-unknown-linux-musl/release/nvx-rs \
             nvx-rs/target/release/nvx-rs
+          echo "NVX_RS=${GITHUB_WORKSPACE}/nvx-rs/target/release/nvx-rs" >> "${GITHUB_ENV}"
 
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
@@ -208,6 +210,8 @@ jobs:
           $ErrorActionPreference = "Stop"
           cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "NVX_RS=$env:GITHUB_WORKSPACE\nvx-rs\target\release\nvx-rs.exe" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx

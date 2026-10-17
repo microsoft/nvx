@@ -5029,10 +5029,19 @@ python3() {
             "nvx-rs \\\n            nvx-rs/target/release/nvx-rs",
             linux,
         )
-        windows = _workflow_job(workflow, "nvx-cli-windows")
+        # The tests that run nvx-rs directly need NVX_RS to name the build.
         self.assertIn(
-            "RUSTFLAGS: -C target-feature=+crt-static",
-            _workflow_step(workflow, "nvx-cli-windows", "Build nvx-rs"),
+            'echo "NVX_RS=${GITHUB_WORKSPACE}/nvx-rs/target/release/nvx-rs" '
+            '>> "${GITHUB_ENV}"',
+            linux,
+        )
+        windows = _workflow_job(workflow, "nvx-cli-windows")
+        windows_build = _workflow_step(workflow, "nvx-cli-windows", "Build nvx-rs")
+        self.assertIn("RUSTFLAGS: -C target-feature=+crt-static", windows_build)
+        self.assertIn(
+            '"NVX_RS=$env:GITHUB_WORKSPACE\\nvx-rs\\target\\release\\nvx-rs.exe" |\n'
+            "            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append",
+            windows_build,
         )
         self.assertLess(
             windows.index("- name: Install the pinned Rust release"),
