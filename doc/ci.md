@@ -362,7 +362,26 @@ hash.
 
 The producer handoff uses one-day workflow artifacts rather than caches. Each
 consumer downloads both the normalized executable and its build provenance,
-then restores executable permissions on Linux. Once the required artifacts are
+then restores executable permissions on Linux.
+
+`nvx.py` runs [`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli) for its `sandbox`
+command and for the egress-policy and artifact steps of its `run` command, so
+the microVM test jobs take `nvx-rs` the same way. Each NVX CLI job builds it
+for its operating system with `--release --locked --features cli`, puts it at
+`nvx-rs/target/release/`, where `nvx.py` looks for it, and runs the CLI tests
+with it: `nvx-cli-linux` builds a static `x86_64-unknown-linux-musl`
+executable, which runs on every self-hosted Linux runner, and
+`nvx-cli-windows` an executable with a static C runtime, which needs no Visual
+C++ redistributable. Once the tests pass, the job uploads it as the one-day
+`nvx-rs-linux-musl-executable` or `nvx-rs-windows-msvc-executable` artifact,
+and each microVM test job of that operating system downloads it into
+`nvx-rs/target/release/` and restores its executable permission on Linux.
+The platform jobs run neither `nvx.py sandbox` nor `nvx.py run`, so they don't
+take it. The `managed-lifecycle` scenario also builds and runs the ignored
+`nvx-rs` test `tests/managed_lifecycle.rs` with Cargo on the runner, as
+`test-aci-edge-sandboxes` builds the tests of its crate.
+
+Once the required artifacts are
 ready, benchmarks run in parallel with the NVX test layer, each on its backend's
 benchmark runner. All three use virtual-machine performance
 series and the constrained eight-CPU affinity policy. Development releases and
@@ -416,7 +435,9 @@ system in `nvx-cli-linux` and `nvx-cli-windows` rather than in every
 hypervisor job. Each checks out OpenVMM, whose pinned CPU profiles a test
 reads, and uses Python 3.12, the release that the self-hosted runners provide;
 the Windows job also installs the pinned Rust release with the minimal profile
-for the curl shim test. Fork pull requests lack the OpenVMM deploy key, so the
+for the curl shim test and the `nvx-rs` build. Each job first builds the
+`nvx-rs` executable that `nvx.py` runs, tests with it, and hands it to the
+microVM test jobs of its operating system, as described above. Fork pull requests lack the OpenVMM deploy key, so the
 CLI jobs run, like the hypervisor jobs, only for pushes and same-repository
 pull requests. Because the microVM and platform jobs of each operating system
 wait for its CLI job, a broken CLI does not occupy the hypervisor runners.
@@ -656,7 +677,9 @@ pin. It restores the shared guest artifacts
 through the `restore-only` input of
 [`build-guest-artifacts`](../.github/actions/build-guest-artifacts/action.yml)
 and the KVM OpenVMM binary that `build-openvmm` caches for the pinned revision,
-so agents can run microVM tests without rebuilding either. The guest artifact
+so agents can run microVM tests without rebuilding either. It doesn't build
+`nvx-rs`: `nvx.py` builds it with Cargo the first time that a command needs
+it. The guest artifact
 restore computes its keys with the same action that saves them. The binary
 restore repeats the key, paths, and gzip compression of the cache entry that
 `build-openvmm` saves, and a test in `scripts/test_nvx_tools.py` fails when

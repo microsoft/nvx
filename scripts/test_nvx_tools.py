@@ -4374,8 +4374,10 @@ python3() {
         self.assertNotIn("build-mode: ${{ inputs.build-mode }}", build_workflow)
         self.assertEqual(build_workflow.count("overwrite: true"), 2)
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
+        # The microVM workflow also downloads nvx-rs, which the benchmarks
+        # don't run.
         for consumer_workflow, download_count in (
-            (microvm_workflow, 4),
+            (microvm_workflow, 5),
             (platform_workflow, 3),
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
@@ -4977,6 +4979,110 @@ python3() {
                         self.assertIn(
                             f"        needs.{cli}.result == 'success' &&\n", job
                         )
+
+    def test_ci_hands_nvx_rs_to_the_microvm_jobs(self):
+        # nvx.py runs nvx-rs for its sandbox command and for run's egress and
+        # artifact steps, and finds it where `cargo build --release` puts it.
+        # Each NVX CLI job builds it for its OS, tests with it, and hands it to
+        # the microVM jobs, as the OpenVMM build jobs hand over OpenVMM.
+        workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
+        workflow = (workflows / "ci.yml").read_text(encoding="utf-8")
+        microvm = (workflows / "run-nvx-microvm-tests.yml").read_text(encoding="utf-8")
+        executables = {
+            "nvx-cli-linux": (
+                "nvx-rs-linux-musl-executable",
+                "nvx-rs/target/release/nvx-rs",
+            ),
+            "nvx-cli-windows": (
+                "nvx-rs-windows-msvc-executable",
+                "nvx-rs/target/release/nvx-rs.exe",
+            ),
+        }
+        self.assertEqual(
+            nvx_rs.binary_path().relative_to(BuildConstants.REPO_ROOT).as_posix(),
+            executables["nvx-cli-windows" if os.name == "nt" else "nvx-cli-linux"][1],
+        )
+        for job_name, (artifact, path) in executables.items():
+            with self.subTest(job=job_name):
+                job = _workflow_job(workflow, job_name)
+                build = _workflow_step(workflow, job_name, "Build nvx-rs")
+                upload = _workflow_step(workflow, job_name, "Upload nvx-rs executable")
+                for option in ("--release", "--locked", "--features cli"):
+                    self.assertIn(option, build)
+                self.assertIn("--manifest-path nvx-rs/Cargo.toml", build)
+                self.assertIn(f"name: {artifact}\n", upload)
+                self.assertIn(f"path: {path}\n", upload)
+                self.assertIn("if-no-files-found: error", upload)
+                # The CLI tests run with the build, and only a validated build
+                # leaves the job.
+                validate = job.index("uses: ./.github/actions/validate-nvx")
+                self.assertLess(job.index("- name: Build nvx-rs"), validate)
+                self.assertGreater(
+                    job.index("- name: Upload nvx-rs executable"), validate
+                )
+        # Self-contained executables run on every self-hosted runner.
+        linux = _workflow_step(workflow, "nvx-cli-linux", "Build nvx-rs")
+        self.assertEqual(linux.count("x86_64-unknown-linux-musl"), 3)
+        self.assertIn("rust-toolchain.toml", linux)
+        self.assertIn(
+            "install -D -m 0755 nvx-rs/target/x86_64-unknown-linux-musl/release/"
+            "nvx-rs \\\n            nvx-rs/target/release/nvx-rs",
+            linux,
+        )
+        windows = _workflow_job(workflow, "nvx-cli-windows")
+        self.assertIn(
+            "RUSTFLAGS: -C target-feature=+crt-static",
+            _workflow_step(workflow, "nvx-cli-windows", "Build nvx-rs"),
+        )
+        self.assertLess(
+            windows.index("- name: Install the pinned Rust release"),
+            windows.index("- name: Build nvx-rs"),
+        )
+
+        for job_name in (
+            *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
+            *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
+            *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
+        ):
+            cli = "nvx-cli-windows" if job_name.endswith("-whp") else "nvx-cli-linux"
+            with self.subTest(consumer=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn(
+                    "uses: ./.github/workflows/run-nvx-microvm-tests.yml", job
+                )
+                self.assertEqual(
+                    re.findall(r"^      nvx-rs-artifact: (\S+)$", job, re.MULTILINE),
+                    [executables[cli][0]],
+                )
+        for job_name in ci.REQUIRED_CI_PLATFORM_JOBS:
+            with self.subTest(consumer=job_name):
+                self.assertNotIn("nvx-rs", _workflow_job(workflow, job_name))
+
+        self.assertIn(
+            "      nvx-rs-artifact:\n"
+            "        description: Name of the nvx-rs executable artifact for the "
+            "runner's OS\n"
+            "        required: true\n"
+            "        type: string\n",
+            microvm,
+        )
+        download = microvm.index("      - name: Download nvx-rs executable\n")
+        self.assertIn(
+            "        uses: actions/download-artifact@v8\n"
+            "        with:\n"
+            "          name: ${{ inputs.nvx-rs-artifact }}\n"
+            "          path: nvx-rs/target/release\n",
+            microvm[download:],
+        )
+        chmod = microvm.index("      - name: Make nvx-rs executable\n")
+        self.assertIn(
+            "        if: runner.os != 'Windows'\n"
+            "        shell: bash\n"
+            "        run: chmod +x nvx-rs/target/release/nvx-rs\n",
+            microvm[chmod:],
+        )
+        self.assertLess(download, chmod)
+        self.assertLess(chmod, microvm.index("scripts/nvx.py"))
 
     def test_ci_preserves_failed_openvmm_test_diagnostics(self):
         workflow = (
