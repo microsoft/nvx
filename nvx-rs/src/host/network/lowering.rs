@@ -17,7 +17,9 @@
 //! The native rules are then sorted by family, address, prefix length, protocol, and ports, and
 //! written as `CIDR`, `CIDR:PROTOCOL`, `CIDR:PROTOCOL:PORT`, or `CIDR:PROTOCOL:FIRST-LAST`.
 
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use super::address::{self, Family, InterfaceError, Interval, Network};
 use super::policy::MAX_RULES_PER_ACTION;
@@ -118,7 +120,10 @@ pub(crate) struct Rule {
     /// Address family of the rule's addresses.
     pub(crate) family: Family,
     /// Addresses that the rule selects: sorted, disjoint intervals of `family`, possibly none.
-    pub(crate) addresses: Vec<Interval>,
+    ///
+    /// The rules of one rule's selectors share them, as Python's share one tuple, so that many
+    /// destinations times many selectors cost no more memory than they take to write.
+    pub(crate) addresses: Rc<[Interval]>,
     /// Protocol that the rule selects, or `None` for every protocol.
     pub(crate) protocol: Option<NativeProtocol>,
     /// Ports that the rule selects, or `None` for every port. Only TCP and UDP rules have ports.
@@ -263,26 +268,31 @@ pub(crate) fn port_protocol_selectors(
         .collect())
 }
 
-/// Returns the rules of an MXC rule: every selector at the addresses of each family. A rule
-/// without `to` selects every address of both families, and one without `ports` selects every
-/// protocol and port.
-pub(crate) fn mxc_rules(
+/// Returns the rules that select each of `selectors` at the addresses of each family of
+/// `destinations`, which the rules share, as `_parse_mxc_rule` and `_parse_legacy_rule` build
+/// them. Without destinations, the rules select every address of both families, and without
+/// selectors every protocol and port.
+pub(crate) fn combine(
     destinations: Option<Vec<(Family, Vec<Interval>)>>,
     selectors: Option<Vec<Selector>>,
 ) -> Vec<Rule> {
-    let destinations = destinations.unwrap_or_else(|| {
-        Family::ALL
+    let destinations: Vec<(Family, Rc<[Interval]>)> = match destinations {
+        Some(destinations) => destinations
             .into_iter()
-            .map(|family| (family, vec![family.everything()]))
-            .collect()
-    });
+            .map(|(family, addresses)| (family, Rc::from(addresses)))
+            .collect(),
+        None => Family::ALL
+            .into_iter()
+            .map(|family| (family, Rc::from([family.everything()])))
+            .collect(),
+    };
     let selectors = selectors.unwrap_or_else(|| vec![(None, None)]);
     destinations
         .iter()
         .flat_map(|(family, addresses)| {
             selectors.iter().map(|&(protocol, ports)| Rule {
                 family: *family,
-                addresses: addresses.clone(),
+                addresses: Rc::clone(addresses),
                 protocol,
                 ports,
             })
@@ -342,12 +352,7 @@ fn lower_family(
     category: &str,
     budget: usize,
 ) -> Result<Vec<NativeRule>> {
-    let address_only = address::merge(
-        rules
-            .iter()
-            .filter(|rule| rule.protocol.is_none())
-            .flat_map(|rule| rule.addresses.iter().copied()),
-    );
+    let address_only = union(rules.iter().copied().filter(|rule| rule.protocol.is_none()));
     let mut lowered: Vec<NativeRule> =
         intervals_to_networks(&address_only, family, budget, category)?
             .into_iter()
@@ -360,11 +365,11 @@ fn lower_family(
         NativeProtocol::Tcp,
         NativeProtocol::Udp,
     ] {
-        let protocol_wide = address::merge(
+        let protocol_wide = union(
             rules
                 .iter()
-                .filter(|rule| rule.protocol == Some(protocol) && rule.ports.is_none())
-                .flat_map(|rule| rule.addresses.iter().copied()),
+                .copied()
+                .filter(|rule| rule.protocol == Some(protocol) && rule.ports.is_none()),
         );
         if protocol_wide.is_empty() {
             continue;
@@ -399,6 +404,17 @@ fn lower_family(
         lowered.extend(port_rules);
     }
     Ok(lowered)
+}
+
+/// Returns the union of the addresses of `rules`, as `_compile_family` merges them, reading the
+/// addresses that rules share once: the rules of one rule's selectors would otherwise repeat
+/// them once for each selector.
+fn union<'a>(rules: impl IntoIterator<Item = &'a Rule>) -> Vec<Interval> {
+    let sets: BTreeSet<AddressSet<'a>> = rules
+        .into_iter()
+        .map(|rule| AddressSet(&rule.addresses))
+        .collect();
+    address::merge(sets.into_iter().flat_map(|set| set.0.iter().copied()))
 }
 
 /// Returns the networks that cover `intervals`, failing once they exceed `maximum`, as
@@ -466,7 +482,10 @@ fn lower_port_rules(
 ) -> Result<Vec<NativeRule>> {
     // Each boundary port, and the address sets that start (+1) or end (-1) there. Ports run to
     // 65536, where rules that end at port 65535 end.
-    let mut events: BTreeMap<u32, Vec<(i64, &[Interval])>> = BTreeMap::new();
+    let mut events: BTreeMap<u32, Vec<(i64, AddressSet<'_>)>> = BTreeMap::new();
+    // Whether each address set holds addresses that `covered` does not, which rules that share
+    // their addresses ask once.
+    let mut uncovered: BTreeMap<AddressSet<'_>, bool> = BTreeMap::new();
     for rule in rules {
         let Some((start, end)) = rule.ports else {
             continue;
@@ -474,21 +493,25 @@ fn lower_port_rules(
         if rule.protocol != Some(protocol) || rule.addresses.is_empty() {
             continue;
         }
-        if address::subtract(&rule.addresses, covered).is_empty() {
+        let addresses = AddressSet(&rule.addresses);
+        if !*uncovered
+            .entry(addresses)
+            .or_insert_with(|| !address::subtract(addresses.0, covered).is_empty())
+        {
             continue;
         }
         events
             .entry(u32::from(start))
             .or_default()
-            .push((1, &rule.addresses));
+            .push((1, addresses));
         events
             .entry(u32::from(end) + 1)
             .or_default()
-            .push((-1, &rule.addresses));
+            .push((-1, addresses));
     }
 
     // The number of active rules with each address set.
-    let mut active: BTreeMap<&[Interval], i64> = BTreeMap::new();
+    let mut active: BTreeMap<AddressSet<'_>, i64> = BTreeMap::new();
     let mut port_ranges: BTreeMap<Network, Vec<(u32, u32)>> = BTreeMap::new();
     // Networks whose last range ends just before the current segment.
     let mut open_networks: Vec<Network> = Vec::new();
@@ -505,7 +528,7 @@ fn lower_port_rules(
             let addresses = address::merge(
                 active
                     .keys()
-                    .flat_map(|intervals| intervals.iter().copied()),
+                    .flat_map(|addresses| addresses.0.iter().copied()),
             );
             let available = address::merge(addresses.iter().chain(covered).copied());
             let mut kept: Vec<Network> = Vec::new();
@@ -549,7 +572,7 @@ fn lower_port_rules(
             let count = active.entry(addresses).or_insert(0);
             *count += direction;
             if *count == 0 {
-                active.remove(addresses);
+                active.remove(&addresses);
             }
         }
         previous_port = Some(port);
@@ -564,4 +587,130 @@ fn lower_port_rules(
             })
         })
         .collect())
+}
+
+/// The addresses of a rule, which compare by value, as Python's tuples do: the port sweep counts
+/// the active rules of each address set, as `_lower_protocol_rules` counts them in a `Counter`.
+/// Like CPython's dictionaries, it compares identical addresses without reading them, so that the
+/// rules of one rule's selectors, which share their addresses, compare at once.
+#[derive(Debug, Clone, Copy)]
+struct AddressSet<'a>(&'a [Interval]);
+
+impl PartialEq for AddressSet<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for AddressSet<'_> {}
+
+impl PartialOrd for AddressSet<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for AddressSet<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if std::ptr::eq(self.0, other.0) {
+            Ordering::Equal
+        } else {
+            self.0.cmp(other.0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rules_of_one_rule_share_its_addresses() {
+        let ipv4: Vec<Interval> = vec![(1, 1), (3, 3)];
+        let ipv6: Vec<Interval> = vec![(5, 6)];
+        let selectors: Vec<Selector> = vec![
+            (Some(NativeProtocol::Tcp), Some((80, 80))),
+            (Some(NativeProtocol::Udp), Some((53, 60))),
+            (None, None),
+        ];
+        let rules = combine(
+            Some(vec![(Family::V4, ipv4.clone()), (Family::V6, ipv6.clone())]),
+            Some(selectors.clone()),
+        );
+        assert_eq!(rules.len(), 6);
+        for (family_rules, (family, addresses)) in rules
+            .chunks(selectors.len())
+            .zip([(Family::V4, &ipv4), (Family::V6, &ipv6)])
+        {
+            for (rule, &(protocol, ports)) in family_rules.iter().zip(&selectors) {
+                assert_eq!(rule.family, family);
+                assert_eq!(*rule.addresses, **addresses);
+                assert_eq!((rule.protocol, rule.ports), (protocol, ports));
+                assert!(Rc::ptr_eq(&rule.addresses, &family_rules[0].addresses));
+            }
+            assert_eq!(
+                Rc::strong_count(&family_rules[0].addresses),
+                selectors.len()
+            );
+        }
+
+        let rules = combine(None, Some(selectors.clone()));
+        assert_eq!(rules.len(), 6);
+        for (family_rules, family) in rules.chunks(selectors.len()).zip(Family::ALL) {
+            for rule in family_rules {
+                assert_eq!(rule.family, family);
+                assert_eq!(*rule.addresses, [family.everything()]);
+                assert!(Rc::ptr_eq(&rule.addresses, &family_rules[0].addresses));
+            }
+        }
+
+        let rules = combine(Some(vec![(Family::V6, ipv6.clone())]), None);
+        assert_eq!(
+            rules,
+            [Rule {
+                family: Family::V6,
+                addresses: Rc::from(ipv6),
+                protocol: None,
+                ports: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn address_sets_compare_by_value() {
+        let addresses: Rc<[Interval]> = Rc::from([(1, 2), (4, 4)]);
+        let copy: Rc<[Interval]> = Rc::from(&*addresses);
+        let longer: Rc<[Interval]> = Rc::from([(1, 2), (4, 4), (6, 6)]);
+        let later: Rc<[Interval]> = Rc::from([(1, 3)]);
+        let empty: Rc<[Interval]> = Rc::from([]);
+        assert_eq!(AddressSet(&addresses), AddressSet(&addresses));
+        assert_eq!(AddressSet(&addresses), AddressSet(&copy));
+        assert!(AddressSet(&empty) < AddressSet(&addresses));
+        assert!(AddressSet(&addresses) < AddressSet(&longer));
+        assert!(AddressSet(&longer) < AddressSet(&later));
+        let sets: BTreeSet<AddressSet<'_>> = [&later, &addresses, &copy, &empty, &longer]
+            .into_iter()
+            .map(|addresses| AddressSet(addresses))
+            .collect();
+        let sorted: Vec<&[Interval]> = sets.iter().map(|set| set.0).collect();
+        assert_eq!(sorted, [&*empty, &*addresses, &*longer, &*later]);
+    }
+
+    #[test]
+    fn shared_addresses_are_merged_once() {
+        let addresses: Vec<Interval> = (0..64).map(|index| (2 * index, 2 * index)).collect();
+        // The union of the 64 rules for every protocol reads their addresses once; for ICMP, so
+        // do the cover of its networks and the addresses that it covers. Python merges the
+        // addresses of each rule into the union: 64 times as many.
+        for (protocol, merged) in [(None, 64), (Some(NativeProtocol::Icmp), 3 * 64)] {
+            let rules = combine(
+                Some(vec![(Family::V4, addresses.clone())]),
+                Some(vec![(protocol, None); 64]),
+            );
+            assert_eq!(rules.len(), 64);
+            let (lowered, _, merged_intervals) = address::probe::count(|| lower(&rules, "allow"));
+            assert_eq!(lowered.unwrap().len(), 64, "{protocol:?}");
+            assert_eq!(merged_intervals, merged, "{protocol:?}");
+        }
+    }
 }

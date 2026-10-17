@@ -1120,3 +1120,46 @@ fn test_partial_address_only_canonicalization_does_not_bridge_gaps() {
         ]
     );
 }
+
+// Tests of the port that the Python tests do not have.
+
+#[test]
+fn rules_share_their_destinations_among_their_selectors() {
+    // 8192 destinations, none adjacent to another, for 8192 selectors: copying the destinations
+    // for each selector would take 2 GiB. Python 3.14 compiles each policy as asserted here.
+    let first = u32::from(std::net::Ipv4Addr::new(10, 0, 0, 0));
+    let destinations: Vec<Value> = (0..8192u32)
+        .map(|index| json!({"cidr": std::net::Ipv4Addr::from(first + 2 * index).to_string()}))
+        .collect();
+    let tcp: Vec<Value> = (0..8192u32)
+        .map(|index| json!({"protocol": "tcp", "port": 2 * index + 1}))
+        .collect();
+    let mixed: Vec<Value> = [
+        vec![json!({"protocol": "any"}); 2048],
+        vec![json!({"protocol": "icmp"}); 2048],
+        tcp[..4096].to_vec(),
+    ]
+    .concat();
+    let compiled = compile(json!({
+        "allow": [
+            {"to": destinations, "ports": mixed},
+            {"to": [{"cidr": "0.0.0.0/0"}]},
+        ]
+    }))
+    .unwrap();
+    assert_eq!(compiled.allow, ["0.0.0.0/0"]);
+    assert!(compiled.deny.is_empty());
+    assert_eq!(
+        message(compile(
+            json!({"deny": [{"to": destinations, "ports": tcp}]})
+        )),
+        "deny emits at most 256 native rules"
+    );
+    let any = vec![json!({"protocol": "any"}); 8192];
+    assert_eq!(
+        message(compile(
+            json!({"allow": [{"to": destinations, "ports": any}]})
+        )),
+        "allow emits at most 256 native rules"
+    );
+}

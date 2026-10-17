@@ -417,7 +417,7 @@ fn parse_rule(rule: &EgressRule, description: &str) -> Result<Vec<Rule>> {
         }
         selectors = Some(parsed);
     }
-    Ok(lowering::mxc_rules(destinations, selectors))
+    Ok(lowering::combine(destinations, selectors))
 }
 
 /// Checks the host-loopback forwards of a policy whose rules lower, and whose host-loopback

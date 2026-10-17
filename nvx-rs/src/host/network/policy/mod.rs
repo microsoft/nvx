@@ -400,6 +400,7 @@ fn parse_legacy_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> 
         return Err(invalid(format!("{description}.cidr is required")));
     };
     let (family, addresses) = parse_peer_fields(rule, cidr, rule.get("except"), description)?;
+    let destinations = Some(vec![(family, addresses)]);
     let port = rule.get("port");
     let end_port = rule.get("endPort");
     if end_port.is_some() && port.is_none() {
@@ -409,12 +410,7 @@ fn parse_legacy_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> 
         if port.is_some() {
             return Err(invalid(format!("{description}.port requires protocol")));
         }
-        return Ok(vec![Rule {
-            family,
-            addresses,
-            protocol: None,
-            ports: None,
-        }]);
+        return Ok(lowering::combine(destinations, None));
     };
     let protocol = self::protocol(rule.document, protocol, description)?;
     let selectors: Vec<Selector> = match port {
@@ -426,15 +422,7 @@ fn parse_legacy_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> 
             description,
         )?,
     };
-    Ok(selectors
-        .into_iter()
-        .map(|(protocol, ports)| Rule {
-            family,
-            addresses: addresses.clone(),
-            protocol,
-            ports,
-        })
-        .collect())
+    Ok(lowering::combine(destinations, Some(selectors)))
 }
 
 /// Parses a port selector of an MXC rule, as `_parse_mxc_port` does.
@@ -497,5 +485,5 @@ fn parse_mxc_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> {
         }
         selectors = Some(parsed);
     }
-    Ok(lowering::mxc_rules(destinations, selectors))
+    Ok(lowering::combine(destinations, selectors))
 }
