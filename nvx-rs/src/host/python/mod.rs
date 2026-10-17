@@ -17,12 +17,16 @@
 //!   `Path.resolve()` and the file identities of `os.stat`.
 //!
 //! Character properties come from the Unicode 16.0.0 database of Python 3.14, in [`unicode`],
-//! which `scripts/nvx_rs_fixtures.py` generates. Python decodes operating-system strings that are
-//! not valid Unicode into surrogates: [`path`] prints such paths as Python does, and the
-//! filesystem queries refuse them.
+//! which `scripts/nvx_rs_fixtures.py` generates. The same script records what Python does with
+//! fixed and seeded random inputs in `tests/fixtures`, and the golden tests compare these
+//! implementations, and the ports that use them, with those records. Python decodes
+//! operating-system strings that are not valid Unicode into surrogates: [`path`] prints such
+//! paths as Python does, and the filesystem queries refuse them.
 
 pub(crate) mod builtins;
 pub(crate) mod fs;
+#[cfg(test)]
+pub(crate) mod golden;
 pub(crate) mod json;
 pub(crate) mod path;
 pub(crate) mod text;

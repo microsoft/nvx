@@ -7,6 +7,13 @@ corpora, so that the Rust tests replay them without Python:
 
 - nvx-rs/src/host/python/unicode.rs: the Unicode tables of str.isprintable and
   int(), from this interpreter's Unicode database.
+- nvx-rs/tests/fixtures/python.json: the Python semantics that the ports keep:
+  str methods, int(), uuid.UUID, pathlib and ntpath, json.loads, and the UTF-8
+  codec.
+- nvx-rs/tests/fixtures/sandbox.json: the launch profile of
+  scripts/nvx_tools/sandbox.py, for both pathlib flavors.
+- nvx-rs/tests/fixtures/sandbox_options.json: the sandbox helpers of
+  scripts/nvx.py.
 - nvx-rs/tests/fixtures/egress-policy.json: scripts/nvx_tools/egress_policy.py
   over every policy that scripts/test_egress_policy.py compiles, hand-written
   edge cases, and a seeded random corpus, and how pathlib prints policy paths.
@@ -28,25 +35,34 @@ Multilingual Plane before a colon, on which the two differ, so the script writes
 the same files on Windows and Linux.
 """
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import inspect
 import io
 import ipaddress
 import json
+import ntpath
 import random
 import re
+import struct
 import sys
 import tempfile
 import unicodedata
 import unittest
-from collections.abc import Callable, Iterable, Iterator
-from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import AnyStr
+import uuid
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import AnyStr, cast
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nvx  # noqa: E402
 import test_egress_policy  # noqa: E402
+from nvx_tools import common, control_session, sandbox, sandbox_lifecycle  # noqa: E402
 from nvx_tools.common import ScriptError  # noqa: E402
 from nvx_tools.egress_policy import (  # noqa: E402
     MAX_POLICY_FILE_SIZE,
@@ -63,6 +79,10 @@ EGRESS_POLICY_FIXTURE = FIXTURE_DIR / "egress-policy.json"
 PYTHON = (3, 14)
 MAX_CODE_POINT = 0x10FFFF
 SEED = 359
+# The fixed current directories of the two flavors.
+CWDS = {"posix": "/fixture/cwd", "windows": "C:\\fixture\\cwd"}
+# The contents of the distro layer that the systemd policy cases hash.
+DISTRO_LAYER = "distro"
 RANDOM_CASES = 200
 # Messages name the policy file; the fixture writes its path as this placeholder.
 PATH_PLACEHOLDER = "{path}"
@@ -83,6 +103,50 @@ Rule = dict[str, object]
 Policy = dict[str, list[Rule]]
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
+Case = dict[str, object]
+
+
+class _PosixFixturePath(PurePosixPath):
+    """A POSIX path whose current directory is fixed."""
+
+    @classmethod
+    def cwd(cls) -> _PosixFixturePath:
+        return cls(CWDS["posix"])
+
+
+class _WindowsFixturePath(PureWindowsPath):
+    """A Windows path whose current directory is fixed."""
+
+    @classmethod
+    def cwd(cls) -> _WindowsFixturePath:
+        return cls(CWDS["windows"])
+
+
+FLAVOR_PATHS: dict[str, type[PurePath]] = {
+    "posix": PurePosixPath,
+    "windows": PureWindowsPath,
+}
+FIXTURE_PATHS: dict[str, type[PurePath]] = {
+    "posix": _PosixFixturePath,
+    "windows": _WindowsFixturePath,
+}
+
+
+@contextlib.contextmanager
+def _flavor(name: str) -> Generator[None]:
+    """Make sandbox.py use the paths of a flavor, with its fixed current directory."""
+    with patch.object(sandbox, "Path", FIXTURE_PATHS[name]):
+        yield
+
+
+def _error(function: Callable[..., object], *arguments: object) -> str | None:
+    """Return the message of the ScriptError that function raises, if any."""
+    try:
+        function(*arguments)
+    except common.ScriptError as error:
+        return str(error)
+    return None
+
 
 # Unicode tables.
 
@@ -101,6 +165,10 @@ def _ranges(predicate: Callable[[int], bool], start: int) -> list[tuple[int, int
     if first is not None:
         ranges.append((first, MAX_CODE_POINT))
     return ranges
+
+
+def space_ranges() -> list[tuple[int, int]]:
+    return _ranges(lambda code: chr(code).isspace(), 0)
 
 
 def decimal_starts() -> list[int]:
@@ -159,6 +227,1434 @@ def unicode_tables_source() -> str:
         lines.append(f"    {row},")
     lines.extend(("];", ""))
     return "\n".join(lines)
+
+
+# Random inputs.
+
+
+def _random_text(
+    rng: random.Random, tokens: Sequence[str], minimum: int, maximum: int
+) -> str:
+    return "".join(rng.choice(tokens) for _ in range(rng.randint(minimum, maximum)))
+
+
+def _mutate(rng: random.Random, text: str, tokens: Sequence[str]) -> str:
+    """Return text with a few random insertions, deletions, and replacements."""
+    characters = list(text)
+    for _ in range(rng.randint(0, 3)):
+        operation = rng.randrange(3)
+        position = rng.randint(0, len(characters))
+        if operation == 0:
+            characters.insert(position, rng.choice(tokens))
+        elif characters and position < len(characters):
+            if operation == 1:
+                del characters[position]
+            else:
+                characters[position] = rng.choice(tokens)
+    return "".join(characters)
+
+
+def _sometimes(
+    rng: random.Random, valid: Sequence[str], invalid: Sequence[str], rate: float = 0.1
+) -> str:
+    """Return a valid value, or at the given rate an invalid one."""
+    return rng.choice(invalid if rng.random() < rate else valid)
+
+
+def _random_number(rng: random.Random) -> str:
+    """Return a decimal number, which may have underscores, leading zeros, or Unicode digits."""
+    digits = str(rng.choice((rng.randint(0, 99), rng.randint(0, 2**32 + 9), 65534)))
+    if rng.random() < 0.2:
+        digits = "0" + digits
+    if rng.random() < 0.2 and len(digits) > 1:
+        position = rng.randint(1, len(digits) - 1)
+        digits = f"{digits[:position]}_{digits[position:]}"
+    if rng.random() < 0.1:
+        digits = "".join(
+            chr(0xFF10 + int(digit)) if digit.isdigit() else digit for digit in digits
+        )
+    return digits
+
+
+TARGET_COMPONENTS = ("work", "a", "srv", "cache", "é", "data-1", "run", "nvx", "etc")
+POLICY_KINDS = ("denied", "allowed", "writable")
+
+
+def _target(rng: random.Random) -> str:
+    """Return a guest target, which one time in seven has a random irregular part."""
+    components = [rng.choice(TARGET_COMPONENTS) for _ in range(rng.randint(1, 3))]
+    if rng.random() < 1 / 7:
+        position = rng.randrange(len(components))
+        components[position] = _random_text(rng, TARGET_TOKENS, 0, 3)
+    return "/" + "/".join(components)
+
+
+TEXT_TOKENS = (
+    "0",
+    "1",
+    "7",
+    "9",
+    "a",
+    "F",
+    "x",
+    "X",
+    "_",
+    "+",
+    "-",
+    " ",
+    "\t",
+    "\n",
+    "\x0b",
+    "\x1c",
+    "\x1f",
+    "\x85",
+    "\xa0",
+    "\u2003",
+    "\u3000",
+    "\u200b",
+    "\u0663",
+    "\uff11",
+    "\U0001d7ce",
+    "\x00",
+    "\x7f",
+    "\xad",
+    "\u0378",
+    "\u2028",
+    "\U0001f600",
+    "\U000e0001",
+    "\ufeff",
+    "'",
+    '"',
+    "\\",
+    "{",
+    "}",
+    ":",
+    ",",
+    "=",
+    "é",
+    "urn:",
+    "uuid:",
+    "0x",
+)
+HEX = "0123456789abcdefABCDEF"
+PATH_TOKENS = (
+    "a",
+    "b",
+    "é",
+    "C",
+    "c",
+    ":",
+    "/",
+    "//",
+    "\\",
+    "\\\\",
+    ".",
+    "..",
+    "?",
+    "UNC",
+    "unc",
+    " ",
+    "x,y",
+    ";",
+    "\x00",
+)
+TARGET_TOKENS = (
+    "/",
+    "a",
+    "work",
+    "proc",
+    "etc",
+    "machine-id",
+    "run",
+    "nvx",
+    "shares",
+    ".",
+    "..",
+    " ",
+    "\u3000",
+    "\x1c",
+    "=",
+    ",",
+    "\\",
+    "\x00",
+    "é",
+)
+
+
+# Python's string, integer, and UUID operations.
+
+
+def _int_outcome(text: str) -> Case:
+    try:
+        return {"int": str(int(text, 10))}
+    except ValueError as error:
+        return {"int_error": str(error)}
+
+
+def _uuid_outcome(text: str) -> str | None:
+    try:
+        return str(uuid.UUID(text))
+    except ValueError:
+        return None
+
+
+def string_cases(rng: random.Random) -> list[Case]:
+    texts = [
+        "",
+        " ",
+        "007",
+        "+5",
+        "-5",
+        " 5 ",
+        "5_000",
+        "_5",
+        "5_",
+        "5__0",
+        "0x5",
+        "1e3",
+        "\u20035\u3000",
+        "\uff15",
+        "\u0664\u0662",
+        "\x1c42\x1f",
+        "1\x002",
+        "it's",
+        'say "hi"',
+        "both ' and \"",
+        "a\\b",
+        "\t\n\r\x00\x7f\x1b",
+        "é\xa0\xad",
+        "\u2028\u200b\u0378",
+        "\U0001f600\U000e0001",
+        "1" * 4300,
+        "0" * 4300 + "1",
+        "x" * 300,
+        "12345678-1234-5678-1234-567812345678",
+        "{12345678-1234-5678-1234-567812345678}",
+        "urn:uuid:12345678-1234-5678-1234-567812345678",
+        "12345678123456781234567812345678",
+        "12345678-1234-5678-1234-567812345678".upper(),
+        "uuuuid:id:12345678123456781234567812345678",
+        "{urn:uuid:12345678-1234-5678-1234-567812345678}",
+        "0x" + "1" * 30,
+        "+" + "1" * 31,
+        "-" + "1" * 31,
+        " " + "a" * 31,
+        "1_" + "1" * 30,
+        "\u0661" + "0" * 31,
+        "0b" + "1" * 30,
+    ]
+    for _ in range(300):
+        texts.append(_random_text(rng, TEXT_TOKENS, 0, 12))
+    canonical = "12345678-1234-5678-1234-567812345678"
+    for _ in range(200):
+        text = rng.choice(
+            (
+                canonical,
+                canonical.replace("-", ""),
+                f"{{{canonical}}}",
+                f"urn:uuid:{canonical}",
+                canonical.upper(),
+            )
+        )
+        texts.append(_mutate(rng, text, (*HEX, *TEXT_TOKENS)))
+    for _ in range(150):
+        texts.append(_mutate(rng, str(rng.randint(-(10**12), 10**12)), TEXT_TOKENS))
+    cases: list[Case] = []
+    for text in texts:
+        case: Case = {
+            "text": text,
+            "repr": repr(text),
+            "split": text.split(),
+            "strip": text.strip(),
+            "uuid": _uuid_outcome(text),
+        }
+        case.update(_int_outcome(text))
+        cases.append(case)
+    return cases
+
+
+# pathlib.
+
+
+def path_cases(rng: random.Random) -> list[Case]:
+    texts = [
+        "",
+        ".",
+        "./a",
+        "a/./b/",
+        "a//b",
+        "a/../b",
+        "/a",
+        "//a",
+        "///a",
+        "a\\b",
+        "c:x",
+        "C:/a/b/",
+        "c:",
+        "./c:x",
+        "//server/share",
+        "//server/share/x",
+        "\\\\?\\C:\\x",
+        "//?/UNC/server/share",
+        "//?/UNC/server",
+        "\\\\.\\device\\x",
+        "\\a",
+        "é:x",
+        "\\\\\\x",
+        "//?/",
+        "x:y:z",
+    ]
+    for _ in range(300):
+        texts.append(_random_text(rng, PATH_TOKENS, 0, 8))
+    cases: list[Case] = []
+    for flavor, path_class in FLAVOR_PATHS.items():
+        for text in texts:
+            path = path_class(text)
+            cases.append(
+                {
+                    "flavor": flavor,
+                    "text": text,
+                    "str": str(path),
+                    "parts": list(path.parts),
+                    "absolute": path.is_absolute(),
+                    "name": path.name,
+                    "parents": [str(parent) for parent in path.parents],
+                }
+            )
+    return cases
+
+
+def join_cases(rng: random.Random) -> list[Case]:
+    pairs = [
+        ("/a/b", "c"),
+        ("/a/b", "/c"),
+        ("C:\\cwd", "a/b"),
+        ("C:\\cwd", "C:x"),
+        ("C:\\cwd", "c:x"),
+        ("C:\\cwd", "D:x"),
+        ("C:\\cwd", "\\x"),
+        ("//server/share", "x"),
+        ("C:", "x"),
+        ("", "x"),
+        ("a", ""),
+    ]
+    for _ in range(200):
+        pairs.append(
+            (
+                _random_text(rng, PATH_TOKENS, 0, 6),
+                _random_text(rng, PATH_TOKENS, 0, 6),
+            )
+        )
+    cases: list[Case] = []
+    for flavor, path_class in FLAVOR_PATHS.items():
+        for left, right in pairs:
+            cases.append(
+                {
+                    "flavor": flavor,
+                    "left": left,
+                    "right": right,
+                    "str": str(path_class(left) / right),
+                }
+            )
+    return cases
+
+
+def equality_cases(rng: random.Random) -> list[Case]:
+    pairs = [("C:\\A", "c:/a"), ("C:\\a", "C:\\b"), ("\\\\S\\x\\Y", "//s/X/y")]
+    for _ in range(100):
+        left = _random_text(rng, (*PATH_TOKENS, "A", "B"), 0, 5)
+        pairs.append((left, rng.choice((left.lower(), left.upper(), left))))
+    return [
+        {
+            "left": left,
+            "right": right,
+            "equal": PureWindowsPath(left) == PureWindowsPath(right),
+        }
+        for left, right in pairs
+    ]
+
+
+def normpath_cases(rng: random.Random) -> list[Case]:
+    texts = [
+        "",
+        ".",
+        "a",
+        "a\\",
+        "A//B",
+        "A/./B",
+        "A/foo/../B",
+        "C:\\",
+        "C:",
+        "C:a\\..\\..",
+        "C:\\..\\a",
+        "..\\..\\a",
+        "a\\..\\..\\b",
+        "\\\\server\\share\\",
+        "\\\\server\\share\\a\\..",
+        ".\\a\\.\\b\\",
+        "\\",
+        "./..",
+        "C:./x",
+    ]
+    for _ in range(250):
+        texts.append(_random_text(rng, PATH_TOKENS, 0, 10))
+    return [{"text": text, "normpath": ntpath.normpath(text)} for text in texts]
+
+
+# The launch profile.
+
+
+def identity_cases(rng: random.Random) -> list[Case]:
+    values = [
+        "1000:1001",
+        "0:0",
+        "1000",
+        "1:2:3",
+        "a:1",
+        "1:",
+        " +1_000 :\uff11\uff10",
+        "4294967295:1",
+        "4294967296:1",
+        "-1:1",
+        "1:0",
+        "1:0x10",
+        "1" * 4301 + ":1",
+    ]
+    tokens = ("0", "1", "5", "9", "_", "+", "-", " ", "\u3000", "\u0661", ":", "x")
+    for _ in range(100):
+        values.append(_random_text(rng, tokens, 0, 12))
+    spaces = ("", " ", "\t", "\u3000")
+    for _ in range(100):
+        fields = [
+            rng.choice(spaces)
+            + rng.choice(("", "", "+", "-"))
+            + _random_number(rng)
+            + rng.choice(spaces)
+            for _ in range(2)
+        ]
+        values.append(":".join(fields))
+    cases: list[Case] = []
+    for value in values:
+        try:
+            identity = sandbox.parse_workload_identity(value)
+            cases.append({"value": value, "identity": list(identity)})
+        except common.ScriptError as error:
+            cases.append({"value": value, "error": str(error)})
+    return cases
+
+
+def layer_cases(rng: random.Random) -> list[Case]:
+    values = [
+        "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+        "custom,layers//custom.erofs,{22222222-2222-2222-2222-22222222222A}",
+        "distro,C:/l/d.erofs,urn:uuid:11111111111111111111111111111111",
+        "unknown,layer.erofs,11111111-1111-1111-1111-111111111111",
+        "distro,layer.erofs,not-a-uuid",
+        "distro,,1",
+        "distro",
+        "distro,a",
+        "distro,a,b,c",
+        "runtime,a\\b/./c,11111111111111111111111111111111",
+    ]
+    roles = ("distro", "runtime", "custom")
+    uuid_forms: tuple[Callable[[uuid.UUID], str], ...] = (
+        str,
+        lambda value: str(value).upper(),
+        lambda value: value.hex,
+        lambda value: f"{{{value}}}",
+        lambda value: value.urn,
+    )
+    for _ in range(150):
+        role = _sometimes(rng, roles, ("Distro", "", "other"))
+        path = _random_text(rng, PATH_TOKENS, 1, 5) if rng.random() < 0.3 else "l.erofs"
+        identifier = rng.choice(uuid_forms)(uuid.UUID(int=rng.getrandbits(128)))
+        if rng.random() < 0.3:
+            identifier = _mutate(rng, identifier, (*HEX, "-", "{", "}", " "))
+        values.append(f"{role},{path},{identifier}")
+    cases: list[Case] = []
+    for flavor in FIXTURE_PATHS:
+        with _flavor(flavor):
+            for value in values:
+                try:
+                    layer = sandbox.SandboxLayer.parse(value)
+                    cases.append(
+                        {
+                            "flavor": flavor,
+                            "value": value,
+                            "role": layer.role,
+                            "path": str(layer.path),
+                            "uuid": layer.uuid,
+                        }
+                    )
+                except common.ScriptError as error:
+                    cases.append(
+                        {"flavor": flavor, "value": value, "error": str(error)}
+                    )
+    return cases
+
+
+def mount_value_cases(rng: random.Random) -> list[Case]:
+    values = [
+        "/workspace",
+        "/workspace,",
+        "/workspace,,rw",
+        "/workspace,host,rx",
+        "/workspace,host,rw,extra",
+        "/workspace,alpha,beta",
+        "/data,/srv/data,rw,ro",
+        "/data,/srv/data,,rw",
+        "/data,/srv/data,rw",
+        "/data,/srv/data",
+        ",",
+        "",
+    ]
+    for _ in range(100):
+        values.append(_random_text(rng, (*PATH_TOKENS, ",", "ro", "rw"), 0, 8))
+    for _ in range(100):
+        host_path = _random_text(rng, (*PATH_TOKENS, ","), 1, 4)
+        mode = _sometimes(rng, ("", ",ro", ",rw"), (",", ",rx", ",RW"))
+        values.append(f"{_target(rng)},{host_path}{mode}")
+    cases: list[Case] = []
+    for value in values:
+        try:
+            target, host_path, access = sandbox.parse_mount_value(value)
+            cases.append(
+                {
+                    "value": value,
+                    "target": target,
+                    "host_path": host_path,
+                    "access": access,
+                }
+            )
+        except common.ScriptError as error:
+            cases.append({"value": value, "error": str(error)})
+    return cases
+
+
+def target_cases(rng: random.Random) -> list[Case]:
+    targets = [
+        "",
+        "/",
+        "workspace",
+        "/workspace/",
+        "/work//space",
+        "/work/./space",
+        "/work/../space",
+        "/work space",
+        "/work=space",
+        "/work\\space",
+        "/" + "x" * 4096,
+        "/" + "x" * 4095,
+        "/" + "é" * 2048,
+        "/proc",
+        "/proc/self",
+        "/sys/fs",
+        "/dev/shm",
+        "/.nvx-agent/tools",
+        "/etc",
+        "/etc/machine-id",
+        "/etc/machine-id/child",
+        "/workspace",
+        "/procfs",
+        "/etc/app",
+        "/run",
+        "/run/nvx",
+        "/run/nvx/time",
+        "/run/nvx/shares",
+    ]
+    for _ in range(100):
+        targets.append(_random_text(rng, TARGET_TOKENS, 0, 8))
+    for _ in range(100):
+        targets.append(_target(rng))
+    return [
+        {"target": target, "error": _error(sandbox.validate_mount_target, target)}
+        for target in targets
+    ]
+
+
+def run_target_cases(rng: random.Random) -> list[Case]:
+    lists = [
+        ["/workspace", "/opt/hostedtoolcache", "/srv/cache"],
+        ["/workspace", "/workspace/cache"],
+        ["/run/nvx", "/b"],
+        ["/run/nvx/shares/x"],
+        ["/a b", "/b"],
+        ["relative", "/b"],
+        ["/" + "x" * 5000],
+        [],
+    ]
+    for _ in range(40):
+        lists.append(
+            [_random_text(rng, TARGET_TOKENS, 1, 6) for _ in range(rng.randint(1, 3))]
+        )
+    for _ in range(80):
+        lists.append([_target(rng) for _ in range(rng.randint(1, 4))])
+    return [
+        {
+            "targets": targets,
+            "error": _error(nvx._validate_run_share_targets, targets),
+        }
+        for targets in lists
+    ]
+
+
+def child_name_cases(rng: random.Random) -> list[Case]:
+    pairs = [(0, "/workspace"), (1, "/workspace"), (999, "/" + "x" * 1000)]
+    for _ in range(50):
+        pairs.append((rng.randint(0, 50), _random_text(rng, TARGET_TOKENS, 1, 8)))
+    return [
+        {
+            "index": index,
+            "target": target,
+            "name": sandbox.aggregate_child_name(index, target),
+        }
+        for index, target in pairs
+    ]
+
+
+def _mount_spec(rng: random.Random) -> Case:
+    """Return a share whose parts are each valid, except one time in ten."""
+    target = _sometimes(rng, (_target(rng),), ("/proc", "/a b", "/etc"))
+    host_path = _sometimes(
+        rng,
+        ("work", "tools/cache", "/srv/data", "C:\\data\\x,y", "C:/w", "w//x/."),
+        ("a/../b", "a\x00b", _random_text(rng, PATH_TOKENS, 1, 5)),
+    )
+    access = _sometimes(rng, ("", ",ro", ",rw"), (",rx",))
+    kind = rng.choice(("directory", "directory", "directory", "file"))
+    denied: list[str] = []
+    allowed: list[str] = []
+    writable: list[str] = []
+    if kind == "directory" or rng.random() < 0.1:
+        denied = rng.sample(
+            ("logs", "secrets", "/abs/out", "C:\\abs\\out"), rng.randint(0, 2)
+        )
+        if denied and rng.random() < 0.5:
+            allowed = ["logs/payloads"]
+        if access == ",rw" and rng.random() < 0.5:
+            writable = rng.sample(("out", "cache", "/abs/out"), rng.randint(1, 2))
+    if rng.random() < 0.1:
+        rng.choice((denied, allowed, writable)).append(
+            rng.choice(("", ".", "a\x00", "logs", "out"))
+        )
+    return {
+        "value": f"{target},{host_path}{access}",
+        "denied": denied,
+        "allowed": allowed,
+        "writable": writable,
+        "owner": rng.choice(("vmm", "vmm", "caller")),
+        "kind": kind,
+    }
+
+
+def _parse_mount(spec: Case) -> sandbox.SandboxMount:
+    return sandbox.SandboxMount.parse(
+        cast(str, spec["value"]),
+        tuple(cast(list[str], spec["denied"])),
+        cast(str, spec["owner"]),
+        allowed_paths=tuple(cast(list[str], spec["allowed"])),
+        writable_paths=tuple(cast(list[str], spec["writable"])),
+        kind=cast(str, spec["kind"]),
+    )
+
+
+def _mount_fields(mount: sandbox.SandboxMount) -> Case:
+    return {
+        "guest_target": mount.guest_target,
+        "host_path": str(mount.host_path),
+        "access": mount.access,
+        "denied": list(mount.denied_paths),
+        "allowed": list(mount.allowed_paths),
+        "writable": list(mount.writable_paths),
+        "owner": mount.owner,
+        "kind": mount.kind,
+    }
+
+
+def mount_cases(rng: random.Random) -> list[Case]:
+    specs: list[Case] = [
+        {
+            "value": "/opt/hostedtoolcache,host-dir,rw",
+            "denied": ["logs", "secrets"],
+            "allowed": [],
+            "writable": [],
+            "owner": "vmm",
+            "kind": "directory",
+        },
+        {
+            "value": "/tmp/mcp-runtime,host-dir,rw",
+            "denied": ["mcp-logs"],
+            "allowed": ["mcp-logs/payloads"],
+            "writable": ["agent", "cache"],
+            "owner": "caller",
+            "kind": "directory",
+        },
+        {
+            "value": "/w,host,ro",
+            "denied": [],
+            "allowed": [],
+            "writable": ["out"],
+            "owner": "vmm",
+            "kind": "directory",
+        },
+        {
+            "value": "/w,host,rw",
+            "denied": [],
+            "allowed": [f"path-{index}" for index in range(129)],
+            "writable": [],
+            "owner": "vmm",
+            "kind": "directory",
+        },
+        {
+            "value": "/etc/app/settings.json,settings.json,ro",
+            "denied": [],
+            "allowed": [],
+            "writable": [],
+            "owner": "vmm",
+            "kind": "file",
+        },
+    ]
+    for _ in range(100):
+        specs.append(_mount_spec(rng))
+    cases: list[Case] = []
+    for flavor in FIXTURE_PATHS:
+        with _flavor(flavor):
+            for spec in specs:
+                case: Case = {"flavor": flavor, **spec}
+                try:
+                    mount = _parse_mount(spec)
+                except common.ScriptError as error:
+                    case["error"] = str(error)
+                    cases.append(case)
+                    continue
+                case["mount"] = _mount_fields(mount)
+                case["arguments"] = sandbox.mounts_openvmm_arguments((mount,))
+                case["fragment"] = mount.command_line_fragment()
+                case["absolute"] = _mount_fields(mount.absolute())
+                case["absolute_policy"] = [
+                    [kind, list(paths)] for kind, paths in mount.absolute_policy_paths()
+                ]
+                cases.append(case)
+    return cases
+
+
+def _launch_spec(rng: random.Random) -> Case:
+    roles = rng.sample(("distro", "runtime", "custom"), rng.choice((1, 1, 2, 3)))
+    if rng.random() < 0.05:
+        roles.append(roles[0])
+    layers = [
+        f"{role},{rng.choice(('layer.erofs', 'C:/layers/x.erofs', 'a//b.erofs'))},"
+        f"{uuid.UUID(int=rng.getrandbits(128))}"
+        for role in roles
+    ]
+    argument_tokens = ("a", "--serve", "x" * 40, "é", "=", "-")
+    arguments = [
+        _random_text(rng, argument_tokens, 1, 3)
+        for _ in range(rng.choice((0, 1, 2, 5, 20)))
+    ]
+    if arguments and rng.random() < 0.05:
+        arguments[rng.randrange(len(arguments))] = rng.choice(("", " a", "a\x1cb"))
+    mounts: list[Case] = []
+    for index in range(rng.choice((0, 0, 1, 2, 3, 6))):
+        kind = rng.choice(("directory", "directory", "file"))
+        mounts.append(
+            {
+                "value": f"/share/{index:02}{'x' * rng.randint(0, 120)},"
+                f"{rng.choice(('host', 'C:/host', '/srv'))}{index}"
+                f"{rng.choice(('', ',ro', ',rw'))}",
+                "denied": (
+                    rng.choice(([], ["secrets"], ["/abs/secrets"]))
+                    if kind == "directory"
+                    else []
+                ),
+                "allowed": [],
+                "writable": [],
+                "owner": "vmm",
+                "kind": kind,
+            }
+        )
+    identity = [rng.choice((1000, 65534)), rng.choice((1001, 65534))]
+    if rng.random() < 0.05:
+        identity[rng.randrange(2)] = 0
+    # Each setting is invalid one time in twenty, so most launches reach the command line.
+    rate = 0.05
+    return {
+        "layers": layers,
+        "scratch": rng.choice(("scratch.ext4", "C:/s/scratch.ext4", "s//x.ext4")),
+        "entrypoint": _sometimes(
+            rng,
+            ("/bin/sh", "/bin/workload", "/usr/bin/python3"),
+            ("bin/sh", "/bin/s h"),
+            rate,
+        ),
+        "args": arguments,
+        "hostname": _sometimes(
+            rng,
+            ("nvx-sandbox", "example", "a" * 63, "a-1"),
+            ("Example", "a" * 64, "-a"),
+            rate,
+        ),
+        "identity": identity,
+        "memory_max": _sometimes(
+            rng, ("", "", "", "268435456", str(10**30)), ("0", "-1"), rate
+        )
+        or None,
+        "pids_max": _sometimes(
+            rng, ("", "", "", "64", str(10**20 - 1)), ("0", "-5"), rate
+        )
+        or None,
+        "mounts": mounts,
+        "command_line": rng.choice(
+            (
+                "",
+                "",
+                "quiet",
+                " quiet  loglevel=0 ",
+                "\u3000quiet\x1c",
+                "nvx_sandbox=0",
+                "virtfs_dir=/x",
+                "a\x00b",
+                "x" * rng.randint(100, 1000),
+                "é" * rng.randint(50, 500),
+                "a\x1cnvx_x=1",
+            )
+        ),
+    }
+
+
+def _launch(flavor: str, spec: Case) -> sandbox.SandboxLaunch:
+    """Return the launch of a specification, under the flavor's patched paths.
+
+    The launch's layers and shares are valid, so that each case checks the launch
+    itself.
+    """
+    layers = tuple(
+        sandbox.SandboxLayer.parse(value) for value in cast(list[str], spec["layers"])
+    )
+    mounts = tuple(_parse_mount(mount) for mount in cast(list[Case], spec["mounts"]))
+    identity = cast(list[int], spec["identity"])
+    memory_max = cast(str | None, spec["memory_max"])
+    pids_max = cast(str | None, spec["pids_max"])
+    return sandbox.SandboxLaunch(
+        layers=layers,
+        scratch=cast(Path, FIXTURE_PATHS[flavor](cast(str, spec["scratch"]))),
+        entrypoint=cast(str, spec["entrypoint"]),
+        args=tuple(cast(list[str], spec["args"])),
+        hostname=cast(str, spec["hostname"]),
+        workload_identity=(identity[0], identity[1]),
+        memory_max=None if memory_max is None else int(memory_max),
+        pids_max=None if pids_max is None else int(pids_max),
+        mounts=mounts,
+    )
+
+
+def _budget_specs() -> list[Case]:
+    """Return launches whose kernel command lines fill the sandbox budget exactly,
+    and by one byte more, with each kind of share set."""
+    share_sets = (
+        (),
+        (("/workspace,host,rw", "directory"),),
+        (("/workspace,host,rw", "directory"), ("/srv/cache,cache", "directory")),
+        (("/etc/app/settings.json,settings.json", "file"),),
+    )
+    specs: list[Case] = []
+    for shares in share_sets:
+        spec: Case = {
+            "layers": ["distro,layer.erofs,11111111-1111-1111-1111-111111111111"],
+            "scratch": "scratch.ext4",
+            "entrypoint": "/bin/sh",
+            "args": [],
+            "hostname": "nvx-sandbox",
+            "identity": [65534, 65534],
+            "memory_max": None,
+            "pids_max": None,
+            "mounts": [
+                {
+                    "value": value,
+                    "denied": [],
+                    "allowed": [],
+                    "writable": [],
+                    "owner": "vmm",
+                    "kind": kind,
+                }
+                for value, kind in shares
+            ],
+            "command_line": "",
+        }
+        with _flavor("posix"):
+            launch = _launch("posix", spec)
+            fragment = sandbox.mounts_command_line_fragment(launch.mounts)
+            used = len(launch.kernel_command_line("").encode()) + len(fragment.encode())
+        # The user's command line comes first, with a space after it, and a NUL ends
+        # the whole command line.
+        room = sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE - used - 2
+        specs.extend({**spec, "command_line": "x" * (room + extra)} for extra in (0, 1))
+    return specs
+
+
+def launch_cases(rng: random.Random) -> list[Case]:
+    specs = [_launch_spec(rng) for _ in range(80)]
+    specs.extend(_budget_specs())
+    cases: list[Case] = []
+    for flavor in FIXTURE_PATHS:
+        with _flavor(flavor):
+            for spec in specs:
+                case: Case = {"flavor": flavor, **spec}
+                try:
+                    launch = _launch(flavor, spec)
+                except common.ScriptError as error:
+                    case["error"] = str(error)
+                    cases.append(case)
+                    continue
+                case["arguments"] = launch.openvmm_arguments()
+                command_line = cast(str, spec["command_line"])
+                try:
+                    case["kernel_command_line"] = launch.kernel_command_line(
+                        command_line
+                    )
+                except common.ScriptError as error:
+                    case["kernel_error"] = str(error)
+                cases.append(case)
+    return cases
+
+
+# The helpers of nvx.py.
+
+
+def sandbox_mounts_cases(rng: random.Random) -> list[Case]:
+    specs: list[Case] = [
+        {
+            "mounts": ["/workspace,work,rw", "/opt/hostedtoolcache,tools,ro"],
+            "policy": [
+                ["denied", 0, "logs"],
+                ["allowed", 0, "logs/payloads"],
+                ["writable", 0, "out"],
+                ["denied", 1, "credentials"],
+            ],
+            "owner": None,
+            "files": [],
+        },
+        {
+            "mounts": ["/w,work,rw"],
+            "policy": [["denied", None, "secrets"]],
+            "owner": "caller",
+            "files": [],
+        },
+        {
+            "mounts": ["/workspace,work,rw", "/opt/hostedtoolcache,tools"],
+            "policy": [["allowed", None, "logs"], ["denied", None, "secrets"]],
+            "owner": None,
+            "files": [],
+        },
+        {
+            "mounts": ["/etc/app/settings.json,settings.json,rw"],
+            "policy": [["writable", 0, "settings.json"]],
+            "owner": None,
+            "files": ["settings.json"],
+        },
+        {"mounts": [], "policy": [["denied", None, "x"]], "owner": None, "files": []},
+    ]
+    for _ in range(120):
+        files = ["f.json"] if rng.random() < 0.5 else []
+        values: list[str] = []
+        policy: list[list[object]] = []
+        if rng.random() < 0.1:
+            policy.append([rng.choice(POLICY_KINDS), None, "early"])
+        for index in range(rng.randint(0, 3)):
+            host_path = rng.choice(("work", "tools", "f.json", "C:/x"))
+            mode = rng.choice(("", ",ro", ",rw"))
+            values.append(f"/m{index},{host_path}{mode}")
+            if host_path in files and rng.random() < 0.9:
+                continue
+            denied = rng.sample(("logs", "secrets", "/d"), rng.randint(0, 2))
+            policy.extend(["denied", index, path] for path in denied)
+            if denied and rng.random() < 0.5:
+                policy.append(["allowed", index, "logs/payloads"])
+            if mode == ",rw" and rng.random() < 0.5:
+                policy.append(["writable", index, "out"])
+            if rng.random() < 0.1:
+                policy.append(
+                    [rng.choice(POLICY_KINDS), index, rng.choice(("", "logs"))]
+                )
+        specs.append(
+            {
+                "mounts": values,
+                "policy": policy,
+                "owner": rng.choice((None, "vmm", "caller")),
+                "files": files,
+            }
+        )
+    destinations = {
+        "denied": "mount_deny",
+        "allowed": "mount_allow",
+        "writable": "mount_write",
+    }
+    cases: list[Case] = []
+    for flavor in FIXTURE_PATHS:
+        with _flavor(flavor):
+            for spec in specs:
+                files = set(cast(list[str], spec["files"]))
+                namespace = argparse.Namespace(
+                    mount=list(cast(list[str], spec["mounts"])),
+                    mount_owner=spec["owner"],
+                    mount_deny=[],
+                    mount_allow=[],
+                    mount_write=[],
+                )
+                for kind, preceding, path in cast(list[list[object]], spec["policy"]):
+                    index = -1 if preceding is None else cast(int, preceding)
+                    getattr(namespace, destinations[cast(str, kind)]).append(
+                        (index, path)
+                    )
+
+                def kind_of(host_path: PurePath, files: set[str] = files) -> str:
+                    return "file" if str(host_path) in files else "directory"
+
+                case: Case = {"flavor": flavor, **spec}
+                try:
+                    with patch.object(nvx, "mount_kind", kind_of):
+                        mounts = nvx._sandbox_mounts(namespace)
+                    case["result"] = [_mount_fields(mount) for mount in mounts]
+                except common.ScriptError as error:
+                    case["error"] = str(error)
+                cases.append(case)
+    return cases
+
+
+def environment_cases(rng: random.Random) -> list[Case]:
+    lists: list[list[str]] = [
+        [f"KEY{index}=value" for index in range(257)],
+        [f"KEY{index}=value" for index in range(256)],
+        ["NO_EQUALS"],
+        ["=empty-key"],
+        ["KEY=embedded\x00nul"],
+        ["KEY=" + "\N{SNOWMAN}" * 1365],
+        ["K=" + "v" * 4094],
+        ["DUPLICATE=one", "DUPLICATE=two"],
+        ["A=1", "B=2"],
+        [],
+    ]
+    tokens = ("A", "B", "=", "", "\x00", "é", "x" * 1000)
+    for _ in range(30):
+        lists.append(
+            [_random_text(rng, tokens, 0, 5) for _ in range(rng.randint(0, 4))]
+        )
+    values = ("", "1", "a=b", "é", "\N{SNOWMAN}" * 300, "x" * 1000, " spaced ")
+    for _ in range(40):
+        entries = [
+            f"{rng.choice(('A', 'B', 'PATH', 'K_1', 'É'))}={rng.choice(values)}"
+            for _ in range(rng.randint(0, 5))
+        ]
+        if entries and rng.random() < 0.1:
+            entries[rng.randrange(len(entries))] = rng.choice(
+                ("NO_EQUALS", "=x", "A=\0")
+            )
+        lists.append(entries)
+    cases: list[Case] = []
+    for entries in lists:
+        try:
+            control_session.encode_exec_environment(tuple(entries))
+            cases.append({"entries": entries, "error": None})
+        except (TypeError, ValueError) as error:
+            cases.append({"entries": entries, "error": str(error)})
+    return cases
+
+
+def _encode_json_value(value: object) -> object:
+    """Return a JSON value in the tagged form that the Rust test compares."""
+    if value is None:
+        return ["null"]
+    if isinstance(value, bool):
+        return ["bool", value]
+    if isinstance(value, int):
+        return ["int", str(value)]
+    if isinstance(value, float):
+        return ["float", struct.pack(">d", value).hex()]
+    if isinstance(value, str):
+        return _encode_string(value)
+    if isinstance(value, list):
+        return [
+            "list",
+            [_encode_json_value(item) for item in cast(list[object], value)],
+        ]
+    members = cast(dict[str, object], value)
+    return [
+        "dict",
+        [
+            [_encode_string(key), _encode_json_value(item)]
+            for key, item in members.items()
+        ],
+    ]
+
+
+def _encode_string(value: str) -> object:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return ["code_points", [ord(character) for character in value]]
+    return ["str", value]
+
+
+JSON_SEEDS = (
+    '{"format": 1, "artifact": "a.erofs", "packages": [{"name": "systemd"}]}',
+    '["A=1", "B=\\u00e9", "C=\\ud83d\\ude00"]',
+    "[NaN, Infinity, -Infinity, 1e400, -0.0, 1E-5, 10, -3]",
+    '{"a": [true, false, null], "a": {"b": "\\n\\t\\\\\\"\\/"}}',
+    '"\\ud800\\udc00\\udc00\\ud800x"',
+    "[]",
+    "{}",
+    " \t\r\n[1 , 2 ] ",
+)
+JSON_TOKENS = (
+    "[",
+    "]",
+    "{",
+    "}",
+    ",",
+    ":",
+    '"',
+    "\\",
+    "u",
+    "d800",
+    "0",
+    "1",
+    "-",
+    ".",
+    "e",
+    "+",
+    " ",
+    "\n",
+    "\r",
+    "\t",
+    "\x00",
+    "\x1f",
+    "null",
+    "true",
+    "NaN",
+    "Infinity",
+    "x",
+    "é",
+    "\ufeff",
+)
+
+
+def json_loads_cases(rng: random.Random) -> list[Case]:
+    texts: list[str] = list(JSON_SEEDS)
+    texts.extend(
+        (
+            "",
+            "[",
+            "[1",
+            "[1,]",
+            '{"a":1,}',
+            "{1:2}",
+            '{"a" 1}',
+            '"abc',
+            '"a\tb"',
+            '"\\x"',
+            '"\\u12"',
+            '"\\u12x4"',
+            '"\\ud800\\u12x4"',
+            "[]\n x",
+            "\ufeff[]",
+            "-",
+            "01",
+            "1.",
+            "1e",
+            "1e+",
+            "-Infinityx",
+            "nul",
+            "[" * 50 + "]" * 50,
+            "1" * 4301,
+            "[" + "1" * 4300 + "]",
+            "1." + "1" * 5000,
+        )
+    )
+    for _ in range(400):
+        texts.append(_mutate(rng, rng.choice(JSON_SEEDS), JSON_TOKENS))
+    cases: list[Case] = []
+    for text in texts:
+        try:
+            value = json.loads(text)
+            cases.append({"text": text, "value": _encode_json_value(value)})
+        except json.JSONDecodeError as error:
+            cases.append({"text": text, "decode_error": str(error)})
+        except ValueError as error:
+            cases.append({"text": text, "value_error": str(error)})
+    return cases
+
+
+def utf8_cases(rng: random.Random) -> list[Case]:
+    samples = [
+        b"ok",
+        b"\xff",
+        b"a\xe2\x82",
+        b"\xe2(",
+        b"\xf0\x90(",
+        b"\xed\xa0\x80",
+        b"\xc0\x80",
+        b"\xf4\x90\x80\x80",
+        b"\xe0\x80\x80",
+        b"\xf0\x80\x80\x80",
+        b"\xf0\x9f\x98",
+    ]
+    pieces = (b"a", b"\xc3\xa9", b"\xe2\x82\xac", b"\xf0\x9f\x98\x80", b"\x80", b"\xff")
+    for _ in range(150):
+        data = b"".join(rng.choice(pieces) for _ in range(rng.randint(0, 6)))
+        cut = rng.randint(0, len(data))
+        samples.append(data[:cut] + data[cut + rng.randint(0, 2) :])
+    cases: list[Case] = []
+    for data in samples:
+        try:
+            data.decode("utf-8")
+            cases.append({"bytes": data.hex(), "error": None})
+        except UnicodeDecodeError as error:
+            cases.append({"bytes": data.hex(), "error": str(error)})
+    return cases
+
+
+class _Executed(Exception):
+    """Raised in place of a managed exec, with the environment that it received."""
+
+    def __init__(self, environment: tuple[str, ...] | None) -> None:
+        super().__init__("executed")
+        self.environment = environment
+
+
+def _document(data: bytes) -> Case:
+    """Return a document as its text when it is UTF-8, or else as its bytes in hex."""
+    try:
+        return {"text": data.decode("utf-8")}
+    except UnicodeDecodeError:
+        return {"bytes": data.hex()}
+
+
+def environment_file_cases(rng: random.Random) -> list[Case]:
+    # A document is its bytes, or a number of spaces.
+    documents: list[bytes | int] = [
+        b"[]",
+        b'["A=1", "B=2"]',
+        b'["DUPLICATE=one", "DUPLICATE=two"]',
+        1024 * 1024 + 1,
+        1024 * 1024,
+        b"{}",
+        b'"A=1"',
+        b"[1]",
+        b"[NaN]",
+        b'[["A=1"]]',
+        b"",
+        b"[",
+        b'["A=1",]',
+        "\ufeff[]".encode(),
+        b'["\xff"]',
+        b'["A=1", "B=\\ud800"]',
+        b'["B=\\udc00\\ud800x"]',
+        b"[" + b"1" * 4301 + b"]",
+        b'["A=\\u00e9"]\r\n',
+    ]
+    for _ in range(60):
+        text = _mutate(rng, rng.choice(JSON_SEEDS[1:2] + JSON_SEEDS[5:]), JSON_TOKENS)
+        documents.append(text.encode("utf-8", "surrogatepass"))
+    for _ in range(30):
+        entries = [
+            f"{rng.choice(('A', 'B', 'É'))}={rng.choice(('1', 'é', '😀', 'x' * 100))}"
+            for _ in range(rng.randint(0, 4))
+        ]
+        documents.append(json.dumps(entries, ensure_ascii=rng.random() < 0.5).encode())
+    cases: list[Case] = []
+    with tempfile.TemporaryDirectory(prefix="nvx-rs-fixtures-") as directory:
+        path = Path(directory) / "environment.json"
+        for document in documents:
+            if isinstance(document, int):
+                path.write_bytes(b" " * document)
+                case: Case = {"spaces": document}
+            else:
+                path.write_bytes(document)
+                case = _document(document)
+            arguments = nvx.parse_args(
+                [
+                    "sandbox",
+                    "exec",
+                    "--state-dir",
+                    "absent-state",
+                    "--environment-file",
+                    str(path),
+                ]
+            )
+
+            def execute(*_: object, **keywords: object) -> object:
+                raise _Executed(cast(tuple[str, ...] | None, keywords["environment"]))
+
+            try:
+                with patch.object(sandbox_lifecycle, "exec_workload", execute):
+                    nvx.command_sandbox(arguments)
+                raise SystemExit("the managed exec did not run")
+            except _Executed as executed:
+                case["environment"] = (
+                    None if executed.environment is None else list(executed.environment)
+                )
+            except (common.ScriptError, ValueError) as error:
+                case["error"] = str(error).replace(str(path), "{path}")
+            cases.append(case)
+    return cases
+
+
+def distro_manifest_cases(rng: random.Random) -> list[Case]:
+    manifests: list[bytes] = []
+    with tempfile.TemporaryDirectory(prefix="nvx-rs-fixtures-") as directory:
+        root = Path(directory)
+        layer_path = root / "distro.erofs"
+        layer_path.write_text(DISTRO_LAYER, encoding="utf-8")
+        digest = common.sha256_file(layer_path)
+        template = (
+            '{{"format": {format}, "artifact": {artifact}, '
+            '"artifact_sha256": {sha256}, "packages": {packages}}}'
+        )
+        for format_value in ("1", "1.0", "true", '"1"', "2", "NaN"):
+            for artifact in ('"distro.erofs"', '"other.erofs"', "1"):
+                for sha256 in (f'"{digest}"', '"0"'):
+                    for packages in (
+                        '[{"name": "systemd"}]',
+                        '[{"name": "bash"}]',
+                        "[]",
+                        "{}",
+                        "[1]",
+                        '[{"name": 1}]',
+                        '[{"name": "systemd"}, 1]',
+                    ):
+                        manifests.append(
+                            template.format(
+                                format=format_value,
+                                artifact=artifact,
+                                sha256=sha256,
+                                packages=packages,
+                            ).encode()
+                        )
+        manifests.extend(
+            (
+                b"[]",
+                b'{\r\n"format": }',
+                b"{\xff}",
+                b"\xef\xbb\xbf{}",
+                b'{"format": 1, "artifact": "distro.erofs", "format": 2}',
+                b"1" * 4301,
+            )
+        )
+        valid = template.format(
+            format="1",
+            artifact='"distro.erofs"',
+            sha256=f'"{digest}"',
+            packages='[{"name": "bash"}]',
+        )
+        for _ in range(60):
+            manifests.append(
+                _mutate(rng, valid, JSON_TOKENS).encode("utf-8", "surrogatepass")
+            )
+        launch = sandbox.SandboxLaunch(
+            layers=(
+                sandbox.SandboxLayer(
+                    role="distro",
+                    path=layer_path,
+                    uuid="11111111-1111-1111-1111-111111111111",
+                ),
+            ),
+            scratch=root / "scratch.ext4",
+            entrypoint="/sbin/init",
+        )
+        manifest_path = root / "distro.erofs.manifest.json"
+        cases: list[Case] = []
+        for manifest in manifests:
+            manifest_path.write_bytes(manifest)
+            try:
+                nvx._validate_sandbox_systemd_policy(launch)
+                error = None
+            except (common.ScriptError, ValueError) as raised:
+                error = str(raised)
+            cases.append({"manifest": _document(manifest), "error": error})
+    return cases
+
+
+def python_fixture() -> dict[str, object]:
+    """Return the cases of the Python semantics that the port reproduces."""
+    rng = random.Random(SEED)
+    return {
+        **_header(),
+        "unicode": unicodedata.unidata_version,
+        "space": space_ranges(),
+        "decimal_starts": decimal_starts(),
+        "non_printable": non_printable_ranges(),
+        "strings": string_cases(rng),
+        "paths": path_cases(rng),
+        "joins": join_cases(rng),
+        "equality": equality_cases(rng),
+        "normpath": normpath_cases(rng),
+        "json": json_loads_cases(rng),
+        "utf8": utf8_cases(rng),
+    }
+
+
+def sandbox_fixture() -> dict[str, object]:
+    """Return the cases of the launch profile of scripts/nvx_tools/sandbox.py."""
+    rng = random.Random(SEED + 1)
+    return {
+        **_header(),
+        "cwds": CWDS,
+        "identities": identity_cases(rng),
+        "layers": layer_cases(rng),
+        "mount_values": mount_value_cases(rng),
+        "mount_targets": target_cases(rng),
+        "child_names": child_name_cases(rng),
+        "mounts": mount_cases(rng),
+        "launches": launch_cases(rng),
+    }
+
+
+def sandbox_options_fixture() -> dict[str, object]:
+    """Return the cases of the sandbox helpers of scripts/nvx.py."""
+    rng = random.Random(SEED + 2)
+    return {
+        **_header(),
+        "cwds": CWDS,
+        "run_share_targets": run_target_cases(rng),
+        "sandbox_mounts": sandbox_mounts_cases(rng),
+        "environments": environment_cases(rng),
+        "environment_files": environment_file_cases(rng),
+        "distro_layer": DISTRO_LAYER,
+        "distro_manifests": distro_manifest_cases(rng),
+    }
+
+
+def _header() -> dict[str, object]:
+    return {
+        "generator": "scripts/nvx_rs_fixtures.py",
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+FIXTURES: dict[str, Callable[[], dict[str, object]]] = {
+    "python.json": python_fixture,
+    "sandbox.json": sandbox_fixture,
+    "sandbox_options.json": sandbox_options_fixture,
+}
+
+
+def fixture_text(document: dict[str, object]) -> str:
+    """Return the fixture with one case per line, in ASCII."""
+    lines = ["{"]
+    items = list(document.items())
+    for position, (key, value) in enumerate(items):
+        comma = "," if position < len(items) - 1 else ""
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            cases = cast(list[object], value)
+            lines.append(f"{json.dumps(key)}: [")
+            for index, case in enumerate(cases):
+                separator = "," if index < len(cases) - 1 else ""
+                lines.append(json.dumps(case, separators=(",", ":")) + separator)
+            lines.append(f"]{comma}")
+        else:
+            lines.append(f"{json.dumps(key)}: {json.dumps(value)}{comma}")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
 
 
 # The egress policy compiler.
@@ -1073,6 +2569,8 @@ def main(argv: list[str] | None = None) -> int:
         fixture = egress_policy_text(egress_policy_fixture(random_cases))
         return 1 if _write(args.output, fixture, args.check) else 0
     stale = _write(UNICODE_TABLES, unicode_tables_source(), args.check)
+    for name, document in FIXTURES.items():
+        stale |= _write(FIXTURE_DIR / name, fixture_text(document()), args.check)
     stale |= _write(
         EGRESS_POLICY_FIXTURE,
         egress_policy_text(egress_policy_fixture(RANDOM_CASES)),

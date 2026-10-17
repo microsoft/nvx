@@ -427,4 +427,6 @@ fn require_pure_file(path: &PurePath, description: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+mod golden;
+#[cfg(test)]
 mod tests;
